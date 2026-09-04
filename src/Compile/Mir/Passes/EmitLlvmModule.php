@@ -1305,7 +1305,41 @@ trait EmitLlvmModule
                   'array_release_own_obj', 'array_release_own_str',
                   'array_release_own_cell', 'array_retain_repr',
                   'array_retain_buf', 'array_retain_obj', 'array_retain_str',
-                  'array_retain_cell'];
+                  'array_retain_cell',
+                  // 48-53: the SELF-ROUTING helpers cross families in silence.
+                  // __mir_rc_retain/_release dispatch on the tag at ptr-8 and
+                  // their STRING arms bump nothing; __mir_rc_retain_str/_release_str
+                  // do the mirror image for objects. So rc_retain - rc_release is
+                  // obj-only increments minus obj-only decrements, MISSING every
+                  // object ref that arrived through a string helper. Until these
+                  // exist no imbalance equation over the two is valid.
+                  'rc_retain_misroute', 'rc_release_misroute',
+                  'str_retain_viaobj', 'str_release_viaobj',
+                  // 52-55: element/cell WALK traffic. An array release walks its
+                  // elements and calls the same __mir_rc_* helpers an emitted
+                  // retain site calls, so rc_retain/rc_release today mix "a site
+                  // ran" with "a walk touched one element". Subtract these to get
+                  // site-level traffic.
+                  'rc_retain_elemwalk', 'rc_release_elemwalk',
+                  'rc_retain_cellwalk', 'rc_release_cellwalk',
+                  // 56: a release that landed on an IMMORTAL buffer (rc < 0).
+                  // arr_alloc_total + array_retain_rc - array_release_rc reads
+                  // -314M against 23.6M live arrays on the g139 Doctrine dump;
+                  // this counter decides whether that is the immortal singleton
+                  // being decremented in a loop or a real uncounted retain.
+                  'array_release_immortal',
+                  // 57-61: BYTES, not counts. Counts cannot say which family
+                  // holds the gigabytes: 9.7M objects, 59.6M strings and 23.6M
+                  // arrays are three numbers with no common unit. These give one.
+                  'bytes_alloc_obj', 'bytes_alloc_str', 'bytes_alloc_arr',
+                  'bytes_free_str', 'bytes_free_arr',
+                  // 62-65: why a possible cycle root was NOT buffered. The
+                  // number of tokens a build ever frees is ~375 000 no matter
+                  // whether 0.8M or 2.75M are allocated, which reads as the
+                  // collector SATURATING rather than as one leaking site. These
+                  // four say which arm of `cc_add_root` swallows the rest.
+                  'cc_root_busy', 'cc_root_purple', 'cc_root_buffered',
+                  'cc_root_push'];
         // ONE spelling of the array length: the global, the bump GEP and the
         // dump loop all read it from the name list. They disagreed before — the
         // global was [16 x i64] while the dump indexed it as [14 x i64].
@@ -1346,6 +1380,16 @@ trait EmitLlvmModule
             $out .= "done:\n";
         }
         $out .= "  ret void\n}\n";
+        // Counts cannot express bytes, and reusing @__prof_bump would need one
+        // call per byte. Same array, same GEP, add N instead of 1. Deliberately
+        // NOT tick-aware: a byte counter must never drive a checkpoint dump,
+        // or the dump interval would depend on allocation SIZE.
+        $out .= "define void @__prof_add(i64 %i, i64 %n) {\nentry:\n";
+        $out .= "  %p = getelementptr inbounds [" . $slots . " x i64], ptr @__prof, i64 0, i64 %i\n";
+        $out .= "  %v = load i64, ptr %p\n";
+        $out .= "  %v1 = add i64 %v, %n\n";
+        $out .= "  store i64 %v1, ptr %p\n";
+        $out .= "  ret void\n}\n";
         $out .= "define void @__manticore_profile_dump() {\nentry:\n";
         // Ordered after the program's own output, not spliced into it.
         if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
@@ -1357,8 +1401,126 @@ trait EmitLlvmModule
             $out .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.fmt.'
                   . (string)$j . ', i64 %v' . (string)$j . ")\n";
         }
+        $out .= $this->classCensusDump();
         $out .= "  ret void\n}\n";
+        return $out . $this->classCensusRuntime();
+    }
+
+    /**
+     * Per-CLASS alloc/free census — `[CLASS] id=<n> alloc=<a> free=<f>` at exit
+     * for every class that allocated at least once. The id→name map is printed
+     * at COMPILE time (see EmitLlvm::classCensusMap), not carried in the binary.
+     *
+     * ⚠ It must be a LOOP over an array, never code per class. The first cut
+     * unrolled a branch, a format global and a dprintf for each of ~2800 classes;
+     * clang answered `cannot encode offset of relocations; object file too large`
+     * on a six-line program. Diagnostic code has to stay O(1) in the class count.
+     *
+     * ⚠ The table is sized from THIS module while `@__prof_class` is linkonce_odr
+     * like every other runtime helper, so a program linking a prebuilt stdlib
+     * keeps ONE body and one size. The bound check is load-bearing: an id from
+     * the other module must be dropped, never written past the end — the exact
+     * trap the 30-slot @__prof array fell into when a 31st counter was added.
+     */
+    /** One bounds-checked `tab[id]++` body. Two tables, one shape — so the alloc
+     *  and free halves cannot drift apart. The bound check is load-bearing: an id
+     *  from another module must be dropped, never written past the end. */
+    private function classCensusBump(string $fn, string $tab, int $n): string
+    {
+        $out  = 'define void @' . $fn . "(i64 %id) {\nentry:\n";
+        $out .= "  %lo = icmp slt i64 %id, 0\n";
+        $out .= '  %hi = icmp sge i64 %id, ' . (string)$n . "\n";
+        $out .= "  %bad = or i1 %lo, %hi\n";
+        $out .= "  br i1 %bad, label %done, label %ok\n";
+        $out .= "ok:\n";
+        $out .= '  %p = getelementptr inbounds [' . (string)$n
+              . ' x i64], ptr @' . $tab . ", i64 0, i64 %id\n";
+        $out .= "  %v = load i64, ptr %p\n";
+        $out .= "  %v1 = add i64 %v, 1\n";
+        $out .= "  store i64 %v1, ptr %p\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
         return $out;
+    }
+
+    private function classCensusRuntime(): string
+    {
+        $n = $this->classCensusSize();
+        $out  = '@__prof_class_tab = linkonce_odr global [' . (string)$n
+              . " x i64] zeroinitializer\n";
+        // The FREE half. An allocation census answers "what does this program
+        // churn"; only alloc MINUS free answers "what is still alive at the
+        // peak", which is the question that decides whether a peak is the cost
+        // of holding the program or the cost of not letting go of it.
+        $out .= '@__prof_class_free_tab = linkonce_odr global [' . (string)$n
+              . " x i64] zeroinitializer\n";
+        $txt = '[CLASS] idx=%lld alloc=%lld free=%lld';
+        $out .= '@__prof.clsfmt = private unnamed_addr constant ['
+              . (string)(\strlen($txt) + 2) . ' x i8] c"' . $txt . '\\0A\\00"' . "\n";
+        $out .= $this->classCensusBump('__prof_class', '__prof_class_tab', $n);
+        $out .= $this->classCensusBump('__prof_class_free', '__prof_class_free_tab', $n);
+        // The id→name map is a COMPILE-time artifact, not a runtime one: carrying
+        // 2800 name strings and their relocations is what blew the object file up.
+        // One line per class on stderr, which the harness captures beside the
+        // build log; `[CLASS] id=N` from the run then reads back through it.
+        foreach ($this->classCensusIndex() as $nm => $ix) {
+            \error_log('[CLASSMAP] ' . (string)$ix . ' ' . $nm);
+        }
+        return $out;
+    }
+
+    /** One spelling of the census table length — the global, the bound check
+     *  and the dump loop must not disagree. */
+    private function classCensusSize(): int
+    {
+        return \count($this->classCensusIndex());
+    }
+
+    /**
+     * class name → DENSE index. `ClassDef::$classId` is `stableClassId()`, a
+     * HASH — ids run to ~1e15 and an array indexed by one is not a table, it is
+     * a 7-petabyte allocation. The census needs its own contiguous numbering.
+     *
+     * @return array<string,int>
+     */
+    private function classCensusIndex(): array
+    {
+        $m = [];
+        $i = 0;
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct) { continue; }
+            $m[$cd->name] = $i;
+            $i = $i + 1;
+        }
+        return $m;
+    }
+
+    /** The dump half: ONE loop, silent for a class that never allocated. */
+    private function classCensusDump(): string
+    {
+        $n = (string)$this->classCensusSize();
+        $o  = "  br label %clsloop\nclsloop:\n";
+        $o .= "  %ci = phi i64 [0, %entry], [%ci2, %clsnext]\n";
+        $o .= '  %cdone = icmp sge i64 %ci, ' . $n . "\n";
+        $o .= "  br i1 %cdone, label %clsend, label %clsbody\n";
+        $o .= "clsbody:\n";
+        $o .= '  %cap = getelementptr inbounds [' . $n
+            . " x i64], ptr @__prof_class_tab, i64 0, i64 %ci\n";
+        $o .= "  %cav = load i64, ptr %cap\n";
+        $o .= "  %cnz = icmp ne i64 %cav, 0\n";
+        $o .= "  br i1 %cnz, label %clsprint, label %clsnext\n";
+        $o .= "clsprint:\n";
+        $o .= '  %cfp = getelementptr inbounds [' . $n
+            . " x i64], ptr @__prof_class_free_tab, i64 0, i64 %ci\n";
+        $o .= "  %cfv = load i64, ptr %cfp\n";
+        $o .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @__prof.clsfmt,"
+            . " i64 %ci, i64 %cav, i64 %cfv)\n";
+        $o .= "  br label %clsnext\n";
+        $o .= "clsnext:\n";
+        $o .= "  %ci2 = add i64 %ci, 1\n";
+        $o .= "  br label %clsloop\n";
+        $o .= "clsend:\n";
+        return $o;
     }
 
     /**

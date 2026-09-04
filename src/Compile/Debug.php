@@ -96,6 +96,215 @@ final class Debug
     public static bool $compactCaches = false;
 
     /**
+     * ON by default; `MANTICORE_RC_RETURN_OWNS=0` opts out. Stop vetoing a property slot's
+     * release-before-overwrite because the slot is READ by a `return`.
+     *
+     * The veto exists because a property read normally hands out a raw borrow,
+     * and dropping the old value would strand it. A RETURN is not that case:
+     * `EmitLlvmModule::emitReturn` already gates on `isBorrowedObjReturn` and
+     * retains a borrowed property read before handing it back, so the caller
+     * owns a reference of its own. This is `tools/prof/propleak.php`'s stated
+     * ordering — a property READ must own what it reads BEFORE a property WRITE
+     * may drop it — already satisfied in this one position.
+     *
+     * Landed with `tests/aot/cases/prop_overwrite_destruct_getter.php` (which fails
+     * without it), a flat `tools/prof/rcbalance.php` table, and a green 1026/1028
+     * suite. The opt-out stays so a suspected double-free can be bisected in one
+     * run — that failure is invisible under Zend, invisible at -O0, and often
+     * invisible until gen-2.
+     */
+    public static bool $rcReturnOwns = true;
+
+    /**
+     * ON by default; `MANTICORE_RC_RECV_TEMP=0` opts out. Release the RECEIVER temp of a method call.
+     *
+     * `f()->m()` evaluates `f()` into a temp, uses it as `$this`, and then drops
+     * it on the floor. Argument position has released its fresh temps since
+     * forever (freshRcArgFlavor + rcReleaseReg); receiver position never did, so
+     * every `$this->getFoo()->bar()` leaked one object per execution. The same
+     * temp is what a condition leaks — `if (f()->ok())` is a receiver too.
+     *
+     * Safe against a fluent `return $this`: the callee retains a borrowed obj
+     * return, so the caller's result owns a reference of its own.
+     */
+    public static bool $rcRecvTemp = true;
+
+    /**
+     * `MANTICORE_RC_ELEM_OWNS=1` — do not veto a property slot's element drop
+     * because of an element read whose CONSUMER takes a reference.
+     *
+     * An element read is a real borrow (it emits no retain — `retain_element`
+     * counts element STORES), so the veto is load-bearing in general. But the
+     * value of a StoreLocal is retained by rcRetainByType and a returned one by
+     * isBorrowedObjReturn; those own what they read. Vetoing the DECLARING CLASS
+     * for them leaks every element of the slot — `Parser::$tokens` is the case
+     * that put 9,236,608 Lexer\\Token allocations against ~0 reclaims.
+     *
+     * ⚠ OPT-IN. Getting this wrong is a use-after-free on a live element,
+     * invisible under Zend and at -O0.
+     */
+    public static bool $rcElemOwns = false;
+
+    /**
+     * ON by default; `MANTICORE_RC_ELEM_TYPE=0` opts out. Let a CONCRETE element
+     * type refine a local's recorded release type after the first store.
+     *
+     * `$a = []` is `vec[unknown]`, and it is usually the ONLY store_local to the
+     * name (appends are store_element), so first-write-wins froze the release as
+     * a plain buffer drop while inference had long since retyped the loads to
+     * `vec[obj<T>]`. Every element leaked. Upgrade is UNKNOWN -> concrete only:
+     * it deepens a release that already ran, it never redirects one.
+     *
+     * ⚠ Load-bearing for {@see $rcPropDrop}, not merely additive: without the
+     * refinement {@see Mir\Passes\EmitLlvmMemory::arrayRetainFlavor} answers a
+     * plain `vec` for the store, the flavors disagree, and every slot is vetoed.
+     * The pair moves the probe 60000/20000 → 60000/60000; either one alone
+     * leaves it at 60000/20000.
+     */
+    public static bool $rcElemType = true;
+
+    /**
+     * ON by default; `MANTICORE_RC_PROP_DROP=0` opts out. Let a CLASS DROP body
+     * give back the element refs its property slot owns, on every release
+     * rather than only at rc → 0.
+     *
+     * The slot's store retained at element depth ({@see
+     * Mir\Passes\EmitLlvm::$propOwnElem} proves it for every store in the
+     * module), so the slot holds one ref per element. `__mir_array_release_obj`
+     * walks elements only at rc → 0, so an object dying while ANOTHER owner
+     * still holds the buffer returns nothing and strands what its own store
+     * took: `$tmp = []; $tmp[] = new Tok; $h->els = $tmp;` leaks every element
+     * — i.e. `Parser::$tokens`, the 9.2M `Lexer\Token`.
+     *
+     * ⚠ The drop body is `linkonce_odr` and coalesces by name, so the verdict
+     * must be identical in every module that emits the class. An IMPORTED or
+     * PRELUDE class is therefore excluded outright, and a library module — which
+     * cannot see its callers' stores at all — never proves a slot.
+     *
+     * The opt-out stays because the failure this guards against is an
+     * OVER-release: invisible under Zend, invisible at -O0, and often invisible
+     * until gen-2. One env var bisects it in a single run.
+     */
+    public static bool $rcPropDrop = true;
+
+    /**
+     * `MANTICORE_RC_CTOR_ARG=1` — release a fresh obj / vec / assoc TEMP passed
+     * to a constructor, the way `emitCall` already does for a free function.
+     *
+     * Without it `new Parser((new Lexer())->scan($src))` strands the array's own
+     * reference and one element ref per token, forever: 168 411 live
+     * `Lexer\Token` from ONE compiled file, 64% of the compiler's live objects,
+     * never freed. The census that found it is `[CLASS] idx= alloc= free=`.
+     *
+     * ⚠ OPT-IN, because releasing it correctly EXPOSES a second, older bug it
+     * was masking: `array_merge` copies elements with no retain (its arrays are
+     * bare `array`, so the element channel is erased and `rcRetainByType`
+     * answers '' for a cell), so the merged array holds BORROWS. Freeing the
+     * caller's temp then frees a live object under it — `hetero_prop_default_vs_getter`
+     * prints an empty `$d->style()->n`. The fix for THAT is an erased element
+     * copy retaining through {@see Mir\Passes\EmitLlvm::retainCellPayload}, the
+     * same tag-dispatched discipline the bag store already uses; until it lands,
+     * this stays off and the leak stays.
+     */
+    public static bool $rcCtorArgTemp = true;
+
+    /**
+     * `MANTICORE_RC_SYM_ELEM=1` — every release of an element-owning array
+     * gives one element ref back, not only at rc → 0.
+     *
+     * The arithmetic: element refs are `base + 1 per retain`, and there is
+     * one more release than there are retains. A symmetric release therefore
+     * hands back `retains + 1 = base + retains` — exactly what was taken. Mix
+     * ONE buffer-only release into that chain and its element ref is never
+     * returned: `$this->stmts = $s` retains at element depth while the
+     * caller's local release is buffer-only, so overwriting a `?Block $body`
+     * freed the Block and nothing under it — 1 object where php frees 149,
+     * which is why a build's MIR is 2.5%% reclaimed.
+     *
+     * ON by default; `MANTICORE_RC_SYM_ELEM=0` is the kill switch. The
+     * element-drop epic recorded that making this symmetric turned 5 AOT cases
+     * red — measured before the class drop, the ctor arg temp, `array_merge`'s
+     * element copy and `get_object_vars` were fixed. Re-counted on top of those:
+     * **zero**, suite 1034/1036.
+     */
+    public static bool $rcSymElem = true;
+
+    /**
+     * A local initialised from an ELEMENT READ co-owns what the read hands it.
+     *
+     * ON by default; `MANTICORE_RC_ELEM_READ_OWNS=0` is the kill switch.
+     * Without it the read is a pure borrow, which is a LIVE use-after-free:
+     * `$keep = $m['a']; unset($m); return $keep;` returns freed memory
+     * (php: `alive`, ours: empty), silently and with DEBUG_VERIFY clean —
+     * `tests/aot/cases/elem_read_borrow_uaf.php`. It is also the precondition
+     * the element SLOT drop waits on: an overwrite or an unset cannot release
+     * the old value while a borrowed local may still point at it.
+     *
+     * ⚠ BOTH HALVES OR NEITHER: if only the emitter says owned the value
+     * LEAKS, if only the pass does the release has no matching retain and the
+     * value is DOUBLE-FREED. Neither half decides on its own — both ask
+     * {@see Mir\Passes\InsertMemoryOps::elemReadCoOwns}, and the retain is
+     * taken at the DESTINATION SLOT's depth, never the value's.
+     */
+    public static bool $rcElemReadOwns = true;
+
+
+    /**
+     * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
+     * buffer address, its length and the RESULTING rc.
+     *
+     * Whole-program counters say how many refs are unbalanced; they cannot say
+     * WHICH buffer never reaches zero. Reading emitter predicates instead cost
+     * two no-op fixes and one masked one, so this observes the thing itself.
+     * Volume is fine on a small input: one 3-line file lexes into a few hundred
+     * array ops.
+     */
+    public static bool $arrRcTrace = false;
+
+    /**
+     * Drain the cycle-collector root buffer at a threshold, the way php does.
+     * ON by default; `MANTICORE_AUTO_GC=0` (or `off`) disables it, any other
+     * value sets the threshold.
+     *
+     * A default is a claim about what a php PROGRAM should do, and php collects
+     * cycles. What kept this off was one defect, not the design: with the
+     * collector running objects finally DIED, and a `get_object_vars()` that had
+     * always given back a reference it never took became a double free instead
+     * of a leak. With that closed the whole corpus passes either way (1032/1034,
+     * 0 failed, same builder), and the collector is worth **-42.5%% RSS /
+     * -49.8%% peak footprint on the FRONT** (`dump-mir`, no clang) for ~6%% more
+     * CPU on a full build; objects reclaimed go from 0.20%% to 33.06%%.
+     *
+     * ⚠ Reclaim still stops well short of everything: a ref held through an
+     * ARRAY element is never trial-deleted, so a cycle closed through an array
+     * is not collected.
+     *
+     * The buffer used to have NO drain at all. A decrement leaving rc > 0
+     * buffers the object as
+     * a possible cycle root, and `__mir_rc_release` then refuses to free it at
+     * rc 0 because the collector owns it — but the collector only ever ran from
+     * an explicit `gc_collect_cycles()`, which the compiler never calls. So
+     * every object retained more than once leaked BY CONSTRUCTION: 0.27%% of
+     * objects freed against 96%% of arrays, and 0 of 9.2M `Lexer\Token`.
+     */
+    public static bool $autoGc = true;
+
+    /**
+     * `MANTICORE_CC_TRACE=1` — print every object the collector frees and every
+     * object ordinary rc frees, plus the root buffer's address and count around
+     * each collection.
+     *
+     * The collector's own double free is a claim about WHO freed a pointer
+     * first; only a per-pointer log answers it. The buffer address answers the
+     * second question in the same run: whether a push during a collection
+     * reallocs the array the collection is walking.
+     */
+    public static bool $ccTrace = false;
+
+    /** Roots buffered before an automatic collection. php uses 10 000. */
+    public static int $autoGcThreshold = 10000;
+
+    /**
      * Memory mode selector:
      *   - `hybrid` — escape-analysis decides per-allocation (default)
      *   - `rc`     — every alloc through libc + refcount/CC
@@ -237,6 +446,33 @@ final class Debug
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$compactCaches = true;
         }
+        $env = \getenv('MANTICORE_RC_RETURN_OWNS');
+        if ($env === '0' || $env === 'off') { self::$rcReturnOwns = false; }
+        $env = \getenv('MANTICORE_RC_RECV_TEMP');
+        if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
+        $env = \getenv('MANTICORE_RC_ELEM_OWNS');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
+        $env = \getenv('MANTICORE_RC_ELEM_TYPE');
+        if ($env === '0' || $env === 'off') { self::$rcElemType = false; }
+        $env = \getenv('MANTICORE_RC_PROP_DROP');
+        if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
+        $env = \getenv('MANTICORE_RC_CTOR_ARG');
+        if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
+        $env = \getenv('MANTICORE_RC_ELEM_READ_OWNS');
+        if ($env === '0' || $env === 'off') { self::$rcElemReadOwns = false; }
+        $env = \getenv('MANTICORE_RC_SYM_ELEM');
+        if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
+        $env = \getenv('MANTICORE_ARR_RC_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
+        $env = \getenv('MANTICORE_CC_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$ccTrace = true; }
+        $env = \getenv('MANTICORE_AUTO_GC');
+        if ($env === '0' || $env === 'off') {
+            self::$autoGc = false;
+        } elseif ($env !== false && $env !== '') {
+            self::$autoGc = true;
+            if (\ctype_digit($env)) { self::$autoGcThreshold = (int)$env; }
+        }
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
@@ -249,6 +485,14 @@ final class Debug
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$stats = true;
             Stats::$on = true;
+            Stats::init();
+        }
+        // The phase timeline alone. Read AFTER the full flag so that setting
+        // both leaves the full report on ({@see Stats::$phaseTrace} says why a
+        // large target can only use this one).
+        $env = \getenv('MANTICORE_PHASE_TRACE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            Stats::$phaseTrace = true;
             Stats::init();
         }
         $env = \getenv('MANTICORE_MEMORY');

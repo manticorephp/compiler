@@ -2317,6 +2317,33 @@ trait EmitLlvmBuiltins
      * boxed value) passes through untouched. Shared by array_first/last element
      * boxing and cell-receiver property reads.
      */
+    /**
+     * Does {@see boxRawValue} hand back a BORROWED payload for this slot type,
+     * rather than minting a fresh +1?
+     *
+     * One predicate, read off boxRawValue's own branches, so a container that
+     * takes ownership of what it boxes cannot drift from the boxer. False for a
+     * scalar (nothing to own), for an enum case (a bare ORDINAL — no header at
+     * all, and `__mir_cell_retain` must never see it as a pointer), and for a
+     * nested CONCRETE array, which boxRawValue rebuilds fresh.
+     */
+    private function boxRawValueBorrows(?Type $t): bool
+    {
+        $k = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { return true; }
+        if ($k === Type::KIND_STRING) { return true; }
+        if ($k === Type::KIND_OBJ) {
+            $c = $t->class ?? '';
+            return !($c !== '' && isset($this->enums[$c]));
+        }
+        if ($k === Type::KIND_ARRAY) {
+            $el = $t->element ?? null;
+            return $el === null || $el->kind === Type::KIND_CELL
+                || $el->kind === Type::KIND_UNKNOWN;
+        }
+        return false;
+    }
+
     private function boxRawValue(string $ev, ?Type $t): string
     {
         $ek = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;
@@ -6722,6 +6749,25 @@ trait EmitLlvmBuiltins
                 // ({@see EmitLlvmObjects::emitFixedPropLoad}).
                 $out .= $this->boxRawValue($v, $pt);
                 $boxed = $this->lastValue;
+                // ⚠ THE MAP OWNS ITS ELEMENTS. Every branch of boxRawValue that
+                // passes the slot's word THROUGH — a cell, a string, an object,
+                // an already-cell-repr array — hands this map a BORROWED payload,
+                // while the map is an `assoc[string,cell]` and its release walks
+                // the elements and runs `__mir_cell_drop` on each. Without the
+                // mirror retain every `get_object_vars()` (and every `(array)$o`,
+                // which lands here too) SILENTLY DROPPED one reference from every
+                // object-valued property of the receiver: `$o->in->v` printed ""
+                // three calls later, and `Parser\Dump::payload()` — one
+                // get_object_vars per AST node — is what took an `Ast\Span` to
+                // rc 0 under a live `FunctionDecl`. Same root and same fix as
+                // `array_merge`'s erased element COPY ({@see retainCellPayload}).
+                // Skipped where the box MINTS a fresh +1 (a nested concrete array
+                // is rebuilt), which would leak instead.
+                if ($this->boxRawValueBorrows($pt)) {
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $boxed . ")\n";
+                }
                 $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
                       . $cur . ', ptr ' . $key . ', i64 ' . $boxed . ", i64 0, i64 0)\n";

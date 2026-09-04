@@ -19,13 +19,44 @@ namespace Compile;
  *
  * Time comes from `hrtime(true)`: a real php function under the Zend cold
  * seed AND a stdlib function natively, so the same code reports in both.
- * RESIDENT MEMORY is deliberately NOT read here — there is no native
- * memory_get_usage(); sample RSS from outside the process and correlate on the
- * elapsed-ms column these lines carry.
+ * So does memory: every line carries `rss=<n>MB` from `memory_get_usage()`,
+ * which natively answers the process's PEAK resident size (getrusage
+ * `ru_maxrss` — {@see \__mc_rss_bytes}). Peak rather than current is the right
+ * reading for attribution: it never goes down, so the phase whose line jumps is
+ * the phase that allocated. An outside sampler still gives the shape between
+ * phases; this gives the boundaries a sampler cannot name.
  */
 final class Stats
 {
     public static bool $on = false;
+
+    /**
+     * `MANTICORE_PHASE_TRACE=1` — the per-phase timeline ONLY: {@see step} and
+     * {@see line} report, while the counters and every other `Stats::$on` hook
+     * stay off.
+     *
+     * It exists because `MANTICORE_STATS=1` cannot be used on a large target.
+     * It also enables the fat-function report in `EmitLlvm`, whose
+     * `Stats::line()` allocation lands in the buffer of a BORROWED array
+     * element that the emitter still holds (`$rawBodyPath = $meta[1]` outliving
+     * `unset($meta)`), and the build dies with the stats text spliced into the
+     * exception message. That bug predates this flag — gen-1 and gen-3 fail
+     * identically — and is recorded as its own root; a phase timeline must not
+     * wait on it.
+     */
+    public static bool $phaseTrace = false;
+
+    /** Is any reporting on? Public so a hot loop can skip building its message. */
+    public static function reporting(): bool
+    {
+        return self::$on || self::$phaseTrace;
+    }
+
+    /** `rss=<n>MB`, the process peak. Read once per phase, never in a loop. */
+    private static function rss(): string
+    {
+        return '  rss=' . (string)\intdiv(\memory_get_usage(), 1048576) . 'MB';
+    }
 
     /** Nanosecond clock reading at compiler startup. */
     private static int $t0 = 0;
@@ -37,7 +68,7 @@ final class Stats
 
     public static function init(): void
     {
-        if (!self::$on) { return; }
+        if (!self::reporting()) { return; }
         self::$t0 = self::now();
     }
 
@@ -71,19 +102,19 @@ final class Stats
      */
     public static function step(string $name, int $startNs, int $fns, int $classes): void
     {
-        if (!self::$on) { return; }
+        if (!self::reporting()) { return; }
         $ms = \intdiv(self::now() - $startNs, 1000000);
         $line = 'stats: ' . (string)self::elapsedMs() . 'ms +' . (string)$ms . 'ms  ' . $name;
         if ($fns >= 0) { $line = $line . '  fns=' . (string)$fns; }
         if ($classes >= 0) { $line = $line . ' cls=' . (string)$classes; }
-        \error_log($line);
+        \error_log($line . self::rss());
     }
 
     /** A free-form stats line, stamped with the elapsed time. */
     public static function line(string $s): void
     {
-        if (!self::$on) { return; }
-        \error_log('stats: ' . (string)self::elapsedMs() . 'ms  ' . $s);
+        if (!self::reporting()) { return; }
+        \error_log('stats: ' . (string)self::elapsedMs() . 'ms  ' . $s . self::rss());
     }
 
     /** Add to a named counter (whole-program scan hits, inner iterations, …). */

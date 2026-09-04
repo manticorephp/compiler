@@ -151,7 +151,7 @@ final class EmitLlvm implements EmitVisitor
         $this->magicPropertyHoldersCache = [];
     }
 
-    private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false): void
+    private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false, int $stagedBytes = 0): void
     {
         if (!\Compile\Debug::$rootTrace) { return; }
         $cacheEntries = \count($this->resolveMethodClassCache)
@@ -172,6 +172,7 @@ final class EmitLlvm implements EmitVisitor
             . ' module_fns=' . (string)\count($module->functions)
             . ' module_classes=' . (string)\count($module->classes)
             . ' module_globals=' . (string)\count($module->globalNames)
+            . ' staged_bytes=' . (string)$stagedBytes
             . ' emitter_classes=' . (string)\count($this->classes)
             . ' defined_fns=' . (string)\count($this->definedFns)
             . ' caches=' . (string)$cacheEntries
@@ -418,6 +419,54 @@ final class EmitLlvm implements EmitVisitor
     public bool $emitLibrary = false;
     /** Whether staged emission defers string globals to the body writer. */
     public bool $deferStringGlobals = false;
+
+    /** Declared return type of the function the borrow scan is walking. */
+    private ?Type $scanReturnType = null;
+
+    /** Parent of the node the borrow scan is currently judging. */
+    private ?Node $scanParent = null;
+
+    /**
+     * Write every lazily generated property-read / dynamic-method helper body
+     * through `$sink`, to a FIXPOINT.
+     *
+     * Emitting a helper can register another one — a property-read helper may
+     * demand a dynamic-method helper, and a dynamic-method helper may demand a
+     * further one. `foreach` iterates a COPY of the array, so anything
+     * registered during the drain used to be dropped on the floor: the call
+     * site was emitted, the definition never was, and clang refused the module
+     * with `use of undefined value @manticore___mc_dyn_method0_…`. One AOT case
+     * (`sapi_ctx_two_tasks`) was red on exactly that.
+     *
+     * The registries double as the GENERATOR'S DEDUP TABLE — `emitDynamicMethod*`
+     * returns early on `isset($this->dynamicMethodHelpers[$key])`. So a key may
+     * never be removed before its body is written, or the next request would
+     * regenerate it and the module would carry two definitions. The body string
+     * is blanked instead: the key survives as a tombstone, the text is freed.
+     */
+    private function drainLazyHelpers(callable $sink): void
+    {
+        $writtenProp = [];
+        $writtenDyn = [];
+        $progress = true;
+        while ($progress) {
+            $progress = false;
+            foreach ($this->propertyReadHelpers as $name => $body) {
+                if (isset($writtenProp[$name])) { continue; }
+                $writtenProp[$name] = true;
+                $this->propertyReadHelpers[$name] = '';
+                $sink($body, (string)$name);
+                $progress = true;
+            }
+            foreach ($this->dynamicMethodHelpers as $name => $body) {
+                if (isset($writtenDyn[$name])) { continue; }
+                $writtenDyn[$name] = true;
+                $this->dynamicMethodHelpers[$name] = '';
+                $sink($body, (string)$name);
+                $progress = true;
+            }
+        }
+    }
     /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
      *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
     private bool $lastCallWasBuiltin = false;
@@ -662,7 +711,14 @@ final class EmitLlvm implements EmitVisitor
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
-        foreach ($module->functions as $fn) { $this->scanCellPropStores($fn->body); }
+        foreach ($module->functions as $fn) {
+            // The RETURN exemption below needs the DECLARED return type: it is
+            // what emitReturn falls back to for an unknown/cell value, and so
+            // what decides whether the return retains.
+            $this->scanReturnType = $fn->returnType;
+            $this->scanCellPropStores($fn->body);
+        }
+        $this->scanReturnType = null;
         $streaming = $this->streamIrPath !== '';
         $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';
         $bodyBytes = 0;
@@ -682,6 +738,23 @@ final class EmitLlvm implements EmitVisitor
         $emitTrace = \getenv('MANTICORE_EMIT_TRACE') !== false;
         $emitTraceFull = \getenv('MANTICORE_EMIT_TRACE') === 'full';
         $emitIndex = 0;
+        // ⚠ The FATTEST body and the COSTLIEST one are different questions, and
+        // conflating them sent this hunt down a wrong path: a batch that jumped
+        // +5 GB was blamed on its fattest function, while a stand shows a fat
+        // body costs only 4-6x its own bytes (and the ratio FALLS with size).
+        // So track the RSS delta per function too, and report the max of each.
+        $batchMaxRss = 0;
+        $batchMaxRssIndex = 0;
+        $batchMaxRssName = '';
+        // Fattest body seen since the last batch line. The name is captured
+        // through `substr`, whose result is a FRESH owned string — a plain
+        // `$n = $fn->name` would be a borrowed property read held across the
+        // rest of the loop, the same shape as the sink-marker landmine below,
+        // and `$module->functions` is DRAINED during emission, so resolving the
+        // name later from the index finds nothing (it printed `?`).
+        $batchMaxBytes = 0;
+        $batchMaxIndex = 0;
+        $batchMaxName = '';
         // Under MANTICORE_STATS, report every function whose IR crosses
         // FAT_FN_IR bytes. A megamorphic dispatch site (one switch arm per
         // implementing class) shows up here by name — the IR-size explosion is
@@ -698,6 +771,9 @@ final class EmitLlvm implements EmitVisitor
             $fn = $module->functions[$functionKey];
             $emitIndex = $emitIndex + 1;
             if ($emitTrace) { \error_log('emit-trace: ' . $fn->name); }
+            // Peak RSS before this body exists. Read here, OUTSIDE the sink-marker
+            // window that starts below.
+            $rssBefore = \Compile\Stats::reporting() ? \memory_get_usage() : 0;
             $body = $this->emitFunction($fn);
             $rawBodyPath = '';
             if ($streaming && \strlen($body) > 0 && $body[0] === "\x1f") {
@@ -718,9 +794,28 @@ final class EmitLlvm implements EmitVisitor
                 $rawBodyBytes = \strlen($body);
             }
             if ($emitTraceFull) {
+                // rss is the process PEAK, so the delta between two consecutive
+                // lines is what emitting THIS body cost that never came back —
+                // the only way to see the build multiplier of one fat function
+                // without a 20-minute tier run.
                 \error_log('emit-trace-body index=' . (string)$emitIndex . ' name=' . $fn->name
-                    . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes);
+                    . ' raw_bytes=' . (string)$rawBodyBytes . ' cumulative_before=' . (string)$bodyBytes
+                    . ' rss=' . (string)\intdiv(\memory_get_usage(), 1048576) . 'MB');
             }
+            // ⚠⚠ THIS LINE IS A LANDMINE, and it is deliberately left under the
+            // full `Stats::$on` rather than promoted to the phase trace.
+            // `$rawBodyPath` above is a BORROWED array element whose buffer
+            // `unset($meta, $body)` has already freed — the emitter takes no
+            // reference for `$x = $arr[$i]` ({@see EmitLlvmLocals::emitStoreLocal}
+            // retains only a LOAD_LOCAL obj/string and an array PROPERTY read).
+            // This `Stats::line` then allocates into that freed buffer, and the
+            // throw at the end of the streaming branch reports
+            // `cannot hoist sink file stats: 17810ms fat fn: …`. Reproduces on
+            // the SELF-BUILD in 18 s, identically before and after the rc work.
+            // Do not add another allocation between the marker read and its use.
+            // The real fix is ownership, not placement: an element read stored
+            // into a local must OWN, which also needs InsertMemoryOps to plant
+            // the matching release, or the retain leaks. Own epic.
             if (\Compile\Stats::$on && $rawBodyBytes >= $fatFn) {
                 \Compile\Stats::line('fat fn: ' . (string)$rawBodyBytes . ' bytes  ' . $fn->name);
             }
@@ -816,24 +911,92 @@ final class EmitLlvm implements EmitVisitor
             // long-lived. Pass-boundary releases cannot reclaim candidate roots
             // accumulated by tens of thousands of emitted functions; this call
             // never resets the target arena or changes ABI/COW semantics.
+            // ⚠ HERE, not up beside `$rawBodyBytes`. `substr` ALLOCATES, and up
+            // there it lands inside the sink-marker window and rewrites
+            // `$rawBodyPath` — which is not a theory: putting it there failed
+            // the T6 build at function 46088 with
+            // `cannot hoist sink file …fnraw.46088.hoisted`, the path variable
+            // holding the value of the `$hoistedPath` concat beside it. By this
+            // point the marker is consumed and retired, so allocating is safe.
+            if (\Compile\Stats::reporting()) {
+                if ($rawBodyBytes > $batchMaxBytes) {
+                    $batchMaxBytes = $rawBodyBytes;
+                    $batchMaxIndex = $emitIndex;
+                    $batchMaxName = \substr($fn->name, 0);
+                }
+                // Peak RSS never falls, so this delta is what emitting THIS body
+                // added and never gave back.
+                $grew = \memory_get_usage() - $rssBefore;
+                if ($grew > $batchMaxRss) {
+                    $batchMaxRss = $grew;
+                    $batchMaxRssIndex = $emitIndex;
+                    $batchMaxRssName = \substr($fn->name, 0);
+                }
+            }
             if (($emitIndex & 1023) === 0) {
                 \Manticore\Allocator::release('emit-batch-' . (string)$emitIndex);
                 $this->compactEmissionCaches();
-                $this->rootSnapshot('emit-batch-' . (string)$emitIndex, $module);
+                $this->rootSnapshot('emit-batch-' . (string)$emitIndex, $module, true, $bodyBytes);
+                // EMISSION is ONE opaque line in the phase timeline while it is
+                // the stage that owns the peak: on T6 the whole front finishes
+                // at 7 970 MB and emission takes the run past 40 GB. A line per
+                // batch names WHERE inside emission the memory goes, which no
+                // outside sampler can do.
+                //
+                // ⚠ Placed at the BATCH BOUNDARY on purpose, not for tidiness.
+                // Anywhere between the sink-marker read and its use (`$rawBodyPath
+                // = $meta[1]` … `unset($meta, $body)` … `if ($rawBodyPath !== '')`)
+                // an allocation lands in the freed buffer of that BORROWED array
+                // element and rewrites the path — which is exactly how
+                // `Stats::line`'s fat-fn report below turns the next throw into
+                // `cannot hoist sink file stats: 17810ms fat fn: …`. Here the
+                // path is already consumed and retired.
+                if (\Compile\Stats::reporting()) {
+                    \Compile\Stats::line('emit batch ' . (string)$emitIndex
+                        . '/' . (string)\count($functionKeys)
+                        . '  ir=' . (string)\intdiv($bodyBytes, 1048576) . 'MB'
+                        . '  fattest=' . (string)\intdiv($batchMaxBytes, 1024) . 'KB @'
+                        . (string)$batchMaxIndex . ' ' . $batchMaxName
+                        . '  costliest=' . (string)\intdiv($batchMaxRss, 1048576) . 'MB @'
+                        . (string)$batchMaxRssIndex . ' ' . $batchMaxRssName);
+                    $batchMaxBytes = 0;
+                    $batchMaxIndex = 0;
+                    $batchMaxName = '';
+                    $batchMaxRss = 0;
+                    $batchMaxRssIndex = 0;
+                    $batchMaxRssName = '';
+                }
             }
             // is the retention term (a `dump-mir` of a 510 KB input peaks at
             // 193 MB, and 99.9% of the live blocks at that moment are 64-byte
             // nodes). An empty Block, not null: the field is typed.
             $fn->body = new Block([], Type::void());
-            unset($module->functions[$functionKey], $fn);
+            // ⚠ A LIBRARY's interface is written AFTER emission, and
+            // {@see \Manticore\Sig::emitModule} builds it by walking exactly this
+            // table. Draining it for a library therefore produced
+            // `"functions":[],"classes":[],"constants":[]` — a stdlib .o full of
+            // symbols behind an interface that declares none of them, so every
+            // program that called one failed clang with `use of undefined value`.
+            // 531 of 1028 AOT cases were red on that alone, and it was invisible
+            // because `bin/build` had been refusing its own preflight since the
+            // day the drain landed. The body above is already emptied, which is
+            // the retention term; the FunctionDef shell that Sig reads is small.
+            //
+            // $this->emitLibrary, NOT $module->isLibraryModule: the latter is
+            // `emitLibrary && exportTypes` (Main.php:3852) and is false for the
+            // stdlib, so guarding on it kept the sig empty. This is the same flag
+            // the driver tests before writing the .sig (Main.php:2185, :2270).
+            if (!$this->emitLibrary) {
+                unset($module->functions[$functionKey], $fn);
+            }
         }
         unset($functionKeys);
-        $this->rootSnapshot('post-function-emission', $module, true);
+        $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
         $extraBodies = $this->emitClosureDropFns();
-        $this->rootSnapshot('post-closure-drop-build', $module, true);
+        $this->rootSnapshot('post-closure-drop-build', $module, true, $bodyBytes);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
@@ -843,7 +1006,7 @@ final class EmitLlvm implements EmitVisitor
         // loop; callers then contain only a small call instead of a repeated
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
-        $this->rootSnapshot('post-lazy-helper-build', $module, true);
+        $this->rootSnapshot('post-lazy-helper-build', $module, true, $bodyBytes);
         if ($streaming) {
             // Helper bodies are compiler-owned text and can be numerous on Doctrine.
             // Do not join all of them into one temporary PHP string: stage, hoist,
@@ -880,23 +1043,24 @@ final class EmitLlvm implements EmitVisitor
             }
             $bodyBytes += \strlen($extraBodies);
             unset($extraBodies);
-            foreach ($this->propertyReadHelpers as $helperName => $helperBody) {
-                $appendStreamedBody($helperBody, (string)$helperName);
-                unset($this->propertyReadHelpers[$helperName]);
-            }
-            foreach ($this->dynamicMethodHelpers as $helperName => $helperBody) {
-                $appendStreamedBody($helperBody, (string)$helperName);
-                unset($this->dynamicMethodHelpers[$helperName]);
-            }
+            $this->drainLazyHelpers($appendStreamedBody);
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
                 . (string)$fileHoistThreshold . ')');
-            $this->rootSnapshot('post-extra-body-merge', $module, true);
+            $this->rootSnapshot('post-extra-body-merge', $module, true, $bodyBytes);
         } else {
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);
+            // The buffered path needs the same drain. Streaming grew one and the
+            // in-memory branch was left with none, so with MANTICORE_STREAM_IR=0
+            // every lazy helper was generated, registered, and then dropped.
+            $this->drainLazyHelpers(function (string $body, string $label) use (&$functionBodyChunks, &$bodyBytes): void {
+                if ($body === '') { return; }
+                $functionBodyChunks[] = $body;
+                $bodyBytes += \strlen($body);
+            });
             \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
@@ -1718,9 +1882,15 @@ final class EmitLlvm implements EmitVisitor
                 $this->cellPropElemAsIndex[$this->cellPropKey($idx->array->object->type->class ?? '', $idx->array->property)] = true;
             }
         }
+        // The elem-borrow arm needs to know its CONSUMER, and markChildBorrows
+        // only ever sees a node's direct children. One field, saved and restored
+        // around the descent, is enough — the walk is depth-first.
+        $savedParent = $this->scanParent;
+        $this->scanParent = $n;
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
         }
+        $this->scanParent = $savedParent;
     }
 
     /**
@@ -1788,7 +1958,20 @@ final class EmitLlvm implements EmitVisitor
             && ($parent->array->type->isArray()
                 || $this->slotIsArrayHinted($parent->array->object, $parent->array->property, $parent->array->type))) {
             $pa = $parent->array;
-            $this->propElemBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+            // An element read is a genuine BORROW — unlike a property read it
+            // emits no retain of its own (`retain_element` counts element
+            // STORES). So the veto here is load-bearing and must not simply be
+            // lifted. What CAN be lifted is the case where the CONSUMER takes a
+            // reference: the value of a StoreLocal is retained by
+            // rcRetainByType (an array-access is not an owned producer, so it
+            // is not skipped), and a returned one is retained by
+            // isBorrowedObjReturn. Those two own what they read, so they cannot
+            // strand anything, and vetoing the whole DECLARING CLASS for them
+            // is what leaks every element of the slot — 9,236,608 Lexer\\Token
+            // on the Doctrine tier, against ~0 reclaims.
+            if (!$this->elemReadIsOwned($parent)) {
+                $this->propElemBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+            }
             $idx = $parent->index;
             if ($idx !== null) { $this->markPropBorrowsIn($idx, 'subscript index'); }
             return;
@@ -1804,6 +1987,22 @@ final class EmitLlvm implements EmitVisitor
             }
             return;
         }
+        // A RETURN already TAKES the reference. emitReturn gates on
+        // isBorrowedObjReturn and retains a borrowed property read before
+        // handing it back, so the caller owns a reference of its own and the
+        // slot may drop what it overwrites without stranding that borrow.
+        // `return $this->p;` is the shape every getter has, and the default
+        // arm below vetoed the whole DECLARING CLASS for it — which is why a
+        // class with a getter leaked every overwritten value while the same
+        // class without one was exactly flat (tools/prof/rcbalance.php,
+        // prop_ow_read vs prop_ow_noread).
+        if ($k === Node::KIND_RETURN && \Compile\Debug::$rcReturnOwns) {
+            $rv = $parent->value;
+            if ($rv !== null && $rv->kind === Node::KIND_PROPERTY_ACCESS
+                && $this->returnRetainsBorrow($rv)) {
+                return;
+            }
+        }
         foreach (\Compile\Mir\Walk::children($parent) as $c) {
             $this->markPropBorrowsIn($c, 'node kind ' . (string)$k);
         }
@@ -1816,6 +2015,87 @@ final class EmitLlvm implements EmitVisitor
         return $kind === Node::KIND_CALL || $kind === Node::KIND_METHOD_CALL
             || $kind === Node::KIND_STATIC_CALL || $kind === Node::KIND_INVOKE
             || $kind === Node::KIND_NEW_OBJ;
+    }
+
+    /**
+     * Does `emitReturn` retain this borrowed property read on the way out?
+     *
+     * Mirrors {@see EmitLlvmModule::isBorrowedObjReturn}'s type test, with
+     * {@see EmitLlvmModule::ownershipReturnType}'s fallback spelled against the
+     * scan's own copy of the declared return type (the emit frame does not
+     * exist yet during a module-wide scan).
+     *
+     * Deliberately narrower than the emitter's predicate: OBJ and STRING only.
+     * Those are the two kinds the borrow rule was strict about — "a string /
+     * object property read emits no retain at all" — and the two the fixture
+     * proves leak. An ARRAY return retains to a DEPTH chosen from the declared
+     * type, and matching that depth against what the slot's drop gives back is
+     * the delicate accounting {@see EmitLlvm::$propOwnElem} exists for; arrays
+     * keep their existing element / call-argument exemptions and are not
+     * widened here.
+     */
+    private function returnRetainsBorrow(Node $v): bool
+    {
+        $t = $v->type;
+        $tk = $t->kind;
+        if ($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) {
+            if ($this->scanReturnType === null) { return false; }
+            $t = $this->scanReturnType;
+            $tk = $t->kind;
+        }
+        if ($tk === Type::KIND_STRING) { return true; }
+        // ⚠ ARRAY too, and its absence was the whole `Lexer\Token` leak.
+        // {@see EmitLlvmModule::isBorrowedObjReturn} — the code that actually
+        // emits the retain — covers OBJ, STRING and ARRAY alike (`$isArr =
+        // isVec() || isAssoc()`), so `return $this->tokens;` DOES hand the
+        // caller a reference of its own. Answering `false` here made this scan
+        // disagree with the emitter, and {@see storeLocalRetainsProp} states
+        // what a disagreement costs: it either leaks or frees a live value.
+        // This one leaked — one site, `Lexer.php:100`, vetoed the slot and
+        // stranded every token: 9.2M of them on the Doctrine tier.
+        if ($t->isVec() || $t->isAssoc()) { return true; }
+        if ($tk !== Type::KIND_OBJ) { return false; }
+        // A struct has no rc header and a Closure is a header-less capture
+        // record; emitReturn refuses both, so neither is retained and the veto
+        // must stand.
+        $cls = $t->class ?? '';
+        if ($cls === '') { return false; }
+        if ($this->isClosureClass($cls)) { return false; }
+        if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        if ($this->isEnumClass($cls)) { return false; }
+        return true;
+    }
+
+    /**
+     * Does the CONSUMER of this element read take a reference of its own?
+     *
+     * Only two shapes are accepted, and both are proven elsewhere in the
+     * emitter rather than assumed here: the value of a StoreLocal (retained by
+     * {@see EmitLlvmMemory::rcRetainByType} — an array access is not an owned
+     * producer, so it is not skipped) and the value of a Return (retained by
+     * {@see EmitLlvmModule::isBorrowedObjReturn}).
+     *
+     * Narrowed to OBJ and STRING elements deliberately: an ARRAY element is
+     * retained to a DEPTH chosen from the destination type, and matching that
+     * against what the slot's drop gives back is the accounting
+     * {@see $propOwnElem} exists for. Widening it here is a separate step.
+     */
+    private function elemReadIsOwned(Node $aa): bool
+    {
+        if (!\Compile\Debug::$rcElemOwns) { return false; }
+        $p = $this->scanParent;
+        if ($p === null) { return false; }
+        $k = $aa->type->kind;
+        if ($k !== Type::KIND_OBJ && $k !== Type::KIND_STRING) { return false; }
+        if ($k === Type::KIND_OBJ) {
+            $cls = $aa->type->class ?? '';
+            if ($cls === '') { return false; }
+            if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return false; }
+            if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        }
+        if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
+        if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
+        return false;
     }
 
     /** Mark `$n` as a raw borrow iff it IS a property read. Deliberately NOT
@@ -1991,6 +2271,28 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
+     * Add `$nReg` (an i64 register or literal) to counter `$idx` — the BYTE
+     * counters. Same gating as {@see profBump}, so production IR is unchanged.
+     */
+    private function profAdd(int $idx, string $nReg): string
+    {
+        if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
+        return '  call void @__prof_add(i64 ' . (string)$idx . ', i64 ' . $nReg . ")\n";
+    }
+
+    /**
+     * Per-CLASS ALLOCATION tally. The index is a literal — the producing class is
+     * static at the allocation site. There is no free half: the free site holds
+     * only the descriptor's hashed class_id, and mapping that back to the dense
+     * index would need a switch over every class, i.e. code per class again.
+     */
+    private function profClass(string $classIdReg): string
+    {
+        if (!\Compile\Debug::$profile && !\Compile\Debug::$allocTrace) { return ''; }
+        return '  call void @__prof_class(i64 ' . $classIdReg . ")\n";
+    }
+
+    /**
      * `@__mir_uncaught()` — the top-level fatal handler an uncaught throw
      * longjmps to (base setjmp installed in @main). Renders PHP's
      * `PHP Fatal error:  Uncaught <Class>: <message>` to stderr and exits 255.
@@ -2068,20 +2370,56 @@ final class EmitLlvm implements EmitVisitor
         $this->frame->transferredLocals[$name] = true;
     }
 
-    /** @param Node[] $args */
-    private function shareCallArgs(array $args): void
+    /**
+     * Mark array locals handed to a callee as element-SHARED, so their release
+     * gives back the buffer and not the elements.
+     *
+     * ⚠ The veto is real: where the callee CONSUMES the caller's element refs,
+     * giving them back too is the parser `$args` double-free. But it is not
+     * universal, and keyed at "any argument" it was costing the compiler its
+     * largest live population. A by-VALUE array parameter of a KNOWN callee
+     * takes an ENTRY RETAIN ({@see EmitLlvmMemory::initRcObjSlots}) at exactly
+     * element depth — the callee co-owns, it does not consume — so the caller
+     * must keep its own release or the reference is stranded forever.
+     *
+     * That is the `Lexer::tokenize()` → `new Parser($toks)` chain: three
+     * references (the append's base, the borrowed-return retain, the property
+     * store's retain) against two releases, leaking one ref per token — 168 411
+     * live `Lexer\Token` from ONE compiled file, 64% of the compiler's live
+     * objects, none ever freed.
+     *
+     * Narrowed, never removed. The veto stands wherever the discipline is not
+     * PROVEN: an unknown or builtin callee, a by-REF parameter (whose callee
+     * "co-owns nothing"), a variadic tail, or an argument past the signature.
+     *
+     * @param Node[] $args
+     */
+    private function shareCallArgs(array $args, string $sym = ''): void
     {
+        $callee = $sym !== '' ? ($this->sigs->paramTypes[$sym] ?? null) : null;
+        $refs = $sym !== '' ? ($this->sigs->refParams[$sym] ?? []) : [];
+        $i = 0;
         foreach ($args as $a) {
-            if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                $t = $a->type;
-                if ($t->isVec() || $t->isAssoc()) {
-                    $el = $t->element;
-                    if ($el !== null
-                        && ($el->kind === Type::KIND_OBJ || $el->kind === Type::KIND_STRING)) {
-                        $this->frame->elementSharedLocals[$a->name] = true;
-                    }
-                }
+            $pos = $i;
+            $i = $i + 1;
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $t = $a->type;
+            if (!$t->isVec() && !$t->isAssoc()) { continue; }
+            $el = $t->element;
+            if ($el === null
+                || ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING)) {
+                continue;
             }
+            // Proven co-owning: the callee is known, this position is a real
+            // by-value parameter of it, and its slot is retained on entry.
+            if ($callee !== null && isset($callee[$pos])
+                && !($refs[$pos] ?? false)) {
+                if (\getenv('MANTICORE_OWNEL_TRACE') !== false) {
+                    \error_log('SHARE? $' . $a->name . ' kept (co-owning param ' . (string)$pos . ' of ' . $sym . ')');
+                }
+                continue;
+            }
+            $this->frame->elementSharedLocals[$a->name] = true;
         }
     }
 
@@ -2701,12 +3039,52 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($flavor === 'str') { return '@__mir_rc_release_str'; }
         if ($flavor === 'obj') { return '@__mir_rc_release'; }
-        if ($flavor === 'vecobj' || $flavor === 'assocobj') { return '@__mir_array_release_obj'; }
-        if ($flavor === 'vecstr' || $flavor === 'assocstr') { return '@__mir_array_release_str'; }
-        if ($flavor === 'veccell' || $flavor === 'assoccell') { return '@__mir_array_release_cell'; }
+        if ($flavor === 'vecobj' || $flavor === 'assocobj') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
+        if ($flavor === 'vecstr' || $flavor === 'assocstr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
+        if ($flavor === 'veccell' || $flavor === 'assoccell') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
         if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
+        // PAIRWISE-SYMMETRIC: this slot took the element refs in its own store's
+        // retain, so its drop gives them back on EVERY release, not only at
+        // rc → 0 ({@see classDropFlavor}). Same vocabulary as
+        // {@see EmitLlvmMemory::rcReleaseReg}, so the two cannot drift.
+        if ($flavor === 'vecobjown' || $flavor === 'assocobjown') { return '@__mir_array_release_ownel_obj'; }
+        if ($flavor === 'vecstrown' || $flavor === 'assocstrown') { return '@__mir_array_release_ownel_str'; }
+        if ($flavor === 'veccellown' || $flavor === 'assoccellown') { return '@__mir_array_release_ownel_cell'; }
         return '';
+    }
+
+    /**
+     * The release flavor a CLASS DROP body uses for one property slot — the
+     * plain {@see discardReleaseFlavor}, or its `own` twin when the slot holds
+     * one element ref per element and may give it back on every release.
+     *
+     * The arithmetic that makes this the fix and not a double free: a buffer's
+     * elements carry ONE base ref plus one per retain, against retains+1
+     * releases, so every release returning EXACTLY one is balanced. Today the
+     * drop returns nothing whenever the buffer outlives the object — the local
+     * that built the array is still holding it — and every element is stranded.
+     *
+     * ⚠ Three ODR conditions, not heuristics. `__mir_drop_<id>` is `linkonce_odr`
+     * and coalesces BY NAME across every object file that emits the class, so a
+     * module-local verdict may only be used where this module is the only
+     * emitter: never for an IMPORTED or PRELUDE class, and never from a LIBRARY
+     * module (which cannot see the stores in the programs that link it, and
+     * whose {@see $propBorrowUnknown} already says so).
+     */
+    private function classDropFlavor(\Compile\Mir\ClassDef $cls, string $prop, Type $pt): string
+    {
+        $flavor = $this->discardReleaseFlavor($pt);
+        if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
+        if ($this->propBorrowUnknown || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
+        if (!$this->isOwnElemFlavor($flavor)) { return $flavor; }
+        $key = $this->cellPropKey($cls->name, $prop);
+        if (!isset($this->propOwnElem[$key]) || $this->propOwnElem[$key] !== $flavor) { return $flavor; }
+        if (isset($this->propOwnElemVeto[$key]) || isset($this->propOwnElemVeto[$prop])) { return $flavor; }
+        if (\getenv('MANTICORE_DROP_TRACE') !== false) {
+            \error_log('CLASSDROP ' . $cls->name . '::' . $prop . ' YES ' . $flavor . 'own');
+        }
+        return $flavor . 'own';
     }
 
     /**
@@ -2717,6 +3095,43 @@ final class EmitLlvm implements EmitVisitor
      * element — `current()` etc. — so it is excluded, as is a closure
      * invoke). Mirrors {@see isFreshStringTemp} for the string flavor.
      */
+    /**
+     * The release flavor for a fresh rc ARG TEMP, deepened to element level when
+     * the callee is proven to CO-OWN rather than consume.
+     *
+     * The temp holds the producer's BASE reference, which owns one ref per
+     * element. Releasing it with the plain flavor gives that back only at
+     * rc → 0 — and a callee that stored the value into a property has already
+     * taken rc to 2, so the plain release returns nothing and every element is
+     * stranded. A by-VALUE parameter of a known callee is retained on entry
+     * ({@see EmitLlvmMemory::initRcObjSlots}), which is exactly that proof.
+     *
+     * Unproven cases keep the plain flavor: an unknown signature, a by-REF
+     * parameter (the callee "co-owns nothing"), or a position past the
+     * declaration. One owner for this question, so the ctor / call / method
+     * paths cannot drift apart.
+     *
+     * @param Type[]   $ptypes callee parameter types, `$this` at 0 where present
+     * @param bool[]   $mask   by-ref flags, same indexing
+     */
+    private function coOwnedArgFlavor(string $flavor, array $ptypes, array $mask, int $pos): string
+    {
+        if (!$this->isOwnElemFlavor($flavor)) { return $flavor; }
+        if (!isset($ptypes[$pos]) || ($mask[$pos] ?? false)) { return $flavor; }
+        // ⚠ BOTH ends must carry elements. The entry retain uses the PARAMETER's
+        // own flavor, so a parameter declared as a bare `array` retains in repr
+        // mode and co-owns NOTHING at element depth — the callee holds the
+        // elements only as borrows. Giving one back here then frees a live
+        // object under it: `new Cell('yo', ['style' => new Style('bold')])`
+        // printed an empty string for `$d->style()->n`, caught by
+        // `hetero_prop_default_vs_getter`. A proof checked at one end is not a
+        // proof.
+        if (!$this->isOwnElemFlavor($this->discardReleaseFlavor($ptypes[$pos]))) {
+            return $flavor;
+        }
+        return $flavor . 'own';
+    }
+
     private function freshRcArgFlavor(Node $a): string
     {
         // A normalized conditional is +1 from every arm, so a borrowed-arg temp
