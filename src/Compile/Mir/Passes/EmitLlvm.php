@@ -2923,6 +2923,35 @@ final class EmitLlvm implements EmitVisitor
         return '  call void @__mir_cell_drop(i64 ' . $key . ")\n";
     }
 
+    /**
+     * Release the BASE temp of a read. `mk($i)->v` and `mkarr($i)[0]` evaluate a
+     * fresh +1, take one word out of it and never free the container — the
+     * mirror of {@see keyTempRelease} on the other operand, and of the receiver
+     * release a method call already does ({@see \Compile\Debug::$rcRecvTemp}).
+     *
+     * `$reg` is the base value; `$regIsPtr` says whether it is a `ptr` register
+     * (property / array reads carry one) so the release helper, which takes the
+     * i64 carrier, gets a ptrtoint first.
+     *
+     * ⚠ Gated on a SCALAR result. A property or element that yields an object,
+     * an array or a string hands it out BORROWED from the base, and freeing the
+     * base would free the value the read just returned.
+     */
+    private function baseTempRelease(Node $base, string $reg, bool $regIsPtr, Type $resultType): string
+    {
+        if (!\Compile\Debug::$rcBaseTemp) { return ''; }
+        $rk = $resultType->kind;
+        if ($rk !== Type::KIND_INT && $rk !== Type::KIND_FLOAT && $rk !== Type::KIND_BOOL) { return ''; }
+        $flavor = $this->freshRcArgFlavor($base);
+        if ($flavor === '') { return ''; }
+        $out = '';
+        $v = $reg;
+        if ($regIsPtr) {
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = ptrtoint ptr ' . $reg . " to i64\n";
+        }
+        return $out . $this->rcReleaseReg($v, $flavor);
+    }
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */
     private function freeStrTemp(Node $node, string $ptr): string
     {

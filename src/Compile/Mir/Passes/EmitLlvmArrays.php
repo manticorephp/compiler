@@ -234,6 +234,12 @@ trait EmitLlvmArrays
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
                   . $base . ', i64 ' . $idx . ")\n";
+            // `mkstr($i)[0]` — the BASE string was a fresh temp and char_at mints
+            // a NEW one-char buffer, so the result cannot alias it: free the
+            // base. (The generic {@see EmitLlvm::baseTempRelease} refuses this
+            // one — its result is a string, which for every OTHER read shape is
+            // borrowed from the base.)
+            $out .= $this->freeStrTemp($aa->array, $base);
             $this->lastValue = $buf;
             $this->lastValueType = 'ptr';
             return $out;
@@ -748,6 +754,9 @@ trait EmitLlvmArrays
         if ($keyIsCell || $keyIsString) {
             $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
         }
+        // …and it keeps no BASE either: `mkarr($i)[0]` built an array for one
+        // element. {@see EmitLlvm::baseTempRelease}.
+        $out .= $this->baseTempRelease($aa->array, $arrPtr, true, $self->type);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // A REFERENCE element yields what it refers to. This is not the decode

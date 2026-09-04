@@ -806,6 +806,9 @@ trait EmitLlvmObjects
             $n->type,
         );
         $loaded = $this->lastValue;
+        // The base was a fresh temp (`mk($i)->v`, `(new N($i))->v`) and the read
+        // is done with it. {@see EmitLlvm::baseTempRelease}.
+        $out .= $this->baseTempRelease($pa->object, $objPtr, true, $n->type);
         if ($n->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $loaded . " to double\n";

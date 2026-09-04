@@ -130,6 +130,24 @@ final class Debug
     public static bool $rcRecvTemp = true;
 
     /**
+     * The BASE temp of a READ owns nothing after the read.
+     *
+     * `mk($i)->v` and `mkarr($i)[0]` evaluate a fresh +1, read one word out
+     * of it and drop the container on the floor — one leaked object per
+     * property read (32 MB per 1M) and one leaked array per element read
+     * (78 MB per 1M), where php is flat. The RECEIVER of a method call has
+     * been released since {@see $rcRecvTemp}; this is the same rule for the
+     * base of a read, asking the same predicate
+     * ({@see Mir\\Passes\\EmitLlvm::freshRcArgFlavor}).
+     *
+     * ⚠ ONLY for a SCALAR result. A property or element whose value is an
+     * object / array / string is handed out BORROWED from the base, so
+     * freeing the base would free what the read just returned. That half
+     * needs the read to co-own first.
+     */
+    public static bool $rcBaseTemp = true;
+
+    /**
      * `MANTICORE_RC_ELEM_OWNS=1` — do not veto a property slot's element drop
      * because of an element read whose CONSUMER takes a reference.
      *
@@ -532,6 +550,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcReturnOwns = false; }
         $env = \getenv('MANTICORE_RC_RECV_TEMP');
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
+        $env = \getenv('MANTICORE_RC_BASE_TEMP');
+        if ($env === '0' || $env === 'off') { self::$rcBaseTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_OWNS');
         if ($env !== false && $env !== '0' && $env !== '') { self::$rcElemOwns = true; }
         $env = \getenv('MANTICORE_RC_ELEM_TYPE');
