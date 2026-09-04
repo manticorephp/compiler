@@ -632,6 +632,23 @@ final class InsertMemoryOps implements Pass
         return $sl->value->type;
     }
 
+    /**
+     * The rc release FLAVOR a slot of this type takes. Two stores to one name
+     * that disagree here have no single release that is right for both: the
+     * helpers differ in where the refcount sits and where the allocation begins
+     * ({@see \Compile\MemoryAbi}), so picking either one corrupts the other's
+     * value. Cell is its own flavor — `__mir_cell_drop` is tag-dispatched.
+     */
+    private function rcSlotFlavor(Type $t): string
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_CELL) { return 'cell'; }
+        if ($k === Type::KIND_STRING) { return 'str'; }
+        if ($k === Type::KIND_ARRAY) { return 'arr'; }
+        if ($k === Type::KIND_OBJ) { return 'obj'; }
+        return '';
+    }
+
     /** Whether a SLOT of this type is rc-managed at all. A concrete scalar slot
      *  is not: the flavor ladder's `obj` default would rc-release an int. */
     private function slotTypeIsRc(Type $t): bool
@@ -775,6 +792,31 @@ final class InsertMemoryOps implements Pass
                     $this->noteBlock($name, "repr", $slotType);
                 }
                 $this->rcObjSlotBoxed[$name] = $boxedSlot;
+                // …and two stores that disagree about the slot's rc FLAVOR are
+                // the same defect one level down. The check above only separates
+                // BOXED from RAW; a name stored first as a string and later as an
+                // object passes it and then takes ONE release for both, chosen
+                // first-write-wins — the string one. `__mir_rc_release_str` reads
+                // rc at ptr-8 and frees from ptr-16, so an OBJECT released through
+                // it decrements a word that is not its refcount and hands the
+                // allocator an address that is not its base.
+                //
+                // Dormant until element reads began to co-own: before that the
+                // store took neither a retain nor a release, so the mismatch cost
+                // nothing. `EmitLlvm::emitCmp` holds the live case — `$cd` is an
+                // SSA register NAME (string) at the tagged-float arm and a
+                // `ClassDef` read out of `$this->classes` in the object-`==`
+                // unroll. The gen-2 compiler then freed ClassDefs the class table
+                // still pointed at: `compare_object_props` died with
+                // "free(): invalid pointer" on Linux, and macOS's allocator
+                // tolerated the same corruption silently.
+                $prevFlavor = isset($this->rcObjType[$name])
+                    ? $this->rcSlotFlavor($this->rcObjType[$name]) : '';
+                $nowFlavor = $this->rcSlotFlavor($slotType);
+                if ($prevFlavor !== '' && $nowFlavor !== '' && $prevFlavor !== $nowFlavor) {
+                    $this->rcObjBlocked[$name] = true;
+                    $this->noteBlock($name, "flavor", $slotType);
+                }
                 if (!isset($this->rcObjType[$name])) {
                     $this->rcObjOrder[] = $name;
                     $this->rcObjType[$name] = $slotType;
