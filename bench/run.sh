@@ -101,7 +101,7 @@ if [ "$leak" = "1" ]; then
     fi
     scale_args=()
     for _ in $(seq 2 "$scale"); do scale_args+=("x"); done
-    printf '%-18s %10s %10s %10s %8s   %s\n' \
+    printf '%-20s %10s %10s %10s %8s   %s\n' \
         "case" "rss-1x(MB)" "rss-${scale}x(MB)" "delta(MB)" "ratio" "verdict"
     printf '%s\n' "--------------------------------------------------------------------------"
     leaks=0; checked=0
@@ -110,18 +110,18 @@ if [ "$leak" = "1" ]; then
         [ -n "$filter" ] && [[ "$name" != *"$filter"* ]] && continue
         bin="$out_dir/$name"
         if ! "$mant" compile "$f" -o "$bin" >"$out_dir/$name.cerr" 2>&1; then
-            printf '%-18s %10s %10s %10s %8s   %s\n' "$name" "-" "-" "-" "-" "COMPILE-FAIL"
+            printf '%-20s %10s %10s %10s %8s   %s\n' "$name" "-" "-" "-" "-" "COMPILE-FAIL"
             continue
         fi
         # No `$argc` in the case ⇒ its work cannot be scaled ⇒ no two points.
         if ! grep -q '\$argc' "$f"; then
-            printf '%-18s %10s %10s %10s %8s   %s\n' "$name" "-" "-" "-" "-" "n/a (no \$argc)"
+            printf '%-20s %10s %10s %10s %8s   %s\n' "$name" "-" "-" "-" "-" "n/a (no \$argc)"
             continue
         fi
         b1="$(max_rss_bytes "$bin")"
         bn="$(max_rss_bytes "$bin" "${scale_args[@]}")"
         if [ -z "$b1" ] || [ -z "$bn" ]; then
-            printf '%-18s %10s %10s %10s %8s   %s\n' "$name" "-" "-" "-" "-" "RSS-FAIL"
+            printf '%-20s %10s %10s %10s %8s   %s\n' "$name" "-" "-" "-" "-" "RSS-FAIL"
             continue
         fi
         r1="$(awk "BEGIN{printf \"%.1f\", $b1/1048576}")"
@@ -149,7 +149,7 @@ if [ "$leak" = "1" ]; then
         else
             verdict="ok"
         fi
-        printf '%-18s %10s %10s %10s %8s   %s\n' "$name" "$r1" "$rn" "$dl" "$ra" "$verdict"
+        printf '%-20s %10s %10s %10s %8s   %s\n' "$name" "$r1" "$rn" "$dl" "$ra" "$verdict"
         # Attribution: the atexit counters of a profile build. A leak shows as
         # alloc/retain running ahead of release on one channel.
         if [ "$leakprof" = "1" ] && [ "$verdict" = "LEAK" ]; then
@@ -170,10 +170,10 @@ if [ "$leak" = "1" ]; then
 fi
 
 if [ "$mem" = "1" ]; then
-    printf '%-18s %10s %10s %9s %10s %10s   %s\n' "case" "native(s)" "php(s)" "speedup" "rss-n(MB)" "rss-p(MB)" "parity"
+    printf '%-20s %10s %10s %9s %10s %10s   %s\n' "case" "native(s)" "php(s)" "speedup" "rss-n(MB)" "rss-p(MB)" "parity"
     printf '%s\n' "----------------------------------------------------------------------------------------"
 else
-    printf '%-18s %10s %10s %9s   %s\n' "case" "native(s)" "php(s)" "speedup" "parity"
+    printf '%-20s %10s %10s %9s   %s\n' "case" "native(s)" "php(s)" "speedup" "parity"
     printf '%s\n' "-------------------------------------------------------------------"
 fi
 
@@ -184,7 +184,7 @@ for f in "$cases_dir"/*.php; do
     bin="$out_dir/$name"
 
     if ! "$mant" compile "$f" -o "$bin" >"$out_dir/$name.cerr" 2>&1; then
-        printf '%-18s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "COMPILE-FAIL"
+        printf '%-20s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "COMPILE-FAIL"
         continue
     fi
 
@@ -194,10 +194,10 @@ for f in "$cases_dir"/*.php; do
     if grep -q '@php-skip' "$f"; then
         nt="$(best_time "$bin")"
         if [ "$mem" = "1" ]; then
-            printf '%-18s %10s %10s %9s %10s %10s   %s\n' \
+            printf '%-20s %10s %10s %9s %10s %10s   %s\n' \
                 "$name" "$nt" "-" "-" "$(max_rss_mb "$bin")" "-" "php-skip"
         else
-            printf '%-18s %10s %10s %9s   %s\n' "$name" "$nt" "-" "-" "php-skip"
+            printf '%-20s %10s %10s %9s   %s\n' "$name" "$nt" "-" "-" "php-skip"
         fi
         total=$((total + 1))
         continue
@@ -206,7 +206,7 @@ for f in "$cases_dir"/*.php; do
     n_out="$("$bin")"
     p_out="$("$php_bin" "$f" 2>/dev/null)"
     if [ "$n_out" != "$p_out" ]; then
-        printf '%-18s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "DIFF"
+        printf '%-20s %10s %10s %9s   %s\n' "$name" "-" "-" "-" "DIFF"
         continue
     fi
 
@@ -218,9 +218,9 @@ for f in "$cases_dir"/*.php; do
     if [ "$mem" = "1" ]; then
         rn="$(max_rss_mb "$bin")"
         rp="$(max_rss_mb "$php_bin" "$f")"
-        printf '%-18s %10s %10s %9s %10s %10s   %s\n' "$name" "$nt" "$pt" "$sp" "$rn" "$rp" "ok"
+        printf '%-20s %10s %10s %9s %10s %10s   %s\n' "$name" "$nt" "$pt" "$sp" "$rn" "$rp" "ok"
     else
-        printf '%-18s %10s %10s %9s   %s\n' "$name" "$nt" "$pt" "$sp" "ok"
+        printf '%-20s %10s %10s %9s   %s\n' "$name" "$nt" "$pt" "$sp" "ok"
     fi
 done
 printf '%s\n' "-------------------------------------------------------------------"
