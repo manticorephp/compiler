@@ -3068,6 +3068,15 @@ final class EmitLlvm implements EmitVisitor
      */
     private function scanDropFlags(): void
     {
+        // Every declared property NAME is a key in that class's generated
+        // `@__mir_props_<id>` ({@see EmitLlvmRuntime}), and that body is emitted
+        // with the descriptors — LONG after the string pool has rendered. Intern
+        // the names HERE, at the top of the preamble, or `litStr` mints an id
+        // whose global no longer exists and clang rejects the module with
+        // `use of undefined value '@.str.N'`.
+        foreach ($this->classes as $cls) {
+            foreach ($cls->propertyNames as $pn) { $this->pool->intern($pn); }
+        }
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             foreach ($cls->propertyNames as $pn) {

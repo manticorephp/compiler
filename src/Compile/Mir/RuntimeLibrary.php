@@ -38,8 +38,11 @@ final class RuntimeLibrary
      */
     public static function descriptorType(): string
     {
-        return '{ i64, ptr, ptr, ptr }';
+        return '{ i64, ptr, ptr, ptr, ptr }';
     }
+
+    /** Byte offset of the props_fn field inside {@see descriptorType}. */
+    public const DESC_PROPS_AT = 32;
 
     /**
      * The full `@__mir_cd_<id> = linkonce_odr global …` definition.
@@ -48,10 +51,36 @@ final class RuntimeLibrary
      * gate. The field costs 8 rodata bytes per class either way; appending it
      * leaves class_id@0 and drop_fn@8 where they were, so no reader moves.
      */
-    public static function descriptorGlobal(int $id, string $dropFld, string $rmetaFld = 'ptr null', string $dynFld = 'ptr null'): string
-    {
+    public static function descriptorGlobal(
+        int $id,
+        string $dropFld,
+        string $rmetaFld = 'ptr null',
+        string $dynFld = 'ptr null',
+        string $propsFld = 'ptr null',
+    ): string {
         return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
-            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld . " }\n";
+            . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld
+            . ', ' . $propsFld . " }\n";
+    }
+
+    /**
+     * `@__mir_props_<id>(ptr %o) -> i64` — the class's DECLARED properties as an
+     * `assoc[string, cell]`, keyed and ordered by declaration.
+     *
+     * A generic runtime helper cannot enumerate a user class: it is
+     * `linkonce_odr` and coalesces BY NAME, so it must never be specialized from
+     * module-local information. The class table it would need does not exist in
+     * `manticore_stdlib.o` at all — which is why `json_encode($object)` answered
+     * `{}` for every object even after the argument bug above was fixed.
+     *
+     * A pointer ON THE DESCRIPTOR closes that: the function is a pure function
+     * of the CLASS, emitted beside the descriptor wherever the class is defined,
+     * so every module agrees on it and `linkonce_odr` may coalesce it. The
+     * generic side just loads the field and calls it.
+     */
+    public static function propsFnSymbol(int $id): string
+    {
+        return '@__mir_props_' . (string)$id;
     }
 
     /** Lightweight dynamic-method row: stable name plus uniform thunk pointer. */
@@ -2390,7 +2419,44 @@ final class RuntimeLibrary
         $out .= "  %isarr = icmp eq i64 %nib, 7\n";
         $out .= "  br i1 %isarr, label %tarr, label %tobj\n";
         $out .= "tobj:\n";
-        $out .= "  %osi = call i64 @manticore___mc_json_enc(i64 %cell)\n";
+        // A class that carries a props_fn on its DESCRIPTOR encodes from its
+        // declared properties, right here in the generic helper — the class
+        // table this would otherwise need does not exist in the stdlib, which
+        // is why every object used to answer `{}`. The result is an
+        // `assoc[string,cell]`, so hand it back to this same walker as an ARRAY
+        // cell and let the existing `tarr` arm do the work.
+        $out .= "  %opay = and i64 %cell, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= "  %optr = inttoptr i64 %opay to ptr\n";
+        $out .= "  %odesc = load ptr, ptr %optr\n";
+        $out .= "  %odn = icmp eq ptr %odesc, null\n";
+        $out .= "  br i1 %odn, label %tobjpunt, label %tobjpf\n";
+        $out .= "tobjpf:\n";
+        $out .= "  %opfp = getelementptr inbounds i8, ptr %odesc, i64 "
+              . (string)self::DESC_PROPS_AT . "\n";
+        $out .= "  %opf = load ptr, ptr %opfp\n";
+        $out .= "  %ohas = icmp ne ptr %opf, null\n";
+        $out .= "  br i1 %ohas, label %tobjprops, label %tobjpunt\n";
+        $out .= "tobjprops:\n";
+        $out .= "  %oarr = call i64 %opf(ptr %optr)\n";
+        $out .= "  %oarrp = inttoptr i64 %oarr to ptr\n";
+        $out .= "  %oacell = call i64 @__manticore_box_array(ptr %oarrp)\n";
+        $out .= "  call void @__mir_json_app(ptr %slotp, ptr %lp, i64 %oacell)\n";
+        // The props array co-owns every value it boxed ({@see
+        // EmitLlvmBuiltins::emitDeclaredPropsArray} mirror-retains a borrowed
+        // one), so it is ours to give back.
+        $out .= "  call void @__mir_array_release_cell(ptr %oarrp)\n";
+        $out .= "  ret void\n";
+        $out .= "tobjpunt:\n";
+        // ★ ALL FOUR ARGUMENTS. `__mc_json_enc(mixed $v, int $flags = 0,
+        // int $maxDepth = 512, int $depth = 0)` is a four-parameter PHP body —
+        // a DEFAULT in php is not a default in the ABI, it is filled by the
+        // CALLER. This punt passed the cell alone, so `$flags`, `$maxDepth` and
+        // `$depth` were whatever the argument registers happened to hold; a
+        // `$maxDepth` of 0 makes the walker's own `$depth >= $maxDepth` guard
+        // true on entry, raise error 1, and `json_encode` turn that into
+        // `false`. Every `json_encode($object)` returned false — the whole
+        // `json_objects` bench row, and every API serializer.
+        $out .= "  %osi = call i64 @manticore___mc_json_enc(i64 %cell, i64 0, i64 512, i64 0)\n";
         $out .= "  %os = inttoptr i64 %osi to ptr\n";
         $out .= "  %on = call i64 @__mir_strlen(ptr %os)\n";
         $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %os, i64 %on)\n";

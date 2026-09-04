@@ -6722,7 +6722,7 @@ trait EmitLlvmBuiltins
      * cast can reuse it without emitting its operand a SECOND time (which would
      * run the operand's side effects twice).
      */
-    private function emitDeclaredPropsArray(string $objp, string $cls): string
+    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -6734,6 +6734,14 @@ trait EmitLlvmBuiltins
             foreach ($cd->propertyNames as $pn) {
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
+                // php serializes ONLY public properties from an object; a
+                // missing meta entry is a compiler-synthesised slot, which is
+                // public by construction. `(array)$o` and an in-scope
+                // get_object_vars() still want them all, so this is opt-in.
+                if ($publicOnly) {
+                    $pm = $cd->propertyMeta[$pn] ?? null;
+                    if ($pm !== null && $pm->visibility !== 'public') { continue; }
+                }
                 $off = (string)$cd->propertyOffset($pn);
                 $key = $this->litStr($pn);
                 $g = $this->ssa->allocReg();
