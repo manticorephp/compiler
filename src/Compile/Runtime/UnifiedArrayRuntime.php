@@ -2587,7 +2587,7 @@ final class UnifiedArrayRuntime
         $acur = $app->load(Type::ptr(), $arrSlot);
         $alen = $app->load(Type::i64(), $acur);
         $cap = $app->load(Type::i64(), $this->hdr($app, $acur, MemoryAbi::ARRAY_CAPACITY_OFFSET));
-        $app->brIf($app->icmp('sge', $alen, $cap), $grow, $store);
+        $this->emitAppendCompactGate($fn, $app, $grow, $store, $acur, $alen, $cap, 'hi');
         $double = $grow->mul($cap, Value::int(Type::i64(), 2));
         $newcap = $grow->select($grow->icmp('slt', $double, Value::int(Type::i64(), 4)), Value::int(Type::i64(), 4), $double);
         $newBytes = $grow->add($grow->mul($newcap, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE)), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
@@ -2721,7 +2721,7 @@ final class UnifiedArrayRuntime
         $acur = $app->load(Type::ptr(), $arrSlot);
         $alen = $app->load(Type::i64(), $acur);
         $cap = $app->load(Type::i64(), $this->hdr($app, $acur, MemoryAbi::ARRAY_CAPACITY_OFFSET));
-        $app->brIf($app->icmp('sge', $alen, $cap), $grow, $store);
+        $this->emitAppendCompactGate($fn, $app, $grow, $store, $acur, $alen, $cap, 's');
         $double = $grow->mul($cap, Value::int(Type::i64(), 2));
         $newcap = $grow->select($grow->icmp('slt', $double, Value::int(Type::i64(), 4)), Value::int(Type::i64(), 4), $double);
         $newBytes = $grow->add($grow->mul($newcap, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE)), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
@@ -2740,6 +2740,59 @@ final class UnifiedArrayRuntime
         // is built yet; drops past load factor) — keeps a large build O(n).
         $store->call('__mir_array_index_add', Type::void(), [$buf, $blen]);
         $store->ret($buf);
+    }
+
+    /**
+     * The append path's FULL-BUFFER decision: compact the tombstones away
+     * instead of growing, when there are enough of them to be worth an O(n)
+     * pass. Wires `$app` to `$grow` / `$store` and returns nothing.
+     *
+     * `unset($a[$k])` leaves a TOMBSTONE and the insert path never looked at
+     * one, so re-inserting the SAME key appended a fresh entry every time and
+     * the entry array grew without bound: `$m['hot'] = $i; unset($m['hot']);`
+     * is 74.4 MB over 1M cycles where php is flat at 28, with `count($m)`
+     * answering 1 the whole way. php does exactly this — it rehashes on resize
+     * when the used count has run ahead of the live one.
+     *
+     * ⚠ Compaction MOVES entries, where a grow does not. A `foreach` that
+     * inserts into the array it is walking would hold an index into the very
+     * entries that move — but that shape now takes a SNAPSHOT copy up front
+     * ({@see \Compile\Mir\Passes\EmitLlvmControl::foreachBodyMutatesBase}),
+     * and it had to: a plain GROW already relocated the buffer under it, so it
+     * SIGSEGVed with this gate switched off. {@see \Compile\Debug::$tombRatio}
+     * is the knob; the default is measured, not guessed.
+     */
+    private function emitAppendCompactGate(
+        FunctionDef $fn,
+        \Codegen\Llvm\Block $app,
+        \Codegen\Llvm\Block $grow,
+        \Codegen\Llvm\Block $store,
+        Value $acur,
+        Value $alen,
+        Value $cap,
+        string $tag,
+    ): void {
+        $ratio = Debug::$tombRatio;
+        if ($ratio < 0) {                       // knob off: always grow
+            $app->brIf($app->icmp('sge', $alen, $cap), $grow, $store);
+            return;
+        }
+        $tchk = $fn->block($this->host->rtFreshLabel($tag . '_tchk'));
+        $comp = $fn->block($this->host->rtFreshLabel($tag . '_comp'));
+        $app->brIf($app->icmp('sge', $alen, $cap), $tchk, $store);
+        $fl = $tchk->load(Type::i64(), $this->hdr($tchk, $acur, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $tombRaw = $tchk->lshr($fl, Value::int(Type::i64(), MemoryAbi::ARRAY_TOMB_SHIFT));
+        $tomb = $tchk->and_($tombRaw, Value::int(Type::i64(), MemoryAbi::ARRAY_TOMB_VALUE_MASK));
+        if ($ratio === 0) {
+            // Any hole at all is enough.
+            $tchk->brIf($tchk->icmp('eq', $tomb, Value::int(Type::i64(), 0)), $grow, $comp);
+        } else {
+            // tomb * ratio >= len — holes are at least 1/ratio of the entries.
+            $scaled = $tchk->mul($tomb, Value::int(Type::i64(), $ratio));
+            $tchk->brIf($tchk->icmp('sge', $scaled, $alen), $comp, $grow);
+        }
+        $comp->call('__mir_array_compact', Type::void(), [$acur]);
+        $comp->br($store);
     }
 
     /**

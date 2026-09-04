@@ -315,6 +315,19 @@ final class Debug
      */
     public static bool $rcForeachValueOwns = false;
 
+    /**
+     * Compact tombstones instead of growing, when `tomb * $tombRatio >= len`.
+     * 0 = compact on ANY hole · N>0 = when holes are at least 1/N of the
+     * entries · -1 = never (the old always-grow behaviour).
+     * `MANTICORE_TOMB_RATIO` overrides. The default is MEASURED, not guessed:
+     * on `tools/prof/tombchurn.php int 200000 20000` (20k live int keys, a
+     * key evicted and re-inserted every iteration) ratio 0 compacts on nearly
+     * every insert — O(len) per insert — and costs **8.9 GB / 40 s** where 8
+     * costs 8.7 MB / 3.96 s and the knob OFF costs 20.9 MB / 3.96 s. 64 and 2
+     * measure the same as 8; 8 is the middle of the flat region.
+     */
+    public static int $tombRatio = 8;
+
     /** BISECT ONLY: when non-empty, foreach co-ownership applies to a function
      *  whose name CONTAINS this substring, and to no other. `MANTICORE_FE_ONLY`.
      *  Lets the self-host crash be narrowed to one emitting function in ~log2(N)
@@ -537,6 +550,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
         $env = \getenv('MANTICORE_RC_FOREACH_VALUE_OWNS');
         if ($env !== false && $env !== '0' && $env !== '' && $env !== 'off') { self::$rcForeachValueOwns = true; }
+        $env = \getenv('MANTICORE_TOMB_RATIO');
+        if ($env !== false && $env !== '') { self::$tombRatio = (int)$env; }
         $env = \getenv('MANTICORE_FE_ONLY');
         if ($env !== false && $env !== '') { self::$feOnly = $env; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
