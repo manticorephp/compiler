@@ -2281,6 +2281,8 @@ trait EmitLlvmCalls
         // callee retains if it keeps it (the +1 convention), so the caller's
         // transient is dead once the call returns.
         $argTemps = [];
+        /** @var array<int,array{0:\Compile\Mir\Node,1:string}> boxed cell args to drop after the call */
+        $cellBoxDrops = [];
         // Cell lvalues unboxed into a scratch slot for a raw-payload by-ref
         // param, re-boxed into the caller's slot after the call. Parallel.
         $reboxSlots = [];
@@ -2393,21 +2395,18 @@ trait EmitLlvmCalls
                 // Tagged (mixed/union) param: NaN-box the arg by its
                 // static type so the callee can read its runtime tag.
                 $out .= $this->emitNode($a);
-                // No post-call temp release is registered on this arm (only the
-                // raw `else` below feeds $rcArgRegs), so a cellified fresh temp
-                // is freed by the rebuild itself or not at all.
-                //
-                // ★ A STRING is the one box that allocates NOTHING — the same
-                // pointer re-tagged — so nothing can free it but the caller,
-                // exactly as on the `string`-param arm below. Without this
-                // every `json_encode($s . $x)` / `var_dump($a . $b)` leaked its
-                // whole argument: 375 B per call, and every json bench row.
-                if ($a->type->kind === Type::KIND_STRING && $this->isFreshStringTemp($a)) {
-                    $out .= $this->coerceToI64();
-                    $argTemps[] = $this->lastValue;
-                }
                 $out .= $this->boxToCell($a->type, $a);
                 $argList .= 'i64 ' . $this->lastValue;
+                // ★ What the box left behind is the CALLER's. A concrete-element
+                // vec/assoc is REBUILT into a fresh cell array here, and a
+                // STRING box re-tags the same pointer — neither has any other
+                // owner, and this arm registered no post-call release at all, so
+                // both rode out of every `f(mixed $v)` call. That is the whole
+                // of `json_encode($rows, JSON_PRETTY_PRINT)`: one rebuilt
+                // 2000-row array per call, 500 KB a call. The predicate is the
+                // one the cell-taking BUILTINS already use, so the two paths
+                // cannot drift.
+                $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
                 $out .= $this->emitNode($a);
                 // An int/bool arg to a declared `float` param converts
@@ -2513,6 +2512,9 @@ trait EmitLlvmCalls
         // if kept) them. Skipped when the call returns one of them by ref.
         if (!($this->sigs->returnsByRef[$c->function] ?? false)) {
             $out .= $this->freeStrArgTemps($argTemps);
+            foreach ($cellBoxDrops as $cbd) {
+                $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
+            }
             $ri = 0;
             foreach ($rcArgRegs as $rg) {
                 $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);

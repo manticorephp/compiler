@@ -433,10 +433,19 @@ final class InferAllocKind implements Pass
             || $v->type->kind !== \Compile\Mir\Type::KIND_STRING) {
             return false;
         }
-        $left = $v->left;
-        return $left->kind === Node::KIND_LOAD_LOCAL
-            && $left->type->kind === \Compile\Mir\Type::KIND_STRING
-            && $left->name === $sl->name;
+        // ★ The LEFTMOST LEAF, not the immediate left — that is the one the
+        // append mutates, and it is the rule {@see
+        // InsertMemoryOps::collectSelfAppendedStrings} already walks. Reading
+        // only `$v->left` saw `$s = $s . $x` and missed `$s = $s . $x . $y`:
+        // the accumulator stayed ARENA, `__mir_str_append`'s grow arm moved it
+        // to the rc heap on the first append, and `arena_leave` cannot free a
+        // heap buffer — one leaked accumulator per call, which is the whole of
+        // `json_encode($rows, JSON_PRETTY_PRINT)`.
+        $leaf = $v;
+        while ($leaf->kind === Node::KIND_CONCAT) { $leaf = $leaf->left; }
+        return $leaf->kind === Node::KIND_LOAD_LOCAL
+            && $leaf->type->kind === \Compile\Mir\Type::KIND_STRING
+            && $leaf->name === $sl->name;
     }
 
     /**

@@ -4788,6 +4788,8 @@ trait EmitLlvmObjects
         $argList = '';
         $first = true;
         $argTemps = [];
+        /** @var array<int,array{0:Node,1:string}> boxed cell args to drop after the call */
+        $cellBoxDrops = [];
         $reboxSlots = [];
         $reboxTmps = [];
         $cls = $this->resolveMethodClass($n->class, $n->method);
@@ -4880,15 +4882,12 @@ trait EmitLlvmObjects
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its static type.
                 $out .= $this->emitNode($a);
-                // A STRING box re-tags the SAME pointer ({@see
-                // EmitLlvmCalls::emitCall}, same arm): the caller still owns the
-                // temp and nothing else will free it.
-                if ($a->type->kind === Type::KIND_STRING && $this->isFreshStringTemp($a)) {
-                    $out .= $this->coerceToI64();
-                    $argTemps[] = $this->lastValue;
-                }
-                $out .= $this->boxToCell($a->type);
+                $out .= $this->boxToCell($a->type, $a);
                 $argList .= 'i64 ' . $this->lastValue;
+                // What the box left behind is the CALLER's — a rebuilt cell
+                // array or a re-tagged string ({@see EmitLlvmCalls::emitCall},
+                // same arm).
+                $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
@@ -4916,6 +4915,9 @@ trait EmitLlvmObjects
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
+        foreach ($cellBoxDrops as $cbd) {
+            $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
+        }
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
             $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
