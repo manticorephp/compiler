@@ -1,0 +1,25 @@
+[overwrite]
+dtor 1
+live 2
+dtor 2
+unset done
+[vec]
+dtor 11
+live 12
+dtor 12
+unset done
+[copy]
+b 21 a 22
+b again 21
+[unset-alias]
+b 31
+a count 0
+[read-outlives]
+keep 41
+dtor 42
+keep 41
+dtor 41
+[strings]
+beta
+count 0
+end
