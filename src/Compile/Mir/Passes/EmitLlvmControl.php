@@ -892,6 +892,27 @@ trait EmitLlvmControl
         return false;
     }
 
+    /**
+     * The emitter half of foreach-value co-ownership — it asks the SAME
+     * predicate the pass does, so the two cannot decide differently about a
+     * name ({@see InsertMemoryOps::foreachValueCoOwns}).
+     */
+    private function foreachValueOwns(Foreach_ $fe): bool
+    {
+        if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums)) { return false; }
+        // …and the NAME must be co-owned by every foreach that binds it, or this
+        // loop's +1 pays for another loop's borrow ({@see InsertMemoryOps::
+        // foreachOwnVetoes} — `scanByRefCaptureNode`'s two `$c` loops are the
+        // shape that produced a gen-2 compiler which could not compile hello
+        // world). Whole-function answer, so it is computed once per body.
+        $body = $this->frame->body;
+        if ($body !== null && $this->feVetoBody !== $body) {
+            $this->feVetoBody = $body;
+            $this->feVeto = InsertMemoryOps::foreachOwnVetoes($body, $this->enums);
+        }
+        return !isset($this->feVeto[$fe->valueVar]);
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
@@ -1066,6 +1087,16 @@ trait EmitLlvmControl
         $reset = !$fe->byRef && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
+        // The co-owning loop drops the slot's PREVIOUS word on every iteration,
+        // and on the first one that word is whatever the frame happened to hold
+        // — an uninitialised `alloca`, or a value from an outer use of the same
+        // name that this loop is about to overwrite anyway. Zero it here, where
+        // the store dominates the body: the drop then no-ops on iteration one,
+        // and php's rule that `$v` survives the loop is untouched (the slot is
+        // written before the body ever reads it).
+        if ($this->foreachValueOwns($fe)) {
+            $out .= '  store i64 0, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -1115,6 +1146,22 @@ trait EmitLlvmControl
             $out .= '  ' . $eu . ' = call i64 @__mir_elem_untag(ptr ' . $arr
                   . ', i64 ' . $ev . ")\n";
             $ev = $eu;
+        }
+        // ★ The loop variable CO-OWNS the element php would have copied into it.
+        // Order is the property-slot order and for the same reason: take the +1
+        // FIRST, then drop what the slot is losing, so a loop that meets the
+        // same value twice goes 1 → 2 → 1 instead of freeing it. The retain and
+        // this release are one emitter-local pair, so a disagreement with
+        // {@see InsertMemoryOps::foreachValueCoOwns} can only STRAND the final
+        // iteration's ref — never double-free it.
+        if ($this->foreachValueOwns($fe)) {
+            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
+            if ($fvFlavor !== '') {
+                $out .= $this->rcRetainReg($ev, $fvFlavor);
+                $prev = $this->ssa->allocReg();
+                $out .= '  ' . $prev . ' = load i64, ptr ' . $valSlot . "\n";
+                $out .= $this->rcReleaseReg($prev, $fvFlavor);
+            }
         }
         $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
         if ($fe->keyVar !== null) {

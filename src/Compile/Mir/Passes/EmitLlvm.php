@@ -242,6 +242,12 @@ final class EmitLlvm implements EmitVisitor
     // that pattern miscompiles under self-host ({@see cellTagIr}).
     private string $elemValReg = '';
 
+    /** Cache for {@see EmitLlvmControl::foreachValueOwns}: the body the veto set
+     *  below was computed from, and the set itself.
+     *  @var array<string, bool> */
+    private array $feVeto = [];
+    private ?Node $feVetoBody = null;
+
     /** The `i1` saying the last element store wrote THROUGH a reference cell
      *  ({@see EmitLlvmArrays::emitElemWriteThrough}), '' when that path is not
      *  live. A store that wrote through displaced nothing at the SLOT, so the

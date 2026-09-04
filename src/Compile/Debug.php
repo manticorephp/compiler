@@ -287,6 +287,34 @@ final class Debug
      */
     public static string $elemDropKinds = 'obj,arr';
 
+    /**
+     * A `foreach` VALUE var CO-OWNS what the loop hands it.
+     *
+     * ⛔ OFF by default — `MANTICORE_RC_FOREACH_VALUE_OWNS=1` opts in. The
+     * DIVERGENCE below is real and reproducible (`probe/fe2.php`, `fe3.php`),
+     * but every version of the retain written so far builds a compiler that
+     * SIGSEGVs in `Walk::children` from a recursive scan — `InferScans::
+     * spreadElemOrigin` with the per-name veto in place, `scanByRefCaptureNode`
+     * without it. A cold seed with this OFF and string element drops ON is
+     * GREEN, so the two are independent: this is the open half.
+     * php gives the loop variable a VALUE (rc++), so `foreach ($m as $k => $v)
+     * { $m[$k] = ''; use($v); }` keeps $v intact. We handed out a pure BORROW of
+     * the element word, which was harmless only while nothing ever dropped an
+     * element off a LIVE array — {@see $rcElemSlotDrop} does, and that pattern
+     * is `EmitLlvm::drainLazyHelpers` itself: it blanks the slot it is iterating
+     * and then writes the value it just freed. That is the whole 29-case
+     * self-host cluster.
+     *
+     * ⚠ BOTH HALVES OR NEITHER, and they ask one predicate
+     * ({@see Mir\Passes\InsertMemoryOps::foreachValueCoOwns}): the emitter takes
+     * the +1 and the pass stops BLOCKING the name so scope exit gives it back.
+     * Restricted to a PROVEN vec/assoc base, which is exactly the condition
+     * under which `emitForeach` takes its unified-array path — a generator, a
+     * Traversable or an erased carrier classifies at RUNTIME and the two halves
+     * could not agree about it.
+     */
+    public static bool $rcForeachValueOwns = false;
+
 
     /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
@@ -501,6 +529,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemReadOwns = false; }
         $env = \getenv('MANTICORE_RC_ELEM_SLOT_DROP');
         if ($env === '0' || $env === 'off') { self::$rcElemSlotDrop = false; }
+        $env = \getenv('MANTICORE_RC_FOREACH_VALUE_OWNS');
+        if ($env !== false && $env !== '0' && $env !== '' && $env !== 'off') { self::$rcForeachValueOwns = true; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
         if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
