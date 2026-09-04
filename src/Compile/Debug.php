@@ -162,6 +162,17 @@ final class Debug
     public static bool $propBorrowEscape = true;
 
     /**
+     * Give a dynamic-property BAG to a class this module stores an undeclared
+     * property on ({@see Mir\Passes\LowerFromAst::grantBagsForDynamicStores}).
+     *
+     * php deprecates that store and performs it; without the bag it wrote
+     * through an offset the class does not have — a SIGSEGV on `$o->dyn = 5`
+     * for any class without #[AllowDynamicProperties].
+     * MANTICORE_DYN_PROP_BAG=0 restores the old layout.
+     */
+    public static bool $dynPropBag = true;
+
+    /**
      * `MANTICORE_RC_ELEM_OWNS=1` — do not veto a property slot's element drop
      * because of an element read whose CONSUMER takes a reference.
      *
@@ -564,6 +575,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcReturnOwns = false; }
         $env = \getenv('MANTICORE_RC_RECV_TEMP');
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
+        $env = \getenv('MANTICORE_DYN_PROP_BAG');
+        if ($env === '0' || $env === 'off') { self::$dynPropBag = false; }
         $env = \getenv('MANTICORE_PROP_BORROW_ESCAPE');
         if ($env === '0' || $env === 'off') { self::$propBorrowEscape = false; }
         $env = \getenv('MANTICORE_RC_BASE_TEMP');

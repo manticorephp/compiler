@@ -718,6 +718,7 @@ final class EmitLlvm implements EmitVisitor
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
         $this->computeKeepsNoArg($module);
+        $this->grantBagsForDynamicStores($module);
         foreach ($module->functions as $fn) {
             // The RETURN exemption below needs the DECLARED return type: it is
             // what emitReturn falls back to for an unknown/cell value, and so
@@ -2150,6 +2151,131 @@ final class EmitLlvm implements EmitVisitor
         if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
         if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
         return false;
+    }
+
+    /**
+     * A class this module actually stores an UNDECLARED property on gets a
+     * dynamic-property bag.
+     *
+     * php 8.2+ only DEPRECATES the creation of a dynamic property; the write
+     * still happens. Without a bag the store fell through to the fixed-slot
+     * path and wrote through an offset the class does not have — `$o->dyn = 5`
+     * on a plain class SIGSEGVed, and `isset($o->nope)` answered true where php
+     * answers false.
+     *
+     * Granted from the STORE, so an object pays the extra word only where the
+     * program needs one. Descendants inherit it, the rule
+     * `#[AllowDynamicProperties]` already follows — a subclass without the slot
+     * would take the parent's offset and land in one of its own properties. A
+     * prelude / extern class is left alone (its layout is a published fact this
+     * module does not get to change) and a `#[Struct]` has no header to hold a
+     * bag at all.
+     *
+     * ⚠ HERE, not in LowerFromAst: the receiver's CLASS comes from inference,
+     * which has not run when lowering ends — the same scan there matched
+     * nothing at all. Layout is read during emission, which is after this.
+     */
+    private function grantBagsForDynamicStores(\Compile\Mir\Module $module): void
+    {
+        if (!\Compile\Debug::$dynPropBag) { return; }
+        $want = [];
+        foreach ($module->functions as $fn) {
+            $this->scanDynamicPropStores($fn->body, $want);
+        }
+        if ($want === [] || $module->isLibraryModule) { return; }
+        // ⚠ The bag sits at the END of a class's own layout, which is the MIDDLE
+        // of every subclass's — a base-typed pointer writing it would land in a
+        // property the child declares. Granting one to `Compile\Mir\Node` (the
+        // compiler's own base node) built a compiler that SIGSEGVed on hello
+        // world. So the whole HIERARCHY takes the bag together, at ONE offset:
+        // the deepest layoutEnd in it, which every member then agrees on.
+        //
+        // A library module is skipped outright: its class layouts go into a
+        // `.sig` that other modules compile against, and this offset is not in
+        // it.
+        foreach ($want as $root => $ignored) {
+            $family = [];
+            foreach ($this->classes as $name => $cd) {
+                $cur = $name;
+                $guard = 0;
+                while ($cur !== '' && $guard < 256) {
+                    if ($cur === $root) { $family[$name] = $cd; break; }
+                    $cur = $this->classes[$cur]->parent ?? '';
+                    $guard = $guard + 1;
+                }
+            }
+            // Someone in the family already has a bag (an inherited
+            // #[AllowDynamicProperties]): its layout is already published to the
+            // rest of this module, so leave the family exactly as it is.
+            $taken = false;
+            foreach ($family as $cd) {
+                if ($cd->usesBag()) { $taken = true; }
+            }
+            if ($taken || $family === []) { continue; }
+            $off = 0;
+            foreach ($family as $cd) {
+                $end = $cd->instanceSize();   // no bag yet, so this IS layoutEnd
+                if ($end > $off) { $off = $end; }
+            }
+            if (\getenv('MANTICORE_BAG_TRACE') !== false) {
+                \error_log('BAG-GRANT ' . $root . ' family=' . (string)\count($family)
+                    . ' offset=' . (string)$off);
+            }
+            foreach ($family as $cd) {
+                $cd->bagOffsetFixed = $off;
+                $cd->hasBag = true;
+            }
+        }
+    }
+
+    /**
+     * Does a SUBCLASS of `$cls` declare `$prop`?
+     *
+     * Then the store is not a dynamic property at all — it is a write through
+     * an imprecise static type (`$node->name = …` where `$node` is typed as the
+     * base `Compile\Mir\Node` and is really a `LoadLocal`). Routing that into a
+     * bag would hide the value from every read through the concrete class, and
+     * it is what first proposed a bag for the compiler's own node hierarchy.
+     */
+    private function subclassDeclares(string $cls, string $prop): bool
+    {
+        foreach ($this->classes as $name => $other) {
+            if ($name === $cls) { continue; }
+            if ($other->propertyOffset($prop) === -1) { continue; }
+            $cur = $other->parent ?? '';
+            $guard = 0;
+            while ($cur !== '' && $guard < 256) {
+                if ($cur === $cls) { return true; }
+                $cur = $this->classes[$cur]->parent ?? '';
+                $guard = $guard + 1;
+            }
+        }
+        return false;
+    }
+    /**
+     * A class that defines `__set` is NOT a dynamic-property case: php routes
+     * the undeclared store to the magic method, and giving it a bag made
+     * `__get`/`__set` stop firing (magic_get_set, magic_isset_unset_erased,
+     * magic_get_erased_receiver).
+     * @param array<string,bool> $want classes seen taking an undeclared store
+     */
+    private function scanDynamicPropStores(Node $n, array &$want): void
+    {
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $cls = $n->object->type->class ?? '';
+            if ($cls !== '' && isset($this->classes[$cls])) {
+                $cd = $this->classes[$cls];
+                if (!$cd->isStruct && !$cd->isExternClass && !$cd->isPreludeClass
+                    && !$cd->usesBag() && $cd->propertyOffset($n->property) === -1
+                    && !$this->subclassDeclares($cls, $n->property)
+                    && $this->resolveMethodClass($cls, "__set") === "") {
+                    $want[$cls] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            $this->scanDynamicPropStores($c, $want);
+        }
     }
 
     /**

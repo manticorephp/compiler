@@ -4329,6 +4329,25 @@ trait EmitLlvmObjects
                         $out .= $this->emitNode($upa->object);
                         $out .= $this->coerceToPtr();
                         $out .= $this->emitMagicCall($unCls, '__unset', $this->lastValue, $upa->property, null);
+                    } elseif ($this->classes[$ucls]->usesBag()) {
+                        // A DYNAMIC property lives in the bag, so unset() has to
+                        // remove the entry — leaving it there kept `isset()`
+                        // answering true after an unset, which is the one thing
+                        // php guarantees about that pair.
+                        $bcd = $this->classes[$ucls];
+                        $out .= $this->emitNode($upa->object);
+                        $out .= $this->coerceToPtr();
+                        $objP = $this->lastValue;
+                        $bg = $this->ssa->allocReg();
+                        $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objP
+                              . ', i64 ' . (string)$bcd->bagOffset() . "\n";
+                        $bagI = $this->ssa->allocReg();
+                        $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+                        $bagP = $this->ssa->allocReg();
+                        $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+                        $kid = $this->pool->intern($upa->property);
+                        $out .= '  call void @__mir_array_unset_str(ptr ' . $bagP
+                              . ', ptr ' . $this->strLitId($kid) . ")\n";
                     }
                 }
                 // Same thing with the receiver's class ERASED — dispatch at

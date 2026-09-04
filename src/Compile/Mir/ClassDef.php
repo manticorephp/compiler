@@ -166,8 +166,22 @@ final class ClassDef
     public function bagOffset(): int
     {
         if (!$this->hasBag) { return -1; }
+        if ($this->bagOffsetFixed >= 0) { return $this->bagOffsetFixed; }
         return $this->layoutEnd();
     }
+
+    /**
+     * A bag offset AGREED across a class hierarchy, or -1 for "after my own
+     * properties".
+     *
+     * The default is wrong the moment a base and a subclass both carry a bag:
+     * the base's `layoutEnd()` is the middle of the subclass's layout, so a
+     * base-typed pointer writing the bag lands in a property the child
+     * declares. One offset — the deepest `layoutEnd()` in the hierarchy — makes
+     * every instance agree, at the cost of a hole in the shallower ones.
+     * {@see Passes\EmitLlvm::grantBagsForDynamicStores} sets it.
+     */
+    public int $bagOffsetFixed = -1;
 
     /**
      * Byte offset just past the last property — where the bag goes, and what the
@@ -276,6 +290,9 @@ final class ClassDef
     /** Instance size in bytes: header + every property's slot + the bag slot. */
     public function instanceSize(): int
     {
-        return $this->layoutEnd() + ($this->hasBag ? 8 : 0);
+        if (!$this->hasBag) { return $this->layoutEnd(); }
+        $bag = $this->bagOffset();
+        $end = $this->layoutEnd();
+        return ($bag > $end ? $bag : $end) + 8;
     }
 }

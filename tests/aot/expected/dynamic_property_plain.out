@@ -1,0 +1,10 @@
+before=false
+dyn=5 x=1 s=a
+after=true other=false
+x=9 dyn=6
+{"x":9,"s":"a","dyn":6}
+{"x":9,"s":"a","dyn":6}
+hello {"x":9,"s":"a","dyn":6,"tag":"hello"}
+unset=false tag=hello
+1 2 sub {"x":1,"s":"a","y":2,"extra":"sub"}
+fresh=false {"x":1,"s":"a"}
