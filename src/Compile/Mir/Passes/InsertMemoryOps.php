@@ -86,6 +86,12 @@ final class InsertMemoryOps implements Pass
      *  about this has no single correct release flavor and is blocked. */
     private array $rcObjSlotBoxed = [];
 
+    /** @var array<string, string> census only: blocked local → which gate blocked it. */
+    private array $blockReason = [];
+
+    /** @var array<string, string> census only: blocked local → the value's type kind. */
+    private array $blockKind = [];
+
     /** @var array<string, bool> FFI function names (foreign, non-rc return) */
     private array $ffiFns = [];
 
@@ -125,6 +131,8 @@ final class InsertMemoryOps implements Pass
         $this->rcObjNeutral = [];
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
+        $this->blockReason = [];
+        $this->blockKind = [];
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -141,6 +149,7 @@ final class InsertMemoryOps implements Pass
         foreach ($fn->params as $p) {
             $this->blocked[$p->name] = true;
             $this->rcObjBlocked[$p->name] = true;
+            $this->noteBlock($p->name, 'param', $p->type);
         }
 
         $this->scanStores($fn->body);
@@ -206,6 +215,7 @@ final class InsertMemoryOps implements Pass
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
             $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "neutral", $t);
         }
 
         // Per-local releases for rc-mode confined allocations.
@@ -265,7 +275,36 @@ final class InsertMemoryOps implements Pass
             $stmts[] = new MemoryOp_('arena_leave', '', null, Type::void());
         }
 
+        $this->censusFunction(\count($releases), \count($rcReleases));
         $fn->body->stmts = $stmts;
+    }
+
+    /**
+     * Census hook — active only under `MANTICORE_STATS=1`, and it changes no
+     * plan. This pass refuses to schedule a release at five distinct gates and
+     * every refusal is a deliberate LEAK ("Block: a leak, never a free of a
+     * tag"). Which gate, and on what type kind, is the whole question: without
+     * it the retained memory has no attributable owner. First reason wins — a
+     * name is blocked once and the first gate is the one that decided it.
+     */
+    private function noteBlock(string $name, string $reason, ?Type $t): void
+    {
+        if (!\Compile\Stats::$on) { return; }
+        if (isset($this->blockReason[$name])) { return; }
+        $this->blockReason[$name] = $reason;
+        $this->blockKind[$name] = $t === null ? 'none' : $t->kind;
+    }
+
+    /** Locals that got a release vs locals that did not, by gate and by kind. */
+    private function censusFunction(int $releases, int $rcReleases): void
+    {
+        if (!\Compile\Stats::$on) { return; }
+        \Compile\Stats::bump('own.released.flavor', $releases);
+        \Compile\Stats::bump('own.released.rcobj', $rcReleases);
+        foreach ($this->blockReason as $name => $reason) {
+            \Compile\Stats::bump('own.blocked.' . $reason, 1);
+            \Compile\Stats::bump('own.blocked.kind.' . $this->blockKind[$name], 1);
+        }
     }
 
     /**
@@ -300,6 +339,25 @@ final class InsertMemoryOps implements Pass
      * property / array read — are excluded: releasing them would
      * over-release the real owner's count.
      */
+    /**
+     * The ONE condition behind element-read co-ownership, shared by both halves
+     * of it: this pass, which makes the destination local release, and
+     * {@see EmitLlvmLocals::elemReadCoOwn}, which takes the matching +1. A type
+     * either gets both or neither — one half alone is a leak or a double free.
+     *
+     * @param array<string, mixed> $enums enum name → def; enum values are non-rc
+     */
+    public static function elemReadCoOwns(?Type $t, array $enums): bool
+    {
+        if ($t === null) { return false; }
+        if ($t->isVec() || $t->isAssoc()) { return true; }
+        if ($t->kind === Type::KIND_OBJ) {
+            $c = $t->class ?? '';
+            return !($c !== '' && isset($enums[$c]));
+        }
+        return false;
+    }
+
     private function isOwnedObj(Node $value): bool
     {
         // A conditional (ternary / `?:` / `??` / match) the contract covers is an
@@ -378,6 +436,17 @@ final class InsertMemoryOps implements Pass
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return true;
         }
+        // An ELEMENT READ co-owns what it hands out — the emitter retains it in
+        // {@see EmitLlvmLocals::emitStoreLocal}, so the local must release it.
+        // The two are one change: see {@see \Compile\Debug::$rcElemReadOwns}.
+        // Without it `$keep = $m['a']; unset($m);` hands back freed memory.
+        // ⚠ The two halves must decide on the SAME predicate, or they disagree
+        // on a name and leave a retain with no release — the extra `dtor elem`
+        // php never runs. {@see EmitLlvmLocals::elemReadCoOwn} is the other half.
+        if (\Compile\Debug::$rcElemReadOwns && $k === Node::KIND_ARRAY_ACCESS
+            && self::elemReadCoOwns($value->type, $this->enums)) {
+            return true;
+        }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
         // allocation — the one producer this pass could not see, because it gates
         // on `effects->alloc`. {@see EmitLlvmLocals::emitStoreLocal}'s snapshot
@@ -411,6 +480,25 @@ final class InsertMemoryOps implements Pass
         // FRESH +1 array, so it is owned exactly like a literal.
         return $k === Node::KIND_ARRAY_LIT
             || ($tk === Type::KIND_ARRAY && $k === Node::KIND_ADD);
+    }
+
+    /**
+     * Is `$new` the same array shape as `$old` but with a CONCRETE element
+     * where `$old` had `unknown`? That is the one upgrade this pass accepts
+     * after the first store: it deepens the release, it cannot redirect it.
+     */
+    private function refinesElement(Type $old, Type $new): bool
+    {
+        if (!\Compile\Debug::$rcElemType) { return false; }
+        if ($old->kind !== $new->kind) { return false; }
+        if (!($old->isVec() && $new->isVec()) && !($old->isAssoc() && $new->isAssoc())) {
+            return false;
+        }
+        $oe = $old->element;
+        $ne = $new->element;
+        if ($oe === null || $ne === null) { return false; }
+        if ($oe->kind !== Type::KIND_UNKNOWN) { return false; }
+        return $ne->kind === Type::KIND_OBJ || $ne->kind === Type::KIND_STRING;
     }
 
     /**
@@ -525,6 +613,7 @@ final class InsertMemoryOps implements Pass
             $fe = $n;
             $this->rcObjBlocked[$fe->valueVar] = true;
             $this->blocked[$fe->valueVar] = true;
+            $this->noteBlock($fe->valueVar, "foreach", null);
             if ($fe->keyVar !== null) {
                 $this->rcObjBlocked[$fe->keyVar] = true;
                 $this->blocked[$fe->keyVar] = true;
@@ -552,7 +641,12 @@ final class InsertMemoryOps implements Pass
             // buffer at `str x8, [x0]` with x0 == 0. An allocation-owned producer
             // (a call's +1) keeps its reference through the same arm, so only the
             // retain-owned one is dropped here.
-            $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS;
+            // An ELEMENT read owns by retain exactly as a property read does
+            // ({@see \Compile\Debug::$rcElemReadOwns}), so it inherits the same
+            // exclusion: the box-back arm returns before the retain, and
+            // claiming ownership there is a release with no matching retain.
+            $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
+                || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS);
             if ($this->isOwnedObj($value) && !($ownedByRetain && $boxedSlot)) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit
@@ -561,10 +655,26 @@ final class InsertMemoryOps implements Pass
                 if (isset($this->rcObjSlotBoxed[$name])
                     && $this->rcObjSlotBoxed[$name] !== $boxedSlot) {
                     $this->rcObjBlocked[$name] = true;
+                    $this->noteBlock($name, "repr", $slotType);
                 }
                 $this->rcObjSlotBoxed[$name] = $boxedSlot;
                 if (!isset($this->rcObjType[$name])) {
                     $this->rcObjOrder[] = $name;
+                    $this->rcObjType[$name] = $slotType;
+                } elseif ($this->refinesElement($this->rcObjType[$name], $slotType)) {
+                    // FIRST-WRITE-WINS was wrong for the element type. `$a = []`
+                    // is `vec[unknown]`, so the release flavor froze as a plain
+                    // `vec` — buffer only — while inference later refined the
+                    // local to `vec[obj<T>]`. Every element then leaked: the
+                    // emitter called __mir_array_release where
+                    // __mir_array_release_obj was needed. That is
+                    // `$filtered = []; $filtered[] = $tok; $this->tokens =
+                    // $filtered;` in Parser::__construct, i.e. 9,236,608 leaked
+                    // Lexer\\Token on the Doctrine tier.
+                    //
+                    // Only ever UNKNOWN -> concrete, and only the element: the
+                    // slot's own kind and boxedness are unchanged, so this adds
+                    // depth to a release that already ran, never a different one.
                     $this->rcObjType[$name] = $slotType;
                 }
                 if (!CondOwn::isConditional($value)) { $this->rcObjPlainOwner[$name] = true; }
@@ -574,6 +684,7 @@ final class InsertMemoryOps implements Pass
                 $this->rcObjNeutral[$name] = true;
             } else {
                 $this->rcObjBlocked[$name] = true;
+                $this->noteBlock($name, "notowned", $value->type);
             }
             // Aliasing a vec (`$b = $a`) leaves two locals sharing one
             // buffer (no obj-style alias retain for vecs — they COW-copy
@@ -582,12 +693,14 @@ final class InsertMemoryOps implements Pass
             if ($value->kind === Node::KIND_LOAD_LOCAL
                 && $value->type->kind === Type::KIND_ARRAY) {
                 $this->rcObjBlocked[$value->name] = true;
+                $this->noteBlock($value->name, "vecalias", $value->type);
             }
             $flavor = $this->allocFlavor($value);
             if ($flavor === null) {
                 // Non-owning store (borrow / scalar / RcHeap escape):
                 // the frame can't free this local at scope exit.
                 $this->blocked[$name] = true;
+                $this->noteBlock($name, "noflavor", $value->type);
             } else {
                 if (!isset($this->ownedFlavor[$name])) {
                     $this->ownedOrder[] = $name;
@@ -597,6 +710,15 @@ final class InsertMemoryOps implements Pass
             }
             $this->scanStores($value);
             return;
+        }
+        // A LOAD carries the refined type. `$a = []` is the only STORE to the
+        // name — the appends are store_element — so the concrete element type
+        // exists nowhere but on the loads inference later retyped. Reading it
+        // here is what turns `__mir_array_release` into
+        // `__mir_array_release_obj` for the slot.
+        if ($n->kind === Node::KIND_LOAD_LOCAL && isset($this->rcObjType[$n->name])
+            && $this->refinesElement($this->rcObjType[$n->name], $n->type)) {
+            $this->rcObjType[$n->name] = $n->type;
         }
         foreach (Walk::children($n) as $c) { $this->scanStores($c); }
     }

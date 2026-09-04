@@ -12,7 +12,7 @@ graphify-out/
 !tests/expected/*.out
 !tests/bootstrap/expected/*.out
 !tests/aot/expected/*.out
-!docs/audit/probes/expected/*.out
+!tests/audit/probes/expected/*.out
 
 # Compiled example binaries (rebuilt via examples/*/build.sh)
 examples/async/*_bin
@@ -21,3 +21,8 @@ examples/http/*_bin
 # OS
 **/.DS_Store
 .fuzz-findings/
+
+# Working notes and audit reports — evidence, handoffs, tier logs.
+# The audit HARNESS (probes, expected, data) lives in tests/audit/ and IS tracked.
+docs/audit/
+docs/status/

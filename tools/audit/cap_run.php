@@ -19,12 +19,12 @@
  *
  *   tests/aot/cases/cap_*.php   probes that PASS today. Auto-discovered by
  *                               tests/aot/run.sh, so they gate forever.
- *   docs/audit/probes/cap_*.php probes that FAIL today. A permanently-red case
+ *   tests/audit/probes/cap_*.php probes that FAIL today. A permanently-red case
  *                               in tests/aot/cases would break the gate and get
  *                               muted — which is exactly how a KNOWN gap turns
  *                               into an UNKNOWN one.
  *
- * When an epic closes a gap it moves that probe from docs/audit/probes/ into
+ * When an epic closes a gap it moves that probe from tests/audit/probes/ into
  * tests/aot/cases/ in the same commit. The audit is meant to self-liquidate.
  *
  * Probe header metadata (parsed, both directories):
@@ -34,7 +34,7 @@
  * Usage:
  *   php tools/audit/cap_run.php [--filter <substr>] [--regen] [--verify]
  *
- *   --regen   (re)generate docs/audit/probes/expected/*.out from `php`
+ *   --regen   (re)generate tests/audit/probes/expected/*.out from `php`
  *   --verify  regenerate into a temp buffer and fail if it differs from what
  *             is checked in — proves no expected file was hand-written
  */
@@ -51,13 +51,13 @@ for ($i = 1; $i < count($argv); $i++) {
     elseif ($argv[$i] === '--verify') { $verify = true; }
 }
 
-$probeDir = 'docs/audit/probes';
+$probeDir = 'tests/audit/probes';
 $caseDir = 'tests/aot/cases';
 $expDir = $probeDir . '/expected';
 $tmp = sys_get_temp_dir() . '/mc_cap_' . getmypid();
 @mkdir($tmp, 0777, true);
 @mkdir($expDir, 0777, true);
-@mkdir('docs/audit/data', 0777, true);
+@mkdir('tests/audit/data', 0777, true);
 
 $mc = $root . '/bin/manticore';
 if (!is_file($mc)) { fwrite(STDERR, "cap_run: no bin/manticore — build the worktree first\n"); exit(2); }
@@ -163,14 +163,14 @@ function diff_lines(string $a, string $b): array
     return $out;
 }
 
-$fh = fopen('docs/audit/data/capability.tsv', 'w');
+$fh = fopen('tests/audit/data/capability.tsv', 'w');
 fwrite($fh, "probe\tlocation\tstatus\towning_epic\tphp_out_sha\tmc_out_sha\n");
 foreach ($rows as $r) { fwrite($fh, implode("\t", $r) . "\n"); }
 fclose($fh);
 
 echo "\n";
 foreach ($counts as $k => $v) { if ($v > 0) { echo "$k=$v "; } }
-echo "\n-> docs/audit/data/capability.tsv\n";
+echo "\n-> tests/audit/data/capability.tsv\n";
 
 // This is an audit tool: a DIFF is a finding, not a failure. Only a broken
 // probe (ORACLE) or a failed --verify is an error worth a non-zero exit.

@@ -13,6 +13,7 @@ host profiler needs to be useful.
 | `../docker/prof/run.sh` | the same, on Linux | `heaptrack` in the gate toolchain image |
 | `report.php` | folds any of the above into PHP names | — |
 | `propleak.php` | is an rc value in a PROPERTY ever released? (no) | `/usr/bin/time -l` |
+| `tier.sh` | what does one audit tier cost, under a hard cap? | macOS `vmmap` + `sample` |
 
 Granularity is **the function, forever**: `-g` is never passed to clang
 (`Main.php:526`), so the binary has no DWARF and no line numbers exist to

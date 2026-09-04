@@ -123,7 +123,7 @@ foreach ($superglobals as $sg) {
 
 $md .= "## SAPI functions called\n\n";
 $md .= "`present` is measured against this tree's stdlib; see\n";
-$md .= "`docs/audit/probes/cap_sapi_fn_presence.php` for the runtime check.\n\n";
+$md .= "`tests/audit/probes/cap_sapi_fn_presence.php` for the runtime check.\n\n";
 $md .= "| function | call sites | first site |\n|---|---|---|\n";
 ksort($sapiHits);
 foreach ($sapiHits as $fn => $sites) {

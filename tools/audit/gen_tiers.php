@@ -12,11 +12,11 @@
  * tier's real membership is computed: anchor + every transitive dependency not
  * already claimed by a lower tier. Closure holds by construction.
  *
- * Usage: php tools/audit/gen_tiers.php <probe-app-dir> [--out docs/audit/tiers.json]
+ * Usage: php tools/audit/gen_tiers.php <probe-app-dir> [--out tests/audit/tiers.json]
  */
 
 $appDir = $argv[1] ?? '';
-$outPath = 'docs/audit/tiers.json';
+$outPath = 'tests/audit/tiers.json';
 for ($i = 2; $i < count($argv); $i++) {
     if ($argv[$i] === '--out' && isset($argv[$i + 1])) { $outPath = $argv[++$i]; }
 }

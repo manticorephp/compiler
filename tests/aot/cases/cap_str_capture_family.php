@@ -2,7 +2,7 @@
 // @epic: bare-alias-capture
 // @why: symfony and doctrine use strstr/strcmp/strncmp throughout; the bare-name
 //       alias binds them to the raw C functions in Runtime\Libc (see
-//       docs/audit/data/alias-capture.tsv). C returns a pointer where PHP
+//       tests/audit/data/alias-capture.tsv). C returns a pointer where PHP
 //       returns a string, and C stops at the first NUL where PHP does not.
 
 // Return shape: PHP gives a string, C gives a char* that lands as an int.

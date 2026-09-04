@@ -87,11 +87,17 @@ for f in "${FILES[@]}"; do
     # A `<case>.diag` sidecar marks a case whose POINT is a diagnostic
     # (`#[\Deprecated]`, `#[\NoDiscard]`). Those need php's error output ON,
     # which the default invocation deliberately suppresses.
+    # ⚠ xdebug REWRITES var_dump: with the extension loaded every dump is
+    # prefixed "<file>:<line>:", so a perfectly matching binary reads as a
+    # divergence on every var_dump case at once. A local `php` with xdebug
+    # installed reported 335 DIFFs against a tree whose AOT suite had been green
+    # 1026/1028 minutes earlier — and each one looked like a real regression.
+    # The oracle is the LANGUAGE, not this host's extension set.
     if [[ -f "${f%.php}.diag" ]]; then
-        ref="$(mc_limit "$REF_TIMEOUT" php -d error_reporting=E_ALL -d display_errors=STDOUT \
+        ref="$(mc_limit "$REF_TIMEOUT" php -d xdebug.mode=off -d error_reporting=E_ALL -d display_errors=STDOUT \
                    -d html_errors=0 -d log_errors=0 "$f" 2>"$WORK/ref.err")"; rrc=$?
     else
-        ref="$(mc_limit "$REF_TIMEOUT" php -d error_reporting=0 -d display_errors=0 \
+        ref="$(mc_limit "$REF_TIMEOUT" php -d xdebug.mode=off -d error_reporting=0 -d display_errors=0 \
                    "$f" 2>"$WORK/ref.err")"; rrc=$?
     fi
     # 124 FIRST: a php side that ran out of time produces no stdout, which the

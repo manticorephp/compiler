@@ -1548,6 +1548,14 @@ final class UnifiedArrayRuntime
             $this->profCounter($bump, 33);
             if ($retainIdx >= 0) { $this->profCounter($bump, $retainIdx); }
             $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
+            if (Debug::$arrRcTrace) {
+                $tlen = $bump->load(Type::i64(), $arr);
+                $tf = $this->module->anonString("[ARC] ret %-18s arr=%p len=%lld rc=%lld\n");
+                $tn = $this->module->anonString($symbol);
+                $bump->call('dprintf', Type::i32(),
+                    [Value::int(Type::i32(), 2), $tf, $tn, $arr, $tlen,
+                     $bump->add($cur, Value::int(Type::i64(), 1))], null, '(i32, ptr, ...)');
+            }
         }
 
         // ── co-own exactly what the matching release will drop ──
@@ -2008,6 +2016,19 @@ final class UnifiedArrayRuntime
         $this->profCounter($dec, 34);
         if ($releaseIdx >= 0) { $this->profCounter($dec, $releaseIdx); }
         $dec->store($next, $rcAddr);
+        if (Debug::$arrRcTrace) {
+            // Per-BUFFER rc history. Every predicate on the token path has been
+            // read, twice wrongly; what was never observed is the rc of ONE
+            // buffer over its life. `len` identifies it (the token array is the
+            // one whose length is the token count) and the flavor names which
+            // release ran, so an unbalanced pair is read off directly instead of
+            // inferred from a whole-program counter.
+            $tlen = $dec->load(Type::i64(), $arr);
+            $tf = $this->module->anonString("[ARC] rel %-18s arr=%p len=%lld rc=%lld\n");
+            $tn = $this->module->anonString($symbol);
+            $dec->call('dprintf', Type::i32(),
+                [Value::int(Type::i32(), 2), $tf, $tn, $arr, $tlen, $next], null, '(i32, ptr, ...)');
+        }
         // `$dec` dominates every block below, so the symmetric variants can use
         // this i1 again at the reclaim gate.
         $isZero = $dec->icmp('sle', $next, Value::int(Type::i64(), 0));

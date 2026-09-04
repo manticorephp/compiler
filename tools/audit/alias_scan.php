@@ -29,7 +29,7 @@
  */
 
 $sigPath = 'lib/manticore_stdlib.o.sig';
-$outPath = 'docs/audit/data/alias-capture.tsv';
+$outPath = 'tests/audit/data/alias-capture.tsv';
 $lowerFns = 'src/Compile/Mir/Passes/LowerFns.php';
 
 $argvv = $argv;

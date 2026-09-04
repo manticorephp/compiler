@@ -97,7 +97,20 @@ final class Type
          * @var self[]
          */
         public readonly array $typeArgs = [],
-    ) {}
+    ) {
+        self::$nextId = self::$nextId + 1;
+        $this->id = self::$nextId;
+    }
+
+    /**
+     * Identity of this exact instance, and the alphabet the composite
+     * cache keys are written in ({@see $interned}). An id rather than a
+     * recursive structural string: the key is built on EVERY factory call,
+     * three million times per build, and walking a nested type there would
+     * cost more than the allocation it saves.
+     */
+    public int $id = 0;
+    private static int $nextId = 0;
 
     /**
      * The parameterless kinds are INTERNED — one object each, for the whole
@@ -187,14 +200,67 @@ final class Type
         return $r;
     }
 
+    /**
+     * COMPOSITE types are interned as well, and they are where the objects
+     * actually are. Interning the parameterless kinds left the composites
+     * minting one object per call: a full self-host build asked for
+     * **3 169 269 Types and wanted 795** — 99.97%% duplicates, of which
+     * `vec` 2 099 389, `assoc` 880 904 and `obj` 168 886. `vec[string]`
+     * alone was 776 084 objects.
+     *
+     * Sound for the same reason the scalars are: every field is readonly, so
+     * a shared instance cannot be told from a fresh one.
+     *
+     * ⚠ The old comment on the scalar slots warned that a keyed array would
+     * put a Type through the CELL boundary on every read. Measured, it does
+     * not: with `@var array<string,self>` on the property the read carries no
+     * cell op at all (checked in the emitted IR), and a stand doing 800 000
+     * lookups peaked at 1.11 MB against 91.16 MB for the same run allocating
+     * each time, at equal CPU.
+     *
+     * @var array<string,self>
+     */
+    private static array $interned = [];
+
     public static function vec(self $element): self
     {
-        return new self(self::KIND_ARRAY, element: $element);
+        $k = 'v' . (string)$element->id;
+        $hit = self::$interned[$k] ?? null;
+        if ($hit !== null) { return $hit; }
+        $t = new self(self::KIND_ARRAY, element: $element);
+        self::$interned[$k] = $t;
+        return $t;
+    }
+
+    /**
+     * An array type from its parts, interned through {@see vec} / {@see assoc}
+     * whenever it carries no record shape.
+     *
+     * Interning only the two public factories left two thirds of the array
+     * types un-shared: `join` runs at every control-flow merge and
+     * `substitute` / `eraseTypeVars` at every generic use, and all three
+     * rebuilt the type with a bare `new self`. One constructor for the shape,
+     * so a new caller cannot quietly opt out of the cache again.
+     *
+     * @param array<string,self>|null $fields
+     */
+    private static function arrayOf(?self $element, ?self $key, ?array $fields): self
+    {
+        if ($fields !== null) {
+            return new self(self::KIND_ARRAY, element: $element, key: $key, fields: $fields);
+        }
+        $el = $element ?? self::unknown();
+        return $key === null ? self::vec($el) : self::assoc($key, $el);
     }
 
     public static function assoc(self $key, self $value): self
     {
-        return new self(self::KIND_ARRAY, element: $value, key: $key);
+        $k = 'a' . (string)$key->id . '.' . (string)$value->id;
+        $hit = self::$interned[$k] ?? null;
+        if ($hit !== null) { return $hit; }
+        $t = new self(self::KIND_ARRAY, element: $value, key: $key);
+        self::$interned[$k] = $t;
+        return $t;
     }
 
     /**
@@ -244,7 +310,12 @@ final class Type
 
     public static function obj(string $class): self
     {
-        return new self(self::KIND_OBJ, class: $class);
+        $k = 'o' . $class;
+        $hit = self::$interned[$k] ?? null;
+        if ($hit !== null) { return $hit; }
+        $t = new self(self::KIND_OBJ, class: $class);
+        self::$interned[$k] = $t;
+        return $t;
     }
 
     /**
@@ -331,12 +402,7 @@ final class Type
             $el = $this->element !== null ? $this->element->substitute($bindings) : null;
             $ky = $this->key !== null ? $this->key->substitute($bindings) : null;
             if ($el === $this->element && $ky === $this->key) { return $this; }
-            return new self(
-                self::KIND_ARRAY,
-                element: $el,
-                key: $ky,
-                fields: $this->fields,
-            );
+            return self::arrayOf($el, $ky, $this->fields);
         }
         return $this;
     }
@@ -379,11 +445,10 @@ final class Type
             return self::cell();
         }
         if ($this->kind === self::KIND_ARRAY && $this->hasTypeVar()) {
-            return new self(
-                self::KIND_ARRAY,
-                element: $this->element !== null ? $this->element->eraseTypeVars() : null,
-                key: $this->key !== null ? $this->key->eraseTypeVars() : null,
-                fields: $this->fields,
+            return self::arrayOf(
+                $this->element !== null ? $this->element->eraseTypeVars() : null,
+                $this->key !== null ? $this->key->eraseTypeVars() : null,
+                $this->fields,
             );
         }
         return $this;
@@ -572,11 +637,7 @@ final class Type
             $key = ($this->key === null && $other->key === null)
                 ? null
                 : $this->joinElement($this->key, $other->key);
-            return new self(
-                self::KIND_ARRAY,
-                element: $this->joinElement($this->element, $other->element),
-                key: $key,
-            );
+            return self::arrayOf($this->joinElement($this->element, $other->element), $key, null);
         }
         return $this;
     }

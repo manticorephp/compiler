@@ -55,6 +55,14 @@ trait EmitLlvmObjects
         $hdr = $isStruct ? 0 : 2;
         $obj = $this->ssa->allocReg();
         $out = '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
+        // Per-CLASS allocation census. The class is known STATICALLY here, and the
+        // matching free reads it back out of the descriptor, so the atexit dump can
+        // name the producer: `Doctrine\ORM\…\PathExpression: alloc=812004 free=0`.
+        // The category counters cannot — they answer "objects leak", never WHOSE.
+        if ($cd !== null && !$isStruct) {
+            $ix = $this->classCensusIndex();
+            if (isset($ix[$cd->name])) { $out .= $this->profClass((string)$ix[$cd->name]); }
+        }
         if ($isStruct) {
             // A struct has NO header — property slot 0 sits at +0 and there is
             // no rc at +8. Leaving the allocator's RC_TAG_MAGIC at ptr-8 would
@@ -309,6 +317,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
+            $rcArgRegs = [];
+            $rcArgFlavs = [];
             $cellBoxSlots = [];
             $cellBoxTmps = [];
             $cellBoxTypes = [];
@@ -386,7 +396,21 @@ trait EmitLlvmObjects
                     }
                     $out .= $this->coerceToI64();
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
-                    if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
+                    if ($this->isFreshStringTemp($a)) {
+                        $argTemps[] = $this->lastValue;
+                    } else {
+                        // A fresh obj / vec / assoc temp handed to a CONSTRUCTOR
+                        // was never released: only `emitCall` (free functions)
+                        // did this, so `new Parser((new Lexer())->scan($src))`
+                        // stranded the array's own reference — and with it one
+                        // element ref per token, forever. 168 411 live
+                        // `Lexer\Token` from one compiled file came through here.
+                        $rf = \Compile\Debug::$rcCtorArgTemp ? $this->freshRcArgFlavor($a) : '';
+                        if ($rf !== '') {
+                            $rcArgRegs[] = $this->lastValue;
+                            $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
+                        }
+                    }
                 }
                 $argList .= ', i64 ' . $this->lastValue;
                 $ai = $ai + 1;
@@ -413,6 +437,11 @@ trait EmitLlvmObjects
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
+            $ri = 0;
+            foreach ($rcArgRegs as $rg) {
+                $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
+                $ri = $ri + 1;
+            }
         }
         // Capture the thrown location + call stack into a Throwable at `new`
         // (PHP records these at construction), when the program queries a trace.
@@ -840,13 +869,20 @@ trait EmitLlvmObjects
     }
 
     /**
-     * Emit one reusable class-id property reader. The old inline path repeated
-     * the complete switch at every erased `$obj->prop` site, which is especially
-     * expensive in Doctrine's large listener methods. This helper is restricted
-     * to fixed-slot properties with no bag, enum-name/value, or magic-property
-     * semantics; those cases remain on the exact inline path below.
+     * Emit one reusable class-id property reader for `$prop`, covering EVERY arm
+     * kind: fixed slots, enum `name`/`value`, `__get` holders, and the dynamic
+     * bag (or a boxed null) as the default. Returns a boxed cell, exactly as the
+     * inline path does for an erased receiver.
+     *
+     * It used to be restricted to the fixed-slot-only shape, and that restriction
+     * was the whole problem. `$hasBag` is a MODULE-WIDE fact — one class with a
+     * dynamic bag anywhere in the program, which every Symfony/Doctrine tree has
+     * — so the extraction was dead and each site inlined a full class_id switch.
+     * With 3 130 classes that is how one Doctrine function reached 101 MB of IR.
+     * Every arm is a function of the SLOT and the NAME, never of the call site,
+     * so there is exactly one correct body per property in the module.
      */
-    private function fixedPropertyReadHelper(string $prop, array $fixed): string
+    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag): string
     {
         $key = '__mc_prop_read_' . $this->mangle($prop);
         $sym = '@manticore_' . $key;
@@ -876,12 +912,33 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        foreach ($enumArms as $ename => $ed) {
+            $lbl = $this->ssa->allocLabel('pr.enum');
+            $switch .= '    i64 ' . (string)$ed->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitEnumCellPropLoad($obj, $ename, $ed, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($magic as $cname => $declCls) {
+            $lbl = $this->ssa->allocLabel('pr.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicGetCell($declCls, $obj, $prop);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
-        $this->rt->needsTagged = true;
-        $null = $this->ssa->allocReg();
-        $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
-        $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        if ($hasBag) {
+            $out .= $this->emitBagReadByName($prop, $obj);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        } else {
+            $this->rt->needsTagged = true;
+            $null = $this->ssa->allocReg();
+            $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
+            $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        }
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $ret = $this->ssa->allocReg();
@@ -934,8 +991,8 @@ trait EmitLlvmObjects
         // Runtime dispatch on the object's class_id. Fixed-slot-only reads are
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
-        if (!$hasBag && $enumArms === [] && $magic === [] && \count($fixed) > 1) {
-            $helper = $this->fixedPropertyReadHelper($prop, $fixed);
+        if (\count($fixed) + \count($enumArms) + \count($magic) > 1) {
+            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag);
             $r = $this->ssa->allocReg();
             $outChunks[] = '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
             $this->lastValue = $r;
@@ -1128,6 +1185,14 @@ trait EmitLlvmObjects
      */
     private function emitBagReadByClassId(PropertyAccess_ $pa, string $objPtr): string
     {
+        return $this->emitBagReadByName($pa->property, $objPtr);
+    }
+
+    /** The bag read judged by NAME alone — everything {@see emitBagReadByClassId}
+     *  ever used from its node. Split out so the whole dispatch can be lifted
+     *  into a helper that has a `%obj` pointer and no node at all. */
+    private function emitBagReadByName(string $prop, string $objPtr): string
+    {
         $bagCds = [];
         foreach ($this->bagClassNames() as $name) {
             if (isset($this->classes[$name])) { $bagCds[] = $this->classes[$name]; }
@@ -1150,7 +1215,7 @@ trait EmitLlvmObjects
         $switchChunks = ['  switch i64 ' . $cid . ', label %' . $def . " [\n"];
         /** @var string[] $bodyChunks */
         $bodyChunks = [];
-        $kid = $this->pool->intern($pa->property);
+        $kid = $this->pool->intern($prop);
         foreach ($bagCds as $cd) {
             $lbl = $this->ssa->allocLabel('bagr.case');
             $switchChunks[] = '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
@@ -1522,12 +1587,20 @@ trait EmitLlvmObjects
      *  name) for a classless receiver whose runtime class is a bag object. */
     private function emitCellBagStore(\Compile\Mir\StoreProperty $n, string $objPtr, string $cellVal): string
     {
+        return $this->emitCellBagStoreByName($n->property, $objPtr, $cellVal);
+    }
+
+    /** The bag store judged by NAME alone. {@see emitBagPtr} ignores the object
+     *  NODE it is handed (it works off `$objPtr`), so nothing here ever needed
+     *  one — which is what lets the whole store lift into a shared writer. */
+    private function emitCellBagStoreByName(string $prop, string $objPtr, string $cellVal): string
+    {
         $std = $this->classes['stdClass'] ?? null;
         $bagOff = $std === null ? 16 : $std->bagOffset();
-        $out = $this->emitBagPtr($n->object, $objPtr, $bagOff);
+        $out = $this->emitBagPtrAt($objPtr, $bagOff);
         $bagP = $this->bagPtrReg;
         $bg = $this->bagSlotReg;
-        $kid = $this->pool->intern($n->property);
+        $kid = $this->pool->intern($prop);
         $nb = $this->ssa->allocReg();
         $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
               . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
@@ -2393,6 +2466,14 @@ trait EmitLlvmObjects
     /** Emit the object → bag-assoc ptr; leaves bag ptr + slot gep regs. */
     private function emitBagPtr(Node $objNode, string $objPtr, int $bagOff): string
     {
+        return $this->emitBagPtrAt($objPtr, $bagOff);
+    }
+
+    /** The bag pointer from a raw object pointer. {@see emitBagPtr}'s node
+     *  parameter was never read; this is that function without it, so a caller
+     *  holding only `%obj` can use it. */
+    private function emitBagPtrAt(string $objPtr, int $bagOff): string
+    {
         $bg = $this->ssa->allocReg();
         $out = '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$bagOff . "\n";
@@ -2428,7 +2509,154 @@ trait EmitLlvmObjects
         // declared properties; each arm's PropertyAccess_ dispatches on the object's
         // class_id, with a stdClass bag fallback for an undeclared name.
         $bagCd = $this->classes['stdClass'] ?? null;
-        return $this->emitDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+        return $this->emitErasedDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+    }
+
+    /**
+     * `$o->$name` on an ERASED receiver — the shape that owns the T6 emission
+     * peak. The general path builds one arm per property NAME and inlines a full
+     * class_id switch inside each, so a single site carries the program's entire
+     * property surface: `ClosureExpressionVisitor::getObjectFieldValue` came out
+     * at 101 MB of IR, `PDOStatement::makeObject` at 53 MB.
+     *
+     * Here every arm is a CALL to that property's one shared reader, so a site
+     * costs a strcmp and a call per name instead of a class switch per name.
+     * The object is evaluated ONCE up front rather than re-emitted per arm,
+     * which the general path could not do because only one of its arms runs.
+     *
+     * @param array<string, Type> $propTypes
+     */
+    private function emitErasedDynPropDispatch(DynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitDynMemberKey($n->name);
+        $keyP = $this->lastValue;
+        $out .= $this->emitObjPtrOf($n->object);
+        $objPtr = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynp.end');
+        foreach ($propTypes as $p => $pt) {
+            $hitL = $this->ssa->allocLabel('dynp.hit');
+            $nextL = $this->ssa->allocLabel('dynp.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($p) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $this->cellPropReadHelperFor($p) . '(ptr ' . $objPtr . ")\n";
+            $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        if ($bagCd !== null && $bagCd->usesBag()) {
+            $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $this->bagPtrReg
+                  . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+            $out .= '  store i64 ' . $reg . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $rv = $this->ssa->allocReg();
+        $out .= '  ' . $rv . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $rv;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The shared WRITER for `$prop`: `(ptr obj, i64 cell) -> void`, the class_id
+     * switch of {@see emitCellStoreProperty} lifted out of the call site.
+     *
+     * The value's retain stays at the SITE — it is a function of the value NODE
+     * and its type, which the helper cannot see. What the helper owns is
+     * everything that depends only on the class and the name: each holder's slot
+     * store, the `__set` arms, and the bag default.
+     */
+    private function cellPropertyWriteHelper(string $prop): string
+    {
+        $key = '__mc_prop_write_' . $this->mangle($prop);
+        $sym = '@manticore_' . $key;
+        if (isset($this->propertyReadHelpers[$key])) { return $sym; }
+
+        $fixed = [];
+        $hasBag = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+            if ($cd->usesBag()) { $hasBag = true; }
+        }
+        $magic = $this->magicPropHolders($prop, '__set');
+
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $obj = '%obj';
+        $cellVal = '%val';
+        $out = 'define internal void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
+        $out .= $this->emitLoadClassId($obj);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('pw.end');
+        $def = $this->ssa->allocLabel('pw.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $bodies = '';
+        $seen = [];
+        foreach ($fixed as $cd) {
+            if (isset($seen[$cd->name])) { continue; }
+            $seen[$cd->name] = true;
+            $lbl = $this->ssa->allocLabel('pw.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n" . $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        foreach ($magic as $cname => $declCls) {
+            if (isset($seen[$cname])) { continue; }
+            $seen[$cname] = true;
+            $lbl = $this->ssa->allocLabel('pw.magic');
+            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitMagicCall($declCls, '__set', $obj, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $switch .= "  ]\n";
+        $out .= $switch . $bodies . $def . ":\n";
+        if ($hasBag) { $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal); }
+        $out .= '  br label %' . $end . "\n";
+        $out .= $end . ":\n  ret void\n}\n\n";
+        $this->propertyReadHelpers[$key] = $out;
+
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        return $sym;
+    }
+
+    /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
+     *  path this asks for one even when a single class declares the name: the
+     *  point is that the SITE stays a call, whatever the arm count. */
+    private function cellPropReadHelperFor(string $prop): string
+    {
+        $enumArms = [];
+        if ($prop === 'name' || $prop === 'value') {
+            foreach ($this->enums as $ename => $ed) {
+                if ($prop === 'value' && $this->edBacking($ed) === '') { continue; }
+                $enumArms[$ename] = $ed;
+            }
+        }
+        return $this->cellPropertyReadHelper(
+            $prop,
+            $this->fixedPropertyHolders($prop),
+            $enumArms,
+            $this->magicPropHolders($prop, '__get'),
+            $this->bagClassNames() !== [],
+        );
     }
 
     /** Declared properties (offset >= 0) of a class as name => Type.
@@ -2636,6 +2864,54 @@ trait EmitLlvmObjects
      * imported class) keeps its arm — and so does an argc of -1, the call site
      * saying it does not know ({@see siteArgc}).
      */
+    /**
+     * Does ANY class that could answer one of these dynamic method names declare
+     * a BY-REF parameter for it? A by-ref argument needs the inline path's
+     * address discipline, which a value parameter cannot carry, so one such
+     * candidate anywhere vetoes the shared-helper extraction for the whole site.
+     *
+     * Conservative on purpose: a false positive only keeps today's inline path.
+     *
+     * @param array<string, Type> $methods candidate method names => return type
+     */
+    private function dynMethodNameHasRefParam(string $method, int $argc): bool
+    {
+        $memo = $method . '/' . (string)$argc;
+        if (isset($this->dynRefParamMemo[$memo])) { return $this->dynRefParamMemo[$memo]; }
+        $hit = $this->dynMethodHasRefParam([$method => true], $argc);
+        $this->dynRefParamMemo[$memo] = $hit;
+        return $hit;
+    }
+
+    /** @var array<string, bool> name/argc => does any candidate take a by-ref param */
+    private array $dynRefParamMemo = [];
+
+    private function dynMethodHasRefParam(array $methods, int $argc): bool
+    {
+        foreach ($methods as $m => $_ignored) {
+            foreach ($this->classes as $cd) {
+                $decl = $this->resolveMethodClass($cd->name, (string)$m);
+                if ($decl === '') { continue; }
+                if (!$this->methodTakesArgc($decl, (string)$m, $argc)) { continue; }
+                $sym = $this->lsbTarget($decl, (string)$m, $cd->name);
+                // ⚠ `anyRefParam`, NOT `refParams[$sym] !== []`. That field is a
+                // per-parameter BOOL ARRAY, so an ordinary one-argument method
+                // has `[false]` — non-empty — and the veto fired on every
+                // candidate, silently keeping the inline path. The predicate has
+                // an owner; asking it is the whole point.
+                if ($this->anyRefParam($sym)
+                    || ($this->sigs->returnsByRef[$sym] ?? false)) {
+                    // ⚠ A conservative gate fails SILENTLY — name the veto.
+                    if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+                        \error_log('DYNM veto: ' . $cd->name . '::' . (string)$m . ' by-ref');
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private function methodTakesArgc(string $holder, string $m, int $argc): bool
     {
         if ($argc < 0) { return true; }
@@ -2759,16 +3035,37 @@ trait EmitLlvmObjects
      * receiver ABI erased (one i64), performs the ordinary fixed-name dispatch
      * once, and returns the already boxed cell result.
      *
-     * This path is deliberately limited to zero-argument calls whose receiver
-     * is a local with KIND_CELL/UNKNOWN type. Such a local read has no evaluation
-     * side effects, and there are no by-ref/spread/default argument contracts to
-     * preserve. Typed and argument-bearing dynamic calls retain the exact inline
-     * path below.
+     * Extended to a FIXED argument count. The zero-arg restriction was stated as
+     * "no by-ref/spread/default argument contracts to preserve", and those are
+     * now gated at the call site instead of assumed away: no spread among the
+     * site's args, and no candidate method with a by-ref parameter
+     * (`$this->sigs->refParams`). Everything else the arguments need is already
+     * register-based — {@see vdArmArgs} boxes/unboxes cell↔non-cell, pads the
+     * arity and handles the spread tail from a LIST STRING and two type arrays,
+     * never from nodes — so the args ride in as extra `i64` parameters.
+     *
+     * That restriction was not academic: `prelude/errors.php`'s
+     * `__mc_call_exception_handler` is `$o->$m($e)`, one argument, and it emitted
+     * **1 876 MB** on the T6 tier — the single costliest function of the run,
+     * with the next one at 78 MB. It is a prelude function, so every program
+     * paid for it.
+     *
+     * The receiver must still be a CELL/UNKNOWN/UNION local: that read has no
+     * evaluation side effects. Typed receivers keep the inline path.
+     *
+     * @param Type[] $argTypes the SITE's argument types, positionally
      */
-    private function dynamicMethodZeroArgHelper(string $method, Type $retT, int $line): string
+    private function dynamicMethodZeroArgHelper(string $method, Type $retT, int $line, array $argTypes = []): string
     {
         $key = $method . '|' . $retT->kind . '|' . ($retT->class ?? '');
-        $name = '__mc_dyn_method0_' . $this->mangle(\str_replace('|', '_', $key));
+        // The arg types are part of the KEY: two sites calling the same method
+        // name with differently-typed arguments need different coercion, and a
+        // helper that ignored that would silently serve one shape to the other.
+        foreach ($argTypes as $at) {
+            $key .= '|a' . $at->kind . ':' . ($at->class ?? '');
+        }
+        $argc = \count($argTypes);
+        $name = '__mc_dyn_method' . (string)$argc . '_' . $this->mangle(\str_replace(['|', ':'], '_', $key));
         $sym = '@manticore_' . $name;
         if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
 
@@ -2801,7 +3098,21 @@ trait EmitLlvmObjects
 
         $slot = $this->ssa->allocReg();
         $this->locals->slots['__mc_dyn_obj'] = $slot;
-        $body = 'define internal i64 ' . $sym . "(i64 %obj) {\nentry:\n";
+        $params = 'i64 %obj';
+        $argList = '';
+        /** @var Type[] $argOutTypes index 0 is the implicit $this */
+        $argOutTypes = [];
+        if ($argc > 0) {
+            $argOutTypes[] = $retT;   // slot 0 is never read by vdArmArgs
+            $i = 0;
+            while ($i < $argc) {
+                $params .= ', i64 %a' . (string)$i;
+                $argList .= ', i64 %a' . (string)$i;
+                $argOutTypes[] = $argTypes[$i];
+                $i = $i + 1;
+            }
+        }
+        $body = 'define internal i64 ' . $sym . '(' . $params . ") {\nentry:\n";
         $body .= '  ' . $slot . " = alloca i64\n";
         $body .= '  store i64 %obj, ptr ' . $slot . "\n";
         $objLoad = $this->ssa->allocReg();
@@ -2821,7 +3132,7 @@ trait EmitLlvmObjects
         foreach ($this->classes as $cd) {
             $decl = $this->resolveMethodClass($cd->name, $method);
             if ($decl === '') { continue; }
-            if (!$this->methodTakesArgc($decl, $method, 0)) { continue; }
+            if (!$this->methodTakesArgc($decl, $method, $argc)) { continue; }
             if ($fallback === '') { $fallback = $decl; }
             $fullPre = $this->lsbTarget($decl, $method, $cd->name);
             $full = $this->erasedEntry($cd->name, '', $method, $fullPre);
@@ -2854,20 +3165,20 @@ trait EmitLlvmObjects
         if (!$this->hasEmittedFunction($fallbackFull)) { $fallbackFull = $distinct[0]; }
         $faCands = $distinct;
         $faCands[] = $fallbackFull;
-        $this->vdSiteArgc = 1;
-        $body .= $this->faPushAny($faCands, -1, [], 1);
+        $this->vdSiteArgc = 1 + $argc;
+        $body .= $this->faPushAny($faCands, -1, [], 1 + $argc);
         if ($this->rt->needsBacktrace) { $body .= $this->btPush($method, $line); }
         $boxCell = $retT->kind === Type::KIND_CELL;
         $body .= $this->emitVirtualDispatch(
             $objArg,
-            'i64 ' . $objArg,
+            'i64 ' . $objArg . $argList,
             $cands,
             $targets,
             $fallbackFull,
             $method,
             $boxCell,
             $erasedSyms,
-            [],
+            $argOutTypes,
         );
         $result = $this->vdResult;
         if (!$boxCell) {
@@ -3004,23 +3315,87 @@ trait EmitLlvmObjects
         // then let each name arm call a reusable fixed-name helper. The helper
         // performs the same erased receiver masking and virtual dispatch as the
         // inline MethodCall path; only the repeated code moves out of this fn.
-        $canExtract = $iv->args === []
+        // A fixed argument list rides into the helper as extra i64 params. The
+        // two contracts the zero-arg gate assumed away are now CHECKED, not
+        // assumed: a SPREAD has no fixed arity to give the helper, and a by-ref
+        // parameter needs the inline path's address discipline, which a value
+        // parameter cannot carry. Anything unproven keeps the inline path.
+        $argsOk = true;
+        foreach ($iv->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { $argsOk = false; break; }
+        }
+        // ⚠ The by-ref veto is PER NAME, not per site. Keyed at the site it was
+        // useless: ONE class anywhere in the program declaring a by-ref method
+        // disabled the extraction for every erased dynamic call, and with 3 130
+        // Symfony/Doctrine classes such a method certainly exists — the T6
+        // prelude site stayed inline at 1 876 MB with the site-wide test.
+        // (Third instance of this shape: `$hasBag` killed the property-reader
+        // extraction the same way, and the bare-name borrow veto before it.)
+        /** @var array<string, Type> $clean names the shared helper may serve */
+        $clean = [];
+        /** @var array<string, Type> $dirty names that must keep the inline path */
+        $dirty = [];
+        $argc = \count($iv->args);
+        foreach ($methods as $m => $retT) {
+            if ($argc > 0 && $this->dynMethodNameHasRefParam((string)$m, $argc)) {
+                $dirty[$m] = $retT;
+            } else {
+                $clean[$m] = $retT;
+            }
+        }
+        // A dirty remainder means the inline fallback is emitted BELOW the clean
+        // chain, and it re-emits the receiver, the name and the arguments. Only
+        // one of the two runs at runtime, but the operands are emitted twice, so
+        // every one of them must be side-effect free to be evaluated twice. That
+        // is the same reason the receiver is already required to be a local.
+        $reEmitSafe = $nameNode->kind === Node::KIND_LOAD_LOCAL
+            || $nameNode->kind === Node::KIND_STRING_CONST;
+        foreach ($iv->args as $a) {
+            if ($a->kind !== Node::KIND_LOAD_LOCAL && $a->kind !== Node::KIND_STRING_CONST) {
+                $reEmitSafe = false;
+                break;
+            }
+        }
+        $canExtract = $argsOk
+            && ($dirty === [] || $reEmitSafe)
             && $recv->kind === Node::KIND_LOAD_LOCAL
             && ($recv->type->kind === Type::KIND_CELL
                 || $recv->type->kind === Type::KIND_UNKNOWN
                 || $recv->type->kind === Type::KIND_UNION)
-            && \count($methods) >= 16;
+            && \count($clean) >= 16;
+        if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+            \error_log('DYNM ' . ($canExtract ? 'yes' : 'no')
+                . ': args=' . (string)$argc
+                . ' argsOk=' . ($argsOk ? '1' : '0')
+                . ' reEmitSafe=' . ($reEmitSafe ? '1' : '0')
+                . ' recvKind=' . (string)$recv->kind
+                . ' recvType=' . (string)$recv->type->kind
+                . ' clean=' . (string)\count($clean) . ' dirty=' . (string)\count($dirty));
+        }
         if ($canExtract) {
             $out = $this->emitNode($recv);
             $out .= $this->coerceToI64();
             $recvArg = $this->lastValue;
             $out .= $this->emitDynMemberKey($nameNode);
             $keyP = $this->lastValue;
+            // Arguments are evaluated ONCE here, before the name chain — only
+            // one arm runs, and the helper takes them as values. The inline path
+            // re-emits them inside every arm for the same reason it re-emits the
+            // receiver.
+            $argVals = '';
+            /** @var Type[] $argTypes */
+            $argTypes = [];
+            foreach ($iv->args as $a) {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceToI64();
+                $argVals .= ', i64 ' . $this->lastValue;
+                $argTypes[] = $a->type;
+            }
             $res = $this->ssa->allocReg();
             $out .= '  ' . $res . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $res . "\n";
             $endL = $this->ssa->allocLabel('dynm.end');
-            foreach ($methods as $m => $retT) {
+            foreach ($clean as $m => $retT) {
                 $hitL = $this->ssa->allocLabel('dynm.hit');
                 $nextL = $this->ssa->allocLabel('dynm.next');
                 $cmp = $this->ssa->allocReg();
@@ -3029,12 +3404,19 @@ trait EmitLlvmObjects
                 $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
                 $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
                 $out .= $hitL . ":\n";
-                $helper = $this->dynamicMethodZeroArgHelper($m, $retT, $iv->line);
+                $helper = $this->dynamicMethodZeroArgHelper($m, $retT, $iv->line, $argTypes);
                 $r = $this->ssa->allocReg();
-                $out .= '  ' . $r . ' = call i64 ' . $helper . '(i64 ' . $recvArg . ")\n";
+                $out .= '  ' . $r . ' = call i64 ' . $helper . '(i64 ' . $recvArg . $argVals . ")\n";
                 $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
+            }
+            // No clean name matched. The by-ref names keep the exact inline
+            // dispatcher, over the DIRTY subset only — so one such method in the
+            // program costs its own arm, not the whole site's extraction.
+            if ($dirty !== []) {
+                $out .= $this->emitDynMethodInlineFallback($dp, $iv, $dirty);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             }
             $out .= '  br label %' . $endL . "\n";
             $out .= $endL . ":\n";
@@ -3285,7 +3667,77 @@ trait EmitLlvmObjects
         // fallback for an undeclared name. WITHOUT this the removed bag path below
         // wrote slot 16 as a bag pointer on a fixed-slot object → a wild write.
         $bagCd = $this->classes['stdClass'] ?? null;
-        return $this->emitStoreDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+        return $this->emitErasedStoreDynPropDispatch($n, $this->allDeclaredPropTypes(), $bagCd);
+    }
+
+    /**
+     * `$o->$name = v` on an ERASED receiver — the write twin of
+     * {@see emitErasedDynPropDispatch}, and the second half of the T6 emission
+     * peak (`PDOStatement::makeObject` is this shape).
+     *
+     * Object and value are evaluated ONCE up front — the general path could not,
+     * because it re-emits both inside every name arm — and each arm is a call to
+     * that property's shared writer instead of an inlined class_id switch.
+     *
+     * @param array<string, Type> $propTypes
+     */
+    private function emitErasedStoreDynPropDispatch(StoreDynProp_ $n, array $propTypes, ?ClassDef $bagCd): string
+    {
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitDynMemberKey($n->name);
+        $keyP = $this->lastValue;
+        $out .= $this->emitObjPtrOf($n->object);
+        $objPtr = $this->lastValue;
+        // The RHS is evaluated and retained HERE, once: only one arm runs, and
+        // the retain depends on the value NODE and its type, which the shared
+        // writer cannot see.
+        //
+        // ⚠ Through {@see emitBagStoreValue}, not `rcRetainByType` directly. One
+        // hoisted value serves BOTH a fixed slot and the bag default, and the bag
+        // needs the stronger discipline: a CELL / UNKNOWN value is copy-retained
+        // by TAG ({@see byRefValueCopyRetainIr}), because `rcRetainByType` reads a
+        // NaN-boxed word as an object pointer and takes no reference on a boxed
+        // string. With the weaker retain the bag kept a BORROWED pointer into the
+        // unserialize parser's own buffer: `$o->t` came back as `"8"`, the class
+        // name length out of `O:8:"stdClass"`. Caught by `unser_object`.
+        $out .= $this->emitBagStoreValue($n->value);
+        $cellVal = $this->lastValue;
+        $endL = $this->ssa->allocLabel('dynsp.end');
+        foreach ($propTypes as $p => $pt) {
+            $hitL = $this->ssa->allocLabel('dynsp.hit');
+            $nextL = $this->ssa->allocLabel('dynsp.next');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($p) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= '  call void ' . $this->cellPropertyWriteHelper($p)
+                  . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        if ($bagCd !== null && $bagCd->usesBag()) {
+            // ⚠ The RUNTIME key, not an interned literal: the name is an
+            // expression here, so {@see emitCellBagStoreByName} (which interns a
+            // STATIC name) is the wrong tool. Same store as the general path's
+            // default arm.
+            $out .= $this->emitBagPtrAt($objPtr, $bagCd->bagOffset());
+            $bagP = $this->bagPtrReg;
+            $bg = $this->bagSlotReg;
+            $nb = $this->ssa->allocReg();
+            $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
+                  . ', ptr ' . $keyP . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+            $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
+            $nbI = $this->ssa->allocReg();
+            $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
+            $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** `$o->$name = v` on a receiver with a known member set (a class or a union):
@@ -5598,6 +6050,21 @@ trait EmitLlvmObjects
         foreach ($cellBoxTmps as $ctmp) {
             $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
             $ci = $ci + 1;
+        }
+        // The RECEIVER temp. `f()->m()` evaluates `f()` into `$thisArg`, hands it
+        // over as `$this`, and until now dropped it on the floor — one leaked
+        // object per execution, on the single most common shape in a Symfony or
+        // Doctrine call chain. Argument position has released its fresh temps
+        // since forever; this is the same rule for the receiver, using the same
+        // predicate (freshRcArgFlavor) and the same helper (rcReleaseReg).
+        //
+        // Placed AFTER the call and after the by-ref write-backs, so the callee
+        // has finished reading `$this`. Safe for a fluent `return $this`: a
+        // borrowed obj return is retained by the callee, so the result carries a
+        // reference of its own.
+        if (\Compile\Debug::$rcRecvTemp) {
+            $recvFlavor = $this->freshRcArgFlavor($mc->object);
+            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($thisArg, $recvFlavor); }
         }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`

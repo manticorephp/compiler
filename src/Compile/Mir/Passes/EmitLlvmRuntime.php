@@ -280,10 +280,35 @@ trait EmitLlvmRuntime
         $out .= "entry:\n";
         $out .= $this->profBump(21);
         $out .= $this->profBump(24);
+        $out .= $this->profAdd(57, "%n");
         $out .= "  %t = add i64 %n, 8\n";
         $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %base, i64 8\n";
+        if (\Compile\Debug::$autoGc && $this->rt->needsCc) {
+            // ⚠ The collection runs HERE, at an allocation, and NOT where the
+            // root is buffered. Triggering it from `cc_add_root` means running a
+            // full mark/scan from INSIDE `__mir_rc_release` — the inliner even
+            // flattens the two — while objects are mid-release and the graph is
+            // transient. That crashed immediately: `cc_children` dereferenced a
+            // null class descriptor, four frames under `__mir_rc_release`.
+            //
+            // An allocation is the safe point php uses for the same reason:
+            // nothing is half-released, and the object being allocated is not
+            // yet reachable. The `active` guard still stands, because collection
+            // frees objects, which allocates nothing but does release children.
+            $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
+            $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+            $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
+            $out .= "gccheck:\n";
+            $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
+            $out .= '  %gchit = icmp sge i64 %gccnt, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
+            $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+            $out .= "gcrun:\n";
+            $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+            $out .= "  br label %gcskip\n";
+            $out .= "gcskip:\n";
+        }
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
         // Tagged realloc (vec grow): realloc the BASE (ptr-8), the tag
@@ -412,6 +437,7 @@ trait EmitLlvmRuntime
         $out .= "define ptr @__mir_str_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(0);
+        $out .= $this->profAdd(58, '%n');
         $out .= "  %le40 = icmp ule i64 %n, " . $p0c . "\n";
         $out .= "  br i1 %le40, label %c0, label %chk1\n";
         $out .= "chk1:\n";
@@ -619,11 +645,18 @@ trait EmitLlvmRuntime
             $out .= "  %rc = load i64, ptr %rcp\n";
             $out .= "  %rc1 = add i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %rcp\n";
+            if (\Compile\Debug::$ccTrace && $this->rt->needsCc) {
+                $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+                $out .= "  %retra = call ptr @llvm.returnaddress(i32 0)\n";
+                $out .= "  %retrc = call i64 @__cc_rcval(ptr %p)\n";
+                $out .= $this->ccTrace('ret', 'ptr %p, i64 %retrc, ptr %retra');
+            }
             $out .= "  br label %done\n";
             $out .= "str:\n";
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sinc\n";
             $out .= "sinc:\n";
+            $out .= $this->profBump(50);
             $out .= "  %src1 = add i64 %tag, 1\n";
             $out .= "  store i64 %src1, ptr %tagp\n";
             $out .= "  br label %done\n";
@@ -635,6 +668,12 @@ trait EmitLlvmRuntime
             // the ptr is a string ⇒ its rc@ptr-8, free base=ptr-24 at zero
             // (the string header is [cap@-24, len@-16, rc@-8]; obj/vec base -8).
             $out .= $this->rcVerifyAliveFormat();
+            $out .= $this->ccTraceGlobals();
+            if (\Compile\Debug::$arrRcTrace) {
+                $orcRaw = '[ORC] rel obj=%p rc=%lld';
+                $out .= '@.orc.rel = private unnamed_addr constant ['
+                    . (string)(\strlen($orcRaw) + 2) . ' x i8] c"' . $orcRaw . '\0A\00", align 1' . "\n";
+            }
             $out .= "define void @__mir_rc_release(ptr %p) {\n";
             $out .= "entry:\n";
             $out .= "  %z = icmp eq ptr %p, null\n";
@@ -667,6 +706,19 @@ trait EmitLlvmRuntime
             $out .= $this->rcVerifyAlive();
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %rcp\n";
+            if (\Compile\Debug::$ccTrace && $this->rt->needsCc) {
+                $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+                $out .= "  %relra = call ptr @llvm.returnaddress(i32 0)\n";
+                $out .= "  %relrc = call i64 @__cc_rcval(ptr %p)\n";
+                $out .= $this->ccTrace('rel', 'ptr %p, i64 %relrc, ptr %relra');
+            }
+            if (\Compile\Debug::$arrRcTrace) {
+                // The OBJECT half of the rc trace. The array half proved every
+                // token buffer reaches rc 0 with an element-walking release, so
+                // the remaining question is one level down: what each ELEMENT's
+                // rc actually does. Same flag — the two halves are one story.
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.orc.rel, ptr %p, i64 %rc1)\n";
+            }
             $out .= "  %rcsh = shl i64 %rc1, 8\n";
             $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
             $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
@@ -686,8 +738,12 @@ trait EmitLlvmRuntime
             // zero in a program that never buffers, so this is a no-op there.
             $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
             $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
-            $out .= "  br i1 %isbuf, label %done, label %dofree\n";
+            $out .= "  br i1 %isbuf, label %blocked, label %dofree\n";
+            $out .= "blocked:\n";
+            $out .= $this->ccTrace('blocked', 'ptr %p');
+            $out .= "  br label %done\n";
             $out .= "dofree:\n";
+            if ($this->rt->needsCc) { $out .= $this->ccTrace('rcfree', 'ptr %p'); }
             $out .= $this->profBump(25);
             // Recursive drop: release this object's obj-typed properties
             // before freeing it, so nested objects don't leak.
@@ -699,6 +755,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sdec\n";
             $out .= "sdec:\n";
+            $out .= $this->profBump(51);
             $out .= "  %src1 = sub i64 %tag, 1\n";
             $out .= "  store i64 %src1, ptr %tagp\n";
             $out .= "  %szero = icmp sle i64 %src1, 0\n";
@@ -724,6 +781,11 @@ trait EmitLlvmRuntime
             // must take the rc@+8 path, never write the tag word.
             $out .= "define void @__mir_rc_retain_str(ptr %p) {\n";
             $out .= "entry:\n";
+            if (\Compile\Debug::$ccTrace) {
+                $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+                $out .= "  %sra = call ptr @llvm.returnaddress(i32 0)\n";
+                $out .= $this->ccTrace('sret', 'ptr %p, ptr %sra');
+            }
             $out .= "  %z = icmp eq ptr %p, null\n";
             $out .= "  br i1 %z, label %done, label %hdr\n";
             $out .= "hdr:\n";
@@ -732,6 +794,7 @@ trait EmitLlvmRuntime
             $out .= "  %isov = icmp eq i64 %rc, " . $magic . "\n";
             $out .= "  br i1 %isov, label %ov, label %strchk\n";
             $out .= "ov:\n";
+            $out .= $this->profBump(48);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %orc = load i64, ptr %rcp\n";
             $out .= "  %orc1 = add i64 %orc, 1\n";
@@ -757,6 +820,11 @@ trait EmitLlvmRuntime
             // (no drop_dispatch — a leak is safe; never corrupt the tag).
             $out .= "define void @__mir_rc_release_str(ptr %p) {\n";
             $out .= "entry:\n";
+            if (\Compile\Debug::$ccTrace) {
+                $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+                $out .= "  %srb = call ptr @llvm.returnaddress(i32 0)\n";
+                $out .= $this->ccTrace('srel', 'ptr %p, ptr %srb');
+            }
             $out .= "  %z = icmp eq ptr %p, null\n";
             $out .= "  br i1 %z, label %done, label %hdr\n";
             $out .= "hdr:\n";
@@ -765,6 +833,7 @@ trait EmitLlvmRuntime
             $out .= "  %isov = icmp eq i64 %rc, " . $magic . "\n";
             $out .= "  br i1 %isov, label %ov, label %strchk\n";
             $out .= "ov:\n";
+            $out .= $this->profBump(49);
             $out .= "  %rcp = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %orc = load i64, ptr %rcp\n";
             $out .= "  %orc1 = sub i64 %orc, 1\n";
@@ -1706,6 +1775,16 @@ trait EmitLlvmRuntime
             $id = (string)$cls->classId;
             $body = '';
             $i = 0;
+            // The FREE half of the class census. Here rather than at the raw
+            // free: this body is already per-class, so the dense index is a
+            // compile-time constant and no id→index switch is needed — the very
+            // cost that keeps the ALLOC side at the `new` sites.
+            if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
+                $censusIx = $this->classCensusIndex()[$cls->name] ?? -1;
+                if ($censusIx >= 0) {
+                    $body .= '  call void @__prof_class_free(i64 ' . (string)$censusIx . ")\n";
+                }
+            }
             // __destruct runs FIRST (PHP calls it before properties are
             // released), on the most-derived __destruct the class resolves.
             $dtorCls = $this->resolveMethodClass($cls->name, '__destruct');
@@ -1721,7 +1800,7 @@ trait EmitLlvmRuntime
                 // Release obj / string / vec / assoc props (flavor picks the
                 // right element-walking helper). Flags were pre-set in
                 // scanDropFlags so the helper is already emitted.
-                $flavor = $this->discardReleaseFlavor($pt);
+                $flavor = $this->classDropFlavor($cls, $pn, $pt);
                 if ($flavor === '') { continue; }
                 $rel = $this->dropHelperFor($flavor);
                 if ($rel === '') { continue; }
@@ -1734,7 +1813,12 @@ trait EmitLlvmRuntime
                 $i = $i + 1;
             }
             $dropFld = 'ptr null';
-            if ($i > 0 || $hasDtor) {
+            // ⚠ A class with no rc property and no __destruct normally emits NO
+            // drop body at all. Under the census that would report alloc > 0,
+            // free = 0 and read as a leak for every such class, so the counter
+            // itself is reason enough to emit the body.
+            $censusOnly = ($body !== '' && $i === 0 && !$hasDtor);
+            if ($i > 0 || $hasDtor || $censusOnly) {
                 // Plain define → linkonceRuntime promotes it; coalesces by name.
                 $defs .= 'define void @__mir_drop_' . $id . "(ptr %o) {\nentry:\n"
                     . $body . "  ret void\n}\n";
@@ -1880,6 +1964,48 @@ trait EmitLlvmRuntime
      * keep branch). Children = obj-typed (non-struct) properties only —
      * strings/vecs don't hold object refs that form collectable cycles.
      */
+
+    /** `MANTICORE_CC_TRACE` line formats, keyed by trace-point id. */
+    private const CC_TRACE_FMTS = [
+        'rcfree' => '[RC] free %p',
+        'cwfree' => '[CC] cw free %p',
+        'mrfree' => '[CC] mr free %p',
+        'push'   => '[CC] push %p cnt=%lld buf=%p',
+        'begin'  => '[CC] begin cnt=%lld buf=%p',
+        'end'    => '[CC] end cnt=%lld buf=%p',
+        'pushact' => '[CC] push-during-collect %p col=%lld',
+        'cwskip'  => '[CC] cw-skip %p col=%lld buf=%lld',
+        'blocked' => '[CC] free-blocked-buffered %p',
+        'root'    => '[CC] root %p col=%lld',
+        'mg'      => '[CC] mg-dec %p rc=%lld',
+        'sb'      => '[CC] sb-inc %p rc=%lld',
+        'scan'    => '[CC] scan %p col=%lld rc=%lld',
+        'white'   => '[CC] white %p',
+        'rel'     => '[RC] rel %p rc=%lld from=%p',
+        'ret'     => '[RC] ret %p rc=%lld from=%p',
+        'sret'    => '[SR] ret %p from=%p',
+        'srel'    => '[SR] rel %p from=%p',
+    ];
+
+    /** The trace's format strings, at module scope (a global cannot sit in a body). */
+    private function ccTraceGlobals(): string
+    {
+        if (!\Compile\Debug::$ccTrace) { return ''; }
+        $out = '';
+        foreach (self::CC_TRACE_FMTS as $id => $fmt) {
+            $out .= '@.cct.' . $id . ' = private unnamed_addr constant ['
+                . (string)(\strlen($fmt) + 2) . ' x i8] c"' . $fmt . '\0A\00", align 1' . "\n";
+        }
+        return $out;
+    }
+
+    /** `MANTICORE_CC_TRACE` line: one dprintf to fd 2, args already in regs. */
+    private function ccTrace(string $id, string $args): string
+    {
+        if (!\Compile\Debug::$ccTrace) { return ''; }
+        return '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cct.' . $id
+            . ', ' . $args . ")\n";
+    }
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -1898,6 +2024,7 @@ trait EmitLlvmRuntime
         $out .= "@__manticore_cc_roots = linkonce_odr global ptr null\n";
         $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
@@ -1957,15 +2084,54 @@ trait EmitLlvmRuntime
         // ── candidate-buffer push (grow x2, min 8) ──
         $out .= "define void @__manticore_cc_add_root(ptr %s) {\n";
         $out .= "entry:\n";
+        // ⚠ NOT WHILE A COLLECTION IS RUNNING — php's `gc_possible_root()`
+        // opens with the same guard. Freeing a white node runs its non-obj
+        // drop, and every array / string property released there can leave
+        // some OTHER object at rc > 0, which lands here. The push goes in
+        // past the `cnt` snapshot this collection is walking, so the entry
+        // is thrown away by the `count = 0` at the end — while the object
+        // KEEPS its buffered bit. `__mir_rc_release` then refuses to free
+        // it at rc 0 forever (the collector "owns" it) and `cc_add_root`
+        // will not re-push it either, since it is already purple. A
+        // permanent leak, and a `__destruct` that php runs and we never
+        // did: two nodes of a dead cycle each holding the same `Leaf` in
+        // an array prop lost it for good.
+        //
+        // Skipping the push costs a cycle root that is rediscovered on the
+        // object's next decrement, and it lets an object that reaches rc 0
+        // during a collection be freed right there, unbuffered.
+        $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+        $out .= "  br i1 %gcbusy, label %busyc, label %live\n";
+        $out .= "busyc:\n";
+        $out .= $this->profBump(62);
+        $out .= "  br label %done\n";
+        $out .= "live:\n";
         $out .= "  %col = call i64 @__cc_color(ptr %s)\n";
+        if (\Compile\Debug::$ccTrace) {
+            $out .= "  %act = load i64, ptr @__manticore_cc_active\n";
+            $out .= "  %inact = icmp ne i64 %act, 0\n";
+            $out .= "  br i1 %inact, label %tract, label %noact\n";
+            $out .= "tract:\n";
+            $out .= $this->ccTrace('pushact', 'ptr %s, i64 %col');
+            $out .= "  br label %noact\n";
+            $out .= "noact:\n";
+        }
         $out .= "  %isp = icmp eq i64 %col, " . $PURPLE . "\n";
-        $out .= "  br i1 %isp, label %done, label %mark\n";
+        $out .= "  br i1 %isp, label %purplec, label %mark\n";
+        $out .= "purplec:\n";
+        $out .= $this->profBump(63);
+        $out .= "  br label %done\n";
         $out .= "mark:\n";
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $PURPLE . ")\n";
         $out .= "  %b = call i64 @__cc_buffered(ptr %s)\n";
         $out .= "  %isb = icmp ne i64 %b, 0\n";
-        $out .= "  br i1 %isb, label %done, label %push\n";
+        $out .= "  br i1 %isb, label %bufc, label %push\n";
+        $out .= "bufc:\n";
+        $out .= $this->profBump(64);
+        $out .= "  br label %done\n";
         $out .= "push:\n";
+        $out .= $this->profBump(65);
         $out .= "  call void @__cc_setbuffered(ptr %s, i64 1)\n";
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %cap = load i64, ptr @__manticore_cc_cap\n";
@@ -1987,6 +2153,19 @@ trait EmitLlvmRuntime
         $out .= "  store ptr %s, ptr %slot\n";
         $out .= "  %cnt1 = add i64 %cnt, 1\n";
         $out .= "  store i64 %cnt1, ptr @__manticore_cc_count\n";
+        $out .= $this->ccTrace('push', 'ptr %s, i64 %cnt1, ptr %buf');
+        // ⚠⚠ THE ROOT BUFFER HAD NO DRAIN. A decrement that leaves rc > 0 buffers
+        // the object as a possible cycle root (purple + buffered), and
+        // `__mir_rc_release` then REFUSES to free it at rc 0 because "the
+        // collector owns it". The collector ran only from an explicit
+        // `gc_collect_cycles()`, which nothing in the compiler calls — so every
+        // object retained more than once leaked by construction: 0.27% of
+        // objects freed against 96% of arrays (arrays are not cycle
+        // candidates), and 0 of 9.2M `Lexer\Token`.
+        //
+        // The drain lives in `__mir_alloc_tagged`, NOT here: collecting from
+        // this point runs a full mark/scan from inside `__mir_rc_release`, on a
+        // graph that is mid-release. {@see Debug::$autoGc}.
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
 
@@ -1996,6 +2175,10 @@ trait EmitLlvmRuntime
         $out .= "  switch i64 %a, label %done [ i64 0, label %mg i64 1, label %sc i64 2, label %sb i64 3, label %cw ]\n";
         $out .= "mg:\n";
         $out .= "  call void @__cc_rcadd(ptr %child, i64 -1)\n";
+        if (\Compile\Debug::$ccTrace) {
+            $out .= "  %mgrc = call i64 @__cc_rcval(ptr %child)\n";
+            $out .= $this->ccTrace('mg', 'ptr %child, i64 %mgrc');
+        }
         $out .= "  call void @__manticore_cc_mark_gray(ptr %child)\n";
         $out .= "  br label %done\n";
         $out .= "sc:\n";
@@ -2003,6 +2186,10 @@ trait EmitLlvmRuntime
         $out .= "  br label %done\n";
         $out .= "sb:\n";
         $out .= "  call void @__cc_rcadd(ptr %child, i64 1)\n";
+        if (\Compile\Debug::$ccTrace) {
+            $out .= "  %sbrc = call i64 @__cc_rcval(ptr %child)\n";
+            $out .= $this->ccTrace('sb', 'ptr %child, i64 %sbrc');
+        }
         $out .= "  %col = call i64 @__cc_color(ptr %child)\n";
         $out .= "  %nb = icmp ne i64 %col, " . $BLACK . "\n";
         $out .= "  br i1 %nb, label %sbgo, label %done\n";
@@ -2015,6 +2202,25 @@ trait EmitLlvmRuntime
         $out .= "done:\n  ret void\n}\n";
 
         // ── per-class obj-child walker (mirrors drop, obj-only) ──
+        //
+        // ⚠ A CHILD IS A REF THE DROP RELEASES, not every obj-typed property.
+        // The gate used to be `kind === KIND_OBJ && !isStruct`, a WIDER set than
+        // the rc system owns. On a probe class carrying `?Box $next`,
+        // `?Generator $gen`, `Color $c` and `?Closure $fn`, the drop released
+        // `next` (obj) and `gen` (str — a Generator's header is string-style,
+        // rc@-8), while the walker followed `next`, `gen` AND `c`:
+        //   - a GENERATOR was handed to `__cc_rcadd`, which writes the rc at
+        //     ptr+8 — inside the frame's data, not its refcount;
+        //   - an ENUM CASE is a bare ORDINAL with no header at all, so
+        //     `inttoptr` of `Color::Blue` (1) stores at address 9. Only the
+        //     `%v == 0` null guard hid it, and that guard is exactly the first
+        //     case of an enum, never the second.
+        // `Ffi\Ptr` (a foreign address whose -8 word belongs to the allocator)
+        // and a closure (retain/drop fn ptrs at -24/-16) are in the same set.
+        //
+        // {@see discardReleaseFlavor} owns the question "is this slot an rc obj
+        // handle", and the drop body asks it through {@see classDropFlavor}. The
+        // walker asks the same one, so the two cannot drift.
         $defs = '';
         $cases = '';
         $dispatch = '';
@@ -2025,10 +2231,7 @@ trait EmitLlvmRuntime
             foreach ($cls->propertyNames as $pn) {
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
-                if ($pt->kind !== Type::KIND_OBJ) { continue; }
-                $pcls = $pt->class ?? '';
-                if ($pcls !== '' && isset($this->classes[$pcls])
-                    && $this->classes[$pcls]->isStruct) { continue; }
+                if ($this->discardReleaseFlavor($pt) !== 'obj') { continue; }
                 $s = (string)$k;
                 $off = (string)$cls->propertyOffset($pn);
                 $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . $off . "\n";
@@ -2083,7 +2286,7 @@ trait EmitLlvmRuntime
             foreach ($cls->propertyNames as $pn) {
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
-                $flavor = $this->discardReleaseFlavor($pt);
+                $flavor = $this->classDropFlavor($cls, $pn, $pt);
                 if ($flavor === '' || $flavor === 'obj') { continue; }
                 $rel = $this->dropHelperFor($flavor);
                 if ($rel === '') { continue; }
@@ -2116,6 +2319,33 @@ trait EmitLlvmRuntime
             $out .= "end:\n  ret void\n}\n";
         }
 
+        // ⚠ THE CENSUS CANNOT SEE A COLLECTOR FREE. Its `free` counter is
+        // bumped inside `__mir_drop_<id>`, and `collect_white` does not call
+        // the drop — it recurses over obj children and drops the non-obj
+        // props itself. So every object the collector reclaims counted as
+        // ALLOCATED AND NEVER FREED: a build read 5.4%% freed while
+        // `cc_reclaim` alone said 2 227 854 objects. One id→index switch,
+        // emitted only under the census, closes the blind spot.
+        if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
+            $cf = "define void @__mir_cc_census_free(ptr %s) {\nentry:\n";
+            $cf .= "  %cdesc = load i64, ptr %s\n";
+            $cf .= "  %cdescp = inttoptr i64 %cdesc to ptr\n";
+            $cf .= "  %cid = load i64, ptr %cdescp\n";
+            $cases = ''; $arms = '';
+            $ix = $this->classCensusIndex();
+            foreach ($this->classes as $cn => $cd) {
+                if (!isset($ix[$cn])) { continue; }
+                $lbl = 'cf' . (string)$cd->classId;
+                $cases .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+                $arms .= $lbl . ":\n  call void @__prof_class_free(i64 " . (string)$ix[$cn] . ")\n  br label %cfend\n";
+            }
+            if ($cases === '') { $cf .= "  ret void\n}\n"; }
+            else {
+                $cf .= "  switch i64 %cid, label %cfend [\n" . $cases . "  ]\n" . $arms . "cfend:\n  ret void\n}\n";
+            }
+            $out .= $cf;
+        }
+
         // ── walkers ──
         $out .= "define void @__manticore_cc_mark_gray(ptr %s) {\n";
         $out .= "entry:\n";
@@ -2131,6 +2361,10 @@ trait EmitLlvmRuntime
         $out .= "define void @__manticore_cc_scan(ptr %s) {\n";
         $out .= "entry:\n";
         $out .= "  %c = call i64 @__cc_color(ptr %s)\n";
+        if (\Compile\Debug::$ccTrace) {
+            $out .= "  %scrc = call i64 @__cc_rcval(ptr %s)\n";
+            $out .= $this->ccTrace('scan', 'ptr %s, i64 %c, i64 %scrc');
+        }
         $out .= "  %isg = icmp eq i64 %c, " . $GRAY . "\n";
         $out .= "  br i1 %isg, label %go, label %done\n";
         $out .= "go:\n";
@@ -2141,6 +2375,7 @@ trait EmitLlvmRuntime
         $out .= "  call void @__manticore_cc_scan_black(ptr %s)\n";
         $out .= "  br label %done\n";
         $out .= "white:\n";
+        $out .= $this->ccTrace('white', 'ptr %s');
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $WHITE . ")\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 1)\n";
         $out .= "  br label %done\n";
@@ -2159,8 +2394,15 @@ trait EmitLlvmRuntime
         $out .= "  %b = call i64 @__cc_buffered(ptr %s)\n";
         $out .= "  %nb = icmp eq i64 %b, 0\n";
         $out .= "  %ok = and i1 %isw, %nb\n";
-        $out .= "  br i1 %ok, label %go, label %done\n";
+        $out .= "  br i1 %ok, label %go, label %skip\n";
+        $out .= "skip:\n";
+        $out .= $this->ccTrace('cwskip', 'ptr %s, i64 %c, i64 %b');
+        $out .= "  br label %done\n";
         $out .= "go:\n";
+        $out .= $this->ccTrace('cwfree', 'ptr %s');
+        if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
+            $out .= "  call void @__mir_cc_census_free(ptr %s)\n";
+        }
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $BLACK . ")\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 3)\n";
         $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
@@ -2178,9 +2420,17 @@ trait EmitLlvmRuntime
         // ── gc_collect_cycles(): MarkRoots → ScanRoots → CollectRoots ──
         $out .= "define i64 @__manticore_cc_collect_cycles() {\n";
         $out .= "entry:\n";
+        // ⚠ THE COLLECTION OWNS THIS FLAG, not its callers. It used to be
+        // set around the AUTO trigger in `__mir_alloc_tagged` only, so a
+        // plain `gc_collect_cycles()` — the builtin, which calls straight
+        // in — ran with the flag CLEAR and `cc_add_root` happily buffered
+        // objects mid-phase. One guard at the one entry point, and every
+        // caller is covered.
+        $out .= "  store i64 1, ptr @__manticore_cc_active\n";
         $out .= "  store i64 0, ptr @__manticore_cc_freed\n";
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= $this->ccTrace('begin', 'i64 %cnt, ptr %buf');
         $out .= "  %ip = alloca i64\n";
         $out .= "  %wp = alloca i64\n";
         $out .= "  store i64 0, ptr %ip\n";
@@ -2195,6 +2445,7 @@ trait EmitLlvmRuntime
         $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
         $out .= "  %s = load ptr, ptr %sp\n";
         $out .= "  %col = call i64 @__cc_color(ptr %s)\n";
+        $out .= $this->ccTrace('root', 'ptr %s, i64 %col');
         $out .= "  %isp = icmp eq i64 %col, " . $PURPLE . "\n";
         $out .= "  br i1 %isp, label %mrkeep, label %mrdrop\n";
         $out .= "mrkeep:\n";
@@ -2213,6 +2464,7 @@ trait EmitLlvmRuntime
         $out .= "  %deadf = and i1 %isbk, %rc0\n";
         $out .= "  br i1 %deadf, label %mrfree, label %mrn\n";
         $out .= "mrfree:\n";
+        $out .= $this->ccTrace('mrfree', 'ptr %s');
         $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
@@ -2250,12 +2502,41 @@ trait EmitLlvmRuntime
         $out .= "  %csp = getelementptr ptr, ptr %buf, i64 %ci\n";
         $out .= "  %cs = load ptr, ptr %csp\n";
         $out .= "  call void @__cc_setbuffered(ptr %cs, i64 0)\n";
+        // ⚠ A ROOT CAN DIE WHILE THIS COLLECTION IS RUNNING, and until its
+        // buffered bit came off just above, NOTHING could free it: an
+        // earlier root's `collect_white` drops its array / string props,
+        // and any object those release takes the `free` path in
+        // `__mir_rc_release`, which refuses on a buffered object. Such a
+        // node was SCANNED ALIVE (black), so `collect_white` skips it too,
+        // and it is leaked with its `__destruct` never run — php runs it.
+        // MarkRoots already frees `black && rc == 0` in `mrfree`; this is
+        // the same test at the other end of the same collection.
+        $out .= "  %ccol = call i64 @__cc_color(ptr %cs)\n";
+        $out .= "  %cisbk = icmp eq i64 %ccol, " . $BLACK . "\n";
+        $out .= "  %crcv = call i64 @__cc_rcval(ptr %cs)\n";
+        $out .= "  %crc0 = icmp sle i64 %crcv, 0\n";
+        $out .= "  %cdead = and i1 %cisbk, %crc0\n";
+        $out .= "  br i1 %cdead, label %crfree, label %crwhite\n";
+        $out .= "crfree:\n";
+        $out .= $this->ccTrace('mrfree', 'ptr %cs');
+        $out .= "  call void @__mir_drop_dispatch(ptr %cs)\n";
+        $out .= "  %cfbase = getelementptr i8, ptr %cs, i64 -8\n";
+        $out .= $this->profBump(30);
+        $out .= $this->poolFreeCall('%cfbase');
+        $out .= "  br label %crn\n";
+        $out .= "crwhite:\n";
         $out .= "  call void @__manticore_cc_collect_white(ptr %cs)\n";
+        $out .= "  br label %crn\n";
+        $out .= "crn:\n";
         $out .= "  %cin = add i64 %ci, 1\n";
         $out .= "  store i64 %cin, ptr %ip\n";
         $out .= "  br label %cr\n";
         $out .= "crd:\n";
+        $out .= "  %endcnt = load i64, ptr @__manticore_cc_count\n";
+        $out .= "  %endbuf = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= $this->ccTrace('end', 'i64 %endcnt, ptr %endbuf');
         $out .= "  store i64 0, ptr @__manticore_cc_count\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_active\n";
         $out .= "  %freed = load i64, ptr @__manticore_cc_freed\n";
         $out .= "  ret i64 %freed\n";
         $out .= "}\n";

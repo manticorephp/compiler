@@ -200,14 +200,28 @@ trait EmitLlvmMemory
      * (else its elements leak). A false positive here only leaks (the safe
      * direction); element-drop on a genuinely co-owned buffer would UAF.
      */
+    /** The emitted symbol of `$class`'s constructor, or '' when there is none to
+     *  speak for (no class, no declared `__construct`). '' keeps the veto. */
+    private function ctorSymbolFor(string $class): string
+    {
+        if ($class === '' || !isset($this->classes[$class])) { return ''; }
+        $decl = $this->resolveMethodClass($class, '__construct');
+        if ($decl === '') { return ''; }
+        return $this->lsbTarget($decl, '__construct', $class);
+    }
+
     private function collectElementSharedLocals(Node $n): void
     {
         $k = $n->kind;
         if ($k === Node::KIND_NEW_OBJ) {
-            $this->shareCallArgs($n->args);
+            // The constructor is resolvable from the class, so its parameters'
+            // retain discipline is knowable — which is what lets
+            // {@see EmitLlvm::shareCallArgs} keep the caller's element release
+            // instead of vetoing it blind. `new Parser($toks)` is the shape.
+            $this->shareCallArgs($n->args, $this->ctorSymbolFor($n->class ?? ''));
         } elseif ($n->type->kind === Type::KIND_OBJ) {
             if ($k === Node::KIND_CALL) {
-                $this->shareCallArgs($n->args);
+                $this->shareCallArgs($n->args, $n->function);
             } elseif ($k === Node::KIND_METHOD_CALL) {
                 $this->shareCallArgs($n->args);
             } elseif ($k === Node::KIND_STATIC_CALL) {
@@ -334,6 +348,25 @@ trait EmitLlvmMemory
             if (!$value->type->isArray()) { $fallback = Type::vec(Type::unknown()); }
         } elseif (!$value->type->isArray()) {
             return null;
+        }
+        // `$a = []` is `vec[unknown]`, and it is usually the ONLY store_local to
+        // the name — the appends that give the local its real element type are
+        // store_element. Judging the pair by the LITERAL's type therefore answered
+        // "not an own-element flavor" and vetoed the local, so its release gave
+        // back no element reference at all while the property store's retain had
+        // taken one per element. Every element then leaked exactly once per
+        // iteration: precisely the `$m = build(); $h->set($m);` shape this
+        // method's own docblock describes, and 9,236,608 leaked Lexer\Token on
+        // the Doctrine tier. InsertMemoryOps has already refined the local's
+        // release type from the LOADS — use it rather than the literal's.
+        if (\Compile\Debug::$rcElemType && $store->kind === Node::KIND_STORE_LOCAL) {
+            $mo = $this->frame->rcObjLocals[$store->name] ?? null;
+            $known = $mo === null ? null : $mo->target->type;
+            if ($known !== null && $known->isArray() && $value->type->isArray()
+                && ($value->type->element === null
+                    || $value->type->element->kind === Type::KIND_UNKNOWN)) {
+                $fallback = $known;
+            }
         }
         $flavor = $this->arrayRetainFlavor($value, $fallback);
         return $this->isOwnElemFlavor($flavor) ? $flavor : null;
@@ -721,8 +754,14 @@ trait EmitLlvmMemory
     private function arrayRetainFlavor(Node $valueNode, ?Type $fallback): string
     {
         $at = $valueNode->type->kind === Type::KIND_ARRAY ? $valueNode->type : null;
-        if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY
-            && ($at === null || $at->element === null)) {
+        // An UNKNOWN element is as uninformative as a missing one, and it is the
+        // common case: `$a = []` types as `vec[unknown]`, whose `element` is a
+        // real Type — so the `=== null` test never fired and the fallback never
+        // won. The flavor then stayed a plain buffer drop while the destination
+        // had long since been refined to `vec[obj<T>]`, and every element leaked.
+        $uninformative = $at === null || $at->element === null
+            || (\Compile\Debug::$rcElemType && $at->element->kind === Type::KIND_UNKNOWN);
+        if ($fallback !== null && $fallback->kind === Type::KIND_ARRAY && $uninformative) {
             $at = $fallback;
         }
         $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
@@ -781,9 +820,9 @@ trait EmitLlvmMemory
         // Self-guarded, so a `Closure` slot holding anything else is untouched.
         elseif ($flavor === 'closure') { $this->rt->needsClosureRc = true; $fn = '@__mir_closure_release'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_release_buf'; }
-        elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $fn = '@__mir_array_release_obj'; }
-        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $fn = '@__mir_array_release_str'; }
-        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_cell'; }
+        elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
+        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
+        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
         // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
         // retain, so its release gives them back — every time, not only at
         // rc → 0 ({@see collectOwnElemLocals}).

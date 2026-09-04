@@ -255,7 +255,7 @@ foreach ($blind as $c => $s) {
     foreach ($s as $sym => $at) { echo "     ", $c, "  ", $sym, "  at ", $at, "\n"; }
 }
 exit(1);
-' "$OUT" "$ROOT/docs/audit/data/calibration-residue.txt" "${GREEN[@]}"
+' "$OUT" "$ROOT/tests/audit/data/calibration-residue.txt" "${GREEN[@]}"
 [ $? -ne 0 ] && RC=1
 rm -f "$OUT"
 

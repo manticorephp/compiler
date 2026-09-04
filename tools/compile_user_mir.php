@@ -55,6 +55,15 @@ if (!\is_string($srcBase) || $srcBase === '') {
 });
 
 require_once $srcBase . '/Manticore/Main.php';
+// Compiler-internal builtins the native compiler emits inline. Under Zend they
+// are ordinary calls, and only the empty-vs-not answer is load-bearing
+// ({@see \Compile\Mir\StringPool::intern}) — the shim
+// {@see compile_files_mir.php} installs, missing here, so this driver could not
+// compile ANY program that interns a string.
+if (!\function_exists('str_bytes')) {
+    function str_bytes(string $s): int { return $s === '' ? 0 : 1; }
+    function manticore_raw_str_bytes(string $s): int { return $s === '' ? 0 : 1; }
+}
 
 \Compile\Debug::initFromEnvironment();
 

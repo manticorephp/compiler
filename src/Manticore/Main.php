@@ -4631,6 +4631,10 @@ function cmd_analyze(array $args): int {
     }
 
     echo $json ? \Analyze\Report::json($diags) : \Analyze\Report::human($diags);
+    // Counters live on stderr while the report goes to stdout, so
+    // `analyze --deep` doubles as the whole-project instrumentation vehicle
+    // (no giant `dump-mir` text to build and throw away).
+    \Compile\Stats::dumpCounters();
 
     // Under --only the selection IS the gate: a warning-severity undefined
     // symbol still means this compiler cannot resolve the name.
@@ -4656,6 +4660,7 @@ function cmd_dump_mir(array $args): int {
     $module = lower_module($sources);
     if ($module === null) { return 65; }
     puts(\Compile\Mir\Dump::module($module, CompileArgs::$dumpPrelude, CompileArgs::$dumpEffects));
+    \Compile\Stats::dumpCounters();
     return 0;
 }
 

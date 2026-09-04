@@ -1,0 +1,7 @@
+a->id = 1
+a->label = alpha
+b->id = 2
+b->count = 20
+g->label = gamma
+std->id = 99
+std->label = bagged
