@@ -717,6 +717,7 @@ final class EmitLlvm implements EmitVisitor
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
+        $this->computeKeepsNoArg($module);
         foreach ($module->functions as $fn) {
             // The RETURN exemption below needs the DECLARED return type: it is
             // what emitReturn falls back to for an unknown/cell value, and so
@@ -1755,6 +1756,21 @@ final class EmitLlvm implements EmitVisitor
     private array $propRawBorrow = [];
 
     /**
+     * User functions PROVEN to keep none of their arguments — the
+     * interprocedural half of {@see $propRawBorrow}.
+     *
+     * `foreach (splitStr("\r\n", $this->block) as $line)` vetoed
+     * `Http\\Headers::block` for the whole program, because a callee CAN keep
+     * what it is handed and the veto had no way to ask. So the block string
+     * was retained by every store and released by none — the header half of
+     * the http bench, 735 B per response.
+     *
+     * {@see computeKeepsNoArg} answers it for the module's OWN functions;
+     * {@see callKeepsNoArg} stays the php-contract name list for builtins.
+     */
+    private array $fnKeepsNoArg = [];
+
+    /**
      * Prop keys whose SLOT owns one element ref per element — every store to
      * them hands the slot a reference that carries the element refs the drop
      * flavor names, so the slot's release-before-overwrite can give them back on
@@ -1990,7 +2006,9 @@ final class EmitLlvm implements EmitVisitor
             // vetoed `Buffer\ByteBuffer::buf` for the whole program.
             // A NAME list, like {@see EmitLlvmMemory::mutatesArg0} — the
             // contract is php's, not our implementation's.
-            $pureArg = $k === Node::KIND_CALL && $this->callKeepsNoArg($parent->function);
+            $pureArg = $k === Node::KIND_CALL
+                && ($this->callKeepsNoArg($parent->function)
+                    || ($this->fnKeepsNoArg[$parent->function] ?? false));
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c->kind === Node::KIND_PROPERTY_ACCESS
                     && ($c->type->isArray()
@@ -2135,6 +2153,113 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
+     * Which of the module's OWN functions keep none of their arguments.
+     *
+     * A may-escape fixpoint, started optimistic (everything keeps nothing) and
+     * only ever ADDING escapes, so recursion terminates and the answer is the
+     * least fixpoint. A parameter ESCAPES when the body can make it outlive the
+     * call: returned, stored into a property / static / element / array literal,
+     * captured by a closure, reached by a by-ref parameter, or handed to a
+     * callee that itself keeps it. Everything unproven escapes — the
+     * conservative direction here is a leak, never a free.
+     *
+     * `splitStr($sep, $s) { return \explode($sep, $s); }` is the shape this
+     * exists for: `explode` allocates its result, so nothing of `$s` survives
+     * the call, and the caller's property slot may drop what it overwrites.
+     */
+    private function computeKeepsNoArg(\Compile\Mir\Module $module): void
+    {
+        if (!\Compile\Debug::$propBorrowEscape) { $this->fnKeepsNoArg = []; return; }
+        $keeps = [];
+        foreach ($module->functions as $fn) { $keeps[$fn->name] = true; }
+        for ($round = 0; $round < 6; $round++) {
+            $changed = false;
+            foreach ($module->functions as $fn) {
+                if (!($keeps[$fn->name] ?? false)) { continue; }
+                if ($this->fnEscapesAParam($fn, $keeps)) {
+                    $keeps[$fn->name] = false;
+                    $changed = true;
+                }
+            }
+            if (!$changed) { break; }
+        }
+        $this->fnKeepsNoArg = $keeps;
+        $want = \getenv('MANTICORE_KEEPS_TRACE');
+        if ($want !== false && $want !== '') {
+            foreach ($keeps as $kn => $kv) {
+                if (\str_contains($kn, $want)) { \error_log('KEEPS ' . $kn . ' = ' . ($kv ? 'no-keep' : 'ESCAPES')); }
+            }
+        }
+    }
+
+    /** @param array<string,bool> $keeps the round's summary, read for callees */
+    private function fnEscapesAParam(\Compile\Mir\FunctionDef $fn, array $keeps): bool
+    {
+        $taint = [];
+        foreach ($fn->params as $p) {
+            if ($p->byRef) { return true; }
+            $taint[$p->name] = true;
+        }
+        if ($taint === []) { return false; }
+        return $this->nodeEscapes($fn->body, $taint, $keeps);
+    }
+
+    /**
+     * @param array<string,bool> $taint locals that may alias a parameter
+     * @param array<string,bool> $keeps
+     */
+    private function nodeEscapes(Node $n, array &$taint, array $keeps): bool
+    {
+        $k = $n->kind;
+        // An alias store SPREADS the taint; it does not itself escape.
+        if ($k === Node::KIND_STORE_LOCAL) {
+            if ($this->aliasesTaint($n->value, $taint)) { $taint[$n->name] = true; }
+        }
+        if ($k === Node::KIND_RETURN) {
+            if ($n->value !== null && $this->aliasesTaint($n->value, $taint)) { return true; }
+        }
+        // Anything that can OUTLIVE the frame.
+        if ($k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_STORE_STATIC_PROP
+            || $k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_LIT
+            || $k === Node::KIND_CLOSURE || $k === Node::KIND_REF_ADDR) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if ($this->aliasesTaint($c, $taint)) { return true; }
+            }
+        }
+        if ($this->isCallLike($k)) {
+            $safe = false;
+            if ($k === Node::KIND_CALL) {
+                $safe = $this->callKeepsNoArg($n->function) || ($keeps[$n->function] ?? false);
+            }
+            if (!$safe) {
+                foreach (\Compile\Mir\Walk::children($n) as $c) {
+                    if ($this->aliasesTaint($c, $taint)) { return true; }
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->nodeEscapes($c, $taint, $keeps)) { return true; }
+        }
+        return false;
+    }
+
+    /** Does `$n` hand over a REFERENCE to a tainted value (rather than a fresh
+     *  one derived from it)? A concat, a cast and every builtin result are
+     *  fresh buffers; only a direct read, or a conditional over such reads,
+     *  aliases the parameter. */
+    private function aliasesTaint(Node $n, array $taint): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL) { return isset($taint[$n->name]); }
+        if ($k === Node::KIND_TERNARY) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if ($this->aliasesTaint($c, $taint)) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Whether this builtin READS its arguments and keeps nothing — so a
      * property read handed to it cannot outlive the call and must not veto the
      * slot's release ({@see markPropBorrowsIn}).
@@ -2162,7 +2287,11 @@ final class EmitLlvm implements EmitVisitor
             // `__mir_str_alloc` buffer and can never hand back the argument. A
             // name whose fast path returns its input UNCHANGED must NOT be here:
             // the result would alias the property and outlive the store.
-            'substr', 'mb_substr', 'str_repeat',
+            // `__mir_str_explode` gives every segment its own pooled
+            // `__mir_str_alloc` + memcpy, so no piece of the subject survives
+            // in the result. It is what `Http\splitStr` delegates to, and the
+            // one call that vetoed `Headers::block` for the whole program.
+            'substr', 'mb_substr', 'str_repeat', 'explode',
         ] as $n) {
             if ($n === $bare) { return true; }
         }
