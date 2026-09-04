@@ -2420,6 +2420,12 @@ final class EmitLlvm implements EmitVisitor
             // in the result. It is what `Http\splitStr` delegates to, and the
             // one call that vetoed `Headers::block` for the whole program.
             'substr', 'mb_substr', 'str_repeat', 'explode',
+            // `$s[$i]` after DemoteCharLocals. An INT of one byte — the only
+            // internal desugar that reaches this scan with a property operand,
+            // and the reason a class with a `byteAt()` never released an
+            // overwritten string slot: `Buffer\ByteBuffer::buf`, 1 KB per
+            // request, 198 MB of `http_parse`.
+            '__str_byte_at',
         ] as $n) {
             if ($n === $bare) { return true; }
         }

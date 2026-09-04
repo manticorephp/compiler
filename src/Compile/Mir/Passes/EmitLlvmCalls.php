@@ -2396,6 +2396,16 @@ trait EmitLlvmCalls
                 // No post-call temp release is registered on this arm (only the
                 // raw `else` below feeds $rcArgRegs), so a cellified fresh temp
                 // is freed by the rebuild itself or not at all.
+                //
+                // ★ A STRING is the one box that allocates NOTHING — the same
+                // pointer re-tagged — so nothing can free it but the caller,
+                // exactly as on the `string`-param arm below. Without this
+                // every `json_encode($s . $x)` / `var_dump($a . $b)` leaked its
+                // whole argument: 375 B per call, and every json bench row.
+                if ($a->type->kind === Type::KIND_STRING && $this->isFreshStringTemp($a)) {
+                    $out .= $this->coerceToI64();
+                    $argTemps[] = $this->lastValue;
+                }
                 $out .= $this->boxToCell($a->type, $a);
                 $argList .= 'i64 ' . $this->lastValue;
             } else {

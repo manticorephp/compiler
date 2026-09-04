@@ -603,9 +603,23 @@ trait EmitLlvmBuiltins
      * tag-dispatched, so it stays correct for whichever of the two array
      * flavors the rebuild produced.
      */
-    private function cellBoxTempDrop(Type $t, string $cellReg): string
+    private function cellBoxTempDrop(Type $t, string $cellReg, ?Node $src = null): string
     {
         if ($t->kind === Type::KIND_CELL) { return ''; }
+        // ★ A STRING box allocates NOTHING — it re-tags the same pointer — so a
+        // FRESH temp handed to a cell-taking builtin has no owner but this call
+        // site: `json_encode($s . $i)` / `print_r($a . $b)` leaked the whole
+        // argument, 375 B a call and every json bench row. Untag before the
+        // release: the cell reg carries the tag bits in the high half.
+        if ($t->kind === Type::KIND_STRING) {
+            if ($src === null || !$this->isFreshStringTemp($src)) { return ''; }
+            $this->rt->needsStrRc = true;
+            $raw = $this->ssa->allocReg();
+            $p = $this->ssa->allocReg();
+            return '  ' . $raw . ' = and i64 ' . $cellReg . ", 281474976710655\n"
+                 . '  ' . $p . ' = inttoptr i64 ' . $raw . " to ptr\n"
+                 . '  call void @__mir_rc_release_str(ptr ' . $p . ")\n";
+        }
         if (!$t->isVec() && !$t->isAssoc()) { return ''; }
         $el = $t->element;
         if ($el === null || $el->kind === Type::KIND_CELL
@@ -3834,7 +3848,7 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_print_r_str(i64 '
               . $bv . ", i64 0)\n";
-        $out .= $this->cellBoxTempDrop($args[0]->type, $bv);
+        $out .= $this->cellBoxTempDrop($args[0]->type, $bv, $args[0]);
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
 
@@ -3988,7 +4002,7 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
             // implode joins into a fresh string and keeps nothing of the walk —
             // so a REBUILT cell-array is dead here ({@see cellBoxTempDrop}).
-            if ($boxed !== '') { $out .= $this->cellBoxTempDrop($arr->type, $boxed); }
+            if ($boxed !== '') { $out .= $this->cellBoxTempDrop($arr->type, $boxed, $arr); }
             $this->lastValue = $reg; $this->lastValueType = 'ptr';
             return $out;
         }
@@ -6938,7 +6952,7 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_var_export(i64 '
               . $cv . ", i64 0)\n";
-        $out .= $this->cellBoxTempDrop($args[0]->type, $cv);
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cv, $args[0]);
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
         $this->lastValue = $p;
@@ -7184,7 +7198,7 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_enc(i64 ' . $cell . ")\n";
         // The encoder READ the cell into its own buffer and kept nothing.
-        $out .= $this->cellBoxTempDrop($args[0]->type, $cell);
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
         // `json_encode(): string|false` — a UNION, so the call site expects a
         // CELL and handing back a raw pointer would be a representation
         // mismatch. The only failure the native encoder can reach on this gate

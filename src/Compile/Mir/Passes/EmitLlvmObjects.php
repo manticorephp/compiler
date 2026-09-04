@@ -4873,6 +4873,13 @@ trait EmitLlvmObjects
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its static type.
                 $out .= $this->emitNode($a);
+                // A STRING box re-tags the SAME pointer ({@see
+                // EmitLlvmCalls::emitCall}, same arm): the caller still owns the
+                // temp and nothing else will free it.
+                if ($a->type->kind === Type::KIND_STRING && $this->isFreshStringTemp($a)) {
+                    $out .= $this->coerceToI64();
+                    $argTemps[] = $this->lastValue;
+                }
                 $out .= $this->boxToCell($a->type);
                 $argList .= 'i64 ' . $this->lastValue;
             } else {
