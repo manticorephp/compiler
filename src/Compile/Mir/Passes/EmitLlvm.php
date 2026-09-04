@@ -2857,6 +2857,18 @@ final class EmitLlvm implements EmitVisitor
         // owned qualify — one with an erased arm stays borrowed.
         if ($this->condOwnsResult($node)) { return true; }
         if ($this->isStrCharRead($node)) { return true; }
+        // `(string)$int` / `(string)$float` MINT a buffer (__mir_int_to_str /
+        // __mir_float_to_str), so a consumer that frees its fresh operands must
+        // free this one: `strlen((string)$i)` and `$m[(string)$i] = 1` each
+        // leaked one string per call. The same arm is asked by the ownership
+        // pass ({@see Mir\Passes\InsertMemoryOps::isOwnedObj}) — the two sides
+        // have to answer identically, or a temp is freed twice or never.
+        // A STRING operand returns the SAME pointer and a CELL / erased one
+        // returns the raw payload, both borrows: only int and float allocate.
+        if ($k === Node::KIND_CAST) {
+            $ok = $node->operand->type->kind;
+            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT;
+        }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE;

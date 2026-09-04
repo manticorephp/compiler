@@ -521,6 +521,25 @@ final class InsertMemoryOps implements Pass
             // the str rc path). Its producer is a call/invoke (the creator).
         }
         $k = $value->kind;
+        // `(string)$int` / `(string)$float` ALLOCATE — __mir_int_to_str and
+        // __mir_float_to_str hand back a fresh rc=1 buffer exactly as a string
+        // builtin does. This was the one producer nobody owned: the local took
+        // the +1, no release was ever scheduled, and a rebind in a loop dropped
+        // the reference on the floor. `for (…) { $s = (string)$i; }` leaked one
+        // string per iteration — 63 MB per 1M where php is flat, and every
+        // decorate/serialize loop that stringifies a counter pays it.
+        //
+        // ONLY int and float. A STRING operand is returned unchanged
+        // ({@see EmitLlvmExpr::emitCast}) — a borrow, and owning it would free
+        // the source. A CELL or an ERASED operand goes through
+        // `__mir_tagged_to_str`, which hands back the RAW payload pointer,
+        // also a borrow. bool/array reach immortal literals, where a release is
+        // a no-op; they are excluded anyway, so the arm never claims anything
+        // it did not see allocated.
+        if ($k === Node::KIND_CAST && $value->type->kind === Type::KIND_STRING) {
+            $ok = $value->operand->type->kind;
+            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT;
+        }
         // A call transfers a +1 owned ref (the return convention) for
         // any flavor (incl. string builtins: substr / strtolower / …).
         // EXCEPT an FFI call: it returns a foreign libc buffer/pointer
