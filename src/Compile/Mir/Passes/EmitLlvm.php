@@ -3705,10 +3705,13 @@ final class EmitLlvm implements EmitVisitor
         $k = $a->kind;
         // An array literal is always a fresh +1 (obj/vec/assoc alike).
         if ($k === Node::KIND_ARRAY_LIT) { return $this->discardReleaseFlavor($a->type); }
-        // assoc returns are NOT +1 under the return convention
-        // (isBorrowedObjReturn covers only obj/vec/string) — a method may
-        // hand back a borrowed assoc. Only obj/vec call results are owned.
-        if ($a->type->isAssoc()) { return ''; }
+        // An ASSOC result used to be exempted here, on the reading that
+        // isBorrowedObjReturn covered only obj/vec/string. It has covered
+        // assoc since — "vec AND assoc: both are one rc'd buffer" — so the
+        // exemption outlived its reason and made every assoc-returning
+        // builtin body leak its whole result: `count(array_flip($t))` and
+        // `count(array_combine($k, $v))` were 22-105 MB in the ownership
+        // table where the same loop over the argument alone is 1.8.
         $owned = $k === Node::KIND_NEW_OBJ
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
         if ($k === Node::KIND_CALL) {
