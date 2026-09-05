@@ -34,7 +34,9 @@ trait EmitLlvmBuiltins
 
     /**
      * The registers of the ARRAY-typed elements of an array LITERAL being
-     * emitted as a call ARGUMENT, to be released BUFFER-ONLY after the call.
+     * emitted as a call ARGUMENT, and the flavor each is released with after
+     * the call — two parallel arrays, never an array of pairs (a nested
+     * element comes back ERASED).
      *
      * A literal OWNS its elements: {@see EmitLlvmArrays::emitArrayLitValue}
      * adopts a fresh one and RETAINS a borrowed one. Its own release drops
@@ -47,11 +49,14 @@ trait EmitLlvmBuiltins
      * A VARIADIC call is where that shape is unavoidable: `array_merge($a,
      * $b)` packs its arguments into one `vec[vec[…]]` literal, so the whole of
      * both arguments leaked on every call — 62.6 MB in the ownership table.
-     * Why the release is buffer-only, and never the element's own flavor, is
-     * the comment at the collection site.
+     * Which flavor each element gets, and why a BORROWED one is buffer-only,
+     * is the comment at the collection site.
      * @var string[]
      */
     private array $litElemDropRegs = [];
+
+    /** Release flavor per {@see $litElemDropRegs} entry. @var string[] */
+    private array $litElemDropFlavors = [];
 
     /** Collect {@see $litElemDropRegs} while emitting an argument literal. */
     private bool $litElemCollect = false;

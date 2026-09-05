@@ -338,38 +338,42 @@ trait EmitLlvmArrays
         if ($cellVals) { $out .= $this->retainCellPayload($value); }
         $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
         $val = $this->lastValue;
-        if (!$cellVals) { $out .= $this->rcRetainByType($value, $val, null, 2); }
+        $ret = '';
+        if (!$cellVals) { $ret = $this->rcRetainByType($value, $val, null, 2); $out .= $ret; }
         // An ARRAY element the literal now owns and whose release will never
         // drop it ({@see EmitLlvmBuiltins::$litElemDropRegs}). Only while an
         // ARGUMENT literal is being emitted, and only for a raw element — a
         // cell element is dropped by the veccell release.
         //
-        // BUFFER-ONLY, in both cases, and that is the whole lesson of the
-        // reverted `8ab002a`. The literal is about to be handed to a callee BY
-        // VALUE, so its elements go with it: the callee co-owns every one of
-        // them and its RESULT keeps them. That is the standing rule for a
-        // container in argument position ({@see EmitLlvm::shareCallArgs} →
-        // {@see \Compile\Mir\FunctionEmitFrame::$elementSharedLocals}, which
-        // vetoes a variadic tail for exactly this reason) — it could only never
-        // see a pack element, because that rule reads a local's NAME and a pack
-        // element is an anonymous temp.
+        // A literal in ARGUMENT position is handed to the callee BY VALUE, so
+        // its elements go with it. The release therefore turns on WHAT THIS
+        // REFERENCE TOOK, which the retain above has just answered:
         //
-        // An element-bearing flavor here -1's every string / object the callee's
-        // result still points at. `8ab002a` used the value's own release flavor
-        // and generation two died in `LowerFns::finishClosure` reading a
-        // recycled string header: `\array_merge($this->collectVars($e->left),
-        // $this->collectVars($e->right))` freed both packs' strings under the
-        // array array_merge had just built out of them.
+        //   OWNED producer (a call / literal / spread) — no retain: the value
+        //     TRANSFERRED its +1 and the literal is its SOLE owner, so the
+        //     release is the element's own flavor and frees it completely.
+        //     This is the whole of `array_merge($a, $b)`: every value in its
+        //     result comes out of the pack and `$out[] = $v` retains each one,
+        //     so the argument's own element refs are the ones left over.
+        //   BORROWED alias — the retain co-owned the elements too
+        //     ({@see arrayRetainFlavor}), and giving them back here MISCOMPILES
+        //     THE COMPILER, twice over: `8ab002a` died in
+        //     `LowerFns::finishClosure` and the same drop behind a matching
+        //     retain died in `LowerFromAst::bareName`, both reading a recycled
+        //     string header. The pair looks symmetric in the IR and is not, and
+        //     the disagreement is not yet named. BUFFER-ONLY until it is —
+        //     one leaked ref per element per call, the safe direction.
         //
-        // A BORROWED element took an element-bearing retain
-        // ({@see arrayRetainFlavor}), so buffer-only leaves those element refs
-        // behind — a leak of one ref per element per call, which is the safe
-        // direction and the only one available while the callee's co-ownership
-        // is an assumption rather than an emitted retain.
+        // A plain `vec` / `assoc` flavor is the REPR walk, whose element drop
+        // is decided at RUNTIME by bits this literal never stamped; it is not
+        // this reference's answer either, so it degrades to buffer-only too.
         if ($this->litElemCollect && !$cellVals
             && $value->type->kind === Type::KIND_ARRAY
             && \str_starts_with($val, '%')) {
+            $ef = $ret === '' ? $this->discardReleaseFlavor($value->type) : '';
+            if ($ef === '' || $ef === 'vec' || $ef === 'assoc') { $ef = 'vecbuf'; }
             $this->litElemDropRegs[] = $val;
+            $this->litElemDropFlavors[] = $ef;
         }
         $this->elemValReg = $val;
         return $out;

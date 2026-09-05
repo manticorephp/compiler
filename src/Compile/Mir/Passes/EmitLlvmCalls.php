@@ -2451,7 +2451,7 @@ trait EmitLlvmCalls
                 }
                 while (\count($this->litElemDropRegs) > $litMark) {
                     $rcArgRegs[] = (string)\array_pop($this->litElemDropRegs);
-                    $rcArgFlavs[] = 'vecbuf';
+                    $rcArgFlavs[] = (string)\array_pop($this->litElemDropFlavors);
                 }
             }
             $ai = $ai + 1;
