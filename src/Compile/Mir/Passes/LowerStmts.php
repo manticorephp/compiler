@@ -402,14 +402,32 @@ trait LowerStmts
      * this: InsertMemoryOps sees a plain owned store and releases it — and a
      * re-entered foreach releases the previous value on the overwrite.
      *
-     * Only call kinds are hoisted. A borrow producer (local / property / element
-     * read) is owned elsewhere and must NOT be released here, and an array
-     * literal is arena-confined (the arena reclaims it).
+     * …and a normalized CONDITIONAL, which is a +1 producer by exactly the same
+     * contract: the emitter gives every covered arm a retain of the result type
+     * ({@see EmitLlvmControl::armRetainPostBox}), so `foreach ($this->params ??
+     * [] as $p)` took an `__mir_array_retain_obj` on the property's buffer that
+     * nothing ever gave back — one reference per CALL, on a container that
+     * outlives the loop. `Codegen\Llvm\FunctionDef::block()` is the shape, and
+     * one buffer there reached rc 28 with 28 retains and no release.
+     *
+     * NOT gated on {@see CondOwn::armsCoverable}: this runs during LOWERING,
+     * before `InferTypes`, so every arm still types `unknown` and that
+     * type-only predicate answers no for everything. Hoisting only gives the
+     * value a NAME; whether the local earns a release stays `InsertMemoryOps`'s
+     * decision, taken later through `isOwnedCond` — the same division the CALL
+     * kinds above already rely on, and the reason they are hoisted
+     * unconditionally too.
+     *
+     * Only call kinds and conditionals are hoisted. A borrow producer (local /
+     * property / element read) is owned elsewhere and must NOT be released
+     * here, and an array literal is arena-confined (the arena reclaims it).
      */
     private function hoistForeachSubject(Foreach_ $fe): Node
     {
         $k = $fe->array->kind;
-        if ($k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
+        $isCond = \Compile\Mir\CondOwn::isConditional($fe->array);
+        if (!$isCond
+            && $k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
             && $k !== Node::KIND_STATIC_CALL && $k !== Node::KIND_INVOKE) {
             return $fe;
         }

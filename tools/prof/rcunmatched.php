@@ -3,8 +3,14 @@
  * Which RETAIN has no partner? Reads a `MANTICORE_CC_TRACE=1` stderr log and
  * balances it BY OBJECT ADDRESS.
  *
- *   MANTICORE_CC_TRACE=1 bin/probe compile tiny.php -o /tmp/x 2> tr.err
+ *   MANTICORE_CC_TRACE=1     bin/probe compile tiny.php -o /tmp/x 2> tr.err   # obj + string
+ *   MANTICORE_ARR_RC_TRACE=1 bin/probe compile tiny.php -o /tmp/x 2> tr.err   # array BUFFERS
  *   php tools/prof/rcunmatched.php tr.err [top]
+ *
+ * Both formats are read. The ARRAY one (`[ARC]`) is the one that answers a
+ * question about a CONTAINER — which owner of a buffer kept its reference —
+ * and it carries no explicit free line, so a release that lands at rc <= 0 is
+ * what ends a buffer's life here.
  *
  * The census says every `Parser\Ast\*` and `Compile\Mir\*` class frees ZERO
  * objects, and `leaks` says those blocks are UNREACHABLE — so nothing HOLDS
@@ -60,6 +66,30 @@ $fh = \fopen($path, 'rb');
 while (($line = \fgets($fh)) !== false) {
     $lines++;
     if ($line === '' || $line[0] !== '[') { continue; }
+    // `[ARC] ret <sym> arr=0x… len=N rc=N fn=NAME` — the ARRAY buffer trace.
+    // Its rc is PRINTED, so the life ends where the count does: a release that
+    // reaches 0 freed the buffer, and the next allocation may hand the address
+    // straight back.
+    if (\strncmp($line, '[ARC] ', 6) === 0) {
+        $isRet = \strpos($line, '[ARC] ret ') === 0;
+        $at = \strpos($line, 'arr=');
+        if ($at === false) { continue; }
+        $sp = \strpos($line, ' ', $at);
+        $ptr = \substr($line, $at + 4, $sp - $at - 4);
+        $fn = '?';
+        $fa = \strpos($line, 'fn=');
+        if ($fa !== false) { $fn = \rtrim(\substr($line, $fa + 3)); }
+        $live[$ptr][] = [$isRet ? 'ret' : 'rel', $fn];
+        if ($isRet) { $retains[$fn] = ($retains[$fn] ?? 0) + 1; }
+        else {
+            $rp = \strpos($line, 'rc=');
+            if ($rp !== false && (int)\substr($line, $rp + 3) <= 0) {
+                unset($live[$ptr]);
+                $freed++;
+            }
+        }
+        continue;
+    }
     // `[RC] free 0x…`, `[CC] cw free 0x…`, `[CC] mr free 0x…` all END a life.
     if (\strpos($line, ' free ') !== false) {
         $p = \substr($line, \strrpos($line, ' ') + 1);

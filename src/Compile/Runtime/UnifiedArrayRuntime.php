@@ -1583,11 +1583,15 @@ final class UnifiedArrayRuntime
             $bump->store($bump->add($cur, Value::int(Type::i64(), 1)), $rcAddr);
             if (Debug::$arrRcTrace) {
                 $tlen = $bump->load(Type::i64(), $arr);
-                $tf = $this->module->anonString("[ARC] ret %-18s arr=%p len=%lld rc=%lld\n");
+                $tf = $this->module->anonString("[ARC] ret %-18s arr=%p len=%lld rc=%lld fn=%s\n");
                 $tn = $this->module->anonString($symbol);
+                // …and WHO took it. Without the caller the trace can say a
+                // buffer ended at rc 2 but never which of its owners kept
+                // the reference — the whole question for the AST graph.
+                $tcaller = $bump->call('__mir_bt_top', Type::ptr(), []);
                 $bump->call('dprintf', Type::i32(),
                     [Value::int(Type::i32(), 2), $tf, $tn, $arr, $tlen,
-                     $bump->add($cur, Value::int(Type::i64(), 1))], null, '(i32, ptr, ...)');
+                     $bump->add($cur, Value::int(Type::i64(), 1)), $tcaller], null, '(i32, ptr, ...)');
             }
         }
 
@@ -2057,10 +2061,11 @@ final class UnifiedArrayRuntime
             // release ran, so an unbalanced pair is read off directly instead of
             // inferred from a whole-program counter.
             $tlen = $dec->load(Type::i64(), $arr);
-            $tf = $this->module->anonString("[ARC] rel %-18s arr=%p len=%lld rc=%lld\n");
+            $tf = $this->module->anonString("[ARC] rel %-18s arr=%p len=%lld rc=%lld fn=%s\n");
             $tn = $this->module->anonString($symbol);
+            $tcaller = $dec->call('__mir_bt_top', Type::ptr(), []);
             $dec->call('dprintf', Type::i32(),
-                [Value::int(Type::i32(), 2), $tf, $tn, $arr, $tlen, $next], null, '(i32, ptr, ...)');
+                [Value::int(Type::i32(), 2), $tf, $tn, $arr, $tlen, $next, $tcaller], null, '(i32, ptr, ...)');
         }
         // `$dec` dominates every block below, so the symmetric variants can use
         // this i1 again at the reclaim gate.

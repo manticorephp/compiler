@@ -276,7 +276,14 @@ trait EmitLlvmModule
         // stores `[]` as a null ptr) is redirected here so a foreach length
         // load reads 0 instead of faulting.
         $out .= "@__mir_zero_word = internal global i64 0\n";
-        if ($this->rt->needsBacktrace) {
+        // …or whenever the ARRAY rc trace is on: it names its caller through
+        // {@see $out `@__mir_bt_top`} below, and a LIBRARY module needs no
+        // backtraces of its own, so without this the stdlib emitted a call to
+        // an undefined `@__mir_bt_top` and clang refused the module. Emitting
+        // the ring under the same condition keeps ONE body for the name —
+        // a second, backtrace-less variant would be an ODR split on a
+        // linkonce_odr symbol, which is the hazard this file warns about.
+        if ($this->rt->needsBacktrace || \Compile\Debug::$arrRcTrace) {
             // Runtime call-stack for backtraces: parallel name/line rings + depth.
             // linkonce_odr so user.o + stdlib.o share one stack.
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
@@ -298,6 +305,33 @@ trait EmitLlvmModule
             $out .= "  %d1 = add i64 %d, 1\n";
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
+            // The name of the frame on TOP of that stack, as a `%s` operand.
+            //
+            // `llvm.returnaddress` alone cannot name a caller here — the binary
+            // is PIE and nothing in-process knows the slide — so every rc trace
+            // that wanted to say WHO took a reference had to read this ring
+            // instead. The obj/string trace already inlined that read
+            // ({@see EmitLlvmRuntime::btNameIr}); the ARRAY runtime is built
+            // through the typed IR builder and cannot paste text, so the read
+            // lives here as a function both can call.
+            //
+            // Answers "?" rather than a null pointer when the stack is empty or
+            // the slot was never filled: a `%s` of null is the allocator's
+            // business, not the trace's.
+            $out .= "@__mir_bt_unknown = private unnamed_addr constant [2 x i8] c\"?\\00\", align 1\n";
+            $out .= "define ptr @__mir_bt_top() {\n";
+            $out .= "entry:\n";
+            $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
+            $out .= "  %ok = icmp sgt i64 %d, 0\n";
+            $out .= "  %im = sub i64 %d, 1\n";
+            $out .= "  %i = select i1 %ok, i64 %im, i64 0\n";
+            $out .= "  %p = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %i\n";
+            $out .= "  %v = load i64, ptr %p\n";
+            $out .= "  %set = icmp ne i64 %v, 0\n";
+            $out .= "  %live = and i1 %ok, %set\n";
+            $out .= "  %np = inttoptr i64 %v to ptr\n";
+            $out .= "  %r = select i1 %live, ptr %np, ptr @__mir_bt_unknown\n";
+            $out .= "  ret ptr %r\n}\n";
             $out .= "define void @__mir_bt_pop() {\n";
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
