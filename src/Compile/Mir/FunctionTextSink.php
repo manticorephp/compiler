@@ -46,14 +46,22 @@ final class FunctionTextSink
             if ($this->fp === null) {
                 throw new \RuntimeException('FunctionTextSink: cannot open ' . $this->path);
             }
-            foreach ($this->chunks as $old) {
+            $n0 = \count($this->chunks);
+            for ($i = 0; $i < $n0; $i++) {
+                $old = $this->chunks[$i];
                 $on = \strlen($old);
                 if (\Manticore\fwrite($old, 1, $on, $this->fp) !== $on) {
                     throw new \RuntimeException('FunctionTextSink: initial flush failed');
                 }
+                // Drop each flushed chunk THROUGH THE SLOT. `$this->chunks = []`
+                // here would hand the property a fresh buffer and drop the old
+                // one on the floor: a property overwrite releases nothing
+                // ({@see tools/prof/propleak.php}), so the whole chunk list and
+                // every string in it leaked. This was the single largest leak
+                // in a self-compile — 126,135 unreachable blocks / 93.4 MB,
+                // rooted right here.
+                unset($this->chunks[$i]);
             }
-            unset($this->chunks);
-            $this->chunks = [];
         }
         if ($this->fp !== null) {
             if (\Manticore\fwrite($chunk, 1, $n, $this->fp) !== $n) {
@@ -71,10 +79,11 @@ final class FunctionTextSink
         }
         $this->finished = true;
         if ($this->fp === null) {
-            $out = \implode('', $this->chunks);
-            unset($this->chunks);
-            $this->chunks = [];
-            return $out;
+            // No clear here on purpose: the sink is finished and about to be
+            // dropped, so its own drop body releases `$chunks` correctly —
+            // whereas `$this->chunks = []` would leak the list and every string
+            // in it (a property overwrite releases nothing).
+            return \implode('', $this->chunks);
         }
         \Manticore\fclose($this->fp);
         $this->fp = null;
