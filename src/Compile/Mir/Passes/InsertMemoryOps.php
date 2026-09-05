@@ -92,6 +92,10 @@ final class InsertMemoryOps implements Pass
     private array $rcObjSlotBoxed = [];
 
     /** @var array<string, string> census only: blocked local → which gate blocked it. */
+    /** Array locals mutated in the function — the copy-on-assign input.
+     *  @var array<string, bool> */
+    private array $mutatedVecs = [];
+
     private array $blockReason = [];
 
     /** @var array<string, string> census only: blocked local → the value's type kind. */
@@ -138,6 +142,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjSlotBoxed = [];
         $this->blockReason = [];
         $this->blockKind = [];
+        $this->mutatedVecs = \Compile\Mir\VecCopyOnAssign::mutatedLocals($fn->body);
         // Per-name, whole-function: a loop variable co-owns only if EVERY foreach
         // binding it does ({@see foreachOwnVetoes}). Computed BEFORE the walk,
         // because the arm that registers a name runs before the later loop that
@@ -853,7 +858,14 @@ final class InsertMemoryOps implements Pass
             // claiming ownership there is a release with no matching retain.
             $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
                 || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS);
-            if ($this->isOwnedObj($value) && !($ownedByRetain && $boxedSlot)) {
+            // `$b = $a` between array locals is a COPY when either side is
+            // mutated ({@see \Compile\Mir\VecCopyOnAssign}) — the emitter hands
+            // the destination a fresh rc=1 buffer and adopts its elements. That
+            // is an owned producer, and it leaves the SOURCE untouched. Reading
+            // the alias answer for both is what left `$q = $r;` in a loop with
+            // no release for either name.
+            $copies = \Compile\Mir\VecCopyOnAssign::copies($value, $name, $this->mutatedVecs);
+            if (($this->isOwnedObj($value) || $copies) && !($ownedByRetain && $boxedSlot)) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit
                 // release reads the slot, not the producer. Block: a leak, never a
@@ -921,7 +933,7 @@ final class InsertMemoryOps implements Pass
             // buffer (no obj-style alias retain for vecs — they COW-copy
             // on mutation). Block the source so we never rc-release a
             // shared vec twice.
-            if ($value->kind === Node::KIND_LOAD_LOCAL
+            if (!$copies && $value->kind === Node::KIND_LOAD_LOCAL
                 && $value->type->kind === Type::KIND_ARRAY) {
                 $this->rcObjBlocked[$value->name] = true;
                 $this->noteBlock($value->name, "vecalias", $value->type);

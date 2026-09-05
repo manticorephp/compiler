@@ -651,10 +651,7 @@ trait EmitLlvmLocals
         // (`mutatedVecLocals` only records mutated locals). Objects are by-handle
         // (never copied); strings immutable. __mir_array_copy is mode-agnostic.
         $v = $sl->value;
-        if ($v->kind === Node::KIND_LOAD_LOCAL
-            && $v->type->isArray()
-            && (isset($this->frame->mutatedVecLocals[$v->name])
-                || isset($this->frame->mutatedVecLocals[$sl->name]))) {
+        if (\Compile\Mir\VecCopyOnAssign::copies($v, $sl->name, $this->frame->mutatedVecLocals)) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();

@@ -26,12 +26,16 @@ for ($i = 0; $i < $n; $i++) {
     $grid = [[$i, $i + 1], [$i + 2]];
     $sum += count($grid) + count($grid[1]) + $grid[0][1];
     // Nested CALL results, not literals — the other producer of an owned
-    // element. NO alias of the whole thing here: `$q = $r` COPIES the buffer
-    // and leaks 69 MB per 200k on its own, before and after this row's fix
-    // (tools/prof/packleak.php `copy`), which would drown the signal.
+    // element. And an ALIAS of the whole thing: `$q = $r` is a COPY as soon as
+    // either side is mutated, so the destination owns a fresh buffer and the
+    // source is untouched — one predicate, {@see \Compile\Mir\VecCopyOnAssign},
+    // read by the emitter AND by InsertMemoryOps. Reading the alias answer for
+    // both left neither name with a release: 69 MB per 200k.
     $rows = [na_nums($i), na_nums($i + 1)];
-    $sum += count($rows) + count($rows[1]) + $rows[0][2];
-    // Overwrite with a different nesting, so the drop path runs every turn.
+    $same = $rows;
+    $sum += count($rows) + count($same[1]) + $same[0][2];
+    // Overwrite with a different nesting, so the drop path runs every turn —
+    // and it is the write that makes the alias above take the copy.
     $rows = [[$i]];
     $sum += count($rows);
 }

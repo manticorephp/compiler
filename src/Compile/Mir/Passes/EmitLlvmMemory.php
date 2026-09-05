@@ -389,98 +389,10 @@ trait EmitLlvmMemory
      */
     private function collectMutatedVecs(Node $n): void
     {
-        // A builtin whose FIRST parameter php declares by reference mutates its
-        // argument exactly like an element store, and the CoW inside the builtin
-        // cannot save it: a read-only alias is never retained, so the buffer's
-        // rc stays 1 and the copy never triggers.
-        //
-        // This arm knew only the four cursor moves (`next`/`prev`/`reset`/`end`,
-        // which write the header's internal pointer). Every OTHER by-ref
-        // builtin was a silent wrong answer — 7 of 9 probed shapes, e.g.
-        // `$b = $a; array_pop($a);` left `$b` short an element and
-        // `array_unshift($a, 9)` left `$b` reading an EMPTY array off the
-        // reallocated base. The list is the shape contract: a name belongs here
-        // when php declares its first parameter `&$array`.
-        // `current`/`key`/`array_key_first` only read.
-        if ($n->kind === Node::KIND_CALL && \count($n->args) > 0) {
-            // Shape first, NAME second: a kind compare is a word compare while
-            // the name test is a walk of string equalities, and this pre-scan
-            // visits every node of every function.
-            $a0 = $n->args[0];
-            $base = $a0;
-            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                // `array_pop($x[0])` mutates the ROOT local too — the same walk
-                // the nested element store below does.
-                $base = $base->array;
-            }
-            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()
-                && $this->mutatesArg0($n->function)) {
-                $this->frame->mutatedVecLocals[$base->name] = true;
-            }
-        }
-        if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $arr = $n->array;
-            if ($arr->kind === Node::KIND_LOAD_LOCAL
-                && $arr->type->isArray()) {
-                $this->frame->mutatedVecLocals[$arr->name] = true;
-            }
-            // A NESTED element store (`$x[0][] = …` / `$x[0][0][] = …`) mutates
-            // the root local `$x` too — its base is an `$x[0]…` element, not `$x`
-            // directly. Walk down the element chain to the root local and mark it
-            // so a by-value copy-on-entry separates the outer buffer (the deep
-            // copy owns the inner levels).
-            $base = $arr;
-            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $base->array;
-            }
-            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
-                $this->frame->mutatedVecLocals[$base->name] = true;
-            }
-        }
-        // `unset($a[$k])` REMOVES an entry — a mutation of `$a` exactly like a
-        // store, and it was the one lvalue shape this scan did not see. So
-        // `$b = $a; unset($a['x']);` never took the copy and the unset removed
-        // the entry from `$b` as well (php: `$b` keeps it). Same root-walk as
-        // the store arm: `unset($x[0][1])` mutates `$x`.
-        if ($n->kind === Node::KIND_UNSET) {
-            foreach ($n->targets as $t) {
-                if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
-                $base = $t;
-                while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
-                if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
-                    $this->frame->mutatedVecLocals[$base->name] = true;
-                }
-            }
-        }
-        // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
-        // or passed as a call argument that may be by-ref) can mutate the vec —
-        // mark it so a prior `$b = $a` copy-on-assigns instead of sharing the
-        // buffer the reference will write through. Over-approximate (any call
-        // arg): a needless copy is safe, a shared write is not.
-        if ($n->kind === Node::KIND_REF_ADDR) {
-            $this->markVecElemBase($n->lvalue);
-        }
-        // Separate arm — `lvalue` is at a different offset on RefCell_ than on
-        // RefAddr_, so the two cannot share one field read.
-        // No REF_CELL arm: a reference cell's source is a plain LOCAL today, and
-        // {@see markVecElemBase} does nothing for anything but an element. The
-        // arm belongs with the element-source instalment that gives it work to
-        // do — writing it early bought nothing and cost a field read on a
-        // Node-typed receiver, which is how it faulted.
-        if ($n->kind === Node::KIND_CALL) {
-            foreach ($n->args as $a) { $this->markVecElemBase($a); }
-        }
-        if ($n->kind === Node::KIND_METHOD_CALL) {
-            foreach ($n->args as $a) { $this->markVecElemBase($a); }
-        }
-        if ($n->kind === Node::KIND_STATIC_CALL) {
-            foreach ($n->args as $a) { $this->markVecElemBase($a); }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            $this->collectMutatedVecs($c);
+        foreach (\Compile\Mir\VecCopyOnAssign::mutatedLocals($n) as $name => $ignored) {
+            $this->frame->mutatedVecLocals[$name] = true;
         }
     }
-
     /**
      * Whether php declares $fn's FIRST parameter by reference over an array,
      * i.e. whether the call mutates the argument in place
@@ -496,25 +408,7 @@ trait EmitLlvmMemory
      */
     private function mutatesArg0(string $fn): bool
     {
-        $bare = $fn;
-        // Monomorphize has already run, so a prelude body arrives as
-        // `sort$mono$p0_vec_int` — matching the raw callee name found the four
-        // codegen builtins and MISSED every php-bodied one (`sort`, `usort`,
-        // `array_push`), which is why the first cut still printed a mutated
-        // alias for them.
-        $m = \strpos($bare, '$mono$');
-        if ($m !== false) { $bare = \substr($bare, 0, $m); }
-        $p = \strrpos($bare, '\\');
-        if ($p !== false) { $bare = \substr($bare, $p + 1); }
-        foreach ([
-            'array_multisort', 'array_pop', 'array_push', 'array_shift', 'array_splice',
-            'array_unshift', 'array_walk', 'array_walk_recursive', 'arsort', 'asort',
-            'each', 'end', 'krsort', 'ksort', 'natcasesort', 'natsort', 'next', 'prev',
-            'reset', 'rsort', 'shuffle', 'sort', 'uasort', 'uksort', 'usort',
-        ] as $k) {
-            if ($k === $bare) { return true; }
-        }
-        return false;
+        return \Compile\Mir\VecCopyOnAssign::mutatesArg0($fn);
     }
 
     /**
