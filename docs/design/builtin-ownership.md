@@ -101,8 +101,9 @@ was skipped by choice. Not run: **amd64**.
 
 ## 3. CLOSED — a pack element's release is what ITS REFERENCE took
 
-`79cd5db`. The leak was real and `8ab002a`'s reasoning about it still
-holds; what it got wrong is what the CALL SITE owns.
+`79cd5db` + `2e1b880`. The leak was real and `8ab002a`'s reasoning about it
+still holds; what it got wrong is that ONE answer covers both kinds of element.
+Table: **LEAK on 0 · parity DIFF 0**.
 
 ### The root
 
