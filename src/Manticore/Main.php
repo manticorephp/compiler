@@ -4311,6 +4311,20 @@ function compile_via_mir(array $sources, array $paths = []): ?string {
         // scope — the cc step below runs long after emission.
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
+        // The MIR and the emitter are SPENT: `$ir` is either the whole module's
+        // text or, for a staged build, the marker naming the file it was written
+        // to. Everything below this line is clang, and clang is where the peak
+        // is measured — a front end left reachable across it is pure resident
+        // weight. Measured on a self-compile: the front end ends at 340 MB, and
+        // the process sat at 593 MB for the ~160 s clang ran.
+        //
+        // Dropping the names is what frees them: a scope-exit release would come
+        // too late, after the assemble the CALLER runs with the string this
+        // returns. Both are plain owned object locals, so the store releases the
+        // old value ({@see Passes\InsertMemoryOps} — the same idiom `lower_module`
+        // uses for the AST).
+        $emit = null;
+        $module = null;
         return $ir;
     } catch (\Throwable $e) {
         dprint("compile failed (emit): " . $e->getMessage(). " ({$e->getFile()}:{$e->getLine()})");
