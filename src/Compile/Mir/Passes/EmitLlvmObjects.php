@@ -4823,6 +4823,9 @@ trait EmitLlvmObjects
         $argTemps = [];
         /** @var string[] tagged cell arg temps to drop after the call */
         $cellArgTemps = [];
+        /** @var string[] fresh rc arg temps, with the flavor each is released by */
+        $rcArgRegs = [];
+        $rcArgFlavs = [];
         /** @var array<int,array{0:Node,1:string}> boxed cell args to drop after the call */
         $cellBoxDrops = [];
         $reboxSlots = [];
@@ -4931,7 +4934,26 @@ trait EmitLlvmObjects
                 if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
-                if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
+                if ($this->isFreshStringTemp($a)) {
+                    $argTemps[] = $this->lastValue;
+                } else {
+                    // …and the rc temp, on exactly the terms the CONSTRUCTOR
+                    // path takes it ({@see emitNew}) and the free-function one
+                    // has always taken it ({@see EmitLlvmCalls::emitCall}).
+                    // Three call kinds, one discipline: a fresh obj / vec /
+                    // assoc handed straight to a callee that only BORROWS it
+                    // has no other owner, so nothing gave its +1 back.                    // A STATIC factory is how the whole AST is built —
+                    // `Stmt::block_($p->parseBlock(), $line)` — so this one
+                    // arm is why every `Parser\Ast\*` and `Compile\Mir\*`
+                    // class freed ZERO objects while `Lexer\Token` freed
+                    // 93.5%: the tokens go through a CONSTRUCTOR, the nodes
+                    // through a static call.
+                    $rf = \Compile\Debug::$rcCtorArgTemp ? $this->freshRcArgFlavor($a) : '';
+                    if ($rf !== '') {
+                        $rcArgRegs[] = $this->lastValue;
+                        $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai);
+                    }
+                }
             }
             $ai = $ai + 1;
         }
@@ -4954,6 +4976,11 @@ trait EmitLlvmObjects
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
+        $rci = 0;
+        foreach ($rcArgRegs as $rg) {
+            $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
+            $rci = $rci + 1;
+        }
         foreach ($cellBoxDrops as $cbd) {
             $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }
@@ -5775,6 +5802,9 @@ trait EmitLlvmObjects
         $argTemps = [];
         /** @var string[] tagged cell arg temps to drop after the call */
         $cellArgTemps = [];
+        /** @var string[] fresh rc arg temps, with the flavor each is released by */
+        $rcArgRegs = [];
+        $rcArgFlavs = [];
         $cellBoxSlots = [];
         $reboxSlots = [];
         $reboxTmps = [];
@@ -5966,7 +5996,22 @@ trait EmitLlvmObjects
                 $pt = $ptypes[$ai + 1] ?? null;
                 $argOutTypes[$ai + 1] = ($a->type->kind === Type::KIND_CELL && $pt !== null)
                     ? $pt : $a->type;
-                if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
+                if ($this->isFreshStringTemp($a)) {
+                    $argTemps[] = $this->lastValue;
+                } else {
+                    // …and the rc temp, on exactly the terms the CONSTRUCTOR
+                    // path takes it ({@see emitNew}) and the free-function one
+                    // has always taken it ({@see EmitLlvmCalls::emitCall}).
+                    // Three call kinds, one discipline: a fresh obj / vec /
+                    // assoc handed straight to a callee that only BORROWS it
+                    // has no other owner, so nothing gave its +1 back.                    // The RECEIVER of a method call already had it ({@see
+                    // emitMethodCallInner's recvFlavor); its ARGUMENTS did not.
+                    $rf = \Compile\Debug::$rcCtorArgTemp ? $this->freshRcArgFlavor($a) : '';
+                    if ($rf !== '') {
+                        $rcArgRegs[] = $this->lastValue;
+                        $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
+                    }
+                }
             }
             $ai = $ai + 1;
         }
@@ -6145,6 +6190,11 @@ trait EmitLlvmObjects
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
+        $rci = 0;
+        foreach ($rcArgRegs as $rg) {
+            $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
+            $rci = $rci + 1;
+        }
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
             $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
