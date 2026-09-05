@@ -27,3 +27,8 @@ examples/http/*_bin
 docs/audit/
 docs/status/
 probe/
+
+# Scratch manifests for measurement runs: a copy of manticore.json whose only
+# difference is an output path, so a probe build does not overwrite the compiler
+# being measured. Two `git add -A` sweeps already committed one.
+manticore.probe*.json
