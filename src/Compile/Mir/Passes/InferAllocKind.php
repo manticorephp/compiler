@@ -357,7 +357,15 @@ final class InferAllocKind implements Pass
         // ── aggregate / capture: element values escape into the container ──
         if ($k === Node::KIND_ARRAY_LIT) {
             foreach ($n->elements as $el) {
-                if ($el->key !== null) { $this->traverse($el->key, false, $collecting); }
+                // A KEY escapes into the container exactly as a value does —
+                // `__mir_array_set_str` rc-retains it and the array outlives the
+                // literal. Reading it as a non-escaping borrow put `"k" . $i`
+                // in the ARENA, and `arena_leave` reclaimed it on the way out of
+                // `function f(): array { return ["k" . $i => …]; }` — the caller
+                // then read every key of every such map as the LAST one written
+                // into the recycled buffer. KIND_STORE_ELEMENT has always passed
+                // true here for the same reason.
+                if ($el->key !== null) { $this->traverse($el->key, true, $collecting); }
                 $this->traverse($el->value, true, $collecting);
             }
             return;
