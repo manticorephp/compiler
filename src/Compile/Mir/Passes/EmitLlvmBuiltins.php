@@ -1148,10 +1148,10 @@ trait EmitLlvmBuiltins
         // cannot be released on its own (a `string|false` result may carry a
         // boxed bool, whose untagged word is not an address). The consumer
         // reads this immediately, like lastValue.
-        $this->ptrArgCell = '';
+        $cellTemp = '';
         if ($this->isFreshCellTemp($arg)) {
             $out .= $this->coerceToI64();
-            $this->ptrArgCell = $this->lastValue;
+            $cellTemp = $this->lastValue;
         }
         if ($arg->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
@@ -1178,6 +1178,7 @@ trait EmitLlvmBuiltins
         $safe = $this->ssa->allocReg();
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $ptr . "\n";
+        if ($cellTemp !== '') { $this->ptrArgCellByReg[$safe] = $cellTemp; }
         $this->lastValue = $safe;
         $this->lastValueType = 'ptr';
         return $out;
@@ -1903,12 +1904,9 @@ trait EmitLlvmBuiltins
         // reach a string only via str_from_buffer / cstr_to_str).
         $out = $this->emitPtrArg($args[0]);
         $a0 = $this->lastValue;
-        $c0 = $this->ptrArgCell;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_strlen(ptr ' . $a0 . ")\n";
         $out .= $this->freeStrTemp($args[0], $a0);
-        // `strlen(json_encode($rows))` — the cell twin of the line above.
-        if ($c0 !== '') { $out .= $this->rcReleaseReg($c0, 'cell'); }
         return $this->finishI64($out, $reg);
     }
 
@@ -1950,8 +1948,20 @@ trait EmitLlvmBuiltins
         } else {
             $out .= $this->coerceToPtr();
         }
-        $out .= $this->arrayCountFromPtrIr($this->lastValue);
-        return $this->finishI64($out, $this->lastValue);
+        $arrPtr = $this->lastValue;
+        $out .= $this->arrayCountFromPtrIr($arrPtr);
+        $cnt = $this->lastValue;
+        // ★ A FRESH array temp dies here. `count()` answers an int, so nothing
+        // it returns can reference an element — the one array builtin where
+        // that needs no further proof. `count(explode($d, $s))` leaked the
+        // whole exploded vec on every call, 3.2 KB a call.
+        $af = $this->freshRcArgFlavor($args[0]);
+        if ($af !== '') {
+            $ai = $this->ssa->allocReg();
+            $out .= '  ' . $ai . ' = ptrtoint ptr ' . $arrPtr . " to i64\n";
+            $out .= $this->rcReleaseReg($ai, $af);
+        }
+        return $this->finishI64($out, $cnt);
     }
 
     /**
@@ -6709,7 +6719,7 @@ trait EmitLlvmBuiltins
             if ($cd->propertyNames === []) { continue; }
             $holders[$cname] = $cd;
         }
-        if ($holders === []) { return $out . $this->emitBagCoOwned($objPtr); }
+        if ($holders === []) { return $out . $this->emitObjectVarsFallback($objPtr); }
 
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
@@ -6750,7 +6760,7 @@ trait EmitLlvmBuiltins
         }
         $switch .= "  ]\n";
         $bodies .= $def . ":\n";
-        $bodies .= $this->emitBagCoOwned($objPtr);
+        $bodies .= $this->emitObjectVarsFallback($objPtr);
         $bi = $this->ssa->allocReg();
         $bodies .= '  ' . $bi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         $bodies .= '  store i64 ' . $bi . ', ptr ' . $res . "\n";
@@ -6769,6 +6779,66 @@ trait EmitLlvmBuiltins
     /** The object's dynamic bag, co-owned — the bag belongs to the object, and a
      *  call result is released by the caller by convention, so without the retain
      *  the first use would free the object's own properties ({@see biObjBag}). */
+    /**
+     * The arm for a class this module's table does not name — which, in
+     * `manticore_stdlib.o`, is EVERY user class: `__mir_object_vars` is
+     * `internal` and specialized from the emitting module's class table, so the
+     * json walker's `(array)$v` there answered the bag alone and
+     * `json_encode($obj, ANY_FLAG)` printed `{}` for every object.
+     *
+     * The descriptor closes it. `@__mir_props_<id>` is a pure function of the
+     * CLASS, emitted beside the descriptor wherever the class is defined and
+     * reachable through the descriptor's 5th field ({@see
+     * \Compile\Mir\RuntimeLibrary::propsFnSymbol}) — the producer side was
+     * already there with only this consumer missing. It returns a FRESH assoc
+     * (declared properties, then the bag), so this arm is owned like the others.
+     * A null descriptor, or a class with neither properties nor a bag, keeps the
+     * old bag-only answer.
+     */
+    private function emitObjectVarsFallback(string $objPtr): string
+    {
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca i64\n";
+        $haveL = $this->ssa->allocLabel('gov.desc');
+        $callL = $this->ssa->allocLabel('gov.props');
+        $bagL  = $this->ssa->allocLabel('gov.bag');
+        $endL  = $this->ssa->allocLabel('gov.fbend');
+        $di = $this->ssa->allocReg();
+        $out .= '  ' . $di . ' = load i64, ptr ' . $objPtr . "\n";
+        $dz = $this->ssa->allocReg();
+        $out .= '  ' . $dz . ' = icmp eq i64 ' . $di . ", 0\n";
+        $out .= '  br i1 ' . $dz . ', label %' . $bagL . ', label %' . $haveL . "\n";
+        $out .= $haveL . ":\n";
+        $dp = $this->ssa->allocReg();
+        $out .= '  ' . $dp . ' = inttoptr i64 ' . $di . " to ptr\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $dp . ", i64 32\n";
+        $fn = $this->ssa->allocReg();
+        $out .= '  ' . $fn . ' = load ptr, ptr ' . $fp . "\n";
+        $fz = $this->ssa->allocReg();
+        $out .= '  ' . $fz . ' = icmp eq ptr ' . $fn . ", null\n";
+        $out .= '  br i1 ' . $fz . ', label %' . $bagL . ', label %' . $callL . "\n";
+        $out .= $callL . ":\n";
+        $pv = $this->ssa->allocReg();
+        $out .= '  ' . $pv . ' = call i64 ' . $fn . '(ptr ' . $objPtr . ")\n";
+        $out .= '  store i64 ' . $pv . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $bagL . ":\n";
+        $out .= $this->emitBagCoOwned($objPtr);
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $bi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        $out .= '  store i64 ' . $bi . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $rv = $this->ssa->allocReg();
+        $out .= '  ' . $rv . ' = load i64, ptr ' . $res . "\n";
+        $rp = $this->ssa->allocReg();
+        $out .= '  ' . $rp . ' = inttoptr i64 ' . $rv . " to ptr\n";
+        $this->lastValue = $rp;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitBagCoOwned(string $objPtr): string
     {
         $out = $this->emitBagOfUnknownClass($objPtr);

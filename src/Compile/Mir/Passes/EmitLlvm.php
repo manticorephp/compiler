@@ -3248,13 +3248,36 @@ final class EmitLlvm implements EmitVisitor
             && !($this->sigs->returnsByRef[$fn] ?? false);
     }
 
-    /** The tagged cell of the last {@see EmitLlvmBuiltins::emitPtrArg} operand
-     *  when it was a fresh temp, '' otherwise. Read IMMEDIATELY after the call,
-     *  like `lastValue`. */
-    private string $ptrArgCell = '';
+    /**
+     * Result reg of an {@see EmitLlvmBuiltins::emitPtrArg} operand that was a
+     * fresh CELL temp -> the TAGGED word to drop once the builtin has read it.
+     *
+     * Keyed by the reg rather than passed along because the ~30 string builtins
+     * all already hand {@see freeStrTemp} exactly that reg — so the cell twin
+     * costs no per-site edit and cannot be forgotten at a new one. SSA regs
+     * restart per function, so {@see EmitLlvmModule::emitFunction} clears it.
+     *
+     * @var array<string,string>
+     */
+    private array $ptrArgCellByReg = [];
+
+    /** Forget every pending cell temp; the reg keys are only valid inside one
+     *  function ({@see $ptrArgCellByReg}). */
+    private function clearPtrArgCells(): void
+    {
+        $this->ptrArgCellByReg = [];
+    }
 
     private function freeStrTemp(Node $node, string $ptr): string
     {
+        // A fresh CELL temp: `$ptr` is only its PAYLOAD, and the payload of a
+        // `string|false` may be a boxed bool whose untagged word is not an
+        // address. Drop the tagged word instead — __mir_cell_drop dispatches.
+        $cell = $this->ptrArgCellByReg[$ptr] ?? '';
+        if ($cell !== '') {
+            unset($this->ptrArgCellByReg[$ptr]);
+            return $this->rcReleaseReg($cell, 'cell');
+        }
         if (!$this->isFreshStringTemp($node)) { return ''; }
         $this->rt->needsStrRc = true;
         return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";

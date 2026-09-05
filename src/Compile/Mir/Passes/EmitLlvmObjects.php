@@ -317,6 +317,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $obj . " to i64\n";
             $argList = 'i64 ' . $objInt;
             $argTemps = [];
+            /** @var string[] tagged cell arg temps to drop after the call */
+            $cellArgTemps = [];
             $rcArgRegs = [];
             $rcArgFlavs = [];
             $cellBoxSlots = [];
@@ -395,6 +397,9 @@ trait EmitLlvmObjects
                         $this->lastValueType = 'double';
                     }
                     $out .= $this->coerceToI64();
+                    // A fresh CELL temp is dropped by its TAGGED word ({@see
+                    // EmitLlvmCalls::emitCall}, same arm).
+                    if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                     if ($this->isFreshStringTemp($a)) {
                         $argTemps[] = $this->lastValue;
@@ -437,6 +442,7 @@ trait EmitLlvmObjects
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
+            foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
             $ri = 0;
             foreach ($rcArgRegs as $rg) {
                 $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
@@ -4788,6 +4794,8 @@ trait EmitLlvmObjects
         $argList = '';
         $first = true;
         $argTemps = [];
+        /** @var string[] tagged cell arg temps to drop after the call */
+        $cellArgTemps = [];
         /** @var array<int,array{0:Node,1:string}> boxed cell args to drop after the call */
         $cellBoxDrops = [];
         $reboxSlots = [];
@@ -4891,6 +4899,9 @@ trait EmitLlvmObjects
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
+                // A fresh CELL temp is dropped by its TAGGED word ({@see
+                // EmitLlvmCalls::emitCall}, same arm).
+                if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($this->isFreshStringTemp($a)) { $argTemps[] = $this->lastValue; }
@@ -4915,6 +4926,7 @@ trait EmitLlvmObjects
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
+        foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
         foreach ($cellBoxDrops as $cbd) {
             $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }
@@ -5734,6 +5746,8 @@ trait EmitLlvmObjects
         }
         $argList = 'i64 ' . $thisArg;
         $argTemps = [];
+        /** @var string[] tagged cell arg temps to drop after the call */
+        $cellArgTemps = [];
         $cellBoxSlots = [];
         $reboxSlots = [];
         $reboxTmps = [];
@@ -5915,6 +5929,9 @@ trait EmitLlvmObjects
             } else {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
+                // A fresh CELL temp is dropped by its TAGGED word ({@see
+                // EmitLlvmCalls::emitCall}, same arm).
+                if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                 $argList .= ', i64 ' . $this->lastValue;
                 // unboxCellArg lowers a CELL arg to the param's repr; everything
@@ -6100,6 +6117,7 @@ trait EmitLlvmObjects
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
+        foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
             $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);

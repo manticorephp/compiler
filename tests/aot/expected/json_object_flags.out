@@ -1,0 +1,15 @@
+{
+    "x": 3,
+    "label": "origin"
+}
+[
+    {
+        "x": 3,
+        "label": "origin"
+    }
+]
+{"k":{"x":3,"label":"origin"}}
+{
+    "a": 1,
+    "b": "two"
+}

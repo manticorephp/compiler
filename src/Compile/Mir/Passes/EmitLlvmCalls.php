@@ -2425,9 +2425,17 @@ trait EmitLlvmCalls
                 // ABI: every fn takes i64 args. Float / ptr values
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();
+                // A fresh CELL temp must be dropped by its TAGGED word:
+                // unboxCellArg strips the tag for the callee's raw param, and
+                // __mir_cell_drop cannot dispatch on a bare payload — it read
+                // the untagged pointer as "not a cell" and freed nothing, so
+                // `trim(json_encode($x))` leaked the whole document.
+                $cellArgTemp = $this->isFreshCellTemp($a) ? $this->lastValue : '';
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
-                if ($this->isFreshStringTemp($a)) {
+                if ($cellArgTemp !== '') {
+                    $rcArgRegs[] = $cellArgTemp; $rcArgFlavs[] = 'cell';
+                } elseif ($this->isFreshStringTemp($a)) {
                     $argTemps[] = $this->lastValue;
                 } else {
                     $rf = $this->freshRcArgFlavor($a);
