@@ -3208,12 +3208,30 @@ final class EmitLlvm implements EmitVisitor
         // leaked one string per call. The same arm is asked by the ownership
         // pass ({@see Mir\Passes\InsertMemoryOps::isOwnedObj}) — the two sides
         // have to answer identically, or a temp is freed twice or never.
-        // A STRING operand returns the SAME pointer and a CELL / erased one
-        // returns the raw payload, both borrows: only int and float allocate.
+        // A STRING operand returns the SAME pointer — the one borrow.
         if ($k === Node::KIND_CAST) {
-            $ok = $node->operand->type->kind;
-            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
-                || $ok === Type::KIND_CELL;
+            // Every arm of the cast but ONE hands back a +1: int/float mint,
+            // a CELL retains the payload it aliases ({@see
+            // EmitLlvmExpr::cellStrResultOwnIr}), and the ERASED dispatch
+            // ({@see EmitLlvmExpr::coerceToStr}) is that same retain on its
+            // boxed arm, `__mir_int_to_str` on its raw arm and an IMMORTAL
+            // literal ("Array", "") on the rest — a release on rc < 0 is a
+            // no-op, so naming them all is sound and naming none of them
+            // stranded one buffer per `strlen((string)json_encode($v))`, where
+            // `strlen(json_encode($v))` was flat: `json_encode` types as
+            // `unknown` here, so the CELL arm never fired. Only a STRING
+            // operand comes back unchanged, and owning that would free the
+            // source.
+            if ($node->operand->type->kind === Type::KIND_STRING) {
+                // The pass-through arm INHERITS its operand's ownership.
+                // `(string)$borrow` is a borrow, but `(string)array_pop($t)`
+                // is the popped element itself and its owner is whoever
+                // consumes the cast — reading the arm as a flat borrow left
+                // that element unowned, which is the whole of `array_pop`'s
+                // and `array_shift`'s row in the ownership table.
+                return $this->isFreshStringTemp($node->operand);
+            }
+            return true;
         }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
@@ -3330,6 +3348,20 @@ final class EmitLlvm implements EmitVisitor
         // the caller's to drop, which is what lets the rebuilt argument array
         // be freed ({@see EmitLlvmBuiltins::biMinMax}).
         if ($fn === 'max' || $fn === 'min') { return true; }
+        // The CLASS C builtins ({@see EmitLlvmBuiltins::emitArrPtrArg}): the
+        // result IS an element or a key of the argument, and the emitter now
+        // retains it ({@see EmitLlvmBuiltins::cellEndpointRetain}) so the
+        // argument can be freed under it. That +1 is the caller's to give
+        // back. Naming them is the THIRD half of the one change — without it
+        // the retain is a leak, and it is safe when the dispatch falls
+        // through to a PHP body instead, which returns +1 by the return
+        // convention anyway.
+        foreach ([
+            'array_first', 'array_last', 'array_key_first', 'array_key_last',
+            'current', 'pos', 'key', 'reset', 'end', 'next', 'prev',
+        ] as $cn) {
+            if ($fn === $cn) { return true; }
+        }
         if ($this->lastCallWasBuiltin) { return false; }
         return isset($this->sigs->paramTypes[$fn])
             && !($this->sigs->returnsByRef[$fn] ?? false);
@@ -3796,15 +3828,28 @@ final class EmitLlvm implements EmitVisitor
         // whole document. `__mir_cell_drop` dispatches on the tag, so a `false`
         // or an int payload is a no-op.
         if ($this->isFreshCellTemp($a)) { return 'cell'; }
+        // A closure LITERAL is a fresh +1: {@see EmitLlvmCalls::emitClosure}
+        // allocates an env with its own lifetime header at rc 1, and the
+        // callee co-owns whatever it keeps ({@see
+        // EmitLlvmMemory::rcRetainByType}'s closure arm retains a BORROWED
+        // closure on every alias / element / property store). Nobody freed
+        // the argument, so `array_filter($t, "strlen")` — a string callable
+        // coerced to a closure at lowering — allocated one env per call and
+        // freed none. Only the LITERAL: a closure read out of a local or a
+        // property is a borrow.
+        if ($a->kind === Node::KIND_CLOSURE) { return 'closure'; }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
         // An array literal is always a fresh +1 (obj/vec/assoc alike).
         if ($k === Node::KIND_ARRAY_LIT) { return $this->discardReleaseFlavor($a->type); }
-        // assoc returns are NOT +1 under the return convention
-        // (isBorrowedObjReturn covers only obj/vec/string) — a method may
-        // hand back a borrowed assoc. Only obj/vec call results are owned.
-        if ($a->type->isAssoc()) { return ''; }
+        // An ASSOC result used to be exempted here, on the reading that
+        // isBorrowedObjReturn covered only obj/vec/string. It has covered
+        // assoc since — "vec AND assoc: both are one rc'd buffer" — so the
+        // exemption outlived its reason and made every assoc-returning
+        // builtin body leak its whole result: `count(array_flip($t))` and
+        // `count(array_combine($k, $v))` were 22-105 MB in the ownership
+        // table where the same loop over the argument alone is 1.8.
         $owned = $k === Node::KIND_NEW_OBJ
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
         if ($k === Node::KIND_CALL) {

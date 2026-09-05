@@ -2236,12 +2236,11 @@ trait EmitLlvmBuiltins
         $this->rt->needsTagged = true;
         if ($wantKey) { $this->rt->needsCellKey = true; }
         $arrT = $args[0]->type;
-        $out = $this->emitNode($args[0]);
-        if ($arrT->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } else {
-            $out .= $this->coerceToPtr();
-        }
+        // CLASS C ({@see emitArrPtrArg}): the result IS an element or a key of
+        // the argument, so the endpoint must be RETAINED below before the
+        // fresh temp this registers is released — `array_first(explode($d,
+        // $s))` stranded the whole exploded vec on every call.
+        $out = $this->emitArrPtrArg($args[0]);
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0
         // (mirrors biCount / biArrayKeys).
         $rawSrc = $this->lastValue;
@@ -2277,11 +2276,15 @@ trait EmitLlvmBuiltins
         if ($wantKey) {
             $boxed = $this->ssa->allocReg();
             $out .= '  ' . $boxed . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
+            $out .= $this->cellEndpointRetain($boxed);
         } else {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
             $out .= $this->boxRawElem($ev, $arrT);
             $boxed = $this->lastValue;
+            if ($this->boxRawValueBorrows($this->elemTypeOf($arrT))) {
+                $out .= $this->cellEndpointRetain($boxed);
+            }
         }
         $out .= '  store i64 ' . $boxed . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $done . "\n";
@@ -2324,12 +2327,12 @@ trait EmitLlvmBuiltins
         $arrNode = $args[0];
         $arrT = $arrNode->type;
         $baseCell = $arrT->kind === Type::KIND_CELL;
-        $out = $this->emitNode($arrNode);
-        if ($baseCell) {
-            $out .= $this->cellToPtr();
-        } else {
-            $out .= $this->coerceToPtr();
-        }
+        // CLASS C, as biArrayEndpoint: the cursor hands back an element the
+        // argument still holds, so it is retained below and the argument — a
+        // fresh temp in `current(explode($d, $s))` — is freed after the read.
+        // A cursor MOVE takes a local / property / static prop, never a temp,
+        // so the COW arm below registers nothing.
+        $out = $this->emitArrPtrArg($arrNode);
         // A cursor move must not be seen through another name for the same
         // buffer: separate first, then write the clone back into the slot.
         if ($moves
@@ -2400,6 +2403,7 @@ trait EmitLlvmBuiltins
             $boxed = $this->ssa->allocReg();
             $out .= '  ' . $boxed . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src
                   . ', i64 ' . $pos . ")\n";
+            $out .= $this->cellEndpointRetain($boxed);
         } else {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src
@@ -2416,9 +2420,13 @@ trait EmitLlvmBuiltins
                 $out .= "  " . $boxed . " = call i64 @__mir_box_by_repr(i64 " . $ev . ", i64 " . $hint . ")\n";
                 $this->lastValue = $boxed;
                 $this->lastValueType = "i64";
+                $out .= $this->cellEndpointRetain($boxed);
             } else {
                 $out .= $this->boxRawElem($ev, $arrT);
                 $boxed = $this->lastValue;
+                if ($this->boxRawValueBorrows($this->elemTypeOf($arrT))) {
+                    $out .= $this->cellEndpointRetain($boxed);
+                }
             }
         }
         $out .= '  store i64 ' . $boxed . ', ptr ' . $res . "\n";
@@ -2458,6 +2466,30 @@ trait EmitLlvmBuiltins
      * all, and `__mir_cell_retain` must never see it as a pointer), and for a
      * nested CONCRETE array, which boxRawValue rebuilds fresh.
      */
+    /**
+     * The RETAIN half of class C: a builtin whose result IS an element or a
+     * key of its argument hands back a +1, so the argument may be freed the
+     * instant the read is done ({@see emitArrPtrArg}) and a consumer gives the
+     * reference back ({@see EmitLlvm::isFreshCellTemp}). Never one without the
+     * others: the retain alone is a leak, the release alone a use-after-free.
+     *
+     * `__mir_cell_retain` dispatches on the tag, so a packed int key, a bool
+     * and a null are no-ops — only a string/object/array payload counts.
+     */
+    private function cellEndpointRetain(string $boxed): string
+    {
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        return '  call void @__mir_cell_retain(i64 ' . $boxed . ")\n";
+    }
+
+    /** The element Type of a vec/assoc, or null for anything else (an erased
+     *  or CELL base), which {@see boxRawValueBorrows} reads as borrowed. */
+    private function elemTypeOf(Type $arrT): ?Type
+    {
+        return ($arrT->isVec() || $arrT->isAssoc()) ? $arrT->element : null;
+    }
+
     private function boxRawValueBorrows(?Type $t): bool
     {
         $k = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;

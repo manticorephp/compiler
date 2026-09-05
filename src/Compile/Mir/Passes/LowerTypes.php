@@ -225,7 +225,15 @@ trait LowerTypes
         // tag AND a single-kind return/value narrows to the concrete scalar
         // (InferTypes), so e.g. array_sum's float specialization returns a raw
         // double instead of a mantissa-truncating box_float.
-        if (\strpos($hint, '|') > 0) {
+        // A TOP-LEVEL `|` only. The plain strpos here was not depth-aware, so
+        // `array<int,string|null>` — str_getcsv's and fgetcsv's declared
+        // return, and every `array<K, V|null>` in the tree — entered the
+        // union branch, matched none of its shapes and collapsed to a bare
+        // `cell`. The `.sig` then carried `mixed` instead of `mixed[]`, and a
+        // caller cannot OWN an erased word: `count(str_getcsv($s))` leaked the
+        // whole record. {@see topLevelUnionArms} is the depth-aware split the
+        // arms below already use.
+        if (\count($this->topLevelUnionArms($hint)) > 1) {
             // `S|null` IS `?S` — php treats the two spellings as one type. Only
             // the shorthand was modelled, so the union spelling fell through to
             // a plain cell and the class was gone: `(string)$x` on a value from
@@ -341,6 +349,14 @@ trait LowerTypes
         if (\strlen($low) > 2 && \substr($low, \strlen($low) - 2) === '[]') {
             $base = \ltrim($hint, '?\\');
             $elem = \substr($base, 0, \strlen($base) - 2);
+            // `(string|null)[]` groups its arms — the parens are the reason
+            // the `|` is not top level, and they must come off before the
+            // element is lowered or it reads as a class name.
+            $elem = \trim($elem);
+            if (\strlen($elem) > 1 && $elem[0] === '('
+                && $elem[\strlen($elem) - 1] === ')') {
+                $elem = \substr($elem, 1, \strlen($elem) - 2);
+            }
             return Type::vec($this->lowerTypeHint($elem));
         }
         // Generic array: `array<V>` → vec[V]; `array<K, V>` → assoc[V].

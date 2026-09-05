@@ -709,8 +709,10 @@ trait EmitLlvmLocals
         // retaining every local assoc alias added a spurious assoc_retain in
         // hot ctors (ClassDef) that, on a value whose buffer abuts a live heap
         // string, wrote rc into the string (the enum backing "int"→"jnt").
-        $aliasObjStr = $v->kind === Node::KIND_LOAD_LOCAL
-            && ($v->type->kind === Type::KIND_OBJ || $v->type->kind === Type::KIND_STRING);
+        // …and the RETAIN half of {@see \Compile\Mir\AliasOwn}: the release
+        // half is {@see InsertMemoryOps::isOwnedObj}, and the two must read
+        // the SAME predicate or the value is freed twice or never.
+        $aliasObjStr = \Compile\Mir\AliasOwn::coOwns($v);
         // `$b = $a` on an ARRAY the frame never mutates: no copy fires, so the
         // two names share one buffer and — until now — neither owned it. The
         // pass answered that by BLOCKING the source, which leaks everything it

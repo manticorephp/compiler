@@ -1,0 +1,22 @@
+alpha|beta|gamma0|z0
+value:0
+alpha|beta|gamma0|alpha|beta|gamma0|tail
+alpha,gamma0
+alpha,beta
+alpha|beta|gamma1|z1
+value:1
+alpha|beta|gamma1|alpha|beta|gamma1|tail
+alpha,gamma1
+alpha,beta
+alpha|beta|gamma2|z2
+value:2
+alpha|beta|gamma2|alpha|beta|gamma2|tail
+alpha,gamma2
+alpha,beta
+alpha|beta|gamma3|z3
+value:3
+alpha|beta|gamma3|alpha|beta|gamma3|tail
+alpha,gamma3
+alpha,beta
+value 1
+2 alpha/beta/gamma9 solo

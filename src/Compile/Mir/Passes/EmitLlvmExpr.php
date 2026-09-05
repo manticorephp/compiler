@@ -2550,7 +2550,22 @@ trait EmitLlvmExpr
             if ($ok === Type::KIND_STRING) { $out .= $this->coerceToPtr(); return $out; }
             if ($ok === Type::KIND_CELL) {
                 $out .= $this->coerceToI64();
-                $out .= $this->coerceCellToStr($this->lastValue);
+                $cv = $this->lastValue;
+                $out .= $this->coerceCellToStr($cv);
+                // A CAST was the one consumer of a fresh cell temp with no
+                // owner: the ~30 string builtins get the drop through
+                // {@see EmitLlvm::$ptrArgCellByReg} and `echo` has its own, but
+                // `strlen((string)json_encode($v))` stranded the whole document
+                // where `strlen(json_encode($v))` was flat. Sound because the
+                // result already CO-OWNS: {@see cellStrResultOwnIr} retains it
+                // exactly when it IS the cell's payload.
+                if ($this->isFreshCellTemp($c->operand)) {
+                    $sv = $this->lastValue;
+                    $st = $this->lastValueType;
+                    $out .= $this->rcReleaseReg($cv, 'cell');
+                    $this->lastValue = $sv;
+                    $this->lastValueType = $st;
+                }
                 return $out;
             }
             $out .= $this->coerceToStr($c->operand);
@@ -2576,8 +2591,12 @@ trait EmitLlvmExpr
                 $this->rt->needsTaggedToInt = true;
                 $this->rt->needsStrtol = true;
                 $out .= $this->coerceToI64();
+                $cv = $this->lastValue;
                 $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+                $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_to_int(i64 ' . $cv . ")\n";
+                // Class A: an int cannot reference the cell, so a fresh temp is
+                // dead the instant it has been read.
+                if ($this->isFreshCellTemp($c->operand)) { $out .= $this->rcReleaseReg($cv, 'cell'); }
                 $this->lastValue = $reg; $this->lastValueType = 'i64';
                 return $out;
             }
@@ -2597,8 +2616,11 @@ trait EmitLlvmExpr
             if ($ok === Type::KIND_CELL) {
                 $this->rt->needsTaggedToFloat = true;
                 $out .= $this->coerceToI64();
+                $cv = $this->lastValue;
                 $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call double @__manticore_tagged_to_double(i64 ' . $this->lastValue . ")\n";
+                $out .= '  ' . $reg . ' = call double @__manticore_tagged_to_double(i64 ' . $cv . ")\n";
+                // Class A, as the int arm above.
+                if ($this->isFreshCellTemp($c->operand)) { $out .= $this->rcReleaseReg($cv, 'cell'); }
                 $this->lastValue = $reg; $this->lastValueType = 'double';
                 return $out;
             }

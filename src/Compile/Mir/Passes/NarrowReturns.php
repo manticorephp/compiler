@@ -244,20 +244,45 @@ final class NarrowReturns implements Pass
         // erased helper return (vec[unknown] from array_map over a bare-array
         // param) is left for Monomorphize to specialize then the post-Mono pass.
         if ($this->concreteOnly && !$this->isConcreteArray($result)) { return false; }
-        // Widening an already-narrowed return: only accept a CELL-element result
-        // (the scalar → cell correction) and only when it actually differs — never
-        // re-narrow a concrete scalar to a different scalar (would not converge).
+        // Widening an already-narrowed return: accept a CELL-element result (the
+        // scalar → cell correction) or a KEYED-ness correction, and only when it
+        // actually differs — never re-narrow a concrete scalar to a different
+        // scalar (would not converge).
+        //
+        // The keyed-ness arm exists because `@return string[]` lowers to a VEC —
+        // php's docblock says what the VALUES are and nothing about the keys — so
+        // `/** @return string[] */ function f(int $i): array { return ["k" . $i =>
+        // "v" . $i]; }` declared int keys over a hashed buffer, and the caller's
+        // foreach read each string key with the raw `__mir_array_key_at`:
+        // `4364574184=v1`. The body BUILDS the buffer, so the body is the truth;
+        // the annotation only ever narrows the element. Monotone in the same
+        // sense as the cell widen — the shapes then agree and the guard below
+        // stops the next sweep. Same symptom the cell-KEY comment above records,
+        // one gate further on.
         if ($mayWiden) {
-            if ($result->element === null || $result->element->kind !== Type::KIND_CELL) {
+            // KEYED-ness and the key KIND, never isAssoc(): that answers true
+            // only for a STRING key, so a CELL-keyed result (a vec arm joined
+            // with an assoc one) read as "not assoc" and the declared vec's int
+            // keys stood — the same distinction the shape reference above draws.
+            $keyFix = $this->keyKindOf($rt) !== $this->keyKindOf($result);
+            if (!$keyFix
+                && ($result->element === null || $result->element->kind !== Type::KIND_CELL)) {
                 return false;
             }
-            if ($rt->isAssoc() === $result->isAssoc()
+            if (!$keyFix
                 && $rt->element !== null && $rt->element->kind === $result->element->kind) {
                 return false;
             }
         }
         $fn->returnType = $result;
         return true;
+    }
+
+    /** The key CHANNEL of an array type: its key kind, or '' for a vec (int
+     *  keys, carried as an absent key). */
+    private function keyKindOf(Type $t): string
+    {
+        return $t->key === null ? '' : $t->key->kind;
     }
 
     /**

@@ -4,6 +4,7 @@ namespace Compile\Mir\Passes;
 
 use Compile\Mir\AllocationKind;
 use Compile\Mir\Block;
+use Compile\Mir\AliasOwn;
 use Compile\Mir\CondOwn;
 use Compile\Mir\Effects;
 use Compile\Mir\FunctionDef;
@@ -608,6 +609,13 @@ final class InsertMemoryOps implements Pass
             // the str rc path). Its producer is a call/invoke (the creator).
         }
         $k = $value->kind;
+        // The RELEASE half of {@see \Compile\Mir\AliasOwn} — `$b = $s`, and the
+        // pass-through `(string)$s` that is the same alias. Its retain half is
+        // {@see EmitLlvmLocals}'s $aliasObjStr; both read this one predicate,
+        // and the class carries what each failure mode cost. The kind gate and
+        // the struct / enum / closure / Ffi\Ptr guards above are this caller's
+        // own rc-eligibility test, which AliasOwn deliberately does not make.
+        if (AliasOwn::coOwns($value)) { return true; }
         // `(string)$int` / `(string)$float` ALLOCATE — __mir_int_to_str and
         // __mir_float_to_str hand back a fresh rc=1 buffer exactly as a string
         // builtin does. This was the one producer nobody owned: the local took
@@ -616,17 +624,24 @@ final class InsertMemoryOps implements Pass
         // string per iteration — 63 MB per 1M where php is flat, and every
         // decorate/serialize loop that stringifies a counter pays it.
         //
-        // ONLY int and float. A STRING operand is returned unchanged
+        // EVERY operand but a STRING. A string is returned unchanged
         // ({@see EmitLlvmExpr::emitCast}) — a borrow, and owning it would free
-        // the source. A CELL or an ERASED operand goes through
-        // `__mir_tagged_to_str`, which hands back the RAW payload pointer,
-        // also a borrow. bool/array reach immortal literals, where a release is
-        // a no-op; they are excluded anyway, so the arm never claims anything
-        // it did not see allocated.
+        // the source. bool/array reach immortal literals, where a release is a
+        // no-op, so claiming them costs nothing and missing a minting arm
+        // costs one buffer per cast.
         if ($k === Node::KIND_CAST && $value->type->kind === Type::KIND_STRING) {
-            $ok = $value->operand->type->kind;
-            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
-                || $ok === Type::KIND_CELL;
+            // The twin of {@see EmitLlvm::isFreshStringTemp}'s cast arm, and it
+            // has to answer identically or the temp is freed twice or never.
+            // Only a STRING operand is returned unchanged — a borrow. Every
+            // other kind mints (int/float/erased-raw), retains the payload it
+            // aliases (cell / erased-boxed), or reaches an IMMORTAL literal
+            // where the release is a no-op.
+            if ($value->operand->type->kind === Type::KIND_STRING) {
+                // The pass-through arm inherits its operand's ownership,
+                // {@see EmitLlvm::isFreshStringTemp}.
+                return $this->isOwnedObj($value->operand);
+            }
+            return true;
         }
         // A call transfers a +1 owned ref (the return convention) for
         // any flavor (incl. string builtins: substr / strtolower / …).
