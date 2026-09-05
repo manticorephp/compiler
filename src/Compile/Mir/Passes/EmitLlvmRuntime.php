@@ -649,7 +649,7 @@ trait EmitLlvmRuntime
                 $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
                 $out .= "  %retra = call ptr @llvm.returnaddress(i32 0)\n";
                 $out .= "  %retrc = call i64 @__cc_rcval(ptr %p)\n";
-                $out .= $this->ccTrace('ret', 'ptr %p, i64 %retrc, ptr %retra');
+                $out .= $this->btNameIr('ret') . $this->ccTrace('ret', 'ptr %p, i64 %retrc, ptr %retra, ptr %retfn');
             }
             $out .= "  br label %done\n";
             $out .= "str:\n";
@@ -710,7 +710,7 @@ trait EmitLlvmRuntime
                 $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
                 $out .= "  %relra = call ptr @llvm.returnaddress(i32 0)\n";
                 $out .= "  %relrc = call i64 @__cc_rcval(ptr %p)\n";
-                $out .= $this->ccTrace('rel', 'ptr %p, i64 %relrc, ptr %relra');
+                $out .= $this->btNameIr('rel') . $this->ccTrace('rel', 'ptr %p, i64 %relrc, ptr %relra, ptr %relfn');
             }
             if (\Compile\Debug::$arrRcTrace) {
                 // The OBJECT half of the rc trace. The array half proved every
@@ -2036,8 +2036,8 @@ trait EmitLlvmRuntime
         'sb'      => '[CC] sb-inc %p rc=%lld',
         'scan'    => '[CC] scan %p col=%lld rc=%lld',
         'white'   => '[CC] white %p',
-        'rel'     => '[RC] rel %p rc=%lld from=%p',
-        'ret'     => '[RC] ret %p rc=%lld from=%p',
+        'rel'     => '[RC] rel %p rc=%lld from=%p fn=%s',
+        'ret'     => '[RC] ret %p rc=%lld from=%p fn=%s',
         'sret'    => '[SR] ret %p from=%p',
         'srel'    => '[SR] rel %p from=%p',
     ];
@@ -2047,11 +2047,42 @@ trait EmitLlvmRuntime
     {
         if (!\Compile\Debug::$ccTrace) { return ''; }
         $out = '';
+        $out .= self::NOFN_GLOBAL;
         foreach (self::CC_TRACE_FMTS as $id => $fmt) {
             $out .= '@.cct.' . $id . ' = private unnamed_addr constant ['
                 . (string)(\strlen($fmt) + 2) . ' x i8] c"' . $fmt . '\0A\00", align 1' . "\n";
         }
         return $out;
+    }
+
+    /** Printed for an rc event with no compiler frame on the backtrace. */
+    private const NOFN_GLOBAL =
+        "@.cct.nofn = private unnamed_addr constant [2 x i8] c\"?\\00\", align 1\n";
+
+    /**
+     * The PHP function name at the top of the compiler's own backtrace, as a
+     * `%s` operand for {@see ccTrace}.
+     *
+     * `llvm.returnaddress` alone needs the image slide to symbolise and the
+     * binary is PIE, so the raw `from=` is unreadable in practice. The compiler
+     * already maintains `@__mir_bt_name` for its own backtraces; reading the
+     * top frame names the site outright, which is the whole reason this trace
+     * gets read. `$tag` prefixes the registers so retain and release can both
+     * use it in one module without colliding.
+     */
+    private function btNameIr(string $tag): string
+    {
+        $o  = '  %' . $tag . "btd = load i64, ptr @__mir_bt_depth\n";
+        $o .= '  %' . $tag . 'btok = icmp sgt i64 %' . $tag . "btd, 0\n";
+        $o .= '  %' . $tag . 'btr = sub i64 %' . $tag . "btd, 1\n";
+        $o .= '  %' . $tag . 'bti = select i1 %' . $tag . 'btok, i64 %' . $tag . "btr, i64 0\n";
+        $o .= '  %' . $tag . 'btg = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %'
+            . $tag . "bti\n";
+        $o .= '  %' . $tag . 'btv = load i64, ptr %' . $tag . "btg\n";
+        $o .= '  %' . $tag . 'btp = inttoptr i64 %' . $tag . "btv to ptr\n";
+        $o .= '  %' . $tag . 'fn = select i1 %' . $tag . 'btok, ptr %' . $tag
+            . "btp, ptr @.cct.nofn\n";
+        return $o;
     }
 
     /** `MANTICORE_CC_TRACE` line: one dprintf to fd 2, args already in regs. */
