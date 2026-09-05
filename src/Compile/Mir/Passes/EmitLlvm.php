@@ -713,6 +713,8 @@ final class EmitLlvm implements EmitVisitor
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
+        $this->clonedClasses = [];
+        $this->cloneClassUnknown = false;
         // A LIBRARY's classes go into a `.sig`, so "nobody borrows this property"
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
@@ -1824,6 +1826,13 @@ final class EmitLlvm implements EmitVisitor
      *  target). Every slot then keeps its old value — the leak, never a free. */
     private bool $propBorrowUnknown = false;
 
+    /** @var array<string, bool> classes `clone`d somewhere in this module. */
+    private array $clonedClasses = [];
+
+    /** A `clone` whose receiver class is erased — it may be ANY class, so no
+     *  class can be proven un-cloned. */
+    private bool $cloneClassUnknown = false;
+
     private function scanCellPropStores(Node $n): void
     {
         // Every property READ that is not the retaining snapshot alias vetoes its
@@ -1884,6 +1893,16 @@ final class EmitLlvm implements EmitVisitor
             } else {
                 $this->cellPropHasInPlaceBox[$key] = true;
             }
+        }
+        // `clone` COPIES an array property with __mir_array_copy, which co-owns
+        // elements in REPR mode — i.e. nothing at all for a concrete, unstamped
+        // buffer. A drop deepened past the slot's own type would then give back a
+        // ref the copy never took, on elements the source still holds. Record the
+        // cloned class so {@see classDropFlavor} can refuse the widening.
+        if ($n->kind === Node::KIND_CLONE) {
+            $cc = $this->cloneObjectClass($n);
+            if ($cc === '') { $this->cloneClassUnknown = true; }
+            else { $this->clonedClasses[$cc] = true; }
         }
         $base = $this->cellPropArrayBaseKey($n);
         if ($base !== null) { $this->cellPropArrayBase[$base] = true; }
@@ -2481,10 +2500,22 @@ final class EmitLlvm implements EmitVisitor
     {
         $t = $this->propStoreRetainType($n);
         $drop = $t === null ? '' : $this->discardReleaseFlavor($t);
+        // The flavor the store's retain ACTUALLY co-owns at. For a declared
+        // `Nd[]` slot it equals $drop; for a bare `array` one it does not —
+        // {@see EmitLlvmMemory::arrayRetainFlavor} reads the informative side, so
+        // the store retains at `vecobj` while the slot's own type says only `vec`
+        // (or, once a bare `array` has erased to `unknown`, says nothing at all).
+        // That disagreement WAS the veto, and the veto was the leak.
+        $retain = $t === null ? '' : $this->arrayRetainFlavor($n->value, $t);
+        // An EMPTY array literal — every `public array $x = []` default and every
+        // re-seed — hands the slot a buffer with no elements. It can neither
+        // prove the flavor nor disprove it, and vetoing on it would disqualify
+        // essentially every property before its first real store.
+        if ($n->value->type->isArray() && $this->isEmptyArrayLit($n->value)) { return; }
         $ok = $t !== null
             && $n->value->type->isArray()
-            && $this->isOwnElemFlavor($drop)
-            && $this->arrayRetainFlavor($n->value, $t) === $drop;
+            && $this->isOwnElemFlavor($retain)
+            && ($retain === $drop || $this->isErasedSlotFlavor($drop));
         if (!$ok) {
             $this->propOwnElemVeto[$key] = true;
             // An ERASED receiver names no class, so the veto has to cover every
@@ -2493,11 +2524,38 @@ final class EmitLlvm implements EmitVisitor
             if (($n->object->type->class ?? '') === '') { $this->propOwnElemVeto[$n->property] = true; }
             return;
         }
-        if (isset($this->propOwnElem[$key]) && $this->propOwnElem[$key] !== $drop) {
+        if (isset($this->propOwnElem[$key]) && $this->propOwnElem[$key] !== $retain) {
             $this->propOwnElemVeto[$key] = true;
             return;
         }
-        $this->propOwnElem[$key] = $drop;
+        $this->propOwnElem[$key] = $retain;
+    }
+
+    /** The class a `clone` names, '' when the receiver's type is erased. Read
+     *  through a Clone_-typed param so `->object` resolves the right field
+     *  offset under the self-host. */
+    private function cloneObjectClass(\Compile\Mir\Clone_ $n): string
+    {
+        return $n->object->type->class ?? '';
+    }
+
+    /** Whether a class may be `clone`d in this module — conservatively true when
+     *  any clone site has an erased receiver. */
+    private function classMayBeCloned(string $class): bool
+    {
+        if ($this->cloneClassUnknown) { return true; }
+        return isset($this->clonedClasses[$class]);
+    }
+
+    /** A slot flavor that claims NOTHING about the elements behind it: the two
+     *  repr-dispatching array flavors, which read ownership off the buffer's own
+     *  bits, and '' — what a bare `array` erased to `unknown` leaves, which drops
+     *  the slot from the class drop body altogether. A proven per-store flavor
+     *  may replace one of these; it may never deepen a concrete one it disagrees
+     *  with. */
+    private function isErasedSlotFlavor(string $flavor): bool
+    {
+        return $flavor === 'vec' || $flavor === 'assoc' || $flavor === '';
     }
 
     /** The flavors that name element refs a release can give back. `vec`/`assoc`
@@ -3520,7 +3578,13 @@ final class EmitLlvm implements EmitVisitor
                 // Unified arrays: every vec/assoc flavor releases via
                 // __mir_array_release* whose deps (needsRc/needsStrRc) are
                 // forced unconditionally in emit(); str/obj likewise covered.
-                if ($flavor !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
+                // An array-SHAPED slot with no flavor of its own counts too: a
+                // flavor proven from its stores may still give it an element
+                // walker ({@see classDropFlavor}).
+                if ($flavor !== '' || $this->propIsArrayShaped($cls, $pn, $pt)) {
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                }
             }
         }
     }
@@ -3569,14 +3633,54 @@ final class EmitLlvm implements EmitVisitor
         $flavor = $this->discardReleaseFlavor($pt);
         if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
         if ($this->propBorrowUnknown || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
-        if (!$this->isOwnElemFlavor($flavor)) { return $flavor; }
+        // A BARE `array` slot names no element type, so it gets no element-aware
+        // drop: at best the repr-dispatching `__mir_array_release`, which finds
+        // repr bits of zero on a CONCRETE buffer ({@see EmitLlvmArrays::
+        // erasedReprCode} deliberately never stamps one) and frees the buffer
+        // while stranding everything in it — and at worst, once the hint has
+        // erased to `unknown`, NO flavor at all, which drops the property from
+        // this body and leaks the array whole. Meanwhile the STORE retained at
+        // the value's own flavor, so the elements were co-owned and nothing ever
+        // gives them back: `public array $kids = []` + `$h->kids = $kids` leaked
+        // 226 MB over 100 k calls where the same slot declared `@var Nd[]` is
+        // flat ({@see tools/prof/bare_array_prop.php}).
+        //
+        // The flavor proven from the slot's own stores may REPLACE an erased one;
+        // it may never deepen a concrete one it disagrees with.
+        $erased = $this->isErasedSlotFlavor($flavor) && $this->propIsArrayShaped($cls, $prop, $pt);
+        if (!$erased && !$this->isOwnElemFlavor($flavor)) { return $flavor; }
         $key = $this->cellPropKey($cls->name, $prop);
-        if (!isset($this->propOwnElem[$key]) || $this->propOwnElem[$key] !== $flavor) { return $flavor; }
+        $proven = $this->propOwnElem[$key] ?? '';
+        if ($proven === '') { return $flavor; }
+        if (!$erased && $proven !== $flavor) { return $flavor; }
         if (isset($this->propOwnElemVeto[$key]) || isset($this->propOwnElemVeto[$prop])) { return $flavor; }
-        if (\getenv('MANTICORE_DROP_TRACE') !== false) {
-            \error_log('CLASSDROP ' . $cls->name . '::' . $prop . ' YES ' . $flavor . 'own');
+        if ($erased) {
+            // Two gates the concrete case does not need. An ELEMENT STORE through
+            // the slot (`$this->kids[] = $x`) fills the buffer with no whole-slot
+            // store to prove anything, and stamps a repr the plain release
+            // already honours — deepening on top of that double-drops.
+            if (isset($this->cellPropArrayBase[$key]) || isset($this->cellPropArrayBase[$prop])) {
+                return $flavor;
+            }
+            // And `clone`: __mir_array_copy co-owns in REPR mode, so the copy of
+            // an unstamped concrete buffer holds its elements as BORROWS.
+            if ($this->classMayBeCloned($cls->name)) { return $flavor; }
         }
-        return $flavor . 'own';
+        if (\getenv('MANTICORE_DROP_TRACE') !== false) {
+            \error_log('CLASSDROP ' . $cls->name . '::' . $prop . ' YES ' . $proven . 'own'
+                . ($erased ? ' (erased slot, flavor proven from its stores)' : ''));
+        }
+        return $proven . 'own';
+    }
+
+    /** Is this slot an ARRAY at runtime whatever its static type says — declared
+     *  `array`, a typed array, or an `array` hint the element erasure flattened
+     *  to `unknown`? The release helpers are tag-guarded and NULL-safe, so this
+     *  only has to be right about the SHAPE, never about the elements. */
+    private function propIsArrayShaped(\Compile\Mir\ClassDef $cls, string $prop, Type $pt): bool
+    {
+        if ($pt->isArray()) { return true; }
+        return $cls->propertyArrayHinted[$prop] ?? false;
     }
 
     /**
