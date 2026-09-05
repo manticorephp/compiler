@@ -411,6 +411,40 @@ final class InsertMemoryOps implements Pass
      *
      * @param array<string, mixed> $enums enum name → def; enum values are non-rc
      */
+    /**
+     * Does `$b = $a` on an array make the destination a CO-OWNER?
+     *
+     * A local array alias is the one rc shape with no answer of its own: the
+     * emitter neither copies it (that needs a proven mutation) nor retains it,
+     * so the two names SHARE one buffer and the pass has to block the source or
+     * it would be released twice. Blocking is a leak of everything the source
+     * ever owned — one `$argl = $args;` in `InferScans::collectDocListKeyArgs`
+     * cost 38.2 MB of live blocks, all of it the vec-property COPIES `$args`
+     * took one line earlier.
+     *
+     * So co-own instead: the emitter takes a +1 and the pass stops blocking.
+     * ⚠ ONE predicate for both halves, and deliberately narrow — the blanket
+     * version of this retain is the one `EmitLlvmLocals` records as having
+     * written rc into a live heap string (the enum backing "int"→"jnt"). Both
+     * sides must name the SAME element, and the element must be one whose
+     * retain/release pair is fully exercised: a STRING or a plain OBJECT.
+     * A cell / unknown / erased element is exactly the raw-word case that
+     * corrupted, and it is refused here.
+     */
+    public static function arrayAliasCoOwns(?Type $value, ?Type $slot,
+                                            array $enums, array $classes = []): bool
+    {
+        if ($value === null || $slot === null) { return false; }
+        if (!$value->isArray() || !$slot->isArray()) { return false; }
+        $ve = $value->element;
+        $se = $slot->element;
+        if ($ve === null || $se === null) { return false; }
+        if ($ve->kind !== $se->kind) { return false; }
+        if ($ve->kind !== Type::KIND_STRING && $ve->kind !== Type::KIND_OBJ) { return false; }
+        if ($ve->kind === Type::KIND_OBJ && ($ve->class ?? '') !== ($se->class ?? '')) { return false; }
+        return self::elemReadCoOwns($ve, $enums, $classes);
+    }
+
     public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
     {
         if ($t === null) { return false; }
@@ -1010,6 +1044,14 @@ final class InsertMemoryOps implements Pass
             // inside its climb blocked `$args`, and with it the OTHER copy the
             // same name takes from `$recv->typeArgs` — 830 279 live blocks.
             $ownedCopy = !$boxedSlot && $this->copiedArrayAlias($sl);
+            // A co-owned alias reaches the same place by the other road: the
+            // emitter takes a +1 instead of a copy, so the destination owns
+            // either way and the SOURCE is safe to release either way — which is
+            // why one flag can stand for both below.
+            if (!$boxedSlot && $value->kind === Node::KIND_LOAD_LOCAL
+                && self::arrayAliasCoOwns($value->type, $sl->type, $this->enums, $this->classes)) {
+                $ownedCopy = true;
+            }
             if (($this->isOwnedObj($value) || $ownedCopy) && !($ownedByRetain && $boxedSlot)) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit

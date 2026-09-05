@@ -651,6 +651,7 @@ trait EmitLlvmLocals
         // (`mutatedVecLocals` only records mutated locals). Objects are by-handle
         // (never copied); strings immutable. __mir_array_copy is mode-agnostic.
         $v = $sl->value;
+        $copiedVecLocal = false;
         if ($v->kind === Node::KIND_LOAD_LOCAL
             && $v->type->isArray()
             && (isset($this->frame->mutatedVecLocals[$v->name])
@@ -673,6 +674,7 @@ trait EmitLlvmLocals
             $out .= $this->arrayAdoptIr($ci, $this->arrayRetainFlavor($v, $sl->type));
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
+            $copiedVecLocal = true;
             // The copy is heap-owned + independent, so it is no longer an
             // arena vec alias.
             unset($this->arena->vecLocals[$sl->name]);
@@ -709,6 +711,16 @@ trait EmitLlvmLocals
         // string, wrote rc into the string (the enum backing "int"→"jnt").
         $aliasObjStr = $v->kind === Node::KIND_LOAD_LOCAL
             && ($v->type->kind === Type::KIND_OBJ || $v->type->kind === Type::KIND_STRING);
+        // `$b = $a` on an ARRAY the frame never mutates: no copy fires, so the
+        // two names share one buffer and — until now — neither owned it. The
+        // pass answered that by BLOCKING the source, which leaks everything it
+        // held ({@see \Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns},
+        // the one predicate both halves ask). Take the +1 here and the source
+        // keeps its release.
+        $aliasArrayLocal = !$copiedVecLocal
+            && $v->kind === Node::KIND_LOAD_LOCAL
+            && \Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns(
+                $v->type, $sl->type, $this->enums, $this->classes);
         // `$saved = $this->map` — a snapshot of an array PROPERTY. Co-own it
         // (rc>1) so a later mutation of the property copy-on-writes instead of
         // clobbering the snapshot's shared buffer (the InferTypes localTypes
@@ -726,7 +738,7 @@ trait EmitLlvmLocals
         $aliasArrayProp = $v->kind === Node::KIND_PROPERTY_ACCESS
             && ($v->type->isArray()
                 || $this->slotIsArrayHinted($v->object, $v->property, $v->type));
-        if ($aliasObjStr || $aliasArrayProp) {
+        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;
             // An array-HINTED slot whose type erased to unknown carries no kind
