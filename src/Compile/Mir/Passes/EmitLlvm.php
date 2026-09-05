@@ -2012,7 +2012,21 @@ final class EmitLlvm implements EmitVisitor
             // is what leaks every element of the slot — 9,236,608 Lexer\\Token
             // on the Doctrine tier, against ~0 reclaims.
             if (!$this->elemReadIsOwned($parent)) {
-                $this->propElemBorrow[$this->cellPropKey($pa->object->type->class ?? '', $pa->property)] = true;
+                $ebKey = $this->cellPropKey($pa->object->type->class ?? '', $pa->property);
+                // Say WHY, the way {@see markPropBorrow} does for the raw veto.
+                // The veto is per SLOT and program-wide — ONE non-owning read
+                // anywhere makes every overwrite of that property release
+                // `assocbuf` and strand its elements — so "which read, and what
+                // consumes it" is the only question worth asking, and it was the
+                // one thing no trace could answer.
+                $ebWant = \getenv('MANTICORE_BORROW_TRACE');
+                if ($ebWant !== false && $ebWant !== '' && \str_contains($ebKey, $ebWant)) {
+                    \error_log('ELEMBORROW ' . $ebKey . ' <- consumer '
+                        . ($this->scanParent === null ? '(none)' : $this->scanParent->kind)
+                        . ' elem=' . $parent->type->toString()
+                        . ' line ' . (string)$parent->line);
+                }
+                $this->propElemBorrow[$ebKey] = true;
             }
             $idx = $parent->index;
             if ($idx !== null) { $this->markPropBorrowsIn($idx, 'subscript index'); }
