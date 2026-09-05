@@ -431,6 +431,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** Parent of the node the borrow scan is currently judging. */
     private ?Node $scanParent = null;
+    /** @var Node[] the ancestors of the node being scanned, outermost first */
+    private array $scanStack = [];
 
     /**
      * Write every lazily generated property-read / dynamic-method helper body
@@ -1849,7 +1851,16 @@ final class EmitLlvm implements EmitVisitor
             // `InferTypes::localTypes` vetoed after the call-argument rule went
             // in — every one of its 13 borrow marks came from this line, all of
             // them `$merged = $this->loopMerge($saved, $this->localTypes);`.
+            // ⚠ With the STORE as the consumer. The descent has not reached
+            // $n yet, so `scanParent` still holds the store's OWN parent —
+            // judging the value against a `block` is what made
+            // {@see elemReadIsOwned} answer no for every `$x = $this->m[$k]`,
+            // the one shape it exists to exempt. The later descent reaches the
+            // same read with the right parent, but the veto is already set.
+            $savedSp = $this->scanParent;
+            $this->scanParent = $n;
             $this->markChildBorrows($v);
+            $this->scanParent = $savedSp;
         } else {
             $this->markChildBorrows($n);
         }
@@ -1929,9 +1940,11 @@ final class EmitLlvm implements EmitVisitor
         // around the descent, is enough — the walk is depth-first.
         $savedParent = $this->scanParent;
         $this->scanParent = $n;
+        $this->scanStack[] = $n;
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
         }
+        \array_pop($this->scanStack);
         $this->scanParent = $savedParent;
     }
 
@@ -2021,8 +2034,13 @@ final class EmitLlvm implements EmitVisitor
                 // one thing no trace could answer.
                 $ebWant = \getenv('MANTICORE_BORROW_TRACE');
                 if ($ebWant !== false && $ebWant !== '' && \str_contains($ebKey, $ebWant)) {
+                    $ebChain = [];
+                    $ebN = \count($this->scanStack);
+                    for ($ebI = $ebN - 1; $ebI >= 0 && $ebI >= $ebN - 4; $ebI--) {
+                        $ebChain[] = $this->scanStack[$ebI]->kind;
+                    }
                     \error_log('ELEMBORROW ' . $ebKey . ' <- consumer '
-                        . ($this->scanParent === null ? '(none)' : $this->scanParent->kind)
+                        . \implode(' < ', $ebChain)
                         . ' elem=' . $parent->type->toString()
                         . ' line ' . (string)$parent->line);
                 }
