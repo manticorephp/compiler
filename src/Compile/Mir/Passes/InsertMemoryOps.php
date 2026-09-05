@@ -91,6 +91,17 @@ final class InsertMemoryOps implements Pass
      *  about this has no single correct release flavor and is blocked. */
     private array $rcObjSlotBoxed = [];
 
+    /** @var array<string, bool> array locals this function ELEMENT-STORES into.
+     *  A strict SUBSET of the emitter's `mutatedVecLocals` ({@see
+     *  EmitLlvmMemory}, which also counts unset / by-ref / mutating builtins),
+     *  so a name in here is one the emitter certainly copies on alias. */
+    private array $elemMutatedLocals = [];
+
+    /** @var array<string, bool> names that took an ERASED array-PROPERTY read.
+     *  Its retain is repr-deep (buffer only), so the element refinement below
+     *  must not deepen this name's release past what that retain took. */
+    private array $rcObjErasedProp = [];
+
     /** @var array<string, string> census only: blocked local → which gate blocked it. */
     private array $blockReason = [];
 
@@ -136,6 +147,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjNeutral = [];
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
+        $this->rcObjErasedProp = [];
         $this->blockReason = [];
         $this->blockKind = [];
         // Per-name, whole-function: a loop variable co-owns only if EVERY foreach
@@ -145,6 +157,8 @@ final class InsertMemoryOps implements Pass
         $this->feFnEnabled = \Compile\Debug::$feOnly === ''
             || \str_contains($fn->name, \Compile\Debug::$feOnly);
         $this->feOwnVeto = self::foreachOwnVetoes($fn->body, $this->enums, $this->classes);
+        $this->elemMutatedLocals = [];
+        $this->collectElemMutated($fn->body);
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -613,6 +627,19 @@ final class InsertMemoryOps implements Pass
             && ($value->type->isVec() || $value->type->isAssoc())) {
             return true;
         }
+        // …and the SAME read of a slot declared a bare `array`, whose type erased
+        // to KIND_UNKNOWN so neither isVec() nor isAssoc() sees it. The emitter's
+        // half already had this fallback and this one did not — so for
+        // `Compile\Mir\Type::$typeArgs`, `ClassDef::$typeParams` and every other
+        // undeclared-element array property, `$a = $o->prop` took a +1 that
+        // NOTHING ever released. That is the compiler's own top live-set site:
+        // `InferCalls::genericReturnType` held 830 279 blocks / 63.3 MB at the
+        // peak, all of them arrays reaching a slot no release was scheduled for.
+        // The rule this restores is the file's own: both halves decide on ONE
+        // predicate, or a retain is left without its release.
+        if ($k === Node::KIND_PROPERTY_ACCESS && $this->erasedArrayPropRead($value)) {
+            return true;
+        }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so
@@ -690,6 +717,75 @@ final class InsertMemoryOps implements Pass
             return $sl->type;
         }
         return $sl->value->type;
+    }
+
+    /**
+     * `$b = $a` where the emitter is CERTAIN to copy: an array-typed local read
+     * whose source or destination this function element-stores into.
+     *
+     * ⚠ The emitter's `mutatedVecLocals` is WIDER (unset, by-ref, array_pop &c),
+     * and that asymmetry is the safe one: every name this answers true for is in
+     * the emitter's set too, so the copy it promises really is emitted. Answering
+     * true where no copy happened would schedule a release on a SHARED buffer.
+     */
+    private function copiedArrayAlias(StoreLocal $sl): bool
+    {
+        $v = $sl->value;
+        if ($v->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        if (!$v->type->isArray()) { return false; }
+        return isset($this->elemMutatedLocals[$v->name])
+            || isset($this->elemMutatedLocals[$sl->name]);
+    }
+
+    /** Names element-stored into directly — the narrow half of the emitter's
+     *  mutation scan ({@see copiedArrayAlias} for why narrow is the safe side). */
+    private function collectElemMutated(Node $n): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $arr = $this->storeElementBase($n);
+            if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
+                $this->elemMutatedLocals[$arr->name] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectElemMutated($c); }
+    }
+
+    /** Read through a StoreElement-typed param so `->array` resolves the right
+     *  field offset under the self-host. */
+    private function storeElementBase(\Compile\Mir\StoreElement $n): Node
+    {
+        return $n->array;
+    }
+
+    /**
+     * A read of a property whose slot is declared a bare `array` but whose TYPE
+     * erased to KIND_UNKNOWN — the case {@see isOwnedObj}'s vec/assoc test
+     * cannot see and {@see EmitLlvmLocals::emitStoreLocal}'s `$aliasArrayProp`
+     * already retains for.
+     *
+     * ⚠ Deliberately a STRICT SUBSET of the emitter's condition: the class must
+     * be named AND declare the property itself, so `slotHolder` over there is
+     * guaranteed to reach the same ClassDef and see the same hint. Under-
+     * claiming here costs today's leak; over-claiming would schedule a release
+     * against a retain that was never emitted, which is a use-after-free.
+     */
+    private function erasedArrayPropRead(Node $value): bool
+    {
+        if ($value->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        if ($value->type->isVec() || $value->type->isAssoc()) { return false; }
+        if ($value->type->kind !== Type::KIND_UNKNOWN) { return false; }
+        return $this->propReadArrayHinted($value);
+    }
+
+    /** Read through a PropertyAccess_-typed param so `->object` / `->property`
+     *  resolve the right field offsets under the self-host. */
+    private function propReadArrayHinted(\Compile\Mir\PropertyAccess_ $pa): bool
+    {
+        $cls = $pa->object->type->class ?? '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return false; }
+        $cd = $this->classes[$cls];
+        if ($cd->propertyOffset($pa->property) < 0) { return false; }
+        return $cd->propertyArrayHinted[$pa->property] ?? false;
     }
 
     /**
@@ -843,6 +939,20 @@ final class InsertMemoryOps implements Pass
             // registers it.
             $slotType = $this->slotStoredType($sl);
             $boxedSlot = $slotType->kind === Type::KIND_CELL;
+            // An ERASED array-property read carries KIND_UNKNOWN, which has no rc
+            // flavor at all — so even once it is owned (below) the release ladder
+            // would find nothing to emit. Name the array explicitly, and name it
+            // as the EMITTER's retain names it: `Type::vec(Type::unknown())`, the
+            // fallback {@see EmitLlvmLocals::emitStoreLocal} hands
+            // {@see EmitLlvmMemory::rcRetainByType} for exactly this store. Both
+            // sides then land on the repr-driven `__mir_array_(retain|release)`.
+            // The KIND_UNKNOWN test is what keeps the cell-slot box-back arm out:
+            // there `slotStoredType` answers the SLOT's cell type, not this.
+            if ($slotType->kind === Type::KIND_UNKNOWN
+                && $this->erasedArrayPropRead($value)) {
+                $slotType = Type::vec(Type::unknown());
+                $this->rcObjErasedProp[$name] = true;
+            }
             // A property read owns BY RETAIN, and the arm that boxes a concrete
             // value into a cell slot ({@see EmitLlvmLocals::emitStoreLocal}, the
             // merge box-back) returns BEFORE the alias retain the general store
@@ -859,7 +969,17 @@ final class InsertMemoryOps implements Pass
             // claiming ownership there is a release with no matching retain.
             $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
                 || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS);
-            if ($this->isOwnedObj($value) && !($ownedByRetain && $boxedSlot)) {
+            // `$b = $a` on an array the frame MUTATES is not an alias at all:
+            // php arrays are values, so {@see EmitLlvmLocals::emitStoreLocal}
+            // hands the slot a `__mir_array_copy` — a fresh, independent, rc=1
+            // buffer, adopted at the element flavor. That is an owned producer by
+            // any reading of the word, and this pass called it "notowned" and
+            // BLOCKED the destination name, so the copy leaked on every store.
+            // `InferCalls::genericReturnType` is the witness: `$args = $next;`
+            // inside its climb blocked `$args`, and with it the OTHER copy the
+            // same name takes from `$recv->typeArgs` — 830 279 live blocks.
+            $ownedCopy = !$boxedSlot && $this->copiedArrayAlias($sl);
+            if (($this->isOwnedObj($value) || $ownedCopy) && !($ownedByRetain && $boxedSlot)) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit
                 // release reads the slot, not the producer. Block: a leak, never a
@@ -898,7 +1018,8 @@ final class InsertMemoryOps implements Pass
                 if (!isset($this->rcObjType[$name])) {
                     $this->rcObjOrder[] = $name;
                     $this->rcObjType[$name] = $slotType;
-                } elseif ($this->refinesElement($this->rcObjType[$name], $slotType)) {
+                } elseif (!isset($this->rcObjErasedProp[$name])
+                        && $this->refinesElement($this->rcObjType[$name], $slotType)) {
                     // FIRST-WRITE-WINS was wrong for the element type. `$a = []`
                     // is `vec[unknown]`, so the release flavor froze as a plain
                     // `vec` — buffer only — while inference later refined the
@@ -927,8 +1048,17 @@ final class InsertMemoryOps implements Pass
             // buffer (no obj-style alias retain for vecs — they COW-copy
             // on mutation). Block the source so we never rc-release a
             // shared vec twice.
+            //
+            // …unless the emitter COPIED ({@see copiedArrayAlias}), which is the
+            // one case where the premise is false: `__mir_array_copy` gives the
+            // destination its own buffer, so there is no shared vec and nothing
+            // to release twice. Blocking the source there is a pure leak of a
+            // buffer this frame built — `$next = []; …; $args = $next;` never
+            // freed `$next`, which is why unblocking only the DESTINATION left
+            // `tools/prof/array_alias_copy.php climb` at 181 MB.
             if ($value->kind === Node::KIND_LOAD_LOCAL
-                && $value->type->kind === Type::KIND_ARRAY) {
+                && $value->type->kind === Type::KIND_ARRAY
+                && !$ownedCopy) {
                 $this->rcObjBlocked[$value->name] = true;
                 $this->noteBlock($value->name, "vecalias", $value->type);
             }
