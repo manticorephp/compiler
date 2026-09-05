@@ -3140,7 +3140,16 @@ final class EmitLlvm implements EmitVisitor
             // `unknown` here, so the CELL arm never fired. Only a STRING
             // operand comes back unchanged, and owning that would free the
             // source.
-            return $node->operand->type->kind !== Type::KIND_STRING;
+            if ($node->operand->type->kind === Type::KIND_STRING) {
+                // The pass-through arm INHERITS its operand's ownership.
+                // `(string)$borrow` is a borrow, but `(string)array_pop($t)`
+                // is the popped element itself and its owner is whoever
+                // consumes the cast — reading the arm as a flat borrow left
+                // that element unowned, which is the whole of `array_pop`'s
+                // and `array_shift`'s row in the ownership table.
+                return $this->isFreshStringTemp($node->operand);
+            }
+            return true;
         }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
@@ -3257,6 +3266,20 @@ final class EmitLlvm implements EmitVisitor
         // the caller's to drop, which is what lets the rebuilt argument array
         // be freed ({@see EmitLlvmBuiltins::biMinMax}).
         if ($fn === 'max' || $fn === 'min') { return true; }
+        // The CLASS C builtins ({@see EmitLlvmBuiltins::emitArrPtrArg}): the
+        // result IS an element or a key of the argument, and the emitter now
+        // retains it ({@see EmitLlvmBuiltins::cellEndpointRetain}) so the
+        // argument can be freed under it. That +1 is the caller's to give
+        // back. Naming them is the THIRD half of the one change — without it
+        // the retain is a leak, and it is safe when the dispatch falls
+        // through to a PHP body instead, which returns +1 by the return
+        // convention anyway.
+        foreach ([
+            'array_first', 'array_last', 'array_key_first', 'array_key_last',
+            'current', 'pos', 'key', 'reset', 'end', 'next', 'prev',
+        ] as $cn) {
+            if ($fn === $cn) { return true; }
+        }
         if ($this->lastCallWasBuiltin) { return false; }
         return isset($this->sigs->paramTypes[$fn])
             && !($this->sigs->returnsByRef[$fn] ?? false);

@@ -541,7 +541,12 @@ final class InsertMemoryOps implements Pass
             // other kind mints (int/float/erased-raw), retains the payload it
             // aliases (cell / erased-boxed), or reaches an IMMORTAL literal
             // where the release is a no-op.
-            return $value->operand->type->kind !== Type::KIND_STRING;
+            if ($value->operand->type->kind === Type::KIND_STRING) {
+                // The pass-through arm inherits its operand's ownership,
+                // {@see EmitLlvm::isFreshStringTemp}.
+                return $this->isOwnedObj($value->operand);
+            }
+            return true;
         }
         // A call transfers a +1 owned ref (the return convention) for
         // any flavor (incl. string builtins: substr / strtolower / …).
