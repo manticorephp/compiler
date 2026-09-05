@@ -341,6 +341,18 @@ final class InsertMemoryOps implements Pass
             $stmts[] = new MemoryOp_('arena_leave', '', null, Type::void());
         }
 
+        // The rc track, which is the one an ARRAY local actually rides.
+        // `ownedFlavor` below is the ARENA track, and reading only that said
+        // `stmts` was "blocked" when the real question is whether its rc
+        // release names the ELEMENT type — a `vec` release hands back the
+        // buffer and strands every element in it.
+        foreach ($this->rcObjOrder as $onm) {
+            $ot = $this->rcObjType[$onm] ?? null;
+            $this->ownTrace('RCOBJ ' . $onm
+                . ' type=' . ($ot === null ? '?' : $ot->toString())
+                . ' flavor=' . ($ot === null ? '?' : $this->rcSlotFlavor($ot))
+                . (isset($this->rcObjBlocked[$onm]) ? ' BLOCKED' : ' released'));
+        }
         foreach ($this->ownedFlavor as $onm => $ofl) {
             $this->ownTrace('OWNED ' . $onm . ' flavor=' . $ofl
                 . (isset($this->blocked[$onm]) ? ' (BLOCKED)' : ''));
