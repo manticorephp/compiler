@@ -3126,12 +3126,21 @@ final class EmitLlvm implements EmitVisitor
         // leaked one string per call. The same arm is asked by the ownership
         // pass ({@see Mir\Passes\InsertMemoryOps::isOwnedObj}) — the two sides
         // have to answer identically, or a temp is freed twice or never.
-        // A STRING operand returns the SAME pointer and a CELL / erased one
-        // returns the raw payload, both borrows: only int and float allocate.
+        // A STRING operand returns the SAME pointer — the one borrow.
         if ($k === Node::KIND_CAST) {
-            $ok = $node->operand->type->kind;
-            return $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
-                || $ok === Type::KIND_CELL;
+            // Every arm of the cast but ONE hands back a +1: int/float mint,
+            // a CELL retains the payload it aliases ({@see
+            // EmitLlvmExpr::cellStrResultOwnIr}), and the ERASED dispatch
+            // ({@see EmitLlvmExpr::coerceToStr}) is that same retain on its
+            // boxed arm, `__mir_int_to_str` on its raw arm and an IMMORTAL
+            // literal ("Array", "") on the rest — a release on rc < 0 is a
+            // no-op, so naming them all is sound and naming none of them
+            // stranded one buffer per `strlen((string)json_encode($v))`, where
+            // `strlen(json_encode($v))` was flat: `json_encode` types as
+            // `unknown` here, so the CELL arm never fired. Only a STRING
+            // operand comes back unchanged, and owning that would free the
+            // source.
+            return $node->operand->type->kind !== Type::KIND_STRING;
         }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
