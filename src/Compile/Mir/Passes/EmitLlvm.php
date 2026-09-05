@@ -3722,7 +3722,31 @@ final class EmitLlvm implements EmitVisitor
      * module (which cannot see the stores in the programs that link it, and
      * whose {@see $propBorrowUnknown} already says so).
      */
+    /**
+     * ⚠ Trace EVERY slot, not only the deepened ones. The `CLASSDROP … YES`
+     * line below used to print on the one path that upgrades a flavor, so a
+     * property whose verdict is the EMPTY flavor — the one that emits no
+     * release at all and leaks the array whole — was INVISIBLE, and read as
+     * "this slot was never considered" — an int or bool slot legitimately has
+     * none, an array slot with none leaks whole, and only the line tells them
+     * apart. `Parser\Ast\Program::statements` is
+     * exactly that slot: `Block::statements`, the same `Stmt[]` declaration one
+     * class over, prints `YES vecobjown`, and the pair only became a question
+     * once both verdicts were on screen.
+     */
     private function classDropFlavor(\Compile\Mir\ClassDef $cls, string $prop, Type $pt): string
+    {
+        $f = $this->classDropFlavorFor($cls, $prop, $pt);
+        if (\getenv('MANTICORE_DROP_TRACE') !== false) {
+            \error_log('CLASSSLOT ' . $cls->name . '::' . $prop
+                . ' => ' . ($f === '' ? '(none)' : $f)
+                . ' type=' . $pt->toString()
+                . ' arrayHinted=' . (($cls->propertyArrayHinted[$prop] ?? false) ? '1' : '0'));
+        }
+        return $f;
+    }
+
+    private function classDropFlavorFor(\Compile\Mir\ClassDef $cls, string $prop, Type $pt): string
     {
         $flavor = $this->discardReleaseFlavor($pt);
         if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
