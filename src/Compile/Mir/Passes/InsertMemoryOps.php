@@ -715,11 +715,17 @@ final class InsertMemoryOps implements Pass
             // free of a tag. Shallower slots are unaffected — `arr` compares
             // equal to `arr` exactly as before.
             $el = $t->element;
-            if ($el !== null && $el->kind === Type::KIND_ARRAY) {
-                $inner = $el->element;
-                return 'arr:' . ($inner === null ? '?' : (string)$inner->kind);
+            if ($el === null || $el->kind !== Type::KIND_ARRAY) { return 'arr'; }
+            // Walk the WHOLE nesting chain: the helper is picked per level
+            // ({@see \Compile\Mir\Passes\EmitLlvmMemory::nestedArrFlavor}),
+            // so a disagreement at ANY level picks a different one.
+            $name = 'arr';
+            $cur = $el;
+            while ($cur !== null && $cur->kind === Type::KIND_ARRAY) {
+                $name = $name . ':arr';
+                $cur = $cur->element;
             }
-            return 'arr';
+            return $name . ':' . ($cur === null ? '?' : (string)$cur->kind);
         }
         if ($k === Type::KIND_OBJ) { return 'obj'; }
         return '';

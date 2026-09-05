@@ -508,6 +508,17 @@ trait EmitLlvmMemory
         if ($inner === 'vecbuf' || $inner === 'assocbuf') { return $prefix . 'arrbuf'; }
         if ($inner === 'vecobj' || $inner === 'assocobj'
             || $inner === 'vecobjown' || $inner === 'assocobjown') { return $prefix . 'arrobj'; }
+        // A nested array OF arrays: ask the same question one level down,
+        // so `vec[vec[vec[string]]]` is `vecarrarrstr`. Three levels are
+        // emitted ({@see \Compile\Runtime\UnifiedArrayRuntime::
+        // nestedFlavors}); deeper falls back to the repr walk.
+        if ($inner === 'vec' || $inner === 'assoc') {
+            $deeper = $el->element;
+            if ($deeper !== null && $deeper->kind === Type::KIND_ARRAY) {
+                $sub = $this->nestedArrFlavor($deeper, '');
+                if ($sub !== 'arr') { return $prefix . 'arr' . $sub; }
+            }
+        }
         return $prefix . 'arr';
     }
 

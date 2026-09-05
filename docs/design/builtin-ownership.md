@@ -249,12 +249,17 @@ Two gates had to move with it, and each was a crash first:
     packleak local                    50/99  → 1/1
     packleak copy                     75/148 → 1/1
 
-⛔ What is left in this area: **`packleak nested`, 84/167** — depth three
-(`vec[vec[vec[string]]]`) falls back to `arr` and the repr walk, because the
-inner flavor of a nested-array element is itself `vec`. One more level of the
-same trick would close it, or the `ARRAY_REPR_*`-at-the-producer design, which
-still carries the `uasort` hazard: it writes a sorted buffer back WITHOUT
-retaining, so a stamped source frees elements the result still points at.
+Depth THREE followed: `nestedArrFlavor` asks itself one level down, so
+`vec[vec[vec[string]]]` is `vecarrarrstr`, `emitDropValue` reads `arr<rest>` as
+"release each element as `<rest>`" at any depth, and
+`UnifiedArrayRuntime::nestedFlavors()` emits three levels from one loop —
+`PruneIr` drops the ones nobody reaches, so the binary grew 112 bytes.
+`InsertMemoryOps::rcSlotFlavor` walks the WHOLE chain for the same reason it
+named one level. `packleak nested` 84/167 → **1/1**.
+
+⛔ What is left in this area is the borrowed pack element (`packleak alias`,
+38/75) — section 3, the half that is bisected and not explained. Deeper than
+three levels falls back to the repr walk: a leak, never a wrong free.
 ### How to test it — the part that is not optional
 
 **A green suite on the generation that EMITS a change proves nothing.** Both
