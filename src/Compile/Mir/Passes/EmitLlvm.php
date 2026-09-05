@@ -3566,6 +3566,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
+        if ($flavor === 'vecarr' || $flavor === 'assocarr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_arr' : '@__mir_array_release_arr'; }
         if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         // PAIRWISE-SYMMETRIC: this slot took the element refs in its own store's
@@ -3575,6 +3576,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobjown' || $flavor === 'assocobjown') { return '@__mir_array_release_ownel_obj'; }
         if ($flavor === 'vecstrown' || $flavor === 'assocstrown') { return '@__mir_array_release_ownel_str'; }
         if ($flavor === 'veccellown' || $flavor === 'assoccellown') { return '@__mir_array_release_ownel_cell'; }
+        if ($flavor === 'vecarrown' || $flavor === 'assocarrown') { return '@__mir_array_release_ownel_arr'; }
         return '';
     }
 

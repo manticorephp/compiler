@@ -605,6 +605,16 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
+            // A NESTED array element — the member the flavor family was
+            // missing, so this fell through to the plain repr walk and
+            // `$a = [f(), g()]` freed the outer buffer and stranded both inner
+            // arrays. ONLY here, on a LOCAL SLOT drop: this path already knows
+            // the slot is not `$shared` (not handed to a callee by value), and
+            // it is the one place the claim is the buffer's sole owner's.
+            // `discardReleaseFlavor` answers for PROPERTIES, call arguments and
+            // the erased repr path too, where the same claim over-releases —
+            // 20 array_ cases and a gen-3 abort.
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return 'vecarr'; }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
             return 'vec';
         }
@@ -614,6 +624,7 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return 'assocarr'; }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
         }
@@ -742,6 +753,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
+        elseif ($flavor === 'vecarr' || $flavor === 'assocarr') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_arr'; }
         // The `own` suffix is a RELEASE-side distinction — retain already co-owns
         // the elements on every call, which is the asymmetry the suffix repairs.
         // Mapped rather than left to the default, so an `own` flavor arriving
@@ -749,6 +761,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobjown' || $flavor === 'assocobjown') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstrown' || $flavor === 'assocstrown') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccellown' || $flavor === 'assoccellown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
+        elseif ($flavor === 'vecarrown' || $flavor === 'assocarrown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_arr'; }
         $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
@@ -780,7 +793,19 @@ trait EmitLlvmMemory
             $at = $fallback;
         }
         $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
-        return $flavor === '' ? 'vec' : $flavor;
+        if ($flavor === '') { $flavor = 'vec'; }
+        // A NESTED array element, the same claim {@see rcReleaseFlavorPlain}
+        // makes on the release side — and it has to be made HERE too, or the
+        // two halves of one decision disagree: the release walked the elements
+        // while the entry retain took the buffer alone, and `array_merge_
+        // recursive` handed back an entry whose key had been freed. Kept out of
+        // `discardReleaseFlavor` on purpose — that one also answers for
+        // PROPERTIES and the erased repr path, where the claim over-releases.
+        if (($flavor === 'vec' || $flavor === 'assoc') && $at !== null
+            && $at->element !== null && $at->element->kind === Type::KIND_ARRAY) {
+            $flavor = $flavor . 'arr';
+        }
+        return $flavor;
     }
 
     /**
@@ -795,6 +820,7 @@ trait EmitLlvmMemory
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
+        elseif ($flavor === 'vecarr' || $flavor === 'assocarr') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_arr'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
         else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
         $p = $this->ssa->allocReg();
@@ -838,12 +864,14 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
+        elseif ($flavor === 'vecarr' || $flavor === 'assocarr') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_arr' : '@__mir_array_release_arr'; }
         // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
         // retain, so its release gives them back — every time, not only at
         // rc → 0 ({@see collectOwnElemLocals}).
         elseif ($flavor === 'vecobjown' || $flavor === 'assocobjown') { $this->rt->needsRc = true; $fn = '@__mir_array_release_ownel_obj'; }
         elseif ($flavor === 'vecstrown' || $flavor === 'assocstrown') { $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_str'; }
         elseif ($flavor === 'veccellown' || $flavor === 'assoccellown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_cell'; }
+        elseif ($flavor === 'vecarrown' || $flavor === 'assocarrown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_arr'; }
         $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";

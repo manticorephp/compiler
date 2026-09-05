@@ -27,15 +27,20 @@
  *           ARRAY_REPR_* ownership stamp on the producer instead.
  *   nested  ⛔OPEN. The same local shape one level deeper, to show the leak is
  *           per NESTING LEVEL and not a one-off.
+ *   copy    ⛔OPEN, and NOT this family: `$q = $r` on a vec-of-arrays COPIES the
+ *           buffer, and the copy does not co-own what it now points at
+ *           ([[array-copy-ownership-2026-09-05]]). Unmoved by `vecarr` — 69 MB
+ *           per 200k before and after — so it is here to keep the two apart.
  *
  * The working set is constant in every mode — each result is consumed to an int
  * and dropped — so RSS that tracks the iteration count IS the leak. At
  * `e172005`, 200k / 400k iterations:
  *
  *   owned    1 MB /   1 MB   flat
- *   alias   38 MB /  75 MB   LEAK
- *   local   84 MB / 167 MB   LEAK
- *   nested 115 MB / 229 MB   LEAK
+ *   alias   38 MB /  75 MB   LEAK   the borrowed pack element
+ *   local   50 MB /  99 MB   LEAK   was 84/167 before `vecarr`
+ *   nested  84 MB / 167 MB   LEAK   was 115/229
+ *   copy   143 MB / 284 MB   LEAK   a different root, see below
  *
  * ⚠ Every leaking mode needs a FRESH array each iteration. A loop-invariant
  * alias leaks a REFCOUNT and not memory — the same strings climb to rc=2n and
@@ -72,6 +77,10 @@ function pl_run(string $mode, int $iters): int
         } elseif ($mode === 'nested') {
             $x = [[pl_pieces($i)], [['solo' . $i]]];
             $sum += count($x) + count($x[0]);
+        } elseif ($mode === 'copy') {
+            $xc = [pl_pieces($i), pl_pieces($i + 1)];
+            $q = $xc;
+            $sum += count($xc) + count($q[1]);
         } else {
             $sum += 1;
         }
