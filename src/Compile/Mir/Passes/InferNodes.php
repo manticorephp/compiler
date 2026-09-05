@@ -1479,6 +1479,15 @@ trait InferNodes
             && \Compile\Mir\CondOwn::isEmptyArrayLit($node->then)) { $node->type = $e; }
         elseif ($t->isArray() && $e->isArray()
             && \Compile\Mir\CondOwn::isEmptyArrayLit($node->else_)) { $node->type = $t; }
+        // Two arrays that disagree on KEYED-ness: the then-arm cannot answer
+        // for both. A vec's absent key is INT keys, so `$c ? ["x" => "1"] :
+        // ["2"]` typed the int arm's key as a string and its foreach printed
+        // `=2` for key 0. Join them — {@see Type::unionWith} lifts the channel
+        // to a self-describing CELL key. Only this shape: taking the then-arm
+        // is right for two arrays that agree, and joining their ELEMENTS as
+        // well would erase a `vec[int]` / `vec[string]` pair to unknown.
+        elseif ($t->isArray() && $e->isArray()
+            && ($t->key !== null) !== ($e->key !== null)) { $node->type = $t->unionWith($e); }
         elseif ($t->kind === $e->kind)        { $node->type = $t; }
         elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
             && $e->kind === Type::KIND_UNKNOWN) {

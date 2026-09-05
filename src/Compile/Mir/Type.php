@@ -631,15 +631,44 @@ final class Type
         // Arrays join element- AND key-wise so a control-flow merge keeps a
         // refined shape (`vec[unknown]` ∪ `vec[string]` → `vec[string]`; a
         // loop body that appends a typed value must not reset to
-        // `vec[unknown]` on the back-edge). A null key (vec) joined with a
-        // string key (assoc) lifts to the string key.
+        // `vec[unknown]` on the back-edge).
+        //
+        // KEYS: a vec's null key is not "no keys", it is INT keys, so a
+        // concrete vec joined with a string-keyed assoc is an array that can
+        // hand out EITHER — a CELL key, the one channel that carries its own
+        // tag (`__mir_array_key_cell_at` classifies packed vs hashed at
+        // runtime). Lifting it to the string key instead typed the int arm's
+        // key as a string and `$c ? ["x" => "1"] : ["2"]` printed `=2` for
+        // key 0. An UNREFINED `[]` still defers — it has no keys at all, which
+        // is what lets `if (!$xs) return []; return ["k" => …];` stay an assoc.
         if ($this->kind === self::KIND_ARRAY) {
-            $key = ($this->key === null && $other->key === null)
-                ? null
-                : $this->joinElement($this->key, $other->key);
+            $key = self::joinArrayKey($this, $other);
             return self::arrayOf($this->joinElement($this->element, $other->element), $key, null);
         }
         return $this;
+    }
+
+    /**
+     * Join the KEY channels of two array types.
+     *
+     * A null key means int keys (a vec) — except on an UNREFINED array
+     * (`[]`, element null/unknown), which has no keys to speak of and
+     * defers to the other side. Two disagreeing concrete channels (int vs
+     * string) are a CELL: it is the only key repr that is self-describing.
+     */
+    private static function joinArrayKey(Type $a, Type $b): ?Type
+    {
+        if ($a->key === null && $b->key === null) { return null; }
+        if ($a->key !== null && $b->key !== null) {
+            return $a->joinElement($a->key, $b->key);
+        }
+        $keyed = $a->key !== null ? $a : $b;
+        $vec = $a->key !== null ? $b : $a;
+        $unrefined = $vec->element === null || $vec->element->kind === self::KIND_UNKNOWN;
+        if ($unrefined) { return $keyed->key; }
+        $kk = $keyed->key->kind;
+        if ($kk === self::KIND_INT || $kk === self::KIND_UNKNOWN) { return $keyed->key; }
+        return self::cell();
     }
 
     /** Join two optional element/key types; `unknown`/null defers to the other. */
