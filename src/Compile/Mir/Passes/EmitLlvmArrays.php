@@ -339,19 +339,6 @@ trait EmitLlvmArrays
         $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
         $val = $this->lastValue;
         if (!$cellVals) { $out .= $this->rcRetainByType($value, $val, null, 2); }
-        // An ARRAY element the literal now owns and its own release will
-        // never drop ({@see EmitLlvmBuiltins::$litElemDropRegs}). Only while
-        // an ARGUMENT literal is being emitted, and only for a raw element:
-        // a cell element is dropped by the veccell release.
-        if ($this->litElemCollect && !$cellVals
-            && $value->type->kind === Type::KIND_ARRAY
-            && \str_starts_with($val, '%')) {
-            $ef = $this->discardReleaseFlavor($value->type);
-            if ($ef !== '') {
-                $this->litElemDropRegs[] = $val;
-                $this->litElemDropFlavors[] = $ef;
-            }
-        }
         $this->elemValReg = $val;
         return $out;
     }
