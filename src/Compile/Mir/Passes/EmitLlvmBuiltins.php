@@ -21,7 +21,103 @@ trait EmitLlvmBuiltins
      * inference ({@see InferTypes::builtinReturnType}) + this emitter
      * special-case them. Semantics track Zend where cheap.
      */
+    /** Pending fresh array-temp POINTER regs, innermost builtin last.
+     *  ⚠ TWO parallel string arrays, never one array of pairs: a nested array
+     *  element comes back ERASED, and concatenating that cell renders its raw
+     *  word — `ptrtoint ptr 44565160096`, which is not even valid IR. The same
+     *  reason `$rcArgRegs` / `$rcArgFlavs` are parallel in emitCall.
+     *  @var string[] */
+    private array $arrArgTempRegs = [];
+
+    /** Release flavor per {@see $arrArgTempRegs} entry. @var string[] */
+    private array $arrArgTempFlavors = [];
+
     private function emitBuiltin(Call $c): ?string
+    {
+        $mark = \count($this->arrArgTempRegs);
+        $ir = $this->emitBuiltinDispatch($c);
+        if ($ir === null) { $this->dropArrArgTempsFrom($mark); return null; }
+        return $ir . $this->freeArrArgTempsFrom($mark);
+    }
+
+    /**
+     * A builtin's ARRAY operand, left in lastValue as a raw pointer — and
+     * REGISTERED when it is a fresh, owned temp, so {@see emitBuiltin} frees it
+     * once the builtin has read it.
+     *
+     * ── The nature of the problem ──
+     * A user call has both halves of the ownership contract: `emitCall`
+     * releases a fresh rc arg temp after the call ({@see
+     * EmitLlvm::freshRcArgFlavor}) and the callee retains what it keeps
+     * ({@see EmitLlvmMemory::initRcObjSlots}). A CODEGEN BUILTIN has neither.
+     * It reads the buffer inline and returns, so `count(explode($d, $s))`
+     * stranded the exploded vec on every call — and the ones that looked fine
+     * (`implode`, `in_array`) were only saved by a cellify rebuild whose
+     * `cellifySourceFlavor` frees the source as a side effect.
+     *
+     * Freeing it is NOT unconditionally sound, which is why this is opt-in per
+     * emitter rather than a blanket release at the dispatcher:
+     *
+     *   A. the result cannot reference the argument at all — a scalar, or a
+     *      string built byte by byte. `count`, `in_array`, `implode`. SAFE.
+     *   B. the result is a fresh ARRAY built by copying element WORDS with no
+     *      retain (`__mir_array_append` of a raw `value_at`) — so it BORROWS
+     *      the source's elements. `array_values`, `array_keys`,
+     *      `array_reverse`, `array_slice`. Safe only once the copy CO-OWNS,
+     *      which is the retain those emitters now take: retain and release are
+     *      one change, never one without the other.
+     *   C. the result IS an element or a key of the argument. `max`, `min`,
+     *      `current`, `key`, `reset`, `end`, `array_pop`, `array_search`,
+     *      `array_key_first`. Safe only once the builtin retains what it hands
+     *      back AND {@see EmitLlvm::isFreshCellTemp} names it, so a consumer
+     *      gives that reference back.
+     *
+     * Anything not converted keeps the old behaviour — a leak, never a UAF.
+     */
+    private function emitArrPtrArg(Node $a): string
+    {
+        $out = $this->emitNode($a);
+        if ($a->type->kind === Type::KIND_CELL) {
+            $out .= $this->cellToPtr();
+        } else {
+            $out .= $this->coerceToPtr();
+        }
+        $f = $this->freshRcArgFlavor($a);
+        // Only an SSA REGISTER can be released: a const-folded array literal is
+        // emitted as a global address LITERAL, and `ptrtoint ptr 53270227616`
+        // is not even valid IR.
+        if ($f !== '' && \str_starts_with($this->lastValue, '%')) {
+            $this->arrArgTempRegs[] = $this->lastValue;
+            $this->arrArgTempFlavors[] = $f;
+        }
+        return $out;
+    }
+
+    /** Release every array temp registered above `$mark`, innermost call first. */
+    private function freeArrArgTempsFrom(int $mark): string
+    {
+        $out = '';
+        while (\count($this->arrArgTempRegs) > $mark) {
+            $reg = (string)\array_pop($this->arrArgTempRegs);
+            $flavor = (string)\array_pop($this->arrArgTempFlavors);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = ptrtoint ptr ' . $reg . " to i64\n";
+            $out .= $this->rcReleaseReg($r, $flavor);
+        }
+        return $out;
+    }
+
+    /** Forget every array temp registered above `$mark` without freeing it —
+     *  the dispatch answered "not a builtin" and its IR was thrown away. */
+    private function dropArrArgTempsFrom(int $mark): void
+    {
+        while (\count($this->arrArgTempRegs) > $mark) {
+            \array_pop($this->arrArgTempRegs);
+            \array_pop($this->arrArgTempFlavors);
+        }
+    }
+
+    private function emitBuiltinDispatch(Call $c): ?string
     {
         $name = \strtolower($c->function);
         if ($name === "runtime\\libc\\strlen") {
@@ -1956,10 +2052,9 @@ trait EmitLlvmBuiltins
         // that needs no further proof. `count(explode($d, $s))` leaked the
         // whole exploded vec on every call, 3.2 KB a call.
         $af = $this->freshRcArgFlavor($args[0]);
-        if ($af !== '') {
-            $ai = $this->ssa->allocReg();
-            $out .= '  ' . $ai . ' = ptrtoint ptr ' . $arrPtr . " to i64\n";
-            $out .= $this->rcReleaseReg($ai, $af);
+        if ($af !== '' && \str_starts_with($arrPtr, '%')) {
+            $this->arrArgTempRegs[] = $arrPtr;
+            $this->arrArgTempFlavors[] = $af;
         }
         return $this->finishI64($out, $cnt);
     }
@@ -2497,12 +2592,7 @@ trait EmitLlvmBuiltins
     private function biArrayKeys(array $args): string
     {
         $this->rt->needsTagged = true;
-        $out = $this->emitNode($args[0]);
-        if ($args[0]->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } else {
-            $out .= $this->coerceToPtr();
-        }
+        $out = $this->emitArrPtrArg($args[0]);
         // An empty `[]` literal lowers to a null ptr; redirect to the
         // zero-word so the length load reads 0 (mirrors biCount).
         $rawSrc = $this->lastValue;
@@ -2536,6 +2626,13 @@ trait EmitLlvmBuiltins
         $out .= $body . ":\n";
         $kb = $this->ssa->allocReg();
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+        // The copy takes element WORDS out of the source, so it must CO-OWN
+        // them — the pair of the source release {@see emitArrPtrArg} registers.
+        // Unconditional: when the source is a live local rather than a temp, the
+        // result array gives this reference back at its own rc -> 0.
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_retain(i64 ' . $kb . ")\n";
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
@@ -2581,12 +2678,7 @@ trait EmitLlvmBuiltins
     private function biArrayValues(array $args, ?Type $boxElem): string
     {
         $this->rt->needsTagged = true;
-        $out = $this->emitNode($args[0]);
-        if ($args[0]->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } else {
-            $out .= $this->coerceToPtr();
-        }
+        $out = $this->emitArrPtrArg($args[0]);
         // An empty `[]` literal lowers to a null ptr; redirect to the
         // zero-word so the length load reads 0 (mirrors biArrayKeys).
         $rawSrc = $this->lastValue;
@@ -2648,6 +2740,13 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $bv . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
             }
         }
+        // The copy takes element WORDS out of the source, so it must CO-OWN
+        // them — the pair of the source release {@see emitArrPtrArg} registers.
+        // Unconditional: when the source is a live local rather than a temp, the
+        // result array gives this reference back at its own rc -> 0.
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_retain(i64 ' . $bv . ")\n";
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
@@ -3432,11 +3531,19 @@ trait EmitLlvmBuiltins
                     'declare i64 @manticore___mc_minmax_of(i64, i64)';
             }
             $out = $this->emitNode($args[0]);
-            $out .= $this->boxToCell($args[0]->type);
+            // `$args[0]` so a concrete-element source is FREED by the rebuild
+            // ({@see EmitLlvm::cellifySourceFlavor}) — `max(explode($d, $s))`
+            // stranded the exploded vec on every call.
+            $out .= $this->boxToCell($args[0]->type, $args[0]);
             $arr = $this->lastValue;
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax_of(i64 ' . $arr
                   . ', i64 ' . ($pred === 'sgt' ? '1' : '0') . ")\n";
+            // …and the REBUILT cell array is the caller's. Safe against the
+            // element it just handed back: `__mc_minmax_of` is a PHP body, so
+            // the +1 return convention already retained the winner
+            // ({@see EmitLlvmModule::emitReturn}, the borrowed-cell arm).
+            $out .= $this->cellBoxTempDrop($args[0]->type, $arr, $args[0]);
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;

@@ -1,0 +1,23 @@
+4
+alpha|bravo|charlie|delta
+0/1/2/3
+delta,charlie,bravo,alpha
+bravo,charlie
+delta alpha
+4
+alpha|bravo|charlie|delta
+0/1/2/3
+delta,charlie,bravo,alpha
+bravo,charlie
+delta alpha
+4
+alpha|bravo|charlie|delta
+0/1/2/3
+delta,charlie,bravo,alpha
+bravo,charlie
+delta alpha
+k1,k2,k3 vv1,vv2,vv3
+vv3 vv1
+k1=vv1 k2=vv2 k3=vv3 
+3
+alphadelta deltaalpha

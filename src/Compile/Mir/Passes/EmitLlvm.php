@@ -3243,6 +3243,11 @@ final class EmitLlvm implements EmitVisitor
         // whichever path ran — the native builtin (flags 0) and the stdlib body
         // alike — so the name answers for both.
         if ($fn === 'json_encode' || $fn === 'json_decode') { return true; }
+        // `max`/`min` over ONE array delegate to the stdlib fold, and a PHP
+        // body's cell return is +1 by the return convention — so the winner is
+        // the caller's to drop, which is what lets the rebuilt argument array
+        // be freed ({@see EmitLlvmBuiltins::biMinMax}).
+        if ($fn === 'max' || $fn === 'min') { return true; }
         if ($this->lastCallWasBuiltin) { return false; }
         return isset($this->sigs->paramTypes[$fn])
             && !($this->sigs->returnsByRef[$fn] ?? false);
@@ -3619,6 +3624,35 @@ final class EmitLlvm implements EmitVisitor
         return $flavor . 'own';
     }
 
+    /**
+     * A builtin whose ARRAY result is a fresh allocation the caller owns
+     * outright — every element minted or copied WITH a reference.
+     *
+     * A NAME list, like {@see callKeepsNoArg}: a builtin has no body for
+     * `sigs->paramTypes` to answer for, and the conservative default (not
+     * owned) is a LEAK of the whole array at every consumer. Anything absent
+     * keeps that leak, which is the safe direction — the wrong direction here
+     * frees an array a later reader still holds.
+     *
+     * `explode` / `str_split` / `preg_split` give every piece its own
+     * `__mir_str_alloc`; `range` / `array_fill` mint scalars; `array_keys` and
+     * `array_values` co-own each element they copy ({@see
+     * EmitLlvmBuiltins::emitArrPtrArg}, class B). A builtin that hands back a
+     * BORROWED array — or one of its elements — must never be listed.
+     */
+    private function builtinMintsOwnedArray(string $fn): bool
+    {
+        $p = \strrpos($fn, chr(92));
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        foreach ([
+            'explode', 'str_split', 'preg_split', 'array_keys', 'array_values',
+            'range', 'array_fill', 'str_getcsv',
+        ] as $n) {
+            if ($n === $bare) { return true; }
+        }
+        return false;
+    }
+
     private function freshRcArgFlavor(Node $a): string
     {
         // A normalized conditional is +1 from every arm, so a borrowed-arg temp
@@ -3648,6 +3682,11 @@ final class EmitLlvm implements EmitVisitor
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
             $owned = isset($this->sigs->paramTypes[$fn]) && !($this->sigs->returnsByRef[$fn] ?? false);
+            // …or a BUILTIN that mints a fresh array. paramTypes is evidence a
+            // user BODY was called, and a codegen builtin has no body — so
+            // `array_slice(explode($d, $s), 0, 2)` stranded the exploded vec:
+            // the arg was owned by nobody and the release was never emitted.
+            if (!$owned) { $owned = $this->builtinMintsOwnedArray($fn); }
         }
         if (!$owned) { return ''; }
         return $this->discardReleaseFlavor($a->type);
