@@ -91,6 +91,11 @@ final class InsertMemoryOps implements Pass
      *  about this has no single correct release flavor and is blocked. */
     private array $rcObjSlotBoxed = [];
 
+    /** @var array<string, bool> owned array names EVERY owned store of which is
+     *  a `__mir_array_copy` — so the name's buffer is this frame's own and
+     *  releasing it cannot free anything another owner still holds. */
+    private array $rcObjCopyOnly = [];
+
     /** @var array<string, bool> array locals this function ELEMENT-STORES into.
      *  A strict SUBSET of the emitter's `mutatedVecLocals` ({@see
      *  EmitLlvmMemory}, which also counts unset / by-ref / mutating builtins),
@@ -148,6 +153,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
         $this->rcObjErasedProp = [];
+        $this->rcObjCopyOnly = [];
         $this->blockReason = [];
         $this->blockKind = [];
         // Per-name, whole-function: a loop variable co-owns only if EVERY foreach
@@ -261,6 +267,17 @@ final class InsertMemoryOps implements Pass
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
             if ($t !== null && $t->kind === Type::KIND_OBJ) { continue; }
+            // …and an ARRAY every owned store of which is a COPY. The SIGBUS this
+            // block was written for is a SHARED buffer (`$conds = null; … $conds
+            // = [];`, whose buffer a live MatchArm_ still held); a copy is the
+            // one array shape with no sharing at all — `__mir_array_copy` gives
+            // the local its own rc=1 buffer, adopted at the element flavor. So
+            // the release has nothing to over-release, and without it the copy is
+            // simply lost: `$args = null; … $args = $mc->args;` in
+            // `InferScans::collectDocListKeyArgs` made FOUR copies per call
+            // against two releases, 374 843 live blocks at the peak.
+            if ($t !== null && $t->kind === Type::KIND_ARRAY
+                && ($this->rcObjCopyOnly[$name] ?? false)) { continue; }
             $this->rcObjBlocked[$name] = true;
             $this->noteBlock($name, "neutral", $t);
         }
@@ -720,6 +737,20 @@ final class InsertMemoryOps implements Pass
     }
 
     /**
+     * Does the emitter answer this store with `__mir_array_copy`? The two sites
+     * that do ({@see EmitLlvmLocals::emitStoreLocal}): a mutated local-to-local
+     * array alias, and a VEC read of an instance or static property. Both hand
+     * the destination a fresh rc=1 buffer adopted at the element flavor.
+     */
+    private function storeMakesArrayCopy(StoreLocal $sl): bool
+    {
+        if ($this->copiedArrayAlias($sl)) { return true; }
+        $v = $sl->value;
+        return ($v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP)
+            && $v->type->isVec();
+    }
+
+    /**
      * `$b = $a` where the emitter is CERTAIN to copy: an array-typed local read
      * whose source or destination this function element-stores into.
      *
@@ -1036,6 +1067,10 @@ final class InsertMemoryOps implements Pass
                     $this->rcObjType[$name] = $slotType;
                 }
                 if (!CondOwn::isConditional($value)) { $this->rcObjPlainOwner[$name] = true; }
+                // Track whether EVERY owned store to this name hands it a COPY.
+                $isCopy = $ownedCopy || $this->storeMakesArrayCopy($sl);
+                if (!isset($this->rcObjCopyOnly[$name])) { $this->rcObjCopyOnly[$name] = $isCopy; }
+                elseif (!$isCopy) { $this->rcObjCopyOnly[$name] = false; }
             } elseif ($this->isRcNeutralStore($value)) {
                 // Decided after the walk — a neutral store only survives when
                 // EVERY owned store to the name is a conditional.
