@@ -181,7 +181,7 @@ one of them.
 - a plain `vec` / `assoc` flavor is the runtime REPR walk, decided by bits a
   literal never stamps — not the reference's answer either, so it degrades to
   buffer-only with them.
-### The other half of the hole — the LOCAL, half closed by `5ed7347`
+### The other half of the hole — the LOCAL, CLOSED
 
 `$x = [explode(",", $s), ["z"]]` in a LOCAL leaked the same way and was not
 covered by the list above: `$litElemCollect` is only set while a call ARGUMENT
@@ -220,23 +220,41 @@ nested_array_local.php` 42.6/83.2 LEAK → 2.0/2.0 ok). What is LEFT:
   way `AliasOwn` is one for obj/string. 69/137 → 1/1; `packleak copy`
   143/284 → 75/148, the rest being the same nested strings.
 
-⛔ **The nested STRINGS are what is left, and they need a design step.** `'arr'`
-drops each element with the repr-driven `__mir_array_release`, which goes only
-as deep as the element's OWN bits describe it — and its producer stamps none.
-Two ways out, neither free:
+✅ **The nested STRINGS are closed too** (`a55ac0d`), by the second road: the
+OUTER flavor carries the INNER one. `vec[vec[string]]` is `vecarrstr`, whose
+walk releases each element as a `vecstr`; `arrobj` / `arrcell` / `arrbuf`
+follow, and plain `arr` stays the answer for an inner the type does not know.
+`EmitLlvmMemory::nestedArrFlavor` picks it, `EmitLlvm::arrFlavorSuffix` is the
+one decoder that release / retain / adopt and the class-drop table all read, and
+the runtime gains 16 symbols from two four-name loops. The inner RETAIN is a
+plain BUFFER retain — the element's own elements are its own, given back once at
+its rc → 0.
 
-1. Stamp `ARRAY_REPR_*` on the element where the literal adopts it. ⚠ This
-   contradicts a documented invariant: `EmitLlvmArrays::erasedReprCode` stamps
-   ONLY the erased path, on the ground that a concrete element uses
-   vecstr/vecobj/veccell and must not be stamped. And the standing hazard is
-   still there — `uasort` writes a sorted buffer back WITHOUT retaining, so a
-   stamped source frees elements the result still points at.
-2. Carry the INNER flavor in the outer one: `vecarrstr` / `vecarrobj` /
-   `vecarrcell` / `vecarrbuf`, either as separate symbols (16 across release /
-   ownel / retain / adopt) or as one helper taking the inner code as an
-   ARGUMENT — which `dropHelperFor`'s symbol-only interface does not admit
-   today. Fully static, no runtime bits, and no shared-buffer hazard beyond the
-   one `vecstr` already carries. This is the better one.
+Two gates had to move with it, and each was a crash first:
+
+- ⚠ `EmitLlvm::shareCallArgs` knew only obj and string, so a `vec[vec[string]]`
+  handed to a callee was never marked element-shared and both sides dropped the
+  inner strings.
+- ⚠ `InsertMemoryOps::rcSlotFlavor` answered `arr` for every array, so two
+  stores that disagree about the INNER element picked different helpers for one
+  slot and first-write-wins handed the loser's buffer to the winner's walk:
+  `$g = [row($i), ['s']]` then `$g = [[$i], [$i+1]]` released a vec of INTS
+  through `__mir_array_release_ownel_arrstr`, reading each int as a string
+  pointer. It now names the inner kind so the existing flavor gate blocks the
+  disagreement — a leak, never a free of a tag. `nested_array_element_drop` is
+  the case that caught it.
+
+    nested string arrays in a local  112/222 → 1/1
+    one nested string array           57/112 → 1/1
+    packleak local                    50/99  → 1/1
+    packleak copy                     75/148 → 1/1
+
+⛔ What is left in this area: **`packleak nested`, 84/167** — depth three
+(`vec[vec[vec[string]]]`) falls back to `arr` and the repr walk, because the
+inner flavor of a nested-array element is itself `vec`. One more level of the
+same trick would close it, or the `ARRAY_REPR_*`-at-the-producer design, which
+still carries the `uasort` hazard: it writes a sorted buffer back WITHOUT
+retaining, so a stamped source frees elements the result still points at.
 ### How to test it — the part that is not optional
 
 **A green suite on the generation that EMITS a change proves nothing.** Both
