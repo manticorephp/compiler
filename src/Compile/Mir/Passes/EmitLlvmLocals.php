@@ -707,23 +707,10 @@ trait EmitLlvmLocals
         // retaining every local assoc alias added a spurious assoc_retain in
         // hot ctors (ClassDef) that, on a value whose buffer abuts a live heap
         // string, wrote rc into the string (the enum backing "int"→"jnt").
-        // …through a PASS-THROUGH cast as well: `(string)$s` on a string
-        // operand hands back the SAME pointer ({@see EmitLlvmExpr::emitCast}),
-        // so it is the same alias and needs the same co-owner. The ownership
-        // pass peels it for free — its cast arm delegates to the operand
-        // ({@see InsertMemoryOps::isOwnedObj}) — so reading only the bare
-        // LoadLocal here left `$t = (string)$tok;` claimed as owned with no
-        // retain behind it, and the release-before-overwrite then freed a
-        // buffer an alias still held: __mc_hosts_lookup_in answered '' for
-        // every host after the first.
-        $av = $v;
-        while ($av->kind === Node::KIND_CAST
-            && $av->type->kind === Type::KIND_STRING
-            && $av->operand->type->kind === Type::KIND_STRING) {
-            $av = $av->operand;
-        }
-        $aliasObjStr = $av->kind === Node::KIND_LOAD_LOCAL
-            && ($av->type->kind === Type::KIND_OBJ || $av->type->kind === Type::KIND_STRING);
+        // …and the RETAIN half of {@see \Compile\Mir\AliasOwn}: the release
+        // half is {@see InsertMemoryOps::isOwnedObj}, and the two must read
+        // the SAME predicate or the value is freed twice or never.
+        $aliasObjStr = \Compile\Mir\AliasOwn::coOwns($v);
         // `$saved = $this->map` — a snapshot of an array PROPERTY. Co-own it
         // (rc>1) so a later mutation of the property copy-on-writes instead of
         // clobbering the snapshot's shared buffer (the InferTypes localTypes
