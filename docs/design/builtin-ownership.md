@@ -1,8 +1,8 @@
 # Handoff — the ownership contract for builtins, and what is left of it
 
-**State**: merged into local `main` `f1baf57` (13 commits). The ownership table
-is down to **3 leaks**, all of them one root — section 3, which is written for
-someone picking it up cold and includes the attempt that failed and why.
+**State**: `f1baf57` merged into local `main`, then `79cd5db` on branch
+`packown`. The ownership table is down to **1 leak** — `array_merge`, whose
+remaining ref belongs to the CALLEE, section 3.
 
 Read this before touching rc/ownership code again. It starts from the model, so
 a session with none of the context can start at the top.
@@ -76,7 +76,7 @@ plateau), and the same program diffed against `php`. **The ratio flags a MISSING
 release, the parity flags an OVER-release**, and it exits non-zero on either, so
 it is ready to become the gate Step 2 below still asks for.
 
-The table went **20 leaks → 3**. Every root it found, in the order they fell:
+The table went **20 leaks → 1**. Every root it found, in the order they fell:
 
 | root | commit | what it was |
 |---|---|---|
@@ -87,6 +87,7 @@ The table went **20 leaks → 3**. Every root it found, in the order they fell:
 | an ASSOC call result was never owned | `875ef56` | `freshRcArgFlavor` exempted it on a reading of `isBorrowedObjReturn` that had stopped being true. `array_flip` 22 MB, `array_combine` 105 MB. |
 | a CLOSURE LITERAL argument | `1d17dde` | `array_filter($t, "strlen")` — lowering coerces the string callable to a closure, `emitClosure` allocates an env at rc 1, and nobody owned it. |
 | a `\|` inside brackets is not a top-level union | `a4470e7` | the gate was a plain `strpos`, so `array<int,string\|null>` (str_getcsv, fgetcsv, every `array<K,V\|null>`) collapsed to a bare cell — the `.sig` then carried `mixed`, not `mixed[]`, **and a caller cannot own an erased word**. |
+| a variadic pack's elements had no release | `79cd5db` | A literal in ARGUMENT position hands its elements to the callee with it, so the call site owns only the BUFFER. Releasing them by the element's own flavor is the pairwise-symmetric drop, and it freed `array_merge`'s result out from under `LowerFns::collectVars`. Section 3. |
 | an obj/string ALIAS was retained and never released | `1335a76` `c526192` `f1baf57` | `$s = $x;` leaked one reference per call — the shape half the stdlib opens with. The retain was in the emitter, the release nowhere. Its pass-through half (`(string)$s` is the same pointer, so the same alias) followed, and `Compile\Mir\AliasOwn` is now the ONE predicate both sides read. |
 
 **Gates at `f1baf57`** (merged into local main): suite **1050/1052, failed 0** ·
@@ -98,11 +99,10 @@ was skipped by choice. Not run: **amd64**.
 
 ---
 
-## 3. THE ONE ROOT LEFT — a variadic pack owns its ARRAY elements
+## 3. CLOSED — a variadic pack's elements are released BUFFER-ONLY
 
-`array_merge` **62.6 MB**, `array_diff` **11.2**, `array_intersect` **11.2** are
-the only rows left in the table. They share one root, and the fix is WRITTEN AND
-REVERTED — read this before writing it again.
+`79cd5db`. The leak was real and `8ab002a`'s reasoning about it still
+holds; what it got wrong is what the CALL SITE owns.
 
 ### The root
 
@@ -113,61 +113,72 @@ $b)` passes `vec[vec[…]]`. A literal OWNS its elements:
 one. Its release drops every element kind that has a flavor — `vecstr`,
 `vecobj`, `veccell` — but an ARRAY element has none:
 `EmitLlvm::discardReleaseFlavor` falls through to a plain `vec`, which is the
-repr walk, and a literal stamps no ownership repr. So the buffer is freed and
-everything inside it is stranded.
+repr walk, and a literal stamps no ownership repr. So the buffer was freed and
+everything inside it stranded.
 
-Reproduce without any builtin at all:
+### What the call site owns: the BUFFER, and nothing else
+
+A literal in ARGUMENT position is handed to the callee BY VALUE, so its
+elements go with it. That is the standing rule for a named local —
+`EmitLlvm::shareCallArgs` marks it `FunctionEmitFrame::$elementSharedLocals`
+and its scope-exit release becomes `__mir_array_release_buf`, "the parser
+`$args` double-free" — and the rule already vetoes **a variadic tail** for
+precisely this reason. It could never see a pack element, because it matches on
+a local's NAME and a pack element is an anonymous temp.
+
+`8ab002a` released each element with the element's OWN release flavor, which
+under `$rcSymElem` is the pairwise-symmetric variant (`__mir_array_release_
+ownel_str`): it -1's every string / object in the element as well as the
+buffer. Generation TWO then died in `LowerFns::finishClosure` reading
+`0xcbf29ce484222325` — the FNV seed of a recycled string header. The producer
+was one line away:
 
 ```php
-function vpack(array ...$as): int { $n = 0; foreach ($as as $a) { $n += count($a); } return $n; }
-for (…) { $acc += vpack(explode(",", $s . $r), ["z"]); }   // 23.1 -> 44.2 MB
-function two(array $a, array $b): int { … }                 // flat — not the call, the PACK
-$x = [explode(",", $s . $r), ["z"]];                        // 23.0 -> 44.2 — not the call at all
+if ($k === 'BinaryOp') { return \array_merge($this->collectVars($e->left), $this->collectVars($e->right)); }
 ```
 
-The last line matters: the same hole exists for a nested literal in a LOCAL, so
-this is not a variadic bug, it is the array-element half of literal ownership.
+The element drop freed both packs' strings under the array `array_merge` had
+just built out of them.
 
-### What was tried, and what it cost
+★★★ **Neither crash site is miscompiled.** `finishClosure`'s IR — and
+`bareName`'s, for the second crash — is BYTE-IDENTICAL to main's. What named
+the producer was a whole-module per-function IR diff: build the compiler twice
+with `bin/manticore build <manifest> --apps-only --keep-ir` (a manifest whose
+`output` points outside the repo), normalize `%rN` / `@.str.N` away, hash each
+`define` body, and diff the two lists. ~250 functions changed; stripping
+`__mir_props_*` and `EmitLlvm__*` left ten, and `LowerFromAst__collectVars` was
+one of them.
 
-`8ab002a` released each owned ARRAY element at the call site, alongside the
-literal itself, with the element's OWN static flavor (which is what makes the
-nested strings go too — the generic repr walk cannot, because a nested array is
-not self-describing). **It took the table to LEAK on 0 and the whole filtered
-suite stayed green.** Then generation TWO of the self-build SIGSEGVed in
-`LowerFns::finishClosure`, reading a freed string's FNV seed
-(`0xcbf29ce484222325`). Reverted in `d332eed`.
+### What is left
 
-Narrowings that did NOT move it:
+Ownership table **LEAK on 3 → 1, parity DIFF 0**. `array_diff` /
+`array_intersect` are clean: their result comes out of `array $arr`, a real
+by-value parameter, which the callee retains on entry.
 
-1. gate the release on the retain the literal actually took (`rcRetainByType`
-   returns '' both for a fresh producer, which transfers, and for a borrowed
-   vec/assoc alias, which it declines to co-own);
-2. strings only;
-3. forget the registered elements when a builtin dispatch is DISCARDED and its
-   IR thrown away (a real hazard — `emitBuiltin` already does this for
-   `$arrArgTempRegs` — but not this bug);
-4. landing the ALIAS fix first and reapplying the pack on top of it: three clean
-   generations, canary still dead.
+`array_merge` still leaks ONE REF PER ELEMENT, and the fix is on the callee
+side. Every value in its result comes out of the PACK; its `foreach` co-owns
+the element array (`__mir_array_retain_str`) and `$out[] = $v` retains each
+value, so after the call a string is held by both the argument's buffer and
+`$out`. Buffer-only strands the argument's ref. Giving it back at the call site
+is exactly the drop that miscompiles, so the answer is an owner for a pack
+element inside the callee — the same `RC_ELEM_READ_OWNS` question that
+[[elem-read-owns-breaks-linux-2026-09-04]] parked.
 
-### What the next session should know
+### The other half of the hole, still open
 
-- ★ **A compiler built with `MANTICORE_DEBUG_VERIFY=1` crashes with NO guard
-  firing.** Both the string and the array release paths carry an `rc <= 0`
-  abort, and neither fires — so this is **not a double-release of a tracked
-  buffer**. Look instead for a release of a word that was never rc-managed, or
-  for a register from IR that was discarded.
-- Next instrument: `MANTICORE_ARR_RC_TRACE=1` on the COMPILER itself (per-buffer
-  rc history, `[ARC]` lines), or `MANTICORE_CC_TRACE=1`. The crash input is
-  tiny — `tests/aot/cases/closure_match_inlined.php` — so the trace is readable.
-- The alternative design, not attempted: stamp `ARRAY_REPR_*` (ownership) on an
-  array at every producer that owns its elements, so the generic
-  `__mir_array_release` walk becomes recursive and the static flavor is not
-  needed. `EmitLlvmArrays::erasedReprCode` already does this for the erased
-  STORE path and carries the ⚠ that blocked it: `uasort` writes a sorted buffer
-  back WITHOUT retaining, so a stamped source frees elements the result still
-  points at. That has to be fixed first.
+`$x = [explode(",", $s), ["z"]]` in a LOCAL leaks the same way and is NOT
+covered: `$litElemCollect` is only set while a call ARGUMENT literal is being
+emitted, because only there is the by-value hand-off what justifies the
+buffer-only release. A local literal genuinely owns its elements, so its answer
+is the `ARRAY_REPR_*` stamp (below), not this list.
 
+The alternative design, still not attempted: stamp `ARRAY_REPR_*` (ownership)
+on an array at every producer that owns its elements, so the generic
+`__mir_array_release` walk becomes recursive and no static flavor is needed.
+`EmitLlvmArrays::erasedReprCode` already does this for the erased STORE path
+and carries the ⚠ that blocked it: `uasort` writes a sorted buffer back WITHOUT
+retaining, so a stamped source frees elements the result still points at. That
+has to be fixed first.
 ### How to test it — the part that is not optional
 
 **A green suite on the generation that EMITS a change proves nothing.** Both
