@@ -4948,7 +4948,9 @@ trait EmitLlvmObjects
                     // class freed ZERO objects while `Lexer\Token` freed
                     // 93.5%: the tokens go through a CONSTRUCTOR, the nodes
                     // through a static call.
-                    $rf = \Compile\Debug::$rcCtorArgTemp ? $this->freshRcArgFlavor($a) : '';
+                    $rf = (\Compile\Debug::$rcCtorArgTemp
+                        && \str_contains(\Compile\Debug::$rcArgTemp, 's'))
+                        ? $this->freshRcArgFlavor($a) : '';
                     if ($rf !== '') {
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai);
@@ -6006,7 +6008,9 @@ trait EmitLlvmObjects
                     // assoc handed straight to a callee that only BORROWS it
                     // has no other owner, so nothing gave its +1 back.                    // The RECEIVER of a method call already had it ({@see
                     // emitMethodCallInner's recvFlavor); its ARGUMENTS did not.
-                    $rf = \Compile\Debug::$rcCtorArgTemp ? $this->freshRcArgFlavor($a) : '';
+                    $rf = (\Compile\Debug::$rcCtorArgTemp
+                        && \str_contains(\Compile\Debug::$rcArgTemp, 'm'))
+                        ? $this->freshRcArgFlavor($a) : '';
                     if ($rf !== '') {
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);

@@ -252,6 +252,29 @@ final class Debug
     public static bool $rcCtorArgTemp = true;
 
     /**
+     * `MANTICORE_RC_ARG_TEMP=<kinds>` — WHICH call kinds release the fresh rc
+     * temp they were handed: `s` static, `m` method. The CONSTRUCTOR arm has
+     * its own older switch ({@see $rcCtorArgTemp}); the free-function arm
+     * ({@see Mir\Passes\EmitLlvmCalls::emitCall}) has never had one.
+     *
+     * ★ `s` is the AST-retention root. The parser builds every node through a
+     * STATIC factory — `Stmt::block_($this->parseBlock(), $span)` — so the
+     * owned temp handed to one had no other owner and nobody gave its +1 back.
+     * That is why every `Parser\Ast\*` and `Compile\Mir\*` class freed ZERO
+     * objects while `Lexer\Token`, which goes through a CONSTRUCTOR, freed
+     * 93.5%.
+     *
+     * ⛔ `m` is OFF, and it is not a smaller version of the same thing: with it
+     * on, `async_sleep_transparent` prints `results:` where php prints
+     * `results: a,b,c` — an over-release, 11 async/http cases, 1040/1053. The
+     * two arms are one line apart and bisect cleanly on this flag
+     * (`MANTICORE_RC_ARG_TEMP=s` green, `=m` red), so whatever a method call
+     * does with an argument that a static call does not is the open question —
+     * NOT proof that the discipline is wrong.
+     */
+    public static string $rcArgTemp = 's';
+
+    /**
      * `MANTICORE_RC_SYM_ELEM=1` — every release of an element-owning array
      * gives one element ref back, not only at rc → 0.
      *
@@ -587,6 +610,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemType = false; }
         $env = \getenv('MANTICORE_RC_PROP_DROP');
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
+        $env = \getenv('MANTICORE_RC_ARG_TEMP');
+        if ($env !== false) { self::$rcArgTemp = $env; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');
         if ($env === '0' || $env === 'off') { self::$rcCtorArgTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_READ_OWNS');

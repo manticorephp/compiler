@@ -142,6 +142,7 @@ final class InsertMemoryOps implements Pass
 
     private function lowerFunction(FunctionDef $fn): void
     {
+        $this->traceFn = $fn->name;
         $this->ownedFlavor = [];
         $this->blocked = [];
         $this->ownedOrder = [];
@@ -340,8 +341,36 @@ final class InsertMemoryOps implements Pass
             $stmts[] = new MemoryOp_('arena_leave', '', null, Type::void());
         }
 
+        foreach ($this->ownedFlavor as $onm => $ofl) {
+            $this->ownTrace('OWNED ' . $onm . ' flavor=' . $ofl
+                . (isset($this->blocked[$onm]) ? ' (BLOCKED)' : ''));
+        }
+        $this->ownTrace('releases=' . (string)\count($releases)
+            . ' rcReleases=' . (string)\count($rcReleases));
         $this->censusFunction(\count($releases), \count($rcReleases));
         $fn->body->stmts = $stmts;
+    }
+
+    /** The function {@see lowerFunction} is working on, for {@see ownTrace}. */
+    private string $traceFn = '';
+
+    /**
+     * `MANTICORE_OWN_TRACE=<substr>` — say, for one function, which local got
+     * a release and which did not.
+     *
+     * The counterpart to `CLASSSLOT` ({@see EmitLlvm::classDropFlavor}), which
+     * answers the same question for a class SLOT. Every refusal here is a
+     * deliberate leak, and {@see censusFunction} only ever counted them by
+     * gate — so a specific array that never came back had no way to name the
+     * gate that kept it. `leaks` names the ALLOCATING function; this names the
+     * decision, and the two together are a file:line.
+     */
+    private function ownTrace(string $line): void
+    {
+        $want = \getenv('MANTICORE_OWN_TRACE');
+        if ($want === false || $want === '') { return; }
+        if (!\str_contains($this->traceFn, $want)) { return; }
+        \error_log('OWN ' . $this->traceFn . ': ' . $line);
     }
 
     /**
@@ -354,6 +383,8 @@ final class InsertMemoryOps implements Pass
      */
     private function noteBlock(string $name, string $reason, ?Type $t): void
     {
+        $this->ownTrace('BLOCK ' . $name . ' <- ' . $reason
+            . ' type=' . ($t === null ? 'none' : $t->toString()));
         if (!\Compile\Stats::$on) { return; }
         if (isset($this->blockReason[$name])) { return; }
         $this->blockReason[$name] = $reason;
