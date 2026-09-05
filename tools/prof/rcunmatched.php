@@ -44,6 +44,8 @@ $live = [];
 $unmatched = [];
 /** @var array<string,int> total retains per fn (context for the ranking) */
 $retains = [];
+/** @var array<string,string> address -> the fn that allocated it */
+$born = [];
 $freed = 0;
 $survivors = 0;
 $lines = 0;
@@ -66,6 +68,40 @@ $fh = \fopen($path, 'rb');
 while (($line = \fgets($fh)) !== false) {
     $lines++;
     if ($line === '' || $line[0] !== '[') { continue; }
+    // `[ARC] new arr=0x… fn=NAME` — a buffer is BORN. Recorded as a life of its
+    // own, because the shape that matters most for a container is the one with
+    // NO other event: allocated, retained by nobody, released by nobody. Without
+    // a birth those are indistinguishable from an address that was never used.
+    if (\strncmp($line, '[ARC] new ', 10) === 0) {
+        $at = \strpos($line, 'arr=');
+        if ($at === false) { continue; }
+        $sp = \strpos($line, ' ', $at);
+        $ptr = \substr($line, $at + 4, $sp - $at - 4);
+        $fn = '?';
+        $fa = \strpos($line, 'fn=');
+        if ($fa !== false) { $fn = \rtrim(\substr($line, $fa + 3)); }
+        // A reused address starts a NEW life; whatever was banked under the old
+        // one was freed, however its last event read.
+        $live[$ptr] = [['ret', $fn]];
+        $born[$ptr] = $fn;
+        continue;
+    }
+    // `[ARC] mov old=0x… arr=0x… fn=NAME` — a GROW reallocated the buffer. The
+    // identity survives, the address does not: carry the life across, or the
+    // old address is a phantom leak and the new one an orphan.
+    if (\strncmp($line, '[ARC] mov ', 10) === 0) {
+        $oa = \strpos($line, 'old=');
+        $na = \strpos($line, 'arr=');
+        if ($oa === false || $na === false) { continue; }
+        $oldP = \substr($line, $oa + 4, \strpos($line, ' ', $oa) - $oa - 4);
+        $newP = \substr($line, $na + 4, \strpos($line, ' ', $na) - $na - 4);
+        if ($oldP !== $newP) {
+            $live[$newP] = $live[$oldP] ?? [];
+            $born[$newP] = $born[$oldP] ?? '?';
+            unset($live[$oldP], $born[$oldP]);
+        }
+        continue;
+    }
     // `[ARC] ret <sym> arr=0x… len=N rc=N fn=NAME` — the ARRAY buffer trace.
     // Its rc is PRINTED, so the life ends where the count does: a release that
     // reaches 0 freed the buffer, and the next allocation may hand the address
@@ -116,6 +152,15 @@ while (($line = \fgets($fh)) !== false) {
 
 foreach ($live as $events) { $settle($events); }
 
+// A container question has a second answer: not "who kept a reference" but
+// "who MADE the buffer that is still here". The two rankings disagree exactly
+// when the leak is downstream of an owner that itself never died.
+$aliveBy = [];
+foreach ($live as $p => $_) {
+    if (!isset($born[$p])) { continue; }
+    $aliveBy[$born[$p]] = ($aliveBy[$born[$p]] ?? 0) + 1;
+}
+
 \arsort($unmatched);
 $total = \array_sum($unmatched);
 \printf("lines=%d  freed=%d  surviving addresses=%d  unmatched retains=%d\n\n",
@@ -125,4 +170,15 @@ $i = 0;
 foreach ($unmatched as $fn => $n) {
     if ($i++ >= $top) { break; }
     \printf("%8d  %8d  %s\n", $n, $retains[$fn] ?? 0, $fn);
+}
+
+if ($aliveBy !== []) {
+    \arsort($aliveBy);
+    \printf("\nBuffers still alive, by the function that ALLOCATED them:\n");
+    \printf("%8s  %s\n", 'ALIVE', 'fn');
+    $j = 0;
+    foreach ($aliveBy as $fn => $n) {
+        if ($j++ >= $top) { break; }
+        \printf("%8d  %s\n", $n, $fn);
+    }
 }

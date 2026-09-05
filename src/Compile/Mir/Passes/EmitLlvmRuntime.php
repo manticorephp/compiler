@@ -314,6 +314,17 @@ trait EmitLlvmRuntime
         // Tagged realloc (vec grow): realloc the BASE (ptr-8), the tag
         // rides along in the copied bytes; return new base+8.
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
+        // A grow REALLOCS, so the buffer keeps its identity but changes its
+        // ADDRESS. A trace keyed on the pointer loses the buffer here — the
+        // old address never dies and the new one is never born, so ONE live
+        // array reads as one phantom leak plus one invisible allocation.
+        // This is what stitches the two halves back together.
+        if (\Compile\Debug::$arrRcTrace) {
+            $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+            $movRaw = '[ARC] mov old=%p arr=%p fn=%s';
+            $out .= '@.arc.mov = private unnamed_addr constant ['
+                . (string)(\strlen($movRaw) + 2) . ' x i8] c"' . $movRaw . '\0A\00", align 1' . "\n";
+        }
         $out .= "define ptr @__mir_realloc_tagged(ptr %p, i64 %n) {\n";
         $out .= "entry:\n";
         $out .= "  %base = getelementptr inbounds i8, ptr %p, i64 -8\n";
@@ -347,6 +358,7 @@ trait EmitLlvmRuntime
             $out .= "  %nbase = call ptr @__mir_arena_realloc(ptr %base, i64 %osz, i64 %nsz)\n";
             $out .= "  store i64 " . $atag . ", ptr %nbase\n";
             $out .= "  %nd = getelementptr inbounds i8, ptr %nbase, i64 8\n";
+            $out .= $this->arcMove('%p', '%nd', 'a');
             $out .= "  ret ptr %nd\n";
             $out .= "heap:\n";
         }
@@ -369,11 +381,13 @@ trait EmitLlvmRuntime
             $out .= "  call ptr @memcpy(ptr %pnew, ptr %base, i64 %cpy)\n";
             $out .= $this->poolFreeCall('%base');
             $out .= "  %pd = getelementptr inbounds i8, ptr %pnew, i64 8\n";
+            $out .= $this->arcMove('%p', '%pd', 'p');
             $out .= "  ret ptr %pd\n";
             $out .= "plain:\n";
         }
         $out .= "  %nb = call ptr @realloc(ptr %base, i64 %t)\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %nb, i64 8\n";
+        $out .= $this->arcMove('%p', '%d', 'h');
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
         // String allocator: a 24-byte header `[cap@-24, len@-16, rc@-8]`
@@ -2083,6 +2097,16 @@ trait EmitLlvmRuntime
         $o .= '  %' . $tag . 'fn = select i1 %' . $tag . 'btok, ptr %' . $tag
             . "btp, ptr @.cct.nofn\n";
         return $o;
+    }
+
+    /** One `[ARC] mov` line: the grow that moved `$old` to `$new`. `$tag`
+     *  keeps the three arms' registers apart within the one function. */
+    private function arcMove(string $old, string $new, string $tag): string
+    {
+        if (!\Compile\Debug::$arrRcTrace) { return ''; }
+        return '  %mv' . $tag . " = call ptr @__mir_bt_top()\n"
+             . '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.arc.mov, ptr '
+             . $old . ', ptr ' . $new . ', ptr %mv' . $tag . ")\n";
     }
 
     /** `MANTICORE_CC_TRACE` line: one dprintf to fd 2, args already in regs. */

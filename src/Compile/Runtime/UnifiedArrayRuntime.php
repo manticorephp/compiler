@@ -1474,6 +1474,17 @@ final class UnifiedArrayRuntime
             $b->call('__prof_bump', Type::void(), [Value::int(Type::i64(), 14)]);
         }
         $data = $b->gep(Type::i8(), $base, [Value::int(Type::i64(), 8)]);
+        if (Debug::$arrRcTrace) {
+            // BIRTH. Without it the balance is blind to the one shape that
+            // matters most: a buffer allocated, never retained by anyone, and
+            // never released — it has no events at all, so it cannot be told
+            // apart from a buffer that was never made. Every fresh array comes
+            // through here (literal, copy, cow clone, packed→hashed promote).
+            $nf = $this->module->anonString("[ARC] new arr=%p fn=%s\n");
+            $nc = $b->call('__mir_bt_top', Type::ptr(), []);
+            $b->call('dprintf', Type::i32(),
+                [Value::int(Type::i32(), 2), $nf, $data, $nc], null, '(i32, ptr, ...)');
+        }
         $b->ret($data);
     }
 
@@ -2906,6 +2917,17 @@ final class UnifiedArrayRuntime
         // runs at rc > 1, so the decrement lands at rc >= 1.
         if (!$dropSource) {
             $clone->store($clone->sub($rc, Value::int(Type::i64(), 1)), $rcAddr);
+            if (Debug::$arrRcTrace) {
+                // A COW that copies drops the caller's reference to the SOURCE
+                // without going through any release helper, so the balance saw
+                // a retain with no partner and blamed whoever took it.
+                $cf = $this->module->anonString("[ARC] rel cow-source     arr=%p len=%lld rc=%lld fn=%s\n");
+                $cl = $clone->load(Type::i64(), $arr);
+                $cc = $clone->call('__mir_bt_top', Type::ptr(), []);
+                $clone->call('dprintf', Type::i32(),
+                    [Value::int(Type::i32(), 2), $cf, $arr, $cl,
+                     $clone->sub($rc, Value::int(Type::i64(), 1)), $cc], null, '(i32, ptr, ...)');
+            }
         }
 
         // ── co-own everything the clone now shares with the source ──
