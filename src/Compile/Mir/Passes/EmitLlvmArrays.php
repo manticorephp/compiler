@@ -339,6 +339,38 @@ trait EmitLlvmArrays
         $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
         $val = $this->lastValue;
         if (!$cellVals) { $out .= $this->rcRetainByType($value, $val, null, 2); }
+        // An ARRAY element the literal now owns and whose release will never
+        // drop it ({@see EmitLlvmBuiltins::$litElemDropRegs}). Only while an
+        // ARGUMENT literal is being emitted, and only for a raw element — a
+        // cell element is dropped by the veccell release.
+        //
+        // BUFFER-ONLY, in both cases, and that is the whole lesson of the
+        // reverted `8ab002a`. The literal is about to be handed to a callee BY
+        // VALUE, so its elements go with it: the callee co-owns every one of
+        // them and its RESULT keeps them. That is the standing rule for a
+        // container in argument position ({@see EmitLlvm::shareCallArgs} →
+        // {@see \Compile\Mir\FunctionEmitFrame::$elementSharedLocals}, which
+        // vetoes a variadic tail for exactly this reason) — it could only never
+        // see a pack element, because that rule reads a local's NAME and a pack
+        // element is an anonymous temp.
+        //
+        // An element-bearing flavor here -1's every string / object the callee's
+        // result still points at. `8ab002a` used the value's own release flavor
+        // and generation two died in `LowerFns::finishClosure` reading a
+        // recycled string header: `\array_merge($this->collectVars($e->left),
+        // $this->collectVars($e->right))` freed both packs' strings under the
+        // array array_merge had just built out of them.
+        //
+        // A BORROWED element took an element-bearing retain
+        // ({@see arrayRetainFlavor}), so buffer-only leaves those element refs
+        // behind — a leak of one ref per element per call, which is the safe
+        // direction and the only one available while the callee's co-ownership
+        // is an assumption rather than an emitted retain.
+        if ($this->litElemCollect && !$cellVals
+            && $value->type->kind === Type::KIND_ARRAY
+            && \str_starts_with($val, '%')) {
+            $this->litElemDropRegs[] = $val;
+        }
         $this->elemValReg = $val;
         return $out;
     }

@@ -32,6 +32,30 @@ trait EmitLlvmBuiltins
     /** Release flavor per {@see $arrArgTempRegs} entry. @var string[] */
     private array $arrArgTempFlavors = [];
 
+    /**
+     * The registers of the ARRAY-typed elements of an array LITERAL being
+     * emitted as a call ARGUMENT, to be released BUFFER-ONLY after the call.
+     *
+     * A literal OWNS its elements: {@see EmitLlvmArrays::emitArrayLitValue}
+     * adopts a fresh one and RETAINS a borrowed one. Its own release drops
+     * them for every element kind that has a flavor — vecstr, vecobj,
+     * veccell — but an ARRAY element has none ({@see
+     * EmitLlvm::discardReleaseFlavor} falls through to a plain `vec`, the repr
+     * walk, and a literal stamps no ownership repr), so the buffer was freed
+     * and everything inside it stranded.
+     *
+     * A VARIADIC call is where that shape is unavoidable: `array_merge($a,
+     * $b)` packs its arguments into one `vec[vec[…]]` literal, so the whole of
+     * both arguments leaked on every call — 62.6 MB in the ownership table.
+     * Why the release is buffer-only, and never the element's own flavor, is
+     * the comment at the collection site.
+     * @var string[]
+     */
+    private array $litElemDropRegs = [];
+
+    /** Collect {@see $litElemDropRegs} while emitting an argument literal. */
+    private bool $litElemCollect = false;
+
     private function emitBuiltin(Call $c): ?string
     {
         $mark = \count($this->arrArgTempRegs);
