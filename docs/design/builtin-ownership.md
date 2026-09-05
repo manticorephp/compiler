@@ -103,7 +103,8 @@ was skipped by choice. Not run: **amd64**.
 
 `79cd5db` + `2e1b880`. The leak was real and `8ab002a`'s reasoning about it
 still holds; what it got wrong is that ONE answer covers both kinds of element.
-Table: **LEAK on 0 · parity DIFF 0**.
+Table: **LEAK on 0 · parity DIFF 0**; AOT suite **1050/1052, failed 0** at
+`12af025` — main's own number. ⛔difftest · fixpoint · LINUX not run.
 
 ### The root
 
