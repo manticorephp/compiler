@@ -32,6 +32,35 @@ trait EmitLlvmBuiltins
     /** Release flavor per {@see $arrArgTempRegs} entry. @var string[] */
     private array $arrArgTempFlavors = [];
 
+    /**
+     * An ARRAY-typed element of an array LITERAL being emitted as a call
+     * ARGUMENT, and its release flavor — two parallel arrays, for the
+     * reason above.
+     *
+     * A literal OWNS its elements: {@see EmitLlvmArrays::emitArrayLitValue}
+     * adopts a fresh one and RETAINS a borrowed one. Its own release drops
+     * them for every element kind that has a flavor — vecstr, vecobj,
+     * veccell — but an ARRAY element has none ({@see
+     * EmitLlvm::discardReleaseFlavor} falls through to a plain `vec`, the
+     * repr walk, and a literal stamps no ownership repr), so the buffer was
+     * freed and everything inside it stranded.
+     *
+     * A VARIADIC call is where that shape is unavoidable: `array_merge($a,
+     * $b)` packs its arguments into one `vec[vec[…]]` literal, so the whole
+     * of both arguments leaked on every call — 62.6 MB in the ownership
+     * table. Released here with each element's OWN static flavor, which is
+     * what makes the nested strings go too; the generic repr walk cannot,
+     * because a nested array is not self-describing yet.
+     * @var string[]
+     */
+    private array $litElemDropRegs = [];
+
+    /** Release flavor per {@see $litElemDropRegs} entry. @var string[] */
+    private array $litElemDropFlavors = [];
+
+    /** Collect {@see $litElemDropRegs} while emitting an argument literal. */
+    private bool $litElemCollect = false;
+
     private function emitBuiltin(Call $c): ?string
     {
         $mark = \count($this->arrArgTempRegs);
