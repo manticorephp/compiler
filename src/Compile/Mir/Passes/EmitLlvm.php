@@ -2069,12 +2069,22 @@ final class EmitLlvm implements EmitVisitor
         // which is handled above or falls through to the default arm below.
         // Arithmetic, comparison, concat and the bitwise operators produce a
         // FRESH value from the bytes; none of them can hold the pointer.
+        // UNSET belongs with them for the same reason, one step further: its
+        // target is not a read at all, it is a CONSUME. Counting it as a borrow
+        // vetoed the slot's release-before-overwrite PROGRAM-WIDE, so a single
+        // `unset($this->x)` in one method made every `$o->x = …` anywhere leak
+        // what it overwrote — `FunctionTextSink::$chunks` held 126,135
+        // unreachable blocks / 93.4 MB on that one line. The element form
+        // (`unset($this->map[$k])`) mutates the buffer in place and does not
+        // escape it either; {@see $cellPropArrayBase} records that use on its
+        // own terms.
         if ($k === Node::KIND_CONCAT || $k === Node::KIND_CMP
             || $k === Node::KIND_ADD || $k === Node::KIND_SUB
             || $k === Node::KIND_MUL || $k === Node::KIND_DIV
             || $k === Node::KIND_MOD || $k === Node::KIND_NEG
             || $k === Node::KIND_NOT || $k === Node::KIND_BITOP
-            || $k === Node::KIND_BITNOT || $k === Node::KIND_ISSET) {
+            || $k === Node::KIND_BITNOT || $k === Node::KIND_ISSET
+            || $k === Node::KIND_UNSET) {
             return;
         }
         foreach (\Compile\Mir\Walk::children($parent) as $c) {

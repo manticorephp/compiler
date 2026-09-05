@@ -4363,10 +4363,37 @@ trait EmitLlvmObjects
                               . ', ptr ' . $this->strLitId($kid) . ")\n";
                     }
                 }
+                // A DECLARED slot: release what it holds and clear it. This used
+                // to be a deliberate no-op, which made `unset($o->prop)` both a
+                // leak (the value was never given back) and a php-parity bug
+                // (`isset()` kept answering true). The release runs under the
+                // SAME gate the overwrite path uses — {@see
+                // propSlotDropsOldValue} — so a slot anything else borrows keeps
+                // leaking rather than freeing under that borrow.
+                if ($ucls !== '' && isset($this->classes[$ucls])
+                    && $this->classes[$ucls]->propertyOffset($upa->property) >= 0) {
+                    $out .= $this->emitNode($upa->object);
+                    $out .= $this->coerceToPtr();
+                    $uObjP = $this->lastValue;
+                    $uType = $this->classes[$ucls]->propertyTypes[$upa->property] ?? null;
+                    $uStore = new \Compile\Mir\StoreProperty(
+                        $upa->object, $upa->property,
+                        new \Compile\Mir\NullConst(Type::null_()), Type::null_());
+                    $uDrop = $this->propSlotDropsOldValue($uStore, $uType);
+                    $uGep = $this->ssa->allocReg();
+                    $out .= '  ' . $uGep . ' = getelementptr inbounds i8, ptr ' . $uObjP
+                          . ', i64 ' . (string)$this->propertyOffset($upa->object, $upa->property) . "\n";
+                    if ($uDrop !== '') {
+                        $uOld = $this->ssa->allocReg();
+                        $out .= '  ' . $uOld . ' = load i64, ptr ' . $uGep . "\n";
+                        $out .= $this->rcReleaseReg($uOld, $uDrop);
+                    }
+                    $out .= $this->emitSlotStore($uGep,
+                        $this->slotHolder($upa->object, $upa->property), $upa->property, '0');
+                }
                 // Same thing with the receiver's class ERASED — dispatch at
-                // runtime. An unset of a DECLARED slot stays the no-op it has
-                // always been, so the default arm has nothing to do. Gate on
-                // "not a KNOWN class", never on `=== ''` — see the isset note.
+                // runtime. Gate on "not a KNOWN class", never on `=== ''` — see
+                // the isset note.
                 if (!isset($this->classes[$ucls])) {
                     $um = $this->magicPropHolders($upa->property, '__unset');
                     if ($um !== []) {
