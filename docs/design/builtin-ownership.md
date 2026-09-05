@@ -1,7 +1,7 @@
 # Handoff — the ownership contract for builtins, and what is left of it
 
-**State**: `f1baf57` merged into local `main`, then `79cd5db` / `2e1b880` on
-branch `packown`. The ownership table is at **LEAK on 0 · parity DIFF 0**.
+**State**: `f1baf57` merged into local `main`, then `79cd5db` / `2e1b880`
+(branch `packown`, merged) and `5ed7347` (branch `arrflavor`). The ownership table is at **LEAK on 0 · parity DIFF 0**.
 What is left of the area is one unnamed disagreement, section 3.
 
 Read this before touching rc/ownership code again. It starts from the model, so
@@ -181,22 +181,47 @@ one of them.
 - a plain `vec` / `assoc` flavor is the runtime REPR walk, decided by bits a
   literal never stamps — not the reference's answer either, so it degrades to
   buffer-only with them.
-### The other half of the hole, still open
+### The other half of the hole — the LOCAL, half closed by `5ed7347`
 
-`$x = [explode(",", $s), ["z"]]` in a LOCAL leaks the same way (84 → 167 MB,
-`tools/prof/packleak.php local`, and `nested` one level deeper) and is NOT
-covered: `$litElemCollect` is only set while a call ARGUMENT literal is being
-emitted, because only there is the by-value hand-off what justifies the
-buffer-only release. A local literal genuinely owns its elements, so its answer
-is the `ARRAY_REPR_*` stamp (below), not this list.
+`$x = [explode(",", $s), ["z"]]` in a LOCAL leaked the same way and was not
+covered by the list above: `$litElemCollect` is only set while a call ARGUMENT
+literal is being emitted, because only there is the by-value hand-off what
+justifies buffer-only. A local literal genuinely owns its elements — it just
+had no way to say so, because **an ARRAY element had no release flavor**.
+`discardReleaseFlavor` fell through to a plain `vec`, the repr walk, over bits
+a literal never stamps.
 
-The alternative design, still not attempted: stamp `ARRAY_REPR_*` (ownership)
-on an array at every producer that owns its elements, so the generic
-`__mir_array_release` walk becomes recursive and no static flavor is needed.
-`EmitLlvmArrays::erasedReprCode` already does this for the erased STORE path
-and carries the ⚠ that blocked it: `uasort` writes a sorted buffer back WITHOUT
-retaining, so a stamped source frees elements the result still points at. That
-has to be fixed first.
+`vecarr` / `assocarr` are that missing member (`5ed7347`), with `'arr'` as a
+runtime VALUE flavor whose element drop is `__mir_array_release`:
+`release_arr`, `release_ownel_arr`, `retain_arr`, `adopt_arr`. Two rules that
+cost a gen-3 abort and 20 red cases:
+
+- ⚠ **The claim does NOT belong in `discardReleaseFlavor`.** That answers for
+  PROPERTIES, call arguments and the erased repr path as well, where it
+  over-releases. It lives in `rcReleaseFlavorPlain` (the LOCAL SLOT drop, which
+  already knows the slot is not `$shared`) and in `arrayRetainFlavor`.
+- ⚠ **Both halves or neither.** Landing only the release made
+  `array_merge_recursive` answer `[""] => float(2.16E-314)`: the drop walked
+  elements the entry retain had never co-owned. `__mir_array_retain_arr`
+  emitted ZERO times is how that reads in the IR.
+
+Nested buffers are now flat (32/63 → 1/1 for a literal of literals, 38/75 → 1/1
+for call results, 54/106 → 1/1 when overwritten in a loop; `bench/cases/
+nested_array_local.php` 42.6/83.2 LEAK → 2.0/2.0 ok). What is LEFT:
+
+- the nested STRINGS (`packleak local` 50/99, `nested` 84/167) — the inner
+  array's own release is repr-driven and its producer stamps no repr;
+- ⛔ **`$q = $r` on a vec-of-arrays, a different root entirely**: the COPY does
+  not co-own what it now points at, 69 MB per 200k BEFORE and AFTER
+  (`packleak copy`, 143/284).
+
+The design that would close the strings, still not attempted: stamp
+`ARRAY_REPR_*` (ownership) on an array at every producer that owns its
+elements, so the generic `__mir_array_release` walk recurses and no static
+flavor is needed at all. `EmitLlvmArrays::erasedReprCode` already does this for
+the erased STORE path and carries the ⚠ that blocked it: `uasort` writes a
+sorted buffer back WITHOUT retaining, so a stamped source frees elements the
+result still points at. That has to be fixed first.
 ### How to test it — the part that is not optional
 
 **A green suite on the generation that EMITS a change proves nothing.** Both
