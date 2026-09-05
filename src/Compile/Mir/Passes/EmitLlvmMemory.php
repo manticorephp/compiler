@@ -210,6 +210,17 @@ trait EmitLlvmMemory
         return $this->lsbTarget($decl, '__construct', $class);
     }
 
+    /** The emitted symbol of `$class::$method` as this site would call it, or
+     *  '' when there is nothing to speak for. The method twin of
+     *  {@see ctorSymbolFor}. */
+    private function methodSymbolFor(string $class, string $method): string
+    {
+        if ($class === '' || $method === '' || !isset($this->classes[$class])) { return ''; }
+        $decl = $this->resolveMethodClass($class, $method);
+        if ($decl === '') { return ''; }
+        return $this->lsbTarget($decl, $method, $class);
+    }
+
     private function collectElementSharedLocals(Node $n): void
     {
         $k = $n->kind;
@@ -223,9 +234,17 @@ trait EmitLlvmMemory
             if ($k === Node::KIND_CALL) {
                 $this->shareCallArgs($n->args, $n->function);
             } elseif ($k === Node::KIND_METHOD_CALL) {
-                $this->shareCallArgs($n->args);
+                // A method is resolvable too, on the same terms as the ctor above:
+                // the question shareCallArgs asks of the symbol is only whether
+                // position N is a BY-VALUE parameter, and php fixes that across
+                // overrides (a signature may not flip by-ref). Passing no symbol
+                // made the veto unconditional, so every array of objects or
+                // strings handed to a method had its elements stranded.
+                $this->shareCallArgs($n->args,
+                    $this->methodSymbolFor($n->object->type->class ?? '', $n->method));
             } elseif ($k === Node::KIND_STATIC_CALL) {
-                $this->shareCallArgs($n->args);
+                $this->shareCallArgs($n->args,
+                    $this->methodSymbolFor($n->class, $n->method));
             } elseif ($k === Node::KIND_INVOKE) {
                 $this->shareCallArgs($n->args);
             }
