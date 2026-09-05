@@ -5,78 +5,65 @@ namespace Compile\Mir;
 /**
  * Memory-effect set carried by every MIR node (and, aggregated, by
  * every {@see FunctionDef}). Computed by {@see Passes\InferEffects}
- * after type inference; consumed by the future MemoryOps lowering
- * (contract step #5) to decide retain / release / arena placement
- * — so that EmitLlvm never invents memory ops from feature handlers.
+ * after type inference; consumed by {@see Passes\InferAllocKind} and
+ * {@see Passes\InsertMemoryOps} to decide retain / release / arena
+ * placement — so that EmitLlvm never invents memory ops from feature
+ * handlers.
+ *
+ * A BITMASK, not an object: one per MIR node meant 2.0 M objects
+ * allocated and none ever freed on a symfony-sized build (the census in
+ * `docs/status/T6-MEMORY-HANDOFF-2026-09-04.md`), all of it to carry
+ * seven booleans. The class survives as the vocabulary — constants plus
+ * the spelling — and `Node::$effects` / `FunctionDef::$effects` are ints.
  *
  * The vocabulary (contract step #3):
- *  - alloc       op allocates a fresh heap value (string concat, array
- *                / object literal, `new`, closure, (string)/(array)/(object) cast)
- *  - retain      a refcount is incremented here   (reserved — filled by MemoryOps)
- *  - release     a refcount is decremented here   (reserved — filled by MemoryOps)
- *  - escape      a value outlives the current frame (return, throw, store-to-heap)
- *  - throw       op may unwind (div/mod by zero, any call, `new`, `throw`)
- *  - callUnknown dispatches through a callee whose body we can't see
- *                (virtual method, `$f(...)` invoke)
- *  - storeHeap   writes a value into a heap slot (property / element /
- *                static-prop / dynamic-prop store)
+ *  - ALLOC        op allocates a fresh heap value (string concat, array
+ *                 / object literal, `new`, closure, (string)/(array)/(object) cast)
+ *  - RETAIN       a refcount is incremented here   (reserved — filled by MemoryOps)
+ *  - RELEASE      a refcount is decremented here   (reserved — filled by MemoryOps)
+ *  - ESCAPE       a value outlives the current frame (return, throw, store-to-heap)
+ *  - MAY_THROW    op may unwind (div/mod by zero, any call, `new`, `throw`)
+ *  - CALL_UNKNOWN dispatches through a callee whose body we can't see
+ *                 (virtual method, `$f(...)` invoke)
+ *  - STORE_HEAP   writes a value into a heap slot (property / element /
+ *                 static-prop / dynamic-prop store)
  *
- * `retain` / `release` stay false at inference time; they are the
- * MemoryOps pass's output, kept in the vocabulary so the type is the
- * single home for the whole effect lattice.
+ * RETAIN / RELEASE stay clear at inference time; they are the MemoryOps
+ * pass's output, kept in the vocabulary so the type is the single home
+ * for the whole effect lattice.
  */
 final class Effects
 {
-    public function __construct(
-        public bool $alloc = false,
-        public bool $retain = false,
-        public bool $release = false,
-        public bool $escape = false,
-        public bool $throw = false,
-        public bool $callUnknown = false,
-        public bool $storeHeap = false,
-    ) {}
-
-    public function isEmpty(): bool
-    {
-        return !$this->alloc && !$this->retain && !$this->release
-            && !$this->escape && !$this->throw && !$this->callUnknown
-            && !$this->storeHeap;
-    }
-
-    /** Union `$o` into this set (mutates in place). */
-    public function mergeFrom(Effects $o): void
-    {
-        if ($o->alloc)       { $this->alloc = true; }
-        if ($o->retain)      { $this->retain = true; }
-        if ($o->release)     { $this->release = true; }
-        if ($o->escape)      { $this->escape = true; }
-        if ($o->throw)       { $this->throw = true; }
-        if ($o->callUnknown) { $this->callUnknown = true; }
-        if ($o->storeHeap)   { $this->storeHeap = true; }
-    }
+    public const NONE         = 0;
+    public const ALLOC        = 1;
+    public const RETAIN       = 2;
+    public const RELEASE      = 4;
+    public const ESCAPE       = 8;
+    public const MAY_THROW    = 16;
+    public const CALL_UNKNOWN = 32;
+    public const STORE_HEAP   = 64;
 
     /**
      * Stable comma-joined spelling in vocabulary order. Empty string
      * for the empty set. Built by hand (no `implode`) to stay on the
      * self-host stdlib surface.
      */
-    public function toString(): string
+    public static function toString(int $m): string
     {
         $out = '';
-        $out = $this->append($out, $this->alloc, 'alloc');
-        $out = $this->append($out, $this->retain, 'retain');
-        $out = $this->append($out, $this->release, 'release');
-        $out = $this->append($out, $this->escape, 'escape');
-        $out = $this->append($out, $this->throw, 'throw');
-        $out = $this->append($out, $this->callUnknown, 'callUnknown');
-        $out = $this->append($out, $this->storeHeap, 'storeHeap');
+        $out = self::append($out, $m & self::ALLOC, 'alloc');
+        $out = self::append($out, $m & self::RETAIN, 'retain');
+        $out = self::append($out, $m & self::RELEASE, 'release');
+        $out = self::append($out, $m & self::ESCAPE, 'escape');
+        $out = self::append($out, $m & self::MAY_THROW, 'throw');
+        $out = self::append($out, $m & self::CALL_UNKNOWN, 'callUnknown');
+        $out = self::append($out, $m & self::STORE_HEAP, 'storeHeap');
         return $out;
     }
 
-    private function append(string $acc, bool $on, string $name): string
+    private static function append(string $acc, int $on, string $name): string
     {
-        if (!$on) { return $acc; }
+        if ($on === 0) { return $acc; }
         if ($acc === '') { return $name; }
         return $acc . ',' . $name;
     }

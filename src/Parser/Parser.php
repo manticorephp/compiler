@@ -204,6 +204,8 @@ final class Parser
         }
         $this->tokens = $filtered;
         $this->pos = 0;
+        $this->spanPos = -1;
+        $this->spanMemo = null;
     }
 
     public function parseProgram(): Program
@@ -3427,10 +3429,32 @@ final class Parser
         throw $this->error($message);
     }
 
+    /**
+     * Position of the current token, MEMOISED on the token index.
+     *
+     * Every parse entry point asks for the span of the token it starts on, and
+     * the nested calls under it ask again at the same index — an expression
+     * statement alone mints one Span per level. The object is readonly, so the
+     * whole nest can share ONE: on a symfony-sized build Span was 1.5 M
+     * allocations with 14 k frees (the census in
+     * `docs/status/T6-MEMORY-HANDOFF-2026-09-04.md`).
+     *
+     * Keyed on the index alone; {@see reset} clears it, which is the only way
+     * an index can come to mean a different token (a new file, new tokens).
+     */
+    private int $spanPos = -1;
+    private ?Span $spanMemo = null;
+
     private function span(): Span
     {
+        if ($this->pos === $this->spanPos && $this->spanMemo !== null) {
+            return $this->spanMemo;
+        }
         $tok = $this->tokens[$this->pos];
-        return new Span($tok->line, $tok->column, $this->sourceFile);
+        $s = new Span($tok->line, $tok->column, $this->sourceFile);
+        $this->spanPos = $this->pos;
+        $this->spanMemo = $s;
+        return $s;
     }
 
     private function error(string $message): ParseError

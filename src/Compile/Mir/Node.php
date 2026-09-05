@@ -122,13 +122,16 @@ abstract class Node
     ) {}
 
     /**
-     * Intrinsic memory effects of this op, filled by
-     * {@see Passes\InferEffects}. Null until that pass runs.
+     * Intrinsic memory effects of this op — an {@see Effects} BITMASK,
+     * filled by {@see Passes\InferEffects}. `Effects::NONE` until that
+     * pass runs, which reads the same as "no effects" at every consumer.
+     * An int, not an object: one Effects object per node was 2.0 M
+     * allocations, none freed, on a symfony-sized build.
      */
-    public ?Effects $effects = null;
+    public int $effects = 0;
 
     /**
-     * Allocation verdict for nodes that allocate (effects->alloc).
+     * Allocation verdict for nodes that allocate (Effects::ALLOC).
      * One of {@see AllocationKind}'s constants, filled by
      * {@see Passes\InferAllocKind}. Null on non-allocating nodes and
      * until that pass runs.

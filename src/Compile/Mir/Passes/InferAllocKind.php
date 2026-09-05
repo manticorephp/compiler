@@ -196,7 +196,6 @@ final class InferAllocKind implements Pass
                 $this->escaping[$n->name] = true;
             }
         } else {
-            $e = $n->effects;
             // Unified PhpArray has no arena path (every buffer is malloc'd),
             // so a confined array local — like a confined `new X()` — must be
             // rc-managed or it leaks every call (isOwnedObj only releases
@@ -208,7 +207,7 @@ final class InferAllocKind implements Pass
             $unionArr = $k === Node::KIND_ADD
                 && $n->type->kind === \Compile\Mir\Type::KIND_ARRAY;
             $uniArr = $k === Node::KIND_ARRAY_LIT || $unionArr;
-            if (($e !== null && $e->alloc) || $uniArr) {
+            if (($n->effects & \Compile\Mir\Effects::ALLOC) !== 0 || $uniArr) {
                 // Objects are ALWAYS heap-allocated (emitNewObj has no arena
                 // path), so a confined `new X()` local must still be rc-managed
                 // — otherwise isOwnedObj never gives it a scope-exit release and

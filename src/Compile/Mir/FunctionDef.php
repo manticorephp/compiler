@@ -15,10 +15,11 @@ final class FunctionDef
     ) {}
 
     /**
-     * Aggregate (union) of every node's intrinsic effects, filled by
-     * {@see Passes\InferEffects}. Null until that pass runs.
+     * Aggregate (union) of every node's intrinsic effects — an
+     * {@see Effects} bitmask, filled by {@see Passes\InferEffects}.
+     * `Effects::NONE` until that pass runs.
      */
-    public ?Effects $effects = null;
+    public int $effects = 0;
 
     /**
      * FFI binding: when set (from `#[Symbol('cSym')]`), this function is

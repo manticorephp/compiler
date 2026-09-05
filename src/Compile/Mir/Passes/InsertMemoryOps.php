@@ -5,6 +5,7 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\AllocationKind;
 use Compile\Mir\Block;
 use Compile\Mir\CondOwn;
+use Compile\Mir\Effects;
 use Compile\Mir\FunctionDef;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\MemoryOp_;
@@ -223,8 +224,29 @@ final class InsertMemoryOps implements Pass
             // a matching retain. A borrowed store still lands in the `else`
             // branch below and blocks the name outright, so only
             // owned-producer-plus-literal names reach here.
+            //
+            // …and EXCEPT an OBJECT, for the same reason and at a far larger
+            // scale. `$x = new Foo(); … $x = null;` is how a compiler phase
+            // hands back a graph it is done with, and the blanket block turned
+            // that idiom into a PERMANENT leak: the name lost the
+            // release-before-overwrite AND its scope-exit release, so the value
+            // was never freed at all. `lower_module` ends with exactly that —
+            // `$program = null; $lower = null;` over the whole AST, under a
+            // comment promising the tree is released there — and it freed
+            // nothing: on a self-compile every `Parser\Ast\*` class showed
+            // alloc=N free=0, ~47% of the live objects at exit
+            // (`docs/status/T6-MEMORY-HANDOFF-2026-09-04.md`).
+            //
+            // An object is safe here for the same reason a string is, and more
+            // directly: it carries its own rc header, and every borrowing
+            // consumer — an alias store, an element / property store, a call
+            // argument — takes a real +1 through
+            // {@see EmitLlvmMemory::rcRetainByType}. The SIGBUS this block was
+            // written for is an ARRAY hazard (a by-value container whose BUFFER
+            // is shared without an rc of its own); arrays keep the block.
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
+            if ($t !== null && $t->kind === Type::KIND_OBJ) { continue; }
             $this->rcObjBlocked[$name] = true;
             $this->noteBlock($name, "neutral", $t);
         }
@@ -749,8 +771,7 @@ final class InsertMemoryOps implements Pass
      */
     private function scanStores(Node $n): void
     {
-        $e = $n->effects;
-        if ($e !== null && $e->alloc && $n->allocKind === AllocationKind::ARENA) {
+        if (($n->effects & Effects::ALLOC) !== 0 && $n->allocKind === AllocationKind::ARENA) {
             $this->hasArena = true;
         }
 
@@ -946,8 +967,7 @@ final class InsertMemoryOps implements Pass
      */
     private function allocFlavor(Node $value): ?string
     {
-        $e = $value->effects;
-        if ($e === null || !$e->alloc) { return null; }
+        if (($value->effects & Effects::ALLOC) === 0) { return null; }
         if ($value->allocKind !== AllocationKind::NO_REFCOUNT) { return null; }
         return $this->flavorOfType($value->type);
     }

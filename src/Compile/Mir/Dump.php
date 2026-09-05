@@ -72,8 +72,8 @@ final class Dump implements EmitVisitor
         }
         $out = "\nfn " . $fn->name . '(' . $paramStr . ') -> '
              . $fn->returnType->toString() . " {\n";
-        if ($showEffects && $fn->effects !== null) {
-            $agg = $fn->effects->toString();
+        if ($showEffects) {
+            $agg = \Compile\Mir\Effects::toString($fn->effects);
             $out .= '  ; effects: ' . ($agg === '' ? '(none)' : $agg) . "\n";
         }
         $printer = new self();
@@ -96,9 +96,7 @@ final class Dump implements EmitVisitor
     private function eff(Node $n): string
     {
         if (!$this->showEffects) { return ''; }
-        $e = $n->effects;
-        if ($e === null) { return ''; }
-        $s = $e->toString();
+        $s = \Compile\Mir\Effects::toString($n->effects);
         $kind = $n->allocKind;
         if ($s === '' && $kind === null) { return ''; }
         $out = '  ; eff: ' . $s;
