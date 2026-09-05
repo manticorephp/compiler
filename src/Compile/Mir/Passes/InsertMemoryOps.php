@@ -521,6 +521,22 @@ final class InsertMemoryOps implements Pass
             // the str rc path). Its producer is a call/invoke (the creator).
         }
         $k = $value->kind;
+        // `$b = $s` / `$m = $obj` — an ALIAS of an obj/string local. The
+        // emitter RETAINS it ({@see EmitLlvmLocals}'s $aliasObjStr) so the
+        // SOURCE's own release cannot free it early — and that retain had no
+        // release, because this pass read a LoadLocal as a plain borrow. Two
+        // halves of one decision, and only one of them was ever taken: every
+        // `$s = $string;` in a function leaked one reference per call, which
+        // is the whole of str_getcsv's row in the ownership table and the
+        // shape of half the stdlib.
+        //
+        // OBJ and STRING only, exactly as the emitter's arm: a vec/assoc
+        // alias is deliberately NOT retained there (it COW-copies on
+        // mutation), and a CELL alias stays borrowed by the gate above.
+        if ($k === Node::KIND_LOAD_LOCAL
+            && ($tk === Type::KIND_OBJ || $tk === Type::KIND_STRING)) {
+            return true;
+        }
         // `(string)$int` / `(string)$float` ALLOCATE — __mir_int_to_str and
         // __mir_float_to_str hand back a fresh rc=1 buffer exactly as a string
         // builtin does. This was the one producer nobody owned: the local took
