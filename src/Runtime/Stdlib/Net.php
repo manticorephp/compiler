@@ -1234,15 +1234,25 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16, int $wantTy
             $proto = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(2));
             $cand = \Runtime\Libc\sys_socket($family, $wantType, $proto);
             if ($cand >= 0) {
-                // SO_REUSEADDR (rebind past TIME_WAIT, like php) + SO_REUSEPORT
-                // (multiple processes bind the same port; the kernel load-balances
-                // accepts — the basis of shared-nothing multi-worker servers).
-                // SO_REUSEPORT: Darwin 0x0200, Linux 15.
+                // SO_REUSEADDR only — rebind past TIME_WAIT, which is what php
+                // sets and all it sets.
+                //
+                // ⚠ SO_REUSEPORT was here too, for shared-nothing multi-worker
+                // servers, and it silently broke the most common server idiom
+                // there is: SCANNING FOR A FREE PORT. With it, binding a port
+                // another listener already holds SUCCEEDS, the kernel
+                // load-balances accepts between the two, and connections meant
+                // for one server are delivered to the other. Two AOT cases that
+                // scan the same range (`async_tls_loopback`, `async_select_reactor`)
+                // then failed with `no-conn` / connect timeout whenever they ran
+                // at the same time — the TLS client's connection went to the
+                // plain-TCP listener. php answers EADDRINUSE here and the scan
+                // moves on; a multi-worker server that WANTS the sharing asks
+                // for it explicitly, it is not the default.
                 $one = \Runtime\Libc\calloc(4, 1);
                 \poke_i32($one, 0, 1);
                 $sol = \__mc_sock_const(0);
                 \Runtime\Libc\sys_setsockopt($cand, $sol, \__mc_sock_const(9), $one, 4);
-                \Runtime\Libc\sys_setsockopt($cand, $sol, \__mc_host_is_darwin() ? 512 : 15, $one, 4);
                 \Runtime\Libc\free($one);
                 $a = \peek_i64(\int_to_ptr($ai), \__mc_ai_off(4));
                 $alen = \peek_i32(\int_to_ptr($ai), \__mc_ai_off(3));
