@@ -1,8 +1,8 @@
 # Handoff — the ownership contract for builtins, and what is left of it
 
-**State**: `f1baf57` merged into local `main`, then `79cd5db` on branch
-`packown`. The ownership table is down to **1 leak** — `array_merge`, whose
-remaining ref belongs to the CALLEE, section 3.
+**State**: `f1baf57` merged into local `main`, then `79cd5db` / `2e1b880` on
+branch `packown`. The ownership table is at **LEAK on 0 · parity DIFF 0**.
+What is left of the area is one unnamed disagreement, section 3.
 
 Read this before touching rc/ownership code again. It starts from the model, so
 a session with none of the context can start at the top.
@@ -76,7 +76,7 @@ plateau), and the same program diffed against `php`. **The ratio flags a MISSING
 release, the parity flags an OVER-release**, and it exits non-zero on either, so
 it is ready to become the gate Step 2 below still asks for.
 
-The table went **20 leaks → 1**. Every root it found, in the order they fell:
+The table went **20 leaks → 0**. Every root it found, in the order they fell:
 
 | root | commit | what it was |
 |---|---|---|
@@ -87,7 +87,7 @@ The table went **20 leaks → 1**. Every root it found, in the order they fell:
 | an ASSOC call result was never owned | `875ef56` | `freshRcArgFlavor` exempted it on a reading of `isBorrowedObjReturn` that had stopped being true. `array_flip` 22 MB, `array_combine` 105 MB. |
 | a CLOSURE LITERAL argument | `1d17dde` | `array_filter($t, "strlen")` — lowering coerces the string callable to a closure, `emitClosure` allocates an env at rc 1, and nobody owned it. |
 | a `\|` inside brackets is not a top-level union | `a4470e7` | the gate was a plain `strpos`, so `array<int,string\|null>` (str_getcsv, fgetcsv, every `array<K,V\|null>`) collapsed to a bare cell — the `.sig` then carried `mixed`, not `mixed[]`, **and a caller cannot own an erased word**. |
-| a variadic pack's elements had no release | `79cd5db` | A literal in ARGUMENT position hands its elements to the callee with it, so the call site owns only the BUFFER. Releasing them by the element's own flavor is the pairwise-symmetric drop, and it freed `array_merge`'s result out from under `LowerFns::collectVars`. Section 3. |
+| a variadic pack's elements had no release | `79cd5db` `2e1b880` | The release turns on what the reference TOOK. An OWNED element transferred its +1 — free it by its own flavor. A BORROWED one took a co-owner retain, and giving those element refs back miscompiles the compiler. Section 3. |
 | an obj/string ALIAS was retained and never released | `1335a76` `c526192` `f1baf57` | `$s = $x;` leaked one reference per call — the shape half the stdlib opens with. The retain was in the emitter, the release nowhere. Its pass-through half (`(string)$s` is the same pointer, so the same alias) followed, and `Compile\Mir\AliasOwn` is now the ONE predicate both sides read. |
 
 **Gates at `f1baf57`** (merged into local main): suite **1050/1052, failed 0** ·
@@ -99,7 +99,7 @@ was skipped by choice. Not run: **amd64**.
 
 ---
 
-## 3. CLOSED — a variadic pack's elements are released BUFFER-ONLY
+## 3. CLOSED — a pack element's release is what ITS REFERENCE took
 
 `79cd5db`. The leak was real and `8ab002a`'s reasoning about it still
 holds; what it got wrong is what the CALL SITE owns.
@@ -116,15 +116,17 @@ one. Its release drops every element kind that has a flavor — `vecstr`,
 repr walk, and a literal stamps no ownership repr. So the buffer was freed and
 everything inside it stranded.
 
-### What the call site owns: the BUFFER, and nothing else
+### What `8ab002a` assumed, and what it cost
 
 A literal in ARGUMENT position is handed to the callee BY VALUE, so its
-elements go with it. That is the standing rule for a named local —
-`EmitLlvm::shareCallArgs` marks it `FunctionEmitFrame::$elementSharedLocals`
-and its scope-exit release becomes `__mir_array_release_buf`, "the parser
-`$args` double-free" — and the rule already vetoes **a variadic tail** for
-precisely this reason. It could never see a pack element, because it matches on
-a local's NAME and a pack element is an anonymous temp.
+elements go with it. There is a standing rule for that shape — a named local in
+argument position is marked `FunctionEmitFrame::$elementSharedLocals` by
+`EmitLlvm::shareCallArgs` and its scope-exit release becomes
+`__mir_array_release_buf`, "the parser `$args` double-free" — and the rule
+already vetoes **a variadic tail**. It could never see a pack element, because
+it matches on a local's NAME and a pack element is an anonymous temp. It is
+also not the whole answer: the veto is right for a BORROWED element and wrong
+for an owned one, which is the distinction below.
 
 `8ab002a` released each element with the element's OWN release flavor, which
 under `$rcSymElem` is the pairwise-symmetric variant (`__mir_array_release_
@@ -149,21 +151,33 @@ with `bin/manticore build <manifest> --apps-only --keep-ir` (a manifest whose
 `__mir_props_*` and `EmitLlvm__*` left ten, and `LowerFromAst__collectVars` was
 one of them.
 
-### What is left
+### The rule, and the half of it that is still dark
 
-Ownership table **LEAK on 3 → 1, parity DIFF 0**. `array_diff` /
-`array_intersect` are clean: their result comes out of `array $arr`, a real
-by-value parameter, which the callee retains on entry.
+**The release turns on what THIS REFERENCE took**, which the retain in
+`emitArrayLitValue` has just answered:
 
-`array_merge` still leaks ONE REF PER ELEMENT, and the fix is on the callee
-side. Every value in its result comes out of the PACK; its `foreach` co-owns
-the element array (`__mir_array_retain_str`) and `$out[] = $v` retains each
-value, so after the call a string is held by both the argument's buffer and
-`$out`. Buffer-only strands the argument's ref. Giving it back at the call site
-is exactly the drop that miscompiles, so the answer is an owner for a pack
-element inside the callee — the same `RC_ELEM_READ_OWNS` question that
-[[elem-read-owns-breaks-linux-2026-09-04]] parked.
-
+- **no retain** — an owned producer (call / literal / spread) transferred its
+  +1 and the literal is its SOLE owner. Release it by its own flavor; it goes
+  completely. That is `array_merge($a, $b)`: every value in its result comes
+  out of the PACK (its `foreach` co-owns the element array and `$out[] = $v`
+  retains each value), so the argument's own element refs are the leftovers.
+  `array_diff` / `array_intersect` were never in that position — their result
+  comes out of `array $arr`, a real by-value parameter the callee retains on
+  entry, so buffer-only already balanced them.
+- **a retain** — a borrowed alias, co-owned including its elements
+  (`arrayRetainFlavor`). Giving those refs back here MISCOMPILES THE COMPILER.
+  ⛔**Bisected, not explained.** Both arms dropping (`8ab002a`) died in
+  `LowerFns::finishClosure`; the borrowed arm alone, behind a flavor-MATCHED
+  retain, died in `LowerFromAst::bareName`; both read a recycled string header.
+  Every pair reads symmetric in the IR — e.g. `VivifyRefArgs::vivifyFunction`
+  emits two `__mir_array_retain_obj` before the call and two
+  `__mir_array_release_ownel_obj` after it — and the retain variant does walk
+  its elements. Buffer-only there until the disagreement is named: one leaked
+  ref per element per call, the safe direction. **This is the next thing to
+  pick up in this area.**
+- a plain `vec` / `assoc` flavor is the runtime REPR walk, decided by bits a
+  literal never stamps — not the reference's answer either, so it degrades to
+  buffer-only with them.
 ### The other half of the hole, still open
 
 `$x = [explode(",", $s), ["z"]]` in a LOCAL leaks the same way and is NOT
