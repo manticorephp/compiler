@@ -211,17 +211,32 @@ nested_array_local.php` 42.6/83.2 LEAK → 2.0/2.0 ok). What is LEFT:
 
 - the nested STRINGS (`packleak local` 50/99, `nested` 84/167) — the inner
   array's own release is repr-driven and its producer stamps no repr;
-- ⛔ **`$q = $r` on a vec-of-arrays, a different root entirely**: the COPY does
-  not co-own what it now points at, 69 MB per 200k BEFORE and AFTER
-  (`packleak copy`, 143/284).
+- ✅ **`$q = $r` on a vec-of-arrays** — CLOSED by `00ff78e`, and it was a
+  different root: the emitter takes an independent `__mir_array_copy` as soon as
+  either side is mutated, so the destination owns a FRESH buffer and the source
+  is untouched — while `InsertMemoryOps` read the read-only-ALIAS answer for
+  both and blocked each of them (`notowned` / `vecalias`). Neither name got a
+  release at all. `Compile\Mir\VecCopyOnAssign` is the one predicate now, the
+  way `AliasOwn` is one for obj/string. 69/137 → 1/1; `packleak copy`
+  143/284 → 75/148, the rest being the same nested strings.
 
-The design that would close the strings, still not attempted: stamp
-`ARRAY_REPR_*` (ownership) on an array at every producer that owns its
-elements, so the generic `__mir_array_release` walk recurses and no static
-flavor is needed at all. `EmitLlvmArrays::erasedReprCode` already does this for
-the erased STORE path and carries the ⚠ that blocked it: `uasort` writes a
-sorted buffer back WITHOUT retaining, so a stamped source frees elements the
-result still points at. That has to be fixed first.
+⛔ **The nested STRINGS are what is left, and they need a design step.** `'arr'`
+drops each element with the repr-driven `__mir_array_release`, which goes only
+as deep as the element's OWN bits describe it — and its producer stamps none.
+Two ways out, neither free:
+
+1. Stamp `ARRAY_REPR_*` on the element where the literal adopts it. ⚠ This
+   contradicts a documented invariant: `EmitLlvmArrays::erasedReprCode` stamps
+   ONLY the erased path, on the ground that a concrete element uses
+   vecstr/vecobj/veccell and must not be stamped. And the standing hazard is
+   still there — `uasort` writes a sorted buffer back WITHOUT retaining, so a
+   stamped source frees elements the result still points at.
+2. Carry the INNER flavor in the outer one: `vecarrstr` / `vecarrobj` /
+   `vecarrcell` / `vecarrbuf`, either as separate symbols (16 across release /
+   ownel / retain / adopt) or as one helper taking the inner code as an
+   ARGUMENT — which `dropHelperFor`'s symbol-only interface does not admit
+   today. Fully static, no runtime bits, and no shared-buffer hazard beyond the
+   one `vecstr` already carries. This is the better one.
 ### How to test it — the part that is not optional
 
 **A green suite on the generation that EMITS a change proves nothing.** Both
