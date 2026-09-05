@@ -2199,6 +2199,19 @@ final class UnifiedArrayRuntime
         // Free the tagged base (ptr-8), not the data ptr.
         $base = $doFree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
         $this->profCounter($doFree, 26);
+        if (Debug::$arrRcTrace) {
+            // DEATH — the only point a heap buffer is actually reclaimed.
+            // Inferring it from `a release that landed at rc <= 0` is not the
+            // same statement: a symmetric variant reaches this block on every
+            // release and returns early above unless the count really hit
+            // zero, so the inference over-reports deaths in one direction and
+            // misses the collector's frees in the other. With the line, ALIVE
+            // in the balance means alive.
+            $ff = $this->module->anonString("[ARC] free arr=%p fn=%s\n");
+            $fc = $doFree->call('__mir_bt_top', Type::ptr(), []);
+            $doFree->call('dprintf', Type::i32(),
+                [Value::int(Type::i32(), 2), $ff, $arr, $fc], null, '(i32, ptr, ...)');
+        }
         $this->poolFree($doFree, $base);
         $doFree->retVoid();
     }

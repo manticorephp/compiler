@@ -68,6 +68,18 @@ $fh = \fopen($path, 'rb');
 while (($line = \fgets($fh)) !== false) {
     $lines++;
     if ($line === '' || $line[0] !== '[') { continue; }
+    // `[ARC] free arr=0x…` — the buffer is RECLAIMED. Stated, not inferred:
+    // a release landing at rc <= 0 is a different claim, and the address is
+    // free to be handed out again the moment this line prints.
+    if (\strncmp($line, '[ARC] free ', 11) === 0) {
+        $at = \strpos($line, 'arr=');
+        if ($at === false) { continue; }
+        $sp = \strpos($line, ' ', $at);
+        $ptr = \substr($line, $at + 4, $sp - $at - 4);
+        unset($live[$ptr], $born[$ptr]);
+        $freed++;
+        continue;
+    }
     // `[ARC] new arr=0x… fn=NAME` — a buffer is BORN. Recorded as a life of its
     // own, because the shape that matters most for a container is the one with
     // NO other event: allocated, retained by nobody, released by nobody. Without
@@ -95,8 +107,12 @@ while (($line = \fgets($fh)) !== false) {
         if ($oa === false || $na === false) { continue; }
         $oldP = \substr($line, $oa + 4, \strpos($line, ' ', $oa) - $oa - 4);
         $newP = \substr($line, $na + 4, \strpos($line, ' ', $na) - $na - 4);
-        if ($oldP !== $newP) {
-            $live[$newP] = $live[$oldP] ?? [];
+        // An ARENA buffer is born through a different allocator and traced
+        // nowhere, so a move of one must not invent a life for the new
+        // address — that phantom would then survive to the end and be
+        // reported as a leak nobody can explain.
+        if ($oldP !== $newP && isset($live[$oldP])) {
+            $live[$newP] = $live[$oldP];
             $born[$newP] = $born[$oldP] ?? '?';
             unset($live[$oldP], $born[$oldP]);
         }
@@ -117,13 +133,9 @@ while (($line = \fgets($fh)) !== false) {
         if ($fa !== false) { $fn = \rtrim(\substr($line, $fa + 3)); }
         $live[$ptr][] = [$isRet ? 'ret' : 'rel', $fn];
         if ($isRet) { $retains[$fn] = ($retains[$fn] ?? 0) + 1; }
-        else {
-            $rp = \strpos($line, 'rc=');
-            if ($rp !== false && (int)\substr($line, $rp + 3) <= 0) {
-                unset($live[$ptr]);
-                $freed++;
-            }
-        }
+        // No rc <= 0 inference here any more: `[ARC] free` states the death
+        // outright, and guessing it from the count double-counted a
+        // SYMMETRIC release (which reaches the free block on every call).
         continue;
     }
     // `[RC] free 0x…`, `[CC] cw free 0x…`, `[CC] mr free 0x…` all END a life.
