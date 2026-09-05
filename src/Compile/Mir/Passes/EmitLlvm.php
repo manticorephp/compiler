@@ -3700,6 +3700,16 @@ final class EmitLlvm implements EmitVisitor
         // whole document. `__mir_cell_drop` dispatches on the tag, so a `false`
         // or an int payload is a no-op.
         if ($this->isFreshCellTemp($a)) { return 'cell'; }
+        // A closure LITERAL is a fresh +1: {@see EmitLlvmCalls::emitClosure}
+        // allocates an env with its own lifetime header at rc 1, and the
+        // callee co-owns whatever it keeps ({@see
+        // EmitLlvmMemory::rcRetainByType}'s closure arm retains a BORROWED
+        // closure on every alias / element / property store). Nobody freed
+        // the argument, so `array_filter($t, "strlen")` — a string callable
+        // coerced to a closure at lowering — allocated one env per call and
+        // freed none. Only the LITERAL: a closure read out of a local or a
+        // property is a borrow.
+        if ($a->kind === Node::KIND_CLOSURE) { return 'closure'; }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
