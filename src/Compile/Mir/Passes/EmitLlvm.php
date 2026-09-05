@@ -2211,6 +2211,26 @@ final class EmitLlvm implements EmitVisitor
         }
         if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
         if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
+        // A property and an element store co-own on the SAME terms a local
+        // does, and by the same call: {@see EmitLlvmMemory::rcRetainByType}
+        // does not treat an array access as an owned producer, so it emits
+        // the +1 ({@see EmitLlvmObjects::emitStoreProperty} either side of
+        // the cell box, {@see EmitLlvmArrays::emitStoreElemValue}).
+        if ($p->kind === Node::KIND_STORE_PROPERTY) { return $p->value === $aa; }
+        if ($p->kind === Node::KIND_STORE_ELEMENT) { return $p->value === $aa; }
+        // `isset($this->m[$k])` tests presence: the word never outlives the
+        // test, so there is nothing for a later drop to strand.
+        if ($p->kind === Node::KIND_ISSET) { return true; }
+        // A conditional the emitter NORMALIZES gives every arm a +1 of the
+        // result type ({@see EmitLlvmControl::armRetainPostBox}), so an arm
+        // is owned before any consumer sees it. Gated on condOwnsResult, not
+        // on isConditional: an unknown-typed arm is deliberately NOT covered
+        // ({@see \Compile\Mir\CondOwn}) and keeps the borrowed treatment.
+        if ($this->condOwnsResult($p)) {
+            foreach (\Compile\Mir\CondOwn::arms($p) as $arm) {
+                if ($arm === $aa) { return true; }
+            }
+        }
         return false;
     }
 
