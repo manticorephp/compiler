@@ -176,13 +176,15 @@ one of them.
   `__mir_array_release_ownel_obj` after it — and the retain variant does walk
   its elements. Buffer-only there until the disagreement is named: one leaked
   ref per element per call, the safe direction. **This is the next thing to
-  pick up in this area.**
+  pick up in this area** — `tools/prof/packleak.php alias` is the repro,
+  38 → 75 MB at 200k/400k.
 - a plain `vec` / `assoc` flavor is the runtime REPR walk, decided by bits a
   literal never stamps — not the reference's answer either, so it degrades to
   buffer-only with them.
 ### The other half of the hole, still open
 
-`$x = [explode(",", $s), ["z"]]` in a LOCAL leaks the same way and is NOT
+`$x = [explode(",", $s), ["z"]]` in a LOCAL leaks the same way (84 → 167 MB,
+`tools/prof/packleak.php local`, and `nested` one level deeper) and is NOT
 covered: `$litElemCollect` is only set while a call ARGUMENT literal is being
 emitted, because only there is the by-value hand-off what justifies the
 buffer-only release. A local literal genuinely owns its elements, so its answer
