@@ -399,9 +399,16 @@ trait EmitLlvmObjects
                     $out .= $this->coerceToI64();
                     // A fresh CELL temp is dropped by its TAGGED word ({@see
                     // EmitLlvmCalls::emitCall}, same arm).
-                    if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
+                    $cellTmp = $this->isFreshCellTemp($a);
+                    if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
-                    if ($this->isFreshStringTemp($a)) {
+                    if ($cellTmp) {
+                        // ★ Already released by its TAGGED word above; asking
+                        // `freshRcArgFlavor` too drops the same temp twice.
+                        // Latent here since the ctor arm landed — a fresh cell
+                        // argument to a CONSTRUCTOR is simply rarer than one to
+                        // a method. Same defect, same fix, one shape.
+                    } elseif ($this->isFreshStringTemp($a)) {
                         $argTemps[] = $this->lastValue;
                     } else {
                         // A fresh obj / vec / assoc temp handed to a CONSTRUCTOR
@@ -4931,23 +4938,32 @@ trait EmitLlvmObjects
                 $out .= $this->coerceToI64();
                 // A fresh CELL temp is dropped by its TAGGED word ({@see
                 // EmitLlvmCalls::emitCall}, same arm).
-                if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
+                $cellTmp = $this->isFreshCellTemp($a);
+                if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
                 $argList .= 'i64 ' . $this->lastValue;
-                if ($this->isFreshStringTemp($a)) {
-                    $argTemps[] = $this->lastValue;
+                if ($cellTmp) {
+                    // ★ ALREADY released — by the TAGGED word recorded above.
+                    // `freshRcArgFlavor` answers 'cell' for this very node, so
+                    // asking it here as well dropped one temp TWICE. The arms
+                    // are EXCLUSIVE, exactly as {@see EmitLlvmCalls::emitCall}
+                    // spells them; written as three independent `if`s they
+                    // freed the string a task had just returned, and
+                    // `async_sleep_transparent` printed `results:` where php
+                    // prints `results: a,b,c` — 11 async/http cases from one
+                    // missing `elseif`.
+                } elseif ($this->isFreshStringTemp($a)) {                    $argTemps[] = $this->lastValue;
                 } else {
-                    // …and the rc temp, on exactly the terms the CONSTRUCTOR
-                    // path takes it ({@see emitNew}) and the free-function one
-                    // has always taken it ({@see EmitLlvmCalls::emitCall}).
-                    // Three call kinds, one discipline: a fresh obj / vec /
-                    // assoc handed straight to a callee that only BORROWS it
-                    // has no other owner, so nothing gave its +1 back.                    // A STATIC factory is how the whole AST is built —
-                    // `Stmt::block_($p->parseBlock(), $line)` — so this one
-                    // arm is why every `Parser\Ast\*` and `Compile\Mir\*`
-                    // class freed ZERO objects while `Lexer\Token` freed
-                    // 93.5%: the tokens go through a CONSTRUCTOR, the nodes
-                    // through a static call.
+                    // …and the rc temp, on the terms the CONSTRUCTOR path
+                    // ({@see emitNew}) and the free-function one ({@see
+                    // EmitLlvmCalls::emitCall}) have always taken it: a fresh
+                    // obj / vec / assoc handed to a callee that only BORROWS it
+                    // has no other owner, so nothing gave its +1 back.
+                    //
+                    // A STATIC factory is how the whole AST is built —
+                    // `Stmt::block_($p->parseBlock(), $line)` — which is why
+                    // every `Parser\Ast\*` and `Compile\Mir\*` class freed ZERO
+                    // objects while `Lexer\Token`, built with `new`, freed 93.5%.
                     $rf = (\Compile\Debug::$rcCtorArgTemp
                         && \str_contains(\Compile\Debug::$rcArgTemp, 's'))
                         ? $this->freshRcArgFlavor($a) : '';
@@ -5990,7 +6006,8 @@ trait EmitLlvmObjects
                 $out .= $this->coerceToI64();
                 // A fresh CELL temp is dropped by its TAGGED word ({@see
                 // EmitLlvmCalls::emitCall}, same arm).
-                if ($this->isFreshCellTemp($a)) { $cellArgTemps[] = $this->lastValue; }
+                $cellTmp = $this->isFreshCellTemp($a);
+                if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
                 $argList .= ', i64 ' . $this->lastValue;
                 // unboxCellArg lowers a CELL arg to the param's repr; everything
@@ -5998,15 +6015,29 @@ trait EmitLlvmObjects
                 $pt = $ptypes[$ai + 1] ?? null;
                 $argOutTypes[$ai + 1] = ($a->type->kind === Type::KIND_CELL && $pt !== null)
                     ? $pt : $a->type;
-                if ($this->isFreshStringTemp($a)) {
-                    $argTemps[] = $this->lastValue;
+                if ($cellTmp) {
+                    // ★ ALREADY released — by the TAGGED word recorded above.
+                    // `freshRcArgFlavor` answers 'cell' for this very node, so
+                    // asking it here as well dropped one temp TWICE. The arms
+                    // are EXCLUSIVE, exactly as {@see EmitLlvmCalls::emitCall}
+                    // spells them; written as three independent `if`s they
+                    // freed the string a task had just returned, and
+                    // `async_sleep_transparent` printed `results:` where php
+                    // prints `results: a,b,c` — 11 async/http cases from one
+                    // missing `elseif`.
+                } elseif ($this->isFreshStringTemp($a)) {                    $argTemps[] = $this->lastValue;
                 } else {
-                    // …and the rc temp, on exactly the terms the CONSTRUCTOR
-                    // path takes it ({@see emitNew}) and the free-function one
-                    // has always taken it ({@see EmitLlvmCalls::emitCall}).
-                    // Three call kinds, one discipline: a fresh obj / vec /
-                    // assoc handed straight to a callee that only BORROWS it
-                    // has no other owner, so nothing gave its +1 back.                    // The RECEIVER of a method call already had it ({@see
+                    // …and the rc temp, on the terms the CONSTRUCTOR path
+                    // ({@see emitNew}) and the free-function one ({@see
+                    // EmitLlvmCalls::emitCall}) have always taken it: a fresh
+                    // obj / vec / assoc handed to a callee that only BORROWS it
+                    // has no other owner, so nothing gave its +1 back.
+                    //
+                    // A STATIC factory is how the whole AST is built —
+                    // `Stmt::block_($p->parseBlock(), $line)` — which is why
+                    // every `Parser\Ast\*` and `Compile\Mir\*` class freed ZERO
+                    // objects while `Lexer\Token`, built with `new`, freed 93.5%.
+                    // The RECEIVER of a method call already had this ({@see
                     // emitMethodCallInner's recvFlavor); its ARGUMENTS did not.
                     $rf = (\Compile\Debug::$rcCtorArgTemp
                         && \str_contains(\Compile\Debug::$rcArgTemp, 'm'))

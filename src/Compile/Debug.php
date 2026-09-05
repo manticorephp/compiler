@@ -272,7 +272,7 @@ final class Debug
      * does with an argument that a static call does not is the open question —
      * NOT proof that the discipline is wrong.
      */
-    public static string $rcArgTemp = 's';
+    public static string $rcArgTemp = 'sm';
 
     /**
      * `MANTICORE_RC_SYM_ELEM=1` — every release of an element-owning array
