@@ -55,40 +55,63 @@ function pl_pieces(int $i): array
     return explode(',', 'alpha,beta,gamma' . $i);
 }
 
-function pl_run(string $mode, int $iters): int
+// ⚠ ONE FUNCTION PER MODE, and one LOCAL per mode. A name written with two
+// different types in one function gets ONE rc flavor (first-write-wins), and
+// with the nested flavors that is enough to make a whole mode read as a leak
+// that is really the neighbouring mode's type. The first version of this file
+// shared `$x` and `pl_run`, and it reported 84/167 for a shape that is flat.
+
+function pl_owned(int $n): int
 {
-    $sum = 0;
-    // Built at RUNTIME on purpose: a string LITERAL is immortal and its retain
-    // is a sentinel no-op, so a base of literals hides an alias arm entirely.
-    $base = pl_pieces(7);
-    for ($i = 0; $i < $iters; $i++) {
-        if ($mode === 'owned') {
-            $m = array_merge(pl_pieces($i), pl_pieces($i + 1));
-            $sum += count($m);
-        } elseif ($mode === 'alias') {
-            // The alias must be FRESH each iteration. A loop-invariant one leaks a
-            // REFCOUNT and not memory — the same three strings just climb to
-            // rc=2n — so RSS reads flat and says nothing.
-            $held = pl_pieces($i);
-            $m = array_merge($held, ['tail']);
-            $sum += count($m) + count($held);
-        } elseif ($mode === 'local') {
-            $x = [pl_pieces($i), ['solo' . $i]];
-            $sum += count($x) + count($x[0]);
-        } elseif ($mode === 'nested') {
-            $x = [[pl_pieces($i)], [['solo' . $i]]];
-            $sum += count($x) + count($x[0]);
-        } elseif ($mode === 'copy') {
-            $xc = [pl_pieces($i), pl_pieces($i + 1)];
-            $q = $xc;
-            $sum += count($xc) + count($q[1]);
-        } else {
-            $sum += 1;
-        }
-    }
-    return $sum + count($base);
+    $s = 0;
+    for ($i = 0; $i < $n; $i++) { $m = array_merge(pl_pieces($i), pl_pieces($i + 1)); $s += count($m); }
+    return $s;
 }
 
+function pl_alias(int $n): int
+{
+    $s = 0;
+    for ($i = 0; $i < $n; $i++) {
+        // The alias must be FRESH each iteration. A loop-invariant one leaks a
+        // REFCOUNT and not memory — the same strings just climb to rc=2n — so
+        // RSS reads flat and says nothing.
+        $held = pl_pieces($i);
+        $m = array_merge($held, ['tail']);
+        $s += count($m) + count($held);
+    }
+    return $s;
+}
+
+function pl_local(int $n): int
+{
+    $s = 0;
+    for ($i = 0; $i < $n; $i++) { $x = [pl_pieces($i), ['solo' . $i]]; $s += count($x) + count($x[0]); }
+    return $s;
+}
+
+function pl_nested(int $n): int
+{
+    $s = 0;
+    for ($i = 0; $i < $n; $i++) { $x = [[pl_pieces($i)], [['solo' . $i]]]; $s += count($x) + count($x[0]); }
+    return $s;
+}
+
+function pl_copy(int $n): int
+{
+    $s = 0;
+    for ($i = 0; $i < $n; $i++) {
+        $x = [pl_pieces($i), pl_pieces($i + 1)];
+        $q = $x;
+        $x[] = ['w'];
+        $s += count($x) + count($q[1]);
+    }
+    return $s;
+}
 $mode = $argc > 1 ? $argv[1] : 'owned';
 $iters = $argc > 2 ? (int)$argv[2] : 200000;
-echo $mode, ' ', pl_run($mode, $iters), "\n";
+if ($mode === 'owned') { echo $mode, ' ', pl_owned($iters), "\n"; }
+elseif ($mode === 'alias') { echo $mode, ' ', pl_alias($iters), "\n"; }
+elseif ($mode === 'local') { echo $mode, ' ', pl_local($iters), "\n"; }
+elseif ($mode === 'nested') { echo $mode, ' ', pl_nested($iters), "\n"; }
+elseif ($mode === 'copy') { echo $mode, ' ', pl_copy($iters), "\n"; }
+else { echo $mode, " 0\n"; }

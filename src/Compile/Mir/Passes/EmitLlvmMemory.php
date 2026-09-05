@@ -486,6 +486,31 @@ trait EmitLlvmMemory
         return $ownEl && $this->isOwnElemFlavor($f) ? $f . 'own' : $f;
     }
 
+    /**
+     * The flavor for a buffer whose ELEMENTS are arrays, carrying the INNER
+     * element's flavor with it: `vec[vec[string]]` is `vecarrstr`, whose walk
+     * releases each element as a `vecstr`.
+     *
+     * Without the inner half the walk is `arr` — the repr-driven
+     * `__mir_array_release`, which goes only as deep as the element's OWN bits
+     * describe it, and a producer stamps none. So the nested BUFFERS were freed
+     * and their strings stranded. The outer static type has always known the
+     * answer; it had nowhere to put it.
+     *
+     * Depth three (`vec[vec[vec[…]]]`) falls back to `arr` and its repr walk —
+     * the inner flavor of a nested-array element is itself `vec`.
+     */
+    private function nestedArrFlavor(Type $el, string $prefix): string
+    {
+        $inner = $this->discardReleaseFlavor($el);
+        if ($inner === 'vecstr' || $inner === 'assocstr') { return $prefix . 'arrstr'; }
+        if ($inner === 'veccell' || $inner === 'assoccell') { return $prefix . 'arrcell'; }
+        if ($inner === 'vecbuf' || $inner === 'assocbuf') { return $prefix . 'arrbuf'; }
+        if ($inner === 'vecobj' || $inner === 'assocobj'
+            || $inner === 'vecobjown' || $inner === 'assocobjown') { return $prefix . 'arrobj'; }
+        return $prefix . 'arr';
+    }
+
     /** {@see rcReleaseFlavor}'s answer before the ownership suffix. */
     private function rcReleaseFlavorPlain(\Compile\Mir\MemoryOp_ $mo, bool $shared): string
     {
@@ -508,7 +533,7 @@ trait EmitLlvmMemory
             // `discardReleaseFlavor` answers for PROPERTIES, call arguments and
             // the erased repr path too, where the same claim over-releases —
             // 20 array_ cases and a gen-3 abort.
-            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return 'vecarr'; }
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'vec'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
             return 'vec';
         }
@@ -518,7 +543,7 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
-            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return 'assocarr'; }
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'assoc'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
         }
@@ -647,7 +672,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
-        elseif ($flavor === 'vecarr' || $flavor === 'assocarr') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_arr'; }
+        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_' . $this->arrFlavorSuffix($flavor); }
         // The `own` suffix is a RELEASE-side distinction — retain already co-owns
         // the elements on every call, which is the asymmetry the suffix repairs.
         // Mapped rather than left to the default, so an `own` flavor arriving
@@ -655,7 +680,6 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobjown' || $flavor === 'assocobjown') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstrown' || $flavor === 'assocstrown') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccellown' || $flavor === 'assoccellown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
-        elseif ($flavor === 'vecarrown' || $flavor === 'assocarrown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_arr'; }
         $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";
@@ -697,7 +721,7 @@ trait EmitLlvmMemory
         // PROPERTIES and the erased repr path, where the claim over-releases.
         if (($flavor === 'vec' || $flavor === 'assoc') && $at !== null
             && $at->element !== null && $at->element->kind === Type::KIND_ARRAY) {
-            $flavor = $flavor . 'arr';
+            $flavor = $this->nestedArrFlavor($at->element, $flavor);
         }
         return $flavor;
     }
@@ -714,7 +738,7 @@ trait EmitLlvmMemory
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
-        elseif ($flavor === 'vecarr' || $flavor === 'assocarr') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_arr'; }
+        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_' . $this->arrFlavorSuffix($flavor); }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
         else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
         $p = $this->ssa->allocReg();
@@ -758,14 +782,13 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
-        elseif ($flavor === 'vecarr' || $flavor === 'assocarr') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_arr' : '@__mir_array_release_arr'; }
+        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = (\Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_' : '@__mir_array_release_') . $this->arrFlavorSuffix($flavor); }
         // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
         // retain, so its release gives them back — every time, not only at
         // rc → 0 ({@see collectOwnElemLocals}).
         elseif ($flavor === 'vecobjown' || $flavor === 'assocobjown') { $this->rt->needsRc = true; $fn = '@__mir_array_release_ownel_obj'; }
         elseif ($flavor === 'vecstrown' || $flavor === 'assocstrown') { $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_str'; }
         elseif ($flavor === 'veccellown' || $flavor === 'assoccellown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_cell'; }
-        elseif ($flavor === 'vecarrown' || $flavor === 'assocarrown') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_release_ownel_arr'; }
         $pv = $this->ssa->allocReg();
         $out  = '  ' . $pv . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
         $out .= '  call void ' . $fn . '(ptr ' . $pv . ")\n";

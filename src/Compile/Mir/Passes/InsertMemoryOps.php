@@ -702,7 +702,25 @@ final class InsertMemoryOps implements Pass
         $k = $t->kind;
         if ($k === Type::KIND_CELL) { return 'cell'; }
         if ($k === Type::KIND_STRING) { return 'str'; }
-        if ($k === Type::KIND_ARRAY) { return 'arr'; }
+        if ($k === Type::KIND_ARRAY) {
+            // An array of ARRAYS carries its INNER element's flavor in the
+            // release helper it picks ({@see \Compile\Mir\Passes\
+            // EmitLlvmMemory::nestedArrFlavor}), so two stores that disagree
+            // about it pick DIFFERENT helpers for one slot — and first-write-
+            // wins hands the loser's buffer to the winner's walk. `$g =
+            // [row($i), ['s']]` then `$g = [[$i], [$i+1]]` released a vec of
+            // INTS through `__mir_array_release_ownel_arrstr`, which read each
+            // int as a string pointer and dereferenced `1 - 8`. Name the
+            // difference so the existing flavor gate blocks it: a leak, never a
+            // free of a tag. Shallower slots are unaffected — `arr` compares
+            // equal to `arr` exactly as before.
+            $el = $t->element;
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) {
+                $inner = $el->element;
+                return 'arr:' . ($inner === null ? '?' : (string)$inner->kind);
+            }
+            return 'arr';
+        }
         if ($k === Type::KIND_OBJ) { return 'obj'; }
         return '';
     }
