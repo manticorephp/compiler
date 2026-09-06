@@ -167,17 +167,40 @@ one of them.
   comes out of `array $arr`, a real by-value parameter the callee retains on
   entry, so buffer-only already balanced them.
 - **a retain** — a borrowed alias, co-owned including its elements
-  (`arrayRetainFlavor`). Giving those refs back here MISCOMPILES THE COMPILER.
-  ⛔**Bisected, not explained.** Both arms dropping (`8ab002a`) died in
-  `LowerFns::finishClosure`; the borrowed arm alone, behind a flavor-MATCHED
-  retain, died in `LowerFromAst::bareName`; both read a recycled string header.
-  Every pair reads symmetric in the IR — e.g. `VivifyRefArgs::vivifyFunction`
-  emits two `__mir_array_retain_obj` before the call and two
-  `__mir_array_release_ownel_obj` after it — and the retain variant does walk
-  its elements. Buffer-only there until the disagreement is named: one leaked
-  ref per element per call, the safe direction. **This is the next thing to
-  pick up in this area** — `tools/prof/packleak.php alias` is the repro,
-  38 → 75 MB at 200k/400k.
+  (`arrayRetainFlavor`). Giving those refs back here MISCOMPILES THE COMPILER,
+  and the reason is now known: **there is nothing to fix in this arm.** The
+  release is one release too many only because a buffer ONE LEVEL UP is already
+  being released while a reference to it survives; the pack-element release
+  merely removes the slack that hid it. The evidence, from
+  `MANTICORE_ARR_RC_TRACE=1` with the string half and its allocation event:
+
+      rel ownel_str arr=…088 rc=1    str 3->2
+      rel ownel_str arr=…088 rc=0    str 2->1     buffer …088 DIES
+      ret retain_str arr=…028 rc=2   str 1->2     the pack literal retains …028
+      rel __mir_array_release arr=…0d8 len=2 rc=0  the pack itself
+      rel ownel_str arr=<singleton>                element 1, empty
+      rel ownel_str arr=…028 rc=1    str 2->1     the pack-element release
+      rel ownel_str arr=…028 rc=0    str 1->0     the slot drop; …028 and the string die
+      ret retain_str arr=…088 rc=2   ✗            …088 retained SEVEN events after it died
+
+  `…088` and `…028` are one buffer and its `__mir_array_copy` — `$out =
+  array_merge($out, …)` copies because `$out` is mutated — so they share the
+  string and each gives it back once, which balances. The last line does not: a
+  buffer retained after its own death, with the ARRAY retain guard silent
+  because the pool has already recycled the block and written rc=1 into it while
+  a live reference to the OLD buffer still holds a slot pointing at the dead
+  string.
+
+  ⛔ **Next: `[ARC] new` for arrays**, the same move that made the string half
+  readable — then the reference that outlives `…088`'s last release can be
+  named. Until then the release stays buffer-only: one leaked ref per element
+  per call, the safe direction (`tools/prof/packleak.php alias`, 38/75).
+
+  ★ Two notes that are no longer true and cost a session each: "a compiler built
+  with `MANTICORE_DEBUG_VERIFY=1` crashes with NO guard firing" — it fires,
+  `[VERIFY] str_release: rc <= 0` inside `LowerFromAst::collectVars` — and the
+  string path had NO retain-side guard at all, so the first illegal touch was
+  silent and only the second was reported.
 - a plain `vec` / `assoc` flavor is the runtime REPR walk, decided by bits a
   literal never stamps — not the reference's answer either, so it degrades to
   buffer-only with them.
