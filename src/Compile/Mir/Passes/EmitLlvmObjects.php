@@ -5271,7 +5271,147 @@ trait EmitLlvmObjects
      * @param array<string, string> $targets    candidate class → declaring class
      * @param array<string, bool>   $erasedSyms symbol → emitted-as-erased
      */
+    /**
+     * ONE dispatcher per distinct SHAPE, called — not spliced into every site.
+     *
+     * The body depends on nothing about the site except the receiver and the
+     * arguments, which are what parameters are for. Everything else — the
+     * candidate set, the callee each resolves to, the fallback, the boxing and
+     * the per-arm re-coercion — is static metadata, so two sites agreeing on all
+     * of it were emitting byte-identical blocks.
+     *
+     * They were not agreeing rarely. `Symfony\Flex\Flex::activate` carried
+     * 16,515 of these switches in ONE function — 736,576 `vd.case` arms and
+     * 1.03M `cid.*` binary-search blocks — for 419 MB of IR out of a 134-line
+     * php body. It is the third instance of the same mistake in this file, after
+     * `emitObjectVarsFn` and `emitErasedIfaceCall`.
+     *
+     * Out-lined only when every argument is already an `i64` operand: the per-arm
+     * coercion in {@see vdArmArgs} matches on `i64 ` and would otherwise fire
+     * inside the thunk where it did not fire at the site.
+     */
     private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
+    {
+        $parts = \explode(', ', $argList);
+        $n = \count($parts);
+        $plain = true;
+        foreach ($parts as $p) {
+            if (!\str_starts_with($p, 'i64 ')) { $plain = false; break; }
+        }
+        if (!$plain || $n < 1 || \count($cands) < 2) {
+            return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
+                $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+        }
+        $key = $this->virtualDispatchKey($n, $cands, $targets, $fallback, $method,
+            $boxCell, $erasedSyms, $argOutTypes);
+        $sym = $this->vdSyms[$key] ?? '';
+        if ($sym === '') {
+            $sym = '__mir_vdisp_' . (string)\count($this->vdSyms);
+            // Registered BEFORE the body is built: the body cannot reach this
+            // shape again (it dispatches, it does not re-dispatch), but a
+            // half-built registry is the one state that would emit two bodies
+            // for one symbol.
+            $this->vdSyms[$key] = $sym;
+            $params = '';
+            $thunkArgs = '';
+            for ($i = 0; $i < $n; $i++) {
+                if ($i > 0) { $params .= ', '; $thunkArgs .= ', '; }
+                $params .= 'i64 %a' . (string)$i;
+                $thunkArgs .= 'i64 %a' . (string)$i;
+            }
+            $body = $this->emitVirtualDispatchInline('%a0', $thunkArgs, $cands, $targets,
+                $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            // ⚠ A body is only a function if it is CLOSED. Some arms reach
+            // helpers that hand back a register the SITE created — a spread pack
+            // is one — and moving that block into a thunk leaves the reference
+            // dangling (`use of undefined value %r475`, pdo_sqlite_types). There
+            // is no list of which shapes do it, so ASK the body: any `%rN` it
+            // uses and does not define means this shape stays inline.
+            if (!$this->irIsClosed($body . '  ret i64 ' . $this->vdResult . "\n")) {
+                unset($this->vdSyms[$key]);
+                return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
+                    $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            }
+            $this->vdExtraBodies .= 'define internal i64 @' . $sym . '(' . $params
+                . ") noinline optnone {\nentry:\n" . $body
+                . '  ret i64 ' . $this->vdResult . "\n}\n\n";
+        }
+        $r = $this->ssa->allocReg();
+        $callArgs = 'i64 ' . $thisArg;
+        for ($i = 1; $i < $n; $i++) { $callArgs .= ', ' . $parts[$i]; }
+        $this->vdResult = $r;
+        return '  ' . $r . ' = call i64 @' . $sym . '(' . $callArgs . ")\n";
+    }
+
+    /**
+     * Whether every `%rN` operand in `$ir` is defined inside `$ir`.
+     *
+     * A block that is legal spliced into its producer is not automatically legal
+     * as a function: it may read a register the surrounding frame defined. The
+     * check is textual and deliberately conservative — a name it cannot see the
+     * definition of makes the shape stay inline, which is only ever a missed
+     * saving.
+     */
+    private function irIsClosed(string $ir): bool
+    {
+        $defined = [];
+        $used = [];
+        foreach (\explode("\n", $ir) as $line) {
+            $t = \ltrim($line);
+            // `%rN = ...` — a definition. Parameters are `%aN` and never match.
+            if (\strncmp($t, '%r', 2) === 0) {
+                $eq = \strpos($t, ' = ');
+                if ($eq !== false) { $defined[\substr($t, 0, $eq)] = true; }
+            }
+            $n = \strlen($line);
+            $i = 0;
+            while ($i < $n) {
+                $c = $line[$i];
+                if ($c === '%' && $i + 1 < $n && $line[$i + 1] === 'r') {
+                    $j = $i + 2;
+                    while ($j < $n) {
+                        $d = $line[$j];
+                        if ($d < '0' || $d > '9') { break; }
+                        $j = $j + 1;
+                    }
+                    if ($j > $i + 2) { $used[\substr($line, $i, $j - $i)] = true; }
+                    $i = $j;
+                    continue;
+                }
+                $i = $i + 1;
+            }
+        }
+        foreach ($used as $u => $_) {
+            if (!isset($defined[$u])) { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * Everything the dispatcher body depends on, as one string. Types enter by
+     * their interned id, classes and symbols by name, in the order the arms are
+     * emitted — two shapes that differ anywhere differ here.
+     *
+     * @param string[]              $cands
+     * @param array<string, string> $targets
+     * @param array<string, bool>   $erasedSyms
+     * @param array<int, ?Type>     $argOutTypes
+     */
+    private function virtualDispatchKey(int $argc, array $cands, array $targets, string $fallback, string $method, bool $boxCell, array $erasedSyms, array $argOutTypes): string
+    {
+        $k = $method . '#' . $fallback . '#' . ($boxCell ? '1' : '0') . '#' . (string)$argc;
+        foreach ($cands as $c) {
+            $t = $targets[$c] ?? '';
+            $k .= '|' . $c . '>' . $t . (isset($erasedSyms[$t]) ? 'E' : '');
+        }
+        $k .= '@';
+        for ($i = 0; $i < $argc; $i++) {
+            $t = $argOutTypes[$i] ?? null;
+            $k .= ($t === null ? '-' : (string)$t->id) . ',';
+        }
+        return $k;
+    }
+    private function emitVirtualDispatchInline(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
         $objp = $this->ssa->allocReg();
         $out = '  ' . $objp . ' = inttoptr i64 ' . $thisArg . " to ptr\n";

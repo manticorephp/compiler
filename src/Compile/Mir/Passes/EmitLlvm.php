@@ -715,6 +715,8 @@ final class EmitLlvm implements EmitVisitor
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
+        $this->vdSyms = [];
+        $this->vdExtraBodies = '';
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -1016,6 +1018,7 @@ final class EmitLlvm implements EmitVisitor
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
+        $extraBodies .= $this->vdExtraBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1864,6 +1867,16 @@ final class EmitLlvm implements EmitVisitor
     private array $erasedIfaceMethod = [];
     /** @var array<string, int> */
     private array $erasedIfaceArgc = [];
+
+    /**
+     * Out-of-line virtual dispatchers: shape key → symbol, and the bodies
+     * themselves ({@see EmitLlvmObjects::emitVirtualDispatch}). A STRING
+     * accumulator, not a registry of structures — the body is built at first
+     * sight, so nothing has to be stored and rebuilt later.
+     * @var array<string, string>
+     */
+    private array $vdSyms = [];
+    private string $vdExtraBodies = '';
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */
