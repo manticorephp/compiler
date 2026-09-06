@@ -448,6 +448,17 @@ trait EmitLlvmRuntime
         if ($darwin) {
             $out .= "@__mir_strreclaim_count = linkonce_odr global i64 0\n";
         }
+        if (\Compile\Debug::$arrRcTrace) {
+            // The ALLOCATION event. Without it the trace cannot tell a
+            // RECYCLED address from the original one — the string pool hands
+            // the same block back within a few lines of freeing it, so a
+            // `rel rc=0` followed by a `ret rc=1` on one address reads as a
+            // retain of a dead string and as a fresh allocation equally well.
+            // The array half needed the same event for the same reason.
+            $nraw = '[SRC] new str=%p len=%lld';
+            $out .= '@.src.new = private unnamed_addr constant ['
+                . (string)(\strlen($nraw) + 2) . ' x i8] c"' . $nraw . '\0A\00", align 1' . "\n";
+        }
         $out .= "define ptr @__mir_str_alloc(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(0);
@@ -514,6 +525,9 @@ trait EmitLlvmRuntime
         $out .= "  %hashp = getelementptr inbounds i8, ptr %p, i64 " . $hashAt . "\n";
         $out .= "  store i64 0, ptr %hashp\n";                        // hash = 0 (uncomputed)
         $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $H . "\n";
+        if (\Compile\Debug::$arrRcTrace) {
+            $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.new, ptr %d, i64 %n)\n";
+        }
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
         // Reclaim a freed string base: recycle into its size-class bin (cap
