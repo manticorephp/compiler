@@ -1926,6 +1926,13 @@ trait EmitLlvmRuntime
             // Derived from the class alone — identical bytes in every module
             // that emits it, which is what the linkonce_odr coalescing needs.
             $propsFld = 'ptr null';
+            // A METHOD enum owns a class row here, and an enum declares no
+            // properties — so this loop would leave its descriptor pointing at
+            // nothing while {@see EmitLlvm::emitEnumCellSingletons} emitted the
+            // body. Point at it; one enum, one answer.
+            if (isset($this->enums[$cls->name])) {
+                $propsFld = 'ptr ' . \Compile\Mir\RuntimeLibrary::propsFnSymbol((int)$id);
+            }
             $hasProps = false;
             foreach ($cls->propertyNames as $pn) {
                 if (($cls->propertyTypes[$pn] ?? null) !== null) { $hasProps = true; break; }

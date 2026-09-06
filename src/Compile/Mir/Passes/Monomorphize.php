@@ -329,6 +329,15 @@ final class Monomorphize implements Pass
             // cloneWith substitutes the pack type wholesale, so the pack ABI is
             // unchanged — only its element type gets sharper.
             if ($p->variadic && !$this->isSpecializableVariadicPack($p, $idx, $calls)) { continue; }
+            // A `#[CellArg]` param is REBUILT boxed at every call site
+            // (`$camask` → `emitCellifyArrayRaw` in EmitLlvmCalls), so what the
+            // callee receives is a `vec[cell]` whatever the argument's static
+            // type says. Specializing it to that static type makes the clone
+            // read tagged cells as raw slots — `array_column($rows, …)` over
+            // `vec[assoc[string,cell]]` died in `__mir_array_retain_cell` on a
+            // tagged word. The attribute IS the repr decision; a dimension has
+            // nothing left to choose.
+            if ($p->cellArg) { continue; }
             // A dimension is either an erased-array param receiving a concrete
             // array, or a bare `callable` param receiving a concrete closure at
             // >=1 site. Retyping the callable param to the closure's obj type

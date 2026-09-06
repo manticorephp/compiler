@@ -1202,6 +1202,21 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /** Backing kind via a typed param (self-host slot offset). */
+    /**
+     * `@__mir_props_<id>(ptr %o) -> i64` for an ENUM — what php's
+     * `get_object_vars()` / `(array)` answer for a case: `name`, plus `value`
+     * when the enum is backed. `linkonce_odr` and derived from the EnumDef
+     * alone, so every module emitting this enum emits identical bytes.
+     */
+    private function emitEnumPropsFn(string $name, \Compile\Mir\EnumDef $ed): string
+    {
+        $ir = $this->emitEnumVarsArray('%o', $name, $ed);
+        $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol($ed->classId);
+        return 'define i64 ' . $sym . "(ptr %o) {\nentry:\n" . $ir
+            . '  %epri = ptrtoint ptr ' . $this->lastValue . " to i64\n"
+            . "  ret i64 %epri\n}\n";
+    }
+
     private function edBacking(\Compile\Mir\EnumDef $ed): string
     {
         return $ed->backing;
@@ -1236,10 +1251,21 @@ final class EmitLlvm implements EmitVisitor
         $out = '';
         // Descriptor — reuse the class descriptor if a method-enum already
         // registered one (dropRuntime emits `@__mir_cd_<id>` for it); else emit.
+        // The case's DECLARED "properties" — `name`, and `value` when backed —
+        // reachable from a GENERIC runtime helper. `__mir_object_vars` is
+        // `internal` and specialized from the EMITTING module's table, so
+        // `manticore_stdlib.o` cannot see a user enum at all: `array_column(
+        // Enum::cases(), 'value')` inside the stdlib answered []. The descriptor
+        // is the channel the class path already uses for exactly this. Derived
+        // from the EnumDef alone — identical bytes in every module that emits
+        // it, which is what the linkonce_odr coalescing requires.
+        $out .= $this->emitEnumPropsFn($name, $ed);
+        $propsFld = 'ptr ' . \Compile\Mir\RuntimeLibrary::propsFnSymbol($ed->classId);
         if (!isset($this->classes[$name])) {
             // Same spelling as the ordinary path — the symbol coalesces by name,
             // so a type that disagreed would be one symbol defined two ways.
-            $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal($ed->classId, 'ptr null');
+            $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
+                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld);
         }
         $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
         // LLVM symbol infix must fold `\` (namespaced enums like Io\Poll\Backend

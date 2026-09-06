@@ -6897,7 +6897,9 @@ trait EmitLlvmBuiltins
             if ($cd->propertyNames === []) { continue; }
             $holders[$cname] = $cd;
         }
-        if ($holders === []) { return $out . $this->emitObjectVarsFallback($objPtr); }
+        if ($holders === [] && $this->enums === []) {
+            return $out . $this->emitObjectVarsFallback($objPtr);
+        }
 
         $out .= $this->emitLoadClassId($objPtr);
         $cid = $this->classIdReg;
@@ -6934,6 +6936,27 @@ trait EmitLlvmBuiltins
             $pi = $this->ssa->allocReg();
             $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $props . " to i64\n";
             $bodies .= '  store i64 ' . $pi . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        // ⚠ An ENUM CASE is an object to every erased consumer, and it is NOT
+        // one of the shapes the fallback can read: its singleton is a
+        // read-only `{ ENUM_TAG_MAGIC, desc, 0, ordinal }` constant with a
+        // descriptor whose props fn is null, so the fallback fell through to
+        // the dynamic-BAG arm and dereferenced the ordinal word as a bag
+        // pointer — `get_object_vars($case)` / `(array)$case` on an erased
+        // receiver SIGSEGVd. php answers `[name => …]`, plus `value` when the
+        // enum is backed; the tables are already emitted per enum and indexed
+        // by the ordinal at +16 ({@see EmitLlvm::emitEnumCellSingletons},
+        // {@see EmitLlvmObjects::emitEnumCellPropLoad}).
+        foreach ($this->enums as $ename => $ed) {
+            if (isset($holders[$ename])) { continue; }
+            $lbl = $this->ssa->allocLabel('gov.enum');
+            $switch .= '    i64 ' . (string)$ed->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $this->emitEnumVarsArray($objPtr, $ename, $ed);
+            $ei = $this->ssa->allocReg();
+            $bodies .= '  ' . $ei . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $bodies .= '  store i64 ' . $ei . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
         $switch .= "  ]\n";
@@ -7036,6 +7059,60 @@ trait EmitLlvmBuiltins
      * cast can reuse it without emitting its operand a SECOND time (which would
      * run the operand's side effects twice).
      */
+    /**
+     * One enum CASE as php sees it through reflection: `[name => <case>]`, plus
+     * `[value => <backing>]` when the enum is backed. The ordinal is at +16 of
+     * the case singleton and the per-enum `__names` / `__values` tables are
+     * already emitted and indexed by it, so this arm reads the same two globals
+     * the direct `$case->name` / `$case->value` path does.
+     *
+     * The boxed name/value are LITERAL globals (immortal, rc = -1), so the map
+     * that now holds them needs no mirror retain — its release runs
+     * `__mir_cell_drop` per element, which is a no-op on an immortal string.
+     */
+    private function emitEnumVarsArray(string $objPtr, string $ecls, \Compile\Mir\EnumDef $ed): string
+    {
+        $this->rt->needsTagged = true;
+        $en = $this->mangle($ecls);
+        $n = (string)\count($ed->caseNames);
+        $g0 = $this->ssa->allocReg();
+        $out = '  ' . $g0 . ' = getelementptr i8, ptr ' . $objPtr . ", i64 16\n";
+        $ord = $this->ssa->allocReg();
+        $out .= '  ' . $ord . ' = load i64, ptr ' . $g0 . "\n";
+        $arr = $this->ssa->allocReg();
+        $out .= '  ' . $arr . " = call ptr @__mir_array_alloc(i64 0)\n";
+        $gepN = $this->ssa->allocReg();
+        $out .= '  ' . $gepN . ' = getelementptr inbounds [' . $n . ' x ptr], ptr @'
+              . $en . '__names, i64 0, i64 ' . $ord . "\n";
+        $nameP = $this->ssa->allocReg();
+        $out .= '  ' . $nameP . ' = load ptr, ptr ' . $gepN . "\n";
+        $nameB = $this->ssa->allocReg();
+        $out .= '  ' . $nameB . ' = call i64 @__manticore_box_ptr(ptr ' . $nameP . ")\n";
+        $cur = $this->ssa->allocReg();
+        $out .= '  ' . $cur . ' = call ptr @__mir_array_set_str(ptr ' . $arr . ', ptr '
+              . $this->litStr('name') . ', i64 ' . $nameB . ", i64 0, i64 0)\n";
+        $backing = $this->edBacking($ed);
+        if ($backing === 'int' || $backing === 'string') {
+            $isInt = $backing === 'int';
+            $gepV = $this->ssa->allocReg();
+            $out .= '  ' . $gepV . ' = getelementptr inbounds [' . $n . ' x '
+                  . ($isInt ? 'i64' : 'ptr') . '], ptr @' . $en
+                  . '__values, i64 0, i64 ' . $ord . "\n";
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = load ' . ($isInt ? 'i64' : 'ptr') . ', ptr ' . $gepV . "\n";
+            $vb = $this->ssa->allocReg();
+            $out .= '  ' . $vb . ' = call i64 @__manticore_box_'
+                  . ($isInt ? 'int(i64 ' : 'ptr(ptr ') . $v . ")\n";
+            $nxt = $this->ssa->allocReg();
+            $out .= '  ' . $nxt . ' = call ptr @__mir_array_set_str(ptr ' . $cur . ', ptr '
+                  . $this->litStr('value') . ', i64 ' . $vb . ", i64 0, i64 0)\n";
+            $cur = $nxt;
+        }
+        $this->lastValue = $cur;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false): string
     {
         $this->rt->needsTagged = true;
