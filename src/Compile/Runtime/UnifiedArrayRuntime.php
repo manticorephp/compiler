@@ -65,6 +65,13 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
         $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
+        // A NESTED array element — `assoc[string, vec[obj<T>]]`. Its own
+        // element flavor is baked into the name rather than read at runtime:
+        // a CONCRETE inner buffer carries no repr bits ({@see
+        // EmitLlvmArrays::erasedReprCode} never stamps one), so the
+        // repr-dispatching plain release walks nothing and the inner objects
+        // are stranded — 155 MB against a flat 1.2 in tools/prof/nested_prop.
+        $this->emitRetainVariant('__mir_array_retain_arrobj', 'arrobj');
         // ADOPT = retain MINUS the rc bump: co-own the hashed keys and the
         // elements of a buffer this frame already owns outright. That is exactly
         // what a value COPY needs — `__mir_array_copy` hands back a FRESH rc=1
@@ -75,6 +82,7 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_adopt_obj', 'obj', false);
         $this->emitRetainVariant('__mir_array_adopt_str', 'str', false);
         $this->emitRetainVariant('__mir_array_adopt_cell', 'cell', false);
+        $this->emitRetainVariant('__mir_array_adopt_arrobj', 'arrobj', false);
         $this->emitRetainVariant('__mir_array_adopt_buf', '', false);
         $this->emitRetainVariant('__mir_array_adopt', 'repr', false);
         $this->emitRelease();
@@ -1726,6 +1734,7 @@ final class UnifiedArrayRuntime
         // one site and released as `_str` at another then over-releases a LIVE
         // buffer (json / pdo / preg / unserialize / var_export went red).
         $this->emitReleaseVariant('__mir_array_release_ownel_obj', 'obj', true);
+        $this->emitReleaseVariant('__mir_array_release_ownel_arrobj', 'arrobj', true);
         $this->emitReleaseVariant('__mir_array_release_ownel_str', 'str', true);
         $this->emitReleaseVariant('__mir_array_release_ownel_cell', 'cell', true);
     }
@@ -1826,6 +1835,17 @@ final class UnifiedArrayRuntime
     {
         if ($flavor === '') { return $b; }
         if ($flavor === 'cell') { $b->call('__mir_cell_drop', Type::void(), [$v]); return $b; }
+        // An element that is ITSELF AN ARRAY. `__mir_rc_release` cannot serve
+        // here: it routes on the word at ptr-8, and an array's tag
+        // (ARRAY_TAG_MAGIC, …0002) is not RC_TAG_MAGIC (…0000), so an array
+        // would take the STRING branch and have its length word decremented as
+        // a refcount. The partner of the store's `__mir_array_retain_obj` is
+        // the inner array's own element-walking release, which is this.
+        if ($flavor === 'arrobj') {
+            $ap = $b->inttoptr($v, Type::ptr());
+            $b->call('__mir_array_release_ownel_obj', Type::void(), [$ap]);
+            return $b;
+        }
         if ($isCell !== null) {
             $cellB = $fn->block('dv_cell_' . $tag);
             $rawB  = $fn->block('dv_raw_' . $tag);
@@ -1860,6 +1880,12 @@ final class UnifiedArrayRuntime
     {
         if ($flavor === '') { return $b; }
         if ($flavor === 'cell') { $b->call('__mir_cell_retain', Type::void(), [$v]); return $b; }
+        // …and its mirror ({@see emitDropValue}'s `arrobj` arm).
+        if ($flavor === 'arrobj') {
+            $ap = $b->inttoptr($v, Type::ptr());
+            $b->call('__mir_array_retain_obj', Type::void(), [$ap]);
+            return $b;
+        }
         $join = null;
         if ($isCell !== null) {
             // Runtime shape beats the static flavor — see {@see emitDropValue}.

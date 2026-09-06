@@ -761,6 +761,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
+        elseif ($flavor === 'vecarrobj' || $flavor === 'assocarrobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_arrobj'; }
         // The `own` suffix is a RELEASE-side distinction — retain already co-owns
         // the elements on every call, which is the asymmetry the suffix repairs.
         // Mapped rather than left to the default, so an `own` flavor arriving
@@ -814,6 +815,7 @@ trait EmitLlvmMemory
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
+        elseif ($flavor === 'vecarrobj' || $flavor === 'assocarrobj') { $this->rt->needsRc = true; $sym .= '_arrobj'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
         else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
         $p = $this->ssa->allocReg();
@@ -857,6 +859,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
+        elseif ($flavor === 'vecarrobj' || $flavor === 'assocarrobj') { $this->rt->needsRc = true; $fn = '@__mir_array_release_ownel_arrobj'; }
         // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
         // retain, so its release gives them back — every time, not only at
         // rc → 0 ({@see collectOwnElemLocals}).

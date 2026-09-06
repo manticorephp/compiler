@@ -2627,7 +2627,8 @@ final class EmitLlvm implements EmitVisitor
     {
         return $flavor === 'vecstr' || $flavor === 'assocstr'
             || $flavor === 'vecobj' || $flavor === 'assocobj'
-            || $flavor === 'veccell' || $flavor === 'assoccell';
+            || $flavor === 'veccell' || $flavor === 'assoccell'
+            || $flavor === 'vecarrobj' || $flavor === 'assocarrobj';
     }
 
     /** Builtins whose argument's array-ness must be visible at runtime (they
@@ -3584,6 +3585,16 @@ final class EmitLlvm implements EmitVisitor
         if ($t->isVec()) {
             $el = $t->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
+            // An element that is ITSELF AN ARRAY. The store retains it as an
+            // array ({@see EmitLlvmMemory::rcRetainByType} → arrayRetainFlavor),
+            // so the drop owes one array release per element; without a name
+            // for that the slot fell to the buffer-only `vec`/`assoc` and every
+            // inner array leaked whole. Only a CONCRETE obj element is covered:
+            // the inner flavor has to be known at compile time, because a
+            // concrete buffer carries no repr bits to dispatch on.
+            if ($el !== null && $el->kind === Type::KIND_ARRAY
+                && $el->element !== null && $el->element->kind === Type::KIND_OBJ
+                && $this->elemObjFlavor($el->element) === 'obj') { return 'vecarrobj'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vec' . $this->elemObjFlavor($el); }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A concrete scalar element (int/float/bool/null) has nothing to
@@ -3595,6 +3606,16 @@ final class EmitLlvm implements EmitVisitor
         if ($t->isAssoc()) {
             $el = $t->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
+            // An element that is ITSELF AN ARRAY. The store retains it as an
+            // array ({@see EmitLlvmMemory::rcRetainByType} → arrayRetainFlavor),
+            // so the drop owes one array release per element; without a name
+            // for that the slot fell to the buffer-only `vec`/`assoc` and every
+            // inner array leaked whole. Only a CONCRETE obj element is covered:
+            // the inner flavor has to be known at compile time, because a
+            // concrete buffer carries no repr bits to dispatch on.
+            if ($el !== null && $el->kind === Type::KIND_ARRAY
+                && $el->element !== null && $el->element->kind === Type::KIND_OBJ
+                && $this->elemObjFlavor($el->element) === 'obj') { return 'assocarrobj'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assoc' . $this->elemObjFlavor($el); }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
@@ -3692,6 +3713,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
+        if ($flavor === 'vecarrobj' || $flavor === 'assocarrobj') { return '@__mir_array_release_ownel_arrobj'; }
         if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         // PAIRWISE-SYMMETRIC: this slot took the element refs in its own store's
