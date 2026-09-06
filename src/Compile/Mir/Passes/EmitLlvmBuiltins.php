@@ -61,6 +61,16 @@ trait EmitLlvmBuiltins
     /** Collect {@see $litElemDropRegs} while emitting an argument literal. */
     private bool $litElemCollect = false;
 
+    /**
+     * The CALLEE's declared element type for the parameter that literal is
+     * being emitted for — null when the callee's parameter is a bare
+     * `array`. The literal's element release is only sound if the callee
+     * CO-OWNS what it copies out, and a callee whose parameter is erased
+     * cannot: its entry retain is the runtime repr walk over bits a
+     * literal never stamps. {@see EmitLlvmArrays::emitArrayLitValue}.
+     */
+    private ?Type $litElemCalleeElem = null;
+
     private function emitBuiltin(Call $c): ?string
     {
         $mark = \count($this->arrArgTempRegs);

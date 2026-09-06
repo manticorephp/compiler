@@ -2414,9 +2414,16 @@ trait EmitLlvmCalls
                 // ({@see EmitLlvmBuiltins::$litElemDropRegs}).
                 $litMark = \count($this->litElemDropRegs);
                 $wasCollect = $this->litElemCollect;
+                $wasCalleeElem = $this->litElemCalleeElem;
                 $this->litElemCollect = $a->kind === Node::KIND_ARRAY_LIT;
+                // What the CALLEE declared for this parameter. The element
+                // release below is a transfer of this reference to the callee,
+                // and only a callee that CO-OWNS the elements can take it.
+                $cpt = $ptypes[$ai] ?? null;
+                $this->litElemCalleeElem = ($cpt !== null && $cpt->isArray()) ? $cpt->element : null;
                 $out .= $this->emitNode($a);
                 $this->litElemCollect = $wasCollect;
+                $this->litElemCalleeElem = $wasCalleeElem;
                 // An int/bool arg to a declared `float` param converts
                 // numerically (sitofp) — else the integer bits bitcast through
                 // the i64 ABI carrier and the callee reads a garbage double

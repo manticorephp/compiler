@@ -372,6 +372,20 @@ trait EmitLlvmArrays
             && \str_starts_with($val, '%')) {
             $ef = $ret === '' ? $this->discardReleaseFlavor($value->type) : '';
             if ($ef === '' || $ef === 'vec' || $ef === 'assoc') { $ef = 'vecbuf'; }
+            // …and only if the CALLEE can take the transfer. A callee whose
+            // parameter is a bare `array` co-owns this element with the
+            // runtime REPR walk (`__mir_array_retain`), over ownership bits a
+            // literal never stamps — so it takes the BUFFER and nothing
+            // inside it, while `$out[] = $v` copies the element values out
+            // with no reference of their own. Dropping them here freed the
+            // strings the callee had just returned: symfony-demo T5 died in
+            // `LowerFromAst::lowerArrowFn` retaining a string the erased
+            // `array_merge` had handed back out of `collectVars`. The
+            // monomorphised clone declares `vec[vec[string]]`, retains with
+            // `__mir_array_retain_str`, and IS owed those refs — same source
+            // line, two callees, one flavor each.
+            $cel = $this->litElemCalleeElem;
+            if ($cel === null || $cel->kind === Type::KIND_UNKNOWN) { $ef = 'vecbuf'; }
             $this->litElemDropRegs[] = $val;
             $this->litElemDropFlavors[] = $ef;
         }
