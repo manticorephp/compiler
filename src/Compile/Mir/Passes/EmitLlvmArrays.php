@@ -367,7 +367,7 @@ trait EmitLlvmArrays
         // A plain `vec` / `assoc` flavor is the REPR walk, whose element drop
         // is decided at RUNTIME by bits this literal never stamped; it is not
         // this reference's answer either, so it degrades to buffer-only too.
-        if ($this->litElemCollect && !$cellVals
+        if ($this->litElemCollect && \Compile\Debug::$rcPackElem && !$cellVals
             && $value->type->kind === Type::KIND_ARRAY
             && \str_starts_with($val, '%')) {
             $ef = $ret === '' ? $this->discardReleaseFlavor($value->type) : '';

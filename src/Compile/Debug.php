@@ -296,6 +296,15 @@ final class Debug
     public static bool $rcSymElem = true;
 
     /**
+     * `MANTICORE_RC_PACK_ELEM=0` — do not release the ARRAY elements of a
+     * call-argument array literal after the call ({@see Mir\Passes\
+     * EmitLlvmArrays::emitArrayLitValue}). The whole of a variadic call's
+     * arguments leaks again; it is a BISECTION HANDLE, to tell a crash that
+     * IS this release from one that merely rides on it.
+     */
+    public static bool $rcPackElem = true;
+
+    /**
      * A local initialised from an ELEMENT READ co-owns what the read hands it.
      *
      * ON by default; `MANTICORE_RC_ELEM_READ_OWNS=0` is the kill switch.
@@ -627,6 +636,8 @@ final class Debug
         if ($env !== false && $env !== '') { self::$feOnly = $env; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
         if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
+        $env = \getenv('MANTICORE_RC_PACK_ELEM');
+        if ($env === '0' || $env === 'off') { self::$rcPackElem = false; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
