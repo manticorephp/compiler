@@ -786,6 +786,19 @@ final class Sig
             if ($t->isAssoc()) {
                 return 'array<string,' . $elemHint . '>';
             }
+            // A CELL key is the TAG-DISPATCHED channel — it accepts either key
+            // kind at runtime and is what `array<int|string, V>` lowers to. It
+            // reports `isAssoc() === false`, so without this arm it encoded as
+            // `V[]` and every dependent module rebuilt it as a COMMITMENT to
+            // packed int keys the library never made: `array_column`'s
+            // `array<int|string, array<int|string, mixed>>` published as
+            // `mixed[][]`, and a string-keyed argument then read as an `array
+            // KEY repr conflict` at the call site ({@see \Compile\Mir\Passes\
+            // TypeCheck::keyKindOf}, which answers null for exactly this key).
+            $key = $t->key;
+            if ($key !== null && $key->kind === Type::KIND_CELL) {
+                return 'array<mixed,' . $elemHint . '>';
+            }
             return $elemHint . '[]';
         }
         return '';
