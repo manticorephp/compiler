@@ -5653,6 +5653,24 @@ trait EmitLlvmObjects
         if (isset($this->resolveMethodClassCache[$key])) {
             return $this->resolveMethodClassCache[$key];
         }
+        // ⚠ BOUNDED, and the bound is the point. The memo is keyed on the PAIR
+        // while every caller that matters iterates all classes for ONE method —
+        // building a holder set, a candidate list, a descendant walk — so the
+        // entries are a cross product that is written once and read never. On
+        // symfony-demo T5 it reached 13,090,427 entries (2,144 classes x ~6,000
+        // method names), which is where the emitter's memory went: the one batch
+        // that crossed the knee took 66 s against half a second for its
+        // neighbours, and the next took 312 s.
+        //
+        // The lookup it replaces is a handful of `isset`s up the parent chain,
+        // so a miss costs MORE than the walk (a key concatenation and an insert).
+        // Keeping a bounded window preserves the only reuse that exists —
+        // repeated queries close together — and gives the rest back.
+        if ($this->resolveMethodClassEntries >= self::RESOLVE_CACHE_MAX) {
+            $this->resolveMethodClassCache = [];
+            $this->resolveMethodClassEntries = 0;
+        }
+        $this->resolveMethodClassEntries = $this->resolveMethodClassEntries + 1;
         $c = $class;
         while ($c !== '') {
             $cd = $this->classes[$c] ?? null;

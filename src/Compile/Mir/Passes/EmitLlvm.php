@@ -141,6 +141,7 @@ final class EmitLlvm implements EmitVisitor
     {
         if (!\Compile\Debug::$compactCaches) { return; }
         $this->resolveMethodClassCache = [];
+        $this->resolveMethodClassEntries = 0;
         $this->mangleCache = [];
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
@@ -205,6 +206,16 @@ final class EmitLlvm implements EmitVisitor
      * dispatch repeatedly asks the same closed-world metadata questions. */
     /** @var array<string, string> */
     private array $resolveMethodClassCache = [];
+
+    /** Live entries in {@see $resolveMethodClassCache}; `count()` per insert is
+     *  the one thing a hot path must not do. */
+    private int $resolveMethodClassEntries = 0;
+
+    /** The window {@see EmitLlvmObjects::resolveMethodClass} keeps. Sized so the
+     *  memo cannot outgrow the module it describes: ~256k entries is more than
+     *  any single class-by-class sweep asks for, and two orders of magnitude
+     *  below the cross product that took the emitter to 13 million. */
+    private const RESOLVE_CACHE_MAX = 262144;
     /** @var array<string, string> deterministic PHP-name → LLVM-name cache */
     private array $mangleCache = [];
     /** @var array<string, bool> */
@@ -583,6 +594,7 @@ final class EmitLlvm implements EmitVisitor
         $this->lib = new RuntimeLibrary();
         $this->classes = $module->classes;
         $this->resolveMethodClassCache = [];
+        $this->resolveMethodClassEntries = 0;
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
