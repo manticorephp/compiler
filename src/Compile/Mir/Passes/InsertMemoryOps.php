@@ -109,6 +109,10 @@ final class InsertMemoryOps implements Pass
     private array $rcObjErasedProp = [];
 
     /** @var array<string, string> census only: blocked local → which gate blocked it. */
+    /** Array locals mutated in the function — the copy-on-assign input.
+     *  @var array<string, bool> */
+    private array $mutatedVecs = [];
+
     private array $blockReason = [];
 
     /** @var array<string, string> census only: blocked local → the value's type kind. */
@@ -158,6 +162,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjCopyOnly = [];
         $this->blockReason = [];
         $this->blockKind = [];
+        $this->mutatedVecs = \Compile\Mir\VecCopyOnAssign::mutatedLocals($fn->body);
         // Per-name, whole-function: a loop variable co-owns only if EVERY foreach
         // binding it does ({@see foreachOwnVetoes}). Computed BEFORE the walk,
         // because the arm that registers a name runs before the later loop that
@@ -923,7 +928,31 @@ final class InsertMemoryOps implements Pass
         $k = $t->kind;
         if ($k === Type::KIND_CELL) { return 'cell'; }
         if ($k === Type::KIND_STRING) { return 'str'; }
-        if ($k === Type::KIND_ARRAY) { return 'arr'; }
+        if ($k === Type::KIND_ARRAY) {
+            // An array of ARRAYS carries its INNER element's flavor in the
+            // release helper it picks ({@see \Compile\Mir\Passes\
+            // EmitLlvmMemory::nestedArrFlavor}), so two stores that disagree
+            // about it pick DIFFERENT helpers for one slot — and first-write-
+            // wins hands the loser's buffer to the winner's walk. `$g =
+            // [row($i), ['s']]` then `$g = [[$i], [$i+1]]` released a vec of
+            // INTS through `__mir_array_release_ownel_arrstr`, which read each
+            // int as a string pointer and dereferenced `1 - 8`. Name the
+            // difference so the existing flavor gate blocks it: a leak, never a
+            // free of a tag. Shallower slots are unaffected — `arr` compares
+            // equal to `arr` exactly as before.
+            $el = $t->element;
+            if ($el === null || $el->kind !== Type::KIND_ARRAY) { return 'arr'; }
+            // Walk the WHOLE nesting chain: the helper is picked per level
+            // ({@see \Compile\Mir\Passes\EmitLlvmMemory::nestedArrFlavor}),
+            // so a disagreement at ANY level picks a different one.
+            $name = 'arr';
+            $cur = $el;
+            while ($cur !== null && $cur->kind === Type::KIND_ARRAY) {
+                $name = $name . ':arr';
+                $cur = $cur->element;
+            }
+            return $name . ':' . ($cur === null ? '?' : (string)$cur->kind);
+        }
         if ($k === Type::KIND_OBJ) { return 'obj'; }
         return '';
     }
@@ -1092,20 +1121,18 @@ final class InsertMemoryOps implements Pass
             // claiming ownership there is a release with no matching retain.
             $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
                 || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS);
-            // `$b = $a` on an array the frame MUTATES is not an alias at all:
-            // php arrays are values, so {@see EmitLlvmLocals::emitStoreLocal}
-            // hands the slot a `__mir_array_copy` — a fresh, independent, rc=1
-            // buffer, adopted at the element flavor. That is an owned producer by
-            // any reading of the word, and this pass called it "notowned" and
-            // BLOCKED the destination name, so the copy leaked on every store.
-            // `InferCalls::genericReturnType` is the witness: `$args = $next;`
-            // inside its climb blocked `$args`, and with it the OTHER copy the
-            // same name takes from `$recv->typeArgs` — 830 279 live blocks.
-            $ownedCopy = !$boxedSlot && $this->copiedArrayAlias($sl);
-            // A co-owned alias reaches the same place by the other road: the
-            // emitter takes a +1 instead of a copy, so the destination owns
-            // either way and the SOURCE is safe to release either way — which is
-            // why one flag can stand for both below.
+            // `$b = $a` between array locals is a COPY when either side is
+            // mutated ({@see \Compile\Mir\VecCopyOnAssign}) — the emitter hands
+            // the destination a fresh rc=1 buffer and adopts its elements. That
+            // is an owned producer, and it leaves the SOURCE untouched. Reading
+            // the alias answer for both is what left `$q = $r;` in a loop with
+            // no release for either name.
+            $ownedCopy = !$boxedSlot
+                && \Compile\Mir\VecCopyOnAssign::copies($value, $name, $this->mutatedVecs);
+            // A co-owned alias reaches the same place by the other road: no
+            // copy fires, the emitter takes a +1 instead, so the destination
+            // owns either way and the SOURCE is safe to release either way —
+            // which is why one flag stands for both below.
             if (!$boxedSlot && $value->kind === Node::KIND_LOAD_LOCAL
                 && self::arrayAliasCoOwns($value->type, $sl->type, $this->enums, $this->classes)) {
                 $ownedCopy = true;
@@ -1184,16 +1211,13 @@ final class InsertMemoryOps implements Pass
             // on mutation). Block the source so we never rc-release a
             // shared vec twice.
             //
-            // …unless the emitter COPIED ({@see copiedArrayAlias}), which is the
-            // one case where the premise is false: `__mir_array_copy` gives the
-            // destination its own buffer, so there is no shared vec and nothing
-            // to release twice. Blocking the source there is a pure leak of a
-            // buffer this frame built — `$next = []; …; $args = $next;` never
-            // freed `$next`, which is why unblocking only the DESTINATION left
-            // `tools/prof/array_alias_copy.php climb` at 181 MB.
-            if ($value->kind === Node::KIND_LOAD_LOCAL
-                && $value->type->kind === Type::KIND_ARRAY
-                && !$ownedCopy) {
+            // …unless the store COPIED or co-owned, which is the one case where
+            // the premise is false: the destination has its own buffer (or its
+            // own +1), so there is no shared vec and nothing to release twice.
+            // Blocking the source there is a pure leak of a buffer this frame
+            // built — `$next = []; …; $args = $next;` never freed `$next`.
+            if (!$ownedCopy && $value->kind === Node::KIND_LOAD_LOCAL
+                && $value->type->kind === Type::KIND_ARRAY) {
                 $this->rcObjBlocked[$value->name] = true;
                 $this->noteBlock($value->name, "vecalias", $value->type);
             }

@@ -338,7 +338,43 @@ trait EmitLlvmArrays
         if ($cellVals) { $out .= $this->retainCellPayload($value); }
         $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
         $val = $this->lastValue;
-        if (!$cellVals) { $out .= $this->rcRetainByType($value, $val, null, 2); }
+        $ret = '';
+        if (!$cellVals) { $ret = $this->rcRetainByType($value, $val, null, 2); $out .= $ret; }
+        // An ARRAY element the literal now owns and whose release will never
+        // drop it ({@see EmitLlvmBuiltins::$litElemDropRegs}). Only while an
+        // ARGUMENT literal is being emitted, and only for a raw element — a
+        // cell element is dropped by the veccell release.
+        //
+        // A literal in ARGUMENT position is handed to the callee BY VALUE, so
+        // its elements go with it. The release therefore turns on WHAT THIS
+        // REFERENCE TOOK, which the retain above has just answered:
+        //
+        //   OWNED producer (a call / literal / spread) — no retain: the value
+        //     TRANSFERRED its +1 and the literal is its SOLE owner, so the
+        //     release is the element's own flavor and frees it completely.
+        //     This is the whole of `array_merge($a, $b)`: every value in its
+        //     result comes out of the pack and `$out[] = $v` retains each one,
+        //     so the argument's own element refs are the ones left over.
+        //   BORROWED alias — the retain co-owned the elements too
+        //     ({@see arrayRetainFlavor}), and giving them back here MISCOMPILES
+        //     THE COMPILER, twice over: `8ab002a` died in
+        //     `LowerFns::finishClosure` and the same drop behind a matching
+        //     retain died in `LowerFromAst::bareName`, both reading a recycled
+        //     string header. The pair looks symmetric in the IR and is not, and
+        //     the disagreement is not yet named. BUFFER-ONLY until it is —
+        //     one leaked ref per element per call, the safe direction.
+        //
+        // A plain `vec` / `assoc` flavor is the REPR walk, whose element drop
+        // is decided at RUNTIME by bits this literal never stamped; it is not
+        // this reference's answer either, so it degrades to buffer-only too.
+        if ($this->litElemCollect && !$cellVals
+            && $value->type->kind === Type::KIND_ARRAY
+            && \str_starts_with($val, '%')) {
+            $ef = $ret === '' ? $this->discardReleaseFlavor($value->type) : '';
+            if ($ef === '' || $ef === 'vec' || $ef === 'assoc') { $ef = 'vecbuf'; }
+            $this->litElemDropRegs[] = $val;
+            $this->litElemDropFlavors[] = $ef;
+        }
         $this->elemValReg = $val;
         return $out;
     }

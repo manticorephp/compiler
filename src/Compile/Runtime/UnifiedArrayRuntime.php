@@ -65,6 +65,14 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
         $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
+        $this->emitRetainVariant('__mir_array_retain_arr', 'arr');
+        // …and one per KNOWN inner flavor, so a `vec[vec[string]]` says so
+        // statically instead of hoping the inner buffer describes itself.
+        // Three levels deep: unused definitions are dropped by PruneIr, so
+        // the cost of a level nobody reaches is compile time, not IR.
+        foreach (self::nestedFlavors() as $in) {
+            $this->emitRetainVariant('__mir_array_retain_' . $in, $in);
+        }
         // ADOPT = retain MINUS the rc bump: co-own the hashed keys and the
         // elements of a buffer this frame already owns outright. That is exactly
         // what a value COPY needs — `__mir_array_copy` hands back a FRESH rc=1
@@ -75,6 +83,10 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_adopt_obj', 'obj', false);
         $this->emitRetainVariant('__mir_array_adopt_str', 'str', false);
         $this->emitRetainVariant('__mir_array_adopt_cell', 'cell', false);
+        $this->emitRetainVariant('__mir_array_adopt_arr', 'arr', false);
+        foreach (self::nestedFlavors() as $in) {
+            $this->emitRetainVariant('__mir_array_adopt_' . $in, $in, false);
+        }
         $this->emitRetainVariant('__mir_array_adopt_buf', '', false);
         $this->emitRetainVariant('__mir_array_adopt', 'repr', false);
         $this->emitRelease();
@@ -1545,6 +1557,28 @@ final class UnifiedArrayRuntime
      * child on its release without ever having retained one: the tree's nodes
      * were freed under it. Retain must undo exactly what release does.
      */
+    /**
+     * Every nested-array value flavor, three levels of `arr` deep:
+     * `arrstr` … `arrbuf`, then `arrarrstr` …, then `arrarrarrstr` ….
+     * `vec[vec[string]]` needs the first, `vec[vec[vec[string]]]` the second.
+     * Deeper than this the static flavor gives up and the plain `arr` repr walk
+     * takes over — a leak, never a wrong free.
+     *
+     * @return string[]
+     */
+    private static function nestedFlavors(): array
+    {
+        $out = [];
+        $cur = ['str', 'obj', 'cell', 'buf'];
+        for ($lvl = 0; $lvl < 3; $lvl++) {
+            $next = [];
+            foreach ($cur as $c) { $next[] = 'arr' . $c; }
+            foreach ($next as $n) { $out[] = $n; }
+            $cur = $next;
+        }
+        return $out;
+    }
+
     private function emitRetainVariant(string $symbol, string $valueFlavor, bool $bumpRc = true): void
     {
         $fn = $this->module->func($symbol, Type::void());
@@ -1712,6 +1746,14 @@ final class UnifiedArrayRuntime
         $this->emitReleaseVariant('__mir_array_release_obj', 'obj');
         $this->emitReleaseVariant('__mir_array_release_str', 'str');
         $this->emitReleaseVariant('__mir_array_release_cell', 'cell');
+        // A NESTED array element. `discardReleaseFlavor` used to fall through
+        // to the plain repr walk for one, so `$a = [f(), g()]` freed the outer
+        // buffer and stranded both inner arrays — 32 MB per 200k iterations
+        // with nothing but int literals inside ({@see tools/prof/packleak.php}).
+        $this->emitReleaseVariant('__mir_array_release_arr', 'arr');
+        foreach (self::nestedFlavors() as $in) {
+            $this->emitReleaseVariant('__mir_array_release_' . $in, $in);
+        }
         // ── PAIRWISE-SYMMETRIC variants: drop the elements on EVERY release,
         // not only at rc → 0. {@see emitRetainVariant} co-owns the elements on
         // every retain, so a retain/release pair around a buffer that does NOT
@@ -1728,6 +1770,10 @@ final class UnifiedArrayRuntime
         $this->emitReleaseVariant('__mir_array_release_ownel_obj', 'obj', true);
         $this->emitReleaseVariant('__mir_array_release_ownel_str', 'str', true);
         $this->emitReleaseVariant('__mir_array_release_ownel_cell', 'cell', true);
+        $this->emitReleaseVariant('__mir_array_release_ownel_arr', 'arr', true);
+        foreach (self::nestedFlavors() as $in) {
+            $this->emitReleaseVariant('__mir_array_release_ownel_' . $in, $in, true);
+        }
     }
 
     /**
@@ -1838,7 +1884,28 @@ final class UnifiedArrayRuntime
             $join = null;
         }
         $p = $b->inttoptr($v, Type::ptr());
-        $name = $flavor === 'str' ? '__mir_rc_release_str' : '__mir_rc_release';
+        // An ARRAY element — the member the family was missing. Its drop is the
+        // repr-driven `__mir_array_release`, which self-guards on the array tag
+        // and goes as deep as the element's OWN bits describe it. It shares the
+        // cell-hint dispatch above on purpose: an erased slot whose runtime hint
+        // says CELL outranks any static flavor, this one included.
+        $name = '__mir_rc_release';
+        if ($flavor === 'str') { $name = '__mir_rc_release_str'; }
+        elseif ($flavor === 'arr') { $name = '__mir_array_release'; }
+        // A nested array whose OWN element flavor the outer type knows —
+        // `vec[vec[string]]` releases each element as `vecstr`, which the
+        // repr-driven `arr` cannot: the inner buffer's producer stamps no
+        // ownership repr, so the repr walk frees it and strands its strings.
+        // NON-symmetric on purpose: the inner buffer is co-owned by a plain
+        // BUFFER retain ({@see emitRetainValue}), so its elements are given
+        // back exactly once, at rc -> 0.
+        // `arr<rest>` where <rest> is the element's OWN suffix, at any depth:
+        // `arrstr` releases each element as a vecstr, `arrarrstr` as a
+        // vecarrstr. One rule, so a third level costs a name and not a branch.
+        elseif (\str_starts_with($flavor, 'arr')) {
+            $rest = \substr($flavor, 3);
+            $name = $rest === '' ? '__mir_array_release' : '__mir_array_release_' . $rest;
+        }
         $b->call($name, Type::void(), [$p]);
         if ($join === null) { return $b; }
         $b->br($join);
@@ -1871,7 +1938,16 @@ final class UnifiedArrayRuntime
             $cellB->br($join);
             $b = $rawB;
         }
-        $fnName = $flavor === 'str' ? '__mir_rc_retain_str' : '__mir_rc_retain';
+        $fnName = '__mir_rc_retain';
+        if ($flavor === 'str') { $fnName = '__mir_rc_retain_str'; }
+        elseif ($flavor === 'arr') { $fnName = '__mir_array_retain'; }
+        // The mirror of the arr* drop: co-own the nested BUFFER and nothing
+        // below it. Its own elements are its own, given back when its rc
+        // reaches zero — a deeper retain here would be a +1 per element per
+        // retain against a release that only fires once.
+        elseif (\str_starts_with($flavor, 'arr') && $flavor !== 'arr') {
+            $fnName = '__mir_array_retain_buf';
+        }
         $doit = $fn->block('rv_do_' . $tag);
         $skip = $fn->block('rv_skip_' . $tag);
         $b->brIf($b->icmp('ugt', $v, Value::int(Type::i64(), 65535)), $doit, $skip);

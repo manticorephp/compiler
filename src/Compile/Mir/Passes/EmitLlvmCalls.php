@@ -2408,7 +2408,15 @@ trait EmitLlvmCalls
                 // cannot drift.
                 $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
+                // A literal argument owns its ARRAY elements and its own
+                // release drops none of them; collect them for the same
+                // post-call release the literal itself gets
+                // ({@see EmitLlvmBuiltins::$litElemDropRegs}).
+                $litMark = \count($this->litElemDropRegs);
+                $wasCollect = $this->litElemCollect;
+                $this->litElemCollect = $a->kind === Node::KIND_ARRAY_LIT;
                 $out .= $this->emitNode($a);
+                $this->litElemCollect = $wasCollect;
                 // An int/bool arg to a declared `float` param converts
                 // numerically (sitofp) — else the integer bits bitcast through
                 // the i64 ABI carrier and the callee reads a garbage double
@@ -2440,6 +2448,10 @@ trait EmitLlvmCalls
                 } else {
                     $rf = $this->freshRcArgFlavor($a);
                     if ($rf !== '') { $rcArgRegs[] = $this->lastValue; $rcArgFlavs[] = $rf; }
+                }
+                while (\count($this->litElemDropRegs) > $litMark) {
+                    $rcArgRegs[] = (string)\array_pop($this->litElemDropRegs);
+                    $rcArgFlavs[] = (string)\array_pop($this->litElemDropFlavors);
                 }
             }
             $ai = $ai + 1;

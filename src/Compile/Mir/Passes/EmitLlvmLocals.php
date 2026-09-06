@@ -651,11 +651,13 @@ trait EmitLlvmLocals
         // (`mutatedVecLocals` only records mutated locals). Objects are by-handle
         // (never copied); strings immutable. __mir_array_copy is mode-agnostic.
         $v = $sl->value;
+        // The predicate is {@see \Compile\Mir\VecCopyOnAssign} — one place, so
+        // this emitter and {@see InsertMemoryOps} cannot disagree about whether
+        // a store COPIES. `$copiedVecLocal` still has to be tracked here: the
+        // alias arm below is the OTHER road to the same ownership, and it must
+        // not fire on a store that already took the copy road.
         $copiedVecLocal = false;
-        if ($v->kind === Node::KIND_LOAD_LOCAL
-            && $v->type->isArray()
-            && (isset($this->frame->mutatedVecLocals[$v->name])
-                || isset($this->frame->mutatedVecLocals[$sl->name]))) {
+        if (\Compile\Mir\VecCopyOnAssign::copies($v, $sl->name, $this->frame->mutatedVecLocals)) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();

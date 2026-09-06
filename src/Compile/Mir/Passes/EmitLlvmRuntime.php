@@ -793,6 +793,24 @@ trait EmitLlvmRuntime
             // free the malloc base (data ptr - 16) at zero.
             // Self-routing too: a misrouted obj/vec (tag = magic at ptr-8)
             // must take the rc@+8 path, never write the tag word.
+            if (\Compile\Debug::$arrRcTrace) {
+                // The STRING half of the rc trace. `[ARC]` answers what a
+                // BUFFER's rc did and `[ORC]` what an object's did; the
+                // question a buffer's element walk raises is one level below
+                // both — how many refs the element itself was given, and by
+                // whom. Without it an over-release inside an element walk can
+                // only be counted, never attributed.
+                foreach ([['ret', 'ret'], ['rel', 'rel']] as $sp) {
+                    $sraw = '[SRC] ' . $sp[1] . ' str=%p rc=%lld';
+                    $out .= '@.src.' . $sp[0] . ' = private unnamed_addr constant ['
+                        . (string)(\strlen($sraw) + 2) . ' x i8] c"' . $sraw . '\0A\00", align 1' . "\n";
+                }
+            }
+            if (\Compile\Debug::$verify) {
+                $rraw = '[VERIFY] str_retain: rc == 0 (retaining a freed string) str=%p rc=%lld';
+                $out .= '@.vfy.strret = private unnamed_addr constant ['
+                    . (string)(\strlen($rraw) + 2) . ' x i8] c"' . $rraw . '\0A\00", align 1' . "\n";
+            }
             $out .= "define void @__mir_rc_retain_str(ptr %p) {\n";
             $out .= "entry:\n";
             if (\Compile\Debug::$ccTrace) {
@@ -818,9 +836,28 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %rc, 0\n";
             $out .= "  br i1 %imm, label %done, label %inc\n";
             $out .= "inc:\n";
+            // The RETAIN half of the guard the release has had since the
+            // string path got one. A dead string is reached here at rc 0 —
+            // an immortal is rc < 0 and was routed away above — and taking a
+            // reference to it is the FIRST illegal touch; without this the
+            // program runs on until some later release trips the rc <= 0
+            // check, which names a site that only inherited the corruption.
+            if (\Compile\Debug::$verify) {
+                $out .= "  %vrbad = icmp eq i64 %rc, 0\n";
+                $out .= "  br i1 %vrbad, label %vrfail, label %vrok\n";
+                $out .= "vrfail:\n";
+                if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.vfy.strret, ptr %p, i64 %rc)\n";
+                $out .= "  call void @abort()\n";
+                $out .= "  unreachable\n";
+                $out .= "vrok:\n";
+            }
             $out .= $this->profBump(1);
             $out .= "  %rc1 = add i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %h\n";
+            if (\Compile\Debug::$arrRcTrace) {
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.ret, ptr %p, i64 %rc1)\n";
+            }
             $out .= "  br label %done\n";
             $out .= "done:\n";
             $out .= "  ret void\n";
@@ -881,6 +918,9 @@ trait EmitLlvmRuntime
             }
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %h\n";
+            if (\Compile\Debug::$arrRcTrace) {
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.rel, ptr %p, i64 %rc1)\n";
+            }
             $out .= "  %zero = icmp sle i64 %rc1, 0\n";
             $out .= "  br i1 %zero, label %free, label %done\n";
             $out .= "free:\n";

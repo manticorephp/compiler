@@ -2860,8 +2860,14 @@ final class EmitLlvm implements EmitVisitor
             $t = $a->type;
             if (!$t->isVec() && !$t->isAssoc()) { continue; }
             $el = $t->element;
+            // ARRAY belongs here with obj and string: a `vec[vec[string]]`
+            // handed to a callee is co-owned by it exactly the same way, and
+            // once the release walk reaches the nested elements' own
+            // elements ({@see EmitLlvmMemory::nestedArrFlavor}) the missing
+            // kind is a DOUBLE DROP of the inner strings, not a leak.
             if ($el === null
-                || ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING)) {
+                || ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING
+                    && $el->kind !== Type::KIND_ARRAY)) {
                 continue;
             }
             // Proven co-owning: the callee is known, this position is a real
@@ -3554,6 +3560,22 @@ final class EmitLlvm implements EmitVisitor
         return 'buf';   // closure / #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
     }
 
+    /**
+     * The helper-symbol suffix of a NESTED-ARRAY flavor, or '' when the flavor
+     * is not one: `vecarr` → `arr`, `assocarrstr` → `arrstr`. The suffix names
+     * what the element walk does to each nested array — `arr` is the
+     * repr-driven release (as deep as the element describes itself) and
+     * `arrstr` / `arrobj` / `arrcell` / `arrbuf` are the STATIC answers the
+     * outer type already knows. One decoder, so release / retain / adopt and
+     * the class-drop table cannot drift.
+     */
+    private function arrFlavorSuffix(string $flavor): string
+    {
+        if (\str_starts_with($flavor, 'vecarr')) { return \substr($flavor, 3); }
+        if (\str_starts_with($flavor, 'assocarr')) { return \substr($flavor, 5); }
+        return '';
+    }
+
     private function discardReleaseFlavor(Type $t): string
     {
         $k = $t->kind;
@@ -3692,6 +3714,10 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
+        if ($this->arrFlavorSuffix($flavor) !== '') {
+            $sfx = $this->arrFlavorSuffix($flavor);
+            return (\Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_' : '@__mir_array_release_') . $sfx;
+        }
         if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         // PAIRWISE-SYMMETRIC: this slot took the element refs in its own store's
@@ -3701,6 +3727,7 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobjown' || $flavor === 'assocobjown') { return '@__mir_array_release_ownel_obj'; }
         if ($flavor === 'vecstrown' || $flavor === 'assocstrown') { return '@__mir_array_release_ownel_str'; }
         if ($flavor === 'veccellown' || $flavor === 'assoccellown') { return '@__mir_array_release_ownel_cell'; }
+
         return '';
     }
 

@@ -1,8 +1,8 @@
 # Handoff — the ownership contract for builtins, and what is left of it
 
-**State**: merged into local `main` `f1baf57` (13 commits). The ownership table
-is down to **3 leaks**, all of them one root — section 3, which is written for
-someone picking it up cold and includes the attempt that failed and why.
+**State**: `f1baf57` merged into local `main`, then `79cd5db` / `2e1b880`
+(branch `packown`, merged) and `5ed7347` (branch `arrflavor`). The ownership table is at **LEAK on 0 · parity DIFF 0**.
+What is left of the area is one unnamed disagreement, section 3.
 
 Read this before touching rc/ownership code again. It starts from the model, so
 a session with none of the context can start at the top.
@@ -76,7 +76,7 @@ plateau), and the same program diffed against `php`. **The ratio flags a MISSING
 release, the parity flags an OVER-release**, and it exits non-zero on either, so
 it is ready to become the gate Step 2 below still asks for.
 
-The table went **20 leaks → 3**. Every root it found, in the order they fell:
+The table went **20 leaks → 0**. Every root it found, in the order they fell:
 
 | root | commit | what it was |
 |---|---|---|
@@ -87,6 +87,7 @@ The table went **20 leaks → 3**. Every root it found, in the order they fell:
 | an ASSOC call result was never owned | `875ef56` | `freshRcArgFlavor` exempted it on a reading of `isBorrowedObjReturn` that had stopped being true. `array_flip` 22 MB, `array_combine` 105 MB. |
 | a CLOSURE LITERAL argument | `1d17dde` | `array_filter($t, "strlen")` — lowering coerces the string callable to a closure, `emitClosure` allocates an env at rc 1, and nobody owned it. |
 | a `\|` inside brackets is not a top-level union | `a4470e7` | the gate was a plain `strpos`, so `array<int,string\|null>` (str_getcsv, fgetcsv, every `array<K,V\|null>`) collapsed to a bare cell — the `.sig` then carried `mixed`, not `mixed[]`, **and a caller cannot own an erased word**. |
+| a variadic pack's elements had no release | `79cd5db` `2e1b880` | The release turns on what the reference TOOK. An OWNED element transferred its +1 — free it by its own flavor. A BORROWED one took a co-owner retain, and giving those element refs back miscompiles the compiler. Section 3. |
 | an obj/string ALIAS was retained and never released | `1335a76` `c526192` `f1baf57` | `$s = $x;` leaked one reference per call — the shape half the stdlib opens with. The retain was in the emitter, the release nowhere. Its pass-through half (`(string)$s` is the same pointer, so the same alias) followed, and `Compile\Mir\AliasOwn` is now the ONE predicate both sides read. |
 
 **Gates at `f1baf57`** (merged into local main): suite **1050/1052, failed 0** ·
@@ -98,11 +99,12 @@ was skipped by choice. Not run: **amd64**.
 
 ---
 
-## 3. THE ONE ROOT LEFT — a variadic pack owns its ARRAY elements
+## 3. CLOSED — a pack element's release is what ITS REFERENCE took
 
-`array_merge` **62.6 MB**, `array_diff` **11.2**, `array_intersect` **11.2** are
-the only rows left in the table. They share one root, and the fix is WRITTEN AND
-REVERTED — read this before writing it again.
+`79cd5db` + `2e1b880`. The leak was real and `8ab002a`'s reasoning about it
+still holds; what it got wrong is that ONE answer covers both kinds of element.
+Table: **LEAK on 0 · parity DIFF 0**; AOT suite **1050/1052, failed 0** at
+`12af025` — main's own number. ⛔difftest · fixpoint · LINUX not run.
 
 ### The root
 
@@ -113,61 +115,151 @@ $b)` passes `vec[vec[…]]`. A literal OWNS its elements:
 one. Its release drops every element kind that has a flavor — `vecstr`,
 `vecobj`, `veccell` — but an ARRAY element has none:
 `EmitLlvm::discardReleaseFlavor` falls through to a plain `vec`, which is the
-repr walk, and a literal stamps no ownership repr. So the buffer is freed and
-everything inside it is stranded.
+repr walk, and a literal stamps no ownership repr. So the buffer was freed and
+everything inside it stranded.
 
-Reproduce without any builtin at all:
+### What `8ab002a` assumed, and what it cost
+
+A literal in ARGUMENT position is handed to the callee BY VALUE, so its
+elements go with it. There is a standing rule for that shape — a named local in
+argument position is marked `FunctionEmitFrame::$elementSharedLocals` by
+`EmitLlvm::shareCallArgs` and its scope-exit release becomes
+`__mir_array_release_buf`, "the parser `$args` double-free" — and the rule
+already vetoes **a variadic tail**. It could never see a pack element, because
+it matches on a local's NAME and a pack element is an anonymous temp. It is
+also not the whole answer: the veto is right for a BORROWED element and wrong
+for an owned one, which is the distinction below.
+
+`8ab002a` released each element with the element's OWN release flavor, which
+under `$rcSymElem` is the pairwise-symmetric variant (`__mir_array_release_
+ownel_str`): it -1's every string / object in the element as well as the
+buffer. Generation TWO then died in `LowerFns::finishClosure` reading
+`0xcbf29ce484222325` — the FNV seed of a recycled string header. The producer
+was one line away:
 
 ```php
-function vpack(array ...$as): int { $n = 0; foreach ($as as $a) { $n += count($a); } return $n; }
-for (…) { $acc += vpack(explode(",", $s . $r), ["z"]); }   // 23.1 -> 44.2 MB
-function two(array $a, array $b): int { … }                 // flat — not the call, the PACK
-$x = [explode(",", $s . $r), ["z"]];                        // 23.0 -> 44.2 — not the call at all
+if ($k === 'BinaryOp') { return \array_merge($this->collectVars($e->left), $this->collectVars($e->right)); }
 ```
 
-The last line matters: the same hole exists for a nested literal in a LOCAL, so
-this is not a variadic bug, it is the array-element half of literal ownership.
+The element drop freed both packs' strings under the array `array_merge` had
+just built out of them.
 
-### What was tried, and what it cost
+★★★ **Neither crash site is miscompiled.** `finishClosure`'s IR — and
+`bareName`'s, for the second crash — is BYTE-IDENTICAL to main's. What named
+the producer was a whole-module per-function IR diff: build the compiler twice
+with `bin/manticore build <manifest> --apps-only --keep-ir` (a manifest whose
+`output` points outside the repo), normalize `%rN` / `@.str.N` away, hash each
+`define` body, and diff the two lists. ~250 functions changed; stripping
+`__mir_props_*` and `EmitLlvm__*` left ten, and `LowerFromAst__collectVars` was
+one of them.
 
-`8ab002a` released each owned ARRAY element at the call site, alongside the
-literal itself, with the element's OWN static flavor (which is what makes the
-nested strings go too — the generic repr walk cannot, because a nested array is
-not self-describing). **It took the table to LEAK on 0 and the whole filtered
-suite stayed green.** Then generation TWO of the self-build SIGSEGVed in
-`LowerFns::finishClosure`, reading a freed string's FNV seed
-(`0xcbf29ce484222325`). Reverted in `d332eed`.
+### The rule, and the half of it that is still dark
 
-Narrowings that did NOT move it:
+**The release turns on what THIS REFERENCE took**, which the retain in
+`emitArrayLitValue` has just answered:
 
-1. gate the release on the retain the literal actually took (`rcRetainByType`
-   returns '' both for a fresh producer, which transfers, and for a borrowed
-   vec/assoc alias, which it declines to co-own);
-2. strings only;
-3. forget the registered elements when a builtin dispatch is DISCARDED and its
-   IR thrown away (a real hazard — `emitBuiltin` already does this for
-   `$arrArgTempRegs` — but not this bug);
-4. landing the ALIAS fix first and reapplying the pack on top of it: three clean
-   generations, canary still dead.
+- **no retain** — an owned producer (call / literal / spread) transferred its
+  +1 and the literal is its SOLE owner. Release it by its own flavor; it goes
+  completely. That is `array_merge($a, $b)`: every value in its result comes
+  out of the PACK (its `foreach` co-owns the element array and `$out[] = $v`
+  retains each value), so the argument's own element refs are the leftovers.
+  `array_diff` / `array_intersect` were never in that position — their result
+  comes out of `array $arr`, a real by-value parameter the callee retains on
+  entry, so buffer-only already balanced them.
+- **a retain** — a borrowed alias, co-owned including its elements
+  (`arrayRetainFlavor`). Giving those refs back here MISCOMPILES THE COMPILER.
+  ⛔**Bisected, not explained.** Both arms dropping (`8ab002a`) died in
+  `LowerFns::finishClosure`; the borrowed arm alone, behind a flavor-MATCHED
+  retain, died in `LowerFromAst::bareName`; both read a recycled string header.
+  Every pair reads symmetric in the IR — e.g. `VivifyRefArgs::vivifyFunction`
+  emits two `__mir_array_retain_obj` before the call and two
+  `__mir_array_release_ownel_obj` after it — and the retain variant does walk
+  its elements. Buffer-only there until the disagreement is named: one leaked
+  ref per element per call, the safe direction. **This is the next thing to
+  pick up in this area** — `tools/prof/packleak.php alias` is the repro,
+  38 → 75 MB at 200k/400k.
+- a plain `vec` / `assoc` flavor is the runtime REPR walk, decided by bits a
+  literal never stamps — not the reference's answer either, so it degrades to
+  buffer-only with them.
+### The other half of the hole — the LOCAL, CLOSED
 
-### What the next session should know
+`$x = [explode(",", $s), ["z"]]` in a LOCAL leaked the same way and was not
+covered by the list above: `$litElemCollect` is only set while a call ARGUMENT
+literal is being emitted, because only there is the by-value hand-off what
+justifies buffer-only. A local literal genuinely owns its elements — it just
+had no way to say so, because **an ARRAY element had no release flavor**.
+`discardReleaseFlavor` fell through to a plain `vec`, the repr walk, over bits
+a literal never stamps.
 
-- ★ **A compiler built with `MANTICORE_DEBUG_VERIFY=1` crashes with NO guard
-  firing.** Both the string and the array release paths carry an `rc <= 0`
-  abort, and neither fires — so this is **not a double-release of a tracked
-  buffer**. Look instead for a release of a word that was never rc-managed, or
-  for a register from IR that was discarded.
-- Next instrument: `MANTICORE_ARR_RC_TRACE=1` on the COMPILER itself (per-buffer
-  rc history, `[ARC]` lines), or `MANTICORE_CC_TRACE=1`. The crash input is
-  tiny — `tests/aot/cases/closure_match_inlined.php` — so the trace is readable.
-- The alternative design, not attempted: stamp `ARRAY_REPR_*` (ownership) on an
-  array at every producer that owns its elements, so the generic
-  `__mir_array_release` walk becomes recursive and the static flavor is not
-  needed. `EmitLlvmArrays::erasedReprCode` already does this for the erased
-  STORE path and carries the ⚠ that blocked it: `uasort` writes a sorted buffer
-  back WITHOUT retaining, so a stamped source frees elements the result still
-  points at. That has to be fixed first.
+`vecarr` / `assocarr` are that missing member (`5ed7347`), with `'arr'` as a
+runtime VALUE flavor whose element drop is `__mir_array_release`:
+`release_arr`, `release_ownel_arr`, `retain_arr`, `adopt_arr`. Two rules that
+cost a gen-3 abort and 20 red cases:
 
+- ⚠ **The claim does NOT belong in `discardReleaseFlavor`.** That answers for
+  PROPERTIES, call arguments and the erased repr path as well, where it
+  over-releases. It lives in `rcReleaseFlavorPlain` (the LOCAL SLOT drop, which
+  already knows the slot is not `$shared`) and in `arrayRetainFlavor`.
+- ⚠ **Both halves or neither.** Landing only the release made
+  `array_merge_recursive` answer `[""] => float(2.16E-314)`: the drop walked
+  elements the entry retain had never co-owned. `__mir_array_retain_arr`
+  emitted ZERO times is how that reads in the IR.
+
+Nested buffers are now flat (32/63 → 1/1 for a literal of literals, 38/75 → 1/1
+for call results, 54/106 → 1/1 when overwritten in a loop; `bench/cases/
+nested_array_local.php` 42.6/83.2 LEAK → 2.0/2.0 ok). What is LEFT:
+
+- the nested STRINGS (`packleak local` 50/99, `nested` 84/167) — the inner
+  array's own release is repr-driven and its producer stamps no repr;
+- ✅ **`$q = $r` on a vec-of-arrays** — CLOSED by `00ff78e`, and it was a
+  different root: the emitter takes an independent `__mir_array_copy` as soon as
+  either side is mutated, so the destination owns a FRESH buffer and the source
+  is untouched — while `InsertMemoryOps` read the read-only-ALIAS answer for
+  both and blocked each of them (`notowned` / `vecalias`). Neither name got a
+  release at all. `Compile\Mir\VecCopyOnAssign` is the one predicate now, the
+  way `AliasOwn` is one for obj/string. 69/137 → 1/1; `packleak copy`
+  143/284 → 75/148, the rest being the same nested strings.
+
+✅ **The nested STRINGS are closed too** (`a55ac0d`), by the second road: the
+OUTER flavor carries the INNER one. `vec[vec[string]]` is `vecarrstr`, whose
+walk releases each element as a `vecstr`; `arrobj` / `arrcell` / `arrbuf`
+follow, and plain `arr` stays the answer for an inner the type does not know.
+`EmitLlvmMemory::nestedArrFlavor` picks it, `EmitLlvm::arrFlavorSuffix` is the
+one decoder that release / retain / adopt and the class-drop table all read, and
+the runtime gains 16 symbols from two four-name loops. The inner RETAIN is a
+plain BUFFER retain — the element's own elements are its own, given back once at
+its rc → 0.
+
+Two gates had to move with it, and each was a crash first:
+
+- ⚠ `EmitLlvm::shareCallArgs` knew only obj and string, so a `vec[vec[string]]`
+  handed to a callee was never marked element-shared and both sides dropped the
+  inner strings.
+- ⚠ `InsertMemoryOps::rcSlotFlavor` answered `arr` for every array, so two
+  stores that disagree about the INNER element picked different helpers for one
+  slot and first-write-wins handed the loser's buffer to the winner's walk:
+  `$g = [row($i), ['s']]` then `$g = [[$i], [$i+1]]` released a vec of INTS
+  through `__mir_array_release_ownel_arrstr`, reading each int as a string
+  pointer. It now names the inner kind so the existing flavor gate blocks the
+  disagreement — a leak, never a free of a tag. `nested_array_element_drop` is
+  the case that caught it.
+
+    nested string arrays in a local  112/222 → 1/1
+    one nested string array           57/112 → 1/1
+    packleak local                    50/99  → 1/1
+    packleak copy                     75/148 → 1/1
+
+Depth THREE followed: `nestedArrFlavor` asks itself one level down, so
+`vec[vec[vec[string]]]` is `vecarrarrstr`, `emitDropValue` reads `arr<rest>` as
+"release each element as `<rest>`" at any depth, and
+`UnifiedArrayRuntime::nestedFlavors()` emits three levels from one loop —
+`PruneIr` drops the ones nobody reaches, so the binary grew 112 bytes.
+`InsertMemoryOps::rcSlotFlavor` walks the WHOLE chain for the same reason it
+named one level. `packleak nested` 84/167 → **1/1**.
+
+⛔ What is left in this area is the borrowed pack element (`packleak alias`,
+38/75) — section 3, the half that is bisected and not explained. Deeper than
+three levels falls back to the repr walk: a leak, never a wrong free.
 ### How to test it — the part that is not optional
 
 **A green suite on the generation that EMITS a change proves nothing.** Both

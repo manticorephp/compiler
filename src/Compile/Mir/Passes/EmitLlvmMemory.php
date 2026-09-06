@@ -408,98 +408,10 @@ trait EmitLlvmMemory
      */
     private function collectMutatedVecs(Node $n): void
     {
-        // A builtin whose FIRST parameter php declares by reference mutates its
-        // argument exactly like an element store, and the CoW inside the builtin
-        // cannot save it: a read-only alias is never retained, so the buffer's
-        // rc stays 1 and the copy never triggers.
-        //
-        // This arm knew only the four cursor moves (`next`/`prev`/`reset`/`end`,
-        // which write the header's internal pointer). Every OTHER by-ref
-        // builtin was a silent wrong answer — 7 of 9 probed shapes, e.g.
-        // `$b = $a; array_pop($a);` left `$b` short an element and
-        // `array_unshift($a, 9)` left `$b` reading an EMPTY array off the
-        // reallocated base. The list is the shape contract: a name belongs here
-        // when php declares its first parameter `&$array`.
-        // `current`/`key`/`array_key_first` only read.
-        if ($n->kind === Node::KIND_CALL && \count($n->args) > 0) {
-            // Shape first, NAME second: a kind compare is a word compare while
-            // the name test is a walk of string equalities, and this pre-scan
-            // visits every node of every function.
-            $a0 = $n->args[0];
-            $base = $a0;
-            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                // `array_pop($x[0])` mutates the ROOT local too — the same walk
-                // the nested element store below does.
-                $base = $base->array;
-            }
-            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()
-                && $this->mutatesArg0($n->function)) {
-                $this->frame->mutatedVecLocals[$base->name] = true;
-            }
-        }
-        if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $arr = $n->array;
-            if ($arr->kind === Node::KIND_LOAD_LOCAL
-                && $arr->type->isArray()) {
-                $this->frame->mutatedVecLocals[$arr->name] = true;
-            }
-            // A NESTED element store (`$x[0][] = …` / `$x[0][0][] = …`) mutates
-            // the root local `$x` too — its base is an `$x[0]…` element, not `$x`
-            // directly. Walk down the element chain to the root local and mark it
-            // so a by-value copy-on-entry separates the outer buffer (the deep
-            // copy owns the inner levels).
-            $base = $arr;
-            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $base->array;
-            }
-            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
-                $this->frame->mutatedVecLocals[$base->name] = true;
-            }
-        }
-        // `unset($a[$k])` REMOVES an entry — a mutation of `$a` exactly like a
-        // store, and it was the one lvalue shape this scan did not see. So
-        // `$b = $a; unset($a['x']);` never took the copy and the unset removed
-        // the entry from `$b` as well (php: `$b` keeps it). Same root-walk as
-        // the store arm: `unset($x[0][1])` mutates `$x`.
-        if ($n->kind === Node::KIND_UNSET) {
-            foreach ($n->targets as $t) {
-                if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
-                $base = $t;
-                while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
-                if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
-                    $this->frame->mutatedVecLocals[$base->name] = true;
-                }
-            }
-        }
-        // Taking an element's ADDRESS by reference (a `$a[$k]` bound via RefAddr_
-        // or passed as a call argument that may be by-ref) can mutate the vec —
-        // mark it so a prior `$b = $a` copy-on-assigns instead of sharing the
-        // buffer the reference will write through. Over-approximate (any call
-        // arg): a needless copy is safe, a shared write is not.
-        if ($n->kind === Node::KIND_REF_ADDR) {
-            $this->markVecElemBase($n->lvalue);
-        }
-        // Separate arm — `lvalue` is at a different offset on RefCell_ than on
-        // RefAddr_, so the two cannot share one field read.
-        // No REF_CELL arm: a reference cell's source is a plain LOCAL today, and
-        // {@see markVecElemBase} does nothing for anything but an element. The
-        // arm belongs with the element-source instalment that gives it work to
-        // do — writing it early bought nothing and cost a field read on a
-        // Node-typed receiver, which is how it faulted.
-        if ($n->kind === Node::KIND_CALL) {
-            foreach ($n->args as $a) { $this->markVecElemBase($a); }
-        }
-        if ($n->kind === Node::KIND_METHOD_CALL) {
-            foreach ($n->args as $a) { $this->markVecElemBase($a); }
-        }
-        if ($n->kind === Node::KIND_STATIC_CALL) {
-            foreach ($n->args as $a) { $this->markVecElemBase($a); }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            $this->collectMutatedVecs($c);
+        foreach (\Compile\Mir\VecCopyOnAssign::mutatedLocals($n) as $name => $ignored) {
+            $this->frame->mutatedVecLocals[$name] = true;
         }
     }
-
     /**
      * Whether php declares $fn's FIRST parameter by reference over an array,
      * i.e. whether the call mutates the argument in place
@@ -515,25 +427,7 @@ trait EmitLlvmMemory
      */
     private function mutatesArg0(string $fn): bool
     {
-        $bare = $fn;
-        // Monomorphize has already run, so a prelude body arrives as
-        // `sort$mono$p0_vec_int` — matching the raw callee name found the four
-        // codegen builtins and MISSED every php-bodied one (`sort`, `usort`,
-        // `array_push`), which is why the first cut still printed a mutated
-        // alias for them.
-        $m = \strpos($bare, '$mono$');
-        if ($m !== false) { $bare = \substr($bare, 0, $m); }
-        $p = \strrpos($bare, '\\');
-        if ($p !== false) { $bare = \substr($bare, $p + 1); }
-        foreach ([
-            'array_multisort', 'array_pop', 'array_push', 'array_shift', 'array_splice',
-            'array_unshift', 'array_walk', 'array_walk_recursive', 'arsort', 'asort',
-            'each', 'end', 'krsort', 'ksort', 'natcasesort', 'natsort', 'next', 'prev',
-            'reset', 'rsort', 'shuffle', 'sort', 'uasort', 'uksort', 'usort',
-        ] as $k) {
-            if ($k === $bare) { return true; }
-        }
-        return false;
+        return \Compile\Mir\VecCopyOnAssign::mutatesArg0($fn);
     }
 
     /**
@@ -611,6 +505,42 @@ trait EmitLlvmMemory
         return $ownEl && $this->isOwnElemFlavor($f) ? $f . 'own' : $f;
     }
 
+    /**
+     * The flavor for a buffer whose ELEMENTS are arrays, carrying the INNER
+     * element's flavor with it: `vec[vec[string]]` is `vecarrstr`, whose walk
+     * releases each element as a `vecstr`.
+     *
+     * Without the inner half the walk is `arr` — the repr-driven
+     * `__mir_array_release`, which goes only as deep as the element's OWN bits
+     * describe it, and a producer stamps none. So the nested BUFFERS were freed
+     * and their strings stranded. The outer static type has always known the
+     * answer; it had nowhere to put it.
+     *
+     * Depth three (`vec[vec[vec[…]]]`) falls back to `arr` and its repr walk —
+     * the inner flavor of a nested-array element is itself `vec`.
+     */
+    private function nestedArrFlavor(Type $el, string $prefix): string
+    {
+        $inner = $this->discardReleaseFlavor($el);
+        if ($inner === 'vecstr' || $inner === 'assocstr') { return $prefix . 'arrstr'; }
+        if ($inner === 'veccell' || $inner === 'assoccell') { return $prefix . 'arrcell'; }
+        if ($inner === 'vecbuf' || $inner === 'assocbuf') { return $prefix . 'arrbuf'; }
+        if ($inner === 'vecobj' || $inner === 'assocobj'
+            || $inner === 'vecobjown' || $inner === 'assocobjown') { return $prefix . 'arrobj'; }
+        // A nested array OF arrays: ask the same question one level down,
+        // so `vec[vec[vec[string]]]` is `vecarrarrstr`. Three levels are
+        // emitted ({@see \Compile\Runtime\UnifiedArrayRuntime::
+        // nestedFlavors}); deeper falls back to the repr walk.
+        if ($inner === 'vec' || $inner === 'assoc') {
+            $deeper = $el->element;
+            if ($deeper !== null && $deeper->kind === Type::KIND_ARRAY) {
+                $sub = $this->nestedArrFlavor($deeper, '');
+                if ($sub !== 'arr') { return $prefix . 'arr' . $sub; }
+            }
+        }
+        return $prefix . 'arr';
+    }
+
     /** {@see rcReleaseFlavor}'s answer before the ownership suffix. */
     private function rcReleaseFlavorPlain(\Compile\Mir\MemoryOp_ $mo, bool $shared): string
     {
@@ -624,6 +554,16 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
+            // A NESTED array element — the member the flavor family was
+            // missing, so this fell through to the plain repr walk and
+            // `$a = [f(), g()]` freed the outer buffer and stranded both inner
+            // arrays. ONLY here, on a LOCAL SLOT drop: this path already knows
+            // the slot is not `$shared` (not handed to a callee by value), and
+            // it is the one place the claim is the buffer's sole owner's.
+            // `discardReleaseFlavor` answers for PROPERTIES, call arguments and
+            // the erased repr path too, where the same claim over-releases —
+            // 20 array_ cases and a gen-3 abort.
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'vec'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
             return 'vec';
         }
@@ -633,6 +573,7 @@ trait EmitLlvmMemory
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
+            if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'assoc'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';
         }
@@ -761,6 +702,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_cell'; }
+        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_' . $this->arrFlavorSuffix($flavor); }
         // The `own` suffix is a RELEASE-side distinction — retain already co-owns
         // the elements on every call, which is the asymmetry the suffix repairs.
         // Mapped rather than left to the default, so an `own` flavor arriving
@@ -799,7 +741,19 @@ trait EmitLlvmMemory
             $at = $fallback;
         }
         $flavor = $at !== null ? $this->discardReleaseFlavor($at) : 'vec';
-        return $flavor === '' ? 'vec' : $flavor;
+        if ($flavor === '') { $flavor = 'vec'; }
+        // A NESTED array element, the same claim {@see rcReleaseFlavorPlain}
+        // makes on the release side — and it has to be made HERE too, or the
+        // two halves of one decision disagree: the release walked the elements
+        // while the entry retain took the buffer alone, and `array_merge_
+        // recursive` handed back an entry whose key had been freed. Kept out of
+        // `discardReleaseFlavor` on purpose — that one also answers for
+        // PROPERTIES and the erased repr path, where the claim over-releases.
+        if (($flavor === 'vec' || $flavor === 'assoc') && $at !== null
+            && $at->element !== null && $at->element->kind === Type::KIND_ARRAY) {
+            $flavor = $this->nestedArrFlavor($at->element, $flavor);
+        }
+        return $flavor;
     }
 
     /**
@@ -814,6 +768,7 @@ trait EmitLlvmMemory
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
+        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_' . $this->arrFlavorSuffix($flavor); }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
         else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
         $p = $this->ssa->allocReg();
@@ -857,6 +812,7 @@ trait EmitLlvmMemory
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
+        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $fn = (\Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_' : '@__mir_array_release_') . $this->arrFlavorSuffix($flavor); }
         // PAIRWISE-SYMMETRIC: this reference took the element refs in its own
         // retain, so its release gives them back — every time, not only at
         // rc → 0 ({@see collectOwnElemLocals}).
