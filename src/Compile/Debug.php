@@ -252,6 +252,29 @@ final class Debug
     public static bool $rcCtorArgTemp = true;
 
     /**
+     * `MANTICORE_RC_NESTED_ARR=1` — give an array element that is ITSELF an
+     * array a release flavor (`vecarrobj` / `assocarrobj`).
+     *
+     * The gap is real and measured: `array<string, P[]>` fell through to the
+     * buffer-only `assoc` while the store had already retained each inner
+     * array with `__mir_array_retain_obj`, so every inner array leaked whole —
+     * 155.7 MB against a paired control at 1.2, php flat for both
+     * ({@see tools/prof/nested_prop.php}). With the flag the repro is flat and
+     * the AOT suite is green.
+     *
+     * ⛔ OFF, because it MISCOMPILES THE COMPILER. `bin/build` gen 1 is clean
+     * and gen 2 dies compiling hello world — Trace/BPT once, SIGSEGV on the
+     * retry, i.e. corruption, not a deterministic bad free, and no `[VERIFY]`
+     * guard fires. That is the same signature as the reverted variadic-pack
+     * element release. Something the compiler's own `array<K, T[]>` slots do
+     * is not the symmetric retain/release pair this flavor assumes; the
+     * candidates are a slot that ALIASES an inner array it did not retain, and
+     * `classDropFlavor`'s deepening, which turns the name into `…arrobjown`
+     * and finds no helper for it.
+     */
+    public static bool $rcNestedArr = false;
+
+    /**
      * `MANTICORE_RC_ARG_TEMP=<kinds>` — WHICH call kinds release the fresh rc
      * temp they were handed: `s` static, `m` method. The CONSTRUCTOR arm has
      * its own older switch ({@see $rcCtorArgTemp}); the free-function arm
@@ -610,6 +633,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemType = false; }
         $env = \getenv('MANTICORE_RC_PROP_DROP');
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
+        $env = \getenv('MANTICORE_RC_NESTED_ARR');
+        if ($env !== false && $env !== '0' && $env !== '') { self::$rcNestedArr = true; }
         $env = \getenv('MANTICORE_RC_ARG_TEMP');
         if ($env !== false) { self::$rcArgTemp = $env; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');

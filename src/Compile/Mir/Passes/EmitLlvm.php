@@ -3592,7 +3592,8 @@ final class EmitLlvm implements EmitVisitor
             // inner array leaked whole. Only a CONCRETE obj element is covered:
             // the inner flavor has to be known at compile time, because a
             // concrete buffer carries no repr bits to dispatch on.
-            if ($el !== null && $el->kind === Type::KIND_ARRAY
+            if (\Compile\Debug::$rcNestedArr
+                && $el !== null && $el->kind === Type::KIND_ARRAY
                 && $el->element !== null && $el->element->kind === Type::KIND_OBJ
                 && $this->elemObjFlavor($el->element) === 'obj') { return 'vecarrobj'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vec' . $this->elemObjFlavor($el); }
@@ -3613,7 +3614,8 @@ final class EmitLlvm implements EmitVisitor
             // inner array leaked whole. Only a CONCRETE obj element is covered:
             // the inner flavor has to be known at compile time, because a
             // concrete buffer carries no repr bits to dispatch on.
-            if ($el !== null && $el->kind === Type::KIND_ARRAY
+            if (\Compile\Debug::$rcNestedArr
+                && $el !== null && $el->kind === Type::KIND_ARRAY
                 && $el->element !== null && $el->element->kind === Type::KIND_OBJ
                 && $this->elemObjFlavor($el->element) === 'obj') { return 'assocarrobj'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assoc' . $this->elemObjFlavor($el); }
