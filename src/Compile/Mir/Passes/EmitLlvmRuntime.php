@@ -816,7 +816,8 @@ trait EmitLlvmRuntime
             if (\Compile\Debug::$ccTrace) {
                 $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
                 $out .= "  %sra = call ptr @llvm.returnaddress(i32 0)\n";
-                $out .= $this->ccTrace('sret', 'ptr %p, ptr %sra');
+                $out .= $this->btNameIr('sret')
+                    . $this->ccTrace('sret', 'ptr %p, ptr %sra, ptr %sretfn');
             }
             $out .= "  %z = icmp eq ptr %p, null\n";
             $out .= "  br i1 %z, label %done, label %hdr\n";
@@ -874,7 +875,8 @@ trait EmitLlvmRuntime
             if (\Compile\Debug::$ccTrace) {
                 $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
                 $out .= "  %srb = call ptr @llvm.returnaddress(i32 0)\n";
-                $out .= $this->ccTrace('srel', 'ptr %p, ptr %srb');
+                $out .= $this->btNameIr('srel')
+                    . $this->ccTrace('srel', 'ptr %p, ptr %srb, ptr %srelfn');
             }
             $out .= "  %z = icmp eq ptr %p, null\n";
             $out .= "  br i1 %z, label %done, label %hdr\n";
@@ -2092,8 +2094,13 @@ trait EmitLlvmRuntime
         'white'   => '[CC] white %p',
         'rel'     => '[RC] rel %p rc=%lld from=%p fn=%s',
         'ret'     => '[RC] ret %p rc=%lld from=%p fn=%s',
-        'sret'    => '[SR] ret %p from=%p',
-        'srel'    => '[SR] rel %p from=%p',
+        // The STRING half carries `fn=` for the same reason the obj half does:
+        // `from=` is a return address in a PIE and nothing in-process knows
+        // the slide, so it names nobody. A string UAF on the symfony T5 build
+        // came down to four releases against three retains in one window, and
+        // without the frame the four were indistinguishable.
+        'sret'    => '[SR] ret %p from=%p fn=%s',
+        'srel'    => '[SR] rel %p from=%p fn=%s',
     ];
 
     /** The trace's format strings, at module scope (a global cannot sit in a body). */

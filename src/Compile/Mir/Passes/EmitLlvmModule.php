@@ -283,7 +283,8 @@ trait EmitLlvmModule
         // the ring under the same condition keeps ONE body for the name —
         // a second, backtrace-less variant would be an ODR split on a
         // linkonce_odr symbol, which is the hazard this file warns about.
-        if ($this->rt->needsBacktrace || \Compile\Debug::$arrRcTrace) {
+        if ($this->rt->needsBacktrace || \Compile\Debug::$arrRcTrace
+            || \Compile\Debug::$ccTrace) {
             // Runtime call-stack for backtraces: parallel name/line rings + depth.
             // linkonce_odr so user.o + stdlib.o share one stack.
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
