@@ -712,6 +712,9 @@ final class EmitLlvm implements EmitVisitor
         $this->propRawBorrow = [];
         $this->propElemBorrow = [];
         $this->needsObjectVarsFn = false;
+        $this->erasedIfaceIface = [];
+        $this->erasedIfaceMethod = [];
+        $this->erasedIfaceArgc = [];
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -1012,6 +1015,7 @@ final class EmitLlvm implements EmitVisitor
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
+        $extraBodies .= $this->emitErasedIfaceFns();
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1842,6 +1846,24 @@ final class EmitLlvm implements EmitVisitor
     /** A site asked for `get_object_vars`' class-table walk, so the module needs
      *  the one shared body ({@see EmitLlvmBuiltins::emitObjectVarsFn}). */
     private bool $needsObjectVarsFn = false;
+
+    /**
+     * Erased-interface dispatchers this module needs
+     * ({@see EmitLlvmObjects::emitErasedIfaceCall}), keyed `iface|method|argc`.
+     *
+     * THREE PARALLEL ARRAYS, not one array of triples: a keyed store of a
+     * LIST into an array property, written from a trait, did not survive to
+     * the reader — the registry read back empty and every site called a
+     * dispatcher whose body was never emitted. Same shape as the note on the
+     * builtin-ownership prober.
+     *
+     * @var array<string, string>
+     */
+    private array $erasedIfaceIface = [];
+    /** @var array<string, string> */
+    private array $erasedIfaceMethod = [];
+    /** @var array<string, int> */
+    private array $erasedIfaceArgc = [];
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */

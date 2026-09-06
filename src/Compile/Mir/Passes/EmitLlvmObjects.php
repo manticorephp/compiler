@@ -1858,41 +1858,95 @@ trait EmitLlvmObjects
     private function emitErasedIfaceCall(string $objPtr, string $iface, string $method,
                                          array $argRegs): string
     {
-        $holders = $this->ifaceMethodHolders($iface, $method);
+        // ONE copy per module, CALLED — not spliced into every site. The arm set
+        // is a pure function of (iface, method) and THIS module's class table;
+        // nothing about the call site enters it except the receiver and the
+        // arguments, which are the parameters. Splicing it inline cost the
+        // symfony-demo T5 build 2.5 GB of IR: `Symfony\Flex\Flex::activate`
+        // alone reached 428 MB — 3.2 MB per line of its 134-line body — with
+        // 2828 of these switches in that one function, each carrying an arm per
+        // class in a ~2800-class module. It is the same mistake, and the same
+        // fix, as the class-table walk ({@see EmitLlvmBuiltins::emitObjectVarsFn}).
+        $key = $iface . '|' . $method . '|' . (string)\count($argRegs);
+        $this->erasedIfaceIface[$key] = $iface;
+        $this->erasedIfaceMethod[$key] = $method;
+        $this->erasedIfaceArgc[$key] = \count($argRegs);
         $oi = $this->ssa->allocReg();
         $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
-        $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . " = alloca i64\n";
-        $end = $this->ssa->allocLabel('ei.end');
-        $def = $this->ssa->allocLabel('ei.default');
-        $out .= $this->emitLoadClassId($objPtr);
-        /** @var string[] $switchChunks */
-        $switchChunks = ['  switch i64 ' . $this->classIdReg . ', label %' . $def . " [\n"];
-        /** @var string[] $bodyChunks */
-        $bodyChunks = [];
-        foreach ($holders as $cname => $declCls) {
-            $lbl = $this->ssa->allocLabel('ei.case');
-            $switchChunks[] = '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            $bodyChunks[] = $lbl . ":\n";
-            $args = 'i64 ' . $oi;
-            foreach ($argRegs as $ar) { $args .= ', i64 ' . $ar; }
-            $r = $this->ssa->allocReg();
-            $bodyChunks[] = '  ' . $r . ' = call i64 @manticore_' . $this->mangle($declCls)
-                           . '__' . $method . '(' . $args . ")\n";
-            $bodyChunks[] = '  store i64 ' . $r . ', ptr ' . $res . "\n";
-            $bodyChunks[] = '  br label %' . $end . "\n";
-        }
-        $switchChunks[] = "  ]\n";
-        $out .= \implode('', $switchChunks) . \implode('', $bodyChunks);
-        unset($switchChunks, $bodyChunks);
-        $out .= $def . ":\n";
-        $out .= '  store i64 0, ptr ' . $res . "\n";
-        $out .= '  br label %' . $end . "\n";
-        $out .= $end . ":\n";
+        $args = 'i64 ' . $oi;
+        foreach ($argRegs as $ar) { $args .= ', i64 ' . $ar; }
         $rr = $this->ssa->allocReg();
-        $out .= '  ' . $rr . ' = load i64, ptr ' . $res . "\n";
+        $out .= '  ' . $rr . ' = call i64 @' . $this->erasedIfaceSym($iface, $method, \count($argRegs))
+              . '(' . $args . ")\n";
         $this->lastValue = $rr;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** The out-of-line symbol for one erased-interface dispatcher. */
+    private function erasedIfaceSym(string $iface, string $method, int $argc): string
+    {
+        $i = \str_replace('\\', '_', \ltrim($iface, '\\'));
+        return '__mir_eicall_' . $i . '__' . $method . '_' . (string)$argc;
+    }
+
+    /**
+     * The bodies for every erased-interface dispatcher a site asked for, emitted
+     * beside the function bodies (not the preamble — the arm set is
+     * module-local, so this must never be a `linkonce_odr` symbol that could
+     * coalesce with another module's table).
+     *
+     * `optnone` for the same reason the object-vars walk carries it: this is the
+     * SLOW path by construction — the receiver's class is unknown — and a
+     * 2800-arm linear dispatcher is the single most expensive thing to hand an
+     * optimizer for no runtime gain.
+     */
+    private function emitErasedIfaceFns(): string
+    {
+        $out = '';
+        foreach ($this->erasedIfaceIface as $key => $iface) {
+            $method = $this->erasedIfaceMethod[$key] ?? '';
+            $argc = $this->erasedIfaceArgc[$key] ?? 0;
+            if ($method === '') { continue; }
+            $holders = $this->ifaceMethodHolders($iface, $method);
+            $params = 'i64 %o';
+            for ($i = 0; $i < $argc; $i++) { $params .= ', i64 %a' . (string)$i; }
+            $body = "  %op = inttoptr i64 %o to ptr\n";
+            $res = $this->ssa->allocReg();
+            $body .= '  ' . $res . " = alloca i64\n";
+            $end = $this->ssa->allocLabel('ei.end');
+            $def = $this->ssa->allocLabel('ei.default');
+            $body .= $this->emitLoadClassId('%op');
+            /** @var string[] $switchChunks */
+            $switchChunks = ['  switch i64 ' . $this->classIdReg . ', label %' . $def . " [\n"];
+            /** @var string[] $bodyChunks */
+            $bodyChunks = [];
+            foreach ($holders as $cname => $declCls) {
+                $lbl = $this->ssa->allocLabel('ei.case');
+                $switchChunks[] = '    i64 ' . (string)$this->classes[$cname]->classId
+                    . ', label %' . $lbl . "\n";
+                $bodyChunks[] = $lbl . ":\n";
+                $args = 'i64 %o';
+                for ($i = 0; $i < $argc; $i++) { $args .= ', i64 %a' . (string)$i; }
+                $r = $this->ssa->allocReg();
+                $bodyChunks[] = '  ' . $r . ' = call i64 @manticore_' . $this->mangle($declCls)
+                               . '__' . $method . '(' . $args . ")\n";
+                $bodyChunks[] = '  store i64 ' . $r . ', ptr ' . $res . "\n";
+                $bodyChunks[] = '  br label %' . $end . "\n";
+            }
+            $switchChunks[] = "  ]\n";
+            $body .= \implode('', $switchChunks) . \implode('', $bodyChunks);
+            unset($switchChunks, $bodyChunks);
+            $body .= $def . ":\n";
+            $body .= '  store i64 0, ptr ' . $res . "\n";
+            $body .= '  br label %' . $end . "\n";
+            $body .= $end . ":\n";
+            $rr = $this->ssa->allocReg();
+            $body .= '  ' . $rr . ' = load i64, ptr ' . $res . "\n";
+            $out .= 'define internal i64 @' . $this->erasedIfaceSym($iface, $method, $argc)
+                  . '(' . $params . ") noinline optnone {\nentry:\n" . $body
+                  . '  ret i64 ' . $rr . "\n}\n\n";
+        }
         return $out;
     }
 
