@@ -305,19 +305,29 @@ function array_fill(int $start, int $count, mixed $value): array
  * `$column_key` yields whole rows (re-keyed). Rows lacking the column are
  * skipped.
  *
- * ARRAY rows only. php also accepts OBJECT rows (reading a public property of
- * the same name), and that is deliberately NOT modelled here: inside this
- * function `$row` is erased to a cell, and a cell receiver cannot be reflected
- * on — `property_exists($row, …)` returns false and a dynamic `$row->$name`
- * read yields the cell's bits, even after funnelling through an `object`-typed
- * param. It needs a compiler fix (erased-receiver reflection), not a stdlib one;
- * shipping the object arm before that would silently drop every object row.
- * @param array<int|string, array<int|string, mixed>> $array
+ * OBJECT rows work too, the way php's do: `get_object_vars()` on the row, then
+ * the same key read. That needed the erased-receiver walk to answer for an ENUM
+ * CASE — `array_column(Enum::cases(), 'value')` is the shape symfony's
+ * `TypeInfo\TypeIdentifier::values()` uses — which it now does.
+ *
+ * `#[CellArg]` makes the CALL SITE box the elements. A stdlib fn is compiled
+ * ONCE, so its `array` param carries a fixed element repr; without the
+ * attribute a `vec[obj<Enum>]` argument arrives with RAW slots that the cell
+ * reads decode as tagged words (`is_object()` answered 1 of 2 cases).
+ *
+ * The declared key is `int|string` — a CELL key, the tag-dispatched channel —
+ * because php's rows may be string-keyed. It only survives into a dependent
+ * module because {@see \Manticore\Sig::encodeType} now writes it.
+ *
+ * @param array<int|string, mixed> $array
  */
-function array_column(array $array, int|string|null $column_key, int|string|null $index_key = null): array
+function array_column(#[\Manticore\Attr\CellArg] array $array, int|string|null $column_key, int|string|null $index_key = null): array
 {
     $out = [];
-    foreach ($array as $row) {
+    foreach ($array as $rawRow) {
+        // A SEPARATE local, not a reassigned `$rawRow`: one name written with
+        // two types gets ONE rc release flavor (first write wins).
+        $row = \is_object($rawRow) ? \get_object_vars($rawRow) : $rawRow;
         if ($column_key === null) {
             $val = $row;
         } else {
