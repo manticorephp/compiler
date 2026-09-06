@@ -65,20 +65,6 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_retain_obj', 'obj');
         $this->emitRetainVariant('__mir_array_retain_str', 'str');
         $this->emitRetainVariant('__mir_array_retain_cell', 'cell');
-        // A NESTED array element — `assoc[string, vec[obj<T>]]`. Its own
-        // element flavor is baked into the name rather than read at runtime:
-        // a CONCRETE inner buffer carries no repr bits ({@see
-        // EmitLlvmArrays::erasedReprCode} never stamps one), so the
-        // repr-dispatching plain release walks nothing and the inner objects
-        // are stranded — 155 MB against a flat 1.2 in tools/prof/nested_prop.
-        // ⚠ NO `retain_arr`. A nested-array slot owns its inner arrays ONCE,
-        // as the buffer — not once per reference. The store usually TRANSFERS
-        // them (an array literal is an owned producer, so `rcRetainByType`
-        // emits nothing), so a reference does not carry per-element refs and
-        // the pair has to be buffer-only retain + a walk at rc -> 0. The
-        // symmetric spelling freed `Rows::$data`'s inner arrays on a release
-        // that was not the last one, and `iterable_erased_traversable` printed
-        // `[][]` for `[a,b][c]`.
         // ADOPT = retain MINUS the rc bump: co-own the hashed keys and the
         // elements of a buffer this frame already owns outright. That is exactly
         // what a value COPY needs — `__mir_array_copy` hands back a FRESH rc=1
@@ -89,7 +75,6 @@ final class UnifiedArrayRuntime
         $this->emitRetainVariant('__mir_array_adopt_obj', 'obj', false);
         $this->emitRetainVariant('__mir_array_adopt_str', 'str', false);
         $this->emitRetainVariant('__mir_array_adopt_cell', 'cell', false);
-        $this->emitRetainVariant('__mir_array_adopt_arr', 'arr', false);
         $this->emitRetainVariant('__mir_array_adopt_buf', '', false);
         $this->emitRetainVariant('__mir_array_adopt', 'repr', false);
         $this->emitRelease();
@@ -1741,7 +1726,6 @@ final class UnifiedArrayRuntime
         // one site and released as `_str` at another then over-releases a LIVE
         // buffer (json / pdo / preg / unserialize / var_export went red).
         $this->emitReleaseVariant('__mir_array_release_ownel_obj', 'obj', true);
-        $this->emitReleaseVariant('__mir_array_release_arr', 'arr', false);
         $this->emitReleaseVariant('__mir_array_release_ownel_str', 'str', true);
         $this->emitReleaseVariant('__mir_array_release_ownel_cell', 'cell', true);
     }
@@ -1842,39 +1826,6 @@ final class UnifiedArrayRuntime
     {
         if ($flavor === '') { return $b; }
         if ($flavor === 'cell') { $b->call('__mir_cell_drop', Type::void(), [$v]); return $b; }
-        // An element that is ITSELF AN ARRAY. `__mir_rc_release` cannot serve
-        // here: it routes on the word at ptr-8, and an array's tag
-        // (ARRAY_TAG_MAGIC, …0002) is not RC_TAG_MAGIC (…0000), so an array
-        // would take the STRING branch and have its length word decremented as
-        // a refcount.
-        //
-        // ⚠ The PLAIN release, deliberately — not `_ownel_obj`. The inner
-        // arrays do NOT all arrive retained at element depth: the same buffer
-        // is retained by `__mir_array_retain` (repr, which walks nothing on a
-        // CONCRETE buffer) at one site and by `__mir_array_retain_obj` at
-        // another, so an element-walking release here ran THREE walks against
-        // ONE and over-released an object — `finishClassDecl`, gen 2, caught by
-        // `MANTICORE_DEBUG_VERIFY=1`. Both ends must carry elements for the
-        // deeper release to be sound, and only the buffer reference is proven
-        // at both. So: give the buffer back, leave the elements — a leak, never
-        // a free of something still live.
-        if ($flavor === 'arr') {
-            $ap = $b->inttoptr($v, Type::ptr());
-            // The NON-symmetric obj variant: it walks the inner array's own
-            // elements only at ITS rc -> 0, which is once. `_ownel_obj` walks on
-            // EVERY release, and the same inner buffer is retained by
-            // `__mir_array_retain` (repr — walks nothing on a CONCRETE buffer)
-            // at one site and `retain_obj` at another, so the symmetric spelling
-            // ran three walks against one and over-released an object
-            // (`finishClassDecl`, gen 2, `MANTICORE_DEBUG_VERIFY=1`).
-            //
-            // The plain `__mir_array_release` is safe but recovers only the
-            // inner BUFFERS — a concrete buffer stamps no repr bits, so its own
-            // free path walks nothing and every inner object stays: 124.7 MB of
-            // the 155.7 ({@see tools/prof/nested_prop.php}).
-            $b->call('__mir_array_release_obj', Type::void(), [$ap]);
-            return $b;
-        }
         if ($isCell !== null) {
             $cellB = $fn->block('dv_cell_' . $tag);
             $rawB  = $fn->block('dv_raw_' . $tag);
@@ -1909,13 +1860,6 @@ final class UnifiedArrayRuntime
     {
         if ($flavor === '') { return $b; }
         if ($flavor === 'cell') { $b->call('__mir_cell_retain', Type::void(), [$v]); return $b; }
-        // …and its mirror ({@see emitDropValue}'s `arr` arm) — plain, for the
-        // reason spelled out there.
-        if ($flavor === 'arr') {
-            $ap = $b->inttoptr($v, Type::ptr());
-            $b->call('__mir_array_retain', Type::void(), [$ap]);
-            return $b;
-        }
         $join = null;
         if ($isCell !== null) {
             // Runtime shape beats the static flavor — see {@see emitDropValue}.

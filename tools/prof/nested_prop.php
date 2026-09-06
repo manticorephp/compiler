@@ -11,15 +11,16 @@
  *
  * The store retains an inner array with `__mir_array_retain_obj` — it is an
  * ARRAY, and that is the array retain. The DROP had no name for "one array
- * release per element": `discardReleaseFlavor` dispatched on the element KIND
- * and an ARRAY element matched no arm, so the slot fell through to the
- * buffer-only `vec`/`assoc` and every inner array leaked whole, with everything
- * in it. 155.7 MB against the control's 1.2 before `vecarrobj`/`assocarrobj`.
+ * release per element": the flavor vocabulary dispatched on the element KIND and
+ * an ARRAY element matched no arm, so the slot fell through to the buffer-only
+ * `vec`/`assoc` and every inner array leaked whole, with everything in it.
+ * 155.7 MB against the control's 1.2 before the `vecarr` family.
  *
- * ⚠ Only a CONCRETE obj inner element is covered. A concrete buffer carries no
- * repr bits ({@see \Compile\Mir\Passes\EmitLlvmArrays::erasedReprCode} never
- * stamps one), so the inner flavor cannot be read at runtime and has to be in
- * the name — which is why this is a flavor and not a dispatch.
+ * ⚠ The deep flavor is claimed ONLY on a LOCAL SLOT drop ({@see
+ * \Compile\Mir\Passes\EmitLlvmMemory::rcReleaseFlavorPlain}), where the slot is
+ * the buffer's sole owner. Claiming it in `discardReleaseFlavor` — which also
+ * answers for PROPERTIES, call arguments and the erased repr path — over-releases:
+ * 20 array_ cases and a gen-3 abort.
  */
 final class P { public function __construct(public readonly string $n) {} }
 

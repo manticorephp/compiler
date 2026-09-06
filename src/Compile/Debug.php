@@ -252,40 +252,6 @@ final class Debug
     public static bool $rcCtorArgTemp = true;
 
     /**
-     * `MANTICORE_RC_NESTED_ARR=0` — turn OFF the release flavor for an array
-     * element that is itself an array (`vecarr` / `assocarr`).
-     *
-     * `discardReleaseFlavor` dispatches on the element KIND, and an ARRAY
-     * element matched no arm: `array<string, P[]>` fell through to the
-     * buffer-only `assoc` while the store had already retained each inner array,
-     * so every inner array leaked whole with everything in it — 155.7 MB against
-     * a paired control at 1.2, php flat for both
-     * ({@see tools/prof/nested_prop.php}). With the flavor: 16.8 MB.
-     *
-     * ⚠ The pairing is buffer-only RETAIN plus an element walk at rc → 0 only,
-     * and the walk hands each inner array to the NON-symmetric
-     * `__mir_array_release_obj`. Both halves of that were paid for:
-     *  - a symmetric (`_ownel_*`) release walks on EVERY release, and the same
-     *    inner buffer is retained by `__mir_array_retain` (repr — which walks
-     *    nothing on a CONCRETE buffer) at one site and `retain_obj` at another,
-     *    so it ran three walks against one and over-released an object
-     *    (`finishClassDecl`, gen 2, caught by `MANTICORE_DEBUG_VERIFY=1`);
-     *  - a symmetric RETAIN is wrong for the mirror reason: an array literal is
-     *    an owned producer, so the store TRANSFERS the inner arrays and a
-     *    reference carries no per-element refs. That spelling freed
-     *    `Rows::$data`'s inner arrays early and `iterable_erased_traversable`
-     *    printed `[][]` for `[a,b][c]`.
-     *
-     * Restricted to a CONCRETE obj inner element: the walk's own element op is
-     * `__mir_rc_release`, self-routing over obj and string but a wild read on a
-     * raw scalar, so `int[][]` stays out.
-     *
-     * ⛔ Residual: the repro still climbs (1.98 MB at 2 000 iterations, 16.8 at
-     * 40 000), so ~11% of the shape is still unaccounted.
-     */
-    public static bool $rcNestedArr = true;
-
-    /**
      * `MANTICORE_RC_ARG_TEMP=<kinds>` — WHICH call kinds release the fresh rc
      * temp they were handed: `s` static, `m` method. The CONSTRUCTOR arm has
      * its own older switch ({@see $rcCtorArgTemp}); the free-function arm
@@ -644,8 +610,6 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcElemType = false; }
         $env = \getenv('MANTICORE_RC_PROP_DROP');
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
-        $env = \getenv('MANTICORE_RC_NESTED_ARR');
-        if ($env === '0' || $env === 'off') { self::$rcNestedArr = false; }
         $env = \getenv('MANTICORE_RC_ARG_TEMP');
         if ($env !== false) { self::$rcArgTemp = $env; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');
