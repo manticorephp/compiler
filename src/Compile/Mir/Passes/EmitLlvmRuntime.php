@@ -455,7 +455,7 @@ trait EmitLlvmRuntime
             // `rel rc=0` followed by a `ret rc=1` on one address reads as a
             // retain of a dead string and as a fresh allocation equally well.
             // The array half needed the same event for the same reason.
-            $nraw = '[SRC] new str=%p len=%lld';
+            $nraw = '[SRC] new str=%p len=%lld fn=%s';
             $out .= '@.src.new = private unnamed_addr constant ['
                 . (string)(\strlen($nraw) + 2) . ' x i8] c"' . $nraw . '\0A\00", align 1' . "\n";
         }
@@ -526,7 +526,8 @@ trait EmitLlvmRuntime
         $out .= "  store i64 0, ptr %hashp\n";                        // hash = 0 (uncomputed)
         $out .= "  %d = getelementptr inbounds i8, ptr %p, i64 " . $H . "\n";
         if (\Compile\Debug::$arrRcTrace) {
-            $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.new, ptr %d, i64 %n)\n";
+            $out .= "  %srcnewfn = call ptr @__mir_bt_top()\n";
+            $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.new, ptr %d, i64 %n, ptr %srcnewfn)\n";
         }
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
@@ -815,7 +816,7 @@ trait EmitLlvmRuntime
                 // whom. Without it an over-release inside an element walk can
                 // only be counted, never attributed.
                 foreach ([['ret', 'ret'], ['rel', 'rel']] as $sp) {
-                    $sraw = '[SRC] ' . $sp[1] . ' str=%p rc=%lld';
+                    $sraw = '[SRC] ' . $sp[1] . ' str=%p rc=%lld fn=%s';
                     $out .= '@.src.' . $sp[0] . ' = private unnamed_addr constant ['
                         . (string)(\strlen($sraw) + 2) . ' x i8] c"' . $sraw . '\0A\00", align 1' . "\n";
                 }
@@ -871,7 +872,8 @@ trait EmitLlvmRuntime
             $out .= "  %rc1 = add i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %h\n";
             if (\Compile\Debug::$arrRcTrace) {
-                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.ret, ptr %p, i64 %rc1)\n";
+                $out .= "  %srcretfn = call ptr @__mir_bt_top()\n";
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.ret, ptr %p, i64 %rc1, ptr %srcretfn)\n";
             }
             $out .= "  br label %done\n";
             $out .= "done:\n";
@@ -935,7 +937,8 @@ trait EmitLlvmRuntime
             $out .= "  %rc1 = sub i64 %rc, 1\n";
             $out .= "  store i64 %rc1, ptr %h\n";
             if (\Compile\Debug::$arrRcTrace) {
-                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.rel, ptr %p, i64 %rc1)\n";
+                $out .= "  %srcrelfn = call ptr @__mir_bt_top()\n";
+                $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.src.rel, ptr %p, i64 %rc1, ptr %srcrelfn)\n";
             }
             $out .= "  %zero = icmp sle i64 %rc1, 0\n";
             $out .= "  br i1 %zero, label %free, label %done\n";
