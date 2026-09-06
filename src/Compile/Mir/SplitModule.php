@@ -354,9 +354,22 @@ final class SplitModule
         /** @var array<string, bool> */
         $refs = [];
         while (true) {
-            $p = \Manticore\fgets($buf, $cap, $in);
-            if ($p === 0) { break; }
-            $line = \cstr_to_str($p);
+            // fgets stops at the BUFFER as readily as at the newline, and this
+            // module has global initialisers whose single line runs to megabytes
+            // (a per-enum case table, a class descriptor array). Treating each
+            // chunk as a line put the tail of one on a line of its own, where it
+            // parses as nothing: `p0.ll:4:1: error: expected top-level entity`,
+            // and the whole split fell back to the serial path that cannot
+            // compile the module at all. Read until the newline actually arrives.
+            $line = '';
+            while (true) {
+                $p = \Manticore\fgets($buf, $cap, $in);
+                if ($p === 0) { break; }
+                $chunk = \cstr_to_str($p);
+                $line .= $chunk;
+                if (\substr($chunk, -1) === "\n") { break; }
+            }
+            if ($line === '') { break; }
             $n = \strlen($line);
             // The stored text must match `run`'s: lines joined by "\n" with the
             // closing brace's newline included, since run appends one itself.

@@ -707,11 +707,11 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
         . (string)$irBytes . ' bytes)', $statT, $splitter->sharedDefs, $splitter->internalDefs);
     $lto = thinlto_flags();
     $objs = [];
-    $cmd = '';
+    /** @var string[] */
+    $cmds = [];
     foreach ($parts as $i => $partPath) {
         $pobj = $base . '.p' . (string)$i . '.o';
-        if ($cmd !== '') { $cmd = $cmd . ' & '; }
-        $cmd = $cmd . 'clang -O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags
+        $cmds[] = 'clang -O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags
              . ' -c -x ir ' . $partPath . ' -o ' . $pobj . ' -Wno-override-module';
         $objs[] = $pobj;
     }
@@ -719,8 +719,36 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     // must not read as a part that built.
     foreach ($objs as $o) { system('rm -f ' . $o); }
     $statT = \Compile\Stats::now();
+    // ⚠ PARTS and CONCURRENCY are two different numbers, and conflating them is
+    // what makes a big module unbuildable. clang's peak is roughly proportional
+    // to the bytes it is handed — measured at ~15x the `.ll` on this module — so
+    // splitting into N parts and running all N at once costs the SAME memory as
+    // the one whole module: the product is constant. symfony-demo T5 took a
+    // 32 GB machine to the OOM killer either way.
+    //
+    // More parts is what shrinks the peak, and only if fewer of them run at a
+    // time. `MANTICORE_SPLIT_BATCH` is that second number; it defaults to ALL,
+    // which is the historical behaviour for the modules that already fit.
+    $batch = \count($cmds);
+    $envBatch = \getenv('MANTICORE_SPLIT_BATCH');
+    if ($envBatch !== false && $envBatch !== '') {
+        $b = (int)$envBatch;
+        if ($b >= 1 && $b < $batch) { $batch = $b; }
+    }
     // `wait` must be INSIDE the subshell: the background jobs are ITS children.
-    system('( ' . $cmd . ' ; wait )');
+    $i = 0;
+    $n = \count($cmds);
+    while ($i < $n) {
+        $cmd = '';
+        $k = 0;
+        while ($k < $batch && $i < $n) {
+            if ($cmd !== '') { $cmd = $cmd . ' & '; }
+            $cmd = $cmd . $cmds[$i];
+            $i = $i + 1;
+            $k = $k + 1;
+        }
+        system('( ' . $cmd . ' ; wait )');
+    }
     \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($parts)
         . ($lto === '' ? '' : ' (thinlto)'), $statT, -1, -1);
     // Count the objects. A "parallel build" that finished suspiciously fast has
