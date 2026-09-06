@@ -252,27 +252,38 @@ final class Debug
     public static bool $rcCtorArgTemp = true;
 
     /**
-     * `MANTICORE_RC_NESTED_ARR=1` — give an array element that is ITSELF an
-     * array a release flavor (`vecarrobj` / `assocarrobj`).
+     * `MANTICORE_RC_NESTED_ARR=0` — turn OFF the release flavor for an array
+     * element that is itself an array (`vecarr` / `assocarr`).
      *
-     * The gap is real and measured: `array<string, P[]>` fell through to the
-     * buffer-only `assoc` while the store had already retained each inner
-     * array with `__mir_array_retain_obj`, so every inner array leaked whole —
-     * 155.7 MB against a paired control at 1.2, php flat for both
-     * ({@see tools/prof/nested_prop.php}). With the flag the repro is flat and
-     * the AOT suite is green.
+     * `discardReleaseFlavor` dispatches on the element KIND, and an ARRAY
+     * element matched no arm: `array<string, P[]>` fell through to the
+     * buffer-only `assoc` while the store had already retained each inner array,
+     * so every inner array leaked whole with everything in it — 155.7 MB against
+     * a paired control at 1.2, php flat for both
+     * ({@see tools/prof/nested_prop.php}). With the flavor: 16.8 MB.
      *
-     * ⛔ OFF, because it MISCOMPILES THE COMPILER. `bin/build` gen 1 is clean
-     * and gen 2 dies compiling hello world — Trace/BPT once, SIGSEGV on the
-     * retry, i.e. corruption, not a deterministic bad free, and no `[VERIFY]`
-     * guard fires. That is the same signature as the reverted variadic-pack
-     * element release. Something the compiler's own `array<K, T[]>` slots do
-     * is not the symmetric retain/release pair this flavor assumes; the
-     * candidates are a slot that ALIASES an inner array it did not retain, and
-     * `classDropFlavor`'s deepening, which turns the name into `…arrobjown`
-     * and finds no helper for it.
+     * ⚠ The pairing is buffer-only RETAIN plus an element walk at rc → 0 only,
+     * and the walk hands each inner array to the NON-symmetric
+     * `__mir_array_release_obj`. Both halves of that were paid for:
+     *  - a symmetric (`_ownel_*`) release walks on EVERY release, and the same
+     *    inner buffer is retained by `__mir_array_retain` (repr — which walks
+     *    nothing on a CONCRETE buffer) at one site and `retain_obj` at another,
+     *    so it ran three walks against one and over-released an object
+     *    (`finishClassDecl`, gen 2, caught by `MANTICORE_DEBUG_VERIFY=1`);
+     *  - a symmetric RETAIN is wrong for the mirror reason: an array literal is
+     *    an owned producer, so the store TRANSFERS the inner arrays and a
+     *    reference carries no per-element refs. That spelling freed
+     *    `Rows::$data`'s inner arrays early and `iterable_erased_traversable`
+     *    printed `[][]` for `[a,b][c]`.
+     *
+     * Restricted to a CONCRETE obj inner element: the walk's own element op is
+     * `__mir_rc_release`, self-routing over obj and string but a wild read on a
+     * raw scalar, so `int[][]` stays out.
+     *
+     * ⛔ Residual: the repro still climbs (1.98 MB at 2 000 iterations, 16.8 at
+     * 40 000), so ~11% of the shape is still unaccounted.
      */
-    public static bool $rcNestedArr = false;
+    public static bool $rcNestedArr = true;
 
     /**
      * `MANTICORE_RC_ARG_TEMP=<kinds>` — WHICH call kinds release the fresh rc
@@ -634,7 +645,7 @@ final class Debug
         $env = \getenv('MANTICORE_RC_PROP_DROP');
         if ($env === '0' || $env === 'off') { self::$rcPropDrop = false; }
         $env = \getenv('MANTICORE_RC_NESTED_ARR');
-        if ($env !== false && $env !== '0' && $env !== '') { self::$rcNestedArr = true; }
+        if ($env === '0' || $env === 'off') { self::$rcNestedArr = false; }
         $env = \getenv('MANTICORE_RC_ARG_TEMP');
         if ($env !== false) { self::$rcArgTemp = $env; }
         $env = \getenv('MANTICORE_RC_CTOR_ARG');

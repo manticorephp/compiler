@@ -2627,8 +2627,7 @@ final class EmitLlvm implements EmitVisitor
     {
         return $flavor === 'vecstr' || $flavor === 'assocstr'
             || $flavor === 'vecobj' || $flavor === 'assocobj'
-            || $flavor === 'veccell' || $flavor === 'assoccell'
-            || $flavor === 'vecarrobj' || $flavor === 'assocarrobj';
+            || $flavor === 'veccell' || $flavor === 'assoccell';
     }
 
     /** Builtins whose argument's array-ness must be visible at runtime (they
@@ -3589,13 +3588,17 @@ final class EmitLlvm implements EmitVisitor
             // array ({@see EmitLlvmMemory::rcRetainByType} → arrayRetainFlavor),
             // so the drop owes one array release per element; without a name
             // for that the slot fell to the buffer-only `vec`/`assoc` and every
-            // inner array leaked whole. Only a CONCRETE obj element is covered:
-            // the inner flavor has to be known at compile time, because a
-            // concrete buffer carries no repr bits to dispatch on.
+            // inner array leaked WHOLE — 155.7 MB against a paired control at
+            // 1.2 ({@see tools/prof/nested_prop.php}).
+            //
+            // Restricted to a CONCRETE obj inner element: the walk hands each
+            // inner array to `__mir_array_release_obj`, whose own element walk
+            // is `__mir_rc_release` — self-routing over obj and string, but a
+            // wild read on a raw scalar. An `int[][]` therefore stays out.
             if (\Compile\Debug::$rcNestedArr
                 && $el !== null && $el->kind === Type::KIND_ARRAY
                 && $el->element !== null && $el->element->kind === Type::KIND_OBJ
-                && $this->elemObjFlavor($el->element) === 'obj') { return 'vecarrobj'; }
+                && $this->elemObjFlavor($el->element) === 'obj') { return 'vecarr'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vec' . $this->elemObjFlavor($el); }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A concrete scalar element (int/float/bool/null) has nothing to
@@ -3611,13 +3614,17 @@ final class EmitLlvm implements EmitVisitor
             // array ({@see EmitLlvmMemory::rcRetainByType} → arrayRetainFlavor),
             // so the drop owes one array release per element; without a name
             // for that the slot fell to the buffer-only `vec`/`assoc` and every
-            // inner array leaked whole. Only a CONCRETE obj element is covered:
-            // the inner flavor has to be known at compile time, because a
-            // concrete buffer carries no repr bits to dispatch on.
+            // inner array leaked WHOLE — 155.7 MB against a paired control at
+            // 1.2 ({@see tools/prof/nested_prop.php}).
+            //
+            // Restricted to a CONCRETE obj inner element: the walk hands each
+            // inner array to `__mir_array_release_obj`, whose own element walk
+            // is `__mir_rc_release` — self-routing over obj and string, but a
+            // wild read on a raw scalar. An `int[][]` therefore stays out.
             if (\Compile\Debug::$rcNestedArr
                 && $el !== null && $el->kind === Type::KIND_ARRAY
                 && $el->element !== null && $el->element->kind === Type::KIND_OBJ
-                && $this->elemObjFlavor($el->element) === 'obj') { return 'assocarrobj'; }
+                && $this->elemObjFlavor($el->element) === 'obj') { return 'assocarr'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assoc' . $this->elemObjFlavor($el); }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
@@ -3715,7 +3722,9 @@ final class EmitLlvm implements EmitVisitor
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
-        if ($flavor === 'vecarrobj' || $flavor === 'assocarrobj') { return '@__mir_array_release_ownel_arrobj'; }
+        // NOT an `ownel` walk: the inner arrays are the BUFFER's, once — see
+        // {@see Runtime\UnifiedArrayRuntime}'s note where `retain_arr` would be.
+        if ($flavor === 'vecarr' || $flavor === 'assocarr') { return '@__mir_array_release_arr'; }
         if ($flavor === 'vecbuf' || $flavor === 'assocbuf') { return '@__mir_array_release_buf'; }
         if ($flavor === 'vec' || $flavor === 'assoc') { return '@__mir_array_release'; }
         // PAIRWISE-SYMMETRIC: this slot took the element refs in its own store's
