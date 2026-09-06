@@ -1,0 +1,7 @@
+class  this   : x|y|3
+class  self   : x|y|3
+class  selfP  : x|y|3
+class  static : x|y|3
+trait  self   : x|y|3
+trait  this   : x|y|3
+trait  nonstat: x|y|3

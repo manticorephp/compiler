@@ -5422,6 +5422,24 @@ final class LowerFromAst implements Pass
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
         }
+        // php lets a STATIC method be reached through `->`, and it passes NO
+        // receiver. Lowered as an ordinary method call it got one anyway, so
+        // every argument shifted a place: the first parameter read the object
+        // pointer and the last read past the frame — silently, with no warning
+        // and no link error, because the ABI is uniformly i64.
+        //
+        // Only for a receiver whose class is statically known AND is `$this`:
+        // any other receiver expression must still be EVALUATED for its side
+        // effects, which a StaticCall_ has nowhere to put.
+        $thisCls = ($expr->object->kind === 'Variable' && $expr->object->name === 'this')
+            ? $this->currentLowerClass : '';
+        if ($thisCls !== '' && $this->methodIsStatic($thisCls, $expr->method)) {
+            $scope = $this->currentStaticClass !== ''
+                ? $this->currentStaticClass : $this->currentLowerClass;
+            $decl = $this->resolveMethodDeclClass($thisCls, $expr->method);
+            return new StaticCall_($decl !== '' ? $decl : $thisCls,
+                $expr->method, $args, Type::unknown(), $scope);
+        }
         $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
         $mc->srcArgc = \count($expr->args);
         return $mc;
@@ -5669,6 +5687,19 @@ final class LowerFromAst implements Pass
             if ($decl === null) { return false; }
             foreach ($decl->methods as $m) {
                 if ($m->name === $method) { return $m->isStatic; }
+            }
+            // A method the class USES rather than declares is still its method,
+            // and its `static` is the trait's. Without this arm a trait's
+            // `private static` answered "instance", so `self::helper($a, $b)`
+            // prepended a receiver the callee has no parameter for and EVERY
+            // argument shifted one place — silently: the first parameter read
+            // the object pointer, the last read whatever followed the frame.
+            foreach ($decl->uses as $traitName) {
+                $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+                if ($td === null) { continue; }
+                foreach ($td->methods as $m) {
+                    if ($m->name === $method) { return $m->isStatic; }
+                }
             }
             $cd = $this->classTable[$c] ?? null;
             $c = $cd !== null ? $cd->parent : '';
