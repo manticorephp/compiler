@@ -7066,11 +7066,17 @@ trait EmitLlvmBuiltins
      * already emitted and indexed by it, so this arm reads the same two globals
      * the direct `$case->name` / `$case->value` path does.
      *
+     * `$nameKey` / `$valueKey` are ready-made operands for the two map KEYS.
+     * A caller in the PREAMBLE must pass them: `litStr` registers a pooled
+     * `@.str.N` lazily, and by preamble time the pool is already written — the
+     * reference dangled and clang refused the module (`use of undefined value`).
+     *
      * The boxed name/value are LITERAL globals (immortal, rc = -1), so the map
      * that now holds them needs no mirror retain — its release runs
      * `__mir_cell_drop` per element, which is a no-op on an immortal string.
      */
-    private function emitEnumVarsArray(string $objPtr, string $ecls, \Compile\Mir\EnumDef $ed): string
+    private function emitEnumVarsArray(string $objPtr, string $ecls, \Compile\Mir\EnumDef $ed,
+        string $nameKey = '', string $valueKey = ''): string
     {
         $this->rt->needsTagged = true;
         $en = $this->mangle($ecls);
@@ -7090,7 +7096,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $nameB . ' = call i64 @__manticore_box_ptr(ptr ' . $nameP . ")\n";
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = call ptr @__mir_array_set_str(ptr ' . $arr . ', ptr '
-              . $this->litStr('name') . ', i64 ' . $nameB . ", i64 0, i64 0)\n";
+              . ($nameKey !== '' ? $nameKey : $this->litStr('name')) . ', i64 ' . $nameB . ", i64 0, i64 0)\n";
         $backing = $this->edBacking($ed);
         if ($backing === 'int' || $backing === 'string') {
             $isInt = $backing === 'int';
@@ -7105,7 +7111,7 @@ trait EmitLlvmBuiltins
                   . ($isInt ? 'int(i64 ' : 'ptr(ptr ') . $v . ")\n";
             $nxt = $this->ssa->allocReg();
             $out .= '  ' . $nxt . ' = call ptr @__mir_array_set_str(ptr ' . $cur . ', ptr '
-                  . $this->litStr('value') . ', i64 ' . $vb . ", i64 0, i64 0)\n";
+                  . ($valueKey !== '' ? $valueKey : $this->litStr('value')) . ', i64 ' . $vb . ", i64 0, i64 0)\n";
             $cur = $nxt;
         }
         $this->lastValue = $cur;

@@ -1210,9 +1210,17 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitEnumPropsFn(string $name, \Compile\Mir\EnumDef $ed): string
     {
-        $ir = $this->emitEnumVarsArray('%o', $name, $ed);
+        $en = $this->mangle($name);
+        $out = $this->strGlobalDef('@' . $en . '__pk_name', 'name');
+        $nameKey = $this->strSymBytes('@' . $en . '__pk_name');
+        $valueKey = '';
+        if ($this->edBacking($ed) === 'int' || $this->edBacking($ed) === 'string') {
+            $out .= $this->strGlobalDef('@' . $en . '__pk_value', 'value');
+            $valueKey = $this->strSymBytes('@' . $en . '__pk_value');
+        }
+        $ir = $this->emitEnumVarsArray('%o', $name, $ed, $nameKey, $valueKey);
         $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol($ed->classId);
-        return 'define i64 ' . $sym . "(ptr %o) {\nentry:\n" . $ir
+        return $out . 'define i64 ' . $sym . "(ptr %o) {\nentry:\n" . $ir
             . '  %epri = ptrtoint ptr ' . $this->lastValue . " to i64\n"
             . "  ret i64 %epri\n}\n";
     }

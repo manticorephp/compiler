@@ -371,7 +371,34 @@ trait LowerTypes
             }
             $keyStr = \trim(\substr($inner, 0, $comma));
             $valStr = \trim(\substr($inner, $comma + 1, \strlen($inner) - $comma - 1));
-            return Type::assoc($this->lowerTypeHint($keyStr), $this->lowerTypeHint($valStr));
+            // A key written as a CLASS CONSTANT is not a key type at all — it is
+            // a docblock naming which VALUES may appear (`array<Foo::BAR, V>`,
+            // `array<Foo::*, V>`, a union of those). Lowered as written it
+            // produced a key that is not KIND_STRING, `isAssoc()` answered
+            // false, and the parameter became a COMMITMENT to packed int keys:
+            // league/commonmark's
+            // `array<TableCell::ALIGN_*, array<string, string|string[]|bool>>`
+            // typed `vec[assoc[string,cell]]` while its own default — keyed by
+            // those very constants, which are 'left' / 'center' / 'right' —
+            // is string-keyed, so the one call site that fills the default read
+            // as an `array KEY repr conflict`. A CELL key is the tag-dispatched
+            // channel (the key reader picks `__mir_array_key_cell_at` off it and
+            // accepts either kind), which is the honest answer for a key whose
+            // TYPE the annotation never states.
+            //
+            // ⚠ Deliberately narrow. Every OTHER key that lowers to neither int
+            // nor string — `array-key` above all — is left as it lowered, even
+            // though `TypeCheck::keyKindOf` reads it as a commitment to int keys
+            // and refuses a legitimately string-keyed argument. Making those a
+            // cell key too changes their `typeToken`, and the ladder of
+            // Monomorphize clones the prelude's recursive merges depend on
+            // ("a cell argument gives Monomorphize an empty callKey") moves with
+            // it: `array_replace_recursive` at depth four then read a string
+            // element as a raw double (`[keep] => 2.1E-314`). That is a real
+            // second root and it is NOT this one.
+            $kt = $this->lowerTypeHint($keyStr);
+            if (\str_contains($keyStr, '::')) { $kt = Type::cell(); }
+            return Type::assoc($kt, $this->lowerTypeHint($valStr));
         }
         // `Generator` / `Generator<V>` / `Generator<K, V>` → a Generator whose
         // yielded value is V (the 2nd param when keyed, mirroring PHP's
