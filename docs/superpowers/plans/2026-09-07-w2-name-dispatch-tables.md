@@ -203,7 +203,7 @@ pack's ELEMENT type, fixed prefix boxed to cells at the site.
 `Fiber__mcRun` (0.43 MB) and `__mc_call_shutdown_function` (0.43 MB) are gone from t1's
 fattest list entirely.
 
-★★★ **A base-`Node` field read SIGSEGVs the native self-build.** `[]->operand`
+★★★ **A base-`Node` field read SIGSEGVs the native self-build.** `$iv->args[$i]->operand`
 resolved by the wrong offset and killed the t2 build (`EXC_BAD_ACCESS` at 0x10, one frame
 deep in `dynfSpreadThunk`); `asSpreadNode()` narrowing is the fix, and it is the same trap the
 `DynProp_` comment in `emitInvoke` already names. t1 never reproduced it — **a corpus that
