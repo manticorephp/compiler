@@ -109,6 +109,12 @@ Shipped (2026-09-07, branch `ci`):
 - Still open: `-j0`/no-LTO on the fast path — the split costs the produced program 43%,
   so it belongs to a throwaway binary only, and `--fast` does not pass it yet.
 
+⚠ **Where `-O` does NOT pay: the case suite.** 153 cases, `-j 0`: 49 s at `-O2`, 48 s at
+`-O1`. A test case is small enough that the front end and the link dominate, so the ~9%
+off a single case compile disappears into the noise. The lever is the BIG target — the
+self-build (−14%) and T5 — not the suite. Use `-O` on the suite for debugging codegen,
+not for throughput.
+
 ## 4. The ladder — ordered by return per hour
 
 ### W0 — the fast loop (§3). Days.

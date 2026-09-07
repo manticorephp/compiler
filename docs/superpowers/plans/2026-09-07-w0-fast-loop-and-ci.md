@@ -77,6 +77,10 @@ Reading: `-O1` takes **14% off the build wall** and costs **~3% on the produced 
 - Produces: `tests/aot/run.sh [-O <level>]`, default `2`, also readable as `MC_OPT`. The
   header line prints `opt=-O<level> jobs=<n>` so a pasted result says what produced it.
 
+**Measured after landing:** 153 cases at `-j 0` take 49 s at `-O2` and 48 s at `-O1` — the
+suite is front-end/link bound, so `-O` is a codegen-debugging knob here, not a throughput
+one. The throughput win is on the big target (self-build −14%).
+
 - [ ] **Step 1: Add the flag** — `-O*|--opt` into the `while` loop, `OPT="${MC_OPT:-2}"`,
       appended to the compile line as `-O$OPT`.
 - [ ] **Step 2: Print it** in the runner's header, next to the case count.
