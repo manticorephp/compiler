@@ -32,6 +32,23 @@ the previous generation then cannot build the tree at all, and only a cold seed 
 ⚠ **A new codegen builtin used by the stdlib needs `bin/build --seed`.** The previous
 generation does not know the symbol, so the stdlib `.o` build dies on an undefined symbol.
 
+## Direction (2026-09) — read this before planning work
+
+[`design/backend-and-build-strategy.md`](design/backend-and-build-strategy.md) is the decision
+doc: why the next year is middle-end and build-infrastructure work, **why we are NOT writing
+our own arm64/amd64 backend** (and the three criteria that would reopen that), and the ordered
+ladder — CI · fast loop · name-id dispatch tables · incremental build · self-describing value
+channels + a MIR verifier · opt-in strict containers.
+
+One-line summary: every root cause of the last two months was ours, not LLVM's. What we pay
+for is that PHP has no static value representation and the pipeline is committed only halfway
+to erasure. A backend would replace the healthiest component and close none of it.
+
+**Optimisation levels are decided policy, not taste:** `-O2` for anything shipped or whose own
+speed matters (`bin/build`, `lib/*.o`, the installed binary); **`-O1 -j0`, no LTO, for the
+iteration loop**; `-O0 --keep-ir` only for a binary `lldb` must walk. ⚠ A green `-O1`/`-O0`
+run is NOT evidence about the `-O2` artifact — the `sjlj` locals bug was right at `-O0` and
+wrong at `-O2`.
 ### Recently completed (2026-07)
 
 - **`ext/pdo` + `pdo_sqlite` — a database layer** (`docs/pdo.md`). `PDO` / `PDOStatement`
@@ -202,6 +219,13 @@ remaining levers:
 - Array / JSON / sort helpers sit at roughly 2× php and are competing with hand-tuned C —
   that is close to the ceiling, not a bug.
 
+- **Name comparison emitted as CODE is the next volume lever**: 516 539 `strcmp` sites on
+  `7b8a02f`, `dynm`+`dynf`+`newdyn` = 315 MB of a 1.20 GB T5 `.ll`. Intern names to i64 ids
+  and dispatch through a per-module table — see the strategy doc, W2.
+- **No incremental build.** Every build is whole-program; a module `.o` cache keyed on source
+  hash ⊕ dependency `.sig` hashes ⊕ `MemoryAbi::VERSION` ⊕ opt level ⊕ emitter flags is the
+  largest developer-velocity lever we have — see W3.
+- **Opt-level policy** — see "Direction (2026-09)" above. `-O2` ships, `-O1 -j0` iterates.
 ## How to build the plans (the method that works here)
 
 1. **Probe-matrix first.** One minimal repro per feature, diffed against `php`, before
@@ -243,6 +267,8 @@ Design notes:
 - [`design/generators-and-pointers.md`](design/generators-and-pointers.md) — generators.
 - [`design/module-system.md`](design/module-system.md) — the module design behind `modules.md`.
 - [`design/build-and-packaging.md`](design/build-and-packaging.md) — packaging.
+- [`design/backend-and-build-strategy.md`](design/backend-and-build-strategy.md) — the
+  2026-09 direction: no own backend, the W0–W5 ladder, and the opt-level policy.
 - [`design/late-static-binding.md`](design/late-static-binding.md) — LSB lowering.
 - [`design/async-attribute.md`](design/async-attribute.md) — a designed, deliberately unbuilt
   `#[Async]`.
