@@ -2480,7 +2480,47 @@ trait EmitLlvmExpr
      * its OWN declared slots. Classes sharing stdClass's offset need no arm —
      * they fall into the default. lastValue ← the bag assoc ptr.
      */
+    /**
+     * ONE copy per module, CALLED — not spliced into every site. The body is
+     * a class-id switch over every class whose bag sits at a non-default
+     * offset, and it depends on nothing about the site but the object
+     * pointer. Same shape as {@see EmitLlvmBuiltins::emitObjectVarsOfPtr}.
+     *
+     * The no-arm case stays inline: it is three instructions and no switch.
+     */
     private function emitBagOfUnknownClass(string $objPtr): string
+    {
+        if ($this->bagOfClassArms() === []) { return $this->emitBagOfUnknownClassInline($objPtr); }
+        $this->needsBagOfFn = true;
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return '  ' . $r . ' = call ptr @__mir_bag_of(ptr ' . $objPtr . ")\n";
+    }
+
+    /** The classes whose dynamic-property bag is NOT at the default offset. */
+    private function bagOfClassArms(): array
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $defOff = $std === null ? 16 : $std->bagOffset();
+        $arms = [];
+        foreach ($this->classes as $cd) {
+            if (!$cd->usesBag()) { continue; }
+            if ($cd->bagOffset() === $defOff) { continue; }
+            $arms[] = $cd;
+        }
+        return $arms;
+    }
+
+    /** The one shared body {@see emitBagOfUnknownClass} calls. */
+    private function emitBagOfFn(): string
+    {
+        $body = $this->emitBagOfUnknownClassInline('%bagf.obj');
+        return "define internal ptr @__mir_bag_of(ptr %bagf.obj) noinline optnone {\nentry:\n"
+            . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
+    }
+
+    private function emitBagOfUnknownClassInline(string $objPtr): string
     {
         $std = $this->classes['stdClass'] ?? null;
         $defOff = $std === null ? 16 : $std->bagOffset();

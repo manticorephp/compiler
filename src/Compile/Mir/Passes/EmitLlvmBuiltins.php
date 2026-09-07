@@ -5540,19 +5540,35 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
-        $caseMap = [];
-        $bodies = '';
-        foreach ($cands as $c) {
-            $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
-            $caseL = $this->ssa->allocLabel('gc.case');
-            $caseMap[$cd->classId] = $caseL;
-            $bodies .= $caseL . ":\n";
-            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($c))) . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $endL . "\n";
+        if ($erased) {
+            // ONE copy per module, CALLED — not spliced into every site. An
+            // erased receiver names no class, so the candidate set is the
+            // WHOLE class table (38 759 arms on symfony-demo T5) and the arm
+            // bodies depend on nothing but the class id. Spliced, it was
+            // 115.0 MB of `gc.*` blocks plus their share of 207.7 MB of
+            // `cid.*` binary search, in a 1.74 GB module. Fourth instance of
+            // the shape {@see emitObjectVarsOfPtr} named — and the third
+            // reached through {@see emitAdaptiveClassIdBranch}.
+            $this->needsGetClassFn = true;
+            $gcr = $this->ssa->allocReg();
+            $out .= '  ' . $gcr . ' = call ptr @__mir_get_class(i64 ' . $cid . ")\n";
+            $out .= '  store ptr ' . $gcr . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+        } else {
+            $caseMap = [];
+            $bodies = '';
+            foreach ($cands as $c) {
+                $cd = $this->classes[$c] ?? null;
+                if ($cd === null) { continue; }
+                $caseL = $this->ssa->allocLabel('gc.case');
+                $caseMap[$cd->classId] = $caseL;
+                $bodies .= $caseL . ":\n";
+                $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($c))) . ', ptr ' . $res . "\n";
+                $bodies .= '  br label %' . $endL . "\n";
+            }
+            $switch = $this->emitAdaptiveClassIdBranch($cid, $caseMap, $defL);
+            $out .= $switch . $bodies;
         }
-        $switch = $this->emitAdaptiveClassIdBranch($cid, $caseMap, $defL);
-        $out .= $switch . $bodies;
         $out .= $defL . ":\n";
         $out .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cls))) . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endL . "\n";
@@ -6870,6 +6886,44 @@ trait EmitLlvmBuiltins
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
         return '  ' . $r . ' = call ptr @__mir_object_vars(ptr ' . $objPtr . ")\n";
+    }
+
+    /**
+     * The one shared body an ERASED `get_class()` calls: class id -> name.
+     *
+     * Emitted beside the function bodies, not in the preamble — the string
+     * pool is still open here, and {@see EmitLlvm::litStr} may not be called
+     * once the preamble is being written.
+     *
+     * `internal` for the reason {@see emitObjectVarsFn} gives: the body is
+     * specialized from THIS module's class table, and a coalesced symbol
+     * would let the linker fold in another module's.
+     */
+    private function emitGetClassFn(): string
+    {
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca ptr\n";
+        $endL = $this->ssa->allocLabel('gcf.end');
+        $defL = $this->ssa->allocLabel('gcf.def');
+        $caseMap = [];
+        $bodies = '';
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct) { continue; }
+            $caseL = $this->ssa->allocLabel('gcf.case');
+            $caseMap[$cd->classId] = $caseL;
+            $bodies .= $caseL . ":\n";
+            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cd->name))) . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $endL . "\n";
+        }
+        $out .= $this->emitAdaptiveClassIdBranch('%gcf.cid', $caseMap, $defL) . $bodies;
+        $out .= $defL . ":\n";
+        $out .= '  store ptr ' . $this->strLitId($this->pool->intern('')) . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $ld = $this->ssa->allocReg();
+        $out .= '  ' . $ld . ' = load ptr, ptr ' . $res . "\n";
+        return "define internal ptr @__mir_get_class(i64 %gcf.cid) noinline optnone {\nentry:\n"
+            . $out . '  ret ptr ' . $ld . "\n}\n\n";
     }
 
     /** The one shared body {@see emitObjectVarsOfPtr} calls. Emitted beside the

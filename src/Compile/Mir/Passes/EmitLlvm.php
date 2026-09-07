@@ -724,6 +724,8 @@ final class EmitLlvm implements EmitVisitor
         $this->propRawBorrow = [];
         $this->propElemBorrow = [];
         $this->needsObjectVarsFn = false;
+        $this->needsGetClassFn = false;
+        $this->needsBagOfFn = false;
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
@@ -1029,6 +1031,8 @@ final class EmitLlvm implements EmitVisitor
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
+        if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
+        if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
@@ -1861,6 +1865,12 @@ final class EmitLlvm implements EmitVisitor
     /** A site asked for `get_object_vars`' class-table walk, so the module needs
      *  the one shared body ({@see EmitLlvmBuiltins::emitObjectVarsFn}). */
     private bool $needsObjectVarsFn = false;
+
+    /** A site asked for the erased `get_class()` body. */
+    private bool $needsGetClassFn = false;
+
+    /** A site asked for the unknown-class dynamic-property-bag body. */
+    private bool $needsBagOfFn = false;
 
     /**
      * Erased-interface dispatchers this module needs
