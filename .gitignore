@@ -32,3 +32,4 @@ probe/
 # difference is an output path, so a probe build does not overwrite the compiler
 # being measured. Two `git add -A` sweeps already committed one.
 manticore.probe*.json
+bin/manticore.fast

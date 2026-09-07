@@ -2,7 +2,7 @@
 #
 # Canonical compiler rebuild — SELF-HOST by default.
 #
-#   bin/build [--seed] [--auto-seed] [--verify] [output]
+#   bin/build [--seed] [--auto-seed] [--verify] [--fast] [output]
 #
 # Manticore builds Manticore. The self-built `bin/manticore` is the
 # canonical builder; the Zend front-end (`bin/compile`) is only the COLD
@@ -14,6 +14,15 @@
 #   --auto-seed    on a BOOTSTRAP GAP (below), escalate to the cold seed
 #                  instead of failing — for CI, where nobody reads the advice
 #   --verify       after rebuilding, run the fixpoint + suite gate
+#   --fast         ITERATION build: -O1, application only, to
+#                  bin/manticore.fast. Never swaps bin/manticore and never
+#                  rebuilds lib/*.o — a slower binary in the canonical slot
+#                  would slow every later build, and a -O1 stdlib would slow
+#                  every user program. -O1 costs ~3% on the compiler's own
+#                  speed and takes ~14% off the build wall (measured
+#                  2026-09-07: 71 s vs 83 s). A green --fast build is NOT
+#                  gate evidence: the sjlj-locals bug was right at -O0 and
+#                  wrong at -O2.
 #   output         target path (default bin/manticore)
 #
 # The self build goes to a temp path, is smoke-tested (compile+run a
@@ -54,16 +63,41 @@ export MANTICORE_PRELUDE="$ROOT/prelude"
 SEED=0
 AUTOSEED=0
 VERIFY=0
+FAST=0
 OUT="bin/manticore"
+OUT_GIVEN=0
 for arg in "$@"; do
     case "$arg" in
         --seed)      SEED=1 ;;
         --auto-seed) AUTOSEED=1 ;;
         --verify)    VERIFY=1 ;;
+        --fast)      FAST=1 ;;
         -*)          echo "unknown flag: $arg" >&2; exit 2 ;;
-        *)           OUT="$arg" ;;
+        *)           OUT="$arg"; OUT_GIVEN=1 ;;
     esac
 done
+
+# --fast exists to keep a fast, non-canonical binary OUT of the canonical slot.
+# Every combination that would defeat that is refused rather than silently
+# downgraded.
+if [[ $FAST -eq 1 ]]; then
+    if [[ $OUT_GIVEN -eq 0 ]]; then OUT="bin/manticore.fast"; fi
+    if [[ "$OUT" == "bin/manticore" ]]; then
+        echo "bin/build: --fast refuses to write bin/manticore — that binary builds" >&2
+        echo "  every later generation, and a -O1 copy would slow all of them." >&2
+        echo "  Use \`bin/build\` for the canonical slot, \`bin/build --fast\` to iterate." >&2
+        exit 2
+    fi
+    if [[ $VERIFY -eq 1 ]]; then
+        echo "bin/build: --fast and --verify are contradictory — a -O1 build is not" >&2
+        echo "  gate evidence (sjlj-locals was right at -O0 and wrong at -O2)." >&2
+        exit 2
+    fi
+    if [[ $SEED -eq 1 ]]; then
+        echo "bin/build: --fast has no meaning for the cold Zend seed (--seed)" >&2
+        exit 2
+    fi
+fi
 
 if [[ $SEED -eq 0 && ! -x bin/manticore ]]; then
     echo "no bin/manticore yet — cold bootstrap via Zend seed" >&2
@@ -132,10 +166,14 @@ else
     TMP="$(mktemp -d)/manticore_new"
     TMP_MANIFEST="$(mktemp).json"
     BUILD_LOG="$(mktemp)"
-    # Redirect the manifest's output to the temp path (the only edit).
-    sed "s#\"$OUT\"#\"$TMP\"#" manticore.json > "$TMP_MANIFEST"
+    # Redirect the manifest's output to the temp path (the only edit). What is
+    # rewritten is the path the MANIFEST names, not $OUT: $OUT is where the
+    # smoke-tested result is installed, and the two differ whenever a target
+    # path is given (--fast, or an explicit output argument).
+    MANIFEST_OUT="bin/manticore"
+    sed "s#\"$MANIFEST_OUT\"#\"$TMP\"#" manticore.json > "$TMP_MANIFEST"
     if ! grep -q "\"$TMP\"" "$TMP_MANIFEST"; then
-        echo "fatal: manticore.json has no application output '$OUT' to redirect" >&2
+        echo "fatal: manticore.json has no application output '$MANIFEST_OUT' to redirect" >&2
         exit 1
     fi
     # An installed compiler that predates --apps-only builds both targets in one
@@ -146,9 +184,21 @@ else
         APPS_ONLY=""
         echo "   (installed compiler predates --apps-only — one-pass build, libraries rebuilt in pass 2)"
     fi
+    # --fast asks for -O1. Probed, because an installed compiler one generation
+    # back may not take -O on `build` at all; falling back to its default is
+    # correct-but-slower, never wrong.
+    OPT_FLAG=""
+    if [[ $FAST -eq 1 ]]; then
+        if supports_flag bin/manticore build -O1 /nonexistent-manifest-probe.json; then
+            OPT_FLAG="-O1"
+            echo "   (--fast: -O1, application only, -> $OUT — NOT gate evidence)"
+        else
+            echo "   (installed compiler predates -O on \`build\` — building at its default)"
+        fi
+    fi
     set +e
     # shellcheck disable=SC2086
-    bin/manticore build $APPS_ONLY "$TMP_MANIFEST" 2>&1 | tee "$BUILD_LOG"
+    bin/manticore build $APPS_ONLY $OPT_FLAG "$TMP_MANIFEST" 2>&1 | tee "$BUILD_LOG"
     BUILD_RC="${PIPESTATUS[0]}"
     set -e
     [[ $BUILD_RC -eq 0 ]] || { echo "fatal: self build failed (rc=$BUILD_RC)" >&2; exit 1; }
@@ -171,10 +221,18 @@ else
     fi
 
     # Keep the outgoing binary: a later gap can retry from HERE instead of from
-    # Zend, and the checkout is never left without a working compiler.
-    if [[ -x "$OUT" ]]; then cp "$OUT" "bin/.manticore.prev"; fi
+    # Zend, and the checkout is never left without a working compiler. A --fast
+    # build writes its own path and touches neither the canonical binary nor the
+    # rescue copy.
+    if [[ $FAST -eq 0 && -x "$OUT" ]]; then cp "$OUT" "bin/.manticore.prev"; fi
     mv "$TMP" "$OUT"
-    echo "ok: $OUT (self-built via manifest, smoke-tested)"
+    if [[ $FAST -eq 0 ]]; then echo "ok: $OUT (self-built via manifest, smoke-tested)"; fi
+
+    if [[ $FAST -eq 1 ]]; then
+        echo "ok: $OUT (--fast, -O1, apps only). lib/*.o untouched — this binary links"
+        echo "    the stdlib bin/manticore built. Promote with a plain \`bin/build\`."
+        exit 0
+    fi
 
     echo "── self-host pass 2: $OUT build --libs-only (stdlib rebuilt by the NEW compiler) ──"
     "$OUT" build --libs-only manticore.json
