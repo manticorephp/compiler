@@ -1845,7 +1845,7 @@ trait EmitLlvmBuiltins
         // same fix, as the class-table walk {@see emitObjectVarsFn}.
         $this->needsInclResolveFn = true;
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @__mir_incl_resolve(ptr ' . $pathP . ")\n";
+        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_incl_resolve') . '(ptr ' . $pathP . ")\n";
         return $this->finishI64($out, $r);
     }
 
@@ -1858,7 +1858,7 @@ trait EmitLlvmBuiltins
         // strcmp walk over the include table is cold by construction — each
         // `require` of a given file runs once — and optimization cost grows
         // faster than function size.
-        return "define internal i64 @__mir_incl_resolve(ptr %incl.path) noinline optnone {\n"
+        return 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_incl_resolve') . "(ptr %incl.path) noinline optnone {\n"
             . "entry:\n" . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
     }
 
@@ -5551,7 +5551,7 @@ trait EmitLlvmBuiltins
             // reached through {@see emitAdaptiveClassIdBranch}.
             $this->needsGetClassFn = true;
             $gcr = $this->ssa->allocReg();
-            $out .= '  ' . $gcr . ' = call ptr @__mir_get_class(i64 ' . $cid . ")\n";
+            $out .= '  ' . $gcr . ' = call ptr @' . $this->mirHelperSym('__mir_get_class') . '(i64 ' . $cid . ")\n";
             $out .= '  store ptr ' . $gcr . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
         } else {
@@ -6885,7 +6885,7 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
-        return '  ' . $r . ' = call ptr @__mir_object_vars(ptr ' . $objPtr . ")\n";
+        return '  ' . $r . ' = call ptr @' . $this->mirHelperSym('__mir_object_vars') . '(ptr ' . $objPtr . ")\n";
     }
 
     /**
@@ -6922,7 +6922,7 @@ trait EmitLlvmBuiltins
         $out .= $endL . ":\n";
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load ptr, ptr ' . $res . "\n";
-        return "define internal ptr @__mir_get_class(i64 %gcf.cid) noinline optnone {\nentry:\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %gcf.cid) noinline optnone {\nentry:\n"
             . $out . '  ret ptr ' . $ld . "\n}\n\n";
     }
 
@@ -6936,7 +6936,7 @@ trait EmitLlvmBuiltins
         // function in the whole backend — 7.22 s of clang's 136.7 s of
         // per-function optimization (5.3%), measured with `-ftime-trace`.
         // Optimizing a cold dispatcher buys nothing at runtime.
-        return "define internal ptr @__mir_object_vars(ptr %gov.obj) noinline optnone {\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 

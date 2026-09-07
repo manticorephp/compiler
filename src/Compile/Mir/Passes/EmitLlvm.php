@@ -729,6 +729,8 @@ final class EmitLlvm implements EmitVisitor
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
+        $this->modToken = \dechex($this->fnvHash64($module->sourceFile
+            . '|' . ($this->emitLibrary ? 'lib' : 'app')));
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
         $this->dynmSyms = [];
@@ -1901,6 +1903,33 @@ final class EmitLlvm implements EmitVisitor
      * @var array<string, string>
      */
     private array $vdSyms = [];
+    /**
+     * What tells THIS module's specialized helpers apart from another
+     * module's of the same name.
+     *
+     * The out-lined dispatchers were `internal`, and correctly so: each body
+     * is specialized from this module's class table, so a shared symbol would
+     * let the linker fold in another module's. But `internal` is FILE-LOCAL,
+     * which means the splitter has to copy every one of them into every part
+     * that reaches one — and they are reached from everywhere. Measured on
+     * symfony-demo T5: parts p0 and p1 were 155 MB each and shared 859 of
+     * their 864 internal bodies, 857 of which were `__mir_vdisp_*` and
+     * `__mir_object_vars`. Out-lining them stopped being a saving and became
+     * a hub that pulls itself into 15 parts.
+     *
+     * A name derived from the module removes the reason for `internal`: two
+     * modules cannot collide, so the bodies can be `linkonce_odr` and the
+     * splitter partitions them like any other coalesced function — ONE copy,
+     * pinned through the optimizer by `@llvm.compiler.used`.
+     */
+    private string $modToken = '';
+
+    /** A module-local helper's symbol, tagged with {@see $modToken}. */
+    protected function mirHelperSym(string $base): string
+    {
+        return $base . '_m' . $this->modToken;
+    }
+
     private string $vdExtraBodies = '';
 
     /** shape key => the shared erased-dynamic-method chain's symbol. */

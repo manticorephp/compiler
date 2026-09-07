@@ -2495,7 +2495,7 @@ trait EmitLlvmExpr
         $r = $this->ssa->allocReg();
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
-        return '  ' . $r . ' = call ptr @__mir_bag_of(ptr ' . $objPtr . ")\n";
+        return '  ' . $r . ' = call ptr @' . $this->mirHelperSym('__mir_bag_of') . '(ptr ' . $objPtr . ")\n";
     }
 
     /** The classes whose dynamic-property bag is NOT at the default offset. */
@@ -2516,7 +2516,7 @@ trait EmitLlvmExpr
     private function emitBagOfFn(): string
     {
         $body = $this->emitBagOfUnknownClassInline('%bagf.obj');
-        return "define internal ptr @__mir_bag_of(ptr %bagf.obj) noinline optnone {\nentry:\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline optnone {\nentry:\n"
             . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 

@@ -1887,7 +1887,7 @@ trait EmitLlvmObjects
     private function erasedIfaceSym(string $iface, string $method, int $argc): string
     {
         $i = \str_replace('\\', '_', \ltrim($iface, '\\'));
-        return '__mir_eicall_' . $i . '__' . $method . '_' . (string)$argc;
+        return $this->mirHelperSym('__mir_eicall_' . $i . '__' . $method . '_' . (string)$argc);
     }
 
     /**
@@ -1943,7 +1943,7 @@ trait EmitLlvmObjects
             $body .= $end . ":\n";
             $rr = $this->ssa->allocReg();
             $body .= '  ' . $rr . ' = load i64, ptr ' . $res . "\n";
-            $out .= 'define internal i64 @' . $this->erasedIfaceSym($iface, $method, $argc)
+            $out .= 'define linkonce_odr i64 @' . $this->erasedIfaceSym($iface, $method, $argc)
                   . '(' . $params . ") noinline optnone {\nentry:\n" . $body
                   . '  ret i64 ' . $rr . "\n}\n\n";
         }
@@ -3711,7 +3711,7 @@ trait EmitLlvmObjects
             $key .= '|a' . (string)$at->kind . ':' . ($at->class ?? '');
         }
         if (isset($this->dynmSyms[$key])) { return $this->dynmSyms[$key]; }
-        $sym = '__mir_dynm_' . (string)\count($this->dynmSyms);
+        $sym = $this->mirHelperSym('__mir_dynm_' . (string)\count($this->dynmSyms));
         // Registered BEFORE the body is built, for the reason
         // {@see emitVirtualDispatch} gives: a half-built registry is the one
         // state that would emit two bodies for one symbol.
@@ -3751,7 +3751,7 @@ trait EmitLlvmObjects
             unset($this->dynmSyms[$key]);
             return '';
         }
-        $this->dynmExtraBodies .= 'define internal i64 @' . $sym . '(' . $params
+        $this->dynmExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
             . ") noinline optnone {\nentry:\n" . $body . '  ret i64 ' . $ld . "\n}\n\n";
         return $sym;
     }
@@ -5395,7 +5395,7 @@ trait EmitLlvmObjects
             $boxCell, $erasedSyms, $argOutTypes);
         $sym = $this->vdSyms[$key] ?? '';
         if ($sym === '') {
-            $sym = '__mir_vdisp_' . (string)\count($this->vdSyms);
+            $sym = $this->mirHelperSym('__mir_vdisp_' . (string)\count($this->vdSyms));
             // Registered BEFORE the body is built: the body cannot reach this
             // shape again (it dispatches, it does not re-dispatch), but a
             // half-built registry is the one state that would emit two bodies
@@ -5421,7 +5421,7 @@ trait EmitLlvmObjects
                 return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
                     $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
             }
-            $this->vdExtraBodies .= 'define internal i64 @' . $sym . '(' . $params
+            $this->vdExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
                 . ") noinline optnone {\nentry:\n" . $body
                 . '  ret i64 ' . $this->vdResult . "\n}\n\n";
         }
