@@ -49,6 +49,11 @@ speed matters (`bin/build`, `lib/*.o`, the installed binary); **`-O1 -j0`, no LT
 iteration loop**; `-O0 --keep-ir` only for a binary `lldb` must walk. ⚠ A green `-O1`/`-O0`
 run is NOT evidence about the `-O2` artifact — the `sjlj` locals bug was right at `-O0` and
 wrong at `-O2`.
+
+Built on branch `ci` (2026-09-07): **`bin/build --fast`** (`-O1`, apps only, to
+`bin/manticore.fast`, never the canonical slot — 71 s vs 83 s), **`tests/aot/run.sh -O <n>`**,
+and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, consumed by
+`tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
 ### Recently completed (2026-07)
 
 - **`ext/pdo` + `pdo_sqlite` — a database layer** (`docs/pdo.md`). `PDO` / `PDOStatement`
