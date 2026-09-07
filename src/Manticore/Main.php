@@ -727,9 +727,24 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     // 32 GB machine to the OOM killer either way.
     //
     // More parts is what shrinks the peak, and only if fewer of them run at a
-    // time. `MANTICORE_SPLIT_BATCH` is that second number; it defaults to ALL,
-    // which is the historical behaviour for the modules that already fit.
+    // time. `MANTICORE_SPLIT_BATCH` is that second number, and the batch
+    // DEFAULTS to what the machine can run — {@see assemble_jobs}, the same
+    // count every other parallel step uses — not to ALL.
+    //
+    // ALL is not a neutral default once the split is worth doing: 24 parts of
+    // symfony-demo T5 at clang's ~1.5-2 GB each is 36-48 GB, so anyone who
+    // sets MANTICORE_SPLIT_JOBS high and nothing else gets the OOM killer.
+    // The measured curve on a 10-core box, same staged module, same output
+    // byte for byte:
+    //
+    //   batch 4   clang 1400 s   whole build 41 m 31 s   peak 6.01 GiB
+    //   batch 8   clang  877 s   whole build 32 m 32 s   peak 5.65 GiB
+    //
+    // Memory did not rise with the concurrency, because the peak belongs to
+    // the COMPILER, which is still resident through the whole assembly.
     $batch = \count($cmds);
+    $auto = assemble_jobs();
+    if ($auto >= 1 && $auto < $batch) { $batch = $auto; }
     $envBatch = \getenv('MANTICORE_SPLIT_BATCH');
     if ($envBatch !== false && $envBatch !== '') {
         $b = (int)$envBatch;
