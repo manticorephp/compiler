@@ -145,6 +145,47 @@ and t2/T5 measure `dynm`** — do not conclude from one corpus.
 - T5 `dynf` under 20 MB (from 81), `dynm` under 40 MB (from 197), IR under 1.0 GB.
 - Suite and difftest unchanged; two generations byte-identical.
 
+## RESULT — Tasks 1-3 landed (`912b440`, branch `nameid`)
+
+`emitDynFnCall` now splits its candidates: a callee with this site's exact arity and no
+by-reference parameter is reached through a per-module `{ ptr name, ptr thunk }` table and
+one `__mc_dynf_lookup`; everything else keeps its inline arm, and **the arms come first**, so
+an argument expression is still evaluated exactly once (a firing arm evaluates it; the table
+path is reached only when none fired).
+
+**The ABI is CELLS and that is the whole trick.** The first cut keyed the thunk on the SITE's
+argument types: 1510 thunks on t1 and a module that did not move (14.88 -> 14.85 MB) — the
+bodies cost what the blocks they replaced cost. Boxing every argument to a cell at the site
+makes the thunk depend on the callee and argc ONLY, so one body serves every site: 520 thunks,
+and the carrier filter (`dynArmTypesEmittable`) stops being needed at all.
+
+| corpus | IR bytes | `strcmp` sites | build wall |
+|---|---|---|---|
+| t1 before | 15 598 962 | 4 832 | 24 s |
+| t1 after | 15 108 241 (**-3.2%**) | 3 323 (**-31%**) | 23 s |
+| t2 before | 241 514 618 | 113 858 | 593 s |
+| **t2 after** | **211 680 756 (-12.3%)** | **81 302 (-29%)** | **411 s (-31%)** |
+
+Where it went on t2: `compiled php` 194.70 -> 165.69 MB; three closures that each carried a
+whole-program chain, 7.98 -> 3.37 MB apiece. Cost: 805 thunks + 139 tables = +0.5 MB of
+`runtime helper`.
+
+⚠ **The t1 BINARY grew 2%** (3 771 008 -> 3 850 880) while its IR shrank. A thunk is
+address-taken, so nothing downstream can fold it away the way a chain arm could be folded
+into its site. IR volume and binary size are not the same objective — the wall clock is what
+W2 is for, and on t2 that is -31%.
+
+Verified: `tests/aot/cases/dynf_table.php` (every argument carrier, plus a `bump()` witness
+that the arguments run once) matches `php`; 231 cases across `dyn`/`callable`/`closure`/
+`func`/`call`/`str` green, **under gen2** — the generation whose own IR the new emitter
+produced. ⛔ Full suite, difftest and Linux NOT run yet.
+
+**Still on the table (next):** the SPREAD path is excluded (`$hasSpread` keeps the chain), and
+that is where t1's remaining mass sits — `Fiber__mcRun` 0.43 MB, `__mc_call_shutdown_function`
+0.43, `__mc_dyn_spread_fallback` 0.27, `__mc_call_shutdown_array` 0.18, all unchanged. A
+spread site needs an args-VECTOR thunk (`i64 f(ptr %args)`), which is the shape
+`__mc_dyn_method_try_call` already uses for methods. Task 4 (`dynmChainFn`) is untouched.
+
 ## Risks, named
 
 1. **A by-ref candidate silently going clean.** `anyRefParam` is the only guard; a miss writes
