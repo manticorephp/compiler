@@ -857,6 +857,7 @@ trait EmitLlvmModule
         $this->arena->vecLocals = [];
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
+        $this->locals->sjljPinAll = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
         foreach ($fn->params as $ahp) {
@@ -864,6 +865,7 @@ trait EmitLlvmModule
         }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
+        $this->locals->collectSjljPins($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
         // same `@g_x` cell so writes are visible inside functions.
         if ($fn->name === '__main') {
@@ -968,7 +970,7 @@ trait EmitLlvmModule
                 $cn = $fn->params[$pi]->name;
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$cn] = $slot;
-                $bodySink->write('  ' . $slot . " = alloca i64\n");
+                $bodySink->write($this->localSlotAlloca($slot));
                 $gep = $this->ssa->allocReg();
                 $bodySink->write('  ' . $gep . ' = getelementptr inbounds i64, ptr %env, i64 ' . (string)($pi + 1) . "\n");
                 $cv = $this->ssa->allocReg();
@@ -980,7 +982,7 @@ trait EmitLlvmModule
                 $cn = $pp->name;
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$cn] = $slot;
-                $bodySink->write('  ' . $slot . " = alloca i64\n");
+                $bodySink->write($this->localSlotAlloca($slot));
                 // Uniform closure ABI: the caller passes every scalar arg as a
                 // tagged cell. A param declared a concrete scalar unboxes the
                 // cell back to its repr here (cell / array / obj params stay raw;
@@ -1014,7 +1016,7 @@ trait EmitLlvmModule
             foreach ($fn->params as $p) {
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$p->name] = $slot;
-                $bodySink->write('  ' . $slot . " = alloca i64\n");
+                $bodySink->write($this->localSlotAlloca($slot));
                 $bodySink->write('  store i64 %arg.' . $p->name . ', ptr ' . $slot . "\n");
                 // A by-value array-hinted slot is read as a RAW buffer pointer
                 // throughout the body, so strip a NaN tag on entry. The call

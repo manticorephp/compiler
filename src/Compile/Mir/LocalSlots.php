@@ -48,6 +48,25 @@ final class LocalSlots
     public array $refCellTargets = [];
 
     /**
+     * True when this function contains a `try`. A try is `_setjmp` and a throw
+     * is `_longjmp`, and longjmp restores the callee-saved registers to what
+     * they held at the setjmp — so any local slot `-O2` promoted OUT of memory
+     * REVERTS on the catch path to its value before the try. That is C's rule
+     * (a local modified between setjmp and longjmp is indeterminate unless it
+     * is volatile), and it silently un-did every assignment a try body made:
+     * `lower_module`'s `$stmts = []` came back as the array it had just
+     * released, the catch released it a second time, and the `Program` that
+     * owned the buffer then double-freed it — POINTER_BEING_FREED_WAS_NOT_
+     * ALLOCATED, three frames deep in a drop body with nothing wrong in it.
+     * Every local of such a function is pinned to the frame instead
+     * ({@see \Compile\Mir\Passes\EmitLlvmLocals::localSlotAlloca}); the set is
+     * not narrowed to "assigned inside the try" because a local is written by
+     * a dozen node kinds and missing one is a silent miscompile again.
+     * Declared LAST — a field added mid-struct shifts every later offset.
+     */
+    public bool $sjljPinAll = false;
+
+    /**
      * Locals a reference CELL points at ({@see \Compile\Mir\RefCell_}). Only a
      * plain local is collected here — a property / element / static-prop source
      * is addressed through its container and needs no per-frame box.
@@ -131,5 +150,16 @@ final class LocalSlots
             }
             return;
         }
+    }
+    /**
+     * Set {@see $sjljPinAll} from one function body. Any `try` anywhere in the
+     * tree counts: a rethrow lands on an OUTER setjmp whose register snapshot
+     * is older still, so nesting only makes the staleness worse.
+     */
+    public function collectSjljPins(Node $n): void
+    {
+        if ($this->sjljPinAll) { return; }
+        if ($n->kind === Node::KIND_TRY_CATCH) { $this->sjljPinAll = true; return; }
+        foreach (Walk::children($n) as $c) { $this->collectSjljPins($c); }
     }
 }

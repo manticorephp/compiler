@@ -102,6 +102,24 @@ use Codegen\Llvm\Module as LlvmModule;
  */
 trait EmitLlvmLocals
 {
+    /**
+     * One local's frame slot. In a function that contains a `try` the slot is
+     * PINNED to memory: an empty `asm sideeffect` taking the pointer is a user
+     * that is not a load or a store, which is exactly what mem2reg/SROA refuse
+     * to promote past — and it assembles to nothing. Without it `-O2` keeps the
+     * local in a callee-saved register and `_longjmp` restores that register to
+     * its value at the `setjmp`, so the catch path reads whatever the local held
+     * BEFORE the try ({@see \Compile\Mir\LocalSlots::$sjljPinAll}).
+     */
+    private function localSlotAlloca(string $slot): string
+    {
+        $out = '  ' . $slot . " = alloca i64\n";
+        if ($this->locals->sjljPinAll) {
+            $out .= '  call void asm sideeffect "", "r"(ptr ' . $slot . ")\n";
+        }
+        return $out;
+    }
+
     private function preallocateLocals(Node $n): string
     {
         $k = $n->kind;
@@ -110,7 +128,7 @@ trait EmitLlvmLocals
             if (!isset($this->locals->globalBacked[$n->name]) && !isset($this->locals->slots[$n->name])) {
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$n->name] = $slot;
-                $out .= '  ' . $slot . " = alloca i64\n";
+                $out .= $this->localSlotAlloca($slot);
             }
             return $out . $this->preallocateLocals($n->value);
         }
@@ -137,7 +155,7 @@ trait EmitLlvmLocals
                 && !isset($this->locals->slots[$lv->name])) {
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$lv->name] = $slot;
-                return '  ' . $slot . " = alloca i64\n"
+                return $this->localSlotAlloca($slot)
                      . '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $slot . "\n";
             }
             return $this->preallocateLocals($lv);
@@ -159,7 +177,7 @@ trait EmitLlvmLocals
                 if ($cVar !== null && !isset($this->locals->slots[$cVar])) {
                     $slot = $this->ssa->allocReg();
                     $this->locals->slots[$cVar] = $slot;
-                    $out .= '  ' . $slot . " = alloca i64\n";
+                    $out .= $this->localSlotAlloca($slot);
                 }
                 foreach ($this->catchBody($c) as $s) { $out .= $this->preallocateLocals($s); }
             }
@@ -193,12 +211,12 @@ trait EmitLlvmLocals
             if (!isset($this->locals->slots[$n->valueVar])) {
                 $vs = $this->ssa->allocReg();
                 $this->locals->slots[$n->valueVar] = $vs;
-                $out .= '  ' . $vs . " = alloca i64\n";
+                $out .= $this->localSlotAlloca($vs);
             }
             if ($n->keyVar !== null && !isset($this->locals->slots[$n->keyVar])) {
                 $ks = $this->ssa->allocReg();
                 $this->locals->slots[$n->keyVar] = $ks;
-                $out .= '  ' . $ks . " = alloca i64\n";
+                $out .= $this->localSlotAlloca($ks);
             }
             // The OBJECT path also holds the iterator in a synthetic local, and
             // that slot needs hoisting for the very same reason — more sharply,
@@ -216,7 +234,7 @@ trait EmitLlvmLocals
                 $this->iterCounter = $this->iterCounter + 1;
                 $is = $this->ssa->allocReg();
                 $this->locals->slots[$n->iterName] = $is;
-                $out .= '  ' . $is . " = alloca i64\n";
+                $out .= $this->localSlotAlloca($is);
             }
             return $out . $this->preallocateLocals($n->body);
         }
