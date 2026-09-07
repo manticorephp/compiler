@@ -136,6 +136,20 @@ trait EmitLlvmObjects
      *
      * No match yields a null object, which is PHP's "Class not found" — the read
      * that follows faults rather than silently constructing the wrong thing.
+     *
+     * The CHAIN is one body per module per argument SHAPE, called. It walks every
+     * class in the module, so a single site is ~150 bytes × the class table —
+     * `newdyn.*` was 94.2 MB of a 1.46 GB symfony-demo T5 module, spread over a
+     * handful of sites that each carried their own copy of all 38 759 arms.
+     *
+     * ★ The handoff said this needed a ctor thunk per class first. It does not.
+     * The only site-specific things in an arm are the argument REGISTERS, their
+     * static types, `srcArgc` and whether the result is boxed — and `faPush`,
+     * which looked like it needed the argument NODES, degenerates to a single
+     * constant store here: it emits an overflow array only when `argc > arity`,
+     * and the candidate filter below already skips every class where that holds.
+     * So the shape (kinds + declared types + srcArgc + boxing) is the key, and
+     * everything else is shared.
      */
     private function emitNewDynObj(\Compile\Mir\NewDynObj $n): string
     {
@@ -169,8 +183,109 @@ trait EmitLlvmObjects
             $argKinds[] = $this->lastValueType;
             $fixedArgs[] = $a;
         }
-        $argc = \count($fixedArgs);
+        $boxResult = $n->type->kind === Type::KIND_CELL;
 
+        // A SPREAD stays spliced: the pack is filled against each candidate's own
+        // parameter list, so the arm depends on the site's array register and its
+        // element type, not just on a shape.
+        if ($spreadArr !== '') {
+            return $out . $this->newDynChainIr(
+                $namePtr, $argRegs, $argKinds, $fixedArgs,
+                $n->srcArgc, $boxResult, $spreadArr, $spreadElem,
+            );
+        }
+
+        $key = (string)\count($fixedArgs) . '|' . (string)$n->srcArgc
+             . '|' . ($boxResult ? '1' : '0');
+        $ai = 0;
+        foreach ($fixedArgs as $a) {
+            $key .= '|' . $a->type->toString() . '#' . $argKinds[$ai];
+            $ai = $ai + 1;
+        }
+        $sym = $this->mirHelperSym('__mir_newdyn_' . \dechex($this->fnvHash64($key)));
+        $this->newDynNeeded[$sym] = new \Compile\Mir\NewDynShape(
+            $argKinds, $fixedArgs, $n->srcArgc, $boxResult,
+        );
+        // All-i64 arguments; the body materialises each one back into the kind
+        // its key records.
+        $callArgs = 'ptr ' . $namePtr;
+        $ai = 0;
+        foreach ($argRegs as $r) {
+            $this->lastValue = $r;
+            $this->lastValueType = $argKinds[$ai];
+            $out .= $this->coerceToI64();
+            $callArgs .= ', i64 ' . $this->lastValue;
+            $ai = $ai + 1;
+        }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = call i64 @' . $sym . '(' . $callArgs . ")\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The shared chains {@see emitNewDynObj} calls, one per argument shape the
+     * module used. `noinline` without `optnone`: a dynamic `new` is not cold.
+     *
+     * Named through {@see EmitLlvm::mirHelperSym} — the class table it walks is
+     * module-local knowledge and a `linkonce_odr` body coalesces BY NAME.
+     */
+    private function emitNewDynFns(): string
+    {
+        $out = '';
+        foreach ($this->newDynNeeded as $sym => $shape) {
+            $params = 'ptr %ndy.n';
+            $body = '';
+            $regs = [];
+            $i = 0;
+            foreach ($shape->kinds as $k) {
+                $p = '%ndy.a' . (string)$i;
+                $params .= ', i64 ' . $p;
+                if ($k === 'ptr') {
+                    $r = $this->ssa->allocReg();
+                    $body .= '  ' . $r . ' = inttoptr i64 ' . $p . " to ptr\n";
+                    $regs[] = $r;
+                } elseif ($k === 'double') {
+                    $r = $this->ssa->allocReg();
+                    $body .= '  ' . $r . ' = bitcast i64 ' . $p . " to double\n";
+                    $regs[] = $r;
+                } else {
+                    $regs[] = $p;
+                }
+                $i = $i + 1;
+            }
+            $this->rt->needsStrcmp = true;
+            $body .= $this->newDynChainIr(
+                '%ndy.n', $regs, $shape->kinds, $shape->args,
+                $shape->srcArgc, $shape->boxResult, '', null,
+            );
+            $out .= 'define linkonce_odr i64 @' . $sym . '(' . $params . ") noinline {\nentry:\n"
+                  . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        }
+        return $out;
+    }
+
+    /**
+     * The name→class comparison chain itself, over registers rather than AST.
+     * Sets {@see EmitLlvm::$lastValue} to the constructed object word.
+     *
+     * @param string[] $argRegs
+     * @param string[] $argKinds
+     * @param Node[]   $fixedArgs
+     */
+    private function newDynChainIr(
+        string $namePtr,
+        array $argRegs,
+        array $argKinds,
+        array $fixedArgs,
+        int $srcArgc,
+        bool $boxResult,
+        string $spreadArr,
+        ?Type $spreadElem,
+    ): string {
+        $out = '';
+        $argc = \count($fixedArgs);
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $endL = $this->ssa->allocLabel('newdyn.end');
@@ -241,8 +356,12 @@ trait EmitLlvmObjects
                 // above widened the list. Kept across the merge with the spread
                 // arm — the two are independent, and dropping this makes a ctor
                 // reading func_get_arg() see the padded arity instead.
+                //
+                // `argc <= need` above is what makes this expressible in a SHARED
+                // body: with no surplus there is no overflow array to rebuild
+                // from the argument nodes, only `store i64 <srcArgc>`.
                 $out .= $this->faPush($this->lsbTarget($ctorClass, '__construct', $cd->name),
-                    $n->srcArgc, $n->args, 1);
+                    $srcArgc, $fixedArgs, 1);
                 $cr = $this->ssa->allocReg();
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
@@ -260,7 +379,7 @@ trait EmitLlvmObjects
             // send get_class's class_id load to address 0. Left raw, that 0 still
             // fails the tag check and falls to the '' arm, which is the behaviour
             // php's "Class not found" case degrades to here.
-            if ($n->type->kind === Type::KIND_CELL) {
+            if ($boxResult) {
                 $this->rt->needsTagged = true;
                 $bx = $this->ssa->allocReg();
                 $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $objPtr . ")\n";

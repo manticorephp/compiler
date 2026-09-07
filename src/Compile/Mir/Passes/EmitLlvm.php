@@ -728,6 +728,7 @@ final class EmitLlvm implements EmitVisitor
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
         $this->eidxNeeded = [];
+        $this->newDynNeeded = [];
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
@@ -1036,6 +1037,7 @@ final class EmitLlvm implements EmitVisitor
         $this->rootSnapshot('post-closure-drop-build', $module, true, $bodyBytes);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
+        $extraBodies .= $this->emitNewDynFns();
         $extraBodies .= $this->emitErasedIndexFns();
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
@@ -1888,6 +1890,11 @@ final class EmitLlvm implements EmitVisitor
      *  one shared body each ({@see EmitLlvmArrays::emitErasedIndexFns}). */
     /** @var array<string, true> */
     private array $eidxNeeded = [];
+
+    /** Argument SHAPES a `new $cls(...)` site used; one shared comparison
+     *  chain each ({@see EmitLlvmObjects::emitNewDynFns}). */
+    /** @var array<string, \Compile\Mir\NewDynShape> */
+    private array $newDynNeeded = [];
 
     /**
      * Erased-interface dispatchers this module needs
