@@ -7,10 +7,11 @@
 # ask. Every job writes that commit into the run summary for exactly that reason.
 name: nightly
 
+# PARKED: manual only — see the note in ci.yml. Re-arm by uncommenting the schedule.
 on:
-  schedule:
-    - cron: '0 2 * * *'
   workflow_dispatch:
+  # schedule:
+  #   - cron: '0 2 * * *'
 
 concurrency:
   group: nightly

@@ -6,11 +6,15 @@
 # machine, the image, and the environment.
 name: ci
 
+# PARKED: manual only. The gate is built and lint-clean, but CI is not the priority
+# right now — pushing it with `push`/`pull_request` triggers live would spend runner
+# minutes on every commit for a signal nobody is reading yet. Re-arm by restoring the
+# two triggers below; nothing else in this file changes.
 on:
-  push:
-    branches: ['**']
-  pull_request:
   workflow_dispatch:
+  # push:
+  #   branches: ['**']
+  # pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
