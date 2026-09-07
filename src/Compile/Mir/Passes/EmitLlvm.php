@@ -726,6 +726,7 @@ final class EmitLlvm implements EmitVisitor
         $this->needsObjectVarsFn = false;
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
+        $this->needsBoxUnknownFn = false;
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
@@ -1037,6 +1038,7 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
+        if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
         $extraBodies .= $this->dynmExtraBodies;
@@ -1876,6 +1878,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** A site asked for the unknown-class dynamic-property-bag body. */
     private bool $needsBagOfFn = false;
+
+    /** A site asked for the erased shallow-boxing body. */
+    private bool $needsBoxUnknownFn = false;
 
     /**
      * Erased-interface dispatchers this module needs

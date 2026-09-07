@@ -591,9 +591,37 @@ trait EmitLlvmBuiltins
      */
     private function boxUnknownShallowIr(): string
     {
+        // ONE copy per module, CALLED. The body reads ONE i64 and nothing
+        // else — no class table, no site metadata — and it was spliced at
+        // every erased boxing site: `bx.*` was 119.1 MB across 2.9M lines of
+        // a 1.46 GB symfony-demo T5 module.
+        //
+        // `noinline` WITHOUT `optnone`, unlike the reflective dispatchers:
+        // those are cold by construction, this one is not, so the single body
+        // is worth optimizing even though the call must not be inlined back
+        // into its callers.
         $this->rt->needsTagged = true;
         $out = $this->coerceToI64();
         $v = $this->lastValue;
+        $this->needsBoxUnknownFn = true;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_box_unknown')
+              . '(i64 ' . $v . ")\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /** The one shared body {@see boxUnknownShallowIr} calls. */
+    private function emitBoxUnknownFn(): string
+    {
+        $body = $this->boxUnknownShallowInlineIr('%bxf.v');
+        return 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_box_unknown')
+            . "(i64 %bxf.v) noinline {\nentry:\n" . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+    }
+
+    private function boxUnknownShallowInlineIr(string $v): string
+    {
+        $this->rt->needsTagged = true;
+        $out = '';
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 ' . $v . ', ptr ' . $slot . "\n";
