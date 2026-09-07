@@ -727,6 +727,7 @@ final class EmitLlvm implements EmitVisitor
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
+        $this->eidxNeeded = [];
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
@@ -1035,6 +1036,7 @@ final class EmitLlvm implements EmitVisitor
         $this->rootSnapshot('post-closure-drop-build', $module, true, $bodyBytes);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
+        $extraBodies .= $this->emitErasedIndexFns();
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
@@ -1881,6 +1883,11 @@ final class EmitLlvm implements EmitVisitor
 
     /** A site asked for the erased shallow-boxing body. */
     private bool $needsBoxUnknownFn = false;
+
+    /** Key channels (`cell` / `int` / `str`) an erased `$x[$k]` site used;
+     *  one shared body each ({@see EmitLlvmArrays::emitErasedIndexFns}). */
+    /** @var array<string, true> */
+    private array $eidxNeeded = [];
 
     /**
      * Erased-interface dispatchers this module needs

@@ -637,10 +637,15 @@ trait EmitLlvmArrays
      * there, which no probe can tell from a small integer). "Not provably an
      * array" must therefore not be read as "string" — that would send real
      * arrays to __mir_str_char_at.
+     *
+     * ONE body per module per KEY CHANNEL, CALLED. Nothing in the three arms is
+     * site-specific: the class table is reached through the per-module erased
+     * interface dispatcher, and the literal key hash rides in as two i64
+     * arguments — so a site keeps only its subject, its key and one call.
+     * `eidx.*` was 101.5 MB of a 1.46 GB symfony-demo T5 module.
      */
     private function emitErasedIndexGet(Node $self, ArrayAccess_ $aa): string
     {
-        $holders = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet');
         $out = $this->emitNode($aa->array);
         $out .= $this->coerceToI64();
         $cv = $this->lastValue;
@@ -651,6 +656,92 @@ trait EmitLlvmArrays
         $out .= $this->emitNode($aa->index);
         $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
         $key = $this->lastValue;
+
+        // All-i64 arguments: a string key crosses as its address, and the
+        // compile-time FNV rides beside it exactly as the direct accessor
+        // passes it ({@see EmitLlvm::litKeyHashArgs}).
+        $args = 'i64 ' . $cv . ', i64 ';
+        if ($keyIsString) {
+            $ki = $this->ssa->allocReg();
+            $out .= '  ' . $ki . ' = ptrtoint ptr ' . $key . " to i64\n";
+            $args .= $ki . $this->litKeyHashArgs($aa->index);
+        } else {
+            $args .= $key;
+        }
+        $variant = $keyIsString ? 'str' : ($keyIsCell ? 'cell' : 'int');
+        $this->eidxNeeded[$variant] = true;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
+              . '(' . $args . ")\n";
+
+        // The callee is done with the key, so a fresh temp dies once
+        // ({@see EmitLlvm::keyTempRelease}). The BOXED copy the object arm
+        // makes is the same pointer re-tagged, never a second buffer.
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
+        }
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($self->type->kind === Type::KIND_FLOAT) {
+            $rf = $this->ssa->allocReg();
+            $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
+            $this->lastValue = $rf;
+            $this->lastValueType = 'double';
+        }
+        return $out;
+    }
+
+    /**
+     * The shared bodies {@see emitErasedIndexGet} calls — one per key channel
+     * the module actually used. `noinline` WITHOUT `optnone`: an erased index
+     * is not cold, so the single body is worth optimizing even though the call
+     * must not be inlined back into its callers.
+     *
+     * Named through {@see EmitLlvm::mirHelperSym}: whether there IS an object
+     * arm is module-local knowledge, and a `linkonce_odr` body coalesces BY
+     * NAME, so a plain name would let one module's body win over another's.
+     */
+    private function emitErasedIndexFns(): string
+    {
+        $out = '';
+        foreach ($this->eidxNeeded as $variant => $ignoredFlag) {
+            $keyIsString = $variant === 'str';
+            $keyIsCell = $variant === 'cell';
+            $params = 'i64 %eix.a, i64 %eix.k';
+            $hashArgs = ', i64 0, i64 0';
+            if ($keyIsString) {
+                $params .= ', i64 %eix.h, i64 %eix.hh';
+                $hashArgs = ', i64 %eix.h, i64 %eix.hh';
+            }
+            $body = '';
+            $key = '%eix.k';
+            if ($keyIsString) {
+                $kp = $this->ssa->allocReg();
+                $body .= '  ' . $kp . " = inttoptr i64 %eix.k to ptr\n";
+                $key = $kp;
+            }
+            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs);
+            $out .= 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
+                  . '(' . $params . ") noinline {\nentry:\n" . $body
+                  . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        }
+        return $out;
+    }
+
+    /**
+     * The three-armed body itself, over registers rather than AST: the subject
+     * word, the key in its channel, and the trailing hash pair the string-key
+     * accessor takes. Sets {@see EmitLlvm::$lastValue} to the result i64.
+     */
+    private function erasedIndexCoreIr(
+        string $cv,
+        string $key,
+        bool $keyIsCell,
+        bool $keyIsString,
+        string $hashArgs,
+    ): string {
+        $holders = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet');
+        $out = '';
         // offsetGet takes `mixed $offset`, so the object arm needs the key BOXED.
         // Boxing is pure — doing it up front keeps both arms off a second emit.
         // Only worth emitting when there IS an object arm.
@@ -748,7 +839,7 @@ trait EmitLlvmArrays
                   . ', i64 ' . $key . ")\n";
         } elseif ($keyIsString) {
             $out .= '  ' . $av . ' = call i64 @__mir_array_get_str(ptr ' . $ap
-                  . ', ptr ' . $key . $this->litKeyHashArgs($aa->index) . ")\n";
+                  . ', ptr ' . $key . $hashArgs . ")\n";
         } else {
             $out .= '  ' . $av . ' = call i64 @__mir_array_get_int(ptr ' . $ap
                   . ', i64 ' . $key . ")\n";
@@ -759,20 +850,8 @@ trait EmitLlvmArrays
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
-        // Both arms are done with the key here (the register dominates the
-        // join), so a fresh temp dies once ({@see EmitLlvm::keyTempRelease}).
-        // The BOXED copy is the same pointer re-tagged, never a second buffer.
-        if ($keyIsCell || $keyIsString) {
-            $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
-        }
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
-        if ($self->type->kind === Type::KIND_FLOAT) {
-            $rf = $this->ssa->allocReg();
-            $out .= '  ' . $rf . ' = bitcast i64 ' . $r . " to double\n";
-            $this->lastValue = $rf;
-            $this->lastValueType = 'double';
-        }
         return $out;
     }
 
