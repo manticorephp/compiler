@@ -616,6 +616,27 @@ trait EmitLlvmCalls
             // A set that shrank below the threshold (a body that would not close)
             // is not worth a table; those candidates go back to being arms.
             if (\count($dynfSyms) < self::DYNF_TABLE_MIN) { $dynfSyms = []; }
+        } else {
+            // A spread arm builds its call from the HOISTED values already, not
+            // from the argument nodes, so it converts to a thunk the same way —
+            // only the arity rule differs: the pack supplies whatever the callee
+            // wants past the fixed prefix.
+            $clean = [];
+            foreach ($this->sigs->returnType as $cname => $crt) {
+                if (\strpos($cname, '__') !== false) { continue; }
+                $cpt = $this->sigs->paramTypes[$cname] ?? [];
+                if (\count($cpt) < $numFixed) { continue; }
+                if ($this->anyRefParam($cname)) { continue; }
+                $clean[$cname] = $crt;
+            }
+            if (\count($clean) >= self::DYNF_TABLE_MIN) {
+                $spreadElem = $iv->args[$spreadIdx]->operand->type->element ?? Type::unknown();
+                foreach ($clean as $cname => $crt) {
+                    $tsym = $this->dynfSpreadThunk($cname, $numFixed, $spreadElem, $crt);
+                    if ($tsym !== '') { $dynfSyms[$cname] = $tsym; }
+                }
+            }
+            if (\count($dynfSyms) < self::DYNF_TABLE_MIN) { $dynfSyms = []; }
         }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -722,7 +743,9 @@ trait EmitLlvmCalls
             $out .= $nextL . ":\n";
         }
         if ($dynfSyms !== []) {
-            $out .= $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms);
+            $out .= $hasSpread
+                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr)
+                : $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms);
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -730,6 +753,121 @@ trait EmitLlvmCalls
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The spread twin of {@see dynfThunk}: `i64 (ptr %spread, i64 %a0…)`.
+     *
+     * A spread arm never re-emitted the argument nodes to begin with — it builds
+     * the call from the hoisted fixed values and `__mir_array_value_at` reads —
+     * so it converts to a thunk cleanly. The fixed prefix rides in as CELLS (one
+     * body per callee and prefix length, whatever the site's static types) and
+     * the tail is read from the pack inside, which is why the pack's ELEMENT type
+     * is part of the key: it is what says whether an element is already tagged.
+     *
+     * A by-reference parameter is refused here as it is in the arm: a spread
+     * supplies it from array ELEMENTS, so there is no caller variable to bind.
+     */
+    private function dynfSpreadThunk(string $fname, int $numFixed, Type $spreadElem, Type $rt): string
+    {
+        $key = 's|' . $fname . '|' . (string)$numFixed
+             . '|' . (string)$spreadElem->kind . ':' . ($spreadElem->class ?? '');
+        if (isset($this->dynfThunks[$key])) { return $this->dynfThunks[$key]; }
+        $tot = \count($this->sigs->paramTypes[$fname] ?? []);
+        if ($tot < $numFixed) { return ''; }
+        $sym = $this->mirHelperSym('__mir_dynfs_' . (string)\count($this->dynfThunks));
+        $this->dynfThunks[$key] = $sym;
+
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+
+        $params = 'ptr %ft.sp';
+        $body = '';
+        $callArgs = [];
+        $cellT = Type::cell();
+        for ($i = 0; $i < $tot; $i = $i + 1) {
+            $lname = '__mc_dynfs_a' . (string)$i;
+            $slot = $this->ssa->allocReg();
+            $body .= '  ' . $slot . " = alloca i64\n";
+            if ($i < $numFixed) {
+                $p = '%ft.a' . (string)$i;
+                $params .= ', i64 ' . $p;
+                $body .= '  store i64 ' . $p . ', ptr ' . $slot . "\n";
+                $callArgs[] = new LoadLocal($lname, $cellT);
+            } else {
+                $ev = $this->ssa->allocReg();
+                $body .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr %ft.sp, i64 '
+                       . (string)($i - $numFixed) . ")\n";
+                $body .= '  store i64 ' . $ev . ', ptr ' . $slot . "\n";
+                $callArgs[] = new LoadLocal($lname, $spreadElem);
+            }
+            $this->locals->slots[$lname] = $slot;
+        }
+        $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
+        $body .= $this->boxToCell($rt);
+        $ret = $this->lastValue;
+        $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
+
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+
+        if (!$closed) {
+            unset($this->dynfThunks[$key]);
+            return '';
+        }
+        $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+        return $sym;
+    }
+
+    /**
+     * The table half of a spread dynamic-name call. The fixed prefix was hoisted
+     * before the arms (it has to dominate every one of them), so nothing is
+     * re-evaluated here — only boxed, and only on the path where no arm fired.
+     *
+     * @param string[]              $fixedRegs hoisted fixed-prefix values
+     * @param array<string, string> $syms      candidate name => thunk symbol
+     */
+    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr): string
+    {
+        $this->dynfExtraBodies .= $this->dynfLookupFn();
+        $pair = $this->dynfTable($syms);
+        $out = '';
+        $argList = 'ptr ' . $spreadArr;
+        foreach ($fixedRegs as $i => $r) {
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            $out .= $this->boxToCell($iv->args[$i]->type, $iv->args[$i]);
+            $argList .= ', i64 ' . $this->lastValue;
+        }
+        $fn = $this->ssa->allocReg();
+        $out .= '  ' . $fn . ' = call ptr @__mc_dynf_lookup(ptr ' . $keyP
+              . ', ptr ' . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = icmp ne ptr ' . $fn . ", null\n";
+        $callL = $this->ssa->allocLabel('dynf.stab');
+        $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $endL . "\n";
+        $out .= $callL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argList . ")\n";
+        $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
         return $out;
     }
 
