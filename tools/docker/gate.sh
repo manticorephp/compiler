@@ -38,7 +38,9 @@ mkdir -p "$MC_WORK" "$MC_LOGDIR"
 echo "=== host:  $(uname -m) / $(. /etc/os-release; echo "$PRETTY_NAME")"
 echo "=== php:   $(php -r 'echo PHP_VERSION;')"
 echo "=== clang: $(clang --version | head -1)"
-echo "=== commit:$(git -C "$MC_REPO" rev-parse --short HEAD 2>/dev/null || echo ' unknown') $(git -C "$MC_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+# MC_COMMIT is what CI passes in: the image carries no git, and a bind-mounted
+# checkout is a different owner than the container user, which `git` refuses.
+echo "=== commit:${MC_COMMIT:-$(git -C "$MC_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 echo "=== gate:  MC_GATE=$MC_GATE MC_JOBS=$MC_JOBS MC_STABILITY_N=$MC_STABILITY_N opt=-O2 (default)"
 
 TREE="$MC_WORK/src-tree"

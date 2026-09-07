@@ -1,0 +1,113 @@
+# The HEAVY gate, nightly: cold seed + suite + difftest (php parity) +
+# selfhost_fixpoint (fixpoint, MIR golden, rebuild stability), on both Linux
+# arches, plus a macOS suite run.
+#
+# Why nightly and not per push: the Linux gate is hours, and its value is
+# answering "is main green, and at WHICH commit" without anyone remembering to
+# ask. Every job writes that commit into the run summary for exactly that reason.
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  linux-gate:
+    name: gate-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: toolchain
+          tags: manticore-toolchain:${{ matrix.arch }}
+          load: true
+          cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
+
+      - name: Full gate
+        run: |
+          mkdir -p ci-logs && chmod 777 ci-logs
+          docker run --rm \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -e MC_GATE=1 \
+            -e MC_JOBS=0 \
+            -e MC_STABILITY_N=2 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+            manticore-toolchain:${{ matrix.arch }} \
+            /bin/bash /repo/tools/docker/gate.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## linux-${{ matrix.arch }} — \`${GITHUB_SHA::12}\`"
+            echo '```'
+            tail -20 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
+            tail -8  ci-logs/difftest.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-logs-${{ matrix.arch }}
+          path: ci-logs/
+          if-no-files-found: warn
+
+  macos:
+    name: macos-arm64
+    runs-on: macos-14
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # Homebrew's `php` is the oracle AND the seed interpreter. difftest is
+      # only honest against 8.5 — the target language version — so it is guarded
+      # rather than run against whatever the formula currently ships.
+      - name: Toolchain
+        run: |
+          brew update
+          brew install php pcre2 openssl@3 sqlite
+          php -v
+          clang --version | head -1
+
+      - name: Cold seed
+        run: bin/compile
+
+      - name: Suite
+        run: bash tests/aot/run.sh -j 0
+
+      - name: Difftest (php 8.5 only)
+        run: |
+          v=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')
+          if [ "$v" = "8.5" ]; then
+            bash tools/difftest.sh
+          else
+            echo "php $v is not 8.5 — skipping difftest, it would grade against the wrong oracle"
+          fi
+
+      - name: Summary
+        if: always()
+        run: echo "## macos-arm64 — \`${GITHUB_SHA::12}\`" >> "$GITHUB_STEP_SUMMARY"
