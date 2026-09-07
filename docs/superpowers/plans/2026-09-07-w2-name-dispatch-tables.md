@@ -186,6 +186,35 @@ that is where t1's remaining mass sits — `Fiber__mcRun` 0.43 MB, `__mc_call_sh
 spread site needs an args-VECTOR thunk (`i64 f(ptr %args)`), which is the shape
 `__mc_dyn_method_try_call` already uses for methods. Task 4 (`dynmChainFn`) is untouched.
 
+## RESULT 2 — the spread path and the method shape (`0023ef1`, `3d0f3f9`, `a44a0e9`)
+
+**Spread sites now table too.** A spread arm never re-emitted the argument nodes to begin
+with (it builds the call from the hoisted fixed values plus `__mir_array_value_at` reads), so
+it converts cleanly: `i64 (ptr %spread, i64 %a0…)`, keyed on callee + prefix length + the
+pack's ELEMENT type, fixed prefix boxed to cells at the site.
+
+| corpus | IR | `strcmp` | wall |
+|---|---|---|---|
+| t1 baseline | 15 598 962 | 4 832 | 24 s |
+| t1 now | **14 793 855 (-5.2%)** | **1 815 (-62%)** | 21 s |
+| t2 baseline | 241 514 618 | 113 858 | 593 s |
+| t2 now | **209 739 963 (-13.1%)** | **74 115 (-35%)** | **385-414 s (-30%)** |
+
+`Fiber__mcRun` (0.43 MB) and `__mc_call_shutdown_function` (0.43 MB) are gone from t1's
+fattest list entirely.
+
+★★★ **A base-`Node` field read SIGSEGVs the native self-build.** `[]->operand`
+resolved by the wrong offset and killed the t2 build (`EXC_BAD_ACCESS` at 0x10, one frame
+deep in `dynfSpreadThunk`); `asSpreadNode()` narrowing is the fix, and it is the same trap the
+`DynProp_` comment in `emitInvoke` already names. t1 never reproduced it — **a corpus that
+does not crash proves nothing about a bigger one**.
+
+**The method side (Task 4) is in and is nearly free at t2**: one shape body in the whole tier
+(209.885 -> 209.740 MB). Its family is a T5 shape — `dynm` was 197 MB of 1.20 GB there — so
+the number that matters for it has not been taken yet.
+
+⛔ Still not run: full suite, difftest, self-host fixpoint, Linux, T5.
+
 ## Risks, named
 
 1. **A by-ref candidate silently going clean.** `anyRefParam` is the only guard; a miss writes
