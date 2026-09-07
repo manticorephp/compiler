@@ -3468,6 +3468,24 @@ trait EmitLlvmObjects
                 $argVals .= ', i64 ' . $this->lastValue;
                 $argTypes[] = $a->type;
             }
+            // ONE chain per SHAPE, called — not spliced into every site. With
+            // no dirty remainder the chain reads only the receiver, the name
+            // and the arguments, which is what parameters are for; everything
+            // else (the name set, each name's helper symbol, the per-arg
+            // coercion) is static metadata, so two sites agreeing on all of it
+            // were emitting byte-identical blocks. `dynm.*` was 164.6 MB of a
+            // 1.74 GB symfony-demo T5 module, the largest single family in it.
+            if ($dirty === []) {
+                $sym = $this->dynmChainFn($clean, $argTypes, $iv->line, $argc);
+                if ($sym !== '') {
+                    $r = $this->ssa->allocReg();
+                    $out .= '  ' . $r . ' = call i64 @' . $sym . '(i64 ' . $recvArg
+                          . ', ptr ' . $keyP . $argVals . ")\n";
+                    $this->lastValue = $r;
+                    $this->lastValueType = 'i64';
+                    return $out;
+                }
+            }
             $res = $this->ssa->allocReg();
             $out .= '  ' . $res . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -3665,6 +3683,77 @@ trait EmitLlvmObjects
             }
         }
         return $this->emitDynMethodInlineFallback($dp, $iv, $methods);
+    }
+
+    /**
+     * The symbol of the shared name chain for this SHAPE, or '' to stay inline.
+     *
+     * The shape is the clean name set with each name's return type, plus the
+     * argument types — exactly what {@see dynamicMethodZeroArgHelper} keys its
+     * own helpers on, so two sites that agree here call the same per-name
+     * helpers from the same arms. The site's LINE is deliberately not in the
+     * key: the helper does not carry it either.
+     *
+     * ⚠ A body is only a function if it is CLOSED — {@see irIsClosed}. The
+     * arms here call helpers that take the parameters, but the check stays:
+     * a shape it cannot prove is only ever a missed saving.
+     *
+     * @param array<string, Type> $clean
+     * @param Type[]              $argTypes
+     */
+    private function dynmChainFn(array $clean, array $argTypes, int $line, int $argc): string
+    {
+        $key = (string)$argc;
+        foreach ($clean as $m => $retT) {
+            $key .= '|' . (string)$m . ':' . (string)$retT->kind . ':' . ($retT->class ?? '');
+        }
+        foreach ($argTypes as $at) {
+            $key .= '|a' . (string)$at->kind . ':' . ($at->class ?? '');
+        }
+        if (isset($this->dynmSyms[$key])) { return $this->dynmSyms[$key]; }
+        $sym = '__mir_dynm_' . (string)\count($this->dynmSyms);
+        // Registered BEFORE the body is built, for the reason
+        // {@see emitVirtualDispatch} gives: a half-built registry is the one
+        // state that would emit two bodies for one symbol.
+        $this->dynmSyms[$key] = $sym;
+        $params = 'i64 %dm.recv, ptr %dm.key';
+        $thunkArgs = '';
+        for ($i = 0; $i < $argc; $i++) {
+            $params .= ', i64 %dm.a' . (string)$i;
+            $thunkArgs .= ', i64 %dm.a' . (string)$i;
+        }
+        $this->rt->needsStrcmp = true;
+        $res = $this->ssa->allocReg();
+        $body = '  ' . $res . " = alloca i64\n";
+        $body .= '  store i64 0, ptr ' . $res . "\n";
+        $endL = $this->ssa->allocLabel('dynm.end');
+        foreach ($clean as $m => $retT) {
+            $hitL = $this->ssa->allocLabel('dynm.hit');
+            $nextL = $this->ssa->allocLabel('dynm.next');
+            $cmp = $this->ssa->allocReg();
+            $body .= '  ' . $cmp . ' = call i32 @strcmp(ptr %dm.key, ptr ' . $this->litStr($m) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $body .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $body .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $body .= $hitL . ":\n";
+            $helper = $this->dynamicMethodZeroArgHelper($m, $retT, $line, $argTypes);
+            $r = $this->ssa->allocReg();
+            $body .= '  ' . $r . ' = call i64 ' . $helper . '(i64 %dm.recv' . $thunkArgs . ")\n";
+            $body .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $body .= '  br label %' . $endL . "\n";
+            $body .= $nextL . ":\n";
+        }
+        $body .= '  br label %' . $endL . "\n";
+        $body .= $endL . ":\n";
+        $ld = $this->ssa->allocReg();
+        $body .= '  ' . $ld . ' = load i64, ptr ' . $res . "\n";
+        if (!$this->irIsClosed($body . '  ret i64 ' . $ld . "\n")) {
+            unset($this->dynmSyms[$key]);
+            return '';
+        }
+        $this->dynmExtraBodies .= 'define internal i64 @' . $sym . '(' . $params
+            . ") noinline optnone {\nentry:\n" . $body . '  ret i64 ' . $ld . "\n}\n\n";
+        return $sym;
     }
 
     /** Existing name-chain dispatcher, retained as the semantic fallback when

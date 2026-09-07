@@ -731,6 +731,8 @@ final class EmitLlvm implements EmitVisitor
         $this->erasedIfaceArgc = [];
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
+        $this->dynmSyms = [];
+        $this->dynmExtraBodies = '';
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -1035,6 +1037,7 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
+        $extraBodies .= $this->dynmExtraBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1899,6 +1902,13 @@ final class EmitLlvm implements EmitVisitor
      */
     private array $vdSyms = [];
     private string $vdExtraBodies = '';
+
+    /** shape key => the shared erased-dynamic-method chain's symbol. */
+    /** @var array<string, string> */
+    private array $dynmSyms = [];
+
+    /** Bodies for {@see EmitLlvmObjects::dynmChainFn}, flushed with the others. */
+    private string $dynmExtraBodies = '';
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */
