@@ -72,12 +72,84 @@ use Compile\Mir\While_;
  */
 trait InferCalls
 {
+    /**
+     * An array LITERAL handed to a parameter whose ELEMENT CHANNEL is `cell`
+     * must be BUILT in that channel.
+     *
+     * {@see InferNodes::inferArrayLit} types a literal from its own values and
+     * nothing else, so a HOMOGENEOUS one keeps a concrete element even when the
+     * callee declared `array<K, mixed>` — and then the callee's every read goes
+     * through `__mir_array_get_cell` over slots holding RAW words. php:
+     *
+     *     class Bag { public function __construct(private array $d) {}          // @param array<string, mixed>
+     *                 public function offsetGet(mixed $o): mixed { return $this->d[$o]; } }
+     *     new Bag(['name' => 'bob'])   // all strings -> raw elements -> reads back an ADDRESS
+     *     new Bag(['name' => 'bob', 'n' => 1])   // heterogeneous -> cells -> correct
+     *
+     * One int in the literal was the difference between `string(3) "bob"` and
+     * `int(4334798736)`. This is the PRODUCER half of "cell is a static claim,
+     * not a runtime guarantee" for the one channel a call can see: the callee's
+     * declared parameter. The literal's own elements are already inferred when
+     * this runs, so retyping the literal is enough — the emitter decides per
+     * element from `$al->type->element` ({@see EmitLlvmArrays::litBoxesValues}).
+     *
+     * `$paramOffset` is 1 for a method or constructor, whose params[0] is
+     * `%this`. A variadic parameter is left alone: the literal is then an
+     * ELEMENT of the pack, not the pack.
+     *
+     * @param Node[] $args
+     */
+    private function adoptLitParamElem(array $args, string $fnName, int $paramOffset): void
+    {
+        $fn = $this->fnByName[$fnName] ?? null;
+        if ($fn === null) { return; }
+        $np = \count($fn->params);
+        $i = 0;
+        foreach ($args as $a) {
+            $pi = $i + $paramOffset;
+            $i = $i + 1;
+            if ($pi >= $np) { break; }
+            if ($a->kind !== Node::KIND_ARRAY_LIT) { continue; }
+            $p = $fn->params[$pi];
+            if ($p->variadic || $p->byRef) { continue; }
+            $pt = $p->type;
+            if (!$pt->isArray()) { continue; }
+            $pe = $pt->element;
+            if ($pe === null || $pe->kind !== Type::KIND_CELL) { continue; }
+            $at = $a->type;
+            if (!$at->isArray()) { continue; }
+            $ae = $at->element;
+            if ($ae === null || $ae->kind === Type::KIND_CELL) { continue; }
+            // Only a POINTER payload actually needs the tag. Under NaN-boxing a raw
+            // int IS its own cell, so re-channelling `vec[int]` buys nothing and
+            // MOVES THE MONOMORPHIZATION LADDER: `Async\mapSettled([10,20,30], …)`
+            // picked the `p0_vec_cell` specialization, whose $k then typed an
+            // unrelated `vec[obj<Task>]` as `assoc[string, obj<Task>]`, and
+            // `__mir_array_get_str` walked a PACKED array — SIGSEGV in two async
+            // tests. String / object / array / closure elements are the ones a raw
+            // slot cannot round-trip through a cell read.
+            $ek = $ae->kind;
+            if ($ek !== Type::KIND_STRING && $ek !== Type::KIND_OBJ
+                && $ek !== Type::KIND_ARRAY && $ek !== Type::KIND_CLOSURE) { continue; }
+            // Keep the SHAPE: a record is the same memory as its assoc and only
+            // `fields` is extra, so re-channelling must not throw it away.
+            if ($at->isRecord()) {
+                $a->type = Type::record($at->fields, Type::cell());
+            } elseif ($at->key !== null) {
+                $a->type = Type::assoc($at->key, Type::cell());
+            } else {
+                $a->type = Type::vec(Type::cell());
+            }
+        }
+    }
+
     private function inferCall(Call $node): Type
     {
         foreach ($node->args as $a) {
             $this->inferNode($a);
         }
         $callee = $node->function;
+        $this->adoptLitParamElem($node->args, $callee, 0);
         $this->inferUnshiftElem($node);
         // A tagged-cell builtin (`strpos` → int|false, `getenv` →
         // string|false) is emitted by EmitLlvm as the NaN-boxed builtin
@@ -697,6 +769,10 @@ trait InferCalls
         $objType = $this->inferNode($node->object);
         foreach ($node->args as $a) {
             $this->inferNode($a);
+        }
+        $mcCls = $objType->class;
+        if ($mcCls !== null && $mcCls !== '') {
+            $this->adoptLitParamElem($node->args, $mcCls . '__' . $node->method, 1);
         }
         // A method on a `#[TypeDef]` receiver is a plain function of the scalar —
         // no dispatch, no vtable, nothing to be virtual over (the class is final

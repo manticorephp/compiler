@@ -1967,6 +1967,7 @@ trait InferNodes
         foreach ($node->args as $a) {
             $this->inferNode($a);
         }
+        $this->adoptLitParamElem($node->args, $node->class . '____construct', 1);
         return $node->type;
     }
 
