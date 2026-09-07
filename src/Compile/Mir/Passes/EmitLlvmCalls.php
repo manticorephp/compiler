@@ -630,7 +630,14 @@ trait EmitLlvmCalls
                 $clean[$cname] = $crt;
             }
             if (\count($clean) >= self::DYNF_TABLE_MIN) {
-                $spreadElem = $iv->args[$spreadIdx]->operand->type->element ?? Type::unknown();
+                // NARROW FIRST. `->operand` read off a base-`Node` resolves by the
+                // wrong offset under the native self-build — that is what SIGSEGVd
+                // the t2 build here, and it is the same trap the DynProp_ comment in
+                // emitInvoke names. The null element is a real case (a bare `array`
+                // pack), so it is tested, not `??`-defaulted.
+                $spNode = $this->asSpreadNode($iv->args[$spreadIdx]);
+                $spElem = $spNode->operand->type->element;
+                $spreadElem = $spElem === null ? Type::unknown() : $spElem;
                 foreach ($clean as $cname => $crt) {
                     $tsym = $this->dynfSpreadThunk($cname, $numFixed, $spreadElem, $crt);
                     if ($tsym !== '') { $dynfSyms[$cname] = $tsym; }
@@ -774,7 +781,7 @@ trait EmitLlvmCalls
         $key = 's|' . $fname . '|' . (string)$numFixed
              . '|' . (string)$spreadElem->kind . ':' . ($spreadElem->class ?? '');
         if (isset($this->dynfThunks[$key])) { return $this->dynfThunks[$key]; }
-        $tot = \count($this->sigs->paramTypes[$fname] ?? []);
+        $tot = isset($this->sigs->paramTypes[$fname]) ? \count($this->sigs->paramTypes[$fname]) : 0;
         if ($tot < $numFixed) { return ''; }
         $sym = $this->mirHelperSym('__mir_dynfs_' . (string)\count($this->dynfThunks));
         $this->dynfThunks[$key] = $sym;
