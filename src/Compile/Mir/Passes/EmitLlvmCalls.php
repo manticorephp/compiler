@@ -584,12 +584,46 @@ trait EmitLlvmCalls
             $out .= $this->coerceToPtr();
             $spreadArr = $this->lastValue;
         }
+        // Split the candidates BEFORE emitting anything. A candidate can be
+        // reached through the TABLE when it takes exactly this site's argument
+        // count, has no by-reference parameter (a thunk is handed values; only
+        // the arm's re-emitted nodes can bind a caller's slot) and pairs its
+        // carriers the way an arm would have to anyway. Everything else keeps
+        // its inline arm, and the ARMS COME FIRST: a name matches at most one
+        // candidate, so the order is not observable, and it is what keeps the
+        // argument expressions evaluated exactly once — a dirty arm that fires
+        // evaluates them itself, and the table path below is reached only when
+        // none did.
+        $dynfSyms = [];
+        if (!$hasSpread) {
+            $clean = [];
+            foreach ($this->sigs->returnType as $cname => $crt) {
+                if (\strpos($cname, '__') !== false) { continue; }
+                $cpt = $this->sigs->paramTypes[$cname] ?? [];
+                if (\count($cpt) !== $argc) { continue; }
+                if ($this->anyRefParam($cname)) { continue; }
+                // No carrier filter: a cell argument is uniform, so the
+                // float-vs-pointer pairing an inline arm cannot even emit is
+                // just unboxed by the callee's own parameter coercion.
+                $clean[$cname] = $crt;
+            }
+            if (\count($clean) >= self::DYNF_TABLE_MIN) {
+                foreach ($clean as $cname => $crt) {
+                    $tsym = $this->dynfThunk($cname, $argc, $crt);
+                    if ($tsym !== '') { $dynfSyms[$cname] = $tsym; }
+                }
+            }
+            // A set that shrank below the threshold (a body that would not close)
+            // is not worth a table; those candidates go back to being arms.
+            if (\count($dynfSyms) < self::DYNF_TABLE_MIN) { $dynfSyms = []; }
+        }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynf.end');
         foreach ($this->sigs->returnType as $fname => $rt) {
             if (\strpos($fname, '__') !== false) { continue; }
+            if (isset($dynfSyms[$fname])) { continue; }
             $ptypes = $this->sigs->paramTypes[$fname] ?? [];
             $pdefs = $this->sigs->paramDefaults[$fname] ?? [];
             $tot = \count($ptypes);
@@ -687,6 +721,9 @@ trait EmitLlvmCalls
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
+        if ($dynfSyms !== []) {
+            $out .= $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms);
+        }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();
@@ -694,6 +731,195 @@ trait EmitLlvmCalls
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * The table half of a dynamic function-name call: evaluate the arguments
+     * ONCE, probe the row array, and call whatever thunk came back.
+     *
+     * Reached only after every inline arm missed, so a hit here cannot double an
+     * argument's side effects. A miss leaves the result slot at the 0 the entry
+     * stored, which is what the all-miss chain did too.
+     *
+     * @param array<string, string> $syms candidate name => thunk symbol
+     */
+    private function emitDynfTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms): string
+    {
+        $this->dynfExtraBodies .= $this->dynfLookupFn();
+        $pair = $this->dynfTable($syms);
+        $out = '';
+        $argRegs = [];
+        foreach ($iv->args as $a) {
+            $out .= $this->emitNode($a);
+            // The uniform ABI is CELLS — one thunk per callee then serves every
+            // site, whatever the static types are here. The node rides along so
+            // the box carries the right rc flavor.
+            $out .= $this->boxToCell($a->type, $a);
+            $argRegs[] = $this->lastValue;
+        }
+        $fn = $this->ssa->allocReg();
+        $out .= '  ' . $fn . ' = call ptr @__mc_dynf_lookup(ptr ' . $keyP
+              . ', ptr ' . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = icmp ne ptr ' . $fn . ", null\n";
+        $callL = $this->ssa->allocLabel('dynf.tab');
+        $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $endL . "\n";
+        $out .= $callL . ":\n";
+        $argList = '';
+        foreach ($argRegs as $i => $r) {
+            $argList .= ($i > 0 ? ', ' : '') . 'i64 ' . $r;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argList . ")\n";
+        $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+        return $out;
+    }
+
+    /** Below this many table-eligible candidates the chain is the smaller IR:
+     *  a table costs its rows plus a lookup call and a branch, and pays only
+     *  when it replaces several `strcmp` blocks. */
+    private const DYNF_TABLE_MIN = 4;
+
+    /**
+     * `ptr @__mc_dynf_lookup(ptr name, ptr rows, i64 count)` — the generic probe
+     * over a `{ ptr name, ptr fn }` row array, emitted once per module.
+     *
+     * First match wins and a miss answers null, which is exactly the chain's own
+     * semantics: a candidate set is keyed by NAME, so at most one row can match
+     * and the scan order is not observable.
+     */
+    private function dynfLookupFn(): string
+    {
+        if ($this->dynfLookupEmitted) { return ''; }
+        $this->dynfLookupEmitted = true;
+        $this->rt->needsStrcmp = true;
+        $out = "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
+        $out .= "  %z = icmp eq i64 %cnt, 0\n";
+        $out .= "  br i1 %z, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+        $out .= "  %off = mul i64 %i, 16\n";
+        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
+        $out .= "  %np = load ptr, ptr %row\n";
+        $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %next\n";
+        $out .= "hit:\n";
+        $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
+        $out .= "  %fv = load ptr, ptr %fp\n";
+        $out .= "  ret ptr %fv\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
+        $out .= "  br i1 %done, label %miss, label %loop\n";
+        $out .= "miss:\n  ret ptr null\n}\n\n";
+        return $out;
+    }
+
+    /**
+     * The uniform `i64 (i64…)` thunk for one dynamic-name candidate, or '' when
+     * this candidate cannot have one.
+     *
+     * The chain's arm re-emits the site's argument NODES per candidate, which is
+     * what makes a by-ref parameter work — `emitCall` sees the caller's slot. A
+     * thunk cannot: it is handed values. So a by-ref candidate never gets one and
+     * keeps its inline arm; here the arguments arrive as `i64` parameters, are
+     * parked in ordinary slots, and the call is built from LOADS of those slots —
+     * so every coercion, default and cell-boxing decision stays exactly where it
+     * was, in `emitCall`, against the SITE's argument types.
+     *
+     * KEYED ON CALLEE + ARGC ONLY, because the arguments ride in as CELLS: the
+     * caller boxes, the thunk's loads are cell-typed, and `emitCall` unboxes into
+     * each parameter exactly as it does for any `mixed` value handed to a typed
+     * one. That is what makes a single thunk serve EVERY site — keying on the
+     * site's argument types instead produced one thunk per shape, and those
+     * bodies cost as much as the chain blocks they replaced (measured on t1:
+     * 1510 thunks, module 14.88 -> 14.85 MB, i.e. a wash). The symbol carries the
+     * module token, so a `linkonce_odr` body never coalesces with a different
+     * module's different body.
+     *
+     */
+    private function dynfThunk(string $fname, int $argc, Type $rt): string
+    {
+        $key = $fname . '|' . (string)$argc;
+        if (isset($this->dynfThunks[$key])) { return $this->dynfThunks[$key]; }
+        $sym = $this->mirHelperSym('__mir_dynft_' . (string)\count($this->dynfThunks));
+        // Registered BEFORE the body is built, for the reason dynmChainFn gives:
+        // a half-built registry is the one state that emits two bodies for one
+        // symbol. Removed again below if the body turns out not to be closed.
+        $this->dynfThunks[$key] = $sym;
+
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+
+        $params = '';
+        $body = '';
+        $callArgs = [];
+        $cellT = Type::cell();
+        for ($i = 0; $i < $argc; $i = $i + 1) {
+            $p = '%ft.a' . (string)$i;
+            $params .= ($i > 0 ? ', ' : '') . 'i64 ' . $p;
+            $slot = $this->ssa->allocReg();
+            $body .= '  ' . $slot . " = alloca i64\n";
+            $body .= '  store i64 ' . $p . ', ptr ' . $slot . "\n";
+            $lname = '__mc_dynft_a' . (string)$i;
+            $this->locals->slots[$lname] = $slot;
+            $callArgs[] = new LoadLocal($lname, $cellT);
+        }
+        $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
+        $body .= $this->boxToCell($rt);
+        $ret = $this->lastValue;
+        $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
+
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+
+        if (!$closed) {
+            unset($this->dynfThunks[$key]);
+            return '';
+        }
+        $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+        return $sym;
+    }
+
+    /**
+     * The `{ ptr name, ptr thunk }` row array for one candidate set.
+     *
+     * @param array<string, string> $clean candidate name => thunk symbol
+     * @return array{string, int} [row-array symbol, row count]
+     */
+    private function dynfTable(array $clean): array
+    {
+        $key = '';
+        foreach ($clean as $fname => $sym) { $key .= $fname . '=' . $sym . '|'; }
+        if (isset($this->dynfTables[$key])) { return $this->dynfTables[$key]; }
+        $rows = [];
+        foreach ($clean as $fname => $sym) {
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($fname) . ', ptr @' . $sym . ' }';
+        }
+        $n = \count($rows);
+        $tsym = '@.dynf.rows.' . $this->mirHelperSym((string)\count($this->dynfTables));
+        $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)$n
+            . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
+        $this->dynfTables[$key] = [$tsym, $n];
+        return [$tsym, $n];
     }
 
     /**

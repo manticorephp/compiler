@@ -738,6 +738,10 @@ final class EmitLlvm implements EmitVisitor
         $this->vdExtraBodies = '';
         $this->dynmSyms = [];
         $this->dynmExtraBodies = '';
+        $this->dynfThunks = [];
+        $this->dynfTables = [];
+        $this->dynfExtraBodies = '';
+        $this->dynfLookupEmitted = false;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -1046,6 +1050,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
         $extraBodies .= $this->dynmExtraBodies;
+        $extraBodies .= $this->dynfExtraBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1957,6 +1962,22 @@ final class EmitLlvm implements EmitVisitor
 
     /** Bodies for {@see EmitLlvmObjects::dynmChainFn}, flushed with the others. */
     private string $dynmExtraBodies = '';
+
+    /** callee|arg-kind key => the uniform `i64 (i64…)` thunk's symbol.
+     *  {@see EmitLlvmCalls::dynfThunk} */
+    /** @var array<string, string> */
+    private array $dynfThunks = [];
+
+    /** candidate-set key => [row-array symbol, row count] for the dynamic
+     *  function-name TABLE that replaced that set's strcmp chain. */
+    /** @var array<string, array{string, int}> */
+    private array $dynfTables = [];
+
+    /** Thunk bodies + row globals for the table path, flushed with the others. */
+    private string $dynfExtraBodies = '';
+
+    /** The module already carries one copy of `__mc_dynf_lookup`. */
+    private bool $dynfLookupEmitted = false;
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */
