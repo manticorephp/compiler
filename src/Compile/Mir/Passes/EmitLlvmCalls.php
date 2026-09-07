@@ -1057,7 +1057,10 @@ trait EmitLlvmCalls
         if (isset($this->dynfTables[$key])) { return $this->dynfTables[$key]; }
         $rows = [];
         foreach ($clean as $fname => $sym) {
-            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($fname) . ', ptr @' . $sym . ' }';
+            // A caller may hand a bare helper symbol or one that already carries
+            // its '@' — the method side's per-name helpers come pre-qualified.
+            $fp = $sym[0] === '@' ? $sym : '@' . $sym;
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($fname) . ', ptr ' . $fp . ' }';
         }
         $n = \count($rows);
         $tsym = '@.dynf.rows.' . $this->mirHelperSym((string)\count($this->dynfTables));

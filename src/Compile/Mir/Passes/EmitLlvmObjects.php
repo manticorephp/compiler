@@ -3846,6 +3846,40 @@ trait EmitLlvmObjects
         $body = '  ' . $res . " = alloca i64\n";
         $body .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynm.end');
+        // Every arm calls a per-name helper with the SAME signature — that is
+        // what the shape key guarantees — so the names are a TABLE and the body
+        // is one probe plus one indirect call. No thunk is needed here; the
+        // helpers already are the uniform ABI.
+        if (\count($clean) >= self::DYNF_TABLE_MIN) {
+            $rows = [];
+            foreach ($clean as $m => $retT) {
+                $rows[$m] = $this->dynamicMethodZeroArgHelper($m, $retT, $line, $argTypes);
+            }
+            $this->dynfExtraBodies .= $this->dynfLookupFn();
+            $pair = $this->dynfTable($rows);
+            $fnp = $this->ssa->allocReg();
+            $body .= '  ' . $fnp . ' = call ptr @__mc_dynf_lookup(ptr %dm.key, ptr '
+                   . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
+            $hitb = $this->ssa->allocReg();
+            $body .= '  ' . $hitb . ' = icmp ne ptr ' . $fnp . ", null\n";
+            $tabL = $this->ssa->allocLabel('dynm.tab');
+            $body .= '  br i1 ' . $hitb . ', label %' . $tabL . ', label %' . $endL . "\n";
+            $body .= $tabL . ":\n";
+            $rr = $this->ssa->allocReg();
+            $body .= '  ' . $rr . ' = call i64 ' . $fnp . '(i64 %dm.recv' . $thunkArgs . ")\n";
+            $body .= '  store i64 ' . $rr . ', ptr ' . $res . "\n";
+            $body .= '  br label %' . $endL . "\n";
+            $body .= $endL . ":\n";
+            $ld0 = $this->ssa->allocReg();
+            $body .= '  ' . $ld0 . ' = load i64, ptr ' . $res . "\n";
+            if (!$this->irIsClosed($body . '  ret i64 ' . $ld0 . "\n")) {
+                unset($this->dynmSyms[$key]);
+                return '';
+            }
+            $this->dynmExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+                . ") noinline optnone {\nentry:\n" . $body . '  ret i64 ' . $ld0 . "\n}\n\n";
+            return $sym;
+        }
         foreach ($clean as $m => $retT) {
             $hitL = $this->ssa->allocLabel('dynm.hit');
             $nextL = $this->ssa->allocLabel('dynm.next');
