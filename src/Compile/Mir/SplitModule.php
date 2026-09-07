@@ -33,13 +33,25 @@ namespace Compile\Mir;
  * `linkonce_odr` means DISCARDABLE IF UNUSED, so a definition parked in a part
  * that does not itself use it is deleted by `clang -O2` — the same GlobalDCE
  * {@see PruneIr} relies on — and goes undefined at link. Coalesced GLOBALS are
- * therefore emitted into every part that names them (the linkage exists exactly
- * to let the linker fold them); coalesced FUNCTIONS stay partitioned and are
+ * therefore emitted ONCE — see below; coalesced FUNCTIONS stay partitioned and are
  * pinned with `@llvm.compiler.used`, which holds them through the optimizer
  * while still letting the LINKER dead-strip whatever the program cannot reach,
  * so nothing grows in the output. A global with plain external linkage is the
  * opposite case — not discardable, so it must be defined exactly once, or the
  * linker reports duplicate symbols (the superglobal cells did).
+ *
+ * ── A coalesced GLOBAL is ONE definition per module, not one per part ──
+ * Copying it into every part that names it is legal, and free while a module
+ * has two parts. It is not free at 24: symfony-demo T5 fed clang 3.96 GB of
+ * part text for a 1.74 GB module, and 615 MB of that difference was 163 595
+ * distinct `@.rmeta.*` globals arriving as 2 338 967 copies. clang's peak is
+ * roughly proportional to the bytes it is handed, so the duplication is paid
+ * twice — in wall clock and in the memory ceiling that decides whether the
+ * program builds at all. {@see closePart} claims one owning part per global —
+ * the first that reaches it — and every other part gets `external`. The claim
+ * also CUTS the closure: a part holding only `@desc = external` does not name
+ * what @desc initializer named, so the reflection table stops travelling with
+ * the descriptor.
  */
 final class SplitModule
 {
@@ -137,7 +149,11 @@ final class SplitModule
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
 
-        $assign = $this->assignParts($shared, $defSize, $parts);
+        $assign = $this->assignParts($shared, $defOrder, $defSize, $defRefs, $internal, $parts);
+        // Threaded through the part loop: the first part that reaches a
+        // coalesced global defines it, every later part declares it.
+        /** @var array<string, bool> */
+        $owned = [];
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -153,7 +169,7 @@ final class SplitModule
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
             $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $assign,
-                                    $internal, $globalOrder, $globals);
+                                    $internal, $globalOrder, $globals, $owned);
             $body = '';
             foreach ($plan->mine as $s) { $body = $body . $defs[$s] . "\n"; }
             $out[] = $partHeader . "\n" . $declText . "\n"
@@ -163,8 +179,31 @@ final class SplitModule
     }
 
     /**
-     * Largest first into the lightest part, so one fat function does not decide
-     * the wall clock on its own.
+     * Assign every shared definition to a part, charging each part for the
+     * file-local bodies that placing it there would COPY.
+     *
+     * Balancing by size alone is what makes a part boundary expensive. A
+     * `define internal` body is file-local, so every part that reaches one gets
+     * its own copy — and with the shared definitions scattered by size, the same
+     * closure is reached from many parts. On symfony-demo T5 that put 22 375
+     * distinct internal bodies into 54 852 copies: 1.08 GB of duplicate text out
+     * of the 3.96 GB handed to clang for a 1.74 GB module.
+     *
+     * The cost of a placement is therefore the part's RESULTING size, not the
+     * definition's own: its bytes, plus every internal component it names that
+     * the part does not already hold. A part that already carries the component
+     * gets it for free and wins; once it has taken enough of them its load is
+     * what dominates and the next definition goes elsewhere. Affinity and
+     * balance out of one number, with no clustering step to run away.
+     *
+     * ⚠ Do NOT do this by MERGING instead — union the definitions that share a
+     * component and pack the unions. Measured: an internal body every part calls
+     * (the out-lined dispatchers) merges the whole module into one cluster, and
+     * part 0 comes out at 1318 MB against 17-85 MB for the other 23. clang's
+     * peak follows the fattest part, so that is worse than the duplication it
+     * removes. Capping the merge width at 8 referrers keeps the balance and
+     * gives back nearly all of the saving (x2.275 -> x2.017); this rule gets it
+     * without the cap.
      *
      * ⚠ NOT array_fill(0, $parts, 0): the array it hands back does not survive a
      * write-then-read natively. Filled here, written on iteration 1 and read on
@@ -173,28 +212,122 @@ final class SplitModule
      * An explicit loop is correct; the array_fill repr bug is real and outlives
      * this file.
      *
-     * @param string[]           $shared
-     * @param array<string, int> $defSize
+     * @param string[]                            $shared
+     * @param string[]                            $defOrder
+     * @param array<string, int>                  $defSize
+     * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, bool>                 $internal
      * @return array<string, int> symbol => part index
      */
-    private function assignParts(array $shared, array $defSize, int $parts): array
+    private function assignParts(array $shared, array $defOrder, array $defSize,
+                                 array $defRefs, array $internal, int $parts): array
     {
+        /** @var array<string, string> symbol => its component's root */
+        $compOf = [];
+        /** @var array<string, int> component root => bytes */
+        $compSize = [];
+        $this->internalComponents($defOrder, $defSize, $defRefs, $internal, $compOf, $compSize);
+
         $bySize = [];
-        foreach ($shared as $s) { $bySize[$s] = $defSize[$s]; }
+        foreach ($shared as $s) { $bySize[$s] = $defSize[$s] ?? 0; }
         \arsort($bySize);
         $load = [];
         for ($q = 0; $q < $parts; $q = $q + 1) { $load[] = 0; }
+        // Which parts already hold a component, as a bit per part. Parts are
+        // capped at 64 (Main.php), so one integer says it — and a flat map of
+        // ints avoids mutating a nested array per placement.
+        /** @var array<string, int> */
+        $have = [];
         /** @var array<string, int> */
         $assign = [];
         foreach ($bySize as $sym => $sz) {
-            $min = 0;
-            for ($p = 1; $p < $parts; $p++) {
-                if ($load[$p] < $load[$min]) { $min = $p; }
+            /** @var array<string, bool> */
+            $comps = [];
+            foreach ($defRefs[$sym] as $r => $_) {
+                if (!isset($compOf[$r])) { continue; }
+                $comps[$compOf[$r]] = true;
             }
-            $assign[$sym] = $min;
-            $load[$min] = $load[$min] + $sz;
+            $best = 0;
+            $bestLoad = -1;
+            for ($p = 0; $p < $parts; $p = $p + 1) {
+                $bit = 1 << $p;
+                $add = 0;
+                foreach ($comps as $c => $_) {
+                    if ((($have[$c] ?? 0) & $bit) === 0) { $add = $add + ($compSize[$c] ?? 0); }
+                }
+                $cand = $load[$p] + $sz + $add;
+                if ($bestLoad < 0 || $cand < $bestLoad) { $bestLoad = $cand; $best = $p; }
+            }
+            $assign[$sym] = $best;
+            $load[$best] = $bestLoad;
+            $bit = 1 << $best;
+            foreach ($comps as $c => $_) { $have[$c] = ($have[$c] ?? 0) | $bit; }
         }
         return $assign;
+    }
+
+    /**
+     * Group the file-local definitions into components that cannot be split.
+     *
+     * An internal body may call another, so a part that takes one takes the
+     * whole reachable set — {@see closePart} closes exactly that to a fixpoint.
+     * Naming the component up front is what lets {@see assignParts} price a
+     * placement: the unit that gets copied is the component, not the body.
+     *
+     * @param string[]                            $defOrder
+     * @param array<string, int>                  $defSize
+     * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, bool>                 $internal
+     * @param array<string, string>               $compOf   out: symbol => root
+     * @param array<string, int>                  $compSize out: root => bytes
+     */
+    private function internalComponents(array $defOrder, array $defSize, array $defRefs,
+                                        array $internal, array &$compOf,
+                                        array &$compSize): void
+    {
+        /** @var array<string, string> */
+        $parent = [];
+        foreach ($defOrder as $s) {
+            if (isset($internal[$s])) { $parent[$s] = $s; }
+        }
+        foreach ($defOrder as $s) {
+            if (!isset($internal[$s])) { continue; }
+            foreach ($defRefs[$s] as $r => $_) {
+                if (!isset($parent[$r])) { continue; }
+                $this->unite($parent, $s, $r);
+            }
+        }
+        foreach ($defOrder as $s) {
+            if (!isset($internal[$s])) { continue; }
+            $r = $this->findRoot($parent, $s);
+            $compOf[$s] = $r;
+            $compSize[$r] = ($compSize[$r] ?? 0) + ($defSize[$s] ?? 0);
+        }
+    }
+
+    /**
+     * ⚠ BY REFERENCE. Handed the map by value, every union copies the whole
+     * table and the split turns quadratic.
+     *
+     * @param array<string, string> $parent
+     */
+    private function unite(array &$parent, string $a, string $b): void
+    {
+        $ra = $this->findRoot($parent, $a);
+        $rb = $this->findRoot($parent, $b);
+        if ($ra === $rb) { return; }
+        $parent[$rb] = $ra;
+    }
+
+    /** @param array<string, string> $parent */
+    private function findRoot(array &$parent, string $x): string
+    {
+        while (isset($parent[$x]) && $parent[$x] !== $x) {
+            $g = $parent[$parent[$x]] ?? $parent[$x];
+            $parent[$x] = $g;
+            $x = $g;
+        }
+        return $x;
     }
 
     /**
@@ -207,10 +340,34 @@ final class SplitModule
      * @param array<string, bool>                 $internal
      * @param string[]                            $globalOrder
      * @param array<string, string>               $globals
+     * @param array<string, bool>                 $owned globals already defined by an earlier part
      */
     private function planPart(int $p, array $defOrder, array $defHead, array $defRefs,
                               array $assign, array $internal, array $globalOrder,
-                              array $globals): PartPlan
+                              array $globals, array &$owned): PartPlan
+    {
+        $plan = $this->closePart($p, $defOrder, $defRefs, $assign, $internal,
+                                 $globalOrder, $globals, $owned);
+        $this->renderPart($plan, $p, $defHead, $assign, $internal, $globalOrder,
+                          $globals);
+        return $plan;
+    }
+
+    /**
+     * What a part must CONTAIN: its own definitions, the file-local closure they
+     * reach, and the globals that closure names. Text is not built here — the
+     * owner pass runs this for every part before any part is rendered.
+     *
+     * @param string[]                            $defOrder
+     * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, int>                  $assign
+     * @param array<string, bool>                 $internal
+     * @param string[]                            $globalOrder
+     * @param array<string, string>               $globals
+     */
+    private function closePart(int $p, array $defOrder, array $defRefs, array $assign,
+                               array $internal, array $globalOrder, array $globals,
+                               array &$owned): PartPlan
     {
         /** @var string[] */
         $mine = [];
@@ -247,18 +404,59 @@ final class SplitModule
                 if ($this->globalClass($globals[$g]) === 'strong') { $refs[$g] = true; }
             }
         }
+        // ⚠ The closure follows a global's INITIALIZER only where this part
+        // will emit one. A part that merely declares `@desc = external` does
+        // not name what @desc's initializer named, so it needs none of it —
+        // and that is the whole reason a class descriptor used to drag its
+        // entire reflection table into all 24 parts: 163 595 `@.rmeta.*`
+        // globals arrived as 2 086 013 declarations even AFTER one part had
+        // been made their owner. Claim on first reach, in part order.
         /** @var array<string, bool> */
         $needG = [];
+        /** @var array<string, bool> */
+        $ownG = [];
         $changed = true;
         while ($changed) {
             $changed = false;
             foreach ($globalOrder as $g) {
                 if (!isset($refs[$g]) || isset($needG[$g])) { continue; }
                 $needG[$g] = true;
+                $cls = $this->globalClass($globals[$g]);
+                if ($cls === 'coalesced') {
+                    if (isset($owned[$g])) { continue; }
+                    $owned[$g] = true;
+                    $ownG[$g] = true;
+                } elseif ($cls === 'strong' && $p !== 0) {
+                    // Part 0 defines every strong global; here it is a bare
+                    // `external` with no initializer to follow.
+                    continue;
+                }
                 foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) { $refs[$r] = true; }
                 $changed = true;
             }
         }
+        $plan = new PartPlan();
+        $plan->mine = $mine;
+        $plan->refs = $refs;
+        $plan->needG = $needG;
+        $plan->ownG = $ownG;
+        return $plan;
+    }
+
+    /**
+     * Turn a closed part into the text that precedes its bodies.
+     *
+     * @param array<string, string> $defHead
+     * @param array<string, int>    $assign
+     * @param array<string, bool>   $internal
+     * @param string[]              $globalOrder
+     * @param array<string, string> $globals
+     */
+    private function renderPart(PartPlan $plan, int $p, array $defHead, array $assign,
+                                array $internal, array $globalOrder, array $globals): void
+    {
+        $needG = $plan->needG;
+        $refs = $plan->refs;
         $gtext = '';
         foreach ($globalOrder as $g) {
             $gl = $globals[$g];
@@ -270,7 +468,16 @@ final class SplitModule
             }
             if ($cls === 'coalesced') {
                 if (!isset($needG[$g])) { continue; }
-                $gtext = $gtext . $gl . "\n";
+                // ⚠ The owner's copy is emitted `weak_odr`, not `linkonce_odr`:
+                // linkonce is DISCARDABLE IF UNUSED, and the one part that
+                // defines it may be the part where -O2 proves its only use dead
+                // — every other part would then hold an unresolved external.
+                // weak_odr is the same coalescing with no discard.
+                if (isset($plan->ownG[$g])) {
+                    $gtext = $gtext . $this->pinGlobal($gl) . "\n";
+                    continue;
+                }
+                $gtext = $gtext . $this->externGlobal($gl) . "\n";
                 continue;
             }
             if ($p === 0) { $gtext = $gtext . $gl . "\n"; continue; }
@@ -287,7 +494,7 @@ final class SplitModule
         }
         /** @var string[] */
         $keep = [];
-        foreach ($mine as $s) {
+        foreach ($plan->mine as $s) {
             if (\str_contains($defHead[$s], ' linkonce_odr ')) { $keep[] = $s; }
         }
         $usedText = '';
@@ -297,12 +504,25 @@ final class SplitModule
             $usedText = '@llvm.compiler.used = appending global [' . (string)\count($keep)
                 . ' x ptr] [' . \implode(', ', $refsList) . '], section "llvm.metadata"' . "\n";
         }
-        $plan = new PartPlan();
-        $plan->mine = $mine;
         $plan->gtext = $gtext;
         $plan->dtext = $dtext;
         $plan->usedText = $usedText;
-        return $plan;
+    }
+
+    /** A coalesced global's definition, made non-discardable for its owning part. */
+    private function pinGlobal(string $line): string
+    {
+        $eq = \strpos($line, ' = ');
+        if ($eq === false) { return $line; }
+        $headPart = \substr($line, 0, $eq + 3);
+        $rest = \substr($line, $eq + 3);
+        if (\str_starts_with($rest, 'linkonce_odr ')) {
+            return $headPart . 'weak_odr ' . \substr($rest, 13);
+        }
+        if (\str_starts_with($rest, 'linkonce ')) {
+            return $headPart . 'weak ' . \substr($rest, 9);
+        }
+        return $line;
     }
 
     /**
@@ -423,7 +643,11 @@ final class SplitModule
         }
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
-        $assign = $this->assignParts($shared, $defSize, $parts);
+        $assign = $this->assignParts($shared, $defOrder, $defSize, $defRefs, $internal, $parts);
+        // Threaded through the part loop: the first part that reaches a
+        // coalesced global defines it, every later part declares it.
+        /** @var array<string, bool> */
+        $owned = [];
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -435,7 +659,7 @@ final class SplitModule
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
             $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $assign,
-                                    $internal, $globalOrder, $globals);
+                                    $internal, $globalOrder, $globals, $owned);
             $path = $outBase . '.p' . (string)$p . '.ll';
             if (!\Manticore\write_file($path,
                     $partHeader . "\n" . $declText . "\n" . $plan->gtext . $plan->dtext . $plan->usedText)) {

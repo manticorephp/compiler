@@ -27,6 +27,30 @@ final class PartPlan
      */
     public array $mine = [];
 
+    /**
+     * Every symbol this part's definitions name, transitively. Set by the
+     * closure pass; the owner pass reads it before any text exists.
+     *
+     * @var array<string, bool>
+     */
+    public array $refs = [];
+
+    /**
+     * The globals this part names, transitively.
+     *
+     * @var array<string, bool>
+     */
+    public array $needG = [];
+
+    /**
+     * The coalesced globals this part DEFINES. Every other part that names one
+     * declares it `external` — and, having no initializer there, stops naming
+     * whatever that initializer named.
+     *
+     * @var array<string, bool>
+     */
+    public array $ownG = [];
+
     /** Global definition lines, already rewritten to this part's linkage. */
     public string $gtext = '';
 

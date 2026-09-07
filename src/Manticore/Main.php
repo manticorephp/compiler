@@ -4706,6 +4706,35 @@ function cmd_dump_mir(array $args): int {
     return 0;
 }
 
+function cmd_split_ir(array $args): int {
+    if (\count($args) < 3) {
+        dprint('usage: split-ir <module.ll> <parts> <outbase>');
+        return 64;
+    }
+    $in = $args[0];
+    $parts = (int)$args[1];
+    $base = $args[2];
+    if (!\file_exists($in)) { dprint('split-ir: no such file ' . $in); return 66; }
+    $t = \Compile\Stats::now();
+    $splitter = new \Compile\Mir\SplitModule();
+    $out = $splitter->runFile($in, $parts, $base);
+    if ($out === []) { dprint('split-ir: split produced no parts'); return 65; }
+    $total = 0;
+    foreach ($out as $i => $p) {
+        $sz = (int)\filesize($p);
+        $total = $total + $sz;
+        puts('  p' . (string)$i . '  ' . (string)\intdiv($sz, 1048576) . ' MB');
+    }
+    $src = (int)\filesize($in);
+    puts('split-ir: ' . (string)\count($out) . ' parts  shared=' . (string)$splitter->sharedDefs
+        . ' internal=' . (string)$splitter->internalDefs);
+    puts('split-ir: module ' . (string)\intdiv($src, 1048576) . ' MB -> parts '
+        . (string)\intdiv($total, 1048576) . ' MB  (x'
+        . (string)(\round($total / ($src > 0 ? $src : 1), 3)) . ')');
+    \Compile\Stats::step('split-ir', $t, -1, -1);
+    return 0;
+}
+
 function main_driver(): int {
     \Compile\Debug::initFromEnvironment();
     $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');
@@ -4723,6 +4752,8 @@ function main_driver(): int {
         ->run(fn (array $args) => cmd_dump_mir($args));
     $cli->command('dump-llvm-mir', 'Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR')
         ->run(fn (array $args) => cmd_dump_llvm_mir($args));
+    $cli->command('split-ir', 'Split a staged .ll module into N part files (dev tool)')
+        ->run(fn (array $args) => cmd_split_ir($args));
     $cli->command('dump-sig', 'Parse PHP, print the module-interface .sig (exported symbol table)')
         ->run(fn (array $args) => cmd_dump_sig($args));
     $cli->command('version', 'Print compiler version')
