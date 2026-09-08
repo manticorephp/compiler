@@ -578,6 +578,75 @@ function with_frame_pointers(string $ir): string {
     return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n";
 }
 
+/**
+ * Content-addressed object cache — `MANTICORE_OBJ_CACHE=1`.
+ *
+ * `clang` is ~72% of a build and it is handed IR this compiler emits
+ * deterministically: the same source produces byte-identical text, which is what
+ * the fixpoint gate proves every time it reports two identical generations. So
+ * an object is a pure function of (IR text, clang flags, clang build), and an
+ * edit that leaves a part's text untouched has no business re-running clang over
+ * it. Measured on the compiler's own module: a one-method edit moves 24 of 6924
+ * definitions — 0.35% of them, 0.91% of the bytes ({@see tools/prof/irdiff.php}).
+ *
+ * Keyed on the CONTENT, never on a path or an mtime: a hit can only be a file
+ * clang already produced from exactly these bytes with exactly these flags. That
+ * is what makes it safe to leave on across branches and worktrees.
+ *
+ * Off by default while it earns trust. It pays only in proportion to how STABLE
+ * the split is — {@see \Compile\Mir\SplitModule::$stable}, because the default
+ * partitioner balances by size and re-shuffles every part when one body grows.
+ */
+function obj_cache_enabled(): bool {
+    $e = \getenv('MANTICORE_OBJ_CACHE');
+    return $e !== false && $e !== '' && $e !== '0' && $e !== 'off';
+}
+
+function obj_cache_dir(): string {
+    $e = \getenv('MANTICORE_OBJ_CACHE_DIR');
+    if ($e !== false && $e !== '') { return $e; }
+    $home = \getenv('MANTICORE_HOME');
+    if ($home === false || $home === '') {
+        $h = \getenv('HOME');
+        $home = ($h === false || $h === '' ? '.' : $h) . '/.manticore';
+    }
+    return $home . '/cache/obj';
+}
+
+/** The toolchain's identity. A different clang is a different object. */
+function clang_id(): string {
+    $v = \shell_exec('clang --version 2>/dev/null | head -1');
+    if ($v === null || $v === false) { return 'clang?'; }
+    return \trim((string)$v);
+}
+
+function obj_cache_key(string $llPath, string $flags): string {
+    $h = \sha1_file($llPath);
+    if ($h === false) { return ''; }
+    return \sha1($flags . '|' . clang_id() . '|' . $h);
+}
+
+/** True when the cached object was placed at `$dest`. */
+function obj_cache_get(string $key, string $dest): bool {
+    if ($key === '') { return false; }
+    $p = obj_cache_dir() . '/' . $key . '.o';
+    if (!\file_exists($p)) { return false; }
+    return \copy($p, $dest);
+}
+
+/** Store through a temp name: a reader must never see a half-written object. */
+function obj_cache_put(string $key, string $src): void {
+    if ($key === '' || !\file_exists($src)) { return; }
+    $dir = obj_cache_dir();
+    if (!\is_dir($dir)) { system('mkdir -p ' . $dir); }
+    $final = $dir . '/' . $key . '.o';
+    if (\file_exists($final)) { return; }
+    $tmp = $final . '.tmp' . \str_replace('.', '', (string)\microtime(true));
+    if (\copy($src, $tmp)) {
+        if (!\rename($tmp, $final)) { \unlink($tmp); }
+    }
+}
+
 function clang_opt_level(): string {
     $e = \getenv('MANTICORE_LLVM_OPT_LEVEL');
     if ($e !== false && \in_array($e, ['0', '1', '2', '3', 's', 'z'], true)) { return $e; }
@@ -625,18 +694,30 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, with_frame_pointers($ir))) { dprint("assemble: cannot write " . $llPath); return []; }
-        $rc = system("clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
-            . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
+        $flags = "-O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags;
+        $key = obj_cache_enabled() ? obj_cache_key($llPath, $flags) : '';
+        if ($key !== '' && obj_cache_get($key, $objPath)) {
+            \Compile\Stats::line('  obj cache: hit (whole module)');
+            return [$objPath];
+        }
+        $rc = system("clang " . $flags . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
         if ($rc !== 0) { dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath); return []; }
+        if ($key !== '') { obj_cache_put($key, $objPath); }
         return [$objPath];
     }
     $statT = \Compile\Stats::now();
     $splitter = new \Compile\Mir\SplitModule();
+    // A cache over a load-balanced split hits nothing: one body growing moves
+    // every part. Turn the cache on and the partition becomes hash-stable.
+    $splitter->stable = obj_cache_enabled() || \getenv("MANTICORE_SPLIT_STABLE") === "1";
     $parts = $splitter->run($ir, $jobs);
     \Compile\Stats::step('  split module (' . (string)$jobs . ' parts)', $statT,
         $splitter->sharedDefs, $splitter->internalDefs);
     $objs = [];
     $cmd = '';
+    $hits = 0;
+    /** @var array<int, string> part index => cache key to store after the batch */
+    $putKeys = [];
     foreach ($parts as $i => $partIr) {
         $pll = $base . ".p" . (string)$i . ".ll";
         $pobj = $base . ".p" . (string)$i . ".o";
@@ -644,22 +725,45 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         // same file as the `#0` references, and a split would leave every other
         // part naming an undefined group.
         if (!write_file($pll, with_frame_pointers($partIr))) { dprint("assemble: cannot write " . $pll); return []; }
-        if ($cmd !== '') { $cmd = $cmd . ' & '; }
-        $cmd = $cmd . "clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
-             . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
         $objs[] = $pobj;
+        $flags = "-O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags;
+        $key = obj_cache_enabled() ? obj_cache_key($pll, $flags) : '';
+        // The stale-object sweep below cannot run over a part restored from the
+        // cache, so a hit is placed AFTER it — see the loop that follows.
+        if ($key !== '') { $putKeys[$i] = $key; }
+        if ($cmd !== '') { $cmd = $cmd . ' & '; }
+        $cmd = $cmd . "clang " . $flags
+             . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
     }
     // Remove stale objects first: existence is what decides success below, so a
     // leftover from an earlier run must not read as a part that built.
     foreach ($objs as $o) { system("rm -f " . $o); }
+    // Now serve what the cache already has, and rebuild the command from the
+    // misses only. Order matters: the sweep above would delete a served object.
+    if ($putKeys !== []) {
+        $cmd = '';
+        foreach ($objs as $i => $pobj) {
+            $pll = $base . ".p" . (string)$i . ".ll";
+            $key = $putKeys[$i] ?? '';
+            if ($key !== '' && obj_cache_get($key, $pobj)) { $hits = $hits + 1; continue; }
+            if ($cmd !== '') { $cmd = $cmd . ' & '; }
+            $cmd = $cmd . "clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
+                 . " -c -x ir " . $pll . " -o " . $pobj . " -Wno-override-module";
+        }
+        \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
+    }
     $statT = \Compile\Stats::now();
     // `wait` must be INSIDE the subshell: the background jobs are ITS children,
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
-    system("( " . $cmd . " ; wait )");
-    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($parts),
+    if ($cmd !== '') { system("( " . $cmd . " ; wait )"); }
+    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)(\count($parts) - $hits),
         $statT, -1, -1);
+    foreach ($putKeys as $i => $key) {
+        $pobj = $base . ".p" . (string)$i . ".o";
+        obj_cache_put($key, $pobj);
+    }
     foreach ($objs as $i => $o) {
         if (!\file_exists($o)) {
             dprint("assemble: part " . (string)$i . " failed to build; IR at " . $base . ".p" . (string)$i . ".ll");
@@ -680,9 +784,16 @@ function assemble_ir_file(string $llPath, string $base, string $cflags, int $irB
     }
     \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
     $statT = \Compile\Stats::now();
-    $rc = system('clang -O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
+    $flags = '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags;
+    $key = obj_cache_enabled() ? obj_cache_key($llPath, $flags) : '';
+    if ($key !== '' && obj_cache_get($key, $objPath)) {
+        \Compile\Stats::step('  obj cache: hit (staged module)', $statT, -1, -1);
+        return [$objPath];
+    }
+    $rc = system('clang ' . $flags . ' -c -x ir ' . $llPath . ' -o ' . $objPath . ' -Wno-override-module');
     \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c staged IR', $statT, -1, -1);
     if ($rc !== 0) { dprint('assemble: clang -c staged IR failed (rc=' . (string)$rc . '); IR at ' . $llPath); return []; }
+    if ($key !== '') { obj_cache_put($key, $objPath); }
     return [$objPath];
 }
 
@@ -701,6 +812,7 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
                                 int $irBytes, int $jobs): array {
     $statT = \Compile\Stats::now();
     $splitter = new \Compile\Mir\SplitModule();
+    $splitter->stable = obj_cache_enabled() || \getenv('MANTICORE_SPLIT_STABLE') === '1';
     $parts = $splitter->runFile($llPath, $jobs, $base);
     if ($parts === []) { dprint('assemble: staged split produced no parts'); return []; }
     \Compile\Stats::step('  split staged module (' . (string)\count($parts) . ' parts, '
@@ -709,15 +821,32 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     $objs = [];
     /** @var string[] */
     $cmds = [];
+    /** @var array<int, string> part index => cache key to store after the batch */
+    $putKeys = [];
+    $hits = 0;
     foreach ($parts as $i => $partPath) {
         $pobj = $base . '.p' . (string)$i . '.o';
-        $cmds[] = 'clang -O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags
-             . ' -c -x ir ' . $partPath . ' -o ' . $pobj . ' -Wno-override-module';
         $objs[] = $pobj;
+        $flags = '-O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags;
+        if (obj_cache_enabled()) {
+            $k = obj_cache_key($partPath, $flags);
+            if ($k !== '') { $putKeys[$i] = $k; }
+        }
+        $cmds[$i] = 'clang ' . $flags . ' -c -x ir ' . $partPath . ' -o ' . $pobj
+             . ' -Wno-override-module';
     }
     // Existence is what decides success below, so a leftover from an earlier run
     // must not read as a part that built.
     foreach ($objs as $o) { system('rm -f ' . $o); }
+    // Serve the hits AFTER that sweep, and drop their commands: a part restored
+    // from the cache is a part clang never has to see again.
+    foreach ($putKeys as $i => $k) {
+        if (obj_cache_get($k, $objs[$i])) { unset($cmds[$i]); unset($putKeys[$i]); $hits = $hits + 1; }
+    }
+    if (obj_cache_enabled()) {
+        \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
+    }
+    $cmds = \array_values($cmds);
     $statT = \Compile\Stats::now();
     // ⚠ PARTS and CONCURRENCY are two different numbers, and conflating them is
     // what makes a big module unbuildable. clang's peak is roughly proportional
@@ -764,8 +893,9 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
         }
         system('( ' . $cmd . ' ; wait )');
     }
-    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($parts)
+    \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
         . ($lto === '' ? '' : ' (thinlto)'), $statT, -1, -1);
+    foreach ($putKeys as $i => $k) { obj_cache_put($k, $objs[$i]); }
     // Count the objects. A "parallel build" that finished suspiciously fast has
     // simply failed to build most of its parts.
     foreach ($objs as $i => $o) {

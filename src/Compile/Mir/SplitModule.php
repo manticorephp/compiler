@@ -60,6 +60,19 @@ final class SplitModule
     /** Definitions duplicated because they are file-local. */
     public int $internalDefs = 0;
 
+    /**
+     * Assign by symbol HASH instead of by load, so a part's membership does not
+     * depend on any other definition.
+     *
+     * The balancing partitioner is the better one for a single build: it prices
+     * each placement against what the part would then have to copy. But it makes
+     * every part a function of the WHOLE module — one body growing re-shuffles
+     * the lot — and that is exactly what an object cache cannot survive. Hashing
+     * the symbol gives up some balance to buy the property that an unchanged
+     * definition stays where it was.
+     */
+    public bool $stable = false;
+
     /** Cached symbol references for definitions reused by several parts. */
     /** @var array<string, array<string, bool>> */
     private array $refsCache = [];
@@ -228,6 +241,14 @@ final class SplitModule
         $compSize = [];
         $this->internalComponents($defOrder, $defSize, $defRefs, $internal, $compOf, $compSize);
 
+        if ($this->stable) {
+            /** @var array<string, int> */
+            $assign = [];
+            foreach ($shared as $s) {
+                $assign[$s] = (int)(\crc32($s) % $parts);
+            }
+            return $assign;
+        }
         $bySize = [];
         foreach ($shared as $s) { $bySize[$s] = $defSize[$s] ?? 0; }
         \arsort($bySize);
