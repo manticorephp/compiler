@@ -768,6 +768,17 @@ function stream_get_wrappers(): array
     return ['php', 'file', 'http', 'https'];
 }
 
+/**
+ * `stream_wrapper_restore($protocol)` — put a built-in wrapper back after a
+ * `stream_wrapper_unregister`. Nothing here can unregister one, so the honest
+ * answer is php's: true for a scheme this build has, false for one it does not.
+ * php also emits a notice either way ("was never changed" / "never existed");
+ * this build stays quiet and answers with the return value alone.
+ */
+function stream_wrapper_restore(string $protocol): bool
+{
+    return \in_array($protocol, \stream_get_wrappers(), true);
+}
 /** Whether $stream is a LOCAL stream (a file/memory resource), not a network one. */
 function stream_is_local(\Resource $stream): bool
 {
@@ -1058,7 +1069,10 @@ function __mc_ctx_unpack(string $blob): array
 
 /**
  * Normalise a context 'header' option to a header block where each line ends
- * with CRLF. php accepts a string ("A: b\r\nC: d") or a string[] (["A: b", …]).
+ * with CRLF, for SPLICING into a request. php accepts a string ("A: b\r\nC: d")
+ * or a string[] (["A: b", …]). Not what the blob stores — see
+ * __mc_ctx_header_raw, which keeps the caller's own spelling so
+ * stream_context_get_options can hand it back unchanged.
  * @param mixed $h
  */
 function __mc_ctx_header_block($h): string
@@ -1084,6 +1098,30 @@ function __mc_ctx_header_block($h): string
 }
 
 /**
+ * The header option AS STORED. php hands stream_context_get_options() back what
+ * the caller set, so the blob keeps that and nothing else: an array is joined
+ * with CRLF (the blob is strings only) but nothing is appended to it. The
+ * trailing CRLF a request needs is added at SPLICE time by
+ * __mc_ctx_header_block — storing it here made a round-tripped header carry a
+ * blank line php never put in it.
+ *
+ * @param mixed $h
+ */
+function __mc_ctx_header_raw($h): string
+{
+    if (\is_array($h)) {
+        $lines = [];
+        foreach ($h as $line) {
+            $l = (string)$line;
+            if ($l !== '') { $lines[] = $l; }
+        }
+        return \implode("\r\n", $lines);
+    }
+
+    return (string)$h;
+}
+
+/**
  * php's stream_context_create(). Only the option subset the HTTP/TLS client
  * honours is stored: http.method / http.header / http.content and
  * ssl.verify_peer / ssl.verify_peer_name. Everything else is accepted and
@@ -1105,7 +1143,7 @@ function stream_context_create(?array $options = null, ?array $params = null): \
         if (isset($options['http']) && \is_array($options['http'])) {
             $h = $options['http'];
             if (isset($h['method'])) { $method = (string)$h['method']; }
-            if (isset($h['header'])) { $header = \__mc_ctx_header_block($h['header']); }
+            if (isset($h['header'])) { $header = \__mc_ctx_header_raw($h['header']); }
             if (isset($h['content'])) { $content = (string)$h['content']; }
         }
         if (isset($options['ssl']) && \is_array($options['ssl'])) {
@@ -1142,7 +1180,7 @@ function __mc_http_get_with_context(string $path, \Resource $context)
     $o = \__mc_ctx_unpack($context->rbuf);
     // [0]=method [1]=header [2]=content, [3]=local_cert [4]=local_pk (server-only),
     // [5]=verify_peer [6]=verify_peer_name.
-    return \__mc_http_get($path, 20, $o[0], $o[1], $o[2], $o[5] === '1', $o[6] === '1');
+    return \__mc_http_get($path, 20, $o[0], \__mc_ctx_header_block($o[1]), $o[2], $o[5] === '1', $o[6] === '1');
 }
 
 /**
@@ -1216,6 +1254,19 @@ function stream_context_get_options(\Resource $context): array
 }
 
 /**
+ * `stream_context_get_params($context)` — php's two-key view of a context. The
+ * `notification` callback is only present once one has been set, and nothing
+ * here sets one, so what comes back is the options array under its own key.
+ * Lossy in exactly the way stream_context_get_options is, and for the same
+ * reason: the stored blob holds the honored subset, not every key handed in.
+ *
+ * @return array<string,mixed>
+ */
+function stream_context_get_params(\Resource $context): array
+{
+    return ['options' => \stream_context_get_options($context)];
+}
+/**
  * Set one honored option on a context (or a whole ['ns'=>['k'=>v]] array), re-packing
  * the stored blob so a later STARTTLS / http fetch honors it. Non-honored keys are
  * accepted and ignored, matching php's tolerance. Returns true for a context.
@@ -1242,7 +1293,7 @@ function stream_context_set_option(\Resource $context, $wrapper_or_options, ?str
         if (isset($wrapper_or_options['http']) && \is_array($wrapper_or_options['http'])) {
             $h = $wrapper_or_options['http'];
             if (isset($h['method'])) { $method = (string)$h['method']; }
-            if (isset($h['header'])) { $header = \__mc_ctx_header_block($h['header']); }
+            if (isset($h['header'])) { $header = \__mc_ctx_header_raw($h['header']); }
             if (isset($h['content'])) { $content = (string)$h['content']; }
         }
     } else {
@@ -1256,7 +1307,7 @@ function stream_context_set_option(\Resource $context, $wrapper_or_options, ?str
             elseif ($opt === 'local_pk') { $pk = (string)$value; }
         } elseif ($wrapper === 'http') {
             if ($opt === 'method') { $method = (string)$value; }
-            elseif ($opt === 'header') { $header = \__mc_ctx_header_block($value); }
+            elseif ($opt === 'header') { $header = \__mc_ctx_header_raw($value); }
             elseif ($opt === 'content') { $content = (string)$value; }
         }
     }

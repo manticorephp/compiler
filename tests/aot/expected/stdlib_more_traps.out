@@ -1,0 +1,42 @@
+7
+0,1 -> 61 (1)
+0,2 -> 61 (1)
+0,3 -> 61c3a4 (3)
+1,2 -> c3a4 (2)
+2,2 -> c3a4 (2)
+2,4 -> c3a4 (2)
+3,3 -> e4b8ad (3)
+1,-1 -> c3a4e4b8ad (5)
+-3,2 ->  (0)
+0,100 -> 61c3a4e4b8ad62 (7)
+5,0 ->  (0)
+c3a4e4b8ad62
+bool(true)
+c3a4
+ascii
+string(0) ""
+Array
+(
+    [options] => Array
+        (
+            [http] => Array
+                (
+                    [method] => POST
+                    [header] => X: 1
+                )
+
+        )
+
+)
+Array
+(
+    [options] => Array
+        (
+        )
+
+)
+bool(true)
+bool(true)
+bool(false)
+array(0) {
+}
