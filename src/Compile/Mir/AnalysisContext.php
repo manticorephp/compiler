@@ -15,6 +15,26 @@ final class AnalysisContext
         $this->barriers = InferenceBarriers::scan($module);
     }
 
+    /**
+     * Function name => a fingerprint of the types that OTHER functions can
+     * observe: its return, its parameters, and the argument types at every call
+     * it makes. Those are exactly the two directions inference travels — a
+     * callee's return reaches its callers, a caller's arguments reach its
+     * callees — so a function whose fingerprint is unchanged cannot have moved
+     * anything its neighbours can see.
+     * @var array<string, int>
+     */
+    public array $typeFp = [];
+
+    /**
+     * Start collecting a fresh round's changes.
+     *
+     * The set is a WORKLIST, not a history: round N's scope is what moved in
+     * round N-1. Accumulating instead only ever widens the scope until it is the
+     * whole module again.
+     */
+    public function beginRound(): void { $this->changes = new ChangeSet(); }
+
     public function invalidated(): array
     {
         return $this->dependencies->invalidateChanges($this->changes);

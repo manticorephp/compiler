@@ -151,7 +151,11 @@ final class NarrowReturns implements Pass
             $lastFull = $scope === null;
             $lastScope = [];
             if ($scope !== null) { foreach ($scope->functions as $sn) { $lastScope[$sn] = true; } }
-            $infer = new InferTypes($scope);
+            // The scope for THIS round has been read; from here the set is the
+            // next round's worklist, so it starts empty and collects what this
+            // inference moves.
+            if ($this->analysis !== null) { $this->analysis->beginRound(); }
+            $infer = new InferTypes($scope, $this->analysis);
             $infer->run($module);
             \Compile\Stats::step('  narrow InferTypes round ' . (string)$iters,
                 $inferT, \count($module->functions), -1);

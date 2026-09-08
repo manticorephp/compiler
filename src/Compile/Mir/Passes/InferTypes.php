@@ -93,13 +93,89 @@ final class InferTypes implements Pass
     public function requires(): array { return [LowerFromAst::NAME]; }
     /** @var array<string, true>|null */
     private ?array $scopeNames = null;
-    public function __construct(?\Compile\Mir\InferenceScope $scope = null)
+    private ?\Compile\Mir\AnalysisContext $ctx = null;
+
+    public function __construct(?\Compile\Mir\InferenceScope $scope = null,
+                                ?\Compile\Mir\AnalysisContext $ctx = null)
     {
+        $this->ctx = $ctx;
         if ($scope !== null && $scope->isTargeted()) {
             $this->scopeNames = [];
             foreach ($scope->functions as $name) { $this->scopeNames[$name] = true; }
         }
     }
+
+    /**
+     * Record whether this function's OBSERVABLE types moved.
+     *
+     * Observable = what a neighbour can see: the return (which reaches every
+     * caller) and the argument types at each call (which reach every callee,
+     * because a parameter is refined from its call sites). `ChangeSet` used to
+     * carry only narrowed RETURNS, so the second direction was invisible and
+     * every scope built from it was incomplete — the reason a closing full round
+     * still found eight functions to narrow.
+     *
+     * Only ever called for a function this run actually re-inferred: one that was
+     * not visited cannot have moved.
+     */
+    private function noteTypeChange(FunctionDef $fn): void
+    {
+        if ($this->ctx === null) { return; }
+        $fp = $this->typeFingerprint($fn);
+        $seen = isset($this->ctx->typeFp[$fn->name]);
+        $old = $seen ? $this->ctx->typeFp[$fn->name] : 0;
+        if ($seen && $old === $fp) { return; }
+        $this->ctx->typeFp[$fn->name] = $fp;
+        if ($seen) { $this->ctx->changes->addFunction($fn->name); }
+    }
+
+    /**
+     * An INT, not a string.
+     *
+     * The string version cost 1.5 GB of RSS: a per-node concatenation inside a
+     * recursive walk, kept alive one fingerprint per function. Folding `crc32` of
+     * the few short tags into an accumulator holds the same information for the
+     * purpose it serves — "did this move?" — in 8 bytes and no allocation.
+     */
+    private function typeFingerprint(FunctionDef $fn): int
+    {
+        $acc = $this->typeCode($fn->returnType);
+        foreach ($fn->params as $p) { $acc = $this->fpMix($acc, $this->typeCode($p->type)); }
+        $this->fpCallTypes($fn->body, $acc);
+        return $acc;
+    }
+
+    private function fpMix(int $acc, int $v): int
+    {
+        return (($acc * 131) + $v) & 4503599627370495;
+    }
+
+    private function typeCode(?Type $t): int
+    {
+        if ($t === null) { return 7; }
+        $c = \crc32($t->kind);
+        $cls = $t->class;
+        if ($cls !== null) { $c = $c + 3 * \crc32($cls); }
+        if ($t->element !== null) { $c = $c + 5 * \crc32($t->element->kind); }
+        if ($t->key !== null) { $c = $c + 11 * \crc32($t->key->kind); }
+        if ($t->numeric) { $c = $c + 17; }
+        return $c;
+    }
+
+    private function fpCallTypes(Node $n, int &$acc): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_NEW_OBJ
+            || $k === Node::KIND_INVOKE) {
+            $acc = $this->fpMix($acc, $this->typeCode($n->type));
+            foreach (Walk::children($n) as $c) {
+                $acc = $this->fpMix($acc, $this->typeCode($c->type));
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->fpCallTypes($c, $acc); }
+    }
+
     /** @return FunctionDef[] */
     private function functionsForScope(Module $module): array
     {
@@ -168,7 +244,7 @@ final class InferTypes implements Pass
             \Compile\Stats::bump('infer.rescan.' . $reason . '.calls', 1);
             \Compile\Stats::bump('infer.rescan.' . $reason . '.functions', \count($functions));
         }
-        foreach ($functions as $fn) { $this->inferFunction($fn); }
+        foreach ($functions as $fn) { $this->inferFunction($fn); $this->noteTypeChange($fn); }
         if (\Compile\Stats::$on) {
             \Compile\Stats::bump('infer.rescan.' . $reason . '.ms',
                 \intdiv(\Compile\Stats::now() - $startNs, 1000000));
@@ -501,6 +577,7 @@ final class InferTypes implements Pass
         $this->scanRefCellProps($module);
         foreach ($this->functionsForScope($module) as $fn) {
             $this->inferFunction($fn);
+            $this->noteTypeChange($fn);
         }
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a

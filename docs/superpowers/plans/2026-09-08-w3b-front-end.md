@@ -122,6 +122,34 @@ IDENTICAL (6704 / 1184 / 1429). The changed bodies are SHORTER — the diff on
 `mb_convert_case` is redundant static-local load/store pairs going away — so the fixpoint
 converges somewhere at least as good, not worse. Suite 1061/0/1063.
 
+## The worklist: a real changed set exists now, and it is STILL not enough
+
+`ChangeSet` recorded only narrowed RETURNS, so the caller-arguments -> callee-parameters
+direction was invisible. It now records both: after every function this run actually
+re-inferred, `InferTypes::noteTypeChange()` compares a fingerprint of that function s
+OBSERVABLE types — its return, its parameters, and the argument types at each call it makes —
+and records the function when it moves. `AnalysisContext::beginRound()` makes the set a
+worklist rather than a history (round N s scope is what moved in round N-1).
+
+The set went from 46 to **252** changed functions in round 1, and a round that narrows nothing
+now correctly reports `changed=0`. ⚠ The first version built the fingerprint as a STRING and
+cost **1.5 GB of RSS** — a per-node concatenation inside a recursive walk, one live string per
+function. It is an int accumulator of `crc32` tags now: same question answered, 8 bytes, no
+allocation.
+
+**And it still does not pay: ON reaches emission at 24.4 s against OFF at 20.9 s.** The same
+eight functions still narrow only after a closing FULL round, and they are all
+property-shaped (`Sig::libsFromJson`, `Exception::getTrace`, `array_reverse`, `array_pad`).
+The remaining dependency is not function-to-function at all: `InferTypes` s module pre-scans
+(`scanAssocProps`, `scanCellElemProps`, `scanPropElementReturns`, `scanRefCellProps`) retype
+CLASS PROPERTIES, and no function-level graph models "who reads this property". `ChangeSet`
+has `addClass()`/`addGlobal()` and **nobody calls them**.
+
+So the next step is a class-level index — property/class => the functions that touch it — with
+the scans reporting their retypes into it. Until then `MANTICORE_WORKLIST` stays opt-in and the
+fingerprint machinery costs nothing when it is off (`noteTypeChange` returns immediately with
+no context; the t1 IR is byte-identical with the flag unset).
+
 ## Order
 
 1. Scope the two big internal rescans (`byref_elem`, `callsite_array`) — ~5.3 s, no soundness

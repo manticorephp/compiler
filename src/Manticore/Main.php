@@ -4250,7 +4250,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $dse = null;
         \Manticore\Allocator::release('after-deadstore');
         $statT = \Compile\Stats::now();
-        $infer = new \Compile\Mir\Passes\InferTypes();
+        $infer = new \Compile\Mir\Passes\InferTypes(null, $analysisContext);
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
         // InferTypes owns several module-wide maps; retain only annotations on Module.
@@ -4277,7 +4277,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $statT = \Compile\Stats::now();
         $infer2 = new \Compile\Mir\Passes\InferTypes(
             ($analysisContext !== null && $worklistMode === 'on')
-                ? $analysisContext->scope() : null
+                ? $analysisContext->scope() : null,
+            $analysisContext
         );
         $module = $infer2->run($module);
         \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
@@ -4295,7 +4296,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $inlineCl = null;
         \Manticore\Allocator::release('after-inline-closures');
         $statT = \Compile\Stats::now();
-        $module = (new \Compile\Mir\Passes\InferTypes())->run($module);
+        $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
