@@ -118,7 +118,20 @@ Each of the six helpers ends by setting `$this->lastValue` to the boxed register
         $this->markCellBoxed($this->lastValue);
 ```
 
-Apply to: `boxToCell` (`EmitLlvmBuiltins.php:796`, every return arm including the `KIND_CELL` pass-through at :803), `boxToCellShallow` (:566), `boxUnknownShallowIr` (:593), `boxRawValue` (:2578), `emitCellifyArrayRaw` (:1106), `boxLastByRepr` (`EmitLlvmExpr.php:2016`).
+Apply to the arms that PERFORM a box: `boxToCell` (`EmitLlvmBuiltins.php:796`), `boxToCellShallow` (:566), `boxUnknownShallowIr` (:593), `boxRawValue` (:2578), `boxLastByRepr` (`EmitLlvmExpr.php:2016`).
+
+**A pass-through arm must PROPAGATE, not assert.** `boxToCell`'s `KIND_CELL` arm and `boxRawValue`'s `KIND_CELL` arm emit no box call — they hand back a value whose static type already claims cell, which is the very claim under audit. Asserting `boxed` there overwrites a RAW input with BOXED and erases the violation class this epic exists to find. Add and use:
+
+```php
+    /** A pass-through transmits provenance; it does not create it. */
+    private function propagateCellProvenance(string $from, string $to): void
+    {
+        if ($from === '' || $to === '' || $from === $to) { return; }
+        if (isset($this->cellProv[$from])) { $this->cellProv[$to] = $this->cellProv[$from]; }
+    }
+```
+
+`emitCellifyArrayRaw` (:1106) marks **`opaque`**, not `boxed`: it rebuilds the array with boxed elements, but the register it returns is a raw array POINTER, not a tagged word. Arrays ride raw in a cell channel by design, and an array in a `$GLOBALS` slot is the known-open channel Task 3 uses as its positive test — asserting `boxed` there would blind the instrument on the one case that proves it works.
 
 - [ ] **Step 4: Reset the map per function**
 
