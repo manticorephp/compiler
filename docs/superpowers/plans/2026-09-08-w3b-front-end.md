@@ -99,6 +99,29 @@ inside `InferTypes`, which is the same prerequisite step 2 has.
 error, so `bin/build` could not recover on its own). `cp bin/.manticore.prev bin/manticore`,
 verify `preg_match` answers 1, rebuild — exactly the documented recovery.
 
+## LANDED: the rescans go through a call graph
+
+`InferTypes` now builds a `DependencyIndex` ONCE per run (lazily, on the first scoped rescan)
+and each scan reports the functions it retyped. The rescan set is that closure —
+`DependencyIndex::invalidate()`: transitively the callers, plus one hop of callees — which is
+what the touched-only attempt was missing.
+
+| counter | before | after |
+|---|---|---|
+| `infer.rescan_functions` | 197 770 | **97 089** |
+| `infer.rescan.byref_elem` | 58 801 fns / 2 659 ms | **8 291 fns / 930 ms** |
+| `infer.rescan.callsite_array` | 58 801 fns | **8 609 fns** |
+
+Phases (compiler own module): InferTypes#1 2469 -> 2260 · #2 1591 -> 1339 · #3 1567 -> 1341 ·
+NarrowReturns(concreteOnly) 3196 -> 2725 · Monomorphize 5011 -> 4249 · NarrowReturns(full)
+6911 -> 5615. **Emission starts at 20.1 s instead of 23.4 s — the front end is ~14% off.**
+
+**Acceptance, honestly:** NOT byte-identical. On the fixed t1 corpus the IR is 14 793 855 ->
+14 780 768 (-13 KB) with **22 of 4489 definitions changed** and `box` / `unbox` / cell counts
+IDENTICAL (6704 / 1184 / 1429). The changed bodies are SHORTER — the diff on
+`mb_convert_case` is redundant static-local load/store pairs going away — so the fixpoint
+converges somewhere at least as good, not worse. Suite 1061/0/1063.
+
 ## Order
 
 1. Scope the two big internal rescans (`byref_elem`, `callsite_array`) — ~5.3 s, no soundness

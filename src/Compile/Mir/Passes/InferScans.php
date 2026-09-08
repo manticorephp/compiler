@@ -672,6 +672,7 @@ trait InferScans
      */
     private function scanCallSiteArrayElems(Module $module): bool
     {
+        $this->rescanTouched = [];
         $cand = [];                      // "fn#idx" → true
         $refined = [];                   // "fn#idx" → true (heuristic vec[scalar])
         foreach ($module->functions as $fn) {
@@ -759,6 +760,7 @@ trait InferScans
                         $p->type = isset($assocKey[$key])
                             ? Type::assoc($assocKey[$key], Type::cell())
                             : Type::vec(Type::cell());
+                        $this->rescanTouched[$fn->name] = true;
                         $changed = true;
                     }
                     continue;
@@ -796,6 +798,7 @@ trait InferScans
                             : Type::vec(Type::cell());
                         $p->elemGuessed = false;
                         $p->elemGuessWithdrawn = true;
+                        $this->rescanTouched[$fn->name] = true;
                         $changed = true;
                     }
                     continue;
@@ -815,6 +818,7 @@ trait InferScans
                 $param->type = isset($assocKey[$key])
                     ? Type::assoc($assocKey[$key], $observed[$key])
                     : Type::vec($observed[$key]);
+                $this->rescanTouched[$fn->name] = true;
                 $changed = true;
             }
         }
@@ -1610,6 +1614,7 @@ trait InferScans
      */
     private function scanByRefElemWiden(Module $module): bool
     {
+        $this->rescanTouched = [];
         $foreign = $this->buildForeignElemMap($module);
         if (\count($foreign) === 0) { return false; }
         $changed = false;
@@ -1631,6 +1636,7 @@ trait InferScans
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->byRefCellElemLocals[$fn->name][$name])) { continue; }
                 $this->byRefCellElemLocals[$fn->name][$name] = true;
+                $this->rescanTouched[$fn->name] = true;
                 $changed = true;
             }
         }

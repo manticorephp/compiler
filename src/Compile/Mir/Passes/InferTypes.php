@@ -111,6 +111,45 @@ final class InferTypes implements Pass
         return $out;
     }
 
+    /**
+     * The functions the LAST module scan actually retyped, and the call graph
+     * that turns them into the set that has to be re-inferred.
+     *
+     * A scan widens one parameter and the rescan after it re-inferred the WHOLE
+     * module — twice per run, 5.3 s of a 24 s front end on the compiler's own
+     * source (`infer.rescan.byref_elem` + `infer.rescan.callsite_array`). The
+     * touched set alone is NOT the answer: retyping F's parameter changes what F
+     * returns and stores, so its callers and callees move with it — scoping to
+     * `touched` only made the compiler refuse its own source with an array-key
+     * repr conflict. {@see \Compile\Mir\DependencyIndex::invalidate} is exactly
+     * that closure: transitively the callers, plus one hop of callees.
+     * @var array<string, bool>
+     */
+    private array $rescanTouched = [];
+
+    private ?\Compile\Mir\DependencyIndex $callGraph = null;
+
+    /**
+     * The re-inference set for what the last scan touched, or null for "all".
+     *
+     * Built once per run: the function set is fixed inside one `run()`, and the
+     * graph is one walk against the twelve full re-inferences it replaces.
+     * @return array<string, bool>|null
+     */
+    private function rescanScope(Module $module): ?array
+    {
+        if ($this->rescanTouched === []) { return null; }
+        if ($this->callGraph === null) {
+            $this->callGraph = \Compile\Mir\DependencyIndex::build($module);
+        }
+        $out = [];
+        foreach ($this->callGraph->invalidate(\array_keys($this->rescanTouched)) as $name) {
+            $out[$name] = true;
+        }
+        foreach ($this->rescanTouched as $name => $_) { $out[$name] = true; }
+        return $out;
+    }
+
     /** Re-infer the current scope and record its aggregate cost. */
     private function inferFunctionsForScope(Module $module, string $reason = 'other', ?array $only = null): void
     {
@@ -398,6 +437,8 @@ final class InferTypes implements Pass
     public function run(Module $module): Module
     {
         $this->sigs = [];
+        $this->callGraph = null;
+        $this->rescanTouched = [];
         $this->classes = $module->classes;
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;
@@ -473,7 +514,7 @@ final class InferTypes implements Pass
         // their own rebuild buffer is typed. Bounded: a seed only widens to cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_elem');
+            $this->inferFunctionsForScope($module, 'byref_elem', $this->rescanScope($module));
             $guard = $guard + 1;
         }
         // Call-site element inference: refine a bare-`array` param to vec[T]
@@ -483,7 +524,7 @@ final class InferTypes implements Pass
         // element-used-as-key lands under a positional int. Externs (the
         // separately-linked stdlib) can't be specialized this way.
         if ($this->scanCallSiteArrayElems($module)) {
-            $this->inferFunctionsForScope($module, 'callsite_array');
+            $this->inferFunctionsForScope($module, 'callsite_array', $this->rescanScope($module));
         }
         // A doc-declared `T[]` / `array<V>` param handed a STRING-KEYED array by
         // some call site: move it to the tagged key channel instead of refusing
