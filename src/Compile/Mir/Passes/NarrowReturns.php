@@ -84,6 +84,7 @@ final class NarrowReturns implements Pass
         }
         // Bounded fixpoint: each productive sweep narrows >=1 function,
         // which is monotonic, so the function count caps the iterations.
+        $escapers = $this->analysis !== null ? $this->analysis->barriers->escapers() : [];
         $iters = 0;
         $closing = false;
         $sawFull = false;
@@ -104,8 +105,12 @@ final class NarrowReturns implements Pass
                     // A function that narrows only AFTER a full inference is one the
                     // dependency model failed to invalidate — name it, that is the
                     // bug report the scope cannot produce for itself.
-                    if ($lastFull && !isset($lastScope[$fn->name])) {
-                        \Compile\Stats::line('  narrow: MISSED BY SCOPE ' . $fn->name);
+                    // Only meaningful when the previous inference was SCOPED: after a
+                    // full one every narrowing trivially looks "missed".
+                    if ($lastFull && $lastScope !== [] && !isset($lastScope[$fn->name])) {
+                        \Compile\Stats::line('  narrow: MISSED BY SCOPE ' . $fn->name
+                            . ' escaper=' . (isset($escapers[$fn->name]) ? 'y' : 'n')
+                            . ' known=' . (isset($this->analysis->typeFp[$fn->name]) ? 'y' : 'n'));
                     }
                     if ($this->analysis !== null) { $this->analysis->changes->addReturn($fn->name); }
                 }

@@ -14,6 +14,21 @@ final class DependencyIndex
     /** Functions containing a `new $cls(...)`, i.e. callers of every constructor. */
     private array $dynNewCallers = [];
     /**
+     * Bare property name => the functions that read or write it.
+     *
+     * Inference does not only travel along calls. `InferTypes`'s module
+     * pre-scans retype CLASS PROPERTIES, and a function that reads one has to
+     * be re-inferred even though it calls nothing that changed — that is what
+     * left `Sig::libsFromJson`, `Exception::getTrace`, `array_reverse` and
+     * `array_pad` narrowing only after a full round. Keyed by NAME, like method
+     * dispatch, and for the same reason: whatever class the receiver is, the
+     * slot reached is some `C::prop`.
+     */
+    private array $propUsers = [];
+    /** Functions reading or writing a property by a RUNTIME name — every
+     *  property change reaches them. */
+    private array $dynPropUsers = [];
+    /**
      * A method's own symbol => its bare name.
      *
      * Composed from the class table (`Class` ⧺ `__` ⧺ `method`), never split out
@@ -119,7 +134,16 @@ final class DependencyIndex
         if ($changes->unknownEscape || \count($changes->classes) > 0 || \count($changes->globals) > 0) {
             return \array_keys($this->functions);
         }
-        return $this->invalidate(\array_keys($changes->functions));
+        $seed = $changes->functions;
+        // A retyped property reaches the functions that name it, plus everyone
+        // who addresses properties by a runtime name.
+        if (\count($changes->props) > 0) {
+            foreach ($changes->props as $prop => $_) {
+                foreach (($this->propUsers[$prop] ?? []) as $fn => $__) { $seed[$fn] = true; }
+            }
+            foreach ($this->dynPropUsers as $fn => $_) { $seed[$fn] = true; }
+        }
+        return $this->invalidate(\array_keys($seed));
     }
     public function dynamicCallerCount(): int { return \count($this->dynamicCallers); }
     public function externCalleeCount(): int { return \count($this->externCallees); }
@@ -139,6 +163,12 @@ final class DependencyIndex
     private function asCall(Node $node): Call { return $node; }
 
     private function asMethodCall(Node $node): MethodCall_ { return $node; }
+
+    private function asPropRead(Node $node): PropertyAccess_ { return $node; }
+
+    private function asPropWrite(Node $node): StoreProperty { return $node; }
+
+    private function asStaticProp(Node $node): StaticProp_ { return $node; }
 
     private function collect(Node $node, string $caller): void
     {
@@ -167,6 +197,19 @@ final class DependencyIndex
             $m = $this->asMethodCall($node)->method;
             $this->methodCallers[$m][$caller] = true;
             $this->dynamicCallers[$caller] = true;
+        }
+        if ($node->kind === Node::KIND_PROPERTY_ACCESS) {
+            $this->propUsers[$this->asPropRead($node)->property][$caller] = true;
+        }
+        if ($node->kind === Node::KIND_STORE_PROPERTY) {
+            $this->propUsers[$this->asPropWrite($node)->property][$caller] = true;
+        }
+        if ($node->kind === Node::KIND_STATIC_PROP || $node->kind === Node::KIND_STORE_STATIC_PROP) {
+            // A static prop's slot name is its global; the same keying works.
+            $this->propUsers[$this->asStaticProp($node)->global][$caller] = true;
+        }
+        if ($node->kind === Node::KIND_DYN_PROP || $node->kind === Node::KIND_STORE_DYN_PROP) {
+            $this->dynPropUsers[$caller] = true;
         }
         // `new $cls(...)` reaches an unknown constructor, so it is a caller of
         // every `__construct` for invalidation purposes — and of nothing else.

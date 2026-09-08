@@ -77,6 +77,21 @@ trait InferScans
      * and retype it assoc[string, V] in its ClassDef. Runs once over the
      * whole module before per-function inference.
      */
+    /**
+     * Retype one class property, and SAY SO.
+     *
+     * Every scan that moves a property type goes through here, because the
+     * change has to reach the functions that read it: inference travels along
+     * properties as well as calls, and nothing modelled that. `Sig::libsFromJson`,
+     * `Exception::getTrace`, `array_reverse` and `array_pad` narrowed only after a
+     * full re-inference for exactly this reason.
+     */
+    private function setPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): void
+    {
+        $cd->propertyTypes[$prop] = $t;
+        if ($this->ctx !== null) { $this->ctx->changes->addProp($prop); }
+    }
+
     private function scanAssocProps(Module $module): bool
     {
         $changed = false;
@@ -110,7 +125,7 @@ trait InferScans
             }
             $v = $valType ?? ($cur !== null && $cur->isVec()
                 ? ($cur->element ?? Type::unknown()) : Type::unknown());
-            $cd->propertyTypes[$prop] = Type::assoc(Type::string_(), $v);
+            $this->setPropType($cd, $prop, Type::assoc(Type::string_(), $v));
             $changed = true;
         }
         return $changed;
@@ -202,7 +217,7 @@ trait InferScans
                                 $take = $curUnk && $argKnown;
                             }
                             if ($take) {
-                                $cd->propertyTypes[$pname] = $arg->type;
+                                $this->setPropType($cd, $pname, $arg->type);
                                 $this->ctorPropChanged = true;
                             }
                         }
@@ -252,7 +267,7 @@ trait InferScans
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN))) {
                 continue;
             }
-            $cd->propertyTypes[$prop] = Type::vec($elem);
+            $this->setPropType($cd, $prop, Type::vec($elem));
         }
     }
 
@@ -295,7 +310,7 @@ trait InferScans
                     . 'reference needs a full word to hold its cell'
                 );
             }
-            $cd->propertyTypes[$prop] = Type::cell();
+            $this->setPropType($cd, $prop, Type::cell());
         }
     }
 
@@ -352,7 +367,7 @@ trait InferScans
                 // keep its key shape rather than flattening to a vec.
                 if ($seen instanceof Type && $cur->kind === Type::KIND_UNKNOWN
                     && ($cd->propertyArrayHinted[$prop] ?? false)) {
-                    $cd->propertyTypes[$prop] = $seen;
+                    $this->setPropType($cd, $prop, $seen);
                     continue;
                 }
                 // A bare `array` hint erases to KIND_UNKNOWN, so the slot is not
@@ -363,15 +378,15 @@ trait InferScans
                 // KEY as a cell, so a hashed one still reads its string keys.
                 if ($cur->kind !== Type::KIND_UNKNOWN
                     || !($cd->propertyArrayHinted[$prop] ?? false)) { continue; }
-                $cd->propertyTypes[$prop] = Type::vec(Type::cell());
+                $this->setPropType($cd, $prop, Type::vec(Type::cell()));
                 continue;
             }
             if ($cur === null) { continue; }
             if (($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
             // Preserve the key shape (assoc vs vec); only the element → cell.
-            $cd->propertyTypes[$prop] = ($cur->key !== null)
+            $this->setPropType($cd, $prop, ($cur->key !== null)
                 ? Type::assoc($cur->key, Type::cell())
-                : Type::vec(Type::cell());
+                : Type::vec(Type::cell()));
         }
     }
 
@@ -415,7 +430,7 @@ trait InferScans
                 || ($cur->isArray()
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
             if (!$isErased) { continue; }
-            $cd->propertyTypes[$prop] = $at;
+            $this->setPropType($cd, $prop, $at);
             $changed = true;
         }
         return $changed;
@@ -469,7 +484,7 @@ trait InferScans
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
             if (!$isErased) { continue; }
             $keyT = ($cur !== null && $cur->isArray()) ? $cur->key : null;
-            $cd->propertyTypes[$prop] = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
+            $this->setPropType($cd, $prop, $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem));
             $changed = true;
         }
         return $changed;
@@ -919,10 +934,10 @@ trait InferScans
                 $pt = $cd->propertyTypes[$prop] ?? null;
                 if ($pt === null) { continue; }
                 $elem = $pt->element;
-                $cd->propertyTypes[$prop] = Type::assoc(
+                $this->setPropType($cd, $prop, Type::assoc(
                     Type::cell(),
                     $elem === null ? Type::unknown() : $elem,
-                );
+                ));
                 $changed = true;
             }
         }

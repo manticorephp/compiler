@@ -150,6 +150,36 @@ the scans reporting their retypes into it. Until then `MANTICORE_WORKLIST` stays
 fingerprint machinery costs nothing when it is off (`noteTypeChange` returns immediately with
 no context; the t1 IR is byte-identical with the flag unset).
 
+## The class-level index: built, and the answer is STILL no
+
+`DependencyIndex` now carries `propUsers` (bare property name => the functions that read or
+write it) and `dynPropUsers` (anything addressing a property by a runtime name), and every
+property retype in `InferScans` goes through one `setPropType()` funnel that reports into
+`ChangeSet::addProp()`. A property change is therefore no longer a blanket "re-infer the
+module": round 2 s scope went from `would-target=0` to `1429` for the right reason.
+
+**And the eight stragglers did not move.** They are escapers, so they WERE in every scoped
+round s set and re-inferred each time — and they still narrow only after a FULL inference.
+That rules out the missing-edge theory entirely: the scope contained them.
+
+What is left is that **a scoped `InferTypes` pass is not equivalent to a full one for the same
+function**. The per-function loop is not pure: `InferTypes` carries ~30 instance maps, and
+several accumulate ACROSS functions while the loop runs (`assocFound`, `propReturnsFound`,
+`byRefCellElemLocals`, the call-site observation tables). Visit a subset and those tables are
+partial, so the same function infers differently. No dependency graph can fix that; the fix is
+to move every cross-function accumulation out of the per-function loop and into the module
+scans, which is a much larger and riskier change than the one this plan set out to make.
+
+**Verdict: stop here.** `MANTICORE_WORKLIST` stays opt-in and unprofitable (ON ~25 s to
+emission against OFF ~21 s). What was worth having is kept and is live in the default path:
+the call-edge fix, the property index, the observable-type fingerprints, and the scoped
+rescans — the last of which is the only measured win of the epic (front end -14%).
+
+⚠ A diagnostic that printed `count($scope->functions)` off a nullable `?InferenceScope`
+SIGSEGVd the self-build, and the binary from the build before it then segfaulted on the
+current source too. `cp bin/.manticore.prev bin/manticore` and rebuild; three generations
+green afterwards.
+
 ## Order
 
 1. Scope the two big internal rescans (`byref_elem`, `callsite_array`) — ~5.3 s, no soundness
