@@ -964,6 +964,7 @@ trait EmitLlvmObjects
         }
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
+            $out .= $this->emitCellAssert($this->lastValue);
         }
         return $out;
     }
@@ -4787,6 +4788,7 @@ trait EmitLlvmObjects
         }
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
+            $out .= $this->emitCellAssert($this->lastValue);
         }
         return $out;
     }

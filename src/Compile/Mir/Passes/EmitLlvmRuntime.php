@@ -262,6 +262,44 @@ trait EmitLlvmRuntime
         return '  call void @__mir_pool_free(ptr ' . $ptr . ")\n";
     }
 
+    /**
+     * `MANTICORE_CELL_ASSERT=1` — the runtime half of the calibration cross-check
+     * (`docs/status/CELLGUARD-CENSUS-2026-09-08.md`). `__manticore_is_tagged`
+     * reuses the SAME NaN-box tag test every tag-dispatch site in this module
+     * open-codes ({@see \Compile\Mir\Passes\EmitLlvmExpr::taggedRuntime}'s
+     * `__manticore_tag`, `__manticore_deref`): a boxed cell's header sits above
+     * 0xFFF0000000000000 (int=0xFFF1 … object=0xFFF8); a raw word — a genuine
+     * double, or a small int/bool/null riding an erased slot uninitialized by
+     * a producer that owed this slot a box — is not.
+     *
+     * `__mir_assert_cell` PRINTS `CELLASSERT site=<n> word=<v>` to stderr and
+     * RETURNS — it never aborts. A calibration run has to reach the end of the
+     * corpus even while every violation the static census predicted fires.
+     */
+    private function cellAssertRuntime(): string
+    {
+        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        $raw = 'CELLASSERT site=%lld word=%lld';
+        $out = '@.cellassert.fmt = private unnamed_addr constant ['
+             . (string)(\strlen($raw) + 2) . ' x i8] c"' . $raw . '\0A\00", align 1' . "\n";
+        $out .= "define i1 @__manticore_is_tagged(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %tagged = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  ret i1 %tagged\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_assert_cell(i64 %v, i64 %site) {\n";
+        $out .= "entry:\n";
+        $out .= "  %tagged = call i1 @__manticore_is_tagged(i64 %v)\n";
+        $out .= "  br i1 %tagged, label %ok, label %bad\n";
+        $out .= "bad:\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cellassert.fmt, i64 %site, i64 %v)\n";
+        $out .= "  br label %ok\n";
+        $out .= "ok:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     private function allocRuntime(): string
     {
         $out  = $this->poolRuntime();

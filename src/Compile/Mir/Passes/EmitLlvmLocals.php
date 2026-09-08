@@ -450,6 +450,7 @@ trait EmitLlvmLocals
         }
         if ($ll->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
+            $out .= $this->emitCellAssert($this->lastValue);
         }
         return $out;
     }

@@ -43,6 +43,9 @@ public bool $needsClosureRc = false;
     public bool $needsIntStr = false;
     public bool $needsExceptions = false;
     public bool $needsTagged = false;
+    /** `MANTICORE_CELL_ASSERT=1` at compile time — a slot-read cell site emits
+     *  a non-fatal runtime tag check ({@see \Compile\Mir\Passes\EmitLlvmCellGuard::emitCellAssert}). */
+    public bool $needsCellAssert = false;
     public bool $needsTaggedEcho = false;
     public bool $needsTaggedToStr = false;
     public bool $needsImplodeCell = false;

@@ -34,9 +34,35 @@ trait EmitLlvmCellGuard
     /** @var string[] one human-readable line per RAW → cell violation */
     public array $cellGuardViolations = [];
 
+    /** @var string[] site id (index) → enclosing function name, for CELLASSERT attribution */
+    private array $cellAssertSites = [];
+
     private function cellGuardOn(): bool
     {
         return \getenv('MANTICORE_CELLGUARD') !== false;
+    }
+
+    private function cellAssertOn(): bool
+    {
+        return \getenv('MANTICORE_CELL_ASSERT') !== false;
+    }
+
+    /**
+     * Emit a non-fatal runtime tag check at a cell SLOT READ — the empirical
+     * cross-check against the static census (`MANTICORE_CELLGUARD`'s `raw`
+     * bucket). Only the three sites {@see markCellOpaque} calls at an actual
+     * slot read (`emitLoadLocal`, `emitPropertyAccess`, `emitStaticProp`) call
+     * this — a call return is not a slot read and a phi has no slot to assert
+     * against, so neither takes an assertion. Returns IR text, or '' when the
+     * flag is off (a production build pays nothing).
+     */
+    private function emitCellAssert(string $reg): string
+    {
+        if (!$this->cellAssertOn() || $reg === '') { return ''; }
+        $this->rt->needsCellAssert = true;
+        $site = \count($this->cellAssertSites);
+        $this->cellAssertSites[] = ($this->frame !== null ? $this->frame->name : '(module)');
+        return '  call void @__mir_assert_cell(i64 ' . $reg . ', i64 ' . (string)$site . ")\n";
     }
 
     private function markCellBoxed(string $reg): void

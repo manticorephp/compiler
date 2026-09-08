@@ -656,6 +656,9 @@ trait EmitLlvmModule
         if ($this->rt->needsTagged) {
             $out .= $this->taggedRuntime();
         }
+        if ($this->rt->needsCellAssert) {
+            $out .= $this->cellAssertRuntime();
+        }
         if ($this->rt->needsTaggedEcho) {
             $out .= $this->taggedEchoRuntime();
         }
