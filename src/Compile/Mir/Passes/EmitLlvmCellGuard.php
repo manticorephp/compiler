@@ -15,14 +15,21 @@ namespace Compile\Mir\Passes;
  * A `raw` value reaching a `cell`-typed sink is a proven contract violation.
  * An `opaque` one is not checkable here; the COUNT of them is the coverage
  * metric that says how much this instrument can see.
+ *
+ * A fourth bucket, `unchecked`, counts a sink whose DESTINATION SLOT TYPE could
+ * not be determined statically — a dynamic-property store picks one of N slots
+ * through a runtime strcmp chain, and some element/property stores are narrower
+ * than the emitter's own box predicates. Never guess such a slot's type and
+ * never skip it silently: count it, so the census states its own blind spots
+ * instead of looking complete.
  */
 trait EmitLlvmCellGuard
 {
     /** @var array<string, string> SSA register name (`%rN`) → 'boxed'|'opaque' */
     private array $cellProv = [];
 
-    /** @var array<string, int> violation kind → count, for the summary line */
-    private array $cellGuardCounts = ['boxed' => 0, 'opaque' => 0, 'raw' => 0];
+    /** @var array<string, int> provenance → count at a cell sink, for the summary line */
+    private array $cellGuardCounts = ['boxed' => 0, 'opaque' => 0, 'raw' => 0, 'unchecked' => 0];
 
     /** @var string[] one human-readable line per RAW → cell violation */
     public array $cellGuardViolations = [];
@@ -83,5 +90,19 @@ trait EmitLlvmCellGuard
             . ' line=' . (string)$site->line
             . ' node=' . $site->kind;
         \error_log($this->cellGuardViolations[\count($this->cellGuardViolations) - 1]);
+    }
+
+    /**
+     * A sink whose destination slot type could not be determined statically —
+     * not "checked and not cell", genuinely unknown (a dynamic-property store
+     * dispatching through a runtime strcmp chain, or an element/property store
+     * narrower than the emitter's own box predicates). Never guess it into
+     * `raw` or `boxed`, never skip it silently: count it here instead, so the
+     * census states its own blind spot rather than looking complete.
+     */
+    private function checkCellSinkUnchecked(): void
+    {
+        if (!$this->cellGuardOn()) { return; }
+        $this->cellGuardCounts['unchecked'] = ($this->cellGuardCounts['unchecked'] ?? 0) + 1;
     }
 }

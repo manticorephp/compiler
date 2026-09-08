@@ -289,10 +289,12 @@ trait EmitLlvmVisit
         // inferStoreStaticProp overwrites it every store) — the property's
         // DECLARED type rides `$n->declared` instead, and only that field is
         // the sink to check. `declared` is null for a store InferTypes never
-        // seeded one for (e.g. `unset($GLOBALS['x'])`'s NullConst store); skip
-        // rather than guess.
+        // seeded one for (e.g. `unset($GLOBALS['x'])`'s NullConst store); count
+        // it `unchecked` rather than guess or skip silently.
         if ($n->declared !== null) {
             $this->checkCellSink('store_static_prop', $n->declared, $n);
+        } else {
+            $this->checkCellSinkUnchecked();
         }
         return $out;
     }
@@ -458,13 +460,15 @@ trait EmitLlvmVisit
         // ELEMENT type, which lives on the array child's own inferred type
         // (`$n->array->type->element`), not on this node. Null (an erased/
         // unknown container, or a vec with no element inferred yet) means
-        // "not provably a cell slot" — skip rather than guess. This does not
-        // replicate `storeElemBoxesValue`'s KIND_CELL-base / erased-value
-        // fallback arms (that predicate is a heuristic, not a field); those
-        // stores are undercounted here, same as any other `opaque` channel.
+        // the slot type is genuinely indeterminate — count it `unchecked`
+        // rather than guess. This does not replicate `storeElemBoxesValue`'s
+        // KIND_CELL-base / erased-value fallback arms (that predicate is a
+        // heuristic, not a field); those stores land in `unchecked` here too.
         $elemT = $n->array->type->element;
         if ($elemT !== null) {
             $this->checkCellSink('store_element', $elemT, $n);
+        } else {
+            $this->checkCellSinkUnchecked();
         }
         return $out;
     }
@@ -496,7 +500,7 @@ trait EmitLlvmVisit
 
     public function visitStoreDynProp(StoreDynProp_ $n): string
     {
-        // NEEDS_CONTEXT (Task 3, unresolved by design — see task-3-report.md):
+        $out = $this->emitStoreDynProp($n);
         // `$n->type` is the ASSIGNED VALUE's type (InferNodes::
         // inferStoreDynProp always sets it to `$vt`), not the destination
         // slot's. Unlike StoreProperty the property NAME here is a runtime
@@ -506,12 +510,10 @@ trait EmitLlvmVisit
         // emitErasedStoreDynPropDispatch) with a bag fallback — no single
         // field or table lookup answers "the slot type" the way `$declared`
         // does for StoreStaticProp_ or the class property table does for
-        // StoreProperty. Fields available: object (Node), name (Node),
-        // value (Node), type (Type, = value type). Deliberately left
-        // uninstrumented rather than inventing a per-arm resolver here; this
-        // sink is a known-open channel structurally like emitMagicCall's
-        // property-protocol paths.
-        return $this->emitStoreDynProp($n);
+        // StoreProperty. Never guess it and never skip it silently: count it
+        // `unchecked`, ruled the same as every other indeterminate-slot sink.
+        $this->checkCellSinkUnchecked();
+        return $out;
     }
 
     public function visitStoreProperty(StoreProperty $n): string
@@ -524,17 +526,19 @@ trait EmitLlvmVisit
         // compile-time string here, so the class table already the emitter
         // itself reads (`$this->classes`) answers it directly for a
         // statically-known receiver class. An erased/union/cell receiver, or
-        // an undeclared (bag) property, has no single declared type — skip
-        // those rather than replicate emitStoreProperty's readonly/hook/bag
-        // dispatch as a resolver.
+        // an undeclared (bag) property, has no single declared type — count
+        // those `unchecked` rather than replicate emitStoreProperty's
+        // readonly/hook/bag dispatch as a resolver.
         $cls = $n->object->type->kind === \Compile\Mir\Type::KIND_OBJ
             ? ($n->object->type->class ?? '')
             : '';
-        if ($cls !== '' && isset($this->classes[$cls])) {
-            $pt = $this->classes[$cls]->propertyTypes[$n->property] ?? null;
-            if ($pt !== null) {
-                $this->checkCellSink('store_property', $pt, $n);
-            }
+        $pt = ($cls !== '' && isset($this->classes[$cls]))
+            ? ($this->classes[$cls]->propertyTypes[$n->property] ?? null)
+            : null;
+        if ($pt !== null) {
+            $this->checkCellSink('store_property', $pt, $n);
+        } else {
+            $this->checkCellSinkUnchecked();
         }
         return $out;
     }
