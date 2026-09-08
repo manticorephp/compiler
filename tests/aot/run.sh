@@ -12,6 +12,11 @@
 #   tests/aot/run.sh -k union       # filter substring
 #   tests/aot/run.sh -v             # verbose: show stderr / IR on fail
 #   tests/aot/run.sh -j 8           # 8 cases at a time (0 = one per core)
+#   tests/aot/run.sh -O 1           # compile the cases at -O1 (default 2)
+#
+# ⚠ -O is an ITERATION lever, not a gate setting. A green -O1/-O0 run is not
+# evidence about the -O2 artifact: the sjlj-locals bug was correct at -O0 and
+# WRONG at -O2. The unfiltered gate runs at the default.
 #
 # Case shapes:
 #   - cases/<name>.php              → single-file compile
@@ -35,6 +40,7 @@ VERBOSE=0
 FILTER=""
 BACKEND_ARGS=""
 JOBS="${MC_JOBS:-1}"
+OPT="${MC_OPT:-2}"
 ONE=""
 
 while [[ $# -gt 0 ]]; do
@@ -44,6 +50,8 @@ while [[ $# -gt 0 ]]; do
         -k|--filter)  FILTER="$2"; shift 2 ;;
         -j|--jobs)    JOBS="$2"; shift 2 ;;
         -j*)          JOBS="${1#-j}"; shift ;;
+        -O|--opt)     OPT="$2"; shift 2 ;;
+        -O*)          OPT="${1#-O}"; shift ;;
         --one)        ONE="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,24p' "$0"
@@ -52,6 +60,14 @@ while [[ $# -gt 0 ]]; do
         *) FILTER="$1"; shift ;;
     esac
 done
+
+case "$OPT" in
+    0|1|2|3|s|z) ;;
+    *) echo "fatal: -O takes one of 0 1 2 3 s z (got '$OPT')" >&2; exit 2 ;;
+esac
+# The per-case workers are this same script re-invoked with --one; the level
+# rides along in the environment rather than in every argv.
+export MC_OPT="$OPT"
 
 if [[ ! -x "$MANTICORE" ]]; then
     echo "fatal: $MANTICORE not built; run bin/compile first" >&2
@@ -114,7 +130,7 @@ run_one() {
     fi
     local crc=0
     mc_limit "$COMPILE_TIMEOUT" \
-        "$MANTICORE" compile $BACKEND_ARGS "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
+        "$MANTICORE" compile $BACKEND_ARGS -O"$OPT" "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
     if [[ $crc -ne 0 ]]; then
         if [[ $crc -eq 124 ]]; then
             printf 'FAIL %s  (compile TIMEOUT >%ss)\n' "$name" "$COMPILE_TIMEOUT"
@@ -292,8 +308,8 @@ if [[ "$JOBS" -gt 1 ]]; then
             parallel+=("$name")
         fi
     done
-    printf 'running %d case(s) %d at a time, %d serial\n' \
-        "${#parallel[@]}" "$JOBS" "${#serial[@]}"
+    printf 'running %d case(s) %d at a time, %d serial  [-O%s]\n' \
+        "${#parallel[@]}" "$JOBS" "${#serial[@]}" "$OPT"
     rm -f "$WORK"/*.verdict "$WORK"/*.rc 2>/dev/null || true
     VOPT=""
     [[ $VERBOSE -eq 1 ]] && VOPT="-v"
@@ -347,7 +363,7 @@ else
 fi
 
 echo "---"
-printf 'passed: %d  failed: %d  total: %d\n' "$passed" "$failed" "${#cases[@]}"
+printf 'passed: %d  failed: %d  total: %d  [-O%s]\n' "$passed" "$failed" "${#cases[@]}" "$OPT"
 if [[ $failed -gt 0 ]]; then
     printf 'failures: %s\n' "${failed_names[*]}"
     exit 1

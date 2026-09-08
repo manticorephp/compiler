@@ -87,13 +87,33 @@ debugger, not for throughput.
 locals bug was correct at `-O0` and WRONG at `-O2` — promoted slots restored to their pre-`try`
 value. Fast loop finds bugs; only an `-O2` gate clears them.
 
-Work items:
+**Measured 2026-09-07 on `7b8a02f`, macOS arm64** — the policy cites numbers, not taste:
 
-- `bin/build --fast` ⇒ `-O1 -j0`, no LTO, no `--verify`. Never installs over `bin/manticore`
-  without saying so.
-- `tests/aot/run.sh` takes the opt level through to the compiler so `-k <substr>` iteration is
-  cheap; the unfiltered gate stays `-O2`.
-- Both print the level they used in their header line, so a pasted result is self-describing.
+| Measurement | `-O0` | `-O1` | `-O2` |
+|---|---|---|---|
+| compiler self-build (`build --apps-only`) | — | **71 s** | 83 s |
+| the produced compiler's own front-end work (`analyze src`, 3×) | — | 0.937 s | 0.909 s |
+| one bench-case compile (`json_records`) | 0.357 s | 0.505 s | 0.552 s |
+| that case's runtime | 1.054 s | 0.703 s | 0.710 s |
+
+`-O1` takes **14% off the build wall** and costs **~3%** on the produced compiler. `-O0`
+compiles fastest and produces a binary ~50% slower — which is why it is a debugger
+setting, not an iteration setting.
+
+Shipped (2026-09-07, branch `ci`):
+
+- **`bin/build --fast`** — `-O1`, application only, to `bin/manticore.fast`. Refuses to
+  write `bin/manticore`, refuses `--verify`, never rebuilds `lib/*.o`. 71 s vs 83 s.
+- **`tests/aot/run.sh -O <level>`** (or `MC_OPT`) — forwarded to every case compile,
+  inherited by the parallel workers, printed in the summary line as `[-O<level>]`.
+- Still open: `-j0`/no-LTO on the fast path — the split costs the produced program 43%,
+  so it belongs to a throwaway binary only, and `--fast` does not pass it yet.
+
+⚠ **Where `-O` does NOT pay: the case suite.** 153 cases, `-j 0`: 49 s at `-O2`, 48 s at
+`-O1`. A test case is small enough that the front end and the link dominate, so the ~9%
+off a single case compile disappears into the noise. The lever is the BIG target — the
+self-build (−14%) and T5 — not the suite. Use `-O` on the suite for debugging codegen,
+not for throughput.
 
 ## 4. The ladder — ordered by return per hour
 
@@ -101,7 +121,13 @@ Work items:
 Exit: a filtered `tests/aot` run and a single-program compile measurably faster; every runner
 prints its opt level.
 
-### W1 — CI. Days. **Highest return per hour in the list.**
+### W1 — CI. Days. **Highest return per hour in the list.** ✅ built 2026-09-07 (branch `ci`)
+
+`tools/docker/gate.sh` is now the ONE definition of a Linux gate — `tools/docker/run_tests.sh`
+and both workflows call it, so a CI green and a local green mean the same thing.
+`.github/workflows/ci.yml` runs the cold seed + full suite on arm64 and amd64 per push;
+`nightly.yml` runs the heavy gate (+ difftest + fixpoint) plus a macOS suite, and writes the
+commit into the run summary. ⛔ Not yet exercised on GitHub — nothing is pushed.
 There is none today, which is why the status file is full of "⛔ not run". A nightly
 `tools/docker/run_tests.sh --gate` on arm64 **and** amd64 plus `tests/aot` + `difftest` on
 macOS would have caught the `RC_ELEM_READ_OWNS` Linux miscompile weeks earlier, and would end
