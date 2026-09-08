@@ -554,7 +554,7 @@ In `EmitLlvmCellGuard`, add:
     }
 ```
 
-Add `/** @var string[] site id → enclosing function */ private array $cellAssertSites = [];` to the trait, and append `emitCellAssert()`'s result at the same three read sites Task 2 marks OPAQUE.
+Add `/** @var string[] site id → enclosing function */ private array $cellAssertSites = [];` to the trait, and append `emitCellAssert()`'s result at the three SLOT-read sites Task 2 Step 1 marks OPAQUE: `emitLoadLocal`, `emitPropertyAccess` and `emitStaticProp`. A call return is not a slot read and a phi has no slot to assert against, so neither takes an assertion.
 
 - [ ] **Step 3: Build and run the corpus under the assertion**
 
@@ -686,7 +686,7 @@ git commit -m "cellguard: <NAME> publishes a boxed word under its cell contract"
 ### Task 8: Turn tagged arithmetic on
 
 **Files:**
-- Modify: `src/Compile/Mir/Passes/InferTypes.php:1701`
+- Modify: `src/Compile/Mir/Passes/InferTypes.php` — the tagged-arith gate, located by TEXT
 - Move: `docs/bugs/erased_arith_float_cell.php` → `tests/aot/cases/erased_arith_float_cell.php`
 - Create: `tests/aot/expected/erased_arith_float_cell.out`
 
@@ -717,7 +717,15 @@ cat tests/aot/expected/erased_arith_float_cell.out
 
 - [ ] **Step 3: Remove the gate**
 
-In `src/Compile/Mir/Passes/InferTypes.php:1701`, change:
+Locate the gate by its text, not by a line number — Task 7 edits this same file first and
+every line below its edit shifts:
+
+```bash
+cd ~/var/projects/manticore-cellguard
+grep -n 'if (false && ($lt->kind === Type::KIND_CELL' src/Compile/Mir/Passes/InferTypes.php
+```
+
+Expected: exactly one hit. Change:
 
 ```php
         if (false && ($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
