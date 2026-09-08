@@ -154,3 +154,18 @@ function spl_object_hash(object $object): string
 // handed an OBJECT — so an object nested inside an array had nowhere to go.
 // Only the escaper stays: it takes a string and returns a string, which crosses
 // the boundary fine, and both the prelude walk and the codegen builtin call it.
+
+/**
+ * `class_alias()` — the PHP body the BOOTSTRAP RULE asks for.
+ *
+ * The compiler that builds the next compiler has never heard of the codegen
+ * builtin, and an unresolved call is a silent runtime trap rather than a link
+ * error — so the name needs a body here first. This one cannot do the job (a
+ * name→metadata registry is a runtime the emitter owns), and it says so by
+ * answering false; the generation that has the builtin shadows it, because
+ * `emitCall` asks `emitBuiltin` before `definedFns`.
+ */
+function class_alias(string $class, string $alias, bool $autoload = true): bool
+{
+    return false;
+}

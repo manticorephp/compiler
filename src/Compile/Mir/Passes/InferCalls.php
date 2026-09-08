@@ -393,6 +393,7 @@ trait InferCalls
         // Reflection Tier-1: existence/relationship queries fold to bool;
         // get_parent_class is string|false (cell); get_class_methods a
         // vec[cell] of name strings (mirrors array_keys).
+        if ($n === 'class_alias') { return Type::bool_(); }
         if ($n === 'class_exists' || $n === 'enum_exists'
             || $n === 'interface_exists' || $n === 'trait_exists'
             || $n === 'method_exists' || $n === 'property_exists'

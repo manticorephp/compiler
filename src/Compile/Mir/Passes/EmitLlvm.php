@@ -298,6 +298,9 @@ final class EmitLlvm implements EmitVisitor
      *  correct-but-fat rather than silently answering "class not found". */
     private bool $reflectAll = true;
 
+    /** {@see \Compile\Mir\Module::$hasClassAlias} */
+    private bool $hasClassAlias = false;
+
     /** Compiler-owned lightweight method tables for erased dynamic calls. */
     private bool $dynamicMethodMeta = false;
 
@@ -607,6 +610,7 @@ final class EmitLlvm implements EmitVisitor
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
+        $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;

@@ -4391,6 +4391,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Compile\Stats::step('ReflectAnalysis', $statT, -1, \count($module->classes));
         $module->reflectAll = $refl->all;
         $module->reflectNames = $refl->names;
+        $module->hasClassAlias = $refl->sawAlias;
         if (\Compile\Debug::$reflectReport) {
             // Built with an explicit loop, NOT
             //   $rnames = $refl->all ? ['<ALL>'] : \array_keys($refl->names);

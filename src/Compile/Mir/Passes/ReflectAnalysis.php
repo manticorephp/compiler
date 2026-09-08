@@ -36,6 +36,9 @@ use Compile\Mir\Walk;
  */
 final class ReflectAnalysis
 {
+    /** The module calls `class_alias()` somewhere. */
+    public bool $sawAlias = false;
+
     public const NAME = 'reflect-analysis';
 
     /** Every class needs metadata: something reflected on a name this pass
@@ -132,6 +135,15 @@ final class ReflectAnalysis
             // metadata. Without this the call compiled to an empty array.
             if ($fname === 'class_implements') {
                 $this->all = true;
+            }
+            // `class_alias($orig, $alias)` resolves $orig THROUGH THE REGISTRY at
+            // run time, so the target needs metadata like any reflected class —
+            // without this the alias always answered false, because the class it
+            // names was not registered. A literal target demands only itself; a
+            // computed one demands the whole set, same rule as class_exists.
+            if ($fname === 'class_alias' && \count($n->args) >= 1) {
+                $this->fromArg($n->args[0]);
+                $this->sawAlias = true;
             }
             if ($fname === 'class_exists' || $fname === 'interface_exists'
                 || $fname === 'trait_exists' || $fname === 'enum_exists') {

@@ -433,11 +433,75 @@ final class RuntimeLibrary
         $out .= "  %nxp = getelementptr i8, ptr %p, i64 8\n";
         $out .= "  %next = load ptr, ptr %nxp\n";
         $out .= "  br label %loop\n";
-        $out .= "miss:\n  ret i64 0\n}\n";
+        $out .= "miss:\n";
+        // Not a declared class — it may be an ALIAS. `class_alias('A', 'B')`
+        // cannot make a new class in a closed world, but it can make B a second
+        // NAME for A's metadata, and every name-resolved question (class_exists,
+        // ReflectionClass, an erased `new $n`) comes through here.
+        $out .= "  %al = call i64 @__mc_alias_find(ptr %name)\n";
+        $out .= "  ret i64 %al\n}\n";
+        $out .= self::classAliasRuntime();
         $out .= self::reflMemberLookup();
         $out .= self::reflMemberTramp();
         $out .= self::reflMethodRow();
         $out .= self::reflPropRow();
+        return $out;
+    }
+
+    /**
+     * `class_alias()` — a second NAME for a class's metadata.
+     *
+     * A closed-world AOT compiler cannot mint a class at run time, but the
+     * alias does not ask for one: it asks that a NAME resolve to an existing
+     * class. So the alias list sits behind {@see reflRegistry}'s find — a miss
+     * on the declared set falls through to it — and every name-resolved
+     * question inherits the answer with no further plumbing.
+     *
+     * NOT indexed with the declared classes: the hash index reads each entry's
+     * name out of its RMETA, and an alias's whole point is that its name is not
+     * the one in there. A linear list is right for the size — a program has a
+     * handful of aliases, against thousands of classes.
+     */
+    private static function classAliasRuntime(): string
+    {
+        $out = "@__mc_alias_head = linkonce_odr global ptr null\n";
+        // node: { ptr name, i64 rmeta, ptr next }
+        $out .= "define i64 @__mc_class_alias(ptr %orig, ptr %alias) {\nentry:\n";
+        $out .= "  %m = call i64 @__mc_refl_find(ptr %orig)\n";
+        $out .= "  %none = icmp eq i64 %m, 0\n";
+        $out .= "  br i1 %none, label %no, label %yes\n";
+        $out .= "no:\n  ret i64 0\n";
+        $out .= "yes:\n";
+        $out .= "  %n = call ptr @__mir_alloc_tagged(i64 24)\n";
+        $out .= "  store ptr %alias, ptr %n\n";
+        $out .= "  %mp = getelementptr i8, ptr %n, i64 8\n";
+        $out .= "  store i64 %m, ptr %mp\n";
+        $out .= "  %hd = load ptr, ptr @__mc_alias_head\n";
+        $out .= "  %np = getelementptr i8, ptr %n, i64 16\n";
+        $out .= "  store ptr %hd, ptr %np\n";
+        $out .= "  store ptr %n, ptr @__mc_alias_head\n";
+        $out .= "  ret i64 1\n}\n";
+        $out .= "define i64 @__mc_alias_find(ptr %name) {\nentry:\n";
+        $out .= "  %h0 = load ptr, ptr @__mc_alias_head\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %p = phi ptr [ %h0, %entry ], [ %nx, %cont ]\n";
+        $out .= "  %end = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %end, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %nm = load ptr, ptr %p\n";
+        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %mp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %mv = load i64, ptr %mp\n";
+        $out .= "  ret i64 %mv\n";
+        $out .= "cont:\n";
+        $out .= "  %nxp = getelementptr i8, ptr %p, i64 16\n";
+        $out .= "  %nx = load ptr, ptr %nxp\n";
+        $out .= "  br label %loop\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
         return $out;
     }
 

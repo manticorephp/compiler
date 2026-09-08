@@ -329,6 +329,12 @@ final class Module
      */
     public bool $isLibraryModule = false;
 
+    /** This module calls `class_alias()`, so a literal `class_exists('X')`
+     *  whose X is not a declared class can no longer fold to FALSE — X may be
+     *  an alias registered at run time. Declared LAST: a field added
+     *  mid-struct shifts every later offset. */
+    public bool $hasClassAlias = false;
+
     public function markPassApplied(string $name): void
     {
         $this->passesApplied[$name] = true;

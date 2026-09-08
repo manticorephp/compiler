@@ -428,6 +428,7 @@ trait EmitLlvmBuiltins
         // member name) is statically known (obj<C> type / string literal);
         // a dynamic arg conservatively folds to the not-found answer.
         if ($name === 'class_exists')                 { return $this->biClassExists($args, 'class'); }
+        if ($name === 'class_alias')                  { return $this->biClassAlias($args); }
         if ($name === 'enum_exists')                  { return $this->biClassExists($args, 'enum'); }
         if ($name === 'interface_exists')             { return $this->biClassExists($args, 'interface'); }
         if ($name === 'trait_exists')                 { return $this->biClassExists($args, 'trait'); }
@@ -6067,6 +6068,40 @@ trait EmitLlvmBuiltins
     /** class_exists / enum_exists / interface_exists / trait_exists — a
      *  static-table membership fold. `$kind` selects the table; class_exists
      *  also matches enums (PHP: an enum IS a class), never interfaces/traits. */
+    /**
+     * `class_alias($class, $alias)` — register a second NAME for a class.
+     *
+     * The registry answers it ({@see \Compile\Mir\RuntimeLibrary}), so every
+     * name-resolved question — `class_exists`, `ReflectionClass`, an erased
+     * `new $n` — inherits the alias with no further plumbing. False when the
+     * target is not in the reflectable set, which is php's answer too when the
+     * class does not exist.
+     *
+     * The third argument ($autoload) is accepted and ignored: there is no
+     * autoloader in a closed world, every class is already linked or absent.
+     *
+     * @param Node[] $args
+     */
+    private function biClassAlias(array $args): string
+    {
+        if (\count($args) < 2) { return $this->biConstBool('', false); }
+        $this->rt->needsStrcmp = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $args[0]->type->kind === Type::KIND_CELL
+            ? $this->cellToPtr() : $this->coerceToPtr();
+        $orig = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $args[1]->type->kind === Type::KIND_CELL
+            ? $this->cellToPtr() : $this->coerceToPtr();
+        $alias = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mc_class_alias(ptr ' . $orig
+              . ', ptr ' . $alias . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function biClassExists(array $args, string $kind): string
     {
         $name = $this->reflClassName($args[0]);
@@ -6076,6 +6111,16 @@ trait EmitLlvmBuiltins
             // says true), because there was no runtime class table to ask. There
             // is one now: the registry. ReflectAnalysis makes such a call site a
             // reflectAll root, so every class is in it.
+            return $this->biExistsDynamic($args[0], $kind);
+        }
+        // A literal name this module does not declare may still exist at run
+        // time — `class_alias()` registers one. Folding FALSE there is a wrong
+        // answer, so ask the registry instead; only a module that actually
+        // calls class_alias pays for it, because the fold is what keeps a
+        // `if (class_exists('Vendor\\X'))` guard from dragging its whole body in.
+        if ($this->hasClassAlias && !isset($this->classes[$name])
+            && !isset($this->enums[$name]) && !isset($this->interfaceNames[$name])
+            && !isset($this->traitNames[$name])) {
             return $this->biExistsDynamic($args[0], $kind);
         }
         $out = $this->reflEvalArgs($args);
