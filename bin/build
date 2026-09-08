@@ -189,9 +189,19 @@ else
     # correct-but-slower, never wrong.
     OPT_FLAG=""
     if [[ $FAST -eq 1 ]]; then
+        # The iteration loop, in full: -O1, a 64-way HASH-STABLE split, and the
+        # content-addressed object cache over it. A one-method edit then moves
+        # ~1% of the IR and clang only sees the parts that actually changed
+        # (measured: 44 of 64 parts served from cache, clang 26.7 -> 8.4 s).
+        # ⚠ A part boundary is an inlining boundary: this binary runs ~80%
+        # slower than an unsplit one, which is exactly why --fast refuses to
+        # write bin/manticore. Set MANTICORE_THINLTO=1 to trade build time for
+        # some of that back (+32% instead of +80%, ~7 s more wall).
+        export MANTICORE_OBJ_CACHE="${MANTICORE_OBJ_CACHE:-1}"
+        export MANTICORE_SPLIT_JOBS="${MANTICORE_SPLIT_JOBS:-64}"
         if supports_flag bin/manticore build -O1 /nonexistent-manifest-probe.json; then
             OPT_FLAG="-O1"
-            echo "   (--fast: -O1, application only, -> $OUT — NOT gate evidence)"
+            echo "   (--fast: -O1, split $MANTICORE_SPLIT_JOBS, obj cache $MANTICORE_OBJ_CACHE, application only -> $OUT — NOT gate evidence)"
         else
             echo "   (installed compiler predates -O on \`build\` — building at its default)"
         fi
