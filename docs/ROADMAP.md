@@ -111,9 +111,10 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 `gen_manifest.php 5` + `build -j 0` with `MANTICORE_SPLIT_JOBS=24 MANTICORE_SPLIT_BATCH=4`
 produces a **171.7 MB binary** from 78 972 functions / 22 212 classes and 1.129 GB of IR, in
 32m43 (front end + emission 1023 s, clang x24 925 s, link 0.95 s), compiler peak 4.72 GiB.
-It prints its tier liveness lines and then stops at `Call to undefined function class_alias()`
-— what used to kill the BUILD is now a runtime trap, and it is the next concrete blocker.
-108 undefined-function traps remain in that build (gmp/openssl/deepclone/image...).
+It RUNS TO COMPLETION: every tier line prints — including `tier T5: 43/58 root classes live` —
+and the process exits 0. `class_alias()` was the last thing in the way and is now implemented
+(the registry answers it). **107** undefined-function traps remain in that build
+(gmp/openssl/deepclone/image/dba/xml...), each one a runtime trap rather than a build failure.
 
 ## Tier 1 — correctness
 
