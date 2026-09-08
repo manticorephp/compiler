@@ -111,6 +111,7 @@ class LogicException extends Exception {}
 class InvalidArgumentException extends LogicException {}
 class OutOfRangeException extends LogicException {}
 class TypeError extends Error {}
+class ArgumentCountError extends TypeError {}
 class ValueError extends Error {}
 class AssertionError extends Error {}
 

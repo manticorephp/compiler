@@ -1095,6 +1095,8 @@ trait LowerPrelude
             // sort flags
             // ext/hash: the only flag php defines for hash_init().
             'HASH_HMAC' => 1,
+            // ext/random: the mt_srand() engine variants.
+            'MT_RAND_MT19937' => 0, 'MT_RAND_PHP' => 1,
             'SORT_REGULAR' => 0, 'SORT_NUMERIC' => 1, 'SORT_STRING' => 2,
             'SORT_DESC' => 3, 'SORT_ASC' => 4, 'SORT_LOCALE_STRING' => 5,
             'SORT_NATURAL' => 6, 'SORT_FLAG_CASE' => 8,
