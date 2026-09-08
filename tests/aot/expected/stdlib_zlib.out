@@ -1,0 +1,21 @@
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+round-trips ok
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+gzdeflate(): Argument #2 ($level) must be between -1 and 9
+gzdeflate(): Argument #2 ($level) must be between -1 and 9
+gzinflate(): Argument #2 ($max_length) must be greater than or equal to 0
+gzdeflate(): Argument #3 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE
+-15 15 31
