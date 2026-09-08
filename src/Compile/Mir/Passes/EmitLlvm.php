@@ -553,16 +553,6 @@ final class EmitLlvm implements EmitVisitor
      *  layout hazard (the ClassDef::$isPreludeClass lesson). */
     private array $reflFnMeta = [];
 
-    /**
-     * DECLARED return type per function, from {@see Module::$declaredReturnTypes}
-     * — the return-sink cell guard's destination type. `$fn->returnType` (and
-     * every copy of it taken here, {@see FunctionEmitFrame::$returnType} and
-     * {@see FunctionSignatures::$returnType} included) is rewritten in place by
-     * InferNodes' return-type adoption, so by the time this pass runs it holds
-     * "what the last pass decided", not "what the source declared". Only this
-     * module field survives untouched.
-     * @var array<string, \Compile\Mir\Type> */
-    private array $declaredReturnTypes = [];
     /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
      *  Keyed by function name / "DeclaringClass::method".
      *  @var array<string, string> */
@@ -576,6 +566,21 @@ final class EmitLlvm implements EmitVisitor
     /** "<declClass>|<kind>|<member>|<k>" → newInstance()'s baked \Error message.
      *  @var array<string, string> */
     private array $attrSiteErrors = [];
+    /**
+     * DECLARED return type per function, from {@see Module::$declaredReturnTypes}
+     * — the return-sink cell guard's destination type. `$fn->returnType` (and
+     * every copy of it taken here, {@see FunctionEmitFrame::$returnType} and
+     * {@see FunctionSignatures::$returnType} included) is rewritten in place by
+     * InferNodes' return-type adoption, so by the time this pass runs it holds
+     * "what the last pass decided", not "what the source declared". Only this
+     * module field survives untouched.
+     *
+     * Declared LAST (true tail of the field list) — a new field mid-class
+     * shifts every later field's offset, a self-host layout hazard (the
+     * ClassDef::$isPreludeClass lesson: clean in one generation, SIGSEGV in
+     * the next once the offset-shifted layout is what compiles the compiler).
+     * @var array<string, \Compile\Mir\Type> */
+    private array $declaredReturnTypes = [];
 
     public function emit(Module $module): string
     {
@@ -1179,6 +1184,13 @@ final class EmitLlvm implements EmitVisitor
             }
             \Compile\Stats::line('IR: staged at ' . $this->streamIrPath . ' ('
                 . (string)$stagedBytes . ' bytes)');
+            // This streaming path is the DEFAULT (Main.php sets streamIrPath
+            // unless MANTICORE_STREAM_IR is set) and returns here, before the
+            // in-memory branch below ever runs — the summary must fire on
+            // THIS exit too, or it silently never prints on an ordinary
+            // `bin/manticore compile` / `bin/build`. Side channel only
+            // (`\error_log`), never appended to the staged-IR marker string.
+            if ($this->cellGuardOn()) { \error_log($this->cellGuardSummary()); }
             return "\x1eMANTICORE_STAGED_IR\n" . $this->streamIrPath . "\n"
                 . (string)$stagedBytes;
         }

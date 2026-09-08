@@ -218,12 +218,26 @@ trait EmitLlvmVisit
         // module never registered one for (a synthesized/trampoline body with
         // no FunctionDef of its own) is a genuinely indeterminate destination
         // — count it `unchecked` rather than fall back to the rewritten field.
-        $fn = $this->frame !== null ? $this->frame->name : '';
-        $rt = $fn !== '' ? ($this->declaredReturnTypes[$fn] ?? null) : null;
-        if ($rt !== null) {
-            $this->checkCellSink('return', $rt, $n);
-        } else {
-            $this->checkCellSinkUnchecked();
+        // A bare `return;` (`$n->value === null`) never assigns
+        // `$this->lastValue` — `emitReturn`'s `$v === null` arm hands
+        // `finishReturn` a literal ('0', or CELL_NULL for a closure/
+        // trampoline) straight as the `ret` operand, bypassing lastValue
+        // entirely. Checking provenance here would read whatever unrelated
+        // register an earlier expression left behind and could fabricate a
+        // phantom `raw->cell` violation. There is also no live "unchecked"
+        // case to count: the destination slot IS known (cell or not), only
+        // the source is a compile-time constant with no provenance question
+        // to ask. So this sink is simply skipped for a valueless return,
+        // never mis-classified and never force-counted into a bucket that
+        // does not describe it.
+        if ($n->value !== null) {
+            $fn = $this->frame !== null ? $this->frame->name : '';
+            $rt = $fn !== '' ? ($this->declaredReturnTypes[$fn] ?? null) : null;
+            if ($rt !== null) {
+                $this->checkCellSink('return', $rt, $n);
+            } else {
+                $this->checkCellSinkUnchecked();
+            }
         }
         return $out;
     }
