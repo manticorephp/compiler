@@ -66,8 +66,8 @@ trait EmitLlvmCellGuard
     /** @var array<string, string> SSA register name (`%rN`) → 'boxed'|'opaque' */
     private array $cellProv = [];
 
-    /** @var array<string, int> violation kind → count, for the summary line */
-    private array $cellGuardCounts = ['boxed' => 0, 'opaque' => 0, 'raw' => 0];
+    /** @var array<string, int> provenance → count at a cell sink, for the summary line */
+    private array $cellGuardCounts = ['boxed' => 0, 'opaque' => 0, 'raw' => 0, 'unchecked' => 0];
 
     /** @var string[] one human-readable line per RAW → cell violation */
     public array $cellGuardViolations = [];
@@ -388,6 +388,7 @@ In `visitReturn` (`EmitLlvmVisit.php`), after the emit call, when the enclosing 
             . ' boxed=' . (string)($this->cellGuardCounts['boxed'] ?? 0)
             . ' opaque=' . (string)($this->cellGuardCounts['opaque'] ?? 0)
             . ' raw=' . (string)($this->cellGuardCounts['raw'] ?? 0)
+            . ' unchecked=' . (string)($this->cellGuardCounts['unchecked'] ?? 0)
             . ' violations=' . (string)\count($this->cellGuardViolations);
     }
 ```
