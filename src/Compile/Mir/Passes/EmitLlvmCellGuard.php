@@ -49,6 +49,13 @@ trait EmitLlvmCellGuard
         return $this->cellProv[$reg] ?? 'raw';
     }
 
+    /** A pass-through transmits provenance; it does not create it. */
+    private function propagateCellProvenance(string $from, string $to): void
+    {
+        if ($from === '' || $to === '' || $from === $to) { return; }
+        if (isset($this->cellProv[$from])) { $this->cellProv[$to] = $this->cellProv[$from]; }
+    }
+
     /** Registers are numbered per function, so the map must not outlive one. */
     private function resetCellGuardFrame(): void
     {

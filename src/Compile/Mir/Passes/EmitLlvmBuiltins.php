@@ -802,10 +802,13 @@ trait EmitLlvmBuiltins
         $this->rt->needsTagged = true;
         $k = $t->kind;
         $srcFlavor = $src !== null ? $this->cellifySourceFlavor($src) : '';
-        // Already a tagged cell — don't double-box.
+        // Already a tagged cell — don't double-box. A pass-through TRANSMITS
+        // provenance, it does not create it: the incoming register's claim
+        // (boxed / opaque / raw) is what this arm hands onward, unchanged.
         if ($k === Type::KIND_CELL) {
+            $inReg = $this->lastValue;
             $ret = $this->coerceToI64();
-            $this->markCellBoxed($this->lastValue);
+            $this->propagateCellProvenance($inReg, $this->lastValue);
             return $ret;
         }
         if ($k === Type::KIND_FLOAT) {
@@ -1137,8 +1140,10 @@ trait EmitLlvmBuiltins
      */
     private function emitCellifyArrayRaw(Type $elem, string $srcFlavor = ''): string
     {
+        // Returns a raw array POINTER (its elements are boxed cells, the
+        // array word itself is not a tagged cell) — opaque, not boxed.
         $ret = $this->emitAssocToCellArrayUnified($elem, true, $srcFlavor);
-        $this->markCellBoxed($this->lastValue);
+        $this->markCellOpaque($this->lastValue);
         return $ret;
     }
 
@@ -2616,11 +2621,14 @@ trait EmitLlvmBuiltins
         if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) {
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
-            // KIND_CELL is statically known already-boxed — still boxed.
-            // KIND_UNKNOWN is an erased word merely ASSUMED cell here; leave
-            // it unmarked (raw) — that assumption is exactly what cellguard
-            // exists to check, not to launder.
-            if ($ek === Type::KIND_CELL) { $this->markCellBoxed($this->lastValue); }
+            // A pass-through TRANSMITS provenance, it does not create it —
+            // KIND_CELL propagates whatever $ev's own claim already was
+            // (same register in and out, so this is a no-op by construction;
+            // the point is that it no longer ASSERTS boxed).
+            // KIND_UNKNOWN is an erased word merely ASSUMED cell here; no
+            // claim to propagate either way — that assumption is exactly
+            // what cellguard exists to check, not to launder.
+            if ($ek === Type::KIND_CELL) { $this->propagateCellProvenance($ev, $this->lastValue); }
             return '';
         }
         // An enum case is an ORDINAL, not an object cell — pass it through raw
