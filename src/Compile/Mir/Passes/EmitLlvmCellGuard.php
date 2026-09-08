@@ -61,4 +61,27 @@ trait EmitLlvmCellGuard
     {
         $this->cellProv = [];
     }
+
+    /**
+     * One cell sink. `$destType` is the slot's declared type; the value being
+     * stored is whatever the emit method left in `$this->lastValue`, which is
+     * why every caller runs AFTER its emit method. `$site` is for the report.
+     */
+    private function checkCellSink(
+        string $sinkKind,
+        \Compile\Mir\Type $destType,
+        \Compile\Mir\Node $site
+    ): void {
+        if (!$this->cellGuardOn()) { return; }
+        if ($destType->kind !== \Compile\Mir\Type::KIND_CELL) { return; }
+        $prov = $this->cellProvenance($this->lastValue);
+        $this->cellGuardCounts[$prov] = ($this->cellGuardCounts[$prov] ?? 0) + 1;
+        if ($prov !== 'raw') { return; }
+        $fn = $this->frame !== null ? $this->frame->name : '(module)';
+        $this->cellGuardViolations[] = 'CELLGUARD raw->cell ' . $sinkKind
+            . ' fn=' . $fn
+            . ' line=' . (string)$site->line
+            . ' node=' . $site->kind;
+        \error_log($this->cellGuardViolations[\count($this->cellGuardViolations) - 1]);
+    }
 }
