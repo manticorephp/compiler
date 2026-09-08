@@ -18,7 +18,16 @@ final class InferenceScope
         if ($context->isConservativeFallback()) {
             return new self(self::FULL, [], 'barrier-or-unknown');
         }
-        return new self(self::TARGETED, $context->invalidated(), 'dependency-closure');
+        // The closure of what changed, WIDENED by every function the analysis
+        // cannot see through: an indirect call, a static dispatch, a dynamic
+        // property, shared state, a closure body, a reference. Those are exactly
+        // the edges DependencyIndex does not model, so re-inferring their holders
+        // unconditionally is what makes the narrowed scope SOUND rather than
+        // optimistic.
+        $names = [];
+        foreach ($context->invalidated() as $n) { $names[$n] = true; }
+        foreach ($context->barriers->escapers() as $n => $_) { $names[$n] = true; }
+        return new self(self::TARGETED, \array_keys($names), 'dependency-closure+escapers');
     }
 
     public function isTargeted(): bool { return $this->mode === self::TARGETED; }

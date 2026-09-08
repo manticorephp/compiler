@@ -85,6 +85,11 @@ final class NarrowReturns implements Pass
         // Bounded fixpoint: each productive sweep narrows >=1 function,
         // which is monotonic, so the function count caps the iterations.
         $iters = 0;
+        $closing = false;
+        $sawFull = false;
+        $lastFull = false;
+        /** @var array<string, bool> */
+        $lastScope = [];
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
@@ -96,13 +101,29 @@ final class NarrowReturns implements Pass
                 if ($this->narrowFunction($fn)) {
                     $changed = true;
                     $narrowed = $narrowed + 1;
+                    // A function that narrows only AFTER a full inference is one the
+                    // dependency model failed to invalidate — name it, that is the
+                    // bug report the scope cannot produce for itself.
+                    if ($lastFull && !isset($lastScope[$fn->name])) {
+                        \Compile\Stats::line('  narrow: MISSED BY SCOPE ' . $fn->name);
+                    }
                     if ($this->analysis !== null) { $this->analysis->changes->addReturn($fn->name); }
                 }
             }
             \Compile\Stats::step('  narrow round ' . (string)$iters
                 . ' (narrowed ' . (string)$narrowed . ')', $roundT, -1, -1);
             \Compile\Stats::bump('narrow.rounds', 1);
-            if (!$changed) { break; }
+            if (!$changed) {
+                // Converged — but if every inference since the last full one was
+                // scoped, that convergence is only as good as the scope. Run one
+                // full inference and let the loop have another go; a second
+                // no-change round after a FULL inference is the real fixpoint.
+                if (!$this->targetedInfer || $this->analysis === null || $sawFull) { break; }
+                $closing = true;
+                $sawFull = true;
+            } else {
+                $sawFull = false;
+            }
             $inferT = \Compile\Stats::now();
             // Report the closure this round WOULD infer over, whether or not the
             // scope is actually applied. Nothing measured this before, which is
@@ -113,11 +134,23 @@ final class NarrowReturns implements Pass
                     . (string)\count($this->analysis->changes->functions)
                     . ' would-target=' . (string)\count($this->analysis->invalidated())
                     . ' of ' . (string)\count($module->functions)
+                    . ' | edges=' . (string)$this->analysis->dependencies->edgeCount()
                     . ' | escapers=' . (string)$this->analysis->barriers->escaperCount()
                     . ' fallback=' . ($this->analysis->isConservativeFallback() ? 'yes' : 'no'));
             }
-            $scope = ($this->targetedInfer && $this->analysis !== null)
+            // Targeted rounds are cheap but they close the fixpoint EARLY: a
+            // function outside the scope keeps last round's node types, so the
+            // next narrow round has nothing new to narrow it with and the loop
+            // exits believing it converged. Measured: 210 more boxed values than
+            // the full-inference build. So the round AFTER an apparent
+            // convergence is run FULL — see the closing pass below — and this
+            // one stays targeted.
+            $scope = ($this->targetedInfer && $this->analysis !== null && !$closing)
                 ? $this->analysis->scope() : null;
+            $closing = false;
+            $lastFull = $scope === null;
+            $lastScope = [];
+            if ($scope !== null) { foreach ($scope->functions as $sn) { $lastScope[$sn] = true; } }
             $infer = new InferTypes($scope);
             $infer->run($module);
             \Compile\Stats::step('  narrow InferTypes round ' . (string)$iters,

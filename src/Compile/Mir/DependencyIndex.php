@@ -40,7 +40,10 @@ final class DependencyIndex
             }
         }
         foreach ($module->functions as $fn) {
-            if ($fn->isPrelude) { continue; }
+            // Prelude bodies used to be skipped. They are ordinary functions for
+            // invalidation: a prelude helper that calls a narrowed function has to
+            // be re-inferred like any other caller, and with no edge collected it
+            // never would be. One extra walk per build buys that soundness.
             $index->callees[$fn->name] = [];
             $index->collect($fn->body, $fn->name);
         }
@@ -90,6 +93,24 @@ final class DependencyIndex
                 }
             }
         }
+        // Inference does not only flow callee -> caller. A parameter's type is
+        // refined FROM its call sites, so when a caller's types move, the
+        // callee has to be re-inferred as well. One hop is enough: the rounds
+        // are a fixpoint, and each round takes the next hop. Without this the
+        // scope missed exactly the functions whose ARRAY ELEMENT types come
+        // from a parameter — array_reverse, array_pad, Sig::libsFromJson,
+        // Exception::getTrace — every one of which narrows only after a full
+        // inference.
+        $n = \count($queue);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $src = $queue[$i];
+            $edges = $this->callees[$src] ?? [];
+            foreach ($edges as $callee => $_) {
+                if (isset($seen[$callee])) { continue; }
+                $seen[$callee] = true;
+                $queue[] = $callee;
+            }
+        }
         return $queue;
     }
 
@@ -104,11 +125,25 @@ final class DependencyIndex
     public function externCalleeCount(): int { return \count($this->externCallees); }
     public function unknownReasonCount(): int { return \count($this->unknownReasons); }
 
+    /**
+     * Narrow before reading a field.
+     *
+     * A `@var` docblock is enough for Zend, which looks properties up by name,
+     * and is NOTHING to the native build, which resolves them by OFFSET off the
+     * declared type — here `Node`, which has no `function` at all. That read
+     * returned garbage, no callee ever matched a module function, and the index
+     * carried ZERO call edges (`edges=0`) while still looking healthy: method
+     * dispatch is keyed separately, so invalidation still produced a plausible
+     * 733 functions and nobody had a reason to doubt it.
+     */
+    private function asCall(Node $node): Call { return $node; }
+
+    private function asMethodCall(Node $node): MethodCall_ { return $node; }
+
     private function collect(Node $node, string $caller): void
     {
         if ($node->kind === Node::KIND_CALL) {
-            /** @var Call $node */
-            $callee = $node->function;
+            $callee = $this->asCall($node)->function;
             if (isset($this->functions[$callee])) {
                 $this->callees[$caller][$callee] = true;
                 $this->callers[$callee][$caller] = true;
@@ -129,8 +164,8 @@ final class DependencyIndex
         // to any `C::m` can only be observed by a site that calls `m`. That is a
         // sound over-approximation and a far narrower one than "every function".
         if ($node->kind === Node::KIND_METHOD_CALL) {
-            /** @var MethodCall_ $node */
-            $this->methodCallers[$node->method][$caller] = true;
+            $m = $this->asMethodCall($node)->method;
+            $this->methodCallers[$m][$caller] = true;
             $this->dynamicCallers[$caller] = true;
         }
         // `new $cls(...)` reaches an unknown constructor, so it is a caller of

@@ -19,7 +19,9 @@ final class InferenceBarriers
     {
         $out = new self();
         foreach ($module->functions as $fn) {
-            if ($fn->isPrelude) { continue; }
+            // Prelude bodies are scanned too: an unscanned function is neither an
+            // escaper nor edge-connected, i.e. invisible to both halves of the
+            // scope decision, which is the one state that is unsound.
             $out->fn = $fn->name;
             $out->scanNode($fn->body);
         }
@@ -32,6 +34,10 @@ final class InferenceBarriers
     public function reasons(): array { return \array_keys($this->reasons); }
 
     public function escaperCount(): int { return \count($this->escapers); }
+    /** Functions whose dependencies this analysis cannot see through — the
+     *  set that must be re-inferred on EVERY round rather than vetoing the
+     *  whole targeted mode. @return array<string, bool> */
+    public function escapers(): array { return $this->escapers; }
     /** @return array<string, int> */
     public function reasonFnCounts(): array { return $this->reasonFns; }
 

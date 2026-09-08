@@ -250,7 +250,10 @@ if [[ -n "$FILTER" ]]; then
             filtered+=("$c")
         fi
     done
-    cases=("${filtered[@]}")
+    # bash 3.2 (what macOS ships) treats "${empty[@]}" as an UNBOUND variable
+    # under `set -u`, so a filter that matches nothing died with
+    # `filtered[@]: unbound variable` instead of the friendly message below.
+    if [[ ${#filtered[@]} -eq 0 ]]; then cases=(); else cases=("${filtered[@]}"); fi
 fi
 
 if [[ ${#cases[@]} -eq 0 ]]; then
