@@ -60,6 +60,13 @@ namespace Compile\Mir\Passes;
  * A `raw` value reaching a `cell`-typed sink is a proven contract violation.
  * An `opaque` one is not checkable here; the COUNT of them is the coverage
  * metric that says how much this instrument can see.
+ *
+ * A fourth bucket, `unchecked`, counts a sink whose DESTINATION SLOT TYPE could
+ * not be determined statically — a dynamic-property store picks one of N slots
+ * through a runtime strcmp chain, and some element/property stores are narrower
+ * than the emitter's own box predicates. Never guess such a slot's type and
+ * never skip it silently: count it, so the census states its own blind spots
+ * instead of looking complete.
  */
 trait EmitLlvmCellGuard
 {
