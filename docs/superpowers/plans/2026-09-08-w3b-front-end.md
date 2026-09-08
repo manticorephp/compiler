@@ -75,6 +75,30 @@ from its CALL SITES, so a change in a caller's argument types must invalidate th
 `MANTICORE_WORKLIST` stays opt-in. Box counts are identical between ON and OFF (10 091), so the
 closing round does its job; the IR still differs by 0.02%, which is the remaining gap.
 
+## Tried and REVERTED: rescanning only what the scan touched
+
+The obvious version of step 1 — each scan records the functions whose type it moved, the
+rescan runs over exactly those — **does not type the program correctly**. Both scans were
+instrumented (three change sites in `scanCallSiteArrayElems`, one in `scanByRefElemWiden`) and
+the rescan scoped to that set; the compiler then refused its own source:
+
+```
+error: … cellPropertyReadHelper() — array KEY repr conflict — a string-keyed array read as
+int-keyed walks the key as the wrong type (assoc[string, obj<EnumDef>] given, vec[obj<EnumDef>]
+expected)
+```
+
+Retyping a parameter of F changes what F RETURNS and what F stores, so the callers and the
+callees have to be re-inferred with it. The touched set alone is the same mistake the
+`MANTICORE_WORKLIST` scope makes, in a smaller place: **the affected set is at least
+touched ∪ callers(touched) ∪ callees(touched)**, and InferTypes has no call graph to ask.
+So step 1 is not a two-line change — it needs `DependencyIndex` (or an equivalent) available
+inside `InferTypes`, which is the same prerequisite step 2 has.
+
+⚠ The failed build POISONED `bin/manticore` (it compiled the reverted source into the same
+error, so `bin/build` could not recover on its own). `cp bin/.manticore.prev bin/manticore`,
+verify `preg_match` answers 1, rebuild — exactly the documented recovery.
+
 ## Order
 
 1. Scope the two big internal rescans (`byref_elem`, `callsite_array`) — ~5.3 s, no soundness
