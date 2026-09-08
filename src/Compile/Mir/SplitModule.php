@@ -402,21 +402,17 @@ final class SplitModule
             foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
         }
         // Every file-local definition reachable from here, to a fixpoint.
+        //
+        // ⚠ This closure and the GLOBAL one below feed each other, so neither
+        // can run once: a global's initializer names definitions (a dispatch
+        // TABLE's rows are `ptr @helper`), and a definition names globals. With
+        // the internal closure running first, an internal body named ONLY by a
+        // global initializer was never copied — part 22 of symfony-demo T5 took
+        // the 2072-row `@.dynf.rows.*` table and clang refused it with `use of
+        // undefined value @manticore___mc_dyn_method0___bits_int_`. The table is
+        // the only reference such a helper has. Alternate to a JOINT fixpoint.
         /** @var array<string, bool> */
         $haveInternal = [];
-        $changed = true;
-        while ($changed) {
-            $changed = false;
-            foreach ($defOrder as $s) {
-                if (!isset($internal[$s]) || isset($haveInternal[$s]) || !isset($refs[$s])) { continue; }
-                $haveInternal[$s] = true;
-                foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
-                $changed = true;
-            }
-        }
-        foreach ($defOrder as $s) {
-            if (isset($haveInternal[$s])) { $mine[] = $s; }
-        }
         // Part 0 carries every non-discardable global, so seed the closure with
         // them: one may be named only by another global's initializer
         // (`@E__fqns` -> `@E__fqn_0`) and would otherwise be emitted without it.
@@ -436,6 +432,20 @@ final class SplitModule
         $needG = [];
         /** @var array<string, bool> */
         $ownG = [];
+        $progress = true;
+        while ($progress) {
+        $progress = false;
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($defOrder as $s) {
+                if (!isset($internal[$s]) || isset($haveInternal[$s]) || !isset($refs[$s])) { continue; }
+                $haveInternal[$s] = true;
+                foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
+                $changed = true;
+                $progress = true;
+            }
+        }
         $changed = true;
         while ($changed) {
             $changed = false;
@@ -454,7 +464,12 @@ final class SplitModule
                 }
                 foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) { $refs[$r] = true; }
                 $changed = true;
+                $progress = true;
             }
+        }
+        }
+        foreach ($defOrder as $s) {
+            if (isset($haveInternal[$s])) { $mine[] = $s; }
         }
         $plan = new PartPlan();
         $plan->mine = $mine;
