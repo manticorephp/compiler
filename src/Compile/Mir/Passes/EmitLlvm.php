@@ -553,6 +553,16 @@ final class EmitLlvm implements EmitVisitor
      *  layout hazard (the ClassDef::$isPreludeClass lesson). */
     private array $reflFnMeta = [];
 
+    /**
+     * DECLARED return type per function, from {@see Module::$declaredReturnTypes}
+     * — the return-sink cell guard's destination type. `$fn->returnType` (and
+     * every copy of it taken here, {@see FunctionEmitFrame::$returnType} and
+     * {@see FunctionSignatures::$returnType} included) is rewritten in place by
+     * InferNodes' return-type adoption, so by the time this pass runs it holds
+     * "what the last pass decided", not "what the source declared". Only this
+     * module field survives untouched.
+     * @var array<string, \Compile\Mir\Type> */
+    private array $declaredReturnTypes = [];
     /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
      *  Keyed by function name / "DeclaringClass::method".
      *  @var array<string, string> */
@@ -610,6 +620,7 @@ final class EmitLlvm implements EmitVisitor
         $this->propertyReadHelpers = [];
         $this->dynamicMethodHelpers = [];
         $this->dynamicMethodAbiDisabled = false;
+        $this->declaredReturnTypes = $module->declaredReturnTypes;
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
         $this->hasClassAlias = $module->hasClassAlias;
@@ -1209,6 +1220,10 @@ final class EmitLlvm implements EmitVisitor
         } elseif (!$this->emitLibrary && $pruneMode === 'off') {
             \Compile\Stats::line('  prune IR skipped (MANTICORE_PRUNE_IR=off)');
         }
+        // One coverage line per module emission, on a side channel
+        // (`\error_log`) — never appended to `$ir`, so this changes nothing a
+        // build compares against.
+        if ($this->cellGuardOn()) { \error_log($this->cellGuardSummary()); }
         return $ir;
     }
 

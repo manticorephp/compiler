@@ -105,4 +105,15 @@ trait EmitLlvmCellGuard
         if (!$this->cellGuardOn()) { return; }
         $this->cellGuardCounts['unchecked'] = ($this->cellGuardCounts['unchecked'] ?? 0) + 1;
     }
+
+    /** Coverage metric: a large `opaque` share means this instrument is blind. */
+    private function cellGuardSummary(): string
+    {
+        return 'CELLGUARD summary'
+            . ' boxed=' . (string)($this->cellGuardCounts['boxed'] ?? 0)
+            . ' opaque=' . (string)($this->cellGuardCounts['opaque'] ?? 0)
+            . ' raw=' . (string)($this->cellGuardCounts['raw'] ?? 0)
+            . ' unchecked=' . (string)($this->cellGuardCounts['unchecked'] ?? 0)
+            . ' violations=' . (string)\count($this->cellGuardViolations);
+    }
 }

@@ -4714,6 +4714,20 @@ trait EmitLlvmExpr
     {
         $ak = $a->type->kind;
         $pt = $ptypes[$pi] ?? null;
+        // The call-argument cell sink: `$pt` is the PARAMETER's declared type
+        // (`$ptypes[$pi]`), never the argument expression's own type — the
+        // same hazard InferNodes creates at every store sink. `$this->
+        // lastValue` at this point is still whatever the caller emitted for
+        // `$a` (emitNode + the float/coerceToI64 fixups run before this
+        // function is called), so the check runs before any unboxing below
+        // touches it. A variadic tail or an unresolved dynamic callee reaches
+        // here with no parameter type at all — genuinely indeterminate, not
+        // "checked and not cell" — so it counts `unchecked` rather than guess.
+        if ($pt !== null) {
+            $this->checkCellSink('call_arg', $pt, $a);
+        } else {
+            $this->checkCellSinkUnchecked();
+        }
         // An ERASED arg counts too: a foreach over a bare-`array` param yields
         // its elements unknown-typed, and symfony passes one straight on to
         // `getNumberOfColumns(array $row)`. Masking is a no-op on a raw pointer

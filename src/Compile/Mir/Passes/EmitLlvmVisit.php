@@ -206,7 +206,26 @@ trait EmitLlvmVisit
 
     public function visitReturn(Return_ $n): string
     {
-        return $this->emitReturn($n);
+        $out = $this->emitReturn($n);
+        // The return-sink cell guard. `$this->frame->returnType` is NOT the
+        // declared return type here — EmitLlvmModule seeds it straight from
+        // `$fn->returnType`, and InferNodes' return-type adoption rewrites
+        // that field in place on every pass, so by emission it holds "what the
+        // last adoption decided", not "what the source declared" (the same
+        // fate `$n->type` meets at every store sink). The DECLARED type
+        // survives only in `Module::$declaredReturnTypes`, copied here as
+        // `$this->declaredReturnTypes` keyed by function name. A function this
+        // module never registered one for (a synthesized/trampoline body with
+        // no FunctionDef of its own) is a genuinely indeterminate destination
+        // — count it `unchecked` rather than fall back to the rewritten field.
+        $fn = $this->frame !== null ? $this->frame->name : '';
+        $rt = $fn !== '' ? ($this->declaredReturnTypes[$fn] ?? null) : null;
+        if ($rt !== null) {
+            $this->checkCellSink('return', $rt, $n);
+        } else {
+            $this->checkCellSinkUnchecked();
+        }
+        return $out;
     }
 
     public function visitCall(Call $n): string
