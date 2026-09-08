@@ -2950,6 +2950,9 @@ trait EmitLlvmCalls
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
         }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 }

@@ -448,6 +448,9 @@ trait EmitLlvmLocals
                 $this->lastValue = $masked;
             }
         }
+        if ($ll->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 

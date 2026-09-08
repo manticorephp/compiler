@@ -962,6 +962,9 @@ trait EmitLlvmObjects
             $out .= '  ' . $masked . ' = and i64 ' . $loaded . ", 281474976710655\n";
             $this->lastValue = $masked;
         }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 
@@ -4769,6 +4772,9 @@ trait EmitLlvmObjects
         } else {
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
+        }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
         }
         return $out;
     }
