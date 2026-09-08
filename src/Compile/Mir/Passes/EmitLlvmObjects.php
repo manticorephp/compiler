@@ -1034,8 +1034,10 @@ trait EmitLlvmObjects
         $oldLast = $this->lastValue;
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
+        $this->resetCellGuardFrame();
         $obj = '%obj';
         $res = $this->ssa->allocReg();
         $out = 'define internal i64 ' . $sym . "(ptr %obj) {\nentry:\n";
@@ -1092,6 +1094,7 @@ trait EmitLlvmObjects
         $this->lastValue = $oldLast;
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
         return $sym;
     }
 
@@ -2791,8 +2794,10 @@ trait EmitLlvmObjects
         $oldLast = $this->lastValue;
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
+        $this->resetCellGuardFrame();
         $obj = '%obj';
         $cellVal = '%val';
         $out = 'define internal void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
@@ -2831,6 +2836,7 @@ trait EmitLlvmObjects
         $this->lastValue = $oldLast;
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
         return $sym;
     }
 
@@ -3279,9 +3285,11 @@ trait EmitLlvmObjects
         $oldVdArm = $this->vdArmList;
         $oldVdArgc = $this->vdSiteArgc;
         $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldCellProv = $this->cellProv;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
+        $this->resetCellGuardFrame();
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -3355,6 +3363,7 @@ trait EmitLlvmObjects
             $this->vdArmList = $oldVdArm;
             $this->vdSiteArgc = $oldVdArgc;
             $this->rt->needsBacktrace = $oldNeedsBacktrace;
+            $this->cellProv = $oldCellProv;
             return $sym;
         }
         $fallbackFull = $this->lsbTarget($fallback, $method, '');
@@ -3401,6 +3410,7 @@ trait EmitLlvmObjects
         $this->vdArmList = $oldVdArm;
         $this->vdSiteArgc = $oldVdArgc;
         $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->cellProv = $oldCellProv;
         return $sym;
     }
 
@@ -3432,9 +3442,11 @@ trait EmitLlvmObjects
         $oldVdArgc = $this->vdSiteArgc;
         $oldAbiDisabled = $this->dynamicMethodAbiDisabled;
         $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldCellProv = $this->cellProv;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
+        $this->resetCellGuardFrame();
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -3489,6 +3501,7 @@ trait EmitLlvmObjects
         $this->vdSiteArgc = $oldVdArgc;
         $this->dynamicMethodAbiDisabled = $oldAbiDisabled;
         $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->cellProv = $oldCellProv;
         return $sym;
     }
 

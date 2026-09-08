@@ -2020,6 +2020,7 @@ trait EmitLlvmExpr
             $out = '  ' . $r . ' = call i64 @__manticore_box_float(double ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
+            $this->markCellBoxed($this->lastValue);
             return $out;
         }
         if ($this->lastValueType === 'ptr') {
@@ -2027,6 +2028,7 @@ trait EmitLlvmExpr
             $out = '  ' . $r . ' = call i64 @__manticore_box_ptr(ptr ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
+            $this->markCellBoxed($this->lastValue);
             return $out;
         }
         $out = $this->coerceToI64();
@@ -2034,6 +2036,7 @@ trait EmitLlvmExpr
         $out .= '  ' . $r . ' = call i64 @__manticore_box_int(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        $this->markCellBoxed($this->lastValue);
         return $out;
     }
 

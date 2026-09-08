@@ -129,6 +129,7 @@ final class EmitLlvm implements EmitVisitor
     use EmitLlvmExceptions;
     use EmitLlvmObjects;
     use EmitLlvmFiber;
+    use EmitLlvmCellGuard;
 
     public function name(): string { return 'emit-llvm'; }
 
@@ -591,6 +592,7 @@ final class EmitLlvm implements EmitVisitor
         $this->gen = new GeneratorContext();
         $this->cf = new ControlFlow();
         $this->frame = new FunctionEmitFrame();
+        $this->resetCellGuardFrame();
         $this->sigs = new FunctionSignatures();
         $this->arena = new ArenaContext();
         $this->locals = new LocalSlots();

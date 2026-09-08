@@ -570,7 +570,9 @@ trait EmitLlvmBuiltins
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($t->kind === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
         return $this->boxToCell($t);
@@ -608,7 +610,9 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_box_unknown')
               . '(i64 ' . $v . ")\n";
-        return $this->finishI64($out, $r);
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /** The one shared body {@see boxUnknownShallowIr} calls. */
@@ -799,23 +803,33 @@ trait EmitLlvmBuiltins
         $k = $t->kind;
         $srcFlavor = $src !== null ? $this->cellifySourceFlavor($src) : '';
         // Already a tagged cell — don't double-box.
-        if ($k === Type::KIND_CELL) { return $this->coerceToI64(); }
+        if ($k === Type::KIND_CELL) {
+            $ret = $this->coerceToI64();
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
+        }
         if ($k === Type::KIND_FLOAT) {
             $out = $this->coerceTo('double');
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_float(double ' . $this->lastValue . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($k === Type::KIND_STRING) {
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_ptr(ptr ' . $this->lastValue . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($k === Type::KIND_NULL) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . " = call i64 @__manticore_box_null()\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($t->isVec()) {
             $elem = $t->element;
@@ -824,12 +838,16 @@ trait EmitLlvmBuiltins
             // recursive consumers (var_dump / json_encode) see tagged cells.
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
-                return $this->emitVecToCellArray($elem, $srcFlavor);
+                $ret = $this->emitVecToCellArray($elem, $srcFlavor);
+                $this->markCellBoxed($this->lastValue);
+                return $ret;
             }
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($t->isAssoc()) {
             $elem = $t->element;
@@ -841,12 +859,16 @@ trait EmitLlvmBuiltins
             // (mirrors the vec branch above).
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
-                return $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
+                $ret = $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
+                $this->markCellBoxed($this->lastValue);
+                return $ret;
             }
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($this->isEnumType($t)) {
             // An enum case is an ORDINAL — box the per-case SINGLETON (carrying
@@ -857,7 +879,9 @@ trait EmitLlvmBuiltins
             $out .= $this->emitEnumSingletonPtr((string)$t->class, $this->lastValue, $pp);
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION) {
             // A union arm is a bare object pointer (all-object union) — box it as
@@ -866,7 +890,9 @@ trait EmitLlvmBuiltins
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";
-            return $this->finishI64($out, $r);
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         // An ERASED word is NOT an int. box_int's 48-bit fit test fails on an
         // already-tagged one, so it took the HEAP arm — malloc(8), store the
@@ -876,12 +902,18 @@ trait EmitLlvmBuiltins
         // instead: an already-boxed word passes through, a raw container is
         // identified from its allocator magic, and anything else is left exactly
         // as it was, which is what the whole erased path does today.
-        if ($k === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
+        if ($k === Type::KIND_UNKNOWN) {
+            $ret = $this->boxUnknownShallowIr();
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
+        }
         $helper = ($k === Type::KIND_BOOL) ? '__manticore_box_bool' : '__manticore_box_int';
         $out = $this->coerceToI64();
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $helper . '(i64 ' . $this->lastValue . ")\n";
-        return $this->finishI64($out, $r);
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /**
@@ -1105,7 +1137,9 @@ trait EmitLlvmBuiltins
      */
     private function emitCellifyArrayRaw(Type $elem, string $srcFlavor = ''): string
     {
-        return $this->emitAssocToCellArrayUnified($elem, true, $srcFlavor);
+        $ret = $this->emitAssocToCellArrayUnified($elem, true, $srcFlavor);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /**
@@ -2582,6 +2616,11 @@ trait EmitLlvmBuiltins
         if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) {
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
+            // KIND_CELL is statically known already-boxed — still boxed.
+            // KIND_UNKNOWN is an erased word merely ASSUMED cell here; leave
+            // it unmarked (raw) — that assumption is exactly what cellguard
+            // exists to check, not to launder.
+            if ($ek === Type::KIND_CELL) { $this->markCellBoxed($this->lastValue); }
             return '';
         }
         // An enum case is an ORDINAL, not an object cell — pass it through raw
@@ -2633,6 +2672,7 @@ trait EmitLlvmBuiltins
         }
         $this->lastValue = $boxed;
         $this->lastValueType = 'i64';
+        $this->markCellBoxed($this->lastValue);
         return $out;
     }
 

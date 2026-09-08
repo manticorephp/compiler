@@ -850,6 +850,7 @@ trait EmitLlvmModule
         // SSA regs restart here, so a leftover reg key would name a DIFFERENT
         // value in this function ({@see EmitLlvm::$ptrArgCellByReg}).
         $this->clearPtrArgCells();
+        $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;

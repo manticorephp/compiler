@@ -793,9 +793,11 @@ trait EmitLlvmCalls
         $oldLast = $this->lastValue;
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
+        $this->resetCellGuardFrame();
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -834,6 +836,7 @@ trait EmitLlvmCalls
         $this->lastValue = $oldLast;
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
 
         if (!$closed) {
             unset($this->dynfThunks[$key]);
@@ -1001,9 +1004,11 @@ trait EmitLlvmCalls
         $oldLast = $this->lastValue;
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
+        $this->resetCellGuardFrame();
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -1034,6 +1039,7 @@ trait EmitLlvmCalls
         $this->lastValue = $oldLast;
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
 
         if (!$closed) {
             unset($this->dynfThunks[$key]);
