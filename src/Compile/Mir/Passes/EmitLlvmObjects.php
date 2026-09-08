@@ -3618,6 +3618,9 @@ trait EmitLlvmObjects
                           . ', ptr ' . $keyP . $argVals . ")\n";
                     $this->lastValue = $r;
                     $this->lastValueType = 'i64';
+                    if ($iv->type->kind === Type::KIND_CELL) {
+                        $this->markCellOpaque($this->lastValue);
+                    }
                     return $out;
                 }
             }
@@ -3654,6 +3657,9 @@ trait EmitLlvmObjects
             $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
             $this->lastValue = $loaded;
             $this->lastValueType = 'i64';
+            if ($iv->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
             return $out;
         }
         // A trailing spread can use the compiler-owned uniform ABI when the
@@ -3814,6 +3820,9 @@ trait EmitLlvmObjects
                 $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
                 $this->lastValue = $loaded;
                 $this->lastValueType = 'i64';
+                if ($iv->type->kind === Type::KIND_CELL) {
+                    $this->markCellOpaque($this->lastValue);
+                }
                 return $out;
             }
         }
@@ -3974,6 +3983,9 @@ trait EmitLlvmObjects
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
+        if ($iv->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 
@@ -5341,6 +5353,9 @@ trait EmitLlvmObjects
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
         }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 
@@ -5971,7 +5986,17 @@ trait EmitLlvmObjects
         // current()/send()/throw() as the generator's element, so `$mc->type` IS
         // that channel — and for a cell/erased one the unbox is a no-op, which
         // leaves the self-describing cell the runtime classifiers want.
-        if ($m === 'current') { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 16); $out .= $this->unboxCellToType($mc->type); $out .= $this->coerceToI64(); return $this->finishI64($out, $this->lastValue); }
+        if ($m === 'current') {
+            $out .= $this->genPrimeIfFresh($g);
+            $out .= $this->genFieldLoad($g, 16);
+            $out .= $this->unboxCellToType($mc->type);
+            $out .= $this->coerceToI64();
+            $out = $this->finishI64($out, $this->lastValue);
+            if ($mc->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
+            return $out;
+        }
         if ($m === 'key')     { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 24); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
@@ -5990,7 +6015,11 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
-            return $this->finishI64($out, $this->lastValue);
+            $out = $this->finishI64($out, $this->lastValue);
+            if ($mc->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
+            return $out;
         }
         if ($m === 'throw') {
             // Inject `$e` at the suspended yield: prime a fresh generator (so
@@ -6007,7 +6036,11 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
-            return $this->finishI64($out, $this->lastValue);
+            $out = $this->finishI64($out, $this->lastValue);
+            if ($mc->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
+            return $out;
         }
         if ($m === 'valid') {
             $out .= $this->genPrimeIfFresh($g);
@@ -6237,6 +6270,9 @@ trait EmitLlvmObjects
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
             if ($this->isCellScalarParam($n->type)) { $out .= $this->unboxCellToType($n->type); }
+            if ($n->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
             return $out;
         }
         // Method overloading: an unresolved instance method on a class that
@@ -6742,6 +6778,9 @@ trait EmitLlvmObjects
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
             $this->lastValue = $regF;
             $this->lastValueType = 'double';
+        }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
         }
         return $out;
     }

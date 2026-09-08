@@ -760,6 +760,9 @@ trait EmitLlvmCalls
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
+        if ($iv->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 
@@ -1218,6 +1221,9 @@ trait EmitLlvmCalls
         if ($this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         return $out;
     }
 
@@ -1440,7 +1446,12 @@ trait EmitLlvmCalls
         $refRet = $known ? (bool)($this->sigs->returnsByRef[$fn] ?? false) : false;
         $dynRef = !$known && $fpReg !== '' && $this->anyClosureReturnsByRef();
         if ($refRet) {
-            if ($this->rawRefCall) { return $out; }
+            if ($this->rawRefCall) {
+                if ($n->type->kind === Type::KIND_CELL) {
+                    $this->markCellOpaque($this->lastValue);
+                }
+                return $out;
+            }
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $reg . " to ptr\n";
             $d = $this->ssa->allocReg();
@@ -1449,6 +1460,9 @@ trait EmitLlvmCalls
             $out .= $this->byRefValueCopyRetainIr($d);
             $this->lastValue = $d;
             $this->lastValueType = 'i64';
+            if ($n->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
             return $out;
         }
         if ($dynRef) {
@@ -1469,6 +1483,9 @@ trait EmitLlvmCalls
                       . ', i64 ' . $spI . "\n";
                 $this->lastValue = $sel;
                 $this->lastValueType = 'i64';
+                if ($n->type->kind === Type::KIND_CELL) {
+                    $this->markCellOpaque($this->lastValue);
+                }
                 return $out;
             }
             // Value context: only the by-ref arm may dereference — the other
@@ -1516,6 +1533,9 @@ trait EmitLlvmCalls
                 $this->lastValue = $rf;
                 $this->lastValueType = 'double';
             }
+            if ($n->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
             return $out;
         }
         // The closure returned a scalar as a tagged cell (uniform ABI). Unbox
@@ -1524,6 +1544,9 @@ trait EmitLlvmCalls
         // stays boxed. A non-scalar (array/obj) result rode raw → no unbox.
         if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
+        }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
         }
         return $out;
     }
@@ -2142,6 +2165,9 @@ trait EmitLlvmCalls
         $this->lastValueType = 'i64';
         if ($this->isCellScalarParam($retType)) {
             $out .= $this->unboxCellToType($retType);
+        }
+        if ($retType->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
         }
         return $out;
     }
