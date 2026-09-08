@@ -367,12 +367,38 @@ trait EmitLlvmLocals
         return $out;
     }
 
+    /**
+     * Is this global-backed slot the `$GLOBALS['x']` VIEW of a top-level variable?
+     *
+     * Three different things live in `globalBacked`: a superglobal, a STATIC
+     * local, and a top-level variable that `$GLOBALS` also names. Only the last
+     * one has a second reader that decodes the slot as a cell, so only it may be
+     * boxed — boxing a static local instead broke `static $stdout` holding a
+     * resource, which is neither a superglobal nor a $GLOBALS name.
+     */
+    private function isGlobalsViewName(string $name): bool
+    {
+        if ($this->isSuperglobalName($name)) { return false; }
+        foreach ($this->globalVarNames as $g) {
+            if ($g === $name) { return true; }
+        }
+        return false;
+    }
+
     private function emitLoadLocal(LoadLocal $n): string
     {
         $ll = $n;
         if (isset($this->locals->globalBacked[$ll->name])) {
             $reg = $this->ssa->allocReg();
             $out = '  ' . $reg . ' = load i64, ptr ' . $this->locals->globalBacked[$ll->name] . "\n";
+            // The mirror of the box in emitStoreLocal: the slot is the
+            // `$GLOBALS['x']` view's cell, so decode it by THIS local's type.
+            if ($this->isGlobalsViewName($ll->name) && $this->isCellBoxableArg($ll->type)) {
+                $this->lastValue = $reg;
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType($ll->type);
+                return $out;
+            }
             if ($ll->type->kind === Type::KIND_FLOAT) {
                 $regF = $this->ssa->allocReg();
                 $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -783,6 +809,18 @@ trait EmitLlvmLocals
                 : $this->rcRetainByType($v, $aliasV, $fallback, 0);
             $this->lastValue = $aliasV;
             $this->lastValueType = 'i64';
+        }
+        // A global cell is ALSO the `$GLOBALS['x']` view, which reads it as a
+        // self-describing cell — so this store has to box, exactly as the
+        // static-prop store does for a `mixed` slot. One slot, one
+        // representation: with the two views disagreeing, `$counter = 7` written
+        // here and read through `$GLOBALS['counter']` (or the reverse) answered
+        // the double with those bits. Arrays/objects/closures ride RAW on both
+        // sides ({@see isCellBoxableArg}), so they stay consistent too.
+        if (isset($this->locals->globalBacked[$sl->name])
+            && $this->isGlobalsViewName($sl->name)
+            && $this->isCellBoxableArg($sl->value->type)) {
+            $out .= $this->boxToCell($sl->value->type, $sl->value);
         }
         $val = $this->lastValue;
         // Coerce float values back into the slot's i64 cell with a

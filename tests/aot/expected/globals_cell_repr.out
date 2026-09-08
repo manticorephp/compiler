@@ -1,0 +1,14 @@
+integer:7
+string:'text'
+double:1.25
+boolean:true
+NULL:NULL
+15
+text!
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string:'now a string'
+8 9 9
+42 42

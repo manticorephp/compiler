@@ -166,7 +166,12 @@ trait LowerSuperglobals
     {
         $cell = $this->globalsCell($target);
         if ($cell === null) { return null; }
-        return new StoreStaticProp_($cell, $value, $value->type);
+        // DECLARED cell, because the READ side is: `lowerGlobalsRead` hands back
+        // `StaticProp_($cell, Type::cell())`, so the slot is a self-describing
+        // channel and the store has to NaN-box. Without the declared type the
+        // emitter stored the raw word and every reader decoded it as the double
+        // with those bits — `$GLOBALS['g'] = 7` came back as 3.5E-323.
+        return new StoreStaticProp_($cell, $value, $value->type, Type::cell());
     }
 
     /** Is `$expr` the bare `$GLOBALS` variable (not a `$GLOBALS[…]` access)? */

@@ -114,6 +114,11 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 | `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
 
+An ARRAY in a `$GLOBALS['x']` slot still reads back as a float: the slot is a cell channel
+and arrays ride RAW in one by design (boxing would rebuild the array and change its identity),
+so the two halves disagree for that carrier alone — scalars, strings, bools and null are
+consistent across the `global $x` / top-level / `$GLOBALS` views since `globals_cell_repr`.
+
 `(object)[10, 20]` keeps the vec shape where php makes a stdClass with the numeric-STRING
 properties `"0"`/`"1"` (`{"0":10,"1":20}` vs `[10,20]`) — the cast would have to rebuild a vec
 as a string-keyed assoc; `tests/aot/cases/object_cast_bag_repr.php` names it.
