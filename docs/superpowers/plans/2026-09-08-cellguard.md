@@ -208,23 +208,18 @@ In `EmitLlvmCalls.php`, where the emitter assigns the call's result register to 
 
 Use whatever local already holds the callee's return `Type` at that point; do not re-resolve the signature.
 
-- [ ] **Step 3: Mark a phi of non-RAW inputs as OPAQUE**
+- [x] **Step 3: RULED OUT — this codebase has no cell-carrying phi**
 
-A loop-carried cell local reaches its sink through a phi. If the phi result stays
-RAW, every such loop reports a violation that is not one, and the census drowns.
+Investigated and withdrawn. The emitter writes 70 `phi` instructions, but every one of them
+is inside a hand-written IR template in a builtin or runtime body, with fixed register names,
+producing a raw scalar (a `strpos` index, a loop counter, a comparison result). None merges a
+`cell`-typed user value.
 
-Where the emitter writes a `phi i64` and assigns the result to `$this->lastValue`:
-
-```php
-        $anyRaw = false;
-        foreach ($incomingRegs as $inc) {
-            if ($this->cellProvenance($inc) === 'raw') { $anyRaw = true; break; }
-        }
-        if (!$anyRaw) { $this->markCellOpaque($this->lastValue); }
-```
-
-Use the list of incoming registers the phi was built from. A phi with a genuinely
-RAW input stays RAW — that is a real violation reaching a merge point.
+User-level merges — a ternary, a null-coalesce, a loop-carried local — do not go through a phi
+at all: the emitter stores to an alloca and reloads, and `Compile\Mir\HoistAllocas` plus LLVM's
+own mem2reg promote them afterwards. So a loop-carried cell is already covered by Step 1's
+`emitLoadLocal` marking, and marking a builtin's raw phi result `opaque` would be wrong — it
+would hide a genuinely raw value behind the "not checkable" bucket.
 - [ ] **Step 4: Probe that a cell round-trip is OPAQUE, not RAW**
 
 ```bash
