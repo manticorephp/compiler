@@ -79,6 +79,36 @@ Scoped rounds cost 0.55 s against 1.6 s full, and the fixpoint runs 6–7 of the
 where the front end is minutes rather than seconds. That is the whole prize; it does not touch
 emission, the object cache, or IR volume.
 
+## PHASE 1 RESULT (2026-09-08): the hypothesis above is WRONG
+
+The harness exists — `MANTICORE_INFER_DIFF=1`, in `NarrowReturns`: after each SCOPED inference it
+runs a FULL one and reports every function whose observable-type fingerprint the full pass still
+moved. On the compiler's own module: **129 functions after round 1**, then 8, then
+(post-Monomorphize) 54 / 5 / 1 / 2. That is the number this epic never had.
+
+The bisect handle exists too — `MANTICORE_INFER_RESET_LOCALS=all|<map>,…` clears the named
+bare-local-name maps at the start of every function — and it says the hypothesis is wrong:
+
+- with `all` (19 maps, the reset branch verified live at **160 410 hits**), the divergence is
+  **129 / 8 / 54 / 5 / 1 / 2 — identical, digit for digit**;
+- and the emitted module is **byte-identical** (`sha1 92a44583…` both ways).
+
+So those ~18 maps are re-derived per function before anything reads them: stale entries are
+inert, they are NOT what makes a scoped pass differ, and **option B would have been a 120-site
+rewrite for exactly zero**. Phase 1 cost one afternoon and bought that.
+
+What the harness says instead: every missed function reports `(BODY only) in-scope=n` — its
+RETURN type is unchanged, only its internal types moved, and it was **outside the scope**. The
+scope holds 3206 of 4877 functions, so 1671 are outside and 129 of those move.
+`ArgCount::verify` is typical: no barrier construct (a plain property store, and a static call
+that lowers to a direct `Call`), so it is not an escaper, and nothing it calls changed its return.
+
+**Next hypothesis, for whoever picks this up:** the miss is a one-round LAG rather than
+unsoundness — a property retyped by this round's scans is only visible to the NEXT round's scope,
+so the fixpoint converges a round later and `narrowFunction` gives up before it gets there. Test
+it by feeding the current round's `changes->props` into its OWN scope before inferring, and watch
+the 129 rather than reasoning about it.
+
 ## Acceptance, for whatever gets built
 
 1. `MANTICORE_INFER_DIFF=1` (the harness) reports zero divergent functions on the compiler's own

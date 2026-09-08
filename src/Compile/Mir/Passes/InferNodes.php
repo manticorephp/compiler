@@ -185,6 +185,31 @@ trait InferNodes
         // Only `__main` binds a `global $x` name implicitly (no decl node) — a
         // same-named local in any other scope is an ordinary local.
         $this->inMainBody = $fn->name === '__main';
+        // The bisect handle — see Debug::$inferResetLocals.
+        if (\Compile\Debug::$inferResetLocals !== []) {
+            $rl = \Compile\Debug::$inferResetLocals;
+            \Compile\Stats::bump("infer.reset_locals_hits", 1);
+            $all = isset($rl['all']);
+            if ($all || isset($rl['assocLocals'])) { $this->assocLocals = []; }
+            if ($all || isset($rl['incStrLocals'])) { $this->incStrLocals = []; }
+            if ($all || isset($rl['cellKeyLocals'])) { $this->cellKeyLocals = []; }
+            if ($all || isset($rl['intKeyLocals'])) { $this->intKeyLocals = []; }
+            if ($all || isset($rl['strLitKeyLocals'])) { $this->strLitKeyLocals = []; }
+            if ($all || isset($rl['cellElemLocals'])) { $this->cellElemLocals = []; }
+            if ($all || isset($rl['emptyArrValLocals'])) { $this->emptyArrValLocals = []; }
+            if ($all || isset($rl['nestedScalarStoreLocals'])) { $this->nestedScalarStoreLocals = []; }
+            if ($all || isset($rl['nestedCellVecLocals'])) { $this->nestedCellVecLocals = []; }
+            if ($all || isset($rl['recordLitLocals'])) { $this->recordLitLocals = []; }
+            if ($all || isset($rl['recordDisqualified'])) { $this->recordDisqualified = []; }
+            if ($all || isset($rl['recordLocals'])) { $this->recordLocals = []; }
+            if ($all || isset($rl['floatLocals'])) { $this->floatLocals = []; }
+            if ($all || isset($rl['cellMergeLocals'])) { $this->cellMergeLocals = []; }
+            if ($all || isset($rl['keyUsedLocals'])) { $this->keyUsedLocals = []; }
+            if ($all || isset($rl['arithUsedLocals'])) { $this->arithUsedLocals = []; }
+            if ($all || isset($rl['cellCaptureLocals'])) { $this->cellCaptureLocals = []; }
+            if ($all || isset($rl['localBuiltArrays'])) { $this->localBuiltArrays = []; }
+            if ($all || isset($rl['refPinnedLocals'])) { $this->refPinnedLocals = []; }
+        }
         $this->localTypes = [];
         $this->kindAliasOf = [];
         $this->currentParamTypes = [];

@@ -137,6 +137,22 @@ final class InferTypes implements Pass
      * the few short tags into an accumulator holds the same information for the
      * purpose it serves — "did this move?" — in 8 bytes and no allocation.
      */
+    /**
+     * Every function's observable-type fingerprint — the harness's ruler.
+     *
+     * {@see \Compile\Mir\Passes\NarrowReturns} uses it under
+     * `MANTICORE_INFER_DIFF=1` to ask the only question that matters for scoped
+     * inference: after a SCOPED pass, does a FULL pass still move anything? Each
+     * name it prints is a function the scope failed to bring up to date.
+     * @return array<string, int>
+     */
+    public function fingerprintAll(Module $module): array
+    {
+        $out = [];
+        foreach ($module->functions as $fn) { $out[$fn->name] = $this->typeFingerprint($fn); }
+        return $out;
+    }
+
     private function typeFingerprint(FunctionDef $fn): int
     {
         $acc = $this->typeCode($fn->returnType);

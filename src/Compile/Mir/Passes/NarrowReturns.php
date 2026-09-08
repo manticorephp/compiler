@@ -84,13 +84,9 @@ final class NarrowReturns implements Pass
         }
         // Bounded fixpoint: each productive sweep narrows >=1 function,
         // which is monotonic, so the function count caps the iterations.
-        $escapers = $this->analysis !== null ? $this->analysis->barriers->escapers() : [];
         $iters = 0;
         $closing = false;
         $sawFull = false;
-        $lastFull = false;
-        /** @var array<string, bool> */
-        $lastScope = [];
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
@@ -105,13 +101,6 @@ final class NarrowReturns implements Pass
                     // A function that narrows only AFTER a full inference is one the
                     // dependency model failed to invalidate — name it, that is the
                     // bug report the scope cannot produce for itself.
-                    // Only meaningful when the previous inference was SCOPED: after a
-                    // full one every narrowing trivially looks "missed".
-                    if ($lastFull && $lastScope !== [] && !isset($lastScope[$fn->name])) {
-                        \Compile\Stats::line('  narrow: MISSED BY SCOPE ' . $fn->name
-                            . ' escaper=' . (isset($escapers[$fn->name]) ? 'y' : 'n')
-                            . ' known=' . (isset($this->analysis->typeFp[$fn->name]) ? 'y' : 'n'));
-                    }
                     if ($this->analysis !== null) { $this->analysis->changes->addReturn($fn->name); }
                 }
             }
@@ -153,15 +142,54 @@ final class NarrowReturns implements Pass
             $scope = ($this->targetedInfer && $this->analysis !== null && !$closing)
                 ? $this->analysis->scope() : null;
             $closing = false;
-            $lastFull = $scope === null;
-            $lastScope = [];
-            if ($scope !== null) { foreach ($scope->functions as $sn) { $lastScope[$sn] = true; } }
             // The scope for THIS round has been read; from here the set is the
             // next round's worklist, so it starts empty and collects what this
             // inference moves.
             if ($this->analysis !== null) { $this->analysis->beginRound(); }
             $infer = new InferTypes($scope, $this->analysis);
             $infer->run($module);
+            // THE HARNESS. `MANTICORE_INFER_DIFF=1` asks the one question three
+            // rounds of theory could not answer: after the SCOPED pass, does a
+            // FULL pass still move anything? Every name it prints is a function
+            // the scope failed to bring up to date — the bisect list. The full
+            // pass also leaves the module correctly typed, so the mode is safe to
+            // run on any build; it only costs a second inference per round.
+            if ($scope !== null && \getenv('MANTICORE_INFER_DIFF') === '1') {
+                $inScope = [];
+                foreach ($scope->functions as $sn) { $inScope[$sn] = true; }
+                \Compile\Stats::line("  infer-diff: scope holds " . (string)\count($inScope) . " fn(s)");
+                $before = $infer->fingerprintAll($module);
+                $retBefore = [];
+                foreach ($module->functions as $bf) {
+                    $rt = $bf->returnType;
+                    $retBefore[$bf->name] = $rt->kind . '/'
+                        . ($rt->element === null ? '-' : $rt->element->kind);
+                }
+                $check = new InferTypes(null, null);
+                $check->run($module);
+                $after = $check->fingerprintAll($module);
+                $moved = 0;
+                foreach ($after as $name => $fp) {
+                    if (($before[$name] ?? 0) === $fp) { continue; }
+                    $moved = $moved + 1;
+                    if ($moved <= 12) {
+                        $rt2 = '?';
+                        foreach ($module->functions as $af) {
+                            if ($af->name !== $name) { continue; }
+                            $rt2 = $af->returnType->kind . '/'
+                                . ($af->returnType->element === null ? '-' : $af->returnType->element->kind);
+                            break;
+                        }
+                        $rt1 = $retBefore[$name] ?? '?';
+                        \Compile\Stats::line('  infer-diff: SCOPE MISSED ' . $name
+                            . '  ret ' . $rt1 . ' -> ' . $rt2
+                            . ($rt1 === $rt2 ? '  (BODY only)' : '')
+                            . '  in-scope=' . (isset($inScope[$name]) ? 'y' : 'n'));
+                    }
+                }
+                \Compile\Stats::line('  infer-diff: round ' . (string)$iters . ' — '
+                    . (string)$moved . ' function(s) a FULL pass still moved');
+            }
             \Compile\Stats::step('  narrow InferTypes round ' . (string)$iters,
                 $inferT, \count($module->functions), -1);
         }

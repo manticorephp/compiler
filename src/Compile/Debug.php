@@ -90,6 +90,19 @@ final class Debug
     public static bool $rootTrace = false;
 
     /**
+     * `MANTICORE_INFER_RESET_LOCALS=<all|map1,map2,…>` — clear the named
+     * bare-local-name inference maps at the start of each function.
+     *
+     * The bisect handle for {@see docs/design/inference-scoping-decision.md}: ~18
+     * of InferTypes's maps are keyed by a LOCAL NAME and never reset, which makes
+     * the per-function loop order-dependent and a scoped pass unable to agree
+     * with a full one. This says which of them actually matter, one at a time,
+     * measured by MANTICORE_INFER_DIFF rather than argued.
+     * @var array<string, bool>
+     */
+    public static array $inferResetLocals = [];
+
+    /**
      * Bound pure emitter memoization tables at batch boundaries. These tables
      * are performance caches; clearing them changes no emitted semantics.
      */
@@ -593,6 +606,13 @@ final class Debug
         $env = \getenv('MANTICORE_ALLOC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$allocTrace = true;
+        }
+        $env = \getenv('MANTICORE_INFER_RESET_LOCALS');
+        if ($env !== false && $env !== '') {
+            foreach (\explode(',', $env) as $nm) {
+                $nm = \trim($nm);
+                if ($nm !== '') { self::$inferResetLocals[$nm] = true; }
+            }
         }
         $env = \getenv('MANTICORE_ROOT_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') {
