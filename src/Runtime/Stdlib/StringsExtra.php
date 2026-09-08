@@ -697,3 +697,98 @@ function version_compare(string $version1, string $version2, ?string $operator =
     if ($operator === "!=" || $operator === "ne" || $operator === "<>") { return $r !== 0; }
     return null;
 }
+
+/**
+ * `count_chars($s, $mode)` — byte frequencies. php's five modes:
+ *   0 every byte 0-255 => count · 1 only those that occur · 2 only those that do
+ *   not · 3 a STRING of the bytes that occur · 4 a string of those that do not.
+ *
+ * @return array<int, int>|string
+ */
+function count_chars(string $string, int $mode = 0): array|string
+{
+    $counts = [];
+    for ($i = 0; $i < 256; $i = $i + 1) { $counts[$i] = 0; }
+    $len = \strlen($string);
+    for ($i = 0; $i < $len; $i = $i + 1) {
+        $b = \ord($string[$i]);
+        $counts[$b] = $counts[$b] + 1;
+    }
+    if ($mode === 0) { return $counts; }
+    if ($mode === 1 || $mode === 2) {
+        $out = [];
+        for ($i = 0; $i < 256; $i = $i + 1) {
+            $hit = $counts[$i] > 0;
+            if ($mode === 1 ? $hit : !$hit) { $out[$i] = $counts[$i]; }
+        }
+        return $out;
+    }
+    if ($mode === 3 || $mode === 4) {
+        $out = '';
+        for ($i = 0; $i < 256; $i = $i + 1) {
+            $hit = $counts[$i] > 0;
+            if ($mode === 3 ? $hit : !$hit) { $out = $out . \chr($i); }
+        }
+        return $out;
+    }
+    throw new \ValueError('count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)');
+}
+
+/**
+ * `strtok()` — php's stateful tokenizer, both forms. The two-argument call sets
+ * the string and takes the first token; the one-argument call continues from
+ * where the last one stopped. That cursor is the whole reason this cannot be a
+ * pure function: php keeps it per-process, and so does this.
+ */
+function strtok(string $a, ?string $b = null): string|false
+{
+    static $buf = '';
+    static $pos = 0;
+    $token = $b;
+    if ($b === null) {
+        $token = $a;
+    } else {
+        $buf = $a;
+        $pos = 0;
+    }
+    $len = \strlen($buf);
+    // Skip leading delimiters, then take everything up to the next one.
+    while ($pos < $len && \strpos($token, $buf[$pos]) !== false) { $pos = $pos + 1; }
+    if ($pos >= $len) { return false; }
+    $start = $pos;
+    while ($pos < $len && \strpos($token, $buf[$pos]) === false) { $pos = $pos + 1; }
+    $out = \substr($buf, $start, $pos - $start);
+    if ($pos < $len) { $pos = $pos + 1; }
+
+    return $out;
+}
+
+/**
+ * `utf8_decode()` — UTF-8 to ISO-8859-1, php's deprecated-but-present shape: a
+ * code point above U+00FF, and every malformed sequence, becomes `?`.
+ */
+function utf8_decode(string $string): string
+{
+    $out = '';
+    $len = \strlen($string);
+    $i = 0;
+    while ($i < $len) {
+        $c = \ord($string[$i]);
+        if ($c < 0x80) { $out = $out . $string[$i]; $i = $i + 1; continue; }
+        if ($c >= 0xC0 && $c < 0xE0 && $i + 1 < $len) {
+            $c2 = \ord($string[$i + 1]);
+            $cp = (($c & 0x1F) << 6) | ($c2 & 0x3F);
+            $out = $out . ($cp <= 0xFF ? \chr($cp) : '?');
+            $i = $i + 2;
+            continue;
+        }
+        // Three- and four-byte sequences are all above U+00FF, and anything else
+        // is malformed; php answers '?' for both.
+        if ($c >= 0xE0 && $c < 0xF0) { $out = $out . '?'; $i = $i + 3; continue; }
+        if ($c >= 0xF0) { $out = $out . '?'; $i = $i + 4; continue; }
+        $out = $out . '?';
+        $i = $i + 1;
+    }
+
+    return $out;
+}

@@ -1,0 +1,37 @@
+array(4) {
+  [101]=>
+  int(1)
+  [104]=>
+  int(1)
+  [108]=>
+  int(2)
+  [111]=>
+  int(1)
+}
+string(2) "ab"
+array(0) {
+}
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+string(1) "a"
+string(1) "b"
+string(1) "c"
+bool(false)
+string(4) "lead"
+int(0)
+int(0)
+bool(true)
+bool(false)
+int(13)
+int(14)
+int(23)
+array(2) {
+  ["Middle"]=>
+  string(6) "Middle"
+  ["Base"]=>
+  string(4) "Base"
+}
+array(0) {
+}

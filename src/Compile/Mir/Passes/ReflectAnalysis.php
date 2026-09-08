@@ -133,7 +133,7 @@ final class ReflectAnalysis
             // escape every program to `all`). The user's CALL is the demand: the
             // answer is the runtime class's interface list, so every class needs
             // metadata. Without this the call compiled to an empty array.
-            if ($fname === 'class_implements') {
+            if ($fname === 'class_implements' || $fname === 'class_parents') {
                 $this->all = true;
             }
             // `class_alias($orig, $alias)` resolves $orig THROUGH THE REGISTRY at

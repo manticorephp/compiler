@@ -3895,6 +3895,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // rather than failing).
         || $demand->callsAny(['get_declared_classes', 'get_declared_interfaces',
                               'get_declared_traits', 'class_implements',
+                              'class_parents',
                               'get_defined_constants']);
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
     // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely

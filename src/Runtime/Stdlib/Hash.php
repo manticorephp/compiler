@@ -223,3 +223,20 @@ function __mc_u32be(int $v): string
     return \chr(($v >> 24) & 255) . \chr(($v >> 16) & 255)
         . \chr(($v >> 8) & 255) . \chr($v & 255);
 }
+
+/**
+ * `hash_equals()` — a comparison whose duration does not depend on WHERE the
+ * strings differ. A length mismatch is php's one early exit (the lengths are not
+ * secret); past that every byte is read and folded into the same accumulator.
+ */
+function hash_equals(string $known_string, string $user_string): bool
+{
+    $len = \strlen($known_string);
+    if ($len !== \strlen($user_string)) { return false; }
+    $diff = 0;
+    for ($i = 0; $i < $len; $i = $i + 1) {
+        $diff = $diff | (\ord($known_string[$i]) ^ \ord($user_string[$i]));
+    }
+
+    return $diff === 0;
+}

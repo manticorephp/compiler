@@ -187,6 +187,29 @@ function class_implements(object|string $objectOrClass, bool $autoload = true): 
 }
 
 /**
+ * `class_parents($objectOrClass)` — every ancestor as a `name => name` map,
+ * nearest first, php's own shape. False when the class is unknown; $autoload is
+ * accepted and ignored, there being nothing to autoload in a whole-program build.
+ *
+ * @return array<string, string>|false
+ */
+function class_parents(object|string $objectOrClass, bool $autoload = true): array|false
+{
+    $name = \is_object($objectOrClass) ? \get_class($objectOrClass) : $objectOrClass;
+    if (!\class_exists($name)) { return false; }
+    $out = [];
+    $rc = new \ReflectionClass($name);
+    $p = $rc->getParentClass();
+    while ($p !== false) {
+        $pn = $p->getName();
+        $out[$pn] = $pn;
+        $p = $p->getParentClass();
+    }
+
+    return $out;
+}
+
+/**
  * Build ReflectionAttribute[] off an attribute table (`$base` = its first entry,
  * `$n` = the count), optionally filtered to `$filter`. Shared by every
  * getAttributes(). A leading `\` on the filter is not part of the name.
