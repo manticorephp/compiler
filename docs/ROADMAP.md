@@ -113,7 +113,10 @@ produces a **171.7 MB binary** from 78 972 functions / 22 212 classes and 1.129 
 32m43 (front end + emission 1023 s, clang x24 925 s, link 0.95 s), compiler peak 4.72 GiB.
 It RUNS TO COMPLETION: every tier line prints — including `tier T5: 43/58 root classes live` —
 and the process exits 0. `class_alias()` was the last thing in the way and is now implemented
-(the registry answers it). **107** undefined-function traps remain in that build
+(the registry answers it). **107** undefined-function traps remain in that build — grouped by what each actually needs in
+`docs/status/T5-TRAPS-HANDOFF-2026-09-08.md` (untracked, like every handoff): ~19 are pure PHP
+with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an FFI binding
+(zlib, gmp, openssl, sodium, GD), ~28 are a subsystem (25 x `pg_*`, dba, SAPI)
 (gmp/openssl/deepclone/image/dba/xml...), each one a runtime trap rather than a build failure.
 
 ## Tier 1 — correctness
