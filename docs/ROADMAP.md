@@ -114,6 +114,10 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 | `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
 
+`(object)[10, 20]` keeps the vec shape where php makes a stdClass with the numeric-STRING
+properties `"0"`/`"1"` (`{"0":10,"1":20}` vs `[10,20]`) — the cast would have to rebuild a vec
+as a string-keyed assoc; `tests/aot/cases/object_cast_bag_repr.php` names it.
+
 `['a'] === ['a']` compares pointers rather than contents, and `extract()` is unimplemented
 (dynamic symbol-table writes the typed frame does not model). `compact()` works.
 

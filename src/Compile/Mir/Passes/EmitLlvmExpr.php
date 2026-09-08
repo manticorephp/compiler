@@ -2672,6 +2672,23 @@ trait EmitLlvmExpr
         }
         if ($c->target === 'object') {
             // `(object)$assoc` → a stdClass whose bag is that assoc.
+            //
+            // The bag is a CELL channel: every reader — a `->prop` read, the
+            // generic object walker behind `json_encode`, `get_object_vars` —
+            // unboxes what it finds there. A concrete-element array does not
+            // hold cells, it holds raw words, so handing its buffer over as the
+            // bag published raw ints under a cell contract and every reader
+            // decoded them as the double with those bits:
+            // `json_encode((object)['k' => 2])` answered `{"k":1.0e-323}`.
+            // Cellify at the PRODUCER — the one place that still knows the
+            // element's static type — rather than teaching each reader to guess.
+            $srcT = $c->operand->type;
+            $srcElem = $srcT->element;
+            if ($srcT->isArray() && $srcElem !== null
+                && $srcElem->kind !== Type::KIND_CELL
+                && $srcElem->kind !== Type::KIND_UNKNOWN) {
+                $out .= $this->emitCellifyArrayRaw($srcElem, $this->cellifySourceFlavor($c->operand));
+            }
             $std = $this->classes['stdClass'] ?? null;
             $bagOff = $std === null ? 16 : $std->bagOffset();
             $size = $std === null ? 24 : $std->instanceSize();
