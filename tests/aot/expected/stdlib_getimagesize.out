@@ -1,0 +1,179 @@
+Array
+(
+    [0] => 10
+    [1] => 5
+    [2] => 3
+    [3] => width="10" height="5"
+    [bits] => 8
+    [mime] => image/png
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 1
+    [1] => 1
+    [2] => 3
+    [3] => width="1" height="1"
+    [bits] => 16
+    [mime] => image/png
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 10
+    [1] => 5
+    [2] => 1
+    [3] => width="10" height="5"
+    [bits] => 1
+    [channels] => 3
+    [mime] => image/gif
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 640
+    [1] => 480
+    [2] => 1
+    [3] => width="640" height="480"
+    [bits] => 8
+    [channels] => 3
+    [mime] => image/gif
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 10
+    [1] => 5
+    [2] => 2
+    [3] => width="10" height="5"
+    [bits] => 8
+    [channels] => 3
+    [mime] => image/jpeg
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 1920
+    [1] => 1080
+    [2] => 2
+    [3] => width="1920" height="1080"
+    [bits] => 8
+    [channels] => 1
+    [mime] => image/jpeg
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 10
+    [1] => 5
+    [2] => 6
+    [3] => width="10" height="5"
+    [bits] => 24
+    [mime] => image/bmp
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 32
+    [1] => 32
+    [2] => 17
+    [3] => width="32" height="32"
+    [bits] => 32
+    [mime] => image/vnd.microsoft.icon
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 48
+    [1] => 48
+    [2] => 17
+    [3] => width="48" height="48"
+    [bits] => 8
+    [mime] => image/vnd.microsoft.icon
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 256
+    [1] => 256
+    [2] => 17
+    [3] => width="256" height="256"
+    [bits] => 8
+    [mime] => image/vnd.microsoft.icon
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 10
+    [1] => 5
+    [2] => 7
+    [3] => width="10" height="5"
+    [mime] => image/tiff
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 7
+    [1] => 9
+    [2] => 8
+    [3] => width="7" height="9"
+    [mime] => image/tiff
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 10
+    [1] => 5
+    [2] => 18
+    [3] => width="10" height="5"
+    [bits] => 8
+    [mime] => image/webp
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 100
+    [1] => 200
+    [2] => 18
+    [3] => width="100" height="200"
+    [bits] => 8
+    [mime] => image/webp
+    [width_unit] => px
+    [height_unit] => px
+)
+Array
+(
+    [0] => 1000
+    [1] => 2000
+    [2] => 18
+    [3] => width="1000" height="2000"
+    [bits] => 8
+    [mime] => image/webp
+    [width_unit] => px
+    [height_unit] => px
+)
+bool(false)
+4x4 apps=APP0,APP13 app13=photoshop
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+24x42 image/png width="24" height="42"
+bool(false)
+image/webp image/vnd.microsoft.icon
+.jpeg jpeg
+bool(false)
+123 6 78 17 18
