@@ -1,0 +1,18 @@
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(3) "md5"
+bool(true)
+string(4) "sha1"
+bool(true)
+string(6) "sha224"
+bool(true)
+string(6) "sha256"
+bool(true)
+string(6) "sha384"
+bool(true)
+string(6) "sha512"
+bool(true)
+throws: TypeError
+throws: ValueError

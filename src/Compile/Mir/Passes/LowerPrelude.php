@@ -1093,6 +1093,8 @@ trait LowerPrelude
             // string padding
             'STR_PAD_RIGHT' => 1, 'STR_PAD_LEFT' => 0, 'STR_PAD_BOTH' => 2,
             // sort flags
+            // ext/hash: the only flag php defines for hash_init().
+            'HASH_HMAC' => 1,
             'SORT_REGULAR' => 0, 'SORT_NUMERIC' => 1, 'SORT_STRING' => 2,
             'SORT_DESC' => 3, 'SORT_ASC' => 4, 'SORT_LOCALE_STRING' => 5,
             'SORT_NATURAL' => 6, 'SORT_FLAG_CASE' => 8,

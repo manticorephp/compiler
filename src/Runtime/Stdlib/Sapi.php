@@ -58,3 +58,20 @@ function uniqid(string $prefix = '', bool $more_entropy = false): string
 
     return $out . \sprintf('%.8F', $frac);
 }
+
+/**
+ * `opcache_compile_file()` — there is no opcode cache in an AOT binary, and php
+ * answers exactly this way when OPcache is disabled: false, having compiled
+ * nothing. A trap here would be worse than the truth, because the caller is a
+ * warm-up script asking "can I precompile?" and false is the honest answer.
+ */
+function opcache_compile_file(string $filename): bool
+{
+    return false;
+}
+
+/** Same: nothing is cached, so nothing can be invalidated. */
+function opcache_invalidate(string $filename, bool $force = false): bool
+{
+    return false;
+}

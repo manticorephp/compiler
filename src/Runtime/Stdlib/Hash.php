@@ -240,3 +240,73 @@ function hash_equals(string $known_string, string $user_string): bool
 
     return $diff === 0;
 }
+
+/**
+ * php's opaque incremental-hash handle.
+ *
+ * php's own `HashContext` is a final, uncloneable object whose state is the
+ * running digest. This one BUFFERS instead: `hash_final` re-hashes what was fed
+ * in, through the same one-shot libcrypto path `hash()` already uses. The answer
+ * is identical for every caller; what differs is that a gigabyte streamed
+ * through `hash_update` is held rather than folded. That is the honest trade to
+ * state here — a streaming EVP context is the follow-up, and it changes only the
+ * memory profile, never a digest.
+ */
+final class HashContext
+{
+    public string $algo = '';
+    public string $buf = '';
+    public string $key = '';
+    public bool $hmac = false;
+    public bool $done = false;
+}
+
+/**
+ * `hash_init($algo, $flags, $key)` — `HASH_HMAC` (1) selects the keyed form,
+ * which `hash_hmac()` below already implements.
+ */
+function hash_init(string $algo, int $flags = 0, string $key = '', array $options = []): HashContext
+{
+    // `< 0`, not `=== 0`: md5 IS id 0 and -1 is the unknown one. Reading that
+    // check the other way rejected md5 and nothing else, which looked exactly
+    // like a cross-module arity bug for an afternoon.
+    if (__mc_algo_id($algo) < 0) {
+        throw new \ValueError('hash_init(): Argument #1 ($algo) must be a valid hashing algorithm');
+    }
+    $ctx = new HashContext();
+    $ctx->algo = $algo;
+    $ctx->hmac = ($flags & 1) !== 0;
+    if ($ctx->hmac && $key === '') {
+        throw new \ValueError('hash_init(): Argument #3 ($key) cannot be empty when HMAC is requested');
+    }
+    $ctx->key = $key;
+
+    return $ctx;
+}
+
+/** Feed more data. php returns true and throws on a finalised context. */
+function hash_update(HashContext $context, string $data): bool
+{
+    // php raises a TYPE error here, not a plain Error: a finalised context is no
+    // longer a valid HashContext, so the failure is the parameter check.
+    if ($context->done) {
+        throw new \TypeError('hash_update(): Argument #1 ($context) must be a valid, non-finalized HashContext');
+    }
+    $context->buf = $context->buf . $data;
+
+    return true;
+}
+
+/**
+ * Finalise. php's context is unusable afterwards, and so is this one — the flag
+ * is what makes a second `hash_update` fail the way php's does.
+ */
+function hash_final(HashContext $context, bool $binary = false): string
+{
+    $context->done = true;
+    if ($context->hmac) {
+        return hash_hmac($context->algo, $context->buf, $context->key, $binary);
+    }
+
+    return hash($context->algo, $context->buf, $binary);
+}
