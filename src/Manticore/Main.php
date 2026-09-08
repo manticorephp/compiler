@@ -4010,7 +4010,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // No T_* arm here on purpose: the T_* constants are compile-time folds in
     // LowerPrelude, so a program can use T_STRING with no prelude at all. Only
     // the CALLS and the class need the source.
-    $useTokenizer = $demand->callsAny(['token_get_all', 'token_name'])
+    // highlight_* live in tokenizer_api.php and CALL token_get_all, so they
+    // demand the tokenizer as surely as a direct call does. Left out, the file
+    // is not linked and highlight_string() answers a runtime trap.
+    $useTokenizer = $demand->callsAny(['token_get_all', 'token_name',
+                                       'highlight_string', 'highlight_file', 'show_source'])
         || $demand->mentions('PhpToken');
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');

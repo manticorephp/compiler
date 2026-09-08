@@ -1,0 +1,34 @@
+<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php
+</span><span style="color: #FF8000">// hi
+</span><span style="color: #0000BB">$x </span><span style="color: #007700">= </span><span style="color: #DD0000">"a" </span><span style="color: #007700">. </span><span style="color: #0000BB">1</span><span style="color: #007700">;
+function </span><span style="color: #0000BB">f</span><span style="color: #007700">() { return </span><span style="color: #0000BB">2</span><span style="color: #007700">; }
+</span><span style="color: #0000BB">?&gt;
+</span>tail
+</code></pre>
+<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php
+$s </span><span style="color: #007700">= </span><span style="color: #DD0000">"a </span><span style="color: #0000BB">$v</span><span style="color: #DD0000"> b"</span><span style="color: #007700">;
+class </span><span style="color: #0000BB">C </span><span style="color: #007700">extends </span><span style="color: #0000BB">P </span><span style="color: #007700">{ const </span><span style="color: #0000BB">K </span><span style="color: #007700">= </span><span style="color: #0000BB">1.5</span><span style="color: #007700">; }
+</span><span style="color: #0000BB">$n </span><span style="color: #007700">= </span><span style="color: #0000BB">\A\B</span><span style="color: #007700">::</span><span style="color: #0000BB">f</span><span style="color: #007700">();
+</span><span style="color: #FF8000">/** doc */
+</span></code></pre>
+<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php
+$a </span><span style="color: #007700">= </span><span style="color: #0000BB">1 </span><span style="color: #007700">&amp; </span><span style="color: #0000BB">2</span><span style="color: #007700">;
+</span><span style="color: #0000BB">$b </span><span style="color: #007700">= </span><span style="color: #DD0000">"q\"q"</span><span style="color: #007700">;
+</span><span style="color: #0000BB">?&gt;
+</span>inline &lt;b&gt;&amp;amp;&lt;/b&gt; "q" &amp; &lt;
+</code></pre>
+<pre><code style="color: #000000">lead &lt;i&gt;x&lt;/i&gt;
+<span style="color: #0000BB">&lt;?php </span><span style="color: #007700">echo </span><span style="color: #0000BB">1</span><span style="color: #007700">; </span><span style="color: #0000BB">?&gt;
+</span>trail
+</code></pre>
+<pre><code style="color: #000000">no php here at all
+</code></pre>
+<pre><code style="color: #000000"></code></pre>
+<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php $q </span><span style="color: #007700">= </span><span style="color: #0000BB">1</span><span style="color: #007700">;
+</span></code></pre>
+bool(true)
+<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php
+$z </span><span style="color: #007700">= </span><span style="color: #0000BB">3</span><span style="color: #007700">;
+</span></code></pre>
+bool(true)
+bool(false)
