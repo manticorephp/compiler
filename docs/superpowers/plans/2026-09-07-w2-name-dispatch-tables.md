@@ -215,6 +215,20 @@ the number that matters for it has not been taken yet.
 
 ⛔ Still not run: full suite, difftest, self-host fixpoint, Linux, T5.
 
+## GATE (2026-09-08, branch `nameid`, gen2 + stdlib rebuilt by the new compiler)
+
+- `tests/aot/run.sh -j 0` -> **passed 1061, failed 0, total 1063** (2 carry no expected output), 303 s.
+- `tools/difftest.sh` -> **MATCH 978 - DIFF 2 - COMPILE 0 - TIMEOUT 0**, 1046 s.
+  Both DIFFs (`error_handler_basic.php`, `trigger_deprecation_shape.php`) are **pre-existing on
+  main** - verified by compiling each with the unmodified `bin/manticore` from the main
+  checkout, and the nameid binary produces output BYTE-IDENTICAL to main for both. The
+  divergence is in the error-message shape (a duplicated notice line plus an absolute vs
+  relative path), not in dispatch.
+- The stdlib was rebuilt by the new compiler first (`build --libs-only`), so this is not a
+  new-compiler / old-stdlib hybrid.
+
+⛔ Still not run: self-host fixpoint, Linux, T5.
+
 ## Risks, named
 
 1. **A by-ref candidate silently going clean.** `anyRefParam` is the only guard; a miss writes
