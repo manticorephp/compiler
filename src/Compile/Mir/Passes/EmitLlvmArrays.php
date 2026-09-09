@@ -927,6 +927,23 @@ trait EmitLlvmArrays
             $reg = $u;
             $this->lastValue = $reg;
         }
+        // CELLGUARD: the element SLOT's own declared type says `cell` — the
+        // exact trust {@see EmitLlvmLocals::emitLoadLocal} / emitPropertyAccess
+        // / emitStaticProp already give a slot typed cell. The condition reads
+        // the ARRAY's element type (`$aa->array->type->element`), never
+        // `$self->type` and never `$aa->array->type` itself: this function is
+        // only reached for a CONCRETE base (an erased/cell base routes through
+        // {@see emitErasedIndexGet} instead, which must stay unmarked — that
+        // path is one of this epic's named suspect channels, and its own
+        // `$self->type` reads `Type::KIND_CELL` for a reason unrelated to any
+        // element type, so it cannot be reused here). Marking inserts no IR —
+        // it writes only to `$this->cellProv`, never `$out` or
+        // `$this->lastValue` — it only tells the census what inference already
+        // committed to for a value it cannot itself decode (see the ⚠ above).
+        $elemT = $aa->array->type->element;
+        if ($elemT !== null && $elemT->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
         if ($self->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
