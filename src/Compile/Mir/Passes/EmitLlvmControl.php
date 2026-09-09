@@ -1167,6 +1167,19 @@ trait EmitLlvmControl
         $valSlot = $this->locals->slots[$fe->valueVar];
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $valAddr . "\n";
+        // A REF cell element is the BOX, not the value. foreach reads through
+        // this inlined address rather than __mir_array_value_at (which derefs
+        // for every other walker), so it needs the same arm: without it
+        // `foreach ([&$d] as $v)` printed the box ADDRESS while `$e[0]` — the
+        // keyed read, one file over — was right. Guarded like the keyed read
+        // in {@see EmitLlvmArrays::emitArrayAccessUnified}, and carrying the
+        // same cross-module caveat: see docs/design/reference-cells.md.
+        if ($this->rt->needsRefCells) {
+            $this->rt->needsTagged = true;
+            $dr = $this->ssa->allocReg();
+            $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $ev . ")\n";
+            $ev = $dr;
+        }
         // ⚠ The value word is NOT decoded by the array's element hint, on any
         // channel. The hint says what the elements ARE at runtime, but every
         // STATIC type downstream still says otherwise, and the two desynchronise
