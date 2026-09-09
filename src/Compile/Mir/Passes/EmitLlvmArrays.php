@@ -940,6 +940,16 @@ trait EmitLlvmArrays
         // it writes only to `$this->cellProv`, never `$out` or
         // `$this->lastValue` — it only tells the census what inference already
         // committed to for a value it cannot itself decode (see the ⚠ above).
+        // ⚠ Placed before the float-bitcast arm below on the CURRENT invariant
+        // that a `KIND_CELL` element and a `KIND_FLOAT` result are mutually
+        // exclusive here (inferArrayAccess sets $self->type = $at->element for
+        // a concrete base, so the two conditions read the same element type
+        // and cannot both hold). Nothing enforces that exclusivity structurally
+        // — a future pass narrowing $self->type independently of $elemT would
+        // strand this mark on `$this->lastValue` BEFORE it gets replaced by
+        // the bitcast result register below, silently losing the mark. If that
+        // ever changes, mark AFTER the float arm, on whatever register is
+        // actually returned.
         $elemT = $aa->array->type->element;
         if ($elemT !== null && $elemT->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
