@@ -49,3 +49,21 @@ foreach ($f as $v) { echo strtoupper($v), ' '; }
 echo "\n";
 $s = 'zz';
 echo implode('|', $f), "\n";
+
+// in_array and json_encode: the two that reached the element through the
+// LIBRARY module and the native json fast path, not through this program.
+var_dump(in_array(7, $e));
+var_dump(in_array(99, $e));
+var_dump(array_search(11, $e));
+echo json_encode($e), "\n";
+echo json_encode(['n' => &$d, 'k' => 'v']), "\n";
+$d = 3;
+echo json_encode($e), "\n";
+echo json_encode([[&$d], 'x']), "\n";
+
+// A reference reaching a stdlib walker that was compiled with no idea a caller
+// would hand it one.
+var_dump(array_sum($e), max($e), min($e));
+$g = [&$d, 1, 2];
+sort($g);
+print_r($g);

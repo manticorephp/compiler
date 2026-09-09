@@ -31,3 +31,19 @@ int(5)
 ab|cd
 AB CD 
 zz|cd
+bool(false)
+bool(false)
+int(1)
+[5,11]
+{"n":5,"k":"v"}
+[3,11]
+[[3],"x"]
+int(14)
+int(11)
+int(3)
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)

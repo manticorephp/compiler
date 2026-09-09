@@ -634,7 +634,16 @@ final class EmitLlvm implements EmitVisitor
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;
-        $this->rt->needsRefCells = $module->hasRefCells && \Compile\Debug::$refCells;
+        // ⚠ `|| $this->emitLibrary`: a LIBRARY CANNOT KNOW ITS CALLERS. Every
+        // stdlib walker — in_array, the json encoder, sort, the array_* family —
+        // receives arrays built by USER modules, and one of those elements may
+        // hold a reference. Asking `$module->hasRefCells` is right for a program
+        // (it knows whether IT holds any) and exactly wrong for the stdlib: with
+        // it off, in_array compared the BOX ADDRESS and json_encode SIGSEGVed on
+        // a cell tagged REF, while the identical PHP compiled into a user module
+        // was correct. See docs/design/reference-cells.md.
+        $this->rt->needsRefCells = ($module->hasRefCells || $this->emitLibrary)
+            && \Compile\Debug::$refCells;
         $this->needsErrorHandlers = $module->needsErrorHandlers;
         $this->needsOb = $module->needsOb;
         $this->hasObjToStr = $module->hasObjToStr;

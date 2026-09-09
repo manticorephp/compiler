@@ -2443,8 +2443,15 @@ final class RuntimeLibrary
         };
 
         // recursive walker.
-        $out .= "\ndefine void @__mir_json_app(ptr %slotp, ptr %lp, i64 %cell) {\n";
+        $out .= "\ndefine void @__mir_json_app(ptr %slotp, ptr %lp, i64 %cellin) {\n";
         $out .= "entry:\n";
+        // A REF cell (nibble 9) has no arm below and never can have one: what
+        // json encodes is what the reference REFERS TO. Without this it fell
+        // through to the array/object arm, masked the payload to the box
+        // pointer, loaded the boxed int inside and dereferenced THAT as an
+        // object — EXC_BAD_ACCESS at 0xfff1000000000027, a tagged int used as
+        // an address. Deref first and the whole dispatch below is unchanged.
+        $out .= "  %cell = call i64 @__manticore_deref(i64 %cellin)\n";
         $out .= "  %tagged = icmp ugt i64 %cell, $T\n";
         $out .= "  br i1 %tagged, label %istag, label %isfloat\n";
         $out .= "isfloat:\n";
