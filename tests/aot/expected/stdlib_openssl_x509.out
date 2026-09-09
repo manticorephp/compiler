@@ -1,0 +1,44 @@
+string(40) "722b94039535b9cee7507f51865719080632f7eb"
+string(64) "e6b45d2ec1a5b987dec486dda80e81b8e7eba3dd36973af5fb1fea5fab160d69"
+string(32) "33b87c17c30a41f0ec11de11c257a071"
+string(64) "e6b45d2ec1a5b987dec486dda80e81b8e7eba3dd36973af5fb1fea5fab160d69"
+array(3) {
+  ["C"]=>
+  string(2) "UA"
+  ["O"]=>
+  string(9) "Manticore"
+  ["CN"]=>
+  string(8) "csr.test"
+}
+array(3) {
+  ["C"]=>
+  string(2) "UA"
+  ["OU"]=>
+  array(2) {
+    [0]=>
+    string(3) "One"
+    [1]=>
+    string(3) "Two"
+  }
+  ["CN"]=>
+  string(8) "dup.test"
+}
+string(20) "OpenSSLAsymmetricKey"
+bits,key,rsa,type
+2048 0 010001 256
+c68cff95ed758086..102bc9db19d280ef
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxoz/le11gIZjisimUpNf
+wR64HpXsxC3rVPqVzbZNspGWpXqSqIr3n3TNwwo3vzMhXxPbNa3OWwxvdhpbR4WP
+FxgU5dMWEAGTxsES27TQtKF3BhUFB1taHzd9XfCuOTQv1kX6YfqZwRRX4n1DcOP1
+7NhY1/X5sn2w+2Iakqj1bQ4lWVC04pN4KvGHNO6UjKXp35ujXaV0671OCt9vABCg
+VN7uH+lbqJZnL51u5i95Yt/ac9EmynndeuN/FJr2UzjGBYC5q+mhg23c7L2Bqz19
+sRQ9k631m/2Ff6W+HAxgSwnSjplLWCL0oW/q9cPkPkEU/H8ZYfXhQroQK8nbGdKA
+7wIDAQAB
+-----END PUBLIC KEY-----
+bool(true)
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+bool(false)

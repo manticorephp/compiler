@@ -3757,6 +3757,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Order is load-bearing — token_get_all() constructs __McTok.
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
+    $opensslSrc = prelude_src_or_empty("openssl_x509.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
@@ -4016,6 +4017,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $useTokenizer = $demand->callsAny(['token_get_all', 'token_name',
                                        'highlight_string', 'highlight_file', 'show_source'])
         || $demand->mentions('PhpToken');
+    // definedFunctions gate: adding a function to prelude/openssl_x509.php
+    // enrols it automatically. The class arm matters because a program can take
+    // an OpenSSLAsymmetricKey parameter without naming any of the functions.
+    $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
+        || $demand->mentions('OpenSSLAsymmetricKey');
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
@@ -4192,6 +4198,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
+        $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -4603,6 +4610,9 @@ function analyze_prelude_files(): array {
         // Same reason: PhpToken is demand-gated at compile time, but the
         // analyzer is closed-world and would read it as an unknown class.
         "tokenizer.php", "tokenizer_api.php",
+        // And again for OpenSSLAsymmetricKey: `function f(OpenSSLAsymmetricKey $k)`
+        // is the ordinary spelling, and closed-world it would read as unknown.
+        "openssl_x509.php",
         // And again for CurlHandle / CurlMultiHandle / CurlShareHandle — a
         // `function fetch(CurlHandle $ch)` hint is the ordinary way to write
         // ext/curl code, and closed-world it would read as an unknown class.

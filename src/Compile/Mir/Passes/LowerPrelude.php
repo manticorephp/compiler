@@ -221,6 +221,11 @@ trait LowerPrelude
             // and token_get_all() constructs __McTok.
             $src .= $this->tokenizerSrc . $this->tokenizerApiSrc;
         }
+        if ($this->opensslSrc !== '') {
+            // ext/openssl certificate reading. Self-contained: DER in, arrays out,
+            // no dependency on any other prelude fragment.
+            $src .= $this->opensslSrc;
+        }
         // Belt and braces: the concatenation ALREADY starts with the Throwable
         // prelude's own `<?php`, so this leading tag is redundant today and the
         // parser skips the duplicate. It is here so that the invariant — this

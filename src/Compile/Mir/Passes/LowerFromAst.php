@@ -452,6 +452,9 @@ final class LowerFromAst implements Pass
     public string $tokenizerSrc = '';
     /** PhpToken / token_get_all / token_name. Must follow tokenizerSrc. */
     public string $tokenizerApiSrc = '';
+    /** ext/openssl, the certificate-reading half — DEMAND-GATED. Pure DER, no
+     *  libcrypto; carries OpenSSLAsymmetricKey, so closed-world analysis wants it. */
+    public string $opensslSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external
