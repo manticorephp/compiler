@@ -1126,6 +1126,11 @@ trait EmitLlvmBuiltins
         }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $res . ")\n";
+        // The whole point of this rebuild: every element above was already
+        // boxed to a cell, and this final call boxes the ARRAY ITSELF —
+        // boxed by construction on every path into $r (the $isNull select
+        // just picks the source pointer this same call then boxes either way).
+        $this->markCellBoxed($r);
         return $this->finishI64($out, $r);
     }
 
@@ -1903,6 +1908,7 @@ trait EmitLlvmBuiltins
             $this->rt->needsTagged = true;
             $f = $this->ssa->allocReg();
             $out .= '  ' . $f . " = call i64 @__manticore_box_bool(i64 0)\n";
+            $this->markCellBoxed($f);
             return $this->finishI64($out, $f);
         }
         // ONE copy per module, CALLED — not spliced into every site. The chain has
@@ -1984,6 +1990,12 @@ trait EmitLlvmBuiltins
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        // NOT marked. Two of three stores into $res box by construction
+        // (box_bool/box_int, right above), but the third — a compile unit
+        // WITH a return — loads `@g_<slot>`, an existing global whose own
+        // provenance this function does not construct; $loaded merges all
+        // three through one alloca, so it inherits the least-proven of them.
+        // Marking it boxed would assert something not established here.
         return $this->finishI64($out, $loaded);
     }
 
@@ -2398,6 +2410,17 @@ trait EmitLlvmBuiltins
         $out .= $done . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        if ($wantKey) {
+            // Both stores into $res box by construction when $wantKey: the
+            // empty arm is box_null, the take arm is __mir_array_key_cell_at
+            // (UnifiedArrayRuntime::emitKeyCellAt — every `ret` tags, no
+            // passthrough). NOT marked when !$wantKey: that arm instead runs
+            // boxRawElem/boxRawValue, which for a CELL/UNKNOWN element passes
+            // the raw carrier through untouched — $r would not be uniformly
+            // boxed on that path, so it is left for boxRawValue's own,
+            // narrower marking (or no marking) to decide.
+            $this->markCellBoxed($r);
+        }
         return $this->finishI64($out, $r);
     }
 
@@ -2541,6 +2564,16 @@ trait EmitLlvmBuiltins
         $out .= $done . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        if ($wantKey) {
+            // As biArrayEndpoint: both arms box by construction when
+            // $wantKey (box_null/box_bool, __mir_array_key_cell_at). NOT
+            // marked when !$wantKey — that branch's CELL/UNKNOWN-element arm
+            // goes through __mir_box_by_repr, which passes its raw carrier
+            // through UNCHANGED when the array's runtime element-hint nibble
+            // is 0 (UnifiedArrayRuntime::emitBoxByRepr's `asis` arm) — not
+            // boxed by construction, so $r must not be asserted boxed here.
+            $this->markCellBoxed($r);
+        }
         return $this->finishI64($out, $r);
     }
 
@@ -3934,6 +3967,9 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mir_strpos(ptr ' . $h . ', ptr ' . $n
               . ', i64 ' . $off . ")\n";
+        // __mir_strpos tags on every `ret` (hit, hitoff, miss —
+        // EmitLlvmRuntime.php's emitted body has no untagged path).
+        $this->markCellBoxed($reg);
         $out .= $this->freeStrTemp($args[0], $h);
         $out .= $this->freeStrTemp($args[1], $n);
         return $this->finishI64($out, $reg);
@@ -4165,6 +4201,9 @@ trait EmitLlvmBuiltins
         $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = phi i64 [' . $cs . ', %' . $lRet . '], ['
               . $cb . ', %' . $lOut . "]\n";
+        // Both incoming values box by construction ($cs = box_ptr, $cb =
+        // box_bool, right above).
+        $this->markCellBoxed($c);
         $this->lastValue = $c;
         $this->lastValueType = 'i64';
         return $out;
@@ -6019,6 +6058,9 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = phi i64 [' . $sc . ', %' . $lSet . '], ['
               . $fc . ', %' . $lNull . "]\n";
+        // Both incoming values box by construction ($sc = box_ptr, $fc =
+        // box_bool, right above) — the phi carries no third arm.
+        $this->markCellBoxed($r);
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
@@ -6847,6 +6889,10 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = call i64 @__manticore_box_ptr(ptr '
                   . $this->litStr($parent) . ")\n";
         }
+        // Both arms are a direct box call on $r — chosen at COMPILE time
+        // (the class table is closed), so $r is boxed by construction either
+        // way, not a runtime merge of a boxed and an unboxed path.
+        $this->markCellBoxed($r);
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
@@ -7694,6 +7740,13 @@ trait EmitLlvmBuiltins
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $nul
               . ', i64 ' . $reg . "\n";
+        // Both operands box by construction: $nul is box_null right above,
+        // and $reg is __mir_json_decodea's own result — every `ret` in that
+        // function and its recursive helpers (__mir_json_deca, __mir_jd_num,
+        // the object/array/string/keyword arms) tags via a box_* call, with
+        // no raw-passthrough arm anywhere in the decoder (verified by
+        // reading every `ret i64` in RuntimeLibrary.php's json-decode family).
+        $this->markCellBoxed($res);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
@@ -7733,6 +7786,10 @@ trait EmitLlvmBuiltins
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $fc
               . ', i64 ' . $sc . "\n";
+        // Both operands are a direct box call right above ($fc = box_bool,
+        // $sc = box_ptr of the encoder's own output) — boxed by construction
+        // on both arms of the select.
+        $this->markCellBoxed($res);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;

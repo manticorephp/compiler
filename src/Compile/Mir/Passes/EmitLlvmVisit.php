@@ -232,7 +232,30 @@ trait EmitLlvmVisit
         // does not describe it.
         if ($n->value !== null) {
             $fn = $this->frame !== null ? $this->frame->name : '';
-            $rt = $fn !== '' ? ($this->declaredReturnTypes[$fn] ?? null) : null;
+            $rt = null;
+            if ($fn !== '' && \str_contains($fn, '$mono$')) {
+                // A Monomorphize clone (name carries the `$mono$` infix —
+                // the same signal `Monomorphize::isCandidate` itself uses)
+                // has no source declaration to read: `cloneWith` seeds its
+                // FunctionDef->returnType from the GENERIC's
+                // declaredReturnTypes entry (Monomorphize.php:544-545), and
+                // this pass's own first-wins registration above then locks
+                // `declaredReturnTypes[clone]` to that same un-narrowed
+                // union forever. Meanwhile per-clone return-type adoption
+                // narrows `$fn->returnType` in place from THIS clone's own
+                // body, and that narrowed field is exactly what
+                // `$this->frame->returnType` is seeded from
+                // (EmitLlvmModule::emitFunction, `:893`) and exactly what
+                // EmitLlvmModule's own return-boxing decision consults
+                // (`:1977-2042`) — the real, agreed-both-ends ABI of this
+                // specialization. Use that live field instead of the
+                // generic's stale declaration; a clone whose narrowed return
+                // is still genuinely cell stays checked, just against the
+                // right type.
+                $rt = $this->frame !== null ? $this->frame->returnType : null;
+            } else {
+                $rt = $fn !== '' ? ($this->declaredReturnTypes[$fn] ?? null) : null;
+            }
             if ($rt !== null) {
                 $this->checkCellSink('return', $rt, $n);
             } else {
