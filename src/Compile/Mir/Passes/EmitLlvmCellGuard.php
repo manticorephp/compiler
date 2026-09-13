@@ -58,6 +58,14 @@ trait EmitLlvmCellGuard
     /** @var string[] one human-readable line per RAW → cell violation */
     public array $cellGuardViolations = [];
 
+    /**
+     * Per-frame ordinal of the cell sinks checked so far — the N-th sink in a
+     * function's emission is the same N in every module that contains the
+     * function, where its `line` is not (prelude bodies land at a different
+     * offset per module). The ratchet keys on `(sink, fn, ord)`; report-only.
+     */
+    private int $cellSinkOrd = 0;
+
     /** @var string[] site id (index) → `fn=… kind=… slot=… decl=…`, for CELLASSERT attribution */
     private array $cellAssertSites = [];
 
@@ -133,6 +141,7 @@ trait EmitLlvmCellGuard
     private function resetCellGuardFrame(): void
     {
         $this->cellProv = [];
+        $this->cellSinkOrd = 0;
     }
 
     /**
@@ -147,12 +156,14 @@ trait EmitLlvmCellGuard
     ): void {
         if (!$this->cellGuard) { return; }
         if ($destType->kind !== \Compile\Mir\Type::KIND_CELL) { return; }
+        $ord = $this->cellSinkOrd++;
         $prov = $this->cellProvenance($this->lastValue);
         $this->cellGuardCounts[$prov] = ($this->cellGuardCounts[$prov] ?? 0) + 1;
         if ($prov !== 'raw') { return; }
         $fn = $this->frame !== null ? $this->frame->name : '(module)';
         $this->cellGuardViolations[] = 'CELLGUARD raw->cell ' . $sinkKind
             . ' fn=' . $fn
+            . ' ord=' . (string)$ord
             . ' line=' . (string)$site->line
             . ' node=' . $site->kind;
         \error_log($this->cellGuardViolations[\count($this->cellGuardViolations) - 1]);

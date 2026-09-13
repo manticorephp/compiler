@@ -12,9 +12,17 @@
 # cap-kill path (see the "cap-killed" bucket below) without waiting for a
 # real case to overrun the default 2 MB.
 #
-# --ratchet: after the census, recompute the corrected (sink, fn, line) site
-# key (see the "site key correction" note below the site-ranking section —
-# the existing site_ranked.txt key drops the sink, this does not) and diff it
+# SITE KEY: (sink, fn, ord). `ord` is the per-function ordinal of the cell
+# sink (the N-th cell sink checked in that function's emission — emitted by
+# EmitLlvmCellGuard::checkCellSink as `ord=N`). A prelude function's `line`
+# is MODULE-dependent (prelude assembly is demand-driven, so one source node
+# lands at a different absolute line per case) and is therefore NOT a site
+# identity; it is kept in the output for humans and dropped from the key.
+# fn=__main is each case's own top-level body, not one shared function, so a
+# __main row is keyed as `__main@<case basename>` (the scan knows the case
+# from the .err filename) — two cases' __main sinks never collapse into one.
+#
+# --ratchet: after the census, take the (sink, fn, ord) site set and diff it
 # against the committed baseline (tools/cellguard_baseline.txt, see
 # --update-baseline). Any site in current-but-not-baseline is NEW and fails
 # the scan (exit 1) with every new site listed. A site in baseline-but-not-
@@ -256,72 +264,63 @@ fi
 echo "── by sink kind (raw line occurrences, same caveat as above) ──"
 cat "$out"/*.err 2>/dev/null | grep -o "raw->cell [a-z_]*" | sort | uniq -c | sort -rn
 
-echo "── THE WORK LIST: distinct (fn,line) sites, ranked by number of DISTINCT CASES that reach them ──"
-# A raw violation line is a call SITE (fn+line), not a case: one prelude body
-# (usort, a monomorphized closure, ...) compiles into every case that pulls it
-# in and logs a hit per case, so the per-case count above is dominated by
-# "how much of the prelude did this case load", not by where the bug lives.
-# This section deduplicates by (fn,line) across the whole corpus and ranks by
-# how many distinct cases reach each site — that is what a later task should
-# work from. Re-running the scan regenerates this from the fresh .err files.
+echo "── THE WORK LIST: distinct (sink,fn,ord) sites, ranked by number of DISTINCT CASES that reach them ──"
+# A raw violation line is a SITE, not a case: one prelude body (usort, a
+# monomorphized closure, ...) compiles into every case that pulls it in and
+# logs a hit per case, so the per-case count above is dominated by "how much
+# of the prelude did this case load", not by where the bug lives. This
+# section deduplicates by the (sink, fn, ord) site key (header comment) across
+# the whole corpus and ranks by how many distinct cases reach each site — that
+# is the work list. `line` is carried along as a REPRESENTATIVE (the smallest
+# seen) for humans only; the same prelude site legitimately shows different
+# lines in different cases. fn=__main rows are keyed `__main@<case>`, so their
+# case-count is always 1 by construction; every other fn is a real shared
+# body and its case-count is a real fan-in count.
 #
-# Caveat: fn=__main is each case's own top-level script body, not one shared
-# function — its "line" is relative to that one file, so two different cases'
-# __main hitting the same line number are almost certainly unrelated code
-# that happen to share a line number, not the same site. Read __main rows in
-# the ranked list with that in mind; every OTHER fn name is a real shared
-# body and the case-count is a real fan-in count.
+# site_pairs.txt columns: fn \t ord \t sink \t case \t line.
 : > "$out/site_pairs.txt"
 for f in "$out"/*.err; do
     b=$(basename "$f" .err)
     grep "CELLGUARD raw->cell" "$f" 2>/dev/null | awk -v case="$b" '{
-        sink=""; fn=""; line="";
+        sink=""; fn=""; ord=""; line="";
         for (i = 1; i <= NF; i++) {
             if ($i == "raw->cell") sink = $(i+1);
             if ($i ~ /^fn=/)       fn = substr($i, 4);
+            if ($i ~ /^ord=/)      ord = substr($i, 5);
             if ($i ~ /^line=/)     line = substr($i, 6);
         }
-        if (fn != "" && line != "") print fn "\t" line "\t" sink "\t" case
+        if (fn == "__main") fn = "__main@" case;
+        if (fn != "" && ord != "") print fn "\t" ord "\t" sink "\t" case "\t" line
     }' | sort -u
 done >> "$out/site_pairs.txt"
 
 awk -F'\t' '{
-    key = $1 "\t" $2;
-    if (!(key in sinkof)) sinkof[key] = $3;
+    key = $3 "\t" $1 "\t" $2;
+    if (!(key in minline) || $5 + 0 < minline[key] + 0) minline[key] = $5;
     ck = key "\t" $4;
     if (!(ck in seen)) { seen[ck] = 1; cnt[key]++ }
 }
-END { for (k in cnt) print cnt[k] "\t" sinkof[k] "\t" k }' "$out/site_pairs.txt" \
+END { for (k in cnt) print cnt[k] "\t" k "\t" minline[k] }' "$out/site_pairs.txt" \
     | sort -t "$(printf '\t')" -k1,1rn -k2,2 -k3,3 -k4,4n > "$out/site_ranked.txt"
-# Columns are count/sink/fn/line. Primary key is the case count (descending —
-# that is the ranking); the rest (sink, then fn, then line numerically) are
-# tie-breakers only, so that rows tied on count come out in a FIXED order
-# instead of awk's unspecified hash-iteration order. This is load-bearing:
-# the census re-runs after each producer fix in the next stage, and a
-# reshuffling top-30 makes "did this fix reduce the census" hard to read.
+# Columns are count/sink/fn/ord/line. Primary key is the case count
+# (descending — that is the ranking); the rest (sink, then fn, then ord
+# numerically) are tie-breakers only, so that rows tied on count come out in
+# a FIXED order instead of awk's unspecified hash-iteration order. This is
+# load-bearing: the census re-runs after each producer fix, and a reshuffling
+# top-30 makes "did this fix reduce the census" hard to read.
 
 site_total=$(wc -l < "$out/site_ranked.txt" | tr -d ' ')
-echo "raw raw->cell lines: $total   distinct (fn,line) sites: $site_total"
-echo "columns: cases-reaching-this-site  sink  fn  line — top 30 of $site_total, full list in $out/site_ranked.txt"
+echo "raw raw->cell lines: $total   distinct (sink,fn,ord) sites: $site_total"
+echo "columns: cases-reaching-this-site  sink  fn  ord  line(representative) — top 30 of $site_total, full list in $out/site_ranked.txt"
 head -n 30 "$out/site_ranked.txt" | column -t -s "$(printf '\t')"
-
-# site key correction: site_ranked.txt above keys on "fn\tline" only (dropping
-# the sink) — a known, uncorrected bug (see docs/status/CELLGUARD-CENSUS-2026-09-08.md
-# §1 "Fix-round-1 correction"): two unrelated sinks sharing a function+line
-# (worst at fn=__main, where many cases' unrelated top-level statements
-# collide on small line numbers) merge into one row here, undercounting
-# distinct sites. It is left as-is above for output stability (re-fixing the
-# display ranking is a separate change), but the ratchet below MUST NOT
-# inherit this bug: it derives its own site set straight from site_pairs.txt,
-# keyed on the full (sink, fn, line) triple.
 
 echo "── site histogram by sink kind (distinct sites, not occurrences) ──"
 awk -F'\t' '{print $2}' "$out/site_ranked.txt" | sort | uniq -c | sort -rn
 
-echo "── aggregate boxed/opaque/raw/unchecked coverage ──"
+echo "── aggregate boxed/opaque/probed/raw/unchecked coverage ──"
 cat "$out"/*.err 2>/dev/null \
     | grep "CELLGUARD summary" \
-    | grep -o 'boxed=[0-9]*\|opaque=[0-9]*\|raw=[0-9]*\|unchecked=[0-9]*\|violations=[0-9]*' \
+    | grep -o 'boxed=[0-9]*\|opaque=[0-9]*\|probed=[0-9]*\|raw=[0-9]*\|unchecked=[0-9]*\|violations=[0-9]*' \
     | awk -F= '{a[$1]+=$2} END {for (k in a) print k"="a[k]}' | sort
 
 echo "── coverage caveats (NOT bugs, deliberately uncovered/unchecked) ──"
@@ -335,9 +334,9 @@ cat <<'EOF'
   emitLoadLocal's globalBacked branch, emitPropertyAccess's delegate branches,
   emitMagicCall's property-protocol paths, emitGeneratorMethod's getReturn arm.
 - the per-case census ranks prelude LOAD, not defect weight (a shared body
-  like usort counts once per case that pulls it in); the distinct-(fn,line)
-  ranking above is the work list. Within it, fn=__main rows conflate distinct
-  cases' unrelated top-level code that happens to share a line number.
+  like usort counts once per case that pulls it in); the distinct-(sink,fn,ord)
+  ranking above is the work list. `line` there is a representative only — a
+  prelude site's line is module-dependent and is not part of the key.
 - the pre-existing compile failures reported above have UNKNOWN cellguard
   status, not clean status — they never reached the emitter, so every count
   in this script's output silently excludes them by absence of data.
@@ -354,7 +353,7 @@ if [ -f "$BASELINE_FILE" ]; then
 else
     baseline_size_now="no baseline yet"
 fi
-echo "── ratchet: $BASELINE_FILE ($baseline_size_now known sites, keyed on the corrected (sink, fn, line) triple) ──"
+echo "── ratchet: $BASELINE_FILE ($baseline_size_now known sites, keyed on the (sink, fn, ord) triple; fn=__main keyed __main@<case>) ──"
 echo "  this run (default mode) does not check it. Run with --ratchet to fail on any"
 echo "  NEW site vs the baseline (closed sites are reported as progress, never fatal"
 echo "  by themselves); run with --update-baseline (add --force if any site is new) to"
@@ -378,10 +377,10 @@ else
     echo "FAIL: instrument went blind on the positive case"; fail=1
 fi
 
-# --- corrected-key site set, computed for --ratchet / --update-baseline only
-# (never for default mode — see the header comment). Keyed sink\tfn\tline,
-# straight off site_pairs.txt (fn\tline\tsink\tcase), sorted+deduped — this
-# is the key described above as NOT what site_ranked.txt's display uses.
+# --- site set, computed for --ratchet / --update-baseline only (never for
+# default mode — see the header comment). Keyed sink\tfn\tord, straight off
+# site_pairs.txt (fn\tord\tsink\tcase\tline), sorted+deduped. `line` is
+# deliberately NOT in it (module-dependent, header comment).
 if [ "$MODE" = "ratchet" ] || [ "$MODE" = "update-baseline" ]; then
     LC_ALL=C awk -F'\t' '{ print $3 "\t" $1 "\t" $2 }' "$out/site_pairs.txt" | LC_ALL=C sort -u > "$out/site_correct.txt"
     current_count=$(wc -l < "$out/site_correct.txt" | tr -d ' ')
@@ -442,13 +441,13 @@ PHP
             > /dev/null 2> "$out/selftest_newsite.err"
     )
     synth_site=$(grep "CELLGUARD raw->cell" "$out/selftest_newsite.err" | awk '{
-        sink=""; fn=""; line="";
+        sink=""; fn=""; ord="";
         for (i = 1; i <= NF; i++) {
             if ($i == "raw->cell") sink = $(i+1);
             if ($i ~ /^fn=/)       fn = substr($i, 4);
-            if ($i ~ /^line=/)    line = substr($i, 6);
+            if ($i ~ /^ord=/)      ord = substr($i, 5);
         }
-        if (fn != "" && line != "") print sink "\t" fn "\t" line
+        if (fn != "" && ord != "") print sink "\t" fn "\t" ord
     }' | head -n 1)
     if [ -z "$synth_site" ]; then
         echo "RATCHET SELF-TEST FAILED: synthetic fixture produced no CELLGUARD violation at all -- instrument regression, not a ratchet bug"
