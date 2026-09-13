@@ -797,10 +797,13 @@ trait EmitLlvmCalls
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
         $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = $sym;
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -840,6 +843,8 @@ trait EmitLlvmCalls
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
         $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
 
         if (!$closed) {
             unset($this->dynfThunks[$key]);
@@ -1008,10 +1013,13 @@ trait EmitLlvmCalls
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
         $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = $sym;
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -1043,6 +1051,8 @@ trait EmitLlvmCalls
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
         $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
 
         if (!$closed) {
             unset($this->dynfThunks[$key]);

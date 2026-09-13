@@ -16,7 +16,8 @@ an emitter without the trait.** Every marking call writes only to compile-time
 PHP arrays; the flag-off path does no bookkeeping at all (the flags are read once
 per `emit()` into two bools and every mark is gated on them). Proven per change by
 an rc+md5 sweep of `.ll` output over 130 corpus files and, at the binary level, by
-a gen3 == gen4 self-host fixpoint.
+the fix wave's own evidence: the new source (post-fix `src/`) rebuilding itself
+byte-identically, gen1 == gen2.
 
 ## Flags
 
@@ -108,10 +109,16 @@ CELLGUARD_SUBSET=40 bash tools/cellguard_scan.sh --ratchet   # smoke, exit 0 exp
 ```
 
 - Site key: `(sink, fn, ord)`. `ord` is the N-th cell sink checked in that
-  function's emission — the same N in every module that contains the function,
-  where `line` is not (prelude assembly is demand-driven; one source node lands
-  at a different absolute line per case). `fn=__main` is keyed `__main@<case>`.
-  `line` is printed as a representative for humans and is not part of the key.
+  function's emission — the same N in every module that contains the function.
+  This holds because `cellSinkOrd` (like `$cellProv`) is saved and restored
+  around every memoized first-use helper (a synthetic body built mid-function,
+  on demand): a function's own sinks are numbered by its own emission order
+  alone, regardless of which helpers were first-used inside it, and a helper's
+  sinks are numbered — and attributed (`fn=`) — under the helper's own frame.
+  `line`, unlike `ord`, is not stable across modules (prelude assembly is
+  demand-driven; one source node lands at a different absolute line per case).
+  `fn=__main` is keyed `__main@<case>`. `line` is printed as a representative
+  for humans and is not part of the key.
 - `NEW:` a site in the current run not in the baseline → **exit 1**. A new site
   is either a real regression or a new corpus case exercising an existing
   producer; both need a look. Accept with `--update-baseline --force` only after

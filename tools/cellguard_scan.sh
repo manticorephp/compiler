@@ -14,10 +14,17 @@
 #
 # SITE KEY: (sink, fn, ord). `ord` is the per-function ordinal of the cell
 # sink (the N-th cell sink checked in that function's emission — emitted by
-# EmitLlvmCellGuard::checkCellSink as `ord=N`). A prelude function's `line`
-# is MODULE-dependent (prelude assembly is demand-driven, so one source node
-# lands at a different absolute line per case) and is therefore NOT a site
-# identity; it is kept in the output for humans and dropped from the key.
+# EmitLlvmCellGuard::checkCellSink as `ord=N`) — the SAME N in every module
+# that contains the function. That holds because `cellSinkOrd` is saved and
+# restored around every memoized first-use helper (a synthetic body EmitLlvm
+# builds mid-function, on demand) exactly like `$cellProv` is: a function's
+# own sinks are numbered by its own emission order alone, never perturbed by
+# which helpers happened to be first-used inside it, and a helper's sinks are
+# numbered — and attributed (`fn=`) — under the helper's own frame. A prelude
+# function's `line` is MODULE-dependent (prelude assembly is demand-driven,
+# so one source node lands at a different absolute line per case) and is
+# therefore NOT a site identity; it is kept in the output for humans and
+# dropped from the key.
 # fn=__main is each case's own top-level body, not one shared function, so a
 # __main row is keyed as `__main@<case basename>` (the scan knows the case
 # from the .err filename) — two cases' __main sinks never collapse into one.

@@ -1048,9 +1048,12 @@ trait EmitLlvmObjects
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
         $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
         $obj = '%obj';
         $res = $this->ssa->allocReg();
         $out = 'define internal i64 ' . $sym . "(ptr %obj) {\nentry:\n";
@@ -1108,6 +1111,8 @@ trait EmitLlvmObjects
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
         $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
     }
 
@@ -2808,9 +2813,12 @@ trait EmitLlvmObjects
         $oldLastType = $this->lastValueType;
         $oldClassId = $this->classIdReg;
         $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
         $obj = '%obj';
         $cellVal = '%val';
         $out = 'define internal void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
@@ -2850,6 +2858,8 @@ trait EmitLlvmObjects
         $this->lastValueType = $oldLastType;
         $this->classIdReg = $oldClassId;
         $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
     }
 
@@ -3299,10 +3309,13 @@ trait EmitLlvmObjects
         $oldVdArgc = $this->vdSiteArgc;
         $oldNeedsBacktrace = $this->rt->needsBacktrace;
         $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -3377,6 +3390,8 @@ trait EmitLlvmObjects
             $this->vdSiteArgc = $oldVdArgc;
             $this->rt->needsBacktrace = $oldNeedsBacktrace;
             $this->cellProv = $oldCellProv;
+            $this->cellSinkOrd = $oldCellSinkOrd;
+            $this->cellSinkFnOverride = $oldCellSinkFn;
             return $sym;
         }
         $fallbackFull = $this->lsbTarget($fallback, $method, '');
@@ -3424,6 +3439,8 @@ trait EmitLlvmObjects
         $this->vdSiteArgc = $oldVdArgc;
         $this->rt->needsBacktrace = $oldNeedsBacktrace;
         $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
     }
 
@@ -3455,11 +3472,14 @@ trait EmitLlvmObjects
         $oldVdArgc = $this->vdSiteArgc;
         $oldAbiDisabled = $this->dynamicMethodAbiDisabled;
         $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
         $oldCellProv = $this->cellProv;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
@@ -3515,6 +3535,8 @@ trait EmitLlvmObjects
         $this->dynamicMethodAbiDisabled = $oldAbiDisabled;
         $this->rt->needsBacktrace = $oldNeedsBacktrace;
         $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
     }
 

@@ -62,9 +62,24 @@ trait EmitLlvmCellGuard
      * Per-frame ordinal of the cell sinks checked so far — the N-th sink in a
      * function's emission is the same N in every module that contains the
      * function, where its `line` is not (prelude bodies land at a different
-     * offset per module). The ratchet keys on `(sink, fn, ord)`; report-only.
+     * offset per module). This holds because the counter is SAVED and RESTORED
+     * across every nested synthetic body an emit method builds mid-function (a
+     * memoized first-use helper) exactly as `$cellProv` is: a function's own
+     * sinks are numbered by its own emission order alone, regardless of which
+     * helpers were first-used inside it, and a helper's sinks are numbered by
+     * the helper's own emission order under its own frame ({@see
+     * $cellSinkFnOverride}). The ratchet keys on `(sink, fn, ord)`; report-only.
      */
     private int $cellSinkOrd = 0;
+
+    /**
+     * Attribution override for {@see checkCellSink}'s `fn=`, set for the
+     * duration of a memoized first-use helper's body so its sinks report under
+     * the helper's OWN symbol rather than whichever function first-used it
+     * (module-dependent). Null outside a helper body — `checkCellSink` then
+     * falls back to `$this->frame->name` as before.
+     */
+    private ?string $cellSinkFnOverride = null;
 
     /** @var string[] site id (index) → `fn=… kind=… slot=… decl=…`, for CELLASSERT attribution */
     private array $cellAssertSites = [];
@@ -160,7 +175,8 @@ trait EmitLlvmCellGuard
         $prov = $this->cellProvenance($this->lastValue);
         $this->cellGuardCounts[$prov] = ($this->cellGuardCounts[$prov] ?? 0) + 1;
         if ($prov !== 'raw') { return; }
-        $fn = $this->frame !== null ? $this->frame->name : '(module)';
+        $fn = $this->cellSinkFnOverride
+            ?? ($this->frame !== null ? $this->frame->name : '(module)');
         $this->cellGuardViolations[] = 'CELLGUARD raw->cell ' . $sinkKind
             . ' fn=' . $fn
             . ' ord=' . (string)$ord
