@@ -11,6 +11,29 @@
 # a small value together with CELLGUARD_SUBSET to deliberately exercise the
 # cap-kill path (see the "cap-killed" bucket below) without waiting for a
 # real case to overrun the default 2 MB.
+#
+# --ratchet: after the census, recompute the corrected (sink, fn, line) site
+# key (see the "site key correction" note below the site-ranking section —
+# the existing site_ranked.txt key drops the sink, this does not) and diff it
+# against the committed baseline (tools/cellguard_baseline.txt, see
+# --update-baseline). Any site in current-but-not-baseline is NEW and fails
+# the scan (exit 1) with every new site listed. A site in baseline-but-not-
+# current is CLOSED and is reported as progress only — it never fails the
+# scan by itself. A subset run's "closed" count is an artifact of scanning
+# fewer cases than the baseline was built from, not real progress; only a
+# full-corpus run's "closed" list is meaningful to act on.
+#
+# --update-baseline: rewrite tools/cellguard_baseline.txt from the current
+# run's corrected site set. Never automatic, never implied by --ratchet.
+# Refuses (exit 1, baseline untouched) if the current site count is GREATER
+# than the existing baseline's, unless --force accompanies it — a regression
+# must never be silently absorbed into the baseline. A DROP in site count
+# (fewer sites than baseline) always updates freely; that direction can only
+# ever be progress, never a silent regression.
+#
+# Default mode (no flags) is unchanged: same census, same non-gating exit 0
+# (bar the pre-existing invariant/positive-case checks), no baseline read or
+# write. It only gains one informational line noting the ratchet exists.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -20,6 +43,26 @@ export MANTICORE_PRELUDE="$PWD/prelude"
 export MANTICORE_CELLGUARD=1
 
 CELLGUARD_SUBSET="${CELLGUARD_SUBSET:-0}"
+
+# --- ratchet flag parsing -----------------------------------------------
+MODE="default"
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --ratchet)         MODE="ratchet" ;;
+        --update-baseline) MODE="update-baseline" ;;
+        --force)           FORCE=1 ;;
+        *)
+            echo "unknown flag: $arg (expected --ratchet, --update-baseline, --force)" >&2
+            exit 2
+            ;;
+    esac
+done
+if [ "$FORCE" = "1" ] && [ "$MODE" != "update-baseline" ]; then
+    echo "--force is only meaningful with --update-baseline" >&2
+    exit 2
+fi
+BASELINE_FILE="tools/cellguard_baseline.txt"
 
 out=/tmp/cellguard_scan
 rm -rf "$out"; mkdir -p "$out"
@@ -197,6 +240,16 @@ echo "raw raw->cell lines: $total   distinct (fn,line) sites: $site_total"
 echo "columns: cases-reaching-this-site  sink  fn  line — top 30 of $site_total, full list in $out/site_ranked.txt"
 head -n 30 "$out/site_ranked.txt" | column -t -s "$(printf '\t')"
 
+# site key correction: site_ranked.txt above keys on "fn\tline" only (dropping
+# the sink) — a known, uncorrected bug (see docs/status/CELLGUARD-CENSUS-2026-09-08.md
+# §1 "Fix-round-1 correction"): two unrelated sinks sharing a function+line
+# (worst at fn=__main, where many cases' unrelated top-level statements
+# collide on small line numbers) merge into one row here, undercounting
+# distinct sites. It is left as-is above for output stability (re-fixing the
+# display ranking is a separate change), but the ratchet below MUST NOT
+# inherit this bug: it derives its own site set straight from site_pairs.txt,
+# keyed on the full (sink, fn, line) triple.
+
 echo "── site histogram by sink kind (distinct sites, not occurrences) ──"
 awk -F'\t' '{print $2}' "$out/site_ranked.txt" | sort | uniq -c | sort -rn
 
@@ -231,6 +284,17 @@ cat <<'EOF'
   glob these sections read), not by luck.
 EOF
 
+if [ -f "$BASELINE_FILE" ]; then
+    baseline_size_now=$(wc -l < "$BASELINE_FILE" | tr -d ' ')
+else
+    baseline_size_now="no baseline yet"
+fi
+echo "── ratchet: $BASELINE_FILE ($baseline_size_now known sites, keyed on the corrected (sink, fn, line) triple) ──"
+echo "  this run (default mode) does not check it. Run with --ratchet to fail on any"
+echo "  NEW site vs the baseline (closed sites are reported as progress, never fatal"
+echo "  by themselves); run with --update-baseline (add --force if the count grew) to"
+echo "  rewrite it after closing sites."
+
 echo "── positive: an array through a \$GLOBALS slot (expect a violation) ──"
 cat > "$out/bad.php" <<'PHP'
 <?php
@@ -247,6 +311,126 @@ if grep -q "CELLGUARD raw->cell" "$out/bad.err"; then
     echo "ok: known-broken channel still caught"
 else
     echo "FAIL: instrument went blind on the positive case"; fail=1
+fi
+
+# --- corrected-key site set, computed for --ratchet / --update-baseline only
+# (never for default mode — see the header comment). Keyed sink\tfn\tline,
+# straight off site_pairs.txt (fn\tline\tsink\tcase), sorted+deduped — this
+# is the key described above as NOT what site_ranked.txt's display uses.
+if [ "$MODE" = "ratchet" ] || [ "$MODE" = "update-baseline" ]; then
+    awk -F'\t' '{ print $3 "\t" $1 "\t" $2 }' "$out/site_pairs.txt" | sort -u > "$out/site_correct.txt"
+    current_count=$(wc -l < "$out/site_correct.txt" | tr -d ' ')
+fi
+
+if [ "$MODE" = "ratchet" ]; then
+    echo "── ratchet ──"
+    if [ ! -f "$BASELINE_FILE" ]; then
+        echo "RATCHET FAILED: no baseline at $BASELINE_FILE — run --update-baseline first"
+        fail=1
+    else
+        sort -u "$BASELINE_FILE" > "$out/baseline_sorted.txt"
+        baseline_count=$(wc -l < "$out/baseline_sorted.txt" | tr -d ' ')
+        # comm needs both inputs sorted in the same collation; both were
+        # produced by `sort -u` just above, in this same shell/locale.
+        comm -23 "$out/site_correct.txt" "$out/baseline_sorted.txt" > "$out/ratchet_new.txt"
+        comm -13 "$out/site_correct.txt" "$out/baseline_sorted.txt" > "$out/ratchet_closed.txt"
+        new_count=$(wc -l < "$out/ratchet_new.txt" | tr -d ' ')
+        closed_count=$(wc -l < "$out/ratchet_closed.txt" | tr -d ' ')
+        echo "baseline: $baseline_count site(s)   current: $current_count site(s)"
+        if [ "$CELLGUARD_SUBSET" != "0" ]; then
+            echo "NOTE: this is a SUBSET run ($CELLGUARD_SUBSET of $corpus_total cases) — a large"
+            echo "  'closed' count below is an artifact of scanning fewer cases than the baseline"
+            echo "  was built from, not real progress. Only trust 'closed' from a full-corpus run."
+        fi
+        echo "new sites (in current, not in baseline): $new_count"
+        [ "$new_count" != "0" ] && sed 's/^/  NEW: /' "$out/ratchet_new.txt"
+        echo "closed sites (in baseline, not in current): $closed_count"
+        [ "$closed_count" != "0" ] && sed 's/^/  CLOSED: /' "$out/ratchet_closed.txt"
+        if [ "$new_count" != "0" ]; then
+            echo "RATCHET FAILED: $new_count new cellguard site(s) not in the baseline"
+            fail=1
+        elif [ "$closed_count" != "0" ]; then
+            echo "RATCHET OK — progress: $closed_count site(s) closed since the baseline."
+            echo "  Run: bash tools/cellguard_scan.sh --update-baseline"
+        else
+            echo "RATCHET OK — no change vs baseline"
+        fi
+    fi
+
+    # --- self-test: a synthetic site NOT in the baseline must be caught.
+    # Run OUTSIDE the corpus loop (same reason as the $GLOBALS positive case
+    # above: its .err must never join the *.err glob the earlier aggregate/
+    # ranking sections read) and diffed on a COPY of the real site set, never
+    # the real one — this proves the comm-based detection itself works
+    # without letting a synthetic fixture contaminate the real baseline
+    # decision above. A named user function is used (not top-level code,
+    # which would key on fn=__main and could coincidentally collide with a
+    # real case's own __main line) so its fn name is guaranteed absent from
+    # any real corpus case and therefore from the baseline.
+    echo "── ratchet self-test: a synthetic known-new site must be caught ──"
+    cat > "$out/selftest_newsite.php" <<'PHP'
+<?php
+function cellguard_selftest_new_site_9c31() {
+    $g = [1, 2, 3];
+    $GLOBALS['cellguard_selftest_new_site_var'] = [4, 5, 6];
+    \var_dump($GLOBALS['cellguard_selftest_new_site_var']);
+}
+cellguard_selftest_new_site_9c31();
+PHP
+    (
+        ulimit -f "$MAX_ERR_BLOCKS"
+        exec php -d memory_limit=2048M tools/compile_user_mir.php "$out/selftest_newsite.php" \
+            > /dev/null 2> "$out/selftest_newsite.err"
+    )
+    synth_site=$(grep "CELLGUARD raw->cell" "$out/selftest_newsite.err" | awk '{
+        sink=""; fn=""; line="";
+        for (i = 1; i <= NF; i++) {
+            if ($i == "raw->cell") sink = $(i+1);
+            if ($i ~ /^fn=/)       fn = substr($i, 4);
+            if ($i ~ /^line=/)    line = substr($i, 6);
+        }
+        if (fn != "" && line != "") print sink "\t" fn "\t" line
+    }' | head -n 1)
+    if [ -z "$synth_site" ]; then
+        echo "RATCHET SELF-TEST FAILED: synthetic fixture produced no CELLGUARD violation at all -- instrument regression, not a ratchet bug"
+        fail=1
+    elif [ ! -f "$BASELINE_FILE" ]; then
+        echo "RATCHET SELF-TEST SKIPPED: no baseline at $BASELINE_FILE to test against"
+    else
+        sort -u "$BASELINE_FILE" > "$out/baseline_sorted.txt"
+        { cat "$out/site_correct.txt"; printf '%s\n' "$synth_site"; } | sort -u > "$out/site_correct_plus_synth.txt"
+        synth_new_hit=$(comm -23 "$out/site_correct_plus_synth.txt" "$out/baseline_sorted.txt" | grep -F -x "$synth_site" || true)
+        if [ -n "$synth_new_hit" ]; then
+            echo "ok: synthetic site '$synth_site' correctly flagged NEW by the ratchet diff"
+        else
+            echo "RATCHET SELF-TEST FAILED: synthetic site '$synth_site' was NOT flagged as new -- either it collided with a real baseline entry (name clash) or the detection logic is broken"
+            fail=1
+        fi
+    fi
+fi
+
+if [ "$MODE" = "update-baseline" ]; then
+    echo "── update-baseline ──"
+    if [ ! -f "$BASELINE_FILE" ]; then
+        # First-time bootstrap: there is no prior baseline to regress against,
+        # so the growth refusal below does not apply -- it exists to catch a
+        # REGRESSION against a real baseline, and "0 known sites" is not one.
+        cp "$out/site_correct.txt" "$BASELINE_FILE"
+        echo "baseline created: $current_count site(s) ($BASELINE_FILE) -- first-time bootstrap, no prior baseline to compare against"
+    else
+        sort -u "$BASELINE_FILE" > "$out/baseline_sorted.txt"
+        baseline_count=$(wc -l < "$out/baseline_sorted.txt" | tr -d ' ')
+        if [ "$current_count" -gt "$baseline_count" ] && [ "$FORCE" != "1" ]; then
+            echo "REFUSED: current census has $current_count site(s) > baseline's $baseline_count -- a"
+            echo "  regression cannot be silently accepted. Re-run with --force only after"
+            echo "  confirming the increase is expected (e.g. corpus growth), never to wave"
+            echo "  away a real new violation."
+            fail=1
+        else
+            cp "$out/site_correct.txt" "$BASELINE_FILE"
+            echo "baseline updated: $baseline_count -> $current_count site(s) ($BASELINE_FILE)"
+        fi
+    fi
 fi
 
 [ "$fail" = "0" ] && echo "CELLGUARD SCAN OK" || { echo "CELLGUARD SCAN FAILED"; exit 1; }
