@@ -1,5 +1,43 @@
 # `cellguard` — W4: self-describing value channels + a cell verifier
 
+> ## Status at merge (2026-09-13) — read this before the body below
+>
+> The body of this document is the design/plan AS WRITTEN. What shipped differs;
+> the tracked record of the shipped instrument is **`docs/design/cellguard.md`**.
+>
+> **Shipped:** Tasks 1–6 (provenance map, boxed/opaque marking, the six sink
+> checks, the summary line, `tools/cellguard_scan.sh`, `MANTICORE_CELL_ASSERT`),
+> 5b (array-element reads marked `opaque` on the array's declared element type —
+> they were `raw` by omission, 4371 of the first census's 5784 "violations"),
+> 5c (a Monomorphize clone's return checked against the clone's own type, not
+> the generic's; ~10 builtins that box by construction marked), and Task 9
+> **reframed**: not "fatal on any violation" but a RATCHET — a committed baseline
+> (`tools/cellguard_baseline.txt`) of known sites; `--ratchet` fails only on a
+> NEW site; `--update-baseline` rewrites it explicitly, never automatically.
+>
+> **Reframed:** Task 9's exit criterion "violations: 0" is unreachable by closing
+> producers in census order — the head of the census IS the tagged-arithmetic
+> gate this epic was meant to open. The gate stays `false &&`.
+>
+> **Deferred to the element-channel epic:** Task 7 (remaining producers), Task 8
+> (turn tagged arithmetic on), Task 10 (`plausiblePtrIr` → assertions).
+>
+> **Corrected lattice** (the body's table is stale): `emitCellifyArrayRaw` is
+> `opaque` (it returns a raw array POINTER whose elements are cells), not
+> `boxed`; there is NO phi step — a phi is `raw` unless later marked; a fourth
+> provenance **`probed`** exists for the two runtime bit-pattern probes
+> (`__mir_box_unknown`, `boxUnknownIfRaw`): counted, never a violation, never
+> trusted as boxed. The site key is `(sink, fn, ord)`, not `(fn, line)`.
+>
+> **Known blind spots:** (1) the `$GLOBALS` two-view slot — `emitLoadLocal`
+> returns at `:401`/`:411` before the `:452` mark, so neither instrument sees a
+> `globalBacked` local; (2) ~4362 `opaque` element reads with no runtime
+> corroboration; (3) 192 corpus cases (187 pre-merge) uncompilable under the Zend host
+> (rc=70, unknown status, never counted clean); (4) **floats are stored
+> UNTAGGED** — every legitimate float in a `mixed` slot fires `CELLASSERT`; the
+> assert cannot tell a raw word from a double, only the `CELLASSERTSITE` table's
+> static kind/slot/decl can, post hoc.
+
 _Branch `cellguard`, worktree `~/var/projects/manticore-cellguard`, off LOCAL `main` `77a10e8`._
 
 ## 1. The problem, stated exactly

@@ -264,13 +264,18 @@ trait EmitLlvmRuntime
 
     /**
      * `MANTICORE_CELL_ASSERT=1` — the runtime half of the calibration cross-check
-     * (`docs/status/CELLGUARD-CENSUS-2026-09-08.md`). `__manticore_is_tagged`
+     * (`docs/design/cellguard.md`). `__manticore_is_tagged`
      * reuses the SAME NaN-box tag test every tag-dispatch site in this module
      * open-codes ({@see \Compile\Mir\Passes\EmitLlvmExpr::taggedRuntime}'s
      * `__manticore_tag`, `__manticore_deref`): a boxed cell's header sits above
      * 0xFFF0000000000000 (int=0xFFF1 … object=0xFFF8); a raw word — a genuine
      * double, or a small int/bool/null riding an erased slot uninitialized by
      * a producer that owed this slot a box — is not.
+     *
+     * ⚠ A genuine double is ALSO not: floats are stored untagged, so every
+     * legitimate float in a `mixed` slot fires this assert. The static site
+     * table (`CELLASSERTSITE`, {@see EmitLlvmCellGuard::logCellAssertSites})
+     * is what lets a reader exclude float-shaped slots post hoc.
      *
      * `__mir_assert_cell` PRINTS `CELLASSERT site=<n> word=<v>` to stderr and
      * RETURNS — it never aborts. A calibration run has to reach the end of the
