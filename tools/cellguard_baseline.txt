@@ -97,6 +97,7 @@ store_local	__closure_5	1
 store_local	__main@cell_prop_nested_array	1
 store_local	__main@dom_basic	0
 store_local	__main@dynamic_new_get_class	0
+store_local	__main@dynamic_new_get_class	1
 store_local	__main@dynamic_new_method	0
 store_local	__main@dynamic_new_method	1
 store_local	__main@dynamic_union_member	0
@@ -108,6 +109,7 @@ store_local	__main@list_destructure	1
 store_local	__main@list_destructure	2
 store_local	__main@new_dyn_shared_chain	0
 store_local	__main@new_dynamic_class_string	0
+store_local	__main@new_dynamic_class_string	1
 store_local	__main@null_coalesce_missing_key	0
 store_local	__main@nullsafe_property	0
 store_local	__main@repr_null_scalar_merge	4
@@ -193,8 +195,7 @@ store_property	Fiber____construct	0
 store_property	Fiber____construct	1
 store_property	Fiber____construct	2
 store_property	Fiber____construct	3
-store_property	Fiber____mcRun	1
-store_property	Fiber____mcRun	3
+store_property	Fiber____mcRun	2
 store_property	Holder____construct	0
 store_property	Holder____construct	1
 store_property	Holder____construct	2
@@ -283,4 +284,5 @@ store_static_prop	__main@static_prop_mixed_store	1
 store_static_prop	__main@static_prop_mixed_store	2
 store_static_prop	__main@static_prop_mixed_store	3
 store_static_prop	__main@static_prop_mixed_store	4
+store_static_prop	__main@static_prop_mixed_store	7
 store_static_prop	bump	0
