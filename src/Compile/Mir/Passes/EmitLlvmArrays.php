@@ -927,6 +927,12 @@ trait EmitLlvmArrays
             $reg = $u;
             $this->lastValue = $reg;
         }
+        if ($self->type->kind === Type::KIND_FLOAT) {
+            $regF = $this->ssa->allocReg();
+            $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
+            $this->lastValue = $regF;
+            $this->lastValueType = 'double';
+        }
         // CELLGUARD: the element SLOT's own declared type says `cell` — the
         // exact trust {@see EmitLlvmLocals::emitLoadLocal} / emitPropertyAccess
         // / emitStaticProp already give a slot typed cell. The condition reads
@@ -936,29 +942,11 @@ trait EmitLlvmArrays
         // {@see emitErasedIndexGet} instead, which must stay unmarked — that
         // path is one of this epic's named suspect channels, and its own
         // `$self->type` reads `Type::KIND_CELL` for a reason unrelated to any
-        // element type, so it cannot be reused here). Marking inserts no IR —
-        // it writes only to `$this->cellProv`, never `$out` or
-        // `$this->lastValue` — it only tells the census what inference already
-        // committed to for a value it cannot itself decode (see the ⚠ above).
-        // ⚠ Placed before the float-bitcast arm below on the CURRENT invariant
-        // that a `KIND_CELL` element and a `KIND_FLOAT` result are mutually
-        // exclusive here (inferArrayAccess sets $self->type = $at->element for
-        // a concrete base, so the two conditions read the same element type
-        // and cannot both hold). Nothing enforces that exclusivity structurally
-        // — a future pass narrowing $self->type independently of $elemT would
-        // strand this mark on `$this->lastValue` BEFORE it gets replaced by
-        // the bitcast result register below, silently losing the mark. If that
-        // ever changes, mark AFTER the float arm, on whatever register is
-        // actually returned.
+        // element type, so it cannot be reused here). Marks the register that
+        // is actually returned; inserts no IR.
         $elemT = $aa->array->type->element;
         if ($elemT !== null && $elemT->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
-        }
-        if ($self->type->kind === Type::KIND_FLOAT) {
-            $regF = $this->ssa->allocReg();
-            $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
-            $this->lastValue = $regF;
-            $this->lastValueType = 'double';
         }
         return $out;
     }
