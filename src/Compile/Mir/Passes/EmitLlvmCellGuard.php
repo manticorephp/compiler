@@ -10,13 +10,19 @@ namespace Compile\Mir\Passes;
  *   - `boxed`  — it came out of a boxing helper or a `@__manticore_box_*` call
  *   - `opaque` — it was loaded from a slot already typed `cell`, or returned
  *                by a callee whose signature says `cell`
+ *   - `probed` — it came out of a RUNTIME bit-pattern probe
+ *                (`__mir_box_unknown`, `boxUnknownIfRaw`'s `select istag`):
+ *                tag-valid by construction, VALUE unproven — a raw word whose
+ *                bits happen to spell a tag passes through such a probe
+ *                unchanged. Counted in its own bucket; never a violation,
+ *                never trusted as `boxed`.
  *   - `raw`    — anything else
  *
  * A `raw` value reaching a `cell`-typed sink is a proven contract violation.
- * An `opaque` one is not checkable here; the COUNT of them is the coverage
- * metric that says how much this instrument can see.
+ * An `opaque` or `probed` one is not checkable here; the COUNT of them is the
+ * coverage metric that says how much this instrument can see.
  *
- * A fourth bucket, `unchecked`, counts a sink whose DESTINATION SLOT TYPE could
+ * A fifth bucket, `unchecked`, counts a sink whose DESTINATION SLOT TYPE could
  * not be determined statically — a dynamic-property store picks one of N slots
  * through a runtime strcmp chain, and some element/property stores are narrower
  * than the emitter's own box predicates. Never guess such a slot's type and
@@ -25,11 +31,11 @@ namespace Compile\Mir\Passes;
  */
 trait EmitLlvmCellGuard
 {
-    /** @var array<string, string> SSA register name (`%rN`) → 'boxed'|'opaque' */
+    /** @var array<string, string> SSA register name (`%rN`) → 'boxed'|'opaque'|'probed' */
     private array $cellProv = [];
 
     /** @var array<string, int> provenance → count at a cell sink, for the summary line */
-    private array $cellGuardCounts = ['boxed' => 0, 'opaque' => 0, 'raw' => 0, 'unchecked' => 0];
+    private array $cellGuardCounts = ['boxed' => 0, 'opaque' => 0, 'probed' => 0, 'raw' => 0, 'unchecked' => 0];
 
     /** @var string[] one human-readable line per RAW → cell violation */
     public array $cellGuardViolations = [];
@@ -75,6 +81,12 @@ trait EmitLlvmCellGuard
         if ($reg !== '' && !isset($this->cellProv[$reg])) {
             $this->cellProv[$reg] = 'opaque';
         }
+    }
+
+    /** A runtime probe's output: tag-valid by construction, value unproven. */
+    private function markCellProbed(string $reg): void
+    {
+        if ($reg !== '') { $this->cellProv[$reg] = 'probed'; }
     }
 
     private function cellProvenance(string $reg): string
@@ -132,12 +144,13 @@ trait EmitLlvmCellGuard
         $this->cellGuardCounts['unchecked'] = ($this->cellGuardCounts['unchecked'] ?? 0) + 1;
     }
 
-    /** Coverage metric: a large `opaque` share means this instrument is blind. */
+    /** Coverage metric: a large `opaque`+`probed` share means this instrument is blind. */
     private function cellGuardSummary(): string
     {
         return 'CELLGUARD summary'
             . ' boxed=' . (string)($this->cellGuardCounts['boxed'] ?? 0)
             . ' opaque=' . (string)($this->cellGuardCounts['opaque'] ?? 0)
+            . ' probed=' . (string)($this->cellGuardCounts['probed'] ?? 0)
             . ' raw=' . (string)($this->cellGuardCounts['raw'] ?? 0)
             . ' unchecked=' . (string)($this->cellGuardCounts['unchecked'] ?? 0)
             . ' violations=' . (string)\count($this->cellGuardViolations);

@@ -611,7 +611,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_box_unknown')
               . '(i64 ' . $v . ")\n";
         $ret = $this->finishI64($out, $r);
-        $this->markCellBoxed($this->lastValue);
+        $this->markCellProbed($this->lastValue);
         return $ret;
     }
 
@@ -905,11 +905,7 @@ trait EmitLlvmBuiltins
         // instead: an already-boxed word passes through, a raw container is
         // identified from its allocator magic, and anything else is left exactly
         // as it was, which is what the whole erased path does today.
-        if ($k === Type::KIND_UNKNOWN) {
-            $ret = $this->boxUnknownShallowIr();
-            $this->markCellBoxed($this->lastValue);
-            return $ret;
-        }
+        if ($k === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
         $helper = ($k === Type::KIND_BOOL) ? '__manticore_box_bool' : '__manticore_box_int';
         $out = $this->coerceToI64();
         $r = $this->ssa->allocReg();

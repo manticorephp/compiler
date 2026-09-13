@@ -2085,6 +2085,7 @@ trait EmitLlvmExpr
         $out .= '  ' . $r . ' = select i1 ' . $istag . ', i64 ' . $v . ', i64 ' . $bx . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        $this->markCellProbed($this->lastValue);
         return $out;
     }
 
