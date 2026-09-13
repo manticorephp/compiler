@@ -25,15 +25,31 @@
 #
 # --update-baseline: rewrite tools/cellguard_baseline.txt from the current
 # run's corrected site set. Never automatic, never implied by --ratchet.
-# Refuses (exit 1, baseline untouched) if the current site count is GREATER
-# than the existing baseline's, unless --force accompanies it — a regression
-# must never be silently absorbed into the baseline. A DROP in site count
-# (fewer sites than baseline) always updates freely; that direction can only
-# ever be progress, never a silent regression.
+# Refuses (exit 1, baseline untouched) whenever the current site SET contains
+# any site not already in the existing baseline — a "new" set, computed the
+# exact same way --ratchet computes it (a same-count swap, N sites closing
+# while N different ones open, is still a refusal: comparing totals alone
+# would miss it) — unless --force accompanies it. A pure drop (nothing new,
+# some sites closed) always updates freely; that direction can only ever be
+# progress, never a silent regression. --update-baseline HARD-REFUSES outright
+# (no --force override — none exists for this one) when CELLGUARD_SUBSET is
+# set: a subset of the corpus can never be a valid corpus-wide baseline, and
+# a leftover exported CELLGUARD_SUBSET from an earlier smoke test is exactly
+# the operator error this guards against.
 #
 # Default mode (no flags) is unchanged: same census, same non-gating exit 0
-# (bar the pre-existing invariant/positive-case checks), no baseline read or
-# write. It only gains one informational line noting the ratchet exists.
+# (bar the pre-existing invariant/positive-case checks). It reads the
+# baseline only to report its size in one informational line — it never
+# writes it and never gates on it.
+#
+# --ratchet and --update-baseline are mutually exclusive: both on one command
+# line is a hard error before anything runs, not "the later flag wins".
+#
+# LC_ALL=C is pinned on every sort/comm that touches the site set or the
+# baseline (including the sort that produces the committed file's own order)
+# — this repo gates on both macOS and Linux, and an unpinned collation can
+# make `comm` misreport new/closed with no error at all if the baseline was
+# written under a different locale than it's diffed under.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -45,12 +61,13 @@ export MANTICORE_CELLGUARD=1
 CELLGUARD_SUBSET="${CELLGUARD_SUBSET:-0}"
 
 # --- ratchet flag parsing -----------------------------------------------
-MODE="default"
+RATCHET_FLAG=0
+UPDATE_FLAG=0
 FORCE=0
 for arg in "$@"; do
     case "$arg" in
-        --ratchet)         MODE="ratchet" ;;
-        --update-baseline) MODE="update-baseline" ;;
+        --ratchet)         RATCHET_FLAG=1 ;;
+        --update-baseline) UPDATE_FLAG=1 ;;
         --force)           FORCE=1 ;;
         *)
             echo "unknown flag: $arg (expected --ratchet, --update-baseline, --force)" >&2
@@ -58,11 +75,59 @@ for arg in "$@"; do
             ;;
     esac
 done
+if [ "$RATCHET_FLAG" = "1" ] && [ "$UPDATE_FLAG" = "1" ]; then
+    echo "--ratchet and --update-baseline are mutually exclusive -- pick one (a mistyped or" >&2
+    echo "  copy-pasted command that meant to only CHECK must never silently WRITE)" >&2
+    exit 2
+fi
+MODE="default"
+[ "$RATCHET_FLAG" = "1" ] && MODE="ratchet"
+[ "$UPDATE_FLAG" = "1" ] && MODE="update-baseline"
 if [ "$FORCE" = "1" ] && [ "$MODE" != "update-baseline" ]; then
     echo "--force is only meaningful with --update-baseline" >&2
     exit 2
 fi
 BASELINE_FILE="tools/cellguard_baseline.txt"
+
+# CRITICAL: a subset scan can never be a valid corpus-wide baseline. Refuse
+# outright, before running anything -- there is no --force for this one.
+if [ "$MODE" = "update-baseline" ] && [ "$CELLGUARD_SUBSET" != "0" ]; then
+    echo "REFUSED: --update-baseline cannot run with CELLGUARD_SUBSET=$CELLGUARD_SUBSET set." >&2
+    echo "  A subset scan can never be a valid corpus-wide baseline -- this would silently" >&2
+    echo "  overwrite the real baseline with a fraction of it. No --force override exists" >&2
+    echo "  for this refusal: unset CELLGUARD_SUBSET, or run a full-corpus scan." >&2
+    exit 1
+fi
+
+# Site count for a baseline-shaped file, and (as a side effect) the LC_ALL=C
+# sort -u'd copy of it at $out/baseline_sorted.txt. ONE place both the
+# default-mode banner and the --ratchet/--update-baseline paths get this
+# number from, so they can never disagree (a raw `wc -l` would over-count a
+# stray duplicate or blank line; a locale-unpinned sort could reorder the
+# committed file differently on another machine). Missing file -> empty
+# baseline_sorted.txt, count 0.
+prepare_baseline_sorted() {
+    if [ -f "$1" ]; then
+        LC_ALL=C sort -u "$1" > "$out/baseline_sorted.txt"
+    else
+        : > "$out/baseline_sorted.txt"
+    fi
+    wc -l < "$out/baseline_sorted.txt" | tr -d ' '
+}
+
+# The one new/closed computation both --ratchet and --update-baseline call --
+# factored out so they cannot drift onto two different definitions of "new"
+# (Critical 2: a total-count comparison alone misses a same-count swap, N
+# sites closing while N different ones open). Requires $out/site_correct.txt
+# (current) and $out/baseline_sorted.txt (existing baseline) to already exist,
+# both already LC_ALL=C sort -u'd. Sets new_count/closed_count and writes
+# $out/ratchet_new.txt / $out/ratchet_closed.txt.
+compute_ratchet_diff() {
+    LC_ALL=C comm -23 "$out/site_correct.txt" "$out/baseline_sorted.txt" > "$out/ratchet_new.txt"
+    LC_ALL=C comm -13 "$out/site_correct.txt" "$out/baseline_sorted.txt" > "$out/ratchet_closed.txt"
+    new_count=$(wc -l < "$out/ratchet_new.txt" | tr -d ' ')
+    closed_count=$(wc -l < "$out/ratchet_closed.txt" | tr -d ' ')
+}
 
 out=/tmp/cellguard_scan
 rm -rf "$out"; mkdir -p "$out"
@@ -285,15 +350,15 @@ cat <<'EOF'
 EOF
 
 if [ -f "$BASELINE_FILE" ]; then
-    baseline_size_now=$(wc -l < "$BASELINE_FILE" | tr -d ' ')
+    baseline_size_now=$(prepare_baseline_sorted "$BASELINE_FILE")
 else
     baseline_size_now="no baseline yet"
 fi
 echo "── ratchet: $BASELINE_FILE ($baseline_size_now known sites, keyed on the corrected (sink, fn, line) triple) ──"
 echo "  this run (default mode) does not check it. Run with --ratchet to fail on any"
 echo "  NEW site vs the baseline (closed sites are reported as progress, never fatal"
-echo "  by themselves); run with --update-baseline (add --force if the count grew) to"
-echo "  rewrite it after closing sites."
+echo "  by themselves); run with --update-baseline (add --force if any site is new) to"
+echo "  rewrite it after closing sites. --update-baseline refuses under CELLGUARD_SUBSET."
 
 echo "── positive: an array through a \$GLOBALS slot (expect a violation) ──"
 cat > "$out/bad.php" <<'PHP'
@@ -318,7 +383,7 @@ fi
 # straight off site_pairs.txt (fn\tline\tsink\tcase), sorted+deduped — this
 # is the key described above as NOT what site_ranked.txt's display uses.
 if [ "$MODE" = "ratchet" ] || [ "$MODE" = "update-baseline" ]; then
-    awk -F'\t' '{ print $3 "\t" $1 "\t" $2 }' "$out/site_pairs.txt" | sort -u > "$out/site_correct.txt"
+    LC_ALL=C awk -F'\t' '{ print $3 "\t" $1 "\t" $2 }' "$out/site_pairs.txt" | LC_ALL=C sort -u > "$out/site_correct.txt"
     current_count=$(wc -l < "$out/site_correct.txt" | tr -d ' ')
 fi
 
@@ -328,14 +393,8 @@ if [ "$MODE" = "ratchet" ]; then
         echo "RATCHET FAILED: no baseline at $BASELINE_FILE — run --update-baseline first"
         fail=1
     else
-        sort -u "$BASELINE_FILE" > "$out/baseline_sorted.txt"
-        baseline_count=$(wc -l < "$out/baseline_sorted.txt" | tr -d ' ')
-        # comm needs both inputs sorted in the same collation; both were
-        # produced by `sort -u` just above, in this same shell/locale.
-        comm -23 "$out/site_correct.txt" "$out/baseline_sorted.txt" > "$out/ratchet_new.txt"
-        comm -13 "$out/site_correct.txt" "$out/baseline_sorted.txt" > "$out/ratchet_closed.txt"
-        new_count=$(wc -l < "$out/ratchet_new.txt" | tr -d ' ')
-        closed_count=$(wc -l < "$out/ratchet_closed.txt" | tr -d ' ')
+        baseline_count=$(prepare_baseline_sorted "$BASELINE_FILE")
+        compute_ratchet_diff
         echo "baseline: $baseline_count site(s)   current: $current_count site(s)"
         if [ "$CELLGUARD_SUBSET" != "0" ]; then
             echo "NOTE: this is a SUBSET run ($CELLGUARD_SUBSET of $corpus_total cases) — a large"
@@ -397,9 +456,12 @@ PHP
     elif [ ! -f "$BASELINE_FILE" ]; then
         echo "RATCHET SELF-TEST SKIPPED: no baseline at $BASELINE_FILE to test against"
     else
-        sort -u "$BASELINE_FILE" > "$out/baseline_sorted.txt"
-        { cat "$out/site_correct.txt"; printf '%s\n' "$synth_site"; } | sort -u > "$out/site_correct_plus_synth.txt"
-        synth_new_hit=$(comm -23 "$out/site_correct_plus_synth.txt" "$out/baseline_sorted.txt" | grep -F -x "$synth_site" || true)
+        # $out/baseline_sorted.txt was already prepared by the main ratchet
+        # block above (the "elif" arm only runs here once we know that block
+        # took its `if [ -f "$BASELINE_FILE" ]` branch) -- reuse it rather
+        # than re-sorting, so there is exactly one prepared copy in play.
+        { cat "$out/site_correct.txt"; printf '%s\n' "$synth_site"; } | LC_ALL=C sort -u > "$out/site_correct_plus_synth.txt"
+        synth_new_hit=$(LC_ALL=C comm -23 "$out/site_correct_plus_synth.txt" "$out/baseline_sorted.txt" | grep -F -x "$synth_site" || true)
         if [ -n "$synth_new_hit" ]; then
             echo "ok: synthetic site '$synth_site' correctly flagged NEW by the ratchet diff"
         else
@@ -418,15 +480,29 @@ if [ "$MODE" = "update-baseline" ]; then
         cp "$out/site_correct.txt" "$BASELINE_FILE"
         echo "baseline created: $current_count site(s) ($BASELINE_FILE) -- first-time bootstrap, no prior baseline to compare against"
     else
-        sort -u "$BASELINE_FILE" > "$out/baseline_sorted.txt"
-        baseline_count=$(wc -l < "$out/baseline_sorted.txt" | tr -d ' ')
-        if [ "$current_count" -gt "$baseline_count" ] && [ "$FORCE" != "1" ]; then
-            echo "REFUSED: current census has $current_count site(s) > baseline's $baseline_count -- a"
-            echo "  regression cannot be silently accepted. Re-run with --force only after"
-            echo "  confirming the increase is expected (e.g. corpus growth), never to wave"
-            echo "  away a real new violation."
+        baseline_count=$(prepare_baseline_sorted "$BASELINE_FILE")
+        # Same new/closed computation --ratchet uses (Critical 2: comparing
+        # totals alone misses a same-count swap -- N sites closing while N
+        # DIFFERENT ones open leaves the count unchanged but is still a real
+        # regression). Refuse whenever ANY new site exists, regardless of the
+        # net count; --force overrides that refusal and nothing else.
+        compute_ratchet_diff
+        echo "baseline: $baseline_count site(s)   current: $current_count site(s)"
+        echo "new sites (in current, not in baseline): $new_count"
+        [ "$new_count" != "0" ] && sed 's/^/  NEW: /' "$out/ratchet_new.txt"
+        echo "closed sites (in baseline, not in current): $closed_count"
+        [ "$closed_count" != "0" ] && sed 's/^/  CLOSED: /' "$out/ratchet_closed.txt"
+        if [ "$new_count" != "0" ] && [ "$FORCE" != "1" ]; then
+            echo "REFUSED: $new_count new cellguard site(s) not in the existing baseline (listed above) --"
+            echo "  a regression cannot be silently accepted, regardless of the net site count (a"
+            echo "  same-count swap must refuse too). Re-run with --force only after confirming"
+            echo "  every site listed above under NEW is expected, never to wave away a real"
+            echo "  new violation."
             fail=1
         else
+            if [ "$new_count" != "0" ]; then
+                echo "--force: accepting $new_count new site(s) into the baseline (listed above)."
+            fi
             cp "$out/site_correct.txt" "$BASELINE_FILE"
             echo "baseline updated: $baseline_count -> $current_count site(s) ($BASELINE_FILE)"
         fi
