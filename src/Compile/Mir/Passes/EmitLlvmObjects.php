@@ -964,7 +964,16 @@ trait EmitLlvmObjects
         }
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
-            $out .= $this->emitCellAssert($this->lastValue);
+            if ($this->cellAssert) {
+                $holder = $this->slotHolder($pa->object, $pa->property);
+                $declT = $holder !== null ? ($holder->propertyTypes[$pa->property] ?? null) : null;
+                $out .= $this->emitCellAssert(
+                    $this->lastValue,
+                    $n->type->kind,
+                    ($holder !== null ? $holder->name : ($pa->object->type->class ?? '?')) . '::$' . $pa->property,
+                    $declT !== null ? $declT->toString() : '?',
+                );
+            }
         }
         return $out;
     }
@@ -4788,7 +4797,9 @@ trait EmitLlvmObjects
         }
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
-            $out .= $this->emitCellAssert($this->lastValue);
+            if ($this->cellAssert) {
+                $out .= $this->emitCellAssert($this->lastValue, $n->type->kind, $n->global, $n->type->toString());
+            }
         }
         return $out;
     }

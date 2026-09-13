@@ -607,6 +607,7 @@ final class EmitLlvm implements EmitVisitor
         $this->gen = new GeneratorContext();
         $this->cf = new ControlFlow();
         $this->frame = new FunctionEmitFrame();
+        $this->readCellGuardFlags();
         $this->resetCellGuardFrame();
         $this->sigs = new FunctionSignatures();
         $this->arena = new ArenaContext();
@@ -1199,7 +1200,8 @@ final class EmitLlvm implements EmitVisitor
             // THIS exit too, or it silently never prints on an ordinary
             // `bin/manticore compile` / `bin/build`. Side channel only
             // (`\error_log`), never appended to the staged-IR marker string.
-            if ($this->cellGuardOn()) { \error_log($this->cellGuardSummary()); }
+            if ($this->cellGuard) { \error_log($this->cellGuardSummary()); }
+            if ($this->cellAssert) { $this->logCellAssertSites(); }
             return "\x1eMANTICORE_STAGED_IR\n" . $this->streamIrPath . "\n"
                 . (string)$stagedBytes;
         }
@@ -1244,7 +1246,8 @@ final class EmitLlvm implements EmitVisitor
         // One coverage line per module emission, on a side channel
         // (`\error_log`) — never appended to `$ir`, so this changes nothing a
         // build compares against.
-        if ($this->cellGuardOn()) { \error_log($this->cellGuardSummary()); }
+        if ($this->cellGuard) { \error_log($this->cellGuardSummary()); }
+        if ($this->cellAssert) { $this->logCellAssertSites(); }
         return $ir;
     }
 

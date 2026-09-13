@@ -28,9 +28,27 @@ namespace Compile\Mir\Passes;
  * than the emitter's own box predicates. Never guess such a slot's type and
  * never skip it silently: count it, so the census states its own blind spots
  * instead of looking complete.
+ *
+ * `MANTICORE_CELLGUARD=1` turns the static census on; `MANTICORE_CELL_ASSERT=1`
+ * emits a non-fatal runtime tag check at the three cell SLOT READS. Both flags
+ * are read ONCE per {@see EmitLlvm::emit} into `$cellGuard` / `$cellAssert`:
+ * the flag-off path does no bookkeeping at all and emits byte-identical IR.
+ *
+ * ⚠ RUNTIME LIMITATION — FLOATS ARE STORED UNTAGGED. `__manticore_box_float`
+ * returns the raw double bits and `__manticore_is_tagged` is `ugt 0xFFF0…`, so
+ * a legitimate float in a `mixed` slot (`public mixed $p = 1.5`) fires
+ * `CELLASSERT` exactly like a missing box would. The assert cannot tell a raw
+ * word from a double; only the static side can, which is why every site in
+ * the `CELLASSERTSITE` table carries the slot's static kind and declared type
+ * — a reader excludes float-shaped slots post hoc, the assert never does.
+ * Tracked record: `docs/design/cellguard.md`.
  */
 trait EmitLlvmCellGuard
 {
+    /** `MANTICORE_CELLGUARD` / `MANTICORE_CELL_ASSERT`, cached per emit(). */
+    private bool $cellGuard = false;
+    private bool $cellAssert = false;
+
     /** @var array<string, string> SSA register name (`%rN`) → 'boxed'|'opaque'|'probed' */
     private array $cellProv = [];
 
@@ -40,17 +58,13 @@ trait EmitLlvmCellGuard
     /** @var string[] one human-readable line per RAW → cell violation */
     public array $cellGuardViolations = [];
 
-    /** @var string[] site id (index) → enclosing function name, for CELLASSERT attribution */
+    /** @var string[] site id (index) → `fn=… kind=… slot=… decl=…`, for CELLASSERT attribution */
     private array $cellAssertSites = [];
 
-    private function cellGuardOn(): bool
+    private function readCellGuardFlags(): void
     {
-        return \getenv('MANTICORE_CELLGUARD') !== false;
-    }
-
-    private function cellAssertOn(): bool
-    {
-        return \getenv('MANTICORE_CELL_ASSERT') !== false;
+        $this->cellGuard = \getenv('MANTICORE_CELLGUARD') !== false;
+        $this->cellAssert = \getenv('MANTICORE_CELL_ASSERT') !== false;
     }
 
     /**
@@ -61,24 +75,38 @@ trait EmitLlvmCellGuard
      * this — a call return is not a slot read and a phi has no slot to assert
      * against, so neither takes an assertion. Returns IR text, or '' when the
      * flag is off (a production build pays nothing).
+     *
+     * `$kind` is the load's static type kind, `$slot` names the slot, `$decl`
+     * is the slot's DECLARED type where one exists (a property's declaration,
+     * else the load's own type) — the site table is what lets a `CELLASSERT`
+     * on a float-holding `mixed` slot be recognised as such (see the trait doc).
      */
-    private function emitCellAssert(string $reg): string
+    private function emitCellAssert(string $reg, string $kind, string $slot, string $decl): string
     {
-        if (!$this->cellAssertOn() || $reg === '') { return ''; }
+        if (!$this->cellAssert || $reg === '') { return ''; }
         $this->rt->needsCellAssert = true;
         $site = \count($this->cellAssertSites);
-        $this->cellAssertSites[] = ($this->frame !== null ? $this->frame->name : '(module)');
+        $this->cellAssertSites[] = 'fn=' . ($this->frame !== null ? $this->frame->name : '(module)')
+            . ' kind=' . $kind . ' slot=' . $slot . ' decl=' . $decl;
         return '  call void @__mir_assert_cell(i64 ' . $reg . ', i64 ' . (string)$site . ")\n";
+    }
+
+    /** One `CELLASSERTSITE` line per site, so `CELLASSERT site=N` is attributable from the shipped code. */
+    private function logCellAssertSites(): void
+    {
+        foreach ($this->cellAssertSites as $i => $desc) {
+            \error_log('CELLASSERTSITE id=' . (string)$i . ' ' . $desc);
+        }
     }
 
     private function markCellBoxed(string $reg): void
     {
-        if ($reg !== '') { $this->cellProv[$reg] = 'boxed'; }
+        if ($this->cellGuard && $reg !== '') { $this->cellProv[$reg] = 'boxed'; }
     }
 
     private function markCellOpaque(string $reg): void
     {
-        if ($reg !== '' && !isset($this->cellProv[$reg])) {
+        if ($this->cellGuard && $reg !== '' && !isset($this->cellProv[$reg])) {
             $this->cellProv[$reg] = 'opaque';
         }
     }
@@ -86,7 +114,7 @@ trait EmitLlvmCellGuard
     /** A runtime probe's output: tag-valid by construction, value unproven. */
     private function markCellProbed(string $reg): void
     {
-        if ($reg !== '') { $this->cellProv[$reg] = 'probed'; }
+        if ($this->cellGuard && $reg !== '') { $this->cellProv[$reg] = 'probed'; }
     }
 
     private function cellProvenance(string $reg): string
@@ -97,7 +125,7 @@ trait EmitLlvmCellGuard
     /** A pass-through transmits provenance; it does not create it. */
     private function propagateCellProvenance(string $from, string $to): void
     {
-        if ($from === '' || $to === '' || $from === $to) { return; }
+        if (!$this->cellGuard || $from === '' || $to === '' || $from === $to) { return; }
         if (isset($this->cellProv[$from])) { $this->cellProv[$to] = $this->cellProv[$from]; }
     }
 
@@ -117,7 +145,7 @@ trait EmitLlvmCellGuard
         \Compile\Mir\Type $destType,
         \Compile\Mir\Node $site
     ): void {
-        if (!$this->cellGuardOn()) { return; }
+        if (!$this->cellGuard) { return; }
         if ($destType->kind !== \Compile\Mir\Type::KIND_CELL) { return; }
         $prov = $this->cellProvenance($this->lastValue);
         $this->cellGuardCounts[$prov] = ($this->cellGuardCounts[$prov] ?? 0) + 1;
@@ -140,7 +168,7 @@ trait EmitLlvmCellGuard
      */
     private function checkCellSinkUnchecked(): void
     {
-        if (!$this->cellGuardOn()) { return; }
+        if (!$this->cellGuard) { return; }
         $this->cellGuardCounts['unchecked'] = ($this->cellGuardCounts['unchecked'] ?? 0) + 1;
     }
 
