@@ -1223,7 +1223,7 @@ trait EmitLlvmControl
                 $out .= $this->rcReleaseReg($prev, $fvFlavor);
             }
         }
-        $out .= '  store i64 ' . $ev . ', ptr ' . $valSlot . "\n";
+        $out .= $this->foreachVarStore($fe->valueVar, $ev, $fe->array->type->element);
         if ($fe->keyVar !== null) {
             $kSlot = $this->locals->slots[$fe->keyVar];
             // key_at handles packed (index) vs hashed (int / str ptr). Over a
@@ -1248,7 +1248,10 @@ trait EmitLlvmControl
             } else {
                 $out .= '  ' . $kp . ' = call i64 @__mir_array_key_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
             }
-            $out .= '  store i64 ' . $kp . ', ptr ' . $kSlot . "\n";
+            $keyIsCell = $kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
+                || $vecErased || $keyK === Type::KIND_CELL;
+            $out .= $this->foreachVarStore($fe->keyVar, $kp,
+                $keyIsCell ? Type::cell() : $fe->array->type->key);
         }
         $out .= $this->emitNode($fe->body);
         $out .= '  br label %' . $stepLabel . "\n";
@@ -1288,6 +1291,45 @@ trait EmitLlvmControl
      * word. One address serves both the read and the `&$v` writeback
      * (in-place value overwrite — no grow, so no relocation).
      */
+    /**
+     * Store a foreach loop variable — THROUGH its reference box when the
+     * variable is ref-promoted, raw into its slot otherwise.
+     *
+     * `foreach ($xs as $v) { $pool[] = [$v, &$v]; }` SIGSEGVed: the `&$v`
+     * makes {@see EmitLlvmModule::emitRefCellBoxes} turn `$v`'s slot into a
+     * BOX ADDRESS, every read of `$v` then goes through that address — and the
+     * loop's own store wrote the element straight into the slot, so the next
+     * read dereferenced the element as a pointer (0xfff1000000000001, a tagged
+     * int used as an address). This is emitStoreLocal's ref arm, which the
+     * foreach store never went through. The box is a CELL channel, so a raw
+     * element is NaN-boxed by its static type first, exactly as a `$v = …`
+     * assignment to a ref-taken local is.
+     */
+    private function foreachVarStore(string $name, string $reg, ?Type $valType): string
+    {
+        $slot = $this->locals->slots[$name];
+        if (!isset($this->locals->refLocals[$name])) {
+            return '  store i64 ' . $reg . ', ptr ' . $slot . "\n";
+        }
+        $out = '';
+        $val = $reg;
+        $wantCell = ($this->locals->refParamTypes[$name] ?? null) !== null
+            && $this->locals->refParamTypes[$name]->kind === Type::KIND_CELL;
+        if ($wantCell && $valType !== null && $valType->kind !== Type::KIND_CELL
+            && $valType->kind !== Type::KIND_UNKNOWN && $this->isCellBoxableArg($valType)) {
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            $out .= $this->boxToCell($valType);
+            $val = $this->lastValue;
+        }
+        $addr = $this->ssa->allocReg();
+        $out .= '  ' . $addr . ' = load i64, ptr ' . $slot . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+        $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
+        return $out;
+    }
+
     private function foreachElemAddrUnified(string $arr, string $i): string
     {
         $H = (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE;

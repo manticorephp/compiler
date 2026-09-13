@@ -164,6 +164,10 @@ final class MemoryAbi
      *  Cross-check: the same formula at tag 3 gives {@see CELL_NULL}. */
     public const CELL_REF_TAG_BITS = -1970324836974592;
 
+    /** `(7 << 48) | 0xFFF0000000000000` — the header of an ARRAY cell, what a
+     *  `mixed` slot holds when it holds an array. Same formula as the REF one. */
+    public const CELL_ARRAY_TAG_BITS = -2533274790395904;
+
     /** Per-closure retain fn, at `env - 24` (the string's unused `cap`). */
     public const CLOSURE_RETAIN_OFFSET = -24;
 

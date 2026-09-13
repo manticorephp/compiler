@@ -844,7 +844,14 @@ trait EmitLlvmArrays
             $out .= '  ' . $av . ' = call i64 @__mir_array_get_int(ptr ' . $ap
                   . ', i64 ' . $key . ")\n";
         }
-        $out .= '  store i64 ' . $av . ', ptr ' . $slot . "\n";
+        // The element may hold a REFERENCE (`[&$a[$k]]` promoted it), and an
+        // erased read answers what it refers to. Unconditional, through the
+        // array runtime's own owner rather than the needsTagged-gated helper —
+        // this body is emitted wherever the array runtime is, and a cell base
+        // is exactly the base a reference-holding array arrives through.
+        $avd = $this->ssa->allocReg();
+        $out .= '  ' . $avd . ' = call i64 @__mir_deref_cell(i64 ' . $av . ")\n";
+        $out .= '  store i64 ' . $avd . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
         $out .= $endL . ":\n";

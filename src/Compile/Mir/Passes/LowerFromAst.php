@@ -4986,12 +4986,15 @@ final class LowerFromAst implements Pass
                 // denormal: the global kept a raw word while the element decoded
                 // by tag. Refusing is the honest answer until the promotion
                 // covers it.
+                // An ELEMENT source (`[&$refs[$k], …]`, the deepclone witness) is
+                // promoted to a boxed reference by the emitter, which REFUSES a
+                // raw-elemented array itself ({@see EmitLlvmObjects::elemRefBoxAddr}).
                 $ok = \Compile\Debug::$refCells
-                    && ($sk === 'Variable' || $sk === 'PropertyAccess');
+                    && ($sk === 'Variable' || $sk === 'PropertyAccess' || $sk === 'ArrayAccess');
                 if (!$ok) {
                     throw new \RuntimeException(
-                        'unsupported: an array literal can bind a VARIABLE or a PROPERTY by '
-                        . 'reference (`[&$a, &$this->p, …]`), and nothing else yet. This '
+                        'unsupported: an array literal can bind a VARIABLE, a PROPERTY or an '
+                        . 'ELEMENT by reference (`[&$a, &$this->p, &$a[$k], …]`), and nothing else yet. This '
                         . 'element would receive a copy, not an alias, so every write '
                         . 'through it would be lost.'
                         . ' at ' . $this->spanWhere($expr->span)

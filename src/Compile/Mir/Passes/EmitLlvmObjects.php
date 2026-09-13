@@ -2628,7 +2628,18 @@ trait EmitLlvmObjects
         // narrowed inside a trait does not resolve to the right offset natively.
         // See the note in EmitLlvmLocals::preallocateLocals.
         $rcKids = \Compile\Mir\Walk::children($n);
-        $addrIr = $this->byRefAddrOf($rcKids[0]);
+        $src = $rcKids[0];
+        // An ARRAY ELEMENT source does not take the element's address. That
+        // address points INTO the buffer and the next insert relocates it —
+        // fine for the short-lived alias `$r = &$a[$k]`, fatal for a reference
+        // STORED in another array. The element is promoted instead: moved into
+        // an off-buffer box, the slot overwritten with cell(REF, box), and the
+        // box is what this cell points at ({@see UnifiedArrayRuntime::emitRefBox}).
+        if ($src->kind === Node::KIND_ARRAY_ACCESS) {
+            $addrIr = $this->elemRefBoxAddr($src);
+        } else {
+            $addrIr = $this->byRefAddrOf($src);
+        }
         if ($addrIr === null) {
             throw new \RuntimeException(
                 'unsupported: cannot take a storable reference to this expression '
@@ -2645,6 +2656,73 @@ trait EmitLlvmObjects
         $out .= '  ' . $c . ' = or i64 ' . $m . ', '
               . (string)\Compile\MemoryAbi::CELL_REF_TAG_BITS . "\n";
         $this->lastValue = $c;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `&$a[$k]` as a STORABLE reference: the element's BOX address in
+     * lastValue (i64), or null when the element is not addressable.
+     *
+     * The array's static element type must be a CELL channel. The box is a
+     * cell channel and every deref hands its contents to a cell consumer, so a
+     * raw-elemented array (`int[]`, `string[]`) would put a raw word where a
+     * self-describing one is required — the erasure family exactly. That is
+     * REFUSED loudly rather than boxed here by the static type: the array's
+     * OTHER readers still believe its elements are raw, and one promoted slot
+     * would read back as a denormal to every one of them. Retyping the element
+     * channel is the promotion analysis docs/design/reference-cells.md asks for.
+     */
+    private function elemRefBoxAddr(\Compile\Mir\ArrayAccess_ $aa): ?string
+    {
+        $el = $aa->array->type->element ?? null;
+        $elKind = $el === null ? Type::KIND_UNKNOWN : $el->kind;
+        if ($elKind !== Type::KIND_CELL && $elKind !== Type::KIND_UNKNOWN) {
+            throw new \RuntimeException(
+                'unsupported: a storable reference to an element of a ' . $elKind
+                . '-elemented array — the element channel is raw, and a reference box is a '
+                . 'cell channel. Every other reader of this array would see a denormal. '
+                . 'See docs/design/reference-cells.md.'
+            );
+        }
+        // Not arrayElemAddressable: that predicate wants a statically ARRAY
+        // base, and the witness base is `mixed` (`$refs = $values` off an
+        // untyped param). ref_box unboxes a NaN-boxed array slot itself, so a
+        // cell base is fine here as long as the SLOT is addressable.
+        // A CELL key (int-or-string at runtime, e.g. `$k` off a foreach over a
+        // `mixed` array) dispatches in the runtime, like every other cell-key
+        // access; only a float / null-append key has no channel at all.
+        $keyKind = $this->arrayElemKeyKind($aa->index);
+        if ($keyKind === null && $this->keyRidesCellChannel($aa->index)) { $keyKind = 'cell'; }
+        if ($keyKind === null || !$this->containerAddressable($aa->array)) { return null; }
+        $bk = $aa->array->type->kind;
+        if (!$aa->array->type->isArray() && $bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN) {
+            return null;
+        }
+        $out = $this->containerCellPtr($aa->array);
+        if ($out === null) { return null; }
+        $slotPtr = $this->lastValue;
+        $bx = $this->ssa->allocReg();
+        if ($keyKind === 'cell') {
+            $this->rt->needsCellKey = true;
+            $out .= $this->emitNode($aa->index);
+            $out .= $this->coerceToI64();
+            $out .= '  ' . $bx . ' = call ptr @__mir_array_ref_box_cell(ptr ' . $slotPtr
+                  . ', i64 ' . $this->lastValue . ")\n";
+        } elseif ($keyKind === 'str') {
+            $out .= $this->emitNode($aa->index);
+            $out .= $this->coerceToPtr();
+            $out .= '  ' . $bx . ' = call ptr @__mir_array_ref_box_str(ptr ' . $slotPtr
+                  . ', ptr ' . $this->lastValue . ")\n";
+        } else {
+            $out .= $this->emitNode($aa->index);
+            $out .= $this->coerceToI64();
+            $out .= '  ' . $bx . ' = call ptr @__mir_array_ref_box(ptr ' . $slotPtr
+                  . ', i64 ' . $this->lastValue . ")\n";
+        }
+        $addr = $this->ssa->allocReg();
+        $out .= '  ' . $addr . ' = ptrtoint ptr ' . $bx . " to i64\n";
+        $this->lastValue = $addr;
         $this->lastValueType = 'i64';
         return $out;
     }

@@ -111,6 +111,7 @@ final class UnifiedArrayRuntime
         $this->emitCowVariant('__mir_array_cow_ownel_cell', 'cell', true);
         $this->emitRefSlot();
         $this->emitRefSlotStr();
+        $this->emitRefBox();
         $this->emitDerefCell();
         $this->emitValueAt();
         $this->emitArrayUnion();
@@ -3175,6 +3176,111 @@ final class UnifiedArrayRuntime
             $hit->load(Type::i64(), $iSlot), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
 
         $miss->ret($scratch);
+    }
+
+    /**
+     * `__mir_array_ref_box(slotAddr, key) -> ptr` — the address of an int-keyed
+     * element's reference BOX, promoting the element if it is not one yet.
+     *
+     * This is what a STORABLE reference to an element (`[&$a[$k]]`) needs and
+     * {@see emitRefSlot} cannot give: ref_slot answers a pointer INTO the
+     * array buffer, valid until the next insert relocates it — fine for the
+     * short-lived alias `$r = &$a[$k]`, fatal for a reference kept in another
+     * array. So the element is moved OFF the buffer into an 8-byte box, the
+     * element slot is overwritten with `cell(REF, box)`, and the box is what
+     * every later holder points at. An element that already holds a REF cell
+     * answers its existing box, which is what makes two references to one
+     * element share one storage, as php's do.
+     *
+     * ⚠ The element word must be a CELL (self-describing): the box is a cell
+     * channel and every deref hands its contents to a cell consumer. The
+     * emitter enforces that from the array's static element type and REFUSES
+     * a raw-elemented array loudly; here, the one raw word that can still
+     * arrive is the auto-vivify sentinel, so an absent key is created as
+     * CELL_NULL up front rather than left for ref_slot to vivify as raw 0.
+     */
+    private function emitRefBox(): void
+    {
+        $this->emitRefBoxVariant('__mir_array_ref_box', '__mir_array_isset_int', '__mir_array_set_int', '__mir_array_ref_slot', false);
+        $this->emitRefBoxVariant('__mir_array_ref_box_str', '__mir_array_isset_str', '__mir_array_set_str', '__mir_array_ref_slot_str', true);
+    }
+
+    private function emitRefBoxVariant(string $sym, string $issetFn, string $setFn, string $slotFn, bool $strKey): void
+    {
+        $fn = $this->module->func($sym, Type::ptr());
+        $slotIn = $fn->param(Type::ptr(), 'slotAddr');
+        $key = $fn->param($strKey ? Type::ptr() : Type::i64(), 'key');
+        $e = $fn->block('entry');
+        $live = $fn->block('rb_live');
+        $create = $fn->block('rb_create');
+        $locate = $fn->block('rb_locate');
+        $have = $fn->block('rb_have');
+        $make = $fn->block('rb_make');
+        $done = $fn->block('rb_done');
+
+        // The slot may hold the array pointer RAW (an `array`-typed local) or
+        // NaN-BOXED (a `mixed` one — `$refs = $values` off an untyped param,
+        // which is the deepclone witness). ref_slot reads its slot raw, so a
+        // boxed word is unboxed into a scratch slot for the duration and
+        // re-boxed on the way out, relocation included. The tag word itself is
+        // the ARRAY tag: a boxed array cell is what a `mixed` slot holds.
+        $w0 = $e->load(Type::i64(), $slotIn);
+        $boxed = $e->icmp('ugt', $w0, Value::int(Type::i64(), -4503599627370496));
+        $tmp = $e->alloca(Type::i64(), 'rb_tmp');
+        $e->store($e->and_($w0, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), $tmp);
+        $slotAddr = $e->select($boxed, $tmp, $slotIn);
+
+        // A null array cannot hold a reference: hand back ref_slot's own
+        // scratch answer by going straight to it.
+        $b0i = $e->load(Type::i64(), $slotAddr);
+        $b0 = $e->inttoptr($b0i, Type::ptr());
+        $e->brIf($e->icmp('eq', $b0, Value::null()), $locate, $live);
+
+        // Absent key → create it as CELL_NULL (php: the variable a reference
+        // brought into being reads null), on a COW-detached buffer.
+        // The string helpers take a (hash, haveHash) tail; 0,0 = compute it.
+        // ⚠ Arity is not checked by the linker: a short call reads garbage
+        // registers silently (tools/check_ir_arity.php is the detector).
+        $z = Value::int(Type::i64(), 0);
+        $issetArgs = $strKey ? [$b0, $key, $z, $z] : [$b0, $key];
+        $present = $live->call($issetFn, Type::i64(), $issetArgs);
+        $live->brIf($live->icmp('eq', $present, Value::int(Type::i64(), 0)), $create, $locate);
+        $cow = $create->call('__mir_array_cow', Type::ptr(), [$b0]);
+        $nullCell = Value::int(Type::i64(), MemoryAbi::CELL_NULL);
+        $setArgs = $strKey ? [$cow, $key, $nullCell, $z, $z] : [$cow, $key, $nullCell];
+        $sv = $create->call($setFn, Type::ptr(), $setArgs);
+        $create->store($create->ptrtoint($sv, Type::i64()), $slotAddr);
+        $create->br($locate);
+
+        // The element's address, then: already a box, or make one.
+        $ep = $locate->call($slotFn, Type::ptr(), [$slotAddr, $key]);
+        $w = $locate->load(Type::i64(), $ep);
+        $isTagged = $locate->icmp('ugt', $w, Value::int(Type::i64(), -4503599627370496));
+        $nib = $locate->and_($locate->lshr($w, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isRef = $locate->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF));
+        $locate->brIf($locate->and_($isTagged, $isRef), $have, $make);
+
+        $haveBox = $have->inttoptr($have->and_($w, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $have->br($done);
+
+        $box = $this->poolAlloc($make, Value::int(Type::i64(), 8));
+        $make->store($w, $box);
+        $bi = $make->ptrtoint($box, Type::i64());
+        $cell = $make->or_($make->and_($bi, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)),
+                           Value::int(Type::i64(), MemoryAbi::CELL_REF_TAG_BITS));
+        $make->store($cell, $ep);
+        $make->br($done);
+
+        // Write the (possibly relocated) base back in the caller's own
+        // representation: raw where it was raw, re-boxed where it was boxed.
+        $phi = $done->phi(Type::ptr());
+        $phi->addIncoming($haveBox, $have);
+        $phi->addIncoming($box, $make);
+        $np = $done->load(Type::i64(), $slotAddr);
+        $reboxed = $done->or_($done->and_($np, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)),
+                              Value::int(Type::i64(), MemoryAbi::CELL_ARRAY_TAG_BITS));
+        $done->store($done->select($boxed, $reboxed, $np), $slotIn);
+        $done->ret($phi->value());
     }
 
     /**
