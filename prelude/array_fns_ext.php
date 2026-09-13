@@ -495,9 +495,9 @@ function array_merge_recursive(array $arr, array ...$others): array
 
 /**
  * `shuffle(&$array)` — randomise the order, dropping the keys (PHP reindexes).
- * Fisher-Yates over a rebuilt list; entropy comes from `random_int`, the one
- * generator this runtime has (there is no `mt_srand`, so a shuffle is never
- * reproducible — a test can only assert the multiset, never the order).
+ * php_array_data_shuffle verbatim: Fisher-Yates walked downwards off
+ * `__mc_mt_range`, the MT engine, NOT `random_int` — which is why a seeded
+ * `mt_srand()` makes a shuffle here match php's element for element.
  * @param mixed[] $array
  */
 function shuffle(array &$array): bool
@@ -506,10 +506,12 @@ function shuffle(array &$array): bool
     foreach ($array as $v) { $values[] = $v; }
     $i = count($values) - 1;
     while ($i > 0) {
-        $j = random_int(0, $i);
-        $tmp = $values[$i];
-        $values[$i] = $values[$j];
-        $values[$j] = $tmp;
+        $j = __mc_mt_range(0, $i);
+        if ($j !== $i) {
+            $tmp = $values[$i];
+            $values[$i] = $values[$j];
+            $values[$j] = $tmp;
+        }
         $i = $i - 1;
     }
     $array = $values;
@@ -518,9 +520,11 @@ function shuffle(array &$array): bool
 
 /**
  * `array_rand(arr, num)` — one random KEY, or a list of `$num` distinct keys in
- * the array's own order (PHP guarantees that order). Selection sampling: walk
- * the keys once and take each with probability (still-needed / still-left),
- * which is uniform without a reject-and-retry loop.
+ * the array's own order (PHP guarantees that order). php's own algorithm, draw for
+ * draw: one `__mc_mt_range` for the single-key case, and for the rest a set of
+ * distinct offsets drawn with retry — inverted when more than half the array is
+ * wanted, so the loop always draws the SMALLER side. A seeded run matches php
+ * for any array php would hold densely (one it never had elements unset from).
  */
 function array_rand(array $array, int $num = 1): mixed
 {
@@ -534,17 +538,24 @@ function array_rand(array $array, int $num = 1): mixed
             'array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1'
         );
     }
-    if ($num === 1) { return $keys[random_int(0, $n - 1)]; }
-    $out = [];
+    if ($num === 1) { return $keys[__mc_mt_range(0, $n - 1)]; }
     $need = $num;
-    $i = 0;
-    while ($i < $n && $need > 0) {
-        $left = $n - $i;
-        if (random_int(1, $left) <= $need) {
-            $out[] = $keys[$i];
+    $neg = false;
+    if ($need > ($n >> 1)) {
+        $neg = true;
+        $need = $n - $need;
+    }
+    $set = [];
+    while ($need > 0) {
+        $rv = __mc_mt_range(0, $n - 1);
+        if (!isset($set[$rv])) {
+            $set[$rv] = true;
             $need = $need - 1;
         }
-        $i = $i + 1;
+    }
+    $out = [];
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        if (isset($set[$i]) !== $neg) { $out[] = $keys[$i]; }
     }
     return $out;
 }

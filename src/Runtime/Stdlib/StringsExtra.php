@@ -792,3 +792,51 @@ function utf8_decode(string $string): string
 
     return $out;
 }
+
+/**
+ * `mb_strcut($string, $start, $length, $encoding)` — substr measured in BYTES,
+ * then pulled back to character boundaries so a cut never splits a multibyte
+ * sequence. That is the whole difference from mb_substr, which counts
+ * characters: mb_strcut is what you want when a byte budget is the constraint
+ * (a column width, a protocol field) and a mangled tail is not acceptable.
+ *
+ * php's order of operations is load-bearing and reproduced here: snap the START
+ * down to a boundary FIRST, and only then measure $length from the snapped
+ * offset — `mb_strcut("aä中b", 2, 4)` is two bytes, not five, because the
+ * length runs from 1 rather than from 2.
+ *
+ * Only UTF-8 needs the snapping; any other encoding named here is treated as
+ * single-byte, which is what mb_strcut does for every single-byte encoding it
+ * knows and is a plain substr for the rest.
+ */
+function mb_strcut(string $string, int $start, ?int $length = null, ?string $encoding = null): string
+{
+    $n = \strlen($string);
+    if ($start < 0) {
+        $start = $n + $start;
+        if ($start < 0) { $start = 0; }
+    }
+    if ($start > $n) { return ''; }
+
+    $utf8 = $encoding === null || \__mc_mb_is_utf8($encoding);
+    if ($utf8) {
+        while ($start > 0 && (\ord($string[$start]) & 0xC0) === 0x80) { $start = $start - 1; }
+    }
+
+    $end = $length === null ? $n : ($length < 0 ? $n + $length : $start + $length);
+    if ($end > $n) { $end = $n; }
+    if ($end < $start) { return ''; }
+    if ($utf8) {
+        while ($end > $start && $end < $n && (\ord($string[$end]) & 0xC0) === 0x80) { $end = $end - 1; }
+    }
+
+    return \substr($string, $start, $end - $start);
+}
+
+/** Whether an mbstring encoding name is UTF-8 under php's spelling rules. */
+function __mc_mb_is_utf8(string $encoding): bool
+{
+    $e = \strtolower($encoding);
+
+    return $e === 'utf-8' || $e === 'utf8';
+}

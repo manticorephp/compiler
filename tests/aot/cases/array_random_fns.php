@@ -1,8 +1,9 @@
 <?php
 
-// shuffle / array_rand draw from `random_int` — this runtime has no mt_srand, so
-// a draw is never reproducible. Everything asserted here is an INVARIANT: the
-// multiset survives a shuffle, and every drawn key belongs to the array.
+// shuffle / array_rand draw from the MT engine, unseeded here on purpose:
+// everything asserted is an INVARIANT — the multiset survives a shuffle, and
+// every drawn key belongs to the array. The SEEDED, php-exact sequences these
+// same two functions produce are in stdlib_mt_rand.
 
 $a = [1, 2, 3, 4, 5, 6];
 shuffle($a);

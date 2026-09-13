@@ -75,3 +75,16 @@ function opcache_invalidate(string $filename, bool $force = false): bool
 {
     return false;
 }
+
+/**
+ * `dba_list()` — the open dba handles. There is no dba layer in a compiled
+ * binary, so nothing can be open and php's own answer for that state is the
+ * empty array. A caller iterating it does the right thing; a caller that would
+ * have hit a trap here was only asking what is open.
+ *
+ * @return array<int,string>
+ */
+function dba_list(): array
+{
+    return [];
+}

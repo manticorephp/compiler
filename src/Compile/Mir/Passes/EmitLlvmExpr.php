@@ -1977,11 +1977,16 @@ trait EmitLlvmExpr
     private function emitBitOp(\Compile\Mir\BitOp $n): string
     {
         $b = $n;
+        // Unbox a CELL operand (and numeric-coerce a string) BEFORE the bitwise
+        // op, exactly as {@see emitNeg} does. coerceToI64 alone hands the raw
+        // NaN-boxed carrier to `or`/`shl`, which is a silent wrong answer: an
+        // int read out of an ERASED array element added correctly and OR-ed to
+        // garbage, because `+` went through coerceArithOperand and this did not.
         $out = $this->emitNode($b->left);
-        $out .= $this->coerceToI64();
+        $out .= $this->coerceArithOperand($b->left, false);
         $l = $this->lastValue;
         $out .= $this->emitNode($b->right);
-        $out .= $this->coerceToI64();
+        $out .= $this->coerceArithOperand($b->right, false);
         $r = $this->lastValue;
         // PHP `>>` is an arithmetic (sign-extending) shift → ashr.
         $op = $b->op;
@@ -2000,7 +2005,7 @@ trait EmitLlvmExpr
     private function emitBitNot(\Compile\Mir\BitNot_ $n): string
     {
         $out = $this->emitNode($n->operand);
-        $out .= $this->coerceToI64();
+        $out .= $this->coerceArithOperand($n->operand, false);
         $val = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = xor i64 ' . $val . ", -1\n";

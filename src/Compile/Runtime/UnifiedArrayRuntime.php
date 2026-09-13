@@ -111,6 +111,7 @@ final class UnifiedArrayRuntime
         $this->emitCowVariant('__mir_array_cow_ownel_cell', 'cell', true);
         $this->emitRefSlot();
         $this->emitRefSlotStr();
+        $this->emitDerefCell();
         $this->emitValueAt();
         $this->emitArrayUnion();
         $this->emitKeyAt();
@@ -3258,8 +3259,64 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_deref_cell(v) -> i64` — the ONE OWNER of "a stored REF cell is the
+     * value it refers to", for the array runtime.
+     *
+     * A cell tagged {@see MemoryAbi::CELL_TAG_REF} is a pointer to the
+     * reference's box; php has no rvalue spelling for the binding itself, so
+     * every path that hands an element to the PROGRAM has to see through it.
+     * The paths that do NOT are just as important and are listed here once,
+     * because getting that half wrong is the same bug with the sign flipped:
+     * retain/release, COW, the packed→hashed promote, the hashed insert and the
+     * ref-slot address helpers all move or account for the STORED WORD, and a
+     * reference stored in an array stays a reference when the array is copied —
+     * `$b = $a` shares the binding in php, and our COW already reproduces that
+     * only because it copies the cell RAW.
+     *
+     * It lives here rather than reusing `@__manticore_deref` because that body
+     * is gated on `needsTagged` while this one ships with the ARRAY runtime: a
+     * module with arrays and no tagged arithmetic would otherwise reference an
+     * undefined symbol.
+     */
+    private function emitDerefCell(): void
+    {
+        $fn = $this->module->func('__mir_deref_cell', Type::i64());
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $box = $fn->block('dc_box');
+        $plain = $fn->block('dc_plain');
+        $isTagged = $e->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $e->and_($e->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isRef = $e->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF));
+        $e->brIf($e->and_($isTagged, $isRef), $box, $plain);
+        $bp = $box->inttoptr($box->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $box->ret($box->load(Type::i64(), $bp));
+        $plain->ret($v);
+    }
+
+    /**
      * `__mir_array_value_at(arr, i) -> i64` — value at slot/entry i for
      * foreach. PACKED: packed slot; HASHED: entry value field.
+     *
+     * ⚠ A REF cell is DEREFERENCED here, and this is the one place that does it
+     * for every full iteration. `__mir_array_value_at` is what foreach, implode,
+     * in_array, the json walk, spread, var_dump and array_keys/values all read
+     * their element through — the value counterpart of {@see emitLiveLen}'s
+     * bound. Before this, an element holding `cell(REF, box)` came back as the
+     * BOX ADDRESS: `foreach ([&$d] as $v)` printed a pointer, `in_array(7, …)`
+     * answered false and the json walk SIGSEGVed, while the keyed read
+     * (`$e[0]`, which derefs in EmitLlvmArrays) was right all along.
+     *
+     * It is deliberately NOT a call to `@__manticore_deref`: that body is gated
+     * on `needsTagged`, and this one is emitted with the array runtime, so a
+     * module with arrays and no tagged arithmetic would reference an undefined
+     * symbol. Inlining also keeps the hot path to four ALU ops and a
+     * well-predicted branch instead of a call per element.
+     *
+     * ⚠ UNCONDITIONAL on purpose. This body is shared across modules, so a
+     * variant that depended on whether THIS module holds a reference would give
+     * the linker two different bodies for one symbol — the same trap the deref
+     * helper's own comment names.
      */
     private function emitValueAt(): void
     {
@@ -3269,10 +3326,17 @@ final class UnifiedArrayRuntime
         $e = $fn->block('entry');
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
+        $chk = $fn->block('va_chk');
         $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
-        $packed->ret($packed->load(Type::i64(), $this->packedSlot($packed, $arr, $i)));
-        $hashed->ret($hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET)));
+        $pv = $packed->load(Type::i64(), $this->packedSlot($packed, $arr, $i));
+        $packed->br($chk);
+        $hv = $hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $hashed->br($chk);
+        $phi = $chk->phi(Type::i64());
+        $phi->addIncoming($pv, $packed);
+        $phi->addIncoming($hv, $hashed);
+        $chk->ret($chk->call('__mir_deref_cell', Type::i64(), [$phi->value()]));
     }
 
     /**

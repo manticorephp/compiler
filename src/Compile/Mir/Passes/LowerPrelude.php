@@ -221,6 +221,11 @@ trait LowerPrelude
             // and token_get_all() constructs __McTok.
             $src .= $this->tokenizerSrc . $this->tokenizerApiSrc;
         }
+        if ($this->opensslSrc !== '') {
+            // ext/openssl certificate reading. Self-contained: DER in, arrays out,
+            // no dependency on any other prelude fragment.
+            $src .= $this->opensslSrc;
+        }
         // Belt and braces: the concatenation ALREADY starts with the Throwable
         // prelude's own `<?php`, so this leading tag is redundant today and the
         // parser skips the duplicate. It is here so that the invariant — this
@@ -1095,6 +1100,20 @@ trait LowerPrelude
             // sort flags
             // ext/hash: the only flag php defines for hash_init().
             'HASH_HMAC' => 1,
+            // ext/random: the mt_srand() engine variants.
+            'MT_RAND_MT19937' => 0, 'MT_RAND_PHP' => 1,
+            // ext/zlib: the container a gz* function wraps its DEFLATE stream in.
+            'ZLIB_ENCODING_RAW' => -15, 'ZLIB_ENCODING_DEFLATE' => 15,
+            'ZLIB_ENCODING_GZIP' => 31,
+            // getimagesize()s format tags. In ext/standard, not GD.
+            'IMAGETYPE_UNKNOWN' => 0, 'IMAGETYPE_GIF' => 1, 'IMAGETYPE_JPEG' => 2,
+            'IMAGETYPE_PNG' => 3, 'IMAGETYPE_SWF' => 4, 'IMAGETYPE_PSD' => 5,
+            'IMAGETYPE_BMP' => 6, 'IMAGETYPE_TIFF_II' => 7, 'IMAGETYPE_TIFF_MM' => 8,
+            'IMAGETYPE_JPC' => 9, 'IMAGETYPE_JPEG2000' => 9, 'IMAGETYPE_JP2' => 10,
+            'IMAGETYPE_JPX' => 11, 'IMAGETYPE_JB2' => 12, 'IMAGETYPE_SWC' => 13,
+            'IMAGETYPE_IFF' => 14, 'IMAGETYPE_WBMP' => 15, 'IMAGETYPE_XBM' => 16,
+            'IMAGETYPE_ICO' => 17, 'IMAGETYPE_WEBP' => 18, 'IMAGETYPE_AVIF' => 19,
+            'IMAGETYPE_COUNT' => 20,
             'SORT_REGULAR' => 0, 'SORT_NUMERIC' => 1, 'SORT_STRING' => 2,
             'SORT_DESC' => 3, 'SORT_ASC' => 4, 'SORT_LOCALE_STRING' => 5,
             'SORT_NATURAL' => 6, 'SORT_FLAG_CASE' => 8,
