@@ -1,0 +1,19 @@
+bool(true)
+int(3)
+bool(true)
+array(2) {
+  [0]=>
+  string(4) "orig"
+  [1]=>
+  string(7) "changed"
+}
+VABC
+string(4) "mine"
+string(5) "after"
+int(2)
+int(3)
+string(5) "hello"
+int(5)
+int(5)
+bool(true)
+int(1)

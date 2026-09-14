@@ -102,6 +102,8 @@ final class UnifiedArrayRuntime
         $this->emitCowVariant('__mir_array_cow_obj', 'obj');
         $this->emitCowVariant('__mir_array_cow_str', 'str');
         $this->emitCowVariant('__mir_array_cow_cell', 'cell');
+        $this->emitCowVariant('__mir_array_clone_cell', 'cell', false, true);
+        $this->emitCellOwnAlias();
         // A cow CONSUMES the caller's reference (it hands back the clone and
         // gives up the source), so a caller whose reference owns element refs
         // must give them back here too — otherwise `$s = $this->map; $s[$k] = v;`
@@ -2037,6 +2039,42 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_cell_own_alias(v) -> i64` — what `$b = $a` stores when `$a` is a
+     * CELL local: a value the destination OWNS, so the `__mir_cell_drop` the
+     * release half schedules for it is balanced whatever the tag turns out to
+     * be at runtime.
+     *
+     * An ARRAY is COPIED (eagerly, {@see emitCowVariant}'s force-clone), not
+     * retained. php's own model is rc + copy-on-write, and a retain here would
+     * be that model — except that the source may be a borrowed `mixed`
+     * parameter whose share was never counted, and the first COW through it
+     * would then charge the caller's buffer for a reference it never took. The
+     * copy gives the destination a fresh rc=1 buffer and touches the source's
+     * count not at all. Every other rc'd payload (string, object) is retained,
+     * and a scalar is handed back as it is. Cost: one clone per array alias
+     * that php would COW lazily — the price of a count nobody was keeping.
+     */
+    private function emitCellOwnAlias(): void
+    {
+        $fn = $this->module->func('__mir_cell_own_alias', Type::i64());
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $arr = $fn->block('oa_arr');
+        $other = $fn->block('oa_other');
+        $istag = $e->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $e->and_($e->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isArr = $e->and_($istag, $e->icmp('eq', $nib, Value::int(Type::i64(), 7)));
+        $e->brIf($isArr, $arr, $other);
+        $ap = $arr->inttoptr($arr->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $cp = $arr->call('__mir_array_clone_cell', Type::ptr(), [$ap]);
+        $ci = $arr->ptrtoint($cp, Type::i64());
+        $arr->ret($arr->or_($arr->and_($ci, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)),
+                            Value::int(Type::i64(), MemoryAbi::CELL_ARRAY_TAG_BITS)));
+        $other->call('__mir_cell_retain', Type::void(), [$v]);
+        $other->ret($v);
+    }
+
+    /**
      * `__mir_cell_retain(v)` — the exact mirror of {@see emitCellDrop}: co-own
      * the rc payload NaN-boxed into a cell, with the same tag dispatch and the
      * same guards (enum ordinal / #[Struct] / closure have no rc header and are
@@ -2975,7 +3013,7 @@ final class UnifiedArrayRuntime
      * borrowed ASSOC return started being +1-retained, which is what makes a
      * `$t = $pool->all(); … $pool->intern(x)` pair two real owners.
      */
-    private function emitCowVariant(string $symbol, string $valueFlavor, bool $dropSource = false): void
+    private function emitCowVariant(string $symbol, string $valueFlavor, bool $dropSource = false, bool $forceClone = false): void
     {
         $fn = $this->module->func($symbol, Type::ptr());
         $arr = $fn->param(Type::ptr(), 'arr');
@@ -2986,7 +3024,17 @@ final class UnifiedArrayRuntime
         $e->brIf($e->icmp('eq', $arr, Value::null()), $keep, $chk);
         $rcAddr = $this->hdr($chk, $arr, MemoryAbi::ARRAY_RC_OFFSET);
         $rc = $chk->load(Type::i64(), $rcAddr);
-        $chk->brIf($chk->icmp('sle', $rc, Value::int(Type::i64(), 1)), $keep, $clone);
+        // `$forceClone`: an eager VALUE COPY (`$b = $a` on a cell-held array),
+        // not a copy-on-write. It clones at any rc and — the whole point —
+        // leaves the source's rc ALONE: the name being copied FROM may be a
+        // borrowed parameter that never held a counted share, and the rc-1 a
+        // COW charges "the caller's reference going away" would then be a
+        // count stolen from whoever actually owns the buffer.
+        if ($forceClone) {
+            $chk->br($clone);
+        } else {
+            $chk->brIf($chk->icmp('sle', $rc, Value::int(Type::i64(), 1)), $keep, $clone);
+        }
 
         $len = $clone->load(Type::i64(), $arr);
         $cap = $clone->load(Type::i64(), $this->hdr($clone, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
@@ -3006,7 +3054,7 @@ final class UnifiedArrayRuntime
         // that reference held go back too — AFTER the clone's deep-retain below
         // (which is why it sits at `$ret`), and it can never free: this path only
         // runs at rc > 1, so the decrement lands at rc >= 1.
-        if (!$dropSource) {
+        if (!$dropSource && !$forceClone) {
             $clone->store($clone->sub($rc, Value::int(Type::i64(), 1)), $rcAddr);
             if (Debug::$arrRcTrace) {
                 // A COW that copies drops the caller's reference to the SOURCE

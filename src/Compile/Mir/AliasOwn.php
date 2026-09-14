@@ -21,11 +21,25 @@ namespace Compile\Mir;
  * release-before-overwrite freed a buffer another alias still held, and
  * `__mc_hosts_lookup_in` answered '' for every host after the first.
  *
- * OBJ and STRING only. A vec/assoc alias is deliberately NOT co-owned (arrays
+ * OBJ, STRING and CELL. A vec/assoc alias is deliberately NOT co-owned (arrays
  * COW-copy on mutation, and blanket-retaining local assoc aliases wrote a
- * refcount into a neighbouring heap string); a CELL alias stays borrowed —
- * its word may be a raw scalar, and a retain on one is a write to a bogus
- * address.
+ * refcount into a neighbouring heap string).
+ *
+ * A CELL alias OWNS its value, and it did not use to: the worry was that a
+ * cell slot's word may be a RAW scalar, and a retain on one would write to a
+ * bogus address. The helpers are tag-guarded — a word outside the tagged
+ * range is a no-op, exactly as `__mir_cell_drop` is — so that worry never
+ * applied. What the destination stores is `__mir_cell_own_alias`'s answer: an
+ * ARRAY payload is COPIED eagerly (the source may be a borrowed `mixed`
+ * parameter whose share was never counted, and a COW through it would steal
+ * the caller's count), anything else rc'd is retained. Either way the
+ * `__mir_cell_drop` this predicate schedules is balanced. What NOT owning
+ * cost was value semantics: `$refs =
+ * $values` with `mixed $values` left the array at rc 1 with two names on it,
+ * so the copy-on-write behind `$refs['r'] = …` saw a sole owner and wrote in
+ * place — a store through one name reached the other. symfony/polyfill-
+ * deepclone's `$values[$k] !== $sentinel` never fired, because the sentinel
+ * had been written into `$values` through `$refs`.
  *
  * Type-only, like `CondOwn::armsCoverable`: no class tables, no signatures, so
  * both callers compute the identical answer. Each caller keeps its own
@@ -57,6 +71,6 @@ final class AliasOwn
         $a = self::peel($v);
         if ($a->kind !== Node::KIND_LOAD_LOCAL) { return false; }
         $k = $a->type->kind;
-        return $k === Type::KIND_OBJ || $k === Type::KIND_STRING;
+        return $k === Type::KIND_OBJ || $k === Type::KIND_STRING || $k === Type::KIND_CELL;
     }
 }

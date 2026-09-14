@@ -810,9 +810,26 @@ trait EmitLlvmLocals
             // blocks from `InferTypes::blockDiverges` alone in one front-end run.
             // Adopt takes the element refs the release will give back, and
             // nothing else.
-            $out .= $copiedVecProp
-                ? $this->arrayAdoptIr($aliasV, $this->arrayRetainFlavor($v, $fallback))
-                : $this->rcRetainByType($v, $aliasV, $fallback, 0);
+            // A CELL alias retains by TAG: rcRetainByType has no cell arm (it
+            // answers '' for a cell with no fallback), and the payload may be an
+            // array, a string, an object, or nothing rc'd at all — which is what
+            // __mir_cell_retain dispatches on, mirroring the __mir_cell_drop the
+            // release half schedules for this slot.
+            if ($v->type->kind === Type::KIND_CELL && !$copiedVecProp) {
+                // Not a bare retain: an ARRAY payload is COPIED, because the
+                // source may be a borrowed `mixed` parameter and a later COW
+                // through it would steal a count the caller still relies on
+                // ({@see UnifiedArrayRuntime::emitCellOwnAlias}). The slot
+                // stores what comes back — a fresh boxed clone, or the same
+                // word now co-owned.
+                $owned = $this->ssa->allocReg();
+                $out .= '  ' . $owned . ' = call i64 @__mir_cell_own_alias(i64 ' . $aliasV . ")\n";
+                $aliasV = $owned;
+            } else {
+                $out .= $copiedVecProp
+                    ? $this->arrayAdoptIr($aliasV, $this->arrayRetainFlavor($v, $fallback))
+                    : $this->rcRetainByType($v, $aliasV, $fallback, 0);
+            }
             $this->lastValue = $aliasV;
             $this->lastValueType = 'i64';
         }
