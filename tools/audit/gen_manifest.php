@@ -63,9 +63,13 @@ foreach ($j['tiers'] as $name => $info) {
 // on every run: the audit's rule is that a bounded measurement says so out loud,
 // because a silent skip reads exactly like a clean result.
 $parseBlocked = [
-    // `[&$refs[$k], $value, &$value]` — a reference inside an array literal.
-    // finding: parser-ref-in-array-literal
-    './vendor/symfony/polyfill-deepclone' => 'parser-ref-in-array-literal',
+    // `[&$refs[$k], $value, &$value]` lowers since the ref-cell element
+    // source landed (finding parser-ref-in-array-literal is CLOSED). What
+    // still refuses, loudly and typed, is reflection over CLOSURES: `new
+    // ReflectionFunction($closure)`, getClosureScopeClass(),
+    // getClosureUsedVariables(), isStatic(), getFileName() (DeepClone.php:658,
+    // 668, 692, 1278, 1283). finding: reflection-closure-surface
+    './vendor/symfony/polyfill-deepclone' => 'reflection-closure-surface',
 ];
 foreach ($parseBlocked as $d => $finding) { $exclude[$d] = true; }
 fwrite(STDERR, "gen_manifest: parse-blocked skips: "
