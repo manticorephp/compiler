@@ -3453,6 +3453,22 @@ final class LowerFromAst implements Pass
             }
             return $this->storeToTarget($expr->target, $lv);
         }
+        // `$a[$k] = &$v` — the ELEMENT is the target. It fell through to the
+        // value copy below and every write through the "reference" was lost;
+        // symfony/polyfill-deepclone's `$values[$k] = &$value` (its "break hard
+        // reference") is exactly this. The element receives a storable REF cell,
+        // the same node `[&$v]` stores, and the emitter REPLACES the slot's
+        // binding rather than writing through whatever reference it held —
+        // which is the whole point of that line.
+        if ($expr->target->kind === 'ArrayAccess'
+            && \Compile\Debug::$refCells
+            && ($expr->source->kind === 'Variable'
+                || $expr->source->kind === 'PropertyAccess'
+                || $expr->source->kind === 'ArrayAccess')) {
+            $lv = $this->lowerExpr($expr->source);
+            $this->module->hasRefCells = true;
+            return $this->storeToTarget($expr->target, new \Compile\Mir\RefCell_($lv, Type::cell()));
+        }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
     }
 

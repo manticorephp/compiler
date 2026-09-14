@@ -37,7 +37,25 @@ final class VecCopyOnAssign
     {
         /** @var array<string, bool> $out */
         $out = [];
-        self::scan($body, $out);
+        self::scan($body, $out, false);
+        return $out;
+    }
+
+    /**
+     * The same scan with the static `isArray()` gate off: every local written
+     * THROUGH as an array, whatever its declared type says. A `mixed` param the
+     * body stores into (`$v[$k] = …`) is exactly the name {@see mutatedLocals}
+     * cannot see — its base is a cell — and exactly the one that must take its
+     * own share of the buffer before that store ({@see
+     * \Compile\Mir\Passes\InsertMemoryOps}'s mutated-cell-param registration).
+     *
+     * @return array<string, bool>
+     */
+    public static function mutatedLocalsAnyType(Node $body): array
+    {
+        /** @var array<string, bool> $out */
+        $out = [];
+        self::scan($body, $out, true);
         return $out;
     }
 
@@ -86,7 +104,7 @@ final class VecCopyOnAssign
     }
 
     /** @param array<string, bool> $out */
-    private static function scan(Node $n, array &$out): void
+    private static function scan(Node $n, array &$out, bool $anyType): void
     {
         if ($n->kind === Node::KIND_CALL && \count($n->args) > 0) {
             // Shape first, NAME second: a kind compare is a word compare while
@@ -95,20 +113,20 @@ final class VecCopyOnAssign
             $base = $n->args[0];
             // `array_pop($x[0])` mutates the ROOT local too.
             while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
-            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()
+            if ($base->kind === Node::KIND_LOAD_LOCAL && ($anyType || $base->type->isArray())
                 && self::mutatesArg0($n->function)) {
                 $out[$base->name] = true;
             }
         }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $arr = $n->array;
-            if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
+            if ($arr->kind === Node::KIND_LOAD_LOCAL && ($anyType || $arr->type->isArray())) {
                 $out[$arr->name] = true;
             }
             // A NESTED element store (`$x[0][] = …`) mutates the root local too.
             $base = $arr;
             while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
-            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
+            if ($base->kind === Node::KIND_LOAD_LOCAL && ($anyType || $base->type->isArray())) {
                 $out[$base->name] = true;
             }
         }
@@ -121,31 +139,31 @@ final class VecCopyOnAssign
                 if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
                 $base = $t;
                 while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
-                if ($base->kind === Node::KIND_LOAD_LOCAL && $base->type->isArray()) {
+                if ($base->kind === Node::KIND_LOAD_LOCAL && ($anyType || $base->type->isArray())) {
                     $out[$base->name] = true;
                 }
             }
         }
         // Taking an element's ADDRESS by reference can mutate the vec.
-        if ($n->kind === Node::KIND_REF_ADDR) { self::markElemBase($n->lvalue, $out); }
+        if ($n->kind === Node::KIND_REF_ADDR) { self::markElemBase($n->lvalue, $out, $anyType); }
         if ($n->kind === Node::KIND_CALL) {
-            foreach ($n->args as $a) { self::markElemBase($a, $out); }
+            foreach ($n->args as $a) { self::markElemBase($a, $out, $anyType); }
         }
         if ($n->kind === Node::KIND_METHOD_CALL) {
-            foreach ($n->args as $a) { self::markElemBase($a, $out); }
+            foreach ($n->args as $a) { self::markElemBase($a, $out, $anyType); }
         }
         if ($n->kind === Node::KIND_STATIC_CALL) {
-            foreach ($n->args as $a) { self::markElemBase($a, $out); }
+            foreach ($n->args as $a) { self::markElemBase($a, $out, $anyType); }
         }
-        foreach (Walk::children($n) as $c) { self::scan($c, $out); }
+        foreach (Walk::children($n) as $c) { self::scan($c, $out, $anyType); }
     }
 
     /** @param array<string, bool> $out */
-    private static function markElemBase(Node $a, array &$out): void
+    private static function markElemBase(Node $a, array &$out, bool $anyType): void
     {
         if ($a->kind !== Node::KIND_ARRAY_ACCESS) { return; }
         $arr = $a->array;
-        if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
+        if ($arr->kind === Node::KIND_LOAD_LOCAL && ($anyType || $arr->type->isArray())) {
             $out[$arr->name] = true;
         }
     }

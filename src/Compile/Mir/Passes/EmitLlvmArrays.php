@@ -1298,7 +1298,16 @@ trait EmitLlvmArrays
         $out = $this->emitNode($se->value);
         $savedValue = $this->lastValue;
         $savedValueType = $this->lastValueType;
+        $this->elemRawReg = '';
         if ($boxVal) {
+            // Keep the RAW word too: it is what the store yields as an
+            // EXPRESSION. `$refs[$k] = $values[$k] = new R()` hands the inner
+            // store's result to the outer one, whose value node is statically
+            // `obj<R>` — given the BOXED word instead it read the rc header at
+            // (tagged word - 8) and SIGSEGVed; for an int it stored the cell bits
+            // under an int claim and `$refs['a']` read -4222124650659798.
+            $this->elemRawReg = $savedValue;
+            $this->elemRawType = $savedValueType;
             // A CELL slot keeps the payload BY POINTER — co-own it, exactly as
             // the cell array-literal path does. Without this the value is freed
             // by its source's release while the array still points at it:
@@ -1471,7 +1480,23 @@ trait EmitLlvmArrays
         // reads it when reference cells are live, so the extra lookup is paid
         // only where the drop is what needs it.
         $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type);
-        $readsOld = $dropFlavor !== '' || $this->rt->needsRefCells;
+        // A REF-cell value (`$a[$k] = &$v`) REBINDS the slot: php replaces the
+        // element's binding, it does not write through the reference the slot
+        // held. So the old word is neither read for write-through nor treated
+        // as a value to drop — the binding it was is simply gone from this slot.
+        $rebinds = $se->value->kind === Node::KIND_REF_CELL;
+        if ($rebinds) {
+            $el = $se->array->type->element ?? null;
+            $elKind = $el === null ? Type::KIND_UNKNOWN : $el->kind;
+            if ($elKind !== Type::KIND_CELL && $elKind !== Type::KIND_UNKNOWN) {
+                throw new \RuntimeException(
+                    'unsupported: a reference into an element of a ' . $elKind
+                    . '-elemented array (`$a[$k] = &$v`) — the element channel is raw and a '
+                    . 'reference cell is not. See docs/design/reference-cells.md.'
+                );
+            }
+        }
+        $readsOld = !$rebinds && ($dropFlavor !== '' || $this->rt->needsRefCells);
         $this->elemWroteThroughRef = '';
         $next = $this->ssa->allocReg();
         if ($isAppend) {
@@ -1493,7 +1518,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
             }
-            if ($this->rt->needsRefCells) {
+            if ($this->rt->needsRefCells && !$rebinds) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -1524,7 +1549,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
             }
-            if ($this->rt->needsRefCells) {
+            if ($this->rt->needsRefCells && !$rebinds) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -1546,7 +1571,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
             }
-            if ($this->rt->needsRefCells) {
+            if ($this->rt->needsRefCells && !$rebinds) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -1582,8 +1607,16 @@ trait EmitLlvmArrays
         }
         if ($hint !== null) { $out .= $this->emitElemHintStamp($next, $hint); }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
-        $this->lastValue = $val;
-        $this->lastValueType = 'i64';
+        // The store as an EXPRESSION is the value in the node's own static
+        // type, not the word the slot took: a boxing store yields the raw
+        // operand, or a chained `$a[$k] = $b[$k] = v` reads a cell as a value.
+        if ($boxVal && $this->elemRawReg !== '') {
+            $this->lastValue = $this->elemRawReg;
+            $this->lastValueType = $this->elemRawType;
+        } else {
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+        }
         return $out;
     }
 }

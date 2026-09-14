@@ -4698,6 +4698,31 @@ trait EmitLlvmObjects
                     }
                     continue;
                 }
+                // `unset($v)` where a STORABLE reference was taken to `$v`
+                // (`[&$v]`, {@see EmitLlvmModule::emitRefCellBoxes}): the slot
+                // holds the address of `$v`'s BOX, not its value. Zeroing it made
+                // the next `$v = …` write through address 0 and trapped. php's
+                // unset breaks the BINDING and nothing else — the name detaches,
+                // every earlier holder keeps the box and what is in it — so the
+                // name is handed a FRESH box holding null. That is also what
+                // makes the deepclone idiom work: `$values[$k] = &$value;
+                // unset($value);` inside a foreach relies on each iteration's
+                // `&$value` being a new variable, not the one the array now
+                // holds. The old box is not released: a box is shared by every
+                // holder and none of them counts it (the same lifetime every
+                // local ref box has today).
+                if (isset($this->locals->refLocals[$name])
+                    && isset($this->locals->slots[$name])
+                    && ($this->locals->refParamTypes[$name] ?? null) !== null
+                    && $this->locals->refParamTypes[$name]->kind === Type::KIND_CELL) {
+                    $nb = $this->ssa->allocReg();
+                    $out .= '  ' . $nb . " = call ptr @__mir_alloc(i64 8)\n";
+                    $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $nb . "\n";
+                    $nbi = $this->ssa->allocReg();
+                    $out .= '  ' . $nbi . ' = ptrtoint ptr ' . $nb . " to i64\n";
+                    $out .= '  store i64 ' . $nbi . ', ptr ' . $this->locals->slots[$name] . "\n";
+                    continue;
+                }
                 $flavor = $this->discardReleaseFlavor($t->type);
                 if (isset($this->locals->globalBacked[$name])) {
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->globalBacked[$name], $flavor); }

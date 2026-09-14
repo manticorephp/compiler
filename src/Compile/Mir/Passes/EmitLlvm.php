@@ -253,6 +253,11 @@ final class EmitLlvm implements EmitVisitor
     // reg holding the element value word. A field, not a by-ref out-param —
     // that pattern miscompiles under self-host ({@see cellTagIr}).
     private string $elemValReg = '';
+    /** The RAW value word a boxing element store took in, with its LLVM repr —
+     *  what the store EXPRESSION yields ({@see EmitLlvmArrays::emitStoreElemValue}).
+     *  '' when the store did not box. */
+    private string $elemRawReg = '';
+    private string $elemRawType = 'i64';
 
     /** The `i1` saying the last element store wrote THROUGH a reference cell
      *  ({@see EmitLlvmArrays::emitElemWriteThrough}), '' when that path is not

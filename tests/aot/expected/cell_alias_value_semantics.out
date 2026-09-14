@@ -17,3 +17,24 @@ int(5)
 int(5)
 bool(true)
 int(1)
+int(1)
+string(5) "first"
+string(5) "first"
+string(6) "second"
+array(3) {
+  [0]=>
+  int(-1)
+  [1]=>
+  int(-1)
+  [2]=>
+  bool(true)
+}
+1
+p=stdClass
+q=stdClass
+r=R#-1
+string(9) "rewritten"
+int(10)
+int(10)
+string(8) "replaced"
+string(8) "replaced"

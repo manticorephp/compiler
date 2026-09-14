@@ -220,6 +220,31 @@ final class InsertMemoryOps implements Pass
             }
         }
 
+        // The SECOND exception, and the same discipline: a BY-VALUE `mixed`
+        // param the body MUTATES AS AN ARRAY (`$v[$k] = …`, `$v[] = …`,
+        // `unset($v[$k])`, `$v[$k] = &$x`). An `array`-hinted param is copied on
+        // entry for this ({@see EmitLlvmModule}'s copy_deep); a `mixed` one was
+        // not, and its slot held the caller's buffer at rc 1 — the one reference
+        // being the CALLER'S — so the copy-on-write behind the first store saw a
+        // sole owner and wrote into the caller's array. Registering it takes the
+        // entry retain + scope-exit drop (both tag-dispatched, so a scalar or a
+        // string arriving in the same param costs a no-op): rc becomes 2, the
+        // first store COPIES, and the frame owns a private buffer from then on.
+        // Witness: symfony/polyfill-deepclone's `$values[$k] = &$value`, which
+        // must rebind the CALLEE's element and leave the caller's `'p' => &$a`
+        // exactly as it was.
+        $mutatedAsArray = \Compile\Mir\VecCopyOnAssign::mutatedLocalsAnyType($fn->body);
+        foreach ($fn->params as $p) {
+            if ($p->byRef || $p->variadic) { continue; }
+            if ($p->type->kind !== Type::KIND_CELL) { continue; }
+            if (!isset($mutatedAsArray[$p->name])) { continue; }
+            unset($this->rcObjBlocked[$p->name]);
+            if (!isset($this->rcObjType[$p->name])) {
+                $this->rcObjOrder[] = $p->name;
+                $this->rcObjType[$p->name] = Type::cell();
+            }
+        }
+
         // A `$x = null;` / `$x = '';` seed neither owns nor borrows, so it must
         // not disqualify the local: the slot then holds 0, an immortal literal
         // (both self-guarded by every release helper) or a genuine +1. Without
