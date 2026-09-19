@@ -60,11 +60,11 @@ RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.or
     && update-alternatives --set php /usr/bin/php8.5
 
 # ---- latest stable clang/LLVM (apt.llvm.org) ----
-# NOT `llvm.sh` with no argument: that targets the trunk version (22 at time of
+# NOT `llvm.sh` with no argument: that targets the development version (23 at time of
 # writing), which publishes no bookworm packages and hard-fails the build. Walk
 # candidate versions newest-first and keep the first that actually installs, so
 # this tracks "latest that exists" without pinning to a version that will rot.
-ARG LLVM_VERSIONS="21 20 19"
+ARG LLVM_VERSIONS="22 21 20"
 RUN curl -sSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
     && chmod +x /tmp/llvm.sh \
     && installed="" \
