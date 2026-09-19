@@ -57,7 +57,7 @@ checks the toolchain above, tells you what is missing, then installs under
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 export PATH="$HOME/.manticore/bin:$PATH"
 
-manticore version        # manticore 0.6.0
+manticore version        # manticore 0.10.0
 ```
 
 Re-running the installer **upgrades in place**: an existing `manticore` rebuilds the

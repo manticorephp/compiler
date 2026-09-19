@@ -333,5 +333,5 @@ patch also: rewrite the drop-body / walker emission against the new shape, updat
 direct offset GEP, and bump the affected `*_HEADER_SIZE`.
 
 The constant is **not** currently surfaced by any command — `manticore version` prints the
-release version (`manticore 0.6.0`) and nothing else. Exposing the ABI version so vendored
+release version (`manticore 0.10.0`) and nothing else. Exposing the ABI version so vendored
 `.o` artefacts can detect a mismatch is open work.

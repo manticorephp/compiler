@@ -20,7 +20,7 @@ present (it checks and tells you what is missing), then puts everything under
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 # then, as the script prints:
 export PATH="$HOME/.manticore/bin:$PATH"
-manticore version        # -> manticore 0.6.0
+manticore version        # -> manticore 0.10.0
 ```
 
 Re-running the installer **upgrades in place**: once a working `manticore` is
