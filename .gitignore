@@ -17,6 +17,8 @@ graphify-out/
 # Compiled example binaries (rebuilt via examples/*/build.sh)
 examples/async/*_bin
 examples/http/*_bin
+examples/symfony-console/bin/
+examples/symfony-console/vendor/
 
 # OS
 **/.DS_Store
@@ -26,6 +28,7 @@ examples/http/*_bin
 # The audit HARNESS (probes, expected, data) lives in tests/audit/ and IS tracked.
 docs/audit/
 docs/status/
+docs/superpowers/
 probe/
 
 # Scratch manifests for measurement runs: a copy of manticore.json whose only

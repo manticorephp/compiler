@@ -198,26 +198,85 @@ cross-unit calls without re-parsing sources, and a distributable compiler that s
 
 ## Performance
 
-Native AOT output vs the Zend interpreter, Apple M1 Pro, `-O2`, best of 5 (`REPS=5`; the
-script defaults to 3), every compiled program verified byte-equal to `php` first. Loops are
-data-dependent and `$argc`-seeded so LLVM cannot fold them away. Representative slice —
-reproduce with `REPS=5 bash bench/run.sh` (cases in `bench/cases/`):
+Native AOT output vs the Zend interpreter on an Apple M1 Pro, `-O2`, PHP 8.5.10.
+Each ordinary-PHP case is verified byte-for-byte against `php` before timing; loops
+are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are seconds
+(lower is better); RSS is peak resident memory in MiB. Reproduce with
+`REPS=5 bash bench/run.sh` (the script defaults to 3 runs; cases live in `bench/cases/`).
 
-| Benchmark | Workload | `php` | manticore | Speedup |
-|---|---|---:|---:|---:|
-| `spectralnorm` | float math, tight loops | 0.44 s | 0.01 s | **44×** |
-| `oop` | 20 M polymorphic virtual calls | 1.13 s | 0.04 s | **28×** |
-| `fib` | recursive, data-dependent depth | 1.86 s | 0.10 s | **19×** |
-| `sieve` | Eratosthenes to 2 M | 0.20 s | 0.02 s | **10×** |
-| `funcarr` | `array_map`/`filter`/`reduce` | 0.16 s | 0.02 s | **8.0×** |
-| `strcat` | 30 M-iter string append | 0.37 s | 0.11 s | **3.4×** |
-| `sort` | `sort()` 3 K ints × 200 | 0.12 s | 0.05 s | **2.4×** |
-| `json` | `json_encode` loop | 0.12 s | 0.08 s | **1.5×** |
+| Case | Native (s) | PHP (s) | Speedup | Native RSS (MiB) | PHP RSS (MiB) | Parity |
+|---|---:|---:|---:|---:|---:|---|
+| `alloc_churn` | 0.04 | 0.34 | 8.5× | 2.2 | 28.1 | ok |
+| `array` | 0.08 | 0.91 | 11.4× | 7.1 | 36.0 | ok |
+| `assoc` | 0.06 | 0.26 | 4.3× | 2.3 | 28.2 | ok |
+| `assoc_small` | 0.03 | 0.18 | 6.0× | 2.0 | 27.9 | ok |
+| `closures` | 0.03 | 0.63 | 21.0× | 2.1 | 28.0 | ok |
+| `dijkstra` | 0.02 | 0.34 | 17.0× | 2.5 | 29.2 | ok |
+| `explode` | 0.06 | 0.39 | 6.5× | 2.0 | 28.0 | ok |
+| `fib` | 0.11 | 12.09 | 109.9× | 2.0 | 28.1 | ok |
+| `fiber_pingpong` | 0.03 | 0.36 | 12.0× | 2.2 | 27.9 | ok |
+| `fiber_switch` | 0.06 | 0.56 | 9.3× | 2.2 | 27.9 | ok |
+| `foreach_assoc` | 0.02 | 0.19 | 9.5× | 26.3 | 41.7 | ok |
+| `funcarr` | 0.02 | 1.02 | 51.0× | 2.4 | 28.0 | ok |
+| `generator_yield` | 0.02 | 0.71 | 35.5× | 2.0 | 28.0 | ok |
+| `http_parse` | 1.08 | — | — | 3.0 | — | php-skip |
+| `http_scale` | 1.17 | — | — | 3.2 | — | php-skip |
+| `implode_int` | 0.20 | 0.28 | 1.4× | 2.2 | 28.3 | ok |
+| `in_array` | 0.11 | 0.26 | 2.4× | 2.0 | 28.3 | ok |
+| `json` | 0.08 | 0.25 | 3.1× | 2.2 | 28.3 | ok |
+| `json_decode` | 0.11 | 0.30 | 2.7× | 16.0 | 45.9 | ok |
+| `json_decode_object` | 0.02 | 0.16 | 8.0× | 6.4 | 33.9 | ok |
+| `json_decode_records` | 0.07 | 0.24 | 3.4× | 11.1 | 39.0 | ok |
+| `json_deep` | 0.03 | 0.18 | 6.0× | 2.2 | 28.6 | ok |
+| `json_escape_heavy` | 0.02 | 0.15 | 7.5× | 3.4 | 28.6 | ok |
+| `json_objects` | 0.21 | 0.36 | 1.7× | 5.0 | 29.5 | ok |
+| `json_pretty` | 0.08 | 0.16 | 2.0× | 5.0 | 29.5 | ok |
+| `json_records` | 0.34 | 0.63 | 1.9× | 18.9 | 33.4 | ok |
+| `json_utf8` | 0.06 | 0.25 | 4.2× | 6.3 | 29.4 | ok |
+| `ksort_asort` | 0.02 | 0.13 | 6.5× | 6.2 | 29.1 | ok |
+| `loop` | 0.06 | 1.37 | 22.8× | 2.0 | 27.9 | ok |
+| `mandelbrot` | 0.04 | 0.97 | 24.2× | 2.0 | 28.0 | ok |
+| `mathf` | 0.02 | 0.72 | 36.0× | 2.0 | 27.9 | ok |
+| `matmul` | 0.01 | 0.17 | 17.0× | 2.6 | 28.9 | ok |
+| `nbody` | 0.04 | 0.37 | 9.2× | 2.0 | 28.2 | ok |
+| `nested_array_local` | 0.02 | 0.18 | 9.0× | 2.2 | 28.2 | ok |
+| `net_bulk` | 0.01 | 0.14 | 14.0× | 2.9 | 28.1 | ok |
+| `net_lines` | 0.02 | 0.15 | 7.5× | 5.9 | 28.2 | ok |
+| `oop` | 0.08 | 3.18 | 39.8× | 2.0 | 28.2 | ok |
+| `refslot` | 0.00 | 0.13 | ∞ | 2.5 | 28.5 | ok |
+| `sieve` | 0.03 | 0.44 | 14.7× | 28.1 | 58.7 | ok |
+| `sort` | 0.05 | 0.20 | 4.0× | 2.4 | 28.1 | ok |
+| `spectralnorm` | 0.02 | 1.55 | 77.5× | 2.2 | 27.9 | ok |
+| `sprintf` | 0.04 | 0.19 | 4.8× | 2.0 | 27.9 | ok |
+| `strcat` | 0.14 | 0.80 | 5.7× | 32.4 | 59.5 | ok |
+| `strops` | 0.02 | 0.22 | 11.0× | 2.0 | 28.0 | ok |
+| `tokenize` | 0.03 | — | — | 14.3 | — | php-skip |
+| `unset_churn` | 0.00 | 0.13 | ∞ | 3.6 | 29.1 | ok |
+| `variadic_pack` | 0.08 | 0.26 | 3.2× | 2.5 | 28.0 | ok |
+| `wordcount` | 0.02 | 0.16 | 8.0× | 2.0 | 28.1 | ok |
 
-Compute-bound work wins big (no per-op dispatch). The library-bound tail is the
-tightest race — those helpers compete with PHP's hand-tuned C — and native still wins
-every one. Also: **cold start** 2.6 ms vs 62 ms (~24×), a trivial program links to a
-**~50 KB** fully-static binary, and `fib.php` compiles to native in ~0.1 s.
+All 45 comparable cases are faster natively; three HTTP/tokenization cases are
+native-only because they use Manticore prelude APIs. The sub-10 ms values are at the
+harness's two-decimal precision, so treat their speedups as directional. The table also
+shows the start-up-memory advantage: most native binaries stay near 2–3 MiB RSS, while
+the PHP interpreter baseline is roughly 28 MiB before workload-specific allocations.
+
+## Examples
+
+The runnable demos live in [`examples/`](examples/): [`async/`](examples/async/) covers
+structured concurrency and [`http/`](examples/http/) has native HTTP servers. The
+[`symfony-console/`](examples/symfony-console/) example is a small Composer application
+compiled with Symfony Console itself — install its dependencies, then build the project:
+
+```bash
+cd examples/symfony-console
+composer install
+manticore build
+./bin/demo greet Ada
+```
+
+Its manifest uses `"composer": true`, so Composer autoload roots and installed packages
+are compiled as source; the generated binary does not load `vendor/autoload.php` at runtime.
 
 ## How it is built
 

@@ -1,0 +1,11 @@
+{
+  "applications": [
+    {
+      "name": "demo",
+      "src": "src",
+      "entry": "src/app.php",
+      "output": "bin/demo",
+      "composer": true
+    }
+  ]
+}

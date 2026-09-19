@@ -170,6 +170,8 @@ final class DependencyIndex
 
     private function asStaticProp(Node $node): StaticProp_ { return $node; }
 
+    private function asStoreStaticProp(Node $node): StoreStaticProp_ { return $node; }
+
     private function collect(Node $node, string $caller): void
     {
         if ($node->kind === Node::KIND_CALL) {
@@ -205,8 +207,12 @@ final class DependencyIndex
             $this->propUsers[$this->asPropWrite($node)->property][$caller] = true;
         }
         if ($node->kind === Node::KIND_STATIC_PROP || $node->kind === Node::KIND_STORE_STATIC_PROP) {
-            // A static prop's slot name is its global; the same keying works.
-            $this->propUsers[$this->asStaticProp($node)->global][$caller] = true;
+            // A static prop's slot name is its global; reads and stores use
+            // different node classes but are indexed under the same key.
+            $global = $node->kind === Node::KIND_STATIC_PROP
+                ? $this->asStaticProp($node)->global
+                : $this->asStoreStaticProp($node)->global;
+            $this->propUsers[$global][$caller] = true;
         }
         if ($node->kind === Node::KIND_DYN_PROP || $node->kind === Node::KIND_STORE_DYN_PROP) {
             $this->dynPropUsers[$caller] = true;
