@@ -302,6 +302,282 @@ function splitPath(string $target): array<int, string>
 }
 
 /**
+ * `host:port` / `[v6]:port` → [host, port], port '' when absent. Splits on the
+ * LAST colon so a bare v6 address is not cut at its first group.
+ *
+ * @internal
+ * @return array<int, string>
+ */
+function splitHostPort(string $hp): array<int, string>
+{
+    $out = [];
+    $colon = \strrpos($hp, ':');
+    $close = \strrpos($hp, ']');
+    // No colon, `[v6]` with no port, or a BARE v6 (two or more colons and no
+    // brackets — `2001:db8::7` has no port to split off).
+    if ($colon === false
+        || ($close !== false && $colon < $close)
+        || ($close === false && \strpos($hp, ':') !== $colon)) {
+        $out[] = \trim($hp, '[]');
+        $out[] = '';
+        return $out;
+    }
+    $out[] = \trim(\substr($hp, 0, $colon), '[]');
+    $out[] = \substr($hp, $colon + 1);
+    return $out;
+}
+
+/**
+ * Parse `a.b.c.d/n` / `x::y/n` / a bare address into [packed network bytes,
+ * prefix length as a decimal string], or null when malformed. The prefix is a
+ * string because the pair rides in one `array<int,string>` — a mixed tuple
+ * would make both elements cells.
+ *
+ * @internal
+ * @return ?array<int, string>
+ */
+function cidrParse(string $cidr): ?array<int, string>
+{
+    if ($cidr === '') {
+        return null;
+    }
+    $slash = \strpos($cidr, '/');
+    $addr = $slash === false ? $cidr : \substr($cidr, 0, $slash);
+    $packed = \inet_pton($addr);
+    if ($packed === false) {
+        return null;
+    }
+    $bits = \strlen($packed) * 8;
+    $len = $bits;
+    if ($slash !== false) {
+        $p = \substr($cidr, $slash + 1);
+        if ($p === '' || !\ctype_digit($p)) {
+            return null;
+        }
+        $len = (int)$p;
+        if ($len > $bits) {
+            return null;
+        }
+    }
+    $out = [];
+    $out[] = $packed;
+    $out[] = (string)$len;
+    return $out;
+}
+
+/**
+ * @internal
+ * @param array<int, string> $net from {@see cidrParse}
+ */
+function inCidrParsed(string $packedIp, array<int, string> $net): bool
+{
+    $network = $net[0];
+    $len = (int)$net[1];
+    if (\strlen($packedIp) !== \strlen($network)) {
+        return false;
+    }
+    $full = \intdiv($len, 8);
+    for ($i = 0; $i < $full; $i = $i + 1) {
+        if ($packedIp[$i] !== $network[$i]) {
+            return false;
+        }
+    }
+    $rem = $len % 8;
+    if ($rem === 0) {
+        return true;
+    }
+    $mask = (0xFF << (8 - $rem)) & 0xFF;
+    return (\ord($packedIp[$full]) & $mask) === (\ord($network[$full]) & $mask);
+}
+
+/** Is `$ip` inside `$cidr`? A bare address is /32 or /128. Malformed → false. */
+function inCidr(string $ip, string $cidr): bool
+{
+    $net = cidrParse($cidr);
+    if ($net === null) {
+        return false;
+    }
+    $packed = \inet_pton($ip);
+    if ($packed === false) {
+        return false;
+    }
+    return inCidrParsed($packed, $net);
+}
+
+/**
+ * Resolve the client behind a trusted proxy.
+ *
+ * `$trusted` is the parsed CIDR list; `$flags` are {@see Proxy} bits. Returns
+ * [remoteAddr, '1'|'0' for secure, forwardedPort] and rewrites `Host` in `$h`
+ * when HOST is granted. A peer outside `$trusted` gets its own address back
+ * and the headers are ignored, not stripped.
+ *
+ * `Proxy::FORWARDED` is opt-in — {@see Proxy::ALL} does not carry it, since a
+ * proxy that merely passes a client-supplied `Forwarded:` through is exactly
+ * as unsafe as trusting an arbitrary `X-Forwarded-*`. When granted and the
+ * header is present, its elements' `for=` values form the SAME right-to-left
+ * chain as `X-Forwarded-For` (one walk, whichever family supplies it, and
+ * `Forwarded` wins when it names `for` at all); `proto=`/`host=` come from
+ * the RIGHTMOST element that names them — the hop nearest this process. Each
+ * field stays gated by its own flag too: `for` needs `FOR`, `proto` needs
+ * `PROTO`, `host` needs `HOST`. A hop `\inet_pton` rejects (`unknown`, an
+ * obfuscated identifier, malformed) is skipped exactly like an empty element;
+ * if every hop is junk, `remoteAddr` stays the peer.
+ *
+ * @internal
+ * @param array<int, array<int, string>> $trusted
+ * @return array<int, string>
+ */
+function resolveForwarded(Headers $h, string $peer, bool $secure, array $trusted, int $flags): array<int, string>
+{
+    $out = [];
+    $out[] = $peer;
+    $out[] = $secure ? '1' : '0';
+    $out[] = '';
+    if (!proxyTrusted(peerIp($peer), $trusted)) {
+        return $out;
+    }
+    $for = '';
+    $proto = '';
+    $host = '';
+    $port = '';
+    if (($flags & Proxy::FOR) !== 0) {
+        $for = $h->get('x-forwarded-for');
+    }
+    if (($flags & Proxy::PROTO) !== 0) {
+        $proto = firstToken($h->get('x-forwarded-proto'));
+    }
+    if (($flags & Proxy::HOST) !== 0) {
+        $host = firstToken($h->get('x-forwarded-host'));
+    }
+    if (($flags & Proxy::PORT) !== 0) {
+        $port = firstToken($h->get('x-forwarded-port'));
+    }
+    $hops = $for === '' ? [] : splitStr(',', $for);
+    if (($flags & Proxy::FORWARDED) !== 0) {
+        $fwd = $h->get('forwarded');
+        if ($fwd !== '') {
+            $fwdHops = [];
+            $namedFor = false;
+            foreach (splitStr(',', $fwd) as $el) {
+                $elFor = '';
+                foreach (splitStr(';', \trim($el)) as $pair) {
+                    $eq = \strpos($pair, '=');
+                    if ($eq === false) {
+                        continue;
+                    }
+                    $k = \strtolower(\trim(\substr($pair, 0, $eq)));
+                    $v = \trim(\substr($pair, $eq + 1), " \t\"");
+                    if ($k === 'for') {
+                        $elFor = $v;
+                        $namedFor = true;
+                    } elseif ($k === 'proto' && ($flags & Proxy::PROTO) !== 0) {
+                        $proto = $v;
+                    } elseif ($k === 'host' && ($flags & Proxy::HOST) !== 0) {
+                        $host = $v;
+                    }
+                }
+                $fwdHops[] = $elFor;
+            }
+            // `for` still needs its own flag even with FORWARDED granted; when
+            // Forwarded names no `for=` at all, the X-Forwarded-For chain (if
+            // any) set above stands.
+            if ($namedFor && ($flags & Proxy::FOR) !== 0) {
+                $hops = $fwdHops;
+            }
+        }
+    }
+    $chosen = '';
+    for ($i = \count($hops) - 1; $i >= 0; $i = $i - 1) {
+        $ip = hopIp($hops[$i]);
+        if ($ip === '') {
+            continue;
+        }
+        $chosen = $ip;
+        if (!proxyTrusted($ip, $trusted)) {
+            break;
+        }
+    }
+    if ($chosen !== '') {
+        $out[0] = $chosen;
+    }
+    if ($proto !== '') {
+        $out[1] = \strtolower($proto) === 'https' ? '1' : '0';
+    }
+    if ($host !== '') {
+        $h->set('Host', $host);
+    }
+    if ($port !== '' && \ctype_digit($port) && (int)$port >= 1 && (int)$port <= 65535) {
+        $out[2] = $port;
+    }
+    return $out;
+}
+
+/**
+ * @internal
+ * @param array<int, array<int, string>> $trusted
+ */
+function proxyTrusted(string $ip, array $trusted): bool
+{
+    if (\count($trusted) === 0) {
+        return false;
+    }
+    $packed = \inet_pton($ip);
+    if ($packed === false) {
+        return false;
+    }
+    foreach ($trusted as $net) {
+        if (inCidrParsed($packed, $net)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The first comma-separated element, trimmed. @internal */
+function firstToken(string $v): string
+{
+    $c = \strpos($v, ',');
+    return \trim($c === false ? $v : \substr($v, 0, $c));
+}
+
+/**
+ * A forwarded hop's IP, or '' when it is not one — `unknown`, an obfuscated
+ * identifier, or anything else `\inet_pton` rejects. Skipped exactly like an
+ * empty element in the walk; the hop's own port (if any) is discarded the
+ * same way {@see splitHostPort} discards one.
+ *
+ * @internal
+ */
+function hopIp(string $hop): string
+{
+    $ip = splitHostPort(\trim($hop))[0];
+    if ($ip === '' || \inet_pton($ip) === false) {
+        return '';
+    }
+    return $ip;
+}
+
+/**
+ * The peer's address with no port. `stream_socket_get_name()` answers
+ * Zend-format `host:port` with NO brackets even for v6 (`::1:54321`), and the
+ * peer ALWAYS carries a port — so this splits at the LAST colon
+ * unconditionally rather than reusing {@see splitHostPort}'s bare-v6
+ * heuristic, which is right for a `Host` header or a forwarded hop but wrong
+ * here (it would refuse to split `::1:54321` at all).
+ *
+ * @internal
+ */
+function peerIp(string $peer): string
+{
+    $colon = \strrpos($peer, ':');
+    if ($colon === false) {
+        return \trim($peer, '[]');
+    }
+    return \trim(\substr($peer, 0, $colon), '[]');
+}
+
+/**
  * Percent-decode a path and collapse its `.` and `..` segments.
  *
  * A server that hands `..` to a handler is a path-traversal generator, so this
@@ -775,6 +1051,25 @@ final class Status
 }
 
 /**
+ * Which forwarded headers a trusted proxy may set. `const int` flags, not an
+ * enum, for the same reason {@see Status} is not one.
+ *
+ * `FORWARDED` is NOT in `ALL` — opt in explicitly. A proxy that merely passes
+ * a client-supplied `Forwarded:` header through is exactly as unsafe as
+ * trusting an arbitrary `X-Forwarded-*`; RFC 7239 support is offered, not
+ * defaulted.
+ */
+final class Proxy
+{
+    public const FOR = 1;
+    public const PROTO = 2;
+    public const HOST = 4;
+    public const PORT = 8;
+    public const FORWARDED = 16;
+    public const ALL = 15;
+}
+
+/**
  * A header block: a lookup by lowercased name, and the wire lines in order.
  *
  * Two structures rather than one because the two questions are different. A
@@ -1053,6 +1348,13 @@ final class Request
         public readonly string $remoteAddr,
         /** True when the connection is TLS. */
         public readonly bool $secure,
+        /** The socket's own peer address, always — {@see $remoteAddr} may come
+         *  from a trusted proxy's header. */
+        public readonly string $peerAddr = '',
+        /** `X-Forwarded-Port` from a trusted proxy, else '' — RFC 7239 has no
+         *  port field of its own; the port inside a `Forwarded: for=` value
+         *  is part of the client address and is discarded. */
+        public readonly string $forwardedPort = '',
         /** Present only for a streamed body. */
         private ?\Buffer\Reader $reader = null,
     ) {
@@ -1405,7 +1707,11 @@ final class Parser
      *  Reader handed to the handler reads on past what the buffer holds. */
     private ?\Resource $conn = null;
     private bool $streamBodies = false;
+    /** @var array<int, array<int, string>> */
+    private array $trusted = [];
+    private int $proxyFlags = 0;
 
+    /** @param array<int, array<int, string>> $trusted */
     public function __construct(
         \Buffer\ByteBuffer $buf,
         string $remoteAddr = '',
@@ -1415,6 +1721,8 @@ final class Parser
         int $maxBodySize = 8388608,
         ?\Resource $conn = null,
         bool $streamBodies = false,
+        array $trusted = [],
+        int $proxyFlags = 0,
     ) {
         $this->buf = $buf;
         $this->remoteAddr = $remoteAddr;
@@ -1424,6 +1732,8 @@ final class Parser
         $this->maxBodySize = $maxBodySize;
         $this->conn = $conn;
         $this->streamBodies = $streamBodies;
+        $this->trusted = $trusted;
+        $this->proxyFlags = $proxyFlags;
     }
 
     /** The request, once {@see parse} has answered {@see READY}. */
@@ -1810,6 +2120,15 @@ final class Parser
         if ($h === null) {
             $h = new Headers();
         }
+        $remote = $this->remoteAddr;
+        $secure = $this->secure;
+        $fport = '';
+        if (\count($this->trusted) > 0) {
+            $r = resolveForwarded($h, $this->remoteAddr, $this->secure, $this->trusted, $this->proxyFlags);
+            $remote = $r[0];
+            $secure = $r[1] === '1';
+            $fport = $r[2];
+        }
         $this->req = new Request(
             $this->method,
             $this->target,
@@ -1819,8 +2138,10 @@ final class Parser
             $h,
             $this->body,
             $this->streamed,
+            $remote,
+            $secure,
             $this->remoteAddr,
-            $this->secure,
+            $fport,
             $this->reader,
         );
         $this->state = self::ST_DONE;
@@ -2040,6 +2361,9 @@ final class Server
     private int $keepAliveMax = 1000;
     private string $serverName = 'manticore';
     private bool $secure = false;
+    /** @var array<int, array<int, string>> parsed CIDRs, {@see trustedProxies} */
+    private array $trustedProxies = [];
+    private int $proxyFlags = 0;
 
     /** How long one `accept` waits before the loop re-reads {@see $stopped}.
      *  This — not closing the listener out from under a parked accept — is what
@@ -2104,6 +2428,27 @@ final class Server
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
 
     /**
+     * Peers whose `X-Forwarded-*` / `Forwarded` headers are believed. Off
+     * unless called. A malformed entry throws here, at configuration time.
+     *
+     * @param array<int, string> $cidrs
+     */
+    public function trustedProxies(array<int, string> $cidrs, int $flags = Proxy::ALL): Server
+    {
+        $parsed = [];
+        foreach ($cidrs as $c) {
+            $net = cidrParse($c);
+            if ($net === null) {
+                throw new \InvalidArgumentException('Http\\Server: bad trusted proxy ' . $c);
+            }
+            $parsed[] = $net;
+        }
+        $this->trustedProxies = $parsed;
+        $this->proxyFlags = $flags;
+        return $this;
+    }
+
+    /**
      * Run until {@see stop} (or cancellation). `$handler` is
      * `callable(Request): Response`.
      *
@@ -2120,10 +2465,44 @@ final class Server
             $this->loop();
             return;
         }
+        // Bind BEFORE any fork and before any reactor: the children inherit
+        // one listener fd and the kernel balances accepts between them.
+        $this->bind();
+        if ($this->workerCount > 0) {
+            \Process\supervise($this->workerCount, function (int $i): void {
+                \Async\async(function () {
+                    \Async\shutdownOn(\SIGTERM, \SIGINT);
+                    $this->loop();
+                });
+            });
+            if ($this->ownsListener && $this->listener !== null) {
+                \fclose($this->listener);
+                $this->listener = null;
+            }
+            return;
+        }
         \Async\async(function () {
             \Async\shutdownOn(\SIGTERM, \SIGINT);
             $this->loop();
         });
+    }
+
+    /** Open the listener once; a no-op when the caller supplied one. */
+    private function bind(): void
+    {
+        if ($this->listener !== null) {
+            return;
+        }
+        $errno = 0;
+        $errstr = '';
+        $l = $this->context === null
+            ? \stream_socket_server($this->addr, $errno, $errstr)
+            : \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $this->context);
+        if ($l === false) {
+            throw new \RuntimeException('Http\\Server: cannot bind ' . $this->addr . ': ' . $errstr);
+        }
+        \stream_set_blocking($l, false);
+        $this->listener = $l;
     }
 
     /**
@@ -2149,23 +2528,10 @@ final class Server
 
     private function loop(): void
     {
+        $this->bind();
         $listener = $this->listener;
         if ($listener === null) {
-            if ($this->workerCount > 0) {
-                // Fork BEFORE any reactor exists — the only safe order.
-                \Process\workers($this->workerCount);
-            }
-            $errno = 0;
-            $errstr = '';
-            $l = $this->context === null
-                ? \stream_socket_server($this->addr, $errno, $errstr)
-                : \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $this->context);
-            if ($l === false) {
-                throw new \RuntimeException('Http\\Server: cannot bind ' . $this->addr . ': ' . $errstr);
-            }
-            $listener = $l;
-            $this->listener = $l;
-            \stream_set_blocking($listener, false);
+            return;
         }
         $gate = new \Async\Semaphore($this->maxConnections);
         try {
@@ -2209,7 +2575,8 @@ final class Server
     {
         $buf = new \Buffer\ByteBuffer();
         $out = new Outbox($conn);
-        $remote = '';
+        $peer = \stream_socket_get_name($conn, true);
+        $remote = $peer === false ? '' : $peer;
         // ONE parser for the connection, reset between messages. Its limits and
         // its buffer do not change, so a fresh object per request was four
         // allocations and a zeroed field block for nothing.
@@ -2222,6 +2589,8 @@ final class Server
             $this->maxBodySize,
             $conn,
             $this->streamBodies,
+            $this->trustedProxies,
+            $this->proxyFlags,
         );
         try {
             $this->pump($conn, $buf, $out, $parser);
@@ -2395,19 +2764,25 @@ final class Server
         $out['REQUEST_URI'] = $req->target;
         $out['SERVER_PROTOCOL'] = 'HTTP/' . $req->version;
         $out['QUERY_STRING'] = $req->queryString;
-        $out['REMOTE_ADDR'] = $req->remoteAddr;
+        // The socket case: `remoteAddr` IS the peer string, `ip:port` with no
+        // brackets even for v6 ({@see peerIp}). A forwarded `remoteAddr`
+        // carries no port at all — split it here would cut a bare v6 address
+        // at its first colon, so it is used as-is instead.
+        if ($req->remoteAddr === $req->peerAddr) {
+            $colon = \strrpos($req->remoteAddr, ':');
+            $out['REMOTE_ADDR'] = peerIp($req->remoteAddr);
+            $out['REMOTE_PORT'] = $colon === false ? '' : \substr($req->remoteAddr, $colon + 1);
+        } else {
+            $out['REMOTE_ADDR'] = $req->remoteAddr;
+            $out['REMOTE_PORT'] = '';
+        }
         $out['HTTPS'] = $req->secure ? 'on' : '';
         $out['CONTENT_TYPE'] = $req->header('Content-Type');
         $out['CONTENT_LENGTH'] = $req->header('Content-Length');
-        $host = $req->header('Host');
-        $colon = \strrpos($host, ':');
-        if ($colon !== false && $colon > 0) {
-            $out['SERVER_NAME'] = \substr($host, 0, $colon);
-            $out['SERVER_PORT'] = \substr($host, $colon + 1);
-        } else {
-            $out['SERVER_NAME'] = $host;
-            $out['SERVER_PORT'] = $req->secure ? '443' : '80';
-        }
+        $hp = splitHostPort($req->header('Host'));
+        $out['SERVER_NAME'] = $hp[0];
+        $out['SERVER_PORT'] = $req->forwardedPort !== '' ? $req->forwardedPort
+            : ($hp[1] !== '' ? $hp[1] : ($req->secure ? '443' : '80'));
         foreach ($req->headers->all() as $k => $v) {
             $out['HTTP_' . \strtoupper(\str_replace('-', '_', $k))] = $v;
         }

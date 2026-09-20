@@ -1535,10 +1535,15 @@ namespace Async {
      */
     final class Context
     {
-        /** The innermost scope open in the calling task, or null outside async(). */
+        /**
+         * The innermost scope open in the calling task, or null outside async().
+         * A QUERY: it must not build the engine — one built here, before a
+         * fork, hands every child a reactor fd that is dead (kqueue) or shared
+         * with the parent (epoll).
+         */
         public static function currentScope(): ?TaskGroup
         {
-            return Scheduler::instance()->currentGroup();
+            return Scheduler::hasInstance() ? Scheduler::instance()->currentGroup() : null;
         }
 
         /** The cancellation handle of the scope the calling task is in. */
@@ -1619,6 +1624,8 @@ namespace Async {
     final class Scheduler
     {
         private static ?Scheduler $instance = null;
+        /** The process that built $instance — a fork inherits it. {@see forRun()} */
+        private static int $instancePid = 0;
 
         /** @var Task[] tasks ready to resume (the run queue) */
         private array $ready = [];
@@ -1716,8 +1723,24 @@ namespace Async {
         {
             if (self::$instance === null) {
                 self::$instance = new Scheduler();
+                self::$instancePid = \getmypid();
             }
             return self::$instance;
+        }
+
+        /**
+         * The engine an async() run starts on. An IDLE engine another process
+         * built is a fork's inheritance: its reactor fd is dead (kqueue is not
+         * inherited across fork) or shared with the parent (epoll), so the
+         * child starts a fresh one. A RUNNING engine is never replaced — a fork
+         * inside a loop is unsupported ({@see \pcntl_fork()}).
+         */
+        public static function forRun(): Scheduler
+        {
+            if (self::$instance !== null && self::$instance->root === null && self::$instancePid !== \getmypid()) {
+                self::$instance = null;
+            }
+            return self::instance();
         }
 
         /** Whether a loop is up — {@see Async\dump()} must not CREATE one. */
@@ -2915,13 +2938,13 @@ namespace Async {
      */
     function async(callable $main): mixed
     {
-        return Scheduler::instance()->run($main, '');
+        return Scheduler::forRun()->run($main, '');
     }
 
     /** @internal {@see async()} with the compiler-folded call site. */
     function __asyncAt(string $site, callable $main): mixed
     {
-        return Scheduler::instance()->run($main, $site);
+        return Scheduler::forRun()->run($main, $site);
     }
 
     /**
@@ -2964,7 +2987,7 @@ namespace Async {
      */
     function __spawnAt(string $site, callable $fn, mixed ...$args): Task
     {
-        $group = Scheduler::instance()->currentGroup();
+        $group = Context::currentScope();
         if ($group === null) {
             throw new \LogicException('spawn() outside Async\\async() — no scope to own the task');
         }
@@ -3268,9 +3291,12 @@ namespace Async {
      */
     function shutdownOn(int ...$signals): void
     {
-        $sched = Scheduler::instance();
         foreach ($signals as $s) {
-            \pcntl_signal($s, function () use ($sched) { $sched->cancelRoot(); });
+            \pcntl_signal($s, function () {
+                if (Scheduler::hasInstance()) {
+                    Scheduler::instance()->cancelRoot();
+                }
+            });
         }
     }
 
@@ -3294,10 +3320,11 @@ namespace Async {
      */
     function dumpOn(int ...$signals): void
     {
-        $sched = Scheduler::instance();
         foreach ($signals as $s) {
-            \pcntl_signal($s, function () use ($sched) {
-                \fwrite(\STDERR, $sched->report());
+            \pcntl_signal($s, function () {
+                if (Scheduler::hasInstance()) {
+                    \fwrite(\STDERR, Scheduler::instance()->report());
+                }
             });
         }
     }

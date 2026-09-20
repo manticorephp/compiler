@@ -28,8 +28,13 @@ buffering it needs, because a server without those is not a server.
 
 One process serves many requests at once. Each connection is a task under one
 `Async\TaskGroup`; the I/O is ordinary `fread`/`fwrite`, which suspends the
-fiber through the netpoller instead of blocking the process. `->workers(N)`
-forks N of those before any reactor exists, so N cores accept on one listener.
+fiber through the netpoller instead of blocking the process.
+
+`->workers(N)` binds the listener once, then forks N workers that inherit it,
+under a supervisor (`Process\supervise`) that reaps and restarts a crashed
+worker and forwards SIGTERM/SIGINT to all of them. The parent serves nothing;
+`serve()` returns once every worker has exited. `workers(0)` (the default)
+serves in-process.
 
 `->maxConnections(N)` is the ceiling per worker. The permit is taken **before**
 `accept`, so at the ceiling the worker stops accepting and the queue stays in
@@ -47,7 +52,8 @@ $req->target        // the raw request-target, still percent-encoded
 $req->queryString   // raw, no leading '?'
 $req->version       // '1.1' | '1.0'
 $req->headers       // Http\Headers
-$req->remoteAddr    // '' unless the server was given one
+$req->remoteAddr    // 'ip:port' from the socket, or the client behind a trusted proxy
+$req->peerAddr      // the socket's answer, always
 $req->secure        // tls
 
 $req->header('Content-Type')       $req->contentType()      // type, no params
@@ -64,6 +70,56 @@ behind a private bitfield — reading five parameters scans the string once.
 
 Both are flat and last-wins: `?a[]=1` gives you the key `a[]`. Nested GPC and
 `$_FILES` wait for the multipart parser that would produce them.
+
+## Behind a proxy
+
+Off unless asked: a header any client can send is not evidence.
+
+    $server->trustedProxies(['10.0.0.0/8', '127.0.0.1'], Http\Proxy::ALL);
+
+`Proxy::ALL` is the four `X-Forwarded-*` headers (`FOR|PROTO|HOST|PORT` = 15).
+`Proxy::FORWARDED` (RFC 7239 `Forwarded:`) is opt-in — grant it explicitly.
+It is NOT in `ALL`: a proxy that merely passes a client-supplied `Forwarded:`
+header through is exactly as unsafe as trusting an arbitrary
+`X-Forwarded-*`, so defaulting to it would be trusting a header without
+knowing your proxy sets it.
+
+When the PEER is in the list:
+
+- `X-Forwarded-For` is walked right to left to the first untrusted hop, and
+  sets `$req->remoteAddr`. A hop `\inet_pton` rejects — `unknown`, an
+  obfuscated identifier (`_gazonk`), anything malformed — is skipped exactly
+  like an empty element; if every hop is junk, `remoteAddr` stays the peer.
+- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` take the FIRST
+  (leftmost) comma-separated value and set `$req->secure`, the `Host` header,
+  and `Request::$forwardedPort` — the opposite end from `X-Forwarded-For`'s
+  right-to-left walk and from `Forwarded:`'s rightmost element below, since
+  each header follows its own convention (Symfony's rule for the
+  `X-Forwarded-*` family).
+- When `FORWARDED` is granted and `Forwarded:` is present, its elements'
+  `for=` values form the SAME right-to-left chain as `X-Forwarded-For` (one
+  walk, whichever family supplies it); `proto=`/`host=` come from the
+  rightmost element that names them — the hop nearest this process. Each
+  field is still gated by its own flag on top of `FORWARDED`: `for` needs
+  `FOR`, `proto` needs `PROTO`, `host` needs `HOST`. When both families are
+  present, `Forwarded` wins for the fields it names; RFC 7239 quoting
+  (`for="[2001:db8::1]:4711"`) is supported, and the port inside a `for=`
+  value is discarded (it is not `X-Forwarded-Port`).
+
+These set `$req->remoteAddr`, `$req->secure`, the `Host` header, and
+`$_SERVER`'s `REMOTE_ADDR`/`HTTPS`/`SERVER_NAME`/`SERVER_PORT`.
+`$req->peerAddr` is always the socket's own answer. `SERVER_NAME`/`SERVER_PORT`
+are split from the `Host` header (itself rewritten by `X-Forwarded-Host` under
+`HOST`), `X-Forwarded-Port` overriding the header's own port when `PORT` is
+granted, then 443/80 by `$req->secure` — unlike php-fpm behind nginx, which
+seeds `SERVER_PORT` from the listener it was started on, not from a header a
+client can influence; that divergence is deliberate here.
+
+A dual-stack listener (`tcp://[::]:port`) hands a v4 client's connection to
+`peerAddr`/`X-Forwarded-For` as a v4-mapped address (`::ffff:a.b.c.d`) — a
+plain v4 CIDR in `trustedProxies()` never matches it (`inCidr` compares packed
+length first, so a 4-byte network against a 16-byte address fails closed);
+list the mapped form (`::ffff:10.0.0.0/104`) or a v6 prefix instead.
 
 ## Response
 

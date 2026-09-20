@@ -5,15 +5,15 @@
 //   bin/manticore compile examples/http/hello.php -o hello && ./hello
 //   curl -v localhost:8080/          curl localhost:8080/hello/ada?loud=1
 //
-// Prefork across cores with ->workers(N); each worker accepts on the same
-// listener, so the kernel balances them.
+// Prefork across cores with ->workers(N): the listener is bound once, N
+// children inherit it and a supervisor restarts one that crashes.
 
 use Http\Request;
 use Http\Response;
 use Http\Server;
 
 (new Server('tcp://127.0.0.1:8080'))
-    ->workers(0)             // >0 forks that many workers before any reactor exists
+    ->workers(0)             // >0 binds once, then forks that many workers under a supervisor
     ->maxConnections(512)    // per worker; the permit is taken BEFORE accept
     ->serve(function (Request $req): Response {
         if ($req->path === '/') {

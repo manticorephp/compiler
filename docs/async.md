@@ -207,7 +207,13 @@ register one: the scheduler notices a non-empty registry and starts pumping, so 
 
 Process control — `Process\fork`, `Process\workers`, `Process\supervise` — lives beside
 pcntl rather than in `Async\`, because none of it runs a scheduler. The process model sits
-under concurrency, not inside it.
+under concurrency, not inside it. Fork BEFORE `async()`: a child that inherits a running loop
+inherits its run queue and a reactor fd that is dead (kqueue is not inherited) or shared with
+the parent (epoll). An idle engine built before the fork — by `Async\watchdog()`, say — is
+safe: the child's first `async()` sees another process built it and starts a fresh one. That
+fresh engine is a plain default one — a `watchdog()` threshold set before the fork does not
+survive into the worker. Set `MANTICORE_ASYNC_WATCHDOG`, or call `watchdog()` again inside the
+worker, after the fork.
 
 ```php
 Async\async(function () {

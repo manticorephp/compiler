@@ -203,7 +203,7 @@ namespace {
      *
      * ⚠ Do not fork a process that is already inside Async\async(): the child
      * inherits the reactor fd, the run queue and every parked task. Fork first —
-     * Async\supervise() / Async\workers() do exactly that.
+     * Process\supervise() / Process\workers() do exactly that.
      */
     function pcntl_fork(): int
     {
@@ -428,9 +428,12 @@ namespace Process {
                 $pid = \pcntl_waitpid(-1, $status, \WNOHANG);
                 if ($pid > 0) {
                     $idx = $this->forget($pid);
-                    if ($idx >= 0 && !$this->stopping) {
-                        // Died while we are NOT shutting down: that is a crash,
-                        // not an exit — put the worker back.
+                    // A clean exit(0) is the worker's own decision (Server::stop()
+                    // in a worker); only a crash — non-zero or a signal — is put
+                    // back, and never while we are shutting down.
+                    $crashed = \pcntl_wifsignaled($status)
+                        || (\pcntl_wifexited($status) && \pcntl_wexitstatus($status) !== 0);
+                    if ($idx >= 0 && !$this->stopping && $crashed) {
                         $this->start($idx, $worker);
                     }
                     continue;
