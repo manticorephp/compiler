@@ -181,7 +181,13 @@ echo "── corpus census: raw violation lines per case (NOT the work list — 
 # recorded to a file from inside the loop and only counted afterward.
 : > "$out/compile_failures.txt"
 : > "$out/cap_killed.txt"
-while IFS= read -r f; do
+# One case per invocation, run `CELLGUARD_JOBS` at a time (default: every
+# core). Each case writes only its own $b.err / bucket line, and a bucket
+# file is appended one short line at a time, so the parallel runs never
+# share a write. The census line ("n case") goes to stdout, gathered by the
+# sort below exactly as the serial loop's did.
+cellguard_one_case() {
+    f="$1"
     b=$(basename "$f" .php)
     (
         ulimit -f "$MAX_ERR_BLOCKS"
@@ -245,7 +251,11 @@ while IFS= read -r f; do
         n=$(grep -c "CELLGUARD raw->cell" "$out/$b.err" || true)
         [ "$n" = "0" ] || echo "$n $b"
     fi
-done < "$out/cases.txt" | sort -rn | tee "$out/census.txt"
+}
+export -f cellguard_one_case
+export out MAX_ERR_BLOCKS CAPPED_BYTES
+CELLGUARD_JOBS="${CELLGUARD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+xargs -P "$CELLGUARD_JOBS" -I{} bash -c 'cellguard_one_case "$1"' _ {} < "$out/cases.txt" | sort -rn | tee "$out/census.txt"
 
 n_cases=$(wc -l < "$out/cases.txt" | tr -d ' ')
 compile_fail=$(wc -l < "$out/compile_failures.txt" | tr -d ' ')
