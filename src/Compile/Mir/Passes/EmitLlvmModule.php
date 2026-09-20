@@ -674,6 +674,9 @@ trait EmitLlvmModule
         if ($this->rt->needsTaggedToInt) {
             $out .= $this->taggedToIntRuntime();
         }
+        if ($this->rt->needsStrtol) {
+            $out .= $this->strToIntRuntime();
+        }
         if ($this->rt->needsTaggedToFloat) {
             $out .= $this->taggedToFloatRuntime();
         }
