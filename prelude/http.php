@@ -405,6 +405,124 @@ function inCidr(string $ip, string $cidr): bool
 }
 
 /**
+ * Resolve the client behind a trusted proxy.
+ *
+ * `$trusted` is the parsed CIDR list; `$flags` are {@see Proxy} bits. Returns
+ * [remoteAddr, '1'|'0' for secure, forwardedPort] and rewrites `Host` in `$h`
+ * when HOST is granted. A peer outside `$trusted` gets its own address back
+ * and the headers are ignored, not stripped.
+ *
+ * @internal
+ * @param array<int, array<int, string>> $trusted
+ * @return array<int, string>
+ */
+function resolveForwarded(Headers $h, string $peer, bool $secure, array $trusted, int $flags): array<int, string>
+{
+    $out = [];
+    $out[] = $peer;
+    $out[] = $secure ? '1' : '0';
+    $out[] = '';
+    $peerIp = splitHostPort($peer)[0];
+    if (!proxyTrusted($peerIp, $trusted)) {
+        return $out;
+    }
+    $for = '';
+    $proto = '';
+    $host = '';
+    $port = '';
+    if (($flags & Proxy::FOR) !== 0) {
+        $for = $h->get('x-forwarded-for');
+    }
+    if (($flags & Proxy::PROTO) !== 0) {
+        $proto = firstToken($h->get('x-forwarded-proto'));
+    }
+    if (($flags & Proxy::HOST) !== 0) {
+        $host = firstToken($h->get('x-forwarded-host'));
+    }
+    if (($flags & Proxy::PORT) !== 0) {
+        $port = firstToken($h->get('x-forwarded-port'));
+    }
+    if (($flags & Proxy::FORWARDED) !== 0) {
+        $fwd = $h->get('forwarded');
+        if ($fwd !== '') {
+            // Only the FIRST element (the hop nearest the client that a
+            // trusted proxy relayed); RFC 7239 §4 lists them client-first.
+            $first = firstToken($fwd);
+            foreach (splitStr(';', $first) as $pair) {
+                $eq = \strpos($pair, '=');
+                if ($eq === false) {
+                    continue;
+                }
+                $k = \strtolower(\trim(\substr($pair, 0, $eq)));
+                $v = \trim(\substr($pair, $eq + 1), " \t\"");
+                if ($k === 'for') {
+                    $for = $v;
+                } elseif ($k === 'proto') {
+                    $proto = $v;
+                } elseif ($k === 'host') {
+                    $host = $v;
+                }
+            }
+        }
+    }
+    if ($for !== '') {
+        $hops = splitStr(',', $for);
+        $chosen = '';
+        for ($i = \count($hops) - 1; $i >= 0; $i = $i - 1) {
+            $hop = splitHostPort(\trim($hops[$i]))[0];
+            if ($hop === '') {
+                continue;
+            }
+            $chosen = $hop;
+            if (!proxyTrusted($hop, $trusted)) {
+                break;
+            }
+        }
+        if ($chosen !== '') {
+            $out[0] = $chosen;
+        }
+    }
+    if ($proto !== '') {
+        $out[1] = \strtolower($proto) === 'https' ? '1' : '0';
+    }
+    if ($host !== '') {
+        $h->set('Host', $host);
+    }
+    if ($port !== '' && \ctype_digit($port)) {
+        $out[2] = $port;
+    }
+    return $out;
+}
+
+/**
+ * @internal
+ * @param array<int, array<int, string>> $trusted
+ */
+function proxyTrusted(string $ip, array $trusted): bool
+{
+    if (\count($trusted) === 0) {
+        return false;
+    }
+    $packed = \inet_pton($ip);
+    if ($packed === false) {
+        return false;
+    }
+    foreach ($trusted as $net) {
+        if (inCidrParsed($packed, $net)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The first comma-separated element, trimmed. @internal */
+function firstToken(string $v): string
+{
+    $c = \strpos($v, ',');
+    return \trim($c === false ? $v : \substr($v, 0, $c));
+}
+
+/**
  * Percent-decode a path and collapse its `.` and `..` segments.
  *
  * A server that hands `..` to a handler is a path-traversal generator, so this
@@ -1170,6 +1288,11 @@ final class Request
         public readonly string $remoteAddr,
         /** True when the connection is TLS. */
         public readonly bool $secure,
+        /** The socket's own peer address, always — {@see $remoteAddr} may come
+         *  from a trusted proxy's header. */
+        public readonly string $peerAddr = '',
+        /** `X-Forwarded-Port` / `Forwarded` port from a trusted proxy, else ''. */
+        public readonly string $forwardedPort = '',
         /** Present only for a streamed body. */
         private ?\Buffer\Reader $reader = null,
     ) {
@@ -1522,7 +1645,11 @@ final class Parser
      *  Reader handed to the handler reads on past what the buffer holds. */
     private ?\Resource $conn = null;
     private bool $streamBodies = false;
+    /** @var array<int, array<int, string>> */
+    private array $trusted = [];
+    private int $proxyFlags = 0;
 
+    /** @param array<int, array<int, string>> $trusted */
     public function __construct(
         \Buffer\ByteBuffer $buf,
         string $remoteAddr = '',
@@ -1532,6 +1659,8 @@ final class Parser
         int $maxBodySize = 8388608,
         ?\Resource $conn = null,
         bool $streamBodies = false,
+        array $trusted = [],
+        int $proxyFlags = 0,
     ) {
         $this->buf = $buf;
         $this->remoteAddr = $remoteAddr;
@@ -1541,6 +1670,8 @@ final class Parser
         $this->maxBodySize = $maxBodySize;
         $this->conn = $conn;
         $this->streamBodies = $streamBodies;
+        $this->trusted = $trusted;
+        $this->proxyFlags = $proxyFlags;
     }
 
     /** The request, once {@see parse} has answered {@see READY}. */
@@ -1927,6 +2058,15 @@ final class Parser
         if ($h === null) {
             $h = new Headers();
         }
+        $remote = $this->remoteAddr;
+        $secure = $this->secure;
+        $fport = '';
+        if (\count($this->trusted) > 0) {
+            $r = resolveForwarded($h, $this->remoteAddr, $this->secure, $this->trusted, $this->proxyFlags);
+            $remote = $r[0];
+            $secure = $r[1] === '1';
+            $fport = $r[2];
+        }
         $this->req = new Request(
             $this->method,
             $this->target,
@@ -1936,8 +2076,10 @@ final class Parser
             $h,
             $this->body,
             $this->streamed,
+            $remote,
+            $secure,
             $this->remoteAddr,
-            $this->secure,
+            $fport,
             $this->reader,
         );
         $this->state = self::ST_DONE;
@@ -2157,6 +2299,9 @@ final class Server
     private int $keepAliveMax = 1000;
     private string $serverName = 'manticore';
     private bool $secure = false;
+    /** @var array<int, array<int, string>> parsed CIDRs, {@see trustedProxies} */
+    private array $trustedProxies = [];
+    private int $proxyFlags = 0;
 
     /** How long one `accept` waits before the loop re-reads {@see $stopped}.
      *  This — not closing the listener out from under a parked accept — is what
@@ -2219,6 +2364,27 @@ final class Server
     public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
     /** `callable(\Throwable, ?Request): Response` */
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
+
+    /**
+     * Peers whose `X-Forwarded-*` / `Forwarded` headers are believed. Off
+     * unless called. A malformed entry throws here, at configuration time.
+     *
+     * @param array<int, string> $cidrs
+     */
+    public function trustedProxies(array<int, string> $cidrs, int $flags = Proxy::ALL): Server
+    {
+        $parsed = [];
+        foreach ($cidrs as $c) {
+            $net = cidrParse($c);
+            if ($net === null) {
+                throw new \InvalidArgumentException('Http\\Server: bad trusted proxy ' . $c);
+            }
+            $parsed[] = $net;
+        }
+        $this->trustedProxies = $parsed;
+        $this->proxyFlags = $flags;
+        return $this;
+    }
 
     /**
      * Run until {@see stop} (or cancellation). `$handler` is
@@ -2361,6 +2527,8 @@ final class Server
             $this->maxBodySize,
             $conn,
             $this->streamBodies,
+            $this->trustedProxies,
+            $this->proxyFlags,
         );
         try {
             $this->pump($conn, $buf, $out, $parser);
@@ -2542,7 +2710,8 @@ final class Server
         $out['CONTENT_LENGTH'] = $req->header('Content-Length');
         $hp = splitHostPort($req->header('Host'));
         $out['SERVER_NAME'] = $hp[0];
-        $out['SERVER_PORT'] = $hp[1] !== '' ? $hp[1] : ($req->secure ? '443' : '80');
+        $out['SERVER_PORT'] = $req->forwardedPort !== '' ? $req->forwardedPort
+            : ($hp[1] !== '' ? $hp[1] : ($req->secure ? '443' : '80'));
         foreach ($req->headers->all() as $k => $v) {
             $out['HTTP_' . \strtoupper(\str_replace('-', '_', $k))] = $v;
         }

@@ -52,7 +52,8 @@ $req->target        // the raw request-target, still percent-encoded
 $req->queryString   // raw, no leading '?'
 $req->version       // '1.1' | '1.0'
 $req->headers       // Http\Headers
-$req->remoteAddr    // '' unless the server was given one
+$req->remoteAddr    // 'ip:port' from the socket, or the client behind a trusted proxy
+$req->peerAddr      // the socket's answer, always
 $req->secure        // tls
 
 $req->header('Content-Type')       $req->contentType()      // type, no params
@@ -69,6 +70,20 @@ behind a private bitfield — reading five parameters scans the string once.
 
 Both are flat and last-wins: `?a[]=1` gives you the key `a[]`. Nested GPC and
 `$_FILES` wait for the multipart parser that would produce them.
+
+## Behind a proxy
+
+Off unless asked: a header any client can send is not evidence.
+
+    $server->trustedProxies(['10.0.0.0/8', '127.0.0.1'], Http\Proxy::ALL);
+
+When the PEER is in the list, `X-Forwarded-For` (walked right to left to the
+first untrusted hop), `X-Forwarded-Proto`, `X-Forwarded-Host` and
+`X-Forwarded-Port`, and RFC 7239 `Forwarded:` (`for`/`proto`/`host`, which win
+when both are present), set `$req->remoteAddr`, `$req->secure`, the `Host`
+header and `$_SERVER`'s `REMOTE_ADDR`/`HTTPS`/`SERVER_NAME`/`SERVER_PORT`.
+`$req->peerAddr` is always the socket's own answer. `Proxy::FOR|PROTO|HOST|
+PORT|FORWARDED` pick which headers are believed.
 
 ## Response
 
