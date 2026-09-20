@@ -10,7 +10,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-WORK="${W4_WORK:-tests/aot/tmp/w4}"
+WORK="${W4_WORK:-tests/aot/.work/w4}"
 mkdir -p "$WORK"
 pass=0; fail=0
 for src in tests/aot/repro/w4/*.php; do

@@ -1,6 +1,0 @@
-
-tests/aot/repro/w4/w4_lit_adopts_param_channel.php:3:33: warning: Bag::__construct(): parameter $d is typed bare `array` — annotate its element type (`@param T[] $d`)
-tests/aot/repro/w4/w4_lit_adopts_param_channel.php:13:26: warning: takesMixedElems(): parameter $a is typed bare `array` — annotate its element type (`@param T[] $a`)
-
-Found 0 error(s), 2 warning(s).
-
