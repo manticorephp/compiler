@@ -14,7 +14,7 @@ use function Async\delay;
 
 function serve(string $name, string $cookie, int $ms): string
 {
-    __mc_request_begin(
+    \Manticore\Sapi\requestBegin(
         ["REQUEST_URI" => "/" . $name],
         ["q" => $name],
         [],
@@ -26,10 +26,10 @@ function serve(string $name, string $cookie, int $ms): string
     // Yield in the middle of the request — the other task runs here.
     delay($ms);
 
-    $hdrs = __mc_response_headers();
+    $hdrs = \Manticore\Sapi\responseHeaders();
     $seen = $_GET["q"] . "|" . $_COOKIE["PHPSESSID"] . "|" . $_SESSION["who"]
         . "|" . $_SERVER["REQUEST_URI"] . "|" . $hdrs[0];
-    __mc_request_end();
+    \Manticore\Sapi\requestEnd();
     return $seen;
 }
 

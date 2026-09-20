@@ -4350,6 +4350,11 @@ final class LowerFromAst implements Pass
     {
         $nm = \ltrim($name, '\\');
         $bare = $this->bareName($name);
+        // A QUALIFIED literal is an FQN check, never a bare-name one: php's
+        // `function_exists('A\b')` does not fall back to a global `b`, so a
+        // user's own bare `contextSwitch` must not fold a guard written against
+        // `Manticore\Sapi\contextSwitch` — no builtin / prelude / alias fallback.
+        if ($nm !== $bare) { return isset($this->fnDecls[$nm]); }
         if (isset(self::HIDDEN_FNS[$bare])) { return false; }
         if (isset(self::RESOLVED_FNS[\strtolower($bare)])) { return true; }
         // A CODEGEN BUILTIN is emitted inline, so it is declared nowhere and

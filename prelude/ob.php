@@ -1,3 +1,5 @@
+<?php
+
 // Output buffering — the `ob_*` family.
 // DEMAND-GATED (Main.php): only a program that calls one of these carries it.
 //
@@ -64,7 +66,7 @@ class __McOb
     public static array $savedStarted = [];
 
     /** The reset value for a metadata column. A property rather than a `[]`
-     *  literal for the reason {@see \__McSapi::$empty} documents: an empty
+     *  literal for the reason {@see \Manticore\Sapi\Context::$empty} documents: an empty
      *  literal types its element `unknown`, and the appends that follow would
      *  then write raw values under readers that decode cells.
      *  @var array<int,mixed> */
@@ -90,7 +92,7 @@ class __McOb
  * OUTERMOST first and writes each contents back into the level just pushed,
  * which is what `__mir_out_write_str` targets.
  *
- * Called from `__mc_sapi_ctx_switch`, guarded by function_exists, so a program
+ * Called from `Manticore\Sapi\contextSwitch`, guarded by function_exists, so a program
  * that never buffers never links it.
  */
 function __mc_ob_ctx_switch(int $from, int $to): void

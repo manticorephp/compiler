@@ -1,3 +1,5 @@
+<?php
+
 // Buffer\ — a byte buffer with a read cursor, and the reader/writer pair over it.
 // DEMAND-GATED (Main.php): only a program that mentions `Buffer\` carries it.
 // `Http\` implies it — the request parser is written on ByteBuffer.

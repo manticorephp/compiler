@@ -178,7 +178,7 @@ trait LowerPrelude
             $src .= $this->sapiSrc;
         }
         if ($this->sessionSrc !== '') {
-            // LAST: it names __McSapi (sapi.php), __McUnSt (unserialize.php) and
+            // LAST: it names Manticore\Sapi\Context (sapi.php), __McUnSt (unserialize.php) and
             // the Throwable hierarchy, and Main forces every one of those on.
             $src .= $this->sessionSrc;
         }

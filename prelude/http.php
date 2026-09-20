@@ -1,3 +1,5 @@
+<?php
+
 // Http\ — an HTTP/1.1 server, and the byte-level wire codec under it.
 // DEMAND-GATED (Main.php): only a program that mentions `Http\` carries any of it.
 //
@@ -827,7 +829,7 @@ final class Headers
     /** The reset values, as properties rather than `[]` literals: an empty
      *  literal types its element `unknown`, and the stores that follow would
      *  then write raw values under readers that expect strings. Same reason
-     *  {@see \__McSapi::$empty} exists. */
+     *  {@see \Manticore\Sapi\Context::$empty} exists. */
     private static array<string, string> $emptyMap = [];
     private static array<int, string> $emptyLines = [];
 
@@ -1298,8 +1300,8 @@ final class Response
         string $sameSite = 'Lax',
     ): Response {
         $enc = $v === '' ? '' : \rawurlencode($v);
-        $line = \__mc_cookie_line($n, $enc, $expires, $path, $domain, $secure, $httponly, $sameSite);
-        // __mc_cookie_line answers the whole wire line, prefix included.
+        $line = \Manticore\Sapi\cookieLine($n, $enc, $expires, $path, $domain, $secure, $httponly, $sameSite);
+        // Manticore\Sapi\cookieLine answers the whole wire line, prefix included.
         $c = \strpos($line, ':');
         $this->headers->add(\substr($line, 0, $c), \trim(\substr($line, $c + 1)));
         return $this;
@@ -2303,7 +2305,7 @@ final class Server
                     },
                 );
             } finally {
-                \__mc_request_end();
+                \Manticore\Sapi\requestEnd();
             }
             if (!$keep) {
                 return;
@@ -2363,21 +2365,21 @@ final class Server
      *
      * `header()`, `header_remove()`, `headers_list()`, `http_response_code()`,
      * `setcookie()` and `setrawcookie()` are live in EVERY handler — that is
-     * what `__mc_response_begin()` costs: an empty header block and a status.
+     * what `Manticore\Sapi\responseBegin()` costs: an empty header block and a status.
      * The superglobals are opt-in (`compat(true)`), because seeding four of
      * them per request for code that never reads them is pure cost.
      */
     private function beginRequest(Request $req): void
     {
         if (!$this->compat) {
-            \__mc_response_begin();
+            \Manticore\Sapi\responseBegin();
             return;
         }
-        // ⚠ Do NOT reimplement the seeding: __mc_request_begin boxes element by
+        // ⚠ Do NOT reimplement the seeding: Manticore\Sapi\requestBegin boxes element by
         // element on purpose (a whole-array store into a cell-element
         // superglobal leaves the elements raw, and `echo $_GET['a']` then
         // prints 2.1E-314).
-        \__mc_request_begin(
+        \Manticore\Sapi\requestBegin(
             $this->serverVars($req),
             $req->queries(),
             $this->postVars($req),
@@ -2488,7 +2490,7 @@ final class Server
      */
     private function absorb(Response $res, string $echoed): Response
     {
-        $lines = \__mc_response_headers();
+        $lines = \Manticore\Sapi\responseHeaders();
         if (\count($lines) > 0) {
             $merged = new Headers();
             foreach ($lines as $line) {
@@ -2511,7 +2513,7 @@ final class Server
             $res->headers->copyFrom($merged);
         }
         if (!$res->statusWasSet()) {
-            $res->status(\__mc_response_status());
+            $res->status(\Manticore\Sapi\responseStatus());
         }
         if ($echoed !== '' && $res->getBody() === '' && !$res->isStreaming()) {
             $res->body($echoed);
@@ -2534,7 +2536,7 @@ final class Server
             $body = '';
         }
         $head = $this->renderHead($res, $req->version, $keep, \strlen($body), $hasBody);
-        \__mc_response_sent();
+        \Manticore\Sapi\responseSent();
         // HEAD carries the headers of the GET it mirrors — Content-Length
         // included — and no body at all.
         $out->add($head);
@@ -2567,7 +2569,7 @@ final class Server
         // The head is gone the moment it is written — which is what makes
         // headers_sent() honest INSIDE the body closure below, and what stops
         // header() from recording into a block already on the wire.
-        \__mc_response_sent();
+        \Manticore\Sapi\responseSent();
         // The queue drains BEFORE the body closure runs: from here the bytes
         // go straight to the socket through the writer below, and a queued
         // head would then arrive AFTER them.
