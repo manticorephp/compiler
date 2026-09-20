@@ -1,0 +1,49 @@
+plain: HTTP/1.1 200 OK body=count=1
+field=f name=hello.txt type=text/plain size=11 error=0 md5=5eb63bbbe01eeed093cb22bb8f5acdc3
+array(2) {
+  ["a"]=>
+  string(1) "1"
+  ["b"]=>
+  array(1) {
+    ["x"]=>
+    string(1) "2"
+  }
+}
+
+array: HTTP/1.1 200 OK body=count=2
+field=f[] name=a.txt type= size=3 error=0 md5=e1faffb3e614e6c2fba74296962386b7
+field=f[] name=b.txt type= size=4 error=0 md5=f50881ced34c7d9e6bce100bf33dec60
+array(0) {
+}
+
+nested: HTTP/1.1 200 OK body=count=1
+field=u[avatar] name=avatar.png type=image/png size=7 error=0 md5=0b75926ab9a9f9fe7d6008245c09352e
+array(1) {
+  ["u"]=>
+  array(2) {
+    ["name"]=>
+    string(3) "Ada"
+    ["age"]=>
+    string(2) "30"
+  }
+}
+
+split: HTTP/1.1 200 OK body=count=1
+field=f name=c.txt type=text/plain size=18 error=0 md5=3c3012aac5a90ccbc0a6baa720661bc3
+array(0) {
+}
+
+bad: HTTP/1.1 400 Bad Request body=
+nobody: HTTP/1.1 200 OK body=count=0
+array(0) {
+}
+
+throws: HTTP/1.1 500 Internal Server Error body=Internal Server Error
+
+toobig: HTTP/1.1 200 OK body=count=1
+field=f name=big.bin type= size=0 error=1 md5=d41d8cd98f00b204e9800998ecf8427e
+array(0) {
+}
+
+served=6 errors=1 served2=1 errors2=0
+done

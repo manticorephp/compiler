@@ -2006,6 +2006,14 @@ final class Request
     private array<string, mixed> $postNested = [];
     private int $parsed = 0;
 
+    private ?Multipart $multipart = null;
+    private bool $multipartFailed = false;
+    private int $maxFileUploads = 20;
+    private int $uploadMaxFilesize = 2097152;
+
+    /** @var array<int, UploadedFile> */
+    private static array<int, UploadedFile> $noFiles = [];
+
     public function __construct(
         /** The raw method token — `GET`, but also `PROPFIND`. */
         public readonly string $method,
@@ -2036,9 +2044,13 @@ final class Request
         /** php's `max_input_vars`: pairs past this many are dropped by
          *  {@see queryArray} and {@see postArray}. */
         public readonly int $maxInputVars = 1000,
+        int $maxFileUploads = 20,
+        int $uploadMaxFilesize = 2097152,
         /** Present only for a streamed body. */
         private ?\Buffer\Reader $reader = null,
     ) {
+        $this->maxFileUploads = $maxFileUploads;
+        $this->uploadMaxFilesize = $uploadMaxFilesize;
     }
 
     public function header(string $n, string $d = ''): string
@@ -2078,16 +2090,70 @@ final class Request
         return $this->queryNested;
     }
 
-    /** php's $_POST shape from a urlencoded form (multipart fields join in Task 5). @return array<string, mixed> */
+    /** php's $_POST shape from a urlencoded form, or a multipart body's fields. @return array<string, mixed> */
     public function postArray(): array<string, mixed>
     {
         if (($this->parsed & self::P_POST) === 0) {
-            $this->postNested = $this->contentType() === 'application/x-www-form-urlencoded'
-                ? parseQueryNested($this->bodyRaw, $this->maxInputVars)
-                : \Manticore\Sapi\Context::$empty;
+            if (\strncasecmp($this->contentType(), 'multipart/form-data', 19) === 0) {
+                $this->ensureMultipart();
+                $m = $this->multipart;
+                $this->postNested = $m === null ? \Manticore\Sapi\Context::$empty : $m->fields();
+            } else {
+                $this->postNested = $this->contentType() === 'application/x-www-form-urlencoded'
+                    ? parseQueryNested($this->bodyRaw, $this->maxInputVars)
+                    : \Manticore\Sapi\Context::$empty;
+            }
             $this->parsed = $this->parsed | self::P_POST;
         }
         return $this->postNested;
+    }
+
+    /** Parse a buffered multipart body once; a streamed one is the handler's ({@see multipart}). */
+    private function ensureMultipart(): void
+    {
+        if ($this->multipart !== null || $this->multipartFailed) {
+            return;
+        }
+        if ($this->streamed || \strncasecmp($this->contentType(), 'multipart/form-data', 19) !== 0) {
+            return;
+        }
+        $m = new Multipart($this->header('Content-Type'), stringSource($this->bodyRaw), $this->maxFileUploads, $this->uploadMaxFilesize);
+        if (!$m->parseAll()) {
+            $this->multipartFailed = true;
+            return;
+        }
+        $this->multipart = $m;
+        foreach ($m->files() as $f) {
+            if (\function_exists('Manticore\\Sapi\\uploadRegister')) {
+                \Manticore\Sapi\uploadRegister($f->tmpName);
+            }
+        }
+    }
+
+    public function multipartFailed(): bool
+    {
+        $this->ensureMultipart();
+        return $this->multipartFailed;
+    }
+
+    /** Every file part, in wire order. @return array<int, UploadedFile> */
+    public function allFiles(): array<int, UploadedFile>
+    {
+        $this->ensureMultipart();
+        $m = $this->multipart;
+        return $m === null ? self::$noFiles : $m->files();
+    }
+
+    /** The first file per field name. @return array<string, UploadedFile> */
+    public function files(): array<string, UploadedFile>
+    {
+        $out = [];
+        foreach ($this->allFiles() as $f) {
+            if (!isset($out[$f->field])) {
+                $out[$f->field] = $f;
+            }
+        }
+        return $out;
     }
 
     public function cookie(string $k, string $d = ''): string
@@ -2414,6 +2480,8 @@ final class Parser
     private array $trusted = [];
     private int $proxyFlags = 0;
     private int $maxInputVars = 1000;
+    private int $maxFileUploads = 20;
+    private int $uploadMaxFilesize = 2097152;
 
     /** @param array<int, array<int, string>> $trusted */
     public function __construct(
@@ -2428,6 +2496,8 @@ final class Parser
         array $trusted = [],
         int $proxyFlags = 0,
         int $maxInputVars = 1000,
+        int $maxFileUploads = 20,
+        int $uploadMaxFilesize = 2097152,
     ) {
         $this->buf = $buf;
         $this->remoteAddr = $remoteAddr;
@@ -2440,6 +2510,8 @@ final class Parser
         $this->trusted = $trusted;
         $this->proxyFlags = $proxyFlags;
         $this->maxInputVars = $maxInputVars;
+        $this->maxFileUploads = $maxFileUploads;
+        $this->uploadMaxFilesize = $uploadMaxFilesize;
     }
 
     /** The request, once {@see parse} has answered {@see READY}. */
@@ -2849,6 +2921,8 @@ final class Parser
             $this->remoteAddr,
             $fport,
             $this->maxInputVars,
+            $this->maxFileUploads,
+            $this->uploadMaxFilesize,
             $this->reader,
         );
         $this->state = self::ST_DONE;
@@ -3073,6 +3147,10 @@ final class Server
     private int $proxyFlags = 0;
     /** php's `max_input_vars`, {@see maxInputVars}. */
     private int $maxInputVars = 1000;
+    private int $maxFileUploads = 20;
+    private int $uploadMaxFilesize = 2097152;
+    /** 0 = maxBodySize; consulted only once bodies stream (Task 7). */
+    private int $postMaxSize = 0;
 
     /** How long one `accept` waits before the loop re-reads {@see $stopped}.
      *  This — not closing the listener out from under a parked accept — is what
@@ -3135,6 +3213,12 @@ final class Server
     public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
     /** php's `max_input_vars` for $_GET / $_POST (1000, like php.ini's default). */
     public function maxInputVars(int $n): Server { $this->maxInputVars = $n < 1 ? 1 : $n; return $this; }
+    /** php's `max_file_uploads` (20). */
+    public function maxFileUploads(int $n): Server { $this->maxFileUploads = $n < 0 ? 0 : $n; return $this; }
+    /** php's per-file `upload_max_filesize` (2 MiB). */
+    public function uploadMaxFilesize(int $n): Server { $this->uploadMaxFilesize = $n < 0 ? 0 : $n; return $this; }
+    /** php's `post_max_size`; 0 defers to {@see maxBodySize}. */
+    public function postMaxSize(int $n): Server { $this->postMaxSize = $n < 0 ? 0 : $n; return $this; }
     /** `callable(\Throwable, ?Request): Response` */
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
 
@@ -3303,6 +3387,8 @@ final class Server
             $this->trustedProxies,
             $this->proxyFlags,
             $this->maxInputVars,
+            $this->maxFileUploads,
+            $this->uploadMaxFilesize,
         );
         try {
             $this->pump($conn, $buf, $out, $parser);
@@ -3412,6 +3498,12 @@ final class Server
      */
     private function serveOne(\Resource $conn, Outbox $out, Request $req, int $handled): bool
     {
+        if ($req->hasBody() && !$req->streamed
+            && \strncasecmp($req->contentType(), 'multipart/form-data', 19) === 0
+            && $req->multipartFailed()) {
+            $this->writeError($out, Status::BAD_REQUEST);
+            return false;
+        }
         $res = $this->dispatch($req);
         $keep = $req->isKeepAlive()
             && !$res->wantsClose()
