@@ -1,0 +1,16 @@
+int(1)
+array(2) {
+  [0]=>
+  string(1) "a"
+  ["k"]=>
+  int(2)
+}
+int(0)
+float(2.5)
+array(1) {
+  [0]=>
+  int(1)
+}
+NULL
+string(3) "str"
+int(65537)

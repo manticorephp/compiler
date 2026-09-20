@@ -3,6 +3,12 @@
 Not part of the suite (no `expected/`, so `run.sh` skips them) — these are the smallest
 programs that still show a bug we have NOT fixed. Keep them building.
 
+## w4/ — the W4 value-channel producers
+
+One repro per producer that stores a RAW word into a `cell` channel, with the php
+oracle output beside it as `<name>.expected`. `bash tools/w4_repros.sh` is their gate;
+a passing one is promoted into `cases/` + `expected/`. See `docs/design/value-channels.md`.
+
 ## await_park_wrong_value.php / await_park_wrong_value_noio.php
 
 A task that PARKS inside a callee can hand back the WRONG value through `Task::await()`:

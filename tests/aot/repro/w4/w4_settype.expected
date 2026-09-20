@@ -1,0 +1,11 @@
+int(123)
+string(5) "70000"
+float(1.5)
+bool(false)
+array(1) {
+  [0]=>
+  int(5)
+}
+NULL
+bool(true)
+string(5) "99999"
