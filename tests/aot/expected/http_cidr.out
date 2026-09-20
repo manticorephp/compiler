@@ -19,4 +19,4 @@ garbage            in 10.0.0.0/8         => false
 10.0.0.1           in 10.0.0.0/33        => false
 10.0.0.1           in 10.0.0.0/-1        => false
 10.0.0.1           in                    => false
-ALL=31 FOR|PROTO=3
+ALL=15 FOR|PROTO=3

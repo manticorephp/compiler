@@ -412,6 +412,18 @@ function inCidr(string $ip, string $cidr): bool
  * when HOST is granted. A peer outside `$trusted` gets its own address back
  * and the headers are ignored, not stripped.
  *
+ * `Proxy::FORWARDED` is opt-in — {@see Proxy::ALL} does not carry it, since a
+ * proxy that merely passes a client-supplied `Forwarded:` through is exactly
+ * as unsafe as trusting an arbitrary `X-Forwarded-*`. When granted and the
+ * header is present, its elements' `for=` values form the SAME right-to-left
+ * chain as `X-Forwarded-For` (one walk, whichever family supplies it, and
+ * `Forwarded` wins when it names `for` at all); `proto=`/`host=` come from
+ * the RIGHTMOST element that names them — the hop nearest this process. Each
+ * field stays gated by its own flag too: `for` needs `FOR`, `proto` needs
+ * `PROTO`, `host` needs `HOST`. A hop `\inet_pton` rejects (`unknown`, an
+ * obfuscated identifier, malformed) is skipped exactly like an empty element;
+ * if every hop is junk, `remoteAddr` stays the peer.
+ *
  * @internal
  * @param array<int, array<int, string>> $trusted
  * @return array<int, string>
@@ -422,8 +434,7 @@ function resolveForwarded(Headers $h, string $peer, bool $secure, array $trusted
     $out[] = $peer;
     $out[] = $secure ? '1' : '0';
     $out[] = '';
-    $peerIp = splitHostPort($peer)[0];
-    if (!proxyTrusted($peerIp, $trusted)) {
+    if (!proxyTrusted(peerIp($peer), $trusted)) {
         return $out;
     }
     $for = '';
@@ -442,45 +453,53 @@ function resolveForwarded(Headers $h, string $peer, bool $secure, array $trusted
     if (($flags & Proxy::PORT) !== 0) {
         $port = firstToken($h->get('x-forwarded-port'));
     }
+    $hops = $for === '' ? [] : splitStr(',', $for);
     if (($flags & Proxy::FORWARDED) !== 0) {
         $fwd = $h->get('forwarded');
         if ($fwd !== '') {
-            // Only the FIRST element (the hop nearest the client that a
-            // trusted proxy relayed); RFC 7239 §4 lists them client-first.
-            $first = firstToken($fwd);
-            foreach (splitStr(';', $first) as $pair) {
-                $eq = \strpos($pair, '=');
-                if ($eq === false) {
-                    continue;
+            $fwdHops = [];
+            $namedFor = false;
+            foreach (splitStr(',', $fwd) as $el) {
+                $elFor = '';
+                foreach (splitStr(';', \trim($el)) as $pair) {
+                    $eq = \strpos($pair, '=');
+                    if ($eq === false) {
+                        continue;
+                    }
+                    $k = \strtolower(\trim(\substr($pair, 0, $eq)));
+                    $v = \trim(\substr($pair, $eq + 1), " \t\"");
+                    if ($k === 'for') {
+                        $elFor = $v;
+                        $namedFor = true;
+                    } elseif ($k === 'proto' && ($flags & Proxy::PROTO) !== 0) {
+                        $proto = $v;
+                    } elseif ($k === 'host' && ($flags & Proxy::HOST) !== 0) {
+                        $host = $v;
+                    }
                 }
-                $k = \strtolower(\trim(\substr($pair, 0, $eq)));
-                $v = \trim(\substr($pair, $eq + 1), " \t\"");
-                if ($k === 'for') {
-                    $for = $v;
-                } elseif ($k === 'proto') {
-                    $proto = $v;
-                } elseif ($k === 'host') {
-                    $host = $v;
-                }
+                $fwdHops[] = $elFor;
+            }
+            // `for` still needs its own flag even with FORWARDED granted; when
+            // Forwarded names no `for=` at all, the X-Forwarded-For chain (if
+            // any) set above stands.
+            if ($namedFor && ($flags & Proxy::FOR) !== 0) {
+                $hops = $fwdHops;
             }
         }
     }
-    if ($for !== '') {
-        $hops = splitStr(',', $for);
-        $chosen = '';
-        for ($i = \count($hops) - 1; $i >= 0; $i = $i - 1) {
-            $hop = splitHostPort(\trim($hops[$i]))[0];
-            if ($hop === '') {
-                continue;
-            }
-            $chosen = $hop;
-            if (!proxyTrusted($hop, $trusted)) {
-                break;
-            }
+    $chosen = '';
+    for ($i = \count($hops) - 1; $i >= 0; $i = $i - 1) {
+        $ip = hopIp($hops[$i]);
+        if ($ip === '') {
+            continue;
         }
-        if ($chosen !== '') {
-            $out[0] = $chosen;
+        $chosen = $ip;
+        if (!proxyTrusted($ip, $trusted)) {
+            break;
         }
+    }
+    if ($chosen !== '') {
+        $out[0] = $chosen;
     }
     if ($proto !== '') {
         $out[1] = \strtolower($proto) === 'https' ? '1' : '0';
@@ -488,7 +507,7 @@ function resolveForwarded(Headers $h, string $peer, bool $secure, array $trusted
     if ($host !== '') {
         $h->set('Host', $host);
     }
-    if ($port !== '' && \ctype_digit($port)) {
+    if ($port !== '' && \ctype_digit($port) && (int)$port >= 1 && (int)$port <= 65535) {
         $out[2] = $port;
     }
     return $out;
@@ -520,6 +539,42 @@ function firstToken(string $v): string
 {
     $c = \strpos($v, ',');
     return \trim($c === false ? $v : \substr($v, 0, $c));
+}
+
+/**
+ * A forwarded hop's IP, or '' when it is not one — `unknown`, an obfuscated
+ * identifier, or anything else `\inet_pton` rejects. Skipped exactly like an
+ * empty element in the walk; the hop's own port (if any) is discarded the
+ * same way {@see splitHostPort} discards one.
+ *
+ * @internal
+ */
+function hopIp(string $hop): string
+{
+    $ip = splitHostPort(\trim($hop))[0];
+    if ($ip === '' || \inet_pton($ip) === false) {
+        return '';
+    }
+    return $ip;
+}
+
+/**
+ * The peer's address with no port. `stream_socket_get_name()` answers
+ * Zend-format `host:port` with NO brackets even for v6 (`::1:54321`), and the
+ * peer ALWAYS carries a port — so this splits at the LAST colon
+ * unconditionally rather than reusing {@see splitHostPort}'s bare-v6
+ * heuristic, which is right for a `Host` header or a forwarded hop but wrong
+ * here (it would refuse to split `::1:54321` at all).
+ *
+ * @internal
+ */
+function peerIp(string $peer): string
+{
+    $colon = \strrpos($peer, ':');
+    if ($colon === false) {
+        return \trim($peer, '[]');
+    }
+    return \trim(\substr($peer, 0, $colon), '[]');
 }
 
 /**
@@ -998,6 +1053,11 @@ final class Status
 /**
  * Which forwarded headers a trusted proxy may set. `const int` flags, not an
  * enum, for the same reason {@see Status} is not one.
+ *
+ * `FORWARDED` is NOT in `ALL` — opt in explicitly. A proxy that merely passes
+ * a client-supplied `Forwarded:` header through is exactly as unsafe as
+ * trusting an arbitrary `X-Forwarded-*`; RFC 7239 support is offered, not
+ * defaulted.
  */
 final class Proxy
 {
@@ -1006,7 +1066,7 @@ final class Proxy
     public const HOST = 4;
     public const PORT = 8;
     public const FORWARDED = 16;
-    public const ALL = 31;
+    public const ALL = 15;
 }
 
 /**
@@ -1291,7 +1351,9 @@ final class Request
         /** The socket's own peer address, always — {@see $remoteAddr} may come
          *  from a trusted proxy's header. */
         public readonly string $peerAddr = '',
-        /** `X-Forwarded-Port` / `Forwarded` port from a trusted proxy, else ''. */
+        /** `X-Forwarded-Port` from a trusted proxy, else '' — RFC 7239 has no
+         *  port field of its own; the port inside a `Forwarded: for=` value
+         *  is part of the client address and is discarded. */
         public readonly string $forwardedPort = '',
         /** Present only for a streamed body. */
         private ?\Buffer\Reader $reader = null,
@@ -2702,9 +2764,18 @@ final class Server
         $out['REQUEST_URI'] = $req->target;
         $out['SERVER_PROTOCOL'] = 'HTTP/' . $req->version;
         $out['QUERY_STRING'] = $req->queryString;
-        $peer = splitHostPort($req->remoteAddr);
-        $out['REMOTE_ADDR'] = $peer[0];
-        $out['REMOTE_PORT'] = $peer[1];
+        // The socket case: `remoteAddr` IS the peer string, `ip:port` with no
+        // brackets even for v6 ({@see peerIp}). A forwarded `remoteAddr`
+        // carries no port at all — split it here would cut a bare v6 address
+        // at its first colon, so it is used as-is instead.
+        if ($req->remoteAddr === $req->peerAddr) {
+            $colon = \strrpos($req->remoteAddr, ':');
+            $out['REMOTE_ADDR'] = peerIp($req->remoteAddr);
+            $out['REMOTE_PORT'] = $colon === false ? '' : \substr($req->remoteAddr, $colon + 1);
+        } else {
+            $out['REMOTE_ADDR'] = $req->remoteAddr;
+            $out['REMOTE_PORT'] = '';
+        }
         $out['HTTPS'] = $req->secure ? 'on' : '';
         $out['CONTENT_TYPE'] = $req->header('Content-Type');
         $out['CONTENT_LENGTH'] = $req->header('Content-Length');

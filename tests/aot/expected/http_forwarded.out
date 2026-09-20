@@ -6,4 +6,13 @@ v6 for:    remote=2001:db8::7 peer=127.0.0.1 secure=0 host=origin.local:8080 fpo
 rfc7239:   remote=2001:db8::1 peer=127.0.0.1 secure=1 host=rfc.example fport= S.addr=2001:db8::1 S.https=on S.name=rfc.example S.port=443
 both:      remote=198.51.100.4 peer=127.0.0.1 secure=1 host=app.example fport=443 S.addr=198.51.100.4 S.https=on S.name=app.example S.port=443
 for only:  remote=10.1.1.1 peer=127.0.0.1 secure=0 host=origin.local:8080 fport= S.addr=10.1.1.1 S.https= S.name=origin.local S.port=8080
+unknown hop: remote=10.1.1.1 peer=127.0.0.1 secure=0 host=origin.local:8080 fport= S.addr=10.1.1.1 S.https= S.name=origin.local S.port=8080
+obf hop:   remote=203.0.113.9 peer=127.0.0.1 secure=0 host=origin.local:8080 fport= S.addr=203.0.113.9 S.https= S.name=origin.local S.port=8080
+only junk: remote=127.0.0.1 peer=127.0.0.1 secure=0 host=origin.local:8080 fport= S.addr=127.0.0.1 S.https= S.name=origin.local S.port=8080
+fwd default off: remote=203.0.113.9 peer=127.0.0.1 secure=0 host=origin.local:8080 fport= S.addr=203.0.113.9 S.https= S.name=origin.local S.port=8080
+port range: remote=203.0.113.9 peer=127.0.0.1 secure=1 host=app.example fport= S.addr=203.0.113.9 S.https=on S.name=app.example S.port=443
+fwd chain: remote=203.0.113.9 peer=127.0.0.1 secure=0 host=h.example fport= S.addr=203.0.113.9 S.https= S.name=h.example S.port=80
+fwd for-only: remote=203.0.113.9 peer=127.0.0.1 secure=0 host=origin.local:8080 fport= S.addr=203.0.113.9 S.https= S.name=origin.local S.port=8080
+v6 peer: remote=203.0.113.9
+v6 peer addr: ::1 127.0.0.1 ::1
 done

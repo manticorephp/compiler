@@ -77,13 +77,34 @@ Off unless asked: a header any client can send is not evidence.
 
     $server->trustedProxies(['10.0.0.0/8', '127.0.0.1'], Http\Proxy::ALL);
 
-When the PEER is in the list, `X-Forwarded-For` (walked right to left to the
-first untrusted hop), `X-Forwarded-Proto`, `X-Forwarded-Host` and
-`X-Forwarded-Port`, and RFC 7239 `Forwarded:` (`for`/`proto`/`host`, which win
-when both are present), set `$req->remoteAddr`, `$req->secure`, the `Host`
-header and `$_SERVER`'s `REMOTE_ADDR`/`HTTPS`/`SERVER_NAME`/`SERVER_PORT`.
-`$req->peerAddr` is always the socket's own answer. `Proxy::FOR|PROTO|HOST|
-PORT|FORWARDED` pick which headers are believed.
+`Proxy::ALL` is the four `X-Forwarded-*` headers (`FOR|PROTO|HOST|PORT` = 15).
+`Proxy::FORWARDED` (RFC 7239 `Forwarded:`) is opt-in — grant it explicitly.
+It is NOT in `ALL`: a proxy that merely passes a client-supplied `Forwarded:`
+header through is exactly as unsafe as trusting an arbitrary
+`X-Forwarded-*`, so defaulting to it would be trusting a header without
+knowing your proxy sets it.
+
+When the PEER is in the list:
+
+- `X-Forwarded-For` is walked right to left to the first untrusted hop, and
+  sets `$req->remoteAddr`. A hop `\inet_pton` rejects — `unknown`, an
+  obfuscated identifier (`_gazonk`), anything malformed — is skipped exactly
+  like an empty element; if every hop is junk, `remoteAddr` stays the peer.
+- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` set
+  `$req->secure`, the `Host` header, and `Request::$forwardedPort`.
+- When `FORWARDED` is granted and `Forwarded:` is present, its elements'
+  `for=` values form the SAME right-to-left chain as `X-Forwarded-For` (one
+  walk, whichever family supplies it); `proto=`/`host=` come from the
+  rightmost element that names them — the hop nearest this process. Each
+  field is still gated by its own flag on top of `FORWARDED`: `for` needs
+  `FOR`, `proto` needs `PROTO`, `host` needs `HOST`. When both families are
+  present, `Forwarded` wins for the fields it names; RFC 7239 quoting
+  (`for="[2001:db8::1]:4711"`) is supported, and the port inside a `for=`
+  value is discarded (it is not `X-Forwarded-Port`).
+
+These set `$req->remoteAddr`, `$req->secure`, the `Host` header, and
+`$_SERVER`'s `REMOTE_ADDR`/`HTTPS`/`SERVER_NAME`/`SERVER_PORT`.
+`$req->peerAddr` is always the socket's own answer.
 
 ## Response
 
