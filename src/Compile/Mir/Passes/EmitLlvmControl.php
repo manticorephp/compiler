@@ -1189,6 +1189,7 @@ trait EmitLlvmControl
             $out .= '  ' . $ed . ' = call i64 @__mir_elem_decode(ptr ' . $arr
                   . ', i64 ' . $ev . ")\n";
             $ev = $ed;
+            $this->markCellOpaque($ev);
         }
         if ($this->rt->needsRefCells) {
             $this->rt->needsTagged = true;

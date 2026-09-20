@@ -3210,6 +3210,8 @@ final class EmitLlvm implements EmitVisitor
               . '(i64 ' . $l . ', i64 ' . $r . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // The helper re-boxes on every path (int cell, float cell, promoted).
+        $this->markCellBoxed($reg);
         return $out;
     }
 
