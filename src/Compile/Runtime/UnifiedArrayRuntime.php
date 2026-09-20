@@ -115,6 +115,7 @@ final class UnifiedArrayRuntime
         $this->emitCowVariant('__mir_array_cow_ownel_cell', 'cell', true);
         $this->emitRefSlot();
         $this->emitRefSlotStr();
+        $this->emitRefSlotCell();
         $this->emitRefBox();
         $this->emitDerefCell();
         $this->emitValueAt();
@@ -3339,6 +3340,31 @@ final class UnifiedArrayRuntime
                               Value::int(Type::i64(), MemoryAbi::CELL_ARRAY_TAG_BITS));
         $done->store($done->select($boxed, $reboxed, $np), $slotIn);
         $done->ret($phi->value());
+    }
+
+    /**
+     * `__mir_array_ref_slot_cell(slotAddr, key) -> ptr` — the CELL-keyed
+     * analogue of {@see emitRefSlot} / {@see emitRefSlotStr}: the key is a
+     * NaN-boxed cell (a `foreach ($a as $i => $_)` index over a cell array),
+     * dispatched on its tag to the int or the string body. A key of any other
+     * kind (null, bool, float) takes the int path with its unboxed payload — the
+     * same coercion the cell-key get/set take.
+     */
+    private function emitRefSlotCell(): void
+    {
+        $fn = $this->module->func('__mir_array_ref_slot_cell', Type::ptr());
+        $slotAddr = $fn->param(Type::ptr(), 'slotAddr');
+        $key = $fn->param(Type::i64(), 'key');
+        $e = $fn->block('entry');
+        $isStr = $fn->block('isstr');
+        $isInt = $fn->block('isint');
+        $istag = $e->icmp('ugt', $key, Value::int(Type::i64(), -4503599627370496));
+        $nib = $e->and_($e->lshr($key, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $e->brIf($e->and_($istag, $e->icmp('eq', $nib, Value::int(Type::i64(), 4))), $isStr, $isInt);
+        $sp = $isStr->inttoptr($isStr->and_($key, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $isStr->ret($isStr->call('__mir_array_ref_slot_str', Type::ptr(), [$slotAddr, $sp]));
+        $iv = $isInt->call('__mir_ckey_unbox_int', Type::i64(), [$key]);
+        $isInt->ret($isInt->call('__mir_array_ref_slot', Type::ptr(), [$slotAddr, $iv]));
     }
 
     /**

@@ -163,6 +163,7 @@ trait EmitLlvmArrays
         if ($k === Type::KIND_STRING || $index->kind === Node::KIND_STRING_CONST) {
             return 'str';
         }
+        if ($k === Type::KIND_CELL) { return 'cell'; }
         return null;
     }
 

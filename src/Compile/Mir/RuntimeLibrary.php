@@ -2559,6 +2559,12 @@ final class RuntimeLibrary
         $out .= "  %arr = inttoptr i64 %arr0 to ptr\n";
         // Compact out tombstones first so the list/object walk sees no holes.
         $out .= "  %alen = call i64 @__mir_array_live_len(ptr %arr)\n";
+        // The buffer's element hint: a cell array may hold a raw-hinted buffer
+        // (an array boxed FLAT into a cell slot), so each value is decoded by
+        // it before the recursive walk — the identity on a CELL-hinted one.
+        $out .= "  %jhfp = getelementptr inbounds i8, ptr %arr, i64 " . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %jhfl = load i64, ptr %jhfp\n";
+        $out .= "  %jhint = and i64 %jhfl, " . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
         $out .= "  %est1 = shl i64 %alen, 3\n";
         $out .= "  %est = add i64 %est1, 16\n";
         $out .= "  %rbuf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %est)\n";
@@ -2615,7 +2621,8 @@ final class RuntimeLibrary
         $out .= "  %le0 = mul i64 %li, %lstride\n";
         $out .= "  %le1 = add i64 %le0, %lbias\n";
         $out .= "  %lvp = getelementptr inbounds i8, ptr %arr, i64 %le1\n";
-        $out .= "  %lv = load i64, ptr %lvp\n";
+        $out .= "  %lv0 = load i64, ptr %lvp\n";
+        $out .= "  %lv = call i64 @__mir_box_by_repr(i64 %lv0, i64 %jhint)\n";
         $out .= "  call void @__mir_json_app(ptr %slotp, ptr %lp, i64 %lv)\n";
         $out .= "  br label %lcont\n";
         $out .= "lcont:\n";
@@ -2708,7 +2715,8 @@ final class RuntimeLibrary
         $out .= $inlinePutc(58);
         $out .= "  %oe3 = add i64 %oe1, $VAL_OFF\n";
         $out .= "  %ovp = getelementptr inbounds i8, ptr %arr, i64 %oe3\n";
-        $out .= "  %ov = load i64, ptr %ovp\n";
+        $out .= "  %ov0 = load i64, ptr %ovp\n";
+        $out .= "  %ov = call i64 @__mir_box_by_repr(i64 %ov0, i64 %jhint)\n";
         $out .= "  call void @__mir_json_app(ptr %slotp, ptr %lp, i64 %ov)\n";
         $out .= "  br label %ocont\n";
         $out .= "ocont:\n";

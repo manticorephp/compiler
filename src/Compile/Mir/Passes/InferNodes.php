@@ -431,6 +431,12 @@ trait InferNodes
             // A loop-widened PARAM arrives raw int — its slot only becomes float
             // after the entry sitofp store, exactly as for a cell-promoted one.
             if (isset($this->floatLoopLocals[$fln]) && $this->isParamName($fn, $fln)) { continue; }
+            // A CELL param's slot is a cell on every path — a `mixed &$v` the
+            // body writes `$v = (float)$v` on ONE branch (settype) is still a
+            // cell at entry; seeding it float made the first read unbox a
+            // string as a double.
+            $cpt = $this->currentParamTypes[$fln] ?? null;
+            if ($cpt !== null && $cpt->kind === Type::KIND_CELL) { continue; }
             $this->localTypes[$fln] = Type::float_();
         }
         $this->genValueType = null;

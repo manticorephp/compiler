@@ -1017,6 +1017,17 @@ trait InferScans
         return $k->kind === Type::KIND_STRING || $k->kind === Type::KIND_CELL;
     }
 
+    /** Names a body assigns WHOLE (a `StoreLocal`), closures excluded — a
+     *  by-ref capture inside one is a different word. @param array<string,bool> $out */
+    private function collectWholeStores(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL) { $out[$n->name] = true; }
+        if ($n->kind === Node::KIND_CLOSURE) { return; }
+        foreach (Walk::children($n) as $c) {
+            $this->collectWholeStores($c, $out);
+        }
+    }
+
     /**
      * Refine an UNTYPED by-ref param (`&$p` with no type hint → cell) to the
      * concrete type every call site passes. Only pointer-carrying types
@@ -1040,11 +1051,20 @@ trait InferScans
             // premise — that an unobserved site leaves the param a cell — only
             // holds for a symbol this module owns outright.
             if ($fn->isPrelude) { continue; }
+            // A body that ASSIGNS the by-ref param whole (`$v = (int)$v`,
+            // `$v = [$v]`) owns its representation: the caller's word may come
+            // back as any kind, so the call sites' type is no contract to
+            // narrow to — the param stays a cell and the callers' slots follow
+            // it ({@see scanRefCellArgWiden}). An element or property store
+            // through the param leaves the word itself alone and narrows fine.
+            $whole = [];
+            $this->collectWholeStores($fn->body, $whole);
             $idx = 0;
             foreach ($fn->params as $p) {
                 if ($p->byRef && !$p->variadic
                     && ($p->type->kind === Type::KIND_CELL
-                        || $p->type->kind === Type::KIND_UNKNOWN)) {
+                        || $p->type->kind === Type::KIND_UNKNOWN)
+                    && !isset($whole[$p->name])) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
                 }
                 $idx = $idx + 1;
@@ -2248,6 +2268,61 @@ trait InferScans
             if ($p === null || !$p->byRef) { continue; }
             if (!$this->isScalarReprKind($p->type)) { continue; }
             $this->markRefPinnedLocal($a);
+        }
+    }
+
+    /**
+     * A local handed to a BY-REF parameter declared CELL (`mixed &$v`) is one
+     * word the callee may rewrite as ANY kind — `retype($a)` turns an int into a
+     * string — so the caller's slot has to be a cell for that name, exactly as a
+     * by-ref CAPTURE shared with a closure is ({@see scanByRefCaptureWiden}; the
+     * same table, the same store-side retype). Without it the call boxed the
+     * raw local into a scratch cell and unboxed the result BY THE CALLER'S OLD
+     * TYPE: `$a = 5; retype($a)` read the string pointer back as an int.
+     * docs/design/value-channels.md, P5.
+     *
+     * A concrete-scalar by-ref param is the OPPOSITE pin ({@see scanRefPinnedNode});
+     * an erased (`&$v`, no hint) one is left alone — its callee writes raw words
+     * by its own static types, and widening every such caller is a repr change
+     * this scan does not make.
+     */
+    private function scanRefCellArgWiden(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($fn->isPrelude) { continue; }
+            $names = [];
+            $this->scanRefCellArgNode($fn->body, $names);
+            foreach ($names as $local => $unused) {
+                if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
+                    $this->byRefCaptureCellLocals[$fn->name][$local] = true;
+                    $changed = true;
+                }
+            }
+        }
+        return $changed;
+    }
+
+    /** @param array<string,bool> $names */
+    private function scanRefCellArgNode(Node $n, array &$names): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $callee = $this->fnByName[$n->function] ?? null;
+            if ($callee !== null) {
+                foreach ($n->args as $i => $a) {
+                    $p = $callee->params[$i] ?? null;
+                    if ($p === null || !$p->byRef) { continue; }
+                    if ($p->type->kind !== Type::KIND_CELL) { continue; }
+                    if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                        $names[$a->name] = true;
+                    } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
+                        $names[$a->target] = true;
+                    }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->scanRefCellArgNode($c, $names);
         }
     }
 

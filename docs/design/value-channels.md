@@ -39,8 +39,22 @@ against the php oracle recorded beside it. A passing repro is promoted into
 `arithType`'s `false &&` is gone, and `MANTICORE_TYPECHECK` is on by default.
 
 Baseline on `b17ede4` (2026-09-20): 7 open, 3 already green and promoted.
-After the element-channel and slot-producer steps: P1, P2, P3, P4, P7 promoted;
-open = P5, P6, `w4_cell_arith` (the tagged-arith unlock), `w4_array_identity`.
+After the element-channel, slot-producer and by-ref steps: P1–P7 promoted;
+open = `w4_cell_arith` (the tagged-arith unlock) and `w4_array_identity`.
+
+**By-ref (P5/P6).** A local handed to a `mixed &` param is one word two frames
+share and the callee may make it ANY kind, so the caller's slot is a cell for
+that name (`InferScans::scanRefCellArgWiden`, the same table the by-ref
+CAPTURE widening uses). Three things stood in the way, each a static claim
+over a shared word: `scanCallSiteRefParams` narrowed a `mixed &` param to the
+call sites' type even when the body ASSIGNS it whole (now excluded); the
+float-slot seeding (`$v = (float)$v` on one branch) typed a cell param's first
+read float; and a by-ref ELEMENT with a cell key (`retype($arr[$i])` under a
+cell-array foreach) had no address path (`__mir_array_ref_slot_cell`). A store
+through the cell param boxes arrays FLAT and objects by pointer (retaining a
+borrow), and the native `json_encode` walker now decodes elements by the
+buffer hint like every other cell reader. `settype` is a pure stdlib body over
+`mixed &$var`.
 
 | # | producer | repro | symptom today | root (status) |
 |---|---|---|---|---|
