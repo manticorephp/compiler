@@ -198,7 +198,11 @@ The body is the generator's: `allFiles()`/`postArray()` on it, or a second
 
 A malformed streamed body makes `multipart()` throw
 `\RuntimeException('malformed multipart')` from inside the generator — at
-iteration, not at the call; generators are lazy. Until the ledgered
+iteration, not at the call; generators are lazy. Garbage right after a
+delimiter throws the same way from the handler's own `Part::read()`/
+`readAll()` call, when that garbage follows the part currently being read, not
+only when the generator resumes to drain a part the handler stopped short of.
+Until the ledgered
 `Server::runHandler` catch-all crash is fixed, a handler without `onError()`
 can be taken down by a crafted body, so install `onError()` on any server that
 streams multipart. A client that cuts the stream mid-part ends that part
@@ -275,8 +279,8 @@ well as the handler, so a streaming body sees it too.
 | `maxBodySize` | 8388608 | 413 (or streamed) |
 | `maxFileUploads` | 20 | further file parts dropped (php's `max_file_uploads`) |
 | `uploadMaxFilesize` | 2097152 | the part is kept with `error` 1 (`UPLOAD_ERR_INI_SIZE`), no temp file |
-| `postMaxSize` | 0 | reserved: php's `post_max_size`; a buffered body is already bounded by `maxBodySize` (413), and a streamed one's field bytes are the handler's (`Part::readAll()`), so nothing enforces it yet |
-| `maxInputVars` | 1000 | `queryArray()`/`postArray()` truncated (php's `max_input_vars`) |
+| `postMaxSize` | 0 | reserved: php's `post_max_size`; not enforced in either mode — a buffered body is already bounded by `maxBodySize` (413), and a streamed one's field bytes are the handler's (`Part::readAll()`) |
+| `maxInputVars` | 1000 | `queryArray()`, urlencoded and multipart `postArray()` truncated silently (php's `max_input_vars`) |
 | `keepAliveMax` | 100 | connection closed after N requests |
 | `idleTimeout` | 5.0 | silent close between requests |
 | `headerTimeout` | 10.0 | 408 mid-head |

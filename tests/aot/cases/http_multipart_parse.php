@@ -45,9 +45,9 @@ function tmpCount(): int
     return $g === false ? -1 : count($g);
 }
 
-function run(string $label, string $body, int $n, int $maxFiles = 20, int $maxSize = 2097152): \Http\Multipart
+function run(string $label, string $body, int $n, int $maxFiles = 20, int $maxSize = 2097152, int $maxVars = 1000): \Http\Multipart
 {
-    $m = new \Http\Multipart('multipart/form-data; boundary=----mcb', chunked($body, $n), $maxFiles, $maxSize);
+    $m = new \Http\Multipart('multipart/form-data; boundary=----mcb', chunked($body, $n), $maxFiles, $maxSize, $maxVars);
     $ok = $m->parseAll();
     echo "[$label] ok=" . ($ok ? 'true' : 'false') . " files=" . count($m->files()) . "\n";
     foreach ($m->files() as $f) {
@@ -83,6 +83,18 @@ $m = run('two-in-array', body([
     part('name="g"', 'G'),
 ]), 7);
 echo '  fields: ' . count($m->fields()) . ' f=' . (isset($m->fields()['f']) ? 'set' : 'unset') . "\n";
+$all[] = $m;
+
+// php's max_input_vars applies to rfc1867 fields too: past it, a field part
+// is still consumed off the wire but dropped from fields() silently.
+$m = run('max-vars', body([
+    part('name="a"', '1'),
+    part('name="b"', '2'),
+    part('name="c"', '3'),
+    part('name="d"', '4'),
+    part('name="e"', '5'),
+]), 7, 20, 2097152, 3);
+echo '  fields: ' . count($m->fields()) . "\n";
 $all[] = $m;
 
 $all[] = run('path-basename', body([

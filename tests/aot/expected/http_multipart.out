@@ -45,5 +45,5 @@ field=f name=big.bin type= size=0 error=1 md5=d41d8cd98f00b204e9800998ecf8427e
 array(0) {
 }
 
-served=6 errors=1 served2=1 errors2=0
+served=6 errors=2 served2=1 errors2=0
 done

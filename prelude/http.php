@@ -1641,6 +1641,8 @@ final class Multipart
     private int $fileCount = 0;
     private int $maxFiles;
     private int $maxSize;
+    private int $fieldCount = 0;
+    private int $maxInputVars;
     /** the MAX_FILE_SIZE field, php's per-form cap; 0 = none, as php's `max_file_size &&` */
     private int $formMax = 0;
 
@@ -1655,12 +1657,13 @@ final class Multipart
     private int $pSize = 0;
     private int $pError = 0;
 
-    public function __construct(string $contentType, mixed $source, int $maxFileUploads = 20, int $uploadMaxFilesize = 2097152)
+    public function __construct(string $contentType, mixed $source, int $maxFileUploads = 20, int $uploadMaxFilesize = 2097152, int $maxInputVars = 1000)
     {
         $this->delim = "\r\n--" . self::boundaryOf($contentType);
         $this->source = $source;
         $this->maxFiles = $maxFileUploads;
         $this->maxSize = $uploadMaxFilesize;
+        $this->maxInputVars = $maxInputVars;
         $this->fields = \Manticore\Sapi\Context::$emptyGpc;
     }
 
@@ -2039,6 +2042,11 @@ final class Multipart
             if ($this->pName === 'MAX_FILE_SIZE' && \ctype_digit($this->pValue)) {
                 $this->formMax = (int)$this->pValue;
             }
+            if ($this->fieldCount >= $this->maxInputVars) {
+                // dropped silently, php's max_input_vars applies to rfc1867 fields too
+                return;
+            }
+            $this->fieldCount = $this->fieldCount + 1;
             nestedAssign($this->fields, $this->pName, $this->pValue, false);
             return;
         }
@@ -2261,7 +2269,7 @@ final class Request
         if ($this->streamed) {
             throw new \LogicException('Http\\Request::' . $who . '(): body is streamed — use multipart()');
         }
-        $m = new Multipart($this->header('Content-Type'), stringSource($this->bodyRaw), $this->maxFileUploads, $this->uploadMaxFilesize);
+        $m = new Multipart($this->header('Content-Type'), stringSource($this->bodyRaw), $this->maxFileUploads, $this->uploadMaxFilesize, $this->maxInputVars);
         if (!$m->parseAll()) {
             $this->multipartFailed = true;
             return;
@@ -2305,7 +2313,7 @@ final class Request
         if ($rd !== null) {
             $m = new Multipart($this->header('Content-Type'), function (int $max) use ($rd): string {
                 return $rd->read($max);
-            }, $this->maxFileUploads, $this->uploadMaxFilesize);
+            }, $this->maxFileUploads, $this->uploadMaxFilesize, $this->maxInputVars);
             yield from $m->parts();
         }
     }
@@ -3372,7 +3380,7 @@ final class Server
     private int $maxInputVars = 1000;
     private int $maxFileUploads = 20;
     private int $uploadMaxFilesize = 2097152;
-    /** 0 = maxBodySize; consulted only once bodies stream (Task 7). */
+    /** php's `post_max_size`. Reserved — not enforced in either mode. */
     private int $postMaxSize = 0;
 
     /** How long one `accept` waits before the loop re-reads {@see $stopped}.
@@ -3441,9 +3449,9 @@ final class Server
     /** php's per-file `upload_max_filesize` (2 MiB). */
     public function uploadMaxFilesize(int $n): Server { $this->uploadMaxFilesize = $n < 0 ? 0 : $n; return $this; }
     /**
-     * Reserved — php's `post_max_size`. Stored, not enforced: a buffered body is
-     * already bounded by {@see maxBodySize}, and a streamed one's field bytes
-     * are the handler's ({@see Part::readAll}).
+     * php's `post_max_size`. Reserved — not enforced in either mode: a
+     * buffered body is already bounded by {@see maxBodySize}, and a streamed
+     * one's field bytes are the handler's ({@see Part::readAll}).
      */
     public function postMaxSize(int $n): Server { $this->postMaxSize = $n < 0 ? 0 : $n; return $this; }
     /** `callable(\Throwable, ?Request): Response` */
@@ -3728,6 +3736,7 @@ final class Server
         if ($req->hasBody() && !$req->streamed
             && \strncasecmp($req->contentType(), 'multipart/form-data', 19) === 0
             && $req->multipartFailed()) {
+            $this->statErrors = $this->statErrors + 1;
             $this->writeError($out, Status::BAD_REQUEST);
             return false;
         }
