@@ -318,6 +318,15 @@ trait LowerClasses
                 }
             }
             if ($prop->isStatic) {
+                // A bare `array` hint erases to KIND_UNKNOWN, which is ALSO what
+                // an unhinted static lowers to — and an unhinted static is a
+                // `mixed` (cell) slot ({@see LowerFromAst::staticPropRef}) while a
+                // bare-array one holds a raw array pointer whose element type
+                // InferScans recovers from the stores. Keep the two apart here:
+                // the hinted slot is an ERASED ARRAY, never a cell.
+                if ($pt->kind === Type::KIND_UNKNOWN && $this->isBareArrayHint($veff)) {
+                    $pt = Type::vec(Type::unknown());
+                }
                 // A REIFIED specialization declares NO static of its own: PHP has
                 // ONE static slot per class, shared by every binding of it, and a
                 // spec that registered its own would silently give each binding a
@@ -578,6 +587,8 @@ trait LowerClasses
                         $tdef = $this->lowerExpr($tprop->default);
                         if ($tIsCell && $tdef->kind === Node::KIND_NULL_CONST) {
                             $tdef = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
+                        } else {
+                            $tdef = $this->cellDefault($tIsCell, $tdef);
                         }
                     }
                     $this->module->addGlobalCell(
@@ -664,11 +675,43 @@ trait LowerClasses
     {
         if (!$isCellProp) { return $def; }
         $k = $def->kind;
+        // A float default is its own cell (canonical NaN-boxing); an ARRAY
+        // literal must box like a scalar or the slot reads back a bare pointer
+        // under a cell claim (`public static mixed $a = [1, 2]` var_dumped a
+        // denormal float). The call is not a link-time constant, so the store
+        // runs from emitGlobalRuntimeInits, as the scalar ones already do.
         if ($k !== Node::KIND_INT_CONST && $k !== Node::KIND_BOOL_CONST
-            && $k !== Node::KIND_STRING_CONST) {
+            && $k !== Node::KIND_STRING_CONST && $k !== Node::KIND_ARRAY_LIT) {
             return $def;
         }
+        // A global default is never seen by InferTypes, so the literal names
+        // its own shape here: a homogeneous scalar list/map keeps that element
+        // kind (the boxer rebuilds it as cells), anything else is a cell array.
+        if ($k === Node::KIND_ARRAY_LIT) { $def->type = $this->staticDefaultLitType($def); }
         return new \Compile\Mir\Call('__mir_to_cell', [$def], Type::cell());
+    }
+
+    /** The static type of a static-default array literal, from its MIR
+     *  elements ({@see cellDefault}). */
+    private function staticDefaultLitType(\Compile\Mir\ArrayLit $lit): Type
+    {
+        $elemKind = -1;
+        $allStrKeys = \count($lit->elements) > 0;
+        foreach ($lit->elements as $el) {
+            $vk = $el->value->kind;
+            $code = $vk === Node::KIND_INT_CONST ? Type::KIND_INT
+                : ($vk === Node::KIND_STRING_CONST ? Type::KIND_STRING
+                : ($vk === Node::KIND_FLOAT_CONST ? Type::KIND_FLOAT
+                : ($vk === Node::KIND_BOOL_CONST ? Type::KIND_BOOL : Type::KIND_CELL)));
+            if ($elemKind === -1) { $elemKind = $code; }
+            elseif ($elemKind !== $code) { $elemKind = Type::KIND_CELL; }
+            if ($el->key === null || $el->key->kind !== Node::KIND_STRING_CONST) { $allStrKeys = false; }
+        }
+        $elem = $elemKind === Type::KIND_INT ? Type::int_()
+            : ($elemKind === Type::KIND_STRING ? Type::string_()
+            : ($elemKind === Type::KIND_FLOAT ? Type::float_()
+            : ($elemKind === Type::KIND_BOOL ? Type::bool_() : Type::cell())));
+        return $allStrKeys ? Type::assoc(Type::string_(), $elem) : Type::vec($elem);
     }
 
     /**

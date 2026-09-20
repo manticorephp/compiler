@@ -622,6 +622,21 @@ trait EmitLlvmArrays
         return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
     }
 
+    /**
+     * True when a CONCRETE-scalar-element container may hold a buffer another
+     * writer cellified: one reachable through a `$GLOBALS` view (a global
+     * cell) or a by-ref binding. A plain local's buffer is its own; the check
+     * costs a flags load per element read, so it is not paid where no other
+     * writer can reach the buffer.
+     */
+    private function elemMayBeCellified(Node $base): bool
+    {
+        if ($base->kind !== Node::KIND_LOAD_LOCAL) { return true; }
+        if (isset($this->locals->globalBacked[$base->name])) { return true; }
+        if (isset($this->locals->refLocals[$base->name])) { return true; }
+        return false;
+    }
+
     /** True when a container's static element type is a CLAIM the buffer may
      *  not honour — cell or erased — so an element read whose result is a cell
      *  must decode by the buffer's hint, and a boxed store must encode by it. */
@@ -970,6 +985,18 @@ trait EmitLlvmArrays
             $u = $this->ssa->allocReg();
             $out .= '  ' . $u . ' = call i64 @__mir_elem_untag(ptr ' . $arrPtr
                   . ', i64 ' . $reg . ")\n";
+            $reg = $u;
+            $this->lastValue = $reg;
+        }
+        // The scalar half of the same rule: a `vec[int]` (float, bool) claim over
+        // a buffer some cell-typed writer cellified — `$GLOBALS['list'][] = 5`
+        // on the buffer `global $list` still reads raw — is unboxed by kind
+        // when, and only when, the buffer says CELL.
+        if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
+            && $this->elemMayBeCellified($aa->array)) {
+            $u = $this->ssa->allocReg();
+            $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
+                  . ', i64 ' . $reg . ', i64 ' . (string)$this->elementHintCodeForType($self->type) . ")\n";
             $reg = $u;
             $this->lastValue = $reg;
         }

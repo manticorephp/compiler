@@ -1208,6 +1208,17 @@ trait EmitLlvmControl
                   . ', i64 ' . $ev . ")\n";
             $ev = $eu;
         }
+        // The scalar half ({@see EmitLlvmArrays::emitArrayAccessUnified}): a
+        // concrete int/float/bool element over a buffer a cell-typed writer may
+        // have cellified is unboxed by kind when the buffer says CELL.
+        if ($fel !== null
+            && ($fel->kind === Type::KIND_INT || $fel->kind === Type::KIND_FLOAT || $fel->kind === Type::KIND_BOOL)
+            && $this->elemMayBeCellified($fe->array)) {
+            $eu = $this->ssa->allocReg();
+            $out .= '  ' . $eu . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arr
+                  . ', i64 ' . $ev . ', i64 ' . (string)$this->elementHintCodeForType($fel) . ")\n";
+            $ev = $eu;
+        }
         // ★ The loop variable CO-OWNS the element php would have copied into it.
         // Order is the property-slot order and for the same reason: take the +1
         // FIRST, then drop what the slot is losing, so a loop that meets the

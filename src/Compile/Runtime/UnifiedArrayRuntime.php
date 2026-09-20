@@ -133,6 +133,7 @@ final class UnifiedArrayRuntime
         $this->emitElemEncode();
         $this->emitCellToKind();
         $this->emitArrayConform();
+        $this->emitElemUntagKind();
         $this->emitElemEncodeRaw();
         $this->emitElemStampRaw();
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
@@ -4224,6 +4225,30 @@ final class UnifiedArrayRuntime
         $floatFromInt->ret($floatFromInt->bitcast($floatFromInt->sitofp($iv, Type::f64()), Type::i64()));
         $floatAsIs->ret($cell);
         $boolk->ret($boolk->and_($cell, Value::int(Type::i64(), 1)));
+    }
+
+    /**
+     * `__mir_elem_untag_kind(arr, v, kind) -> i64` — the scalar half of the
+     * sound untag: an element read under a concrete INT/FLOAT/BOOL claim comes
+     * back as that kind's raw word when the buffer is CELL-hinted
+     * ({@see emitCellToKind}), and untouched otherwise. Null-guarded like
+     * `__mir_elem_untag`.
+     */
+    private function emitElemUntagKind(): void
+    {
+        $fn = $this->module->func('__mir_elem_untag_kind', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $e = $fn->block('entry');
+        $asis = $fn->block('asis');
+        $chk = $fn->block('chk');
+        $dec = $fn->block('dec');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
+        $asis->ret($v);
+        $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk->brIf($isCell, $dec, $asis);
+        $dec->ret($dec->call('__mir_cell_to_kind', Type::i64(), [$v, $kind]));
     }
 
     /**

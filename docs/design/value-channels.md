@@ -39,6 +39,8 @@ against the php oracle recorded beside it. A passing repro is promoted into
 `arithType`'s `false &&` is gone, and `MANTICORE_TYPECHECK` is on by default.
 
 Baseline on `b17ede4` (2026-09-20): 7 open, 3 already green and promoted.
+After the element-channel and slot-producer steps: P1, P2, P3, P4, P7 promoted;
+open = P5, P6, `w4_cell_arith` (the tagged-arith unlock), `w4_array_identity`.
 
 | # | producer | repro | symptom today | root (status) |
 |---|---|---|---|---|
@@ -116,6 +118,25 @@ truth at every erased boundary, and both the read and the store consult it.**
   raw-hinted buffer crossing into a cell channel; retiring it needs every
   cell-base reader (cursor family, spread, union, comparisons, the runtime
   walkers) to decode by hint. Deferred behind the verifier.
+
+**Slot producers (P1–P3), landed the same day.** A `$GLOBALS`-viewed global
+cell and a `mixed`/unhinted static slot hold an ARRAY boxed FLAT
+(`box_array`, the buffer's own hint intact — `boxForViewSlot`) and an object
+by pointer; the `global $x` local reads the raw pointer back through the view
+unbox, the element by-ref slot (`__mir_array_ref_slot`) works on an unboxed
+scratch word re-boxed into the cell, and `vecWriteBack` re-boxes. Never the
+cell rebuild at a store: it consumes a fresh source that the assignment
+EXPRESSION still yields (`self::$d ?? self::$d = [...]` read a freed buffer).
+An unhinted static (`public static $x`) is now a `mixed` slot whose read is
+typed CELL; a bare `array`-hinted static stays an erased ARRAY slot (raw
+pointer, element type refined by InferScans) — the two used to share
+KIND_UNKNOWN. A static default array literal is typed from its own elements
+and boxed like the scalar defaults. The scalar half of the sound untag
+(`__mir_elem_untag_kind`) covers an INT/FLOAT/BOOL claim over a buffer a cell
+writer cellified, paid only where another writer can reach the buffer (a
+global cell, a by-ref binding). ⛔ `++`/`--` and a raw by-ref address on a
+viewed global still hit the cell raw; `public $u` (unhinted INSTANCE prop)
+still stores an array raw; array `===` compares words (`w4_array_identity`).
 
 Landed 2026-09-20 (`w4`): suite 1080/0/1082 on gen2; P4 and P7 promoted;
 `compare_natsort`, `erased_record_element`, `assoc_string_by_value_cow`,

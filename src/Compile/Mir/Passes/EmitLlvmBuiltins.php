@@ -7892,7 +7892,9 @@ trait EmitLlvmBuiltins
             // stale base.
             if (isset($this->locals->globalBacked[$name])) {
                 $asI = $this->ssa->allocReg();
-                $out = $this->packArrayBack($arr2, $asI, $asCell);
+                // A `$GLOBALS`-viewed cell holds the buffer BOXED (flat), as the
+                // plain store into it does ({@see EmitLlvmLocals::boxForViewSlot}).
+                $out = $this->packArrayBack($arr2, $asI, $asCell || $this->isGlobalsViewName($name));
                 $out .= '  store i64 ' . $asI . ', ptr '
                       . $this->locals->globalBacked[$name] . "\n";
                 return $out;

@@ -4937,15 +4937,20 @@ trait EmitLlvmObjects
         // every scalar come back as a denormal float — `C::$s = 42; C::$s === 42`
         // was false, and `AsyncHook::clear()`'s `= null` left every hook reading as
         // NON-null, so fclose() after async() called through a null closure.
-        // Arrays/objects/closures ride raw here exactly as they do at a call
-        // boundary ({@see EmitLlvm::isCellBoxableArg}) and exactly as an INSTANCE
-        // cell-property does — so `is_array()`/`get_debug_type()` on an array in a
-        // `mixed` static prop still lie (count() and the element reads work). That
-        // is the repr-consistency epic's cell-array-backing-slot problem, not this
-        // store's: boxing would rebuild the array and change its identity.
+        // An ARRAY or an OBJECT is boxed too (docs/design/value-channels.md,
+        // P2/P3): the slot's readers are all cell-typed, so a raw pointer under
+        // a cell claim read back as a denormal float. An array is boxed FLAT —
+        // the same buffer under a tag, its own element hint intact — never the
+        // cell rebuild: the rebuild consumes a fresh source, and the assignment
+        // EXPRESSION still yields that source (`self::$d ?? self::$d = [...]`
+        // read a freed buffer). The slot retains or takes the buffer exactly
+        // as the raw store did; cell readers decode its elements by the hint.
+        // Closures, enums and structs carry no tag a consumer could trust and
+        // stay raw ({@see EmitLlvmLocals::viewSlotBoxes}).
         $dk = $n->declared === null ? null : $n->declared->kind;
+        $vt = $n->value->type;
         $box = ($dk === Type::KIND_CELL || $dk === Type::KIND_UNKNOWN)
-            && $this->isCellBoxableArg($n->value->type);
+            && $this->viewSlotBoxes($vt);
         // A float is boxed from the DOUBLE register: coercing to i64 first would
         // hand box_float the bit pattern as an integer (1.5 stored as 4.6e18).
         // Floats are not rc-managed, so nothing is owed to the retain below.
@@ -4997,7 +5002,7 @@ trait EmitLlvmObjects
         // declared type instead of the cell's null (which retains nothing).
         $out .= $this->rcRetainByType($n->value, $val, $dcT, 5);
         if ($box) {
-            $out .= $this->boxToCell($n->value->type, $n->value);
+            $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;
         }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";

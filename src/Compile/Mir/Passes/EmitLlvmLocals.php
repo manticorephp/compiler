@@ -376,6 +376,50 @@ trait EmitLlvmLocals
      * boxed — boxing a static local instead broke `static $stdout` holding a
      * resource, which is neither a superglobal nor a $GLOBALS name.
      */
+    /**
+     * Whether a value of type `$t` is boxed into a `$GLOBALS`-viewed slot:
+     * every scalar/string/cell ({@see isCellBoxableArg}) plus arrays and
+     * tag-trustworthy objects, which {@see boxForViewSlot} boxes flat.
+     */
+    private function viewSlotBoxes(Type $t): bool
+    {
+        if ($this->isCellBoxableArg($t)) { return true; }
+        // An ERASED word takes the runtime probe (`boxUnknownShallowIr`): a
+        // guess, but a raw word under a cell claim is a wrong answer every time.
+        if ($t->kind === Type::KIND_UNKNOWN) { return true; }
+        if ($t->isArray()) { return true; }
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        if ($cls === '') { return false; }
+        if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return false; }
+        if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        return true;
+    }
+
+    /** Box lastValue for a `$GLOBALS`-viewed slot: arrays and objects FLAT by
+     *  pointer (the buffer keeps its own element hint), everything else as
+     *  {@see boxToCell} does. */
+    private function boxForViewSlot(Type $t, Node $src): string
+    {
+        if ($t->isArray()) {
+            $this->rt->needsTagged = true;
+            $out = $this->coerceToPtr();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+            $this->markCellBoxed($r);
+            return $this->finishI64($out, $r);
+        }
+        if ($t->kind === Type::KIND_OBJ) {
+            $this->rt->needsTagged = true;
+            $out = $this->coerceToPtr();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";
+            $this->markCellBoxed($r);
+            return $this->finishI64($out, $r);
+        }
+        return $this->boxToCell($t, $src);
+    }
+
     private function isGlobalsViewName(string $name): bool
     {
         if ($this->isSuperglobalName($name)) { return false; }
@@ -393,7 +437,7 @@ trait EmitLlvmLocals
             $out = '  ' . $reg . ' = load i64, ptr ' . $this->locals->globalBacked[$ll->name] . "\n";
             // The mirror of the box in emitStoreLocal: the slot is the
             // `$GLOBALS['x']` view's cell, so decode it by THIS local's type.
-            if ($this->isGlobalsViewName($ll->name) && $this->isCellBoxableArg($ll->type)) {
+            if ($this->isGlobalsViewName($ll->name) && $this->viewSlotBoxes($ll->type)) {
                 $this->lastValue = $reg;
                 $this->lastValueType = 'i64';
                 $out .= $this->unboxCellToType($ll->type);
@@ -838,12 +882,16 @@ trait EmitLlvmLocals
         // static-prop store does for a `mixed` slot. One slot, one
         // representation: with the two views disagreeing, `$counter = 7` written
         // here and read through `$GLOBALS['counter']` (or the reverse) answered
-        // the double with those bits. Arrays/objects/closures ride RAW on both
-        // sides ({@see isCellBoxableArg}), so they stay consistent too.
+        // the double with those bits. An ARRAY is boxed FLAT (`box_array`, the
+        // same buffer under a tag — never the cell rebuild): the `global $x`
+        // local keeps reading its concrete elements raw off that buffer, and the
+        // view reads them through the buffer's hint, so the two agree on one
+        // buffer. An object is boxed by pointer for the same reason; closures,
+        // enums and structs have no tag a consumer could trust and stay raw.
         if (isset($this->locals->globalBacked[$sl->name])
             && $this->isGlobalsViewName($sl->name)
-            && $this->isCellBoxableArg($sl->value->type)) {
-            $out .= $this->boxToCell($sl->value->type, $sl->value);
+            && $this->viewSlotBoxes($sl->value->type)) {
+            $out .= $this->boxForViewSlot($sl->value->type, $sl->value);
         }
         $val = $this->lastValue;
         // Coerce float values back into the slot's i64 cell with a
@@ -1025,6 +1073,26 @@ trait EmitLlvmLocals
             $out = $this->containerCellPtr($aa->array);
             if ($out === null) { return null; }
             $slotPtr = $this->lastValue;
+            // A `$GLOBALS`-viewed global cell holds the buffer BOXED
+            // ({@see boxForViewSlot}); `__mir_array_ref_slot` reads and writes
+            // a raw pointer, so it works on a scratch word that is unboxed
+            // going in and re-boxed into the cell coming out. The element
+            // address it hands back points into the buffer either way.
+            $viewCell = $aa->array->kind === Node::KIND_LOAD_LOCAL
+                && isset($this->locals->globalBacked[$aa->array->name])
+                && $this->isGlobalsViewName($aa->array->name)
+                ? $slotPtr : '';
+            if ($viewCell !== '') {
+                $this->rt->needsTagged = true;
+                $w = $this->ssa->allocReg();
+                $out .= '  ' . $w . ' = load i64, ptr ' . $viewCell . "\n";
+                $rawW = $this->ssa->allocReg();
+                $out .= '  ' . $rawW . ' = and i64 ' . $w . ", 281474976710655\n";
+                $scr = $this->ssa->allocReg();
+                $out .= '  ' . $scr . " = alloca i64\n";
+                $out .= '  store i64 ' . $rawW . ', ptr ' . $scr . "\n";
+                $slotPtr = $scr;
+            }
             $ep = $this->ssa->allocReg();
             if ($keyKind === 'str') {
                 $out .= $this->emitNode($aa->index);
@@ -1038,6 +1106,15 @@ trait EmitLlvmLocals
                 $keyReg = $this->lastValue;
                 $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot(ptr '
                       . $slotPtr . ', i64 ' . $keyReg . ")\n";
+            }
+            if ($viewCell !== '') {
+                $nw = $this->ssa->allocReg();
+                $out .= '  ' . $nw . ' = load i64, ptr ' . $slotPtr . "\n";
+                $np = $this->ssa->allocReg();
+                $out .= '  ' . $np . ' = inttoptr i64 ' . $nw . " to ptr\n";
+                $nb = $this->ssa->allocReg();
+                $out .= '  ' . $nb . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
+                $out .= '  store i64 ' . $nb . ', ptr ' . $viewCell . "\n";
             }
             $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";

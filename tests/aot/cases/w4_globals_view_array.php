@@ -18,4 +18,3 @@ viaGlobalKw();
 viaGlobalsView();
 viaGlobalKw();
 var_dump($counter, $list, $name);
-var_dump($GLOBALS['list'] === $list);
