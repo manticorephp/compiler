@@ -684,7 +684,7 @@ function parseQuery(string $qs): array<string, string>
  * channel W4 has not closed; a local copy plus a store keeps every level typed.
  *
  * @internal
- * @param array<string, mixed> $arr
+ * @param array<int|string, mixed> $arr
  */
 function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = true): void
 {
@@ -697,6 +697,8 @@ function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = tr
     }
     // `0=x` lands at [0], as every segment below does: php canonicalises the
     // base too, and a runtime string key does not canonicalise on the store.
+    // The array is cell-keyed ({@see \Manticore\Sapi\Context::$emptyGpc}), so an
+    // int here is an int entry every reader — foreach included — sees as one.
     $bk = canonicalIntKey($base) ? (int)$base : $base;
     if ($bpos === false) {
         $arr[$bk] = $val;
@@ -729,7 +731,7 @@ function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = tr
         return;
     }
     if (!isset($arr[$bk]) || !\is_array($arr[$bk])) {
-        $arr[$bk] = \Manticore\Sapi\Context::$empty;
+        $arr[$bk] = \Manticore\Sapi\Context::$emptyGpc;
     }
     $node = $arr[$bk];
     nestedWalk($node, $segs, 0, $val);
@@ -738,7 +740,7 @@ function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = tr
 
 /**
  * @internal
- * @param array<string, mixed> $node
+ * @param array<int|string, mixed> $node
  * @param array<int, string> $segs
  */
 function nestedWalk(array &$node, array $segs, int $idx, mixed $val): void
@@ -750,7 +752,7 @@ function nestedWalk(array &$node, array $segs, int $idx, mixed $val): void
             $node[] = $val;
             return;
         }
-        $child = \Manticore\Sapi\Context::$empty;
+        $child = \Manticore\Sapi\Context::$emptyGpc;
         nestedWalk($child, $segs, $idx + 1, $val);
         $node[] = $child;
         return;
@@ -761,7 +763,7 @@ function nestedWalk(array &$node, array $segs, int $idx, mixed $val): void
         return;
     }
     if (!isset($node[$k]) || !\is_array($node[$k])) {
-        $node[$k] = \Manticore\Sapi\Context::$empty;
+        $node[$k] = \Manticore\Sapi\Context::$emptyGpc;
     }
     $child = $node[$k];
     nestedWalk($child, $segs, $idx + 1, $val);
@@ -796,11 +798,11 @@ function canonicalIntKey(string $s): bool
  * {@see parseQuery} stays for `query()`; this one is built on first use.
  *
  * @internal
- * @return array<string, mixed>
+ * @return array<int|string, mixed>
  */
-function parseQueryNested(string $qs, int $maxVars): array<string, mixed>
+function parseQueryNested(string $qs, int $maxVars): array<int|string, mixed>
 {
-    $out = \Manticore\Sapi\Context::$empty;
+    $out = \Manticore\Sapi\Context::$emptyGpc;
     if ($qs === '') {
         return $out;
     }
@@ -1622,7 +1624,7 @@ final class Multipart
     private int $state = 0;
     private bool $eof = false;
 
-    /** @var array<string, mixed> */
+    /** @var array<int|string, mixed> */
     private array $fields;
     /** @var array<int, UploadedFile> */
     private array $files = [];
@@ -1649,7 +1651,7 @@ final class Multipart
         $this->source = $source;
         $this->maxFiles = $maxFileUploads;
         $this->maxSize = $uploadMaxFilesize;
-        $this->fields = \Manticore\Sapi\Context::$empty;
+        $this->fields = \Manticore\Sapi\Context::$emptyGpc;
     }
 
     /** The boundary parameter, unquoted; '' when the header has none. */
@@ -1671,8 +1673,8 @@ final class Multipart
         return $v;
     }
 
-    /** @return array<string, mixed> */
-    public function fields(): array<string, mixed>
+    /** @return array<int|string, mixed> */
+    public function fields(): array<int|string, mixed>
     {
         return $this->fields;
     }
@@ -2001,10 +2003,10 @@ final class Request
     private array<string, string> $queryCache = [];
     /** @var array<string,string> */
     private array<string, string> $cookieCache = [];
-    /** @var array<string, mixed> */
-    private array<string, mixed> $queryNested = [];
-    /** @var array<string, mixed> */
-    private array<string, mixed> $postNested = [];
+    /** @var array<int|string, mixed> */
+    private array<int|string, mixed> $queryNested = [];
+    /** @var array<int|string, mixed> */
+    private array<int|string, mixed> $postNested = [];
     private int $parsed = 0;
 
     private ?Multipart $multipart = null;
@@ -2081,8 +2083,8 @@ final class Request
         return $this->queryCache;
     }
 
-    /** php's $_GET shape: nested (`a[]`, `a[b][c]`), last-wins, max_input_vars-capped. @return array<string, mixed> */
-    public function queryArray(): array<string, mixed>
+    /** php's $_GET shape: nested (`a[]`, `a[b][c]`), last-wins, max_input_vars-capped. @return array<int|string, mixed> */
+    public function queryArray(): array<int|string, mixed>
     {
         if (($this->parsed & self::P_QUERY_NESTED) === 0) {
             $this->queryNested = parseQueryNested($this->queryString, $this->maxInputVars);
@@ -2091,18 +2093,18 @@ final class Request
         return $this->queryNested;
     }
 
-    /** php's $_POST shape from a urlencoded form, or a multipart body's fields. @return array<string, mixed> */
-    public function postArray(): array<string, mixed>
+    /** php's $_POST shape from a urlencoded form, or a multipart body's fields. @return array<int|string, mixed> */
+    public function postArray(): array<int|string, mixed>
     {
         if (($this->parsed & self::P_POST) === 0) {
             if (\strncasecmp($this->contentType(), 'multipart/form-data', 19) === 0) {
                 $this->ensureMultipart();
                 $m = $this->multipart;
-                $this->postNested = $m === null ? \Manticore\Sapi\Context::$empty : $m->fields();
+                $this->postNested = $m === null ? \Manticore\Sapi\Context::$emptyGpc : $m->fields();
             } else {
                 $this->postNested = $this->contentType() === 'application/x-www-form-urlencoded'
                     ? parseQueryNested($this->bodyRaw, $this->maxInputVars)
-                    : \Manticore\Sapi\Context::$empty;
+                    : \Manticore\Sapi\Context::$emptyGpc;
             }
             $this->parsed = $this->parsed | self::P_POST;
         }
@@ -2162,11 +2164,11 @@ final class Request
      * (`f[]`×2 → `$_FILES['f']['name'] = [0 => …, 1 => …]`, `u[avatar]` →
      * `$_FILES['u']['name']['avatar']`). A part with filename= but no name= is
      * php's anonymous upload: rfc1867 files it under a running int, `$_FILES[0]`.
-     * @return array<string, mixed>
+     * @return array<int|string, mixed>
      */
-    public function filesArray(): array<string, mixed>
+    public function filesArray(): array<int|string, mixed>
     {
-        $out = \Manticore\Sapi\Context::$empty;
+        $out = \Manticore\Sapi\Context::$emptyGpc;
         $anon = 0;
         foreach ($this->allFiles() as $f) {
             $field = $f->field;
@@ -2188,7 +2190,7 @@ final class Request
      * `f[a][]` with column `size` → `$out['f']['size']['a'][]`: the base is the
      * field, the column sits between the base and the bracket path. No urldecode:
      * a multipart name is registered as sent (rfc1867), unlike a query key.
-     * @param array<string, mixed> $out
+     * @param array<int|string, mixed> $out
      */
     private function filesColumn(array &$out, string $field, string $col, mixed $val): void
     {
@@ -2196,7 +2198,7 @@ final class Request
         if ($b === false) {
             $bk = canonicalIntKey($field) ? (int)$field : $field;
             if (!isset($out[$bk]) || !\is_array($out[$bk])) {
-                $out[$bk] = \Manticore\Sapi\Context::$empty;
+                $out[$bk] = \Manticore\Sapi\Context::$emptyGpc;
             }
             $row = $out[$bk];
             $row[$col] = $val;
@@ -3594,6 +3596,9 @@ final class Server
      */
     private function beginRequest(Request $req): void
     {
+        // The upload registry opens BEFORE anything can parse a body: under
+        // compat the requestBegin() arguments below run the multipart parse.
+        \Manticore\Sapi\uploadsBegin();
         if (!$this->compat) {
             \Manticore\Sapi\responseBegin();
             return;

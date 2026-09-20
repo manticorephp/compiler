@@ -1,3 +1,29 @@
+=== move: HTTP/1.1 200 OK
+array(1) {
+  ["f"]=>
+  array(6) {
+    ["name"]=>
+    string(9) "hello.txt"
+    ["full_path"]=>
+    string(9) "hello.txt"
+    ["type"]=>
+    string(10) "text/plain"
+    ["tmp_name"]=>
+    string(3) "TMP"
+    ["error"]=>
+    int(0)
+    ["size"]=>
+    int(11)
+  }
+}
+is_uploaded before=true
+stranger=false
+move=true
+is_uploaded after=false
+move again=false
+dest exists=true dest=hello world
+tmp given=yes exists after=no
+dest after=yes
 === single: HTTP/1.1 200 OK
 array(1) {
   ["f"]=>
@@ -137,32 +163,6 @@ array(2) {
   }
 }
 tmp given=yes exists after=no
-=== move: HTTP/1.1 200 OK
-array(1) {
-  ["f"]=>
-  array(6) {
-    ["name"]=>
-    string(9) "hello.txt"
-    ["full_path"]=>
-    string(9) "hello.txt"
-    ["type"]=>
-    string(10) "text/plain"
-    ["tmp_name"]=>
-    string(3) "TMP"
-    ["error"]=>
-    int(0)
-    ["size"]=>
-    int(11)
-  }
-}
-is_uploaded before=true
-stranger=false
-move=true
-is_uploaded after=false
-move again=false
-dest exists=true dest=hello world
-tmp given=yes exists after=no
-dest after=yes
 === nobody: HTTP/1.1 200 OK
 array(0) {
 }

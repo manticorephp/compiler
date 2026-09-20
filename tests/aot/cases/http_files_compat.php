@@ -144,6 +144,14 @@ async(function () use ($server, $port, $dest) {
 
     $c = fsockopen('127.0.0.1', $port);
 
+    // move FIRST: the very first request of the process registers its upload
+    // before any request ever began — is_uploaded_file / move_uploaded_file on
+    // `f` prove that path; the moved file survives the sweep.
+    roundtrip('move', $c, post('/move', body([part('name="a"', '1'),
+        part('name="f"; filename="hello.txt"', 'hello world', 'text/plain')])));
+    echo 'dest after=', (file_exists($dest) ? 'yes' : 'no'), "\n";
+    @unlink($dest);
+
     // single: one text field + one file under `f`.
     roundtrip('single', $c, post('/upload', body([part('name="a"', '1'),
         part('name="f"; filename="hello.txt"', 'hello world', 'text/plain')])));
@@ -159,12 +167,6 @@ async(function () use ($server, $port, $dest) {
     // anon: filename= with no name= lands under $_FILES[0], the named one under `g`.
     roundtrip('anon', $c, post('/upload', body([part('filename="anon.txt"', 'ANON', 'text/plain'),
         part('name="g"; filename="g.txt"', 'GG', 'text/plain')])));
-
-    // move: is_uploaded_file / move_uploaded_file on `f`; the moved file survives the sweep.
-    roundtrip('move', $c, post('/move', body([part('name="a"', '1'),
-        part('name="f"; filename="hello.txt"', 'hello world', 'text/plain')])));
-    echo 'dest after=', (file_exists($dest) ? 'yes' : 'no'), "\n";
-    @unlink($dest);
 
     // nobody: a GET seeds an empty $_FILES.
     roundtrip('nobody', $c, "GET /upload HTTP/1.1\r\nHost: t\r\n\r\n");

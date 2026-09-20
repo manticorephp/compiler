@@ -87,8 +87,10 @@ namespace Manticore\Sapi {
         /** @var array<int,array<string,mixed>> parked $_FILES, by task id */
         public static array $savedFiles = [];
 
-        /** @var array<string,bool> tmp path → moved?, this request's uploads */
-        public static array $uploaded = [];
+        /** tmp path → moved?, this request's uploads. Typed like $empty: the
+         *  first registration of a process lands here before any reset.
+         *  @var array<string,bool> */
+        public static array<string, bool> $uploaded = [];
 
         /** @var array<int,array<string,bool>> parked $uploaded, by task id */
         public static array $savedUploaded = [];
@@ -110,6 +112,16 @@ namespace Manticore\Sapi {
         /** The reset value for $uploaded, typed for the same reason.
          *  @var array<string,bool> */
         public static array<string, bool> $emptyFlags = [];
+
+        /**
+         * The seed value for a GPC-shaped array — $_GET/$_POST/$_FILES and the
+         * Request arrays they come from. php keys these int-OR-string (`?0=x`,
+         * `a[]=1`, an anonymous upload at $_FILES[0]), so the key is a tagged
+         * cell: a string-typed key over an int entry has no string to borrow and
+         * would have to MINT one per iteration. Same cell-element reason as $empty.
+         * @var array<int|string,mixed>
+         */
+        public static array<int|string, mixed> $emptyGpc = [];
 
         /** True once any request has begun, anywhere in the process — the guard that
          *  keeps the per-task swap off a program that serves none. */
@@ -224,18 +236,6 @@ namespace Manticore\Sapi {
     }
 
     /**
-     * php's canonical-int key rule for a top-level GPC name: `0` and `-7` are int
-     * keys, `01`, ` 1` and `1e3` stay strings. The nested levels are canonicalised
-     * by the caller (Http\nestedAssign); a top-level key arrives here as the
-     * string foreach hands back, and a runtime string key does not canonicalise
-     * on the store, so the seeding has to pick the int store itself.
-     */
-    function intKey(string $k): bool
-    {
-        return (string)(int)$k === $k;
-    }
-
-    /**
      * Begin serving a request on the current flow: seed the GPC superglobals and
      * start an empty response.
      *
@@ -251,22 +251,23 @@ namespace Manticore\Sapi {
      * its static type, which is exactly what the readers expect. $get, $post and
      * $files are `mixed`-valued because they nest (`?a[]=1`, `a[b][c]`,
      * $_FILES['f']['size']); the caller builds every level as a cell-element
-     * array (Http\parseQueryNested) so the nested stores stay typed too. A
-     * top-level name that is a canonical int (`?0=x`, an anonymous upload) is
-     * stored under the INT key, as php does ({@see intKey}).
+     * array (Http\parseQueryNested) so the nested stores stay typed too. Their
+     * keys are int-or-string cells ({@see Context::$emptyGpc}): `?0=x` and an
+     * anonymous upload land under the INT key, as php does, and the element
+     * store below dispatches on the key's tag.
      */
-    function requestBegin(array<string, string> $server = [], array<string, mixed> $get = [], array<string, mixed> $post = [], array<string, string> $cookie = [], array<string, mixed> $files = []): void
+    function requestBegin(array<string, string> $server = [], array<int|string, mixed> $get = [], array<int|string, mixed> $post = [], array<string, string> $cookie = [], array<int|string, mixed> $files = []): void
     {
         foreach ($server as $k => $v) {
             $_SERVER[$k] = $v;
         }
         $_GET = Context::$empty;
         foreach ($get as $k => $v) {
-            if (intKey($k)) { $_GET[(int)$k] = $v; } else { $_GET[$k] = $v; }
+            $_GET[$k] = $v;
         }
         $_POST = Context::$empty;
         foreach ($post as $k => $v) {
-            if (intKey($k)) { $_POST[(int)$k] = $v; } else { $_POST[$k] = $v; }
+            $_POST[$k] = $v;
         }
         $_COOKIE = Context::$empty;
         foreach ($cookie as $k => $v) {
@@ -274,19 +275,19 @@ namespace Manticore\Sapi {
         }
         $_REQUEST = Context::$empty;
         foreach ($get as $k => $v) {
-            if (intKey($k)) { $_REQUEST[(int)$k] = $v; } else { $_REQUEST[$k] = $v; }
+            $_REQUEST[$k] = $v;
         }
         foreach ($post as $k => $v) {
-            if (intKey($k)) { $_REQUEST[(int)$k] = $v; } else { $_REQUEST[$k] = $v; }
+            $_REQUEST[$k] = $v;
         }
         $_FILES = Context::$empty;
         foreach ($files as $k => $v) {
-            if (intKey($k)) { $_FILES[(int)$k] = $v; } else { $_FILES[$k] = $v; }
+            $_FILES[$k] = $v;
         }
         $_SESSION = Context::$empty;
         // $uploaded is NOT reset here: the multipart parse that registers this
         // request's temp files runs while the caller builds $files, i.e. BEFORE
-        // this body. requestEnd() empties it, on every path out of a request.
+        // this body. uploadsBegin() opens it, requestEnd() empties it.
         responseBegin();
     }
 
@@ -332,6 +333,16 @@ namespace Manticore\Sapi {
                 @\unlink($tmp);
             }
         }
+        Context::$uploaded = Context::$emptyFlags;
+    }
+
+    /**
+     * @internal Open this request's upload registry, typed. Called by the server
+     * at the top of every request, BEFORE the multipart parse that registers
+     * into it — that parse runs while requestBegin()'s arguments are built.
+     */
+    function uploadsBegin(): void
+    {
         Context::$uploaded = Context::$emptyFlags;
     }
 
