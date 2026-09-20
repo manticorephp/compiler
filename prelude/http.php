@@ -674,6 +674,9 @@ function parseQuery(string $qs): array<string, string>
  * canonical decimal segment is an int key. A copy of the stdlib's
  * parse_str assign with a `mixed` value, because a $_FILES column is an int.
  *
+ * `$decode = false` skips the urldecode: a multipart part name is already
+ * bytes, and php's rfc1867 registers it as sent (`a%20b` stays `a%20b`).
+ *
  * Oracle: `php -r 'parse_str($qs, $r); var_dump($r);'`.
  *
  * The `$node = $arr[$base]; …; $arr[$base] = $node;` read-modify-write is
@@ -683,9 +686,9 @@ function parseQuery(string $qs): array<string, string>
  * @internal
  * @param array<string, mixed> $arr
  */
-function nestedAssign(array &$arr, string $rawKey, mixed $val): void
+function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = true): void
 {
-    $key = \urldecode($rawKey);
+    $key = $decode ? \urldecode($rawKey) : $rawKey;
     $bpos = \strpos($key, '[');
     $base = $bpos === false ? $key : \substr($key, 0, $bpos);
     $base = \str_replace(['.', ' '], '_', $base);
@@ -829,6 +832,30 @@ function stringSource(string $s): \Closure
 }
 
 /**
+ * Offset of the whole-word `param=` in a Content-Disposition value, -1 when
+ * absent: `filename=` must not match inside `name=` nor inside a quoted
+ * `name="xfilename=1"`, and vice versa.
+ *
+ * @internal
+ */
+function dispositionParamPos(string $v, string $param): int
+{
+    $needle = $param . '=';
+    $pos = 0;
+    while (true) {
+        $p = \stripos($v, $needle, $pos);
+        if ($p === false) {
+            return -1;
+        }
+        if ($p > 0 && $v[$p - 1] !== ';' && $v[$p - 1] !== ' ' && $v[$p - 1] !== "\t") {
+            $pos = $p + 1;
+            continue;
+        }
+        return $p;
+    }
+}
+
+/**
  * `name="…"` / `filename="…"` from a Content-Disposition value. Inside the
  * quotes only `\\` and `\"` are escapes — php's substring_conf — so a bare
  * `C:\dir\x.txt` keeps its backslashes; `%22` decodes to `"`.
@@ -837,21 +864,11 @@ function stringSource(string $s): \Closure
  */
 function dispositionParam(string $v, string $param): string
 {
-    $needle = $param . '=';
-    $pos = 0;
-    while (true) {
-        $p = \stripos($v, $needle, $pos);
-        if ($p === false) {
-            return '';
-        }
-        // whole-word: `filename=` must not match inside `name=` and vice versa
-        if ($p > 0 && $v[$p - 1] !== ';' && $v[$p - 1] !== ' ' && $v[$p - 1] !== "\t") {
-            $pos = $p + 1;
-            continue;
-        }
-        break;
+    $p = dispositionParamPos($v, $param);
+    if ($p < 0) {
+        return '';
     }
-    $s = $p + \strlen($needle);
+    $s = $p + \strlen($param) + 1;
     if ($s < \strlen($v) && $v[$s] === '"') {
         $out = '';
         $i = $s + 1;
@@ -1611,8 +1628,8 @@ final class Multipart
     private int $fileCount = 0;
     private int $maxFiles;
     private int $maxSize;
-    /** the MAX_FILE_SIZE field, php's per-form cap; -1 = none */
-    private int $formMax = -1;
+    /** the MAX_FILE_SIZE field, php's per-form cap; 0 = none, as php's `max_file_size &&` */
+    private int $formMax = 0;
 
     private string $pName = '';
     private string $pFile = '';
@@ -1665,7 +1682,12 @@ final class Multipart
         return $this->files;
     }
 
-    /** Run to the closing delimiter. False = malformed (the server answers 400). */
+    /**
+     * Run to the closing delimiter. False = malformed (the server answers 400),
+     * and then no temp file survives: the open part's and every collected one's
+     * are unlinked and `files()` is empty, so a stream of bad bodies cannot
+     * fill the disk.
+     */
     public function parseAll(): bool
     {
         if (\strlen($this->delim) <= 4) {
@@ -1674,25 +1696,43 @@ final class Multipart
         while ($this->state !== self::ST_DONE) {
             if ($this->state === self::ST_PREAMBLE) {
                 if (!$this->preamble()) {
-                    return false;
+                    return $this->abort();
                 }
             } elseif ($this->state === self::ST_HEAD) {
                 if ($this->head() < 0) {
-                    return false;
+                    return $this->abort();
                 }
-            } else {
-                $this->body();
+            } elseif (!$this->body()) {
+                return $this->abort();
             }
             if ($this->eof && $this->state !== self::ST_DONE) {
-                // Cut off mid-part: php marks the open file PARTIAL.
+                // Cut off mid-part: php marks the open file PARTIAL — only a
+                // file still being written; one already dropped (-1) or
+                // failed (4, 1, 2) keeps its own verdict.
                 if ($this->state === self::ST_BODY) {
-                    $this->pError = $this->pIsFile ? UploadedFile::ERR_PARTIAL : 0;
+                    if ($this->pIsFile && $this->pError === 0) {
+                        $this->pError = UploadedFile::ERR_PARTIAL;
+                    }
                     $this->closePart();
                 }
                 $this->state = self::ST_DONE;
             }
         }
         return true;
+    }
+
+    /** Malformed: drop the open part's temp file and every collected one. */
+    private function abort(): bool
+    {
+        $this->dropTmp();
+        foreach ($this->files as $f) {
+            if ($f->tmpName !== '') {
+                @\unlink($f->tmpName);
+            }
+        }
+        $this->files = [];
+        $this->state = self::ST_DONE;
+        return false;
     }
 
     private function fill(): bool
@@ -1730,12 +1770,17 @@ final class Multipart
         }
     }
 
-    /** After a delimiter: `--` ends the message, CRLF opens a part. */
+    /**
+     * After a delimiter: `--` ends the message, CRLF opens a part, anything
+     * else is garbage (false → 400). EOF here is a message cut right after a
+     * delimiter: the part before it is complete, so it ends as DONE.
+     */
     private function afterDelim(): bool
     {
         while (\strlen($this->buf) < 2) {
             if (!$this->fill()) {
-                return false;
+                $this->state = self::ST_DONE;
+                return true;
             }
         }
         if (\strncmp($this->buf, '--', 2) === 0) {
@@ -1783,12 +1828,14 @@ final class Multipart
             if ($hn === 'content-disposition') {
                 $this->pName = dispositionParam($hv, 'name');
                 $this->pFile = dispositionParam($hv, 'filename');
-                $this->pIsFile = \stripos($hv, 'filename=') !== false;
+                $this->pIsFile = dispositionParamPos($hv, 'filename') >= 0;
             } elseif ($hn === 'content-type') {
                 $this->pType = $hv;
             }
         }
         if ($this->pName === '' && !$this->pIsFile) {
+            // php (rfc1867): neither name= nor filename= is "Mime headers garbled";
+            // a file part with only filename= is kept, field ''
             return -1;
         }
         if ($this->pIsFile) {
@@ -1817,6 +1864,7 @@ final class Multipart
         }
         $r = @\fopen($tmp, 'wb');
         if ($r === false) {
+            @\unlink($tmp);
             $this->pError = UploadedFile::ERR_CANT_WRITE;
             return;
         }
@@ -1824,8 +1872,11 @@ final class Multipart
         $this->pTmpName = $tmp;
     }
 
-    /** Body bytes up to the next delimiter; everything before a possible split delimiter is consumed. */
-    private function body(): void
+    /**
+     * Body bytes up to the next delimiter; everything before a possible split
+     * delimiter is consumed. False = garbage after the delimiter.
+     */
+    private function body(): bool
     {
         while (true) {
             $p = \strpos($this->buf, $this->delim);
@@ -1833,10 +1884,7 @@ final class Multipart
                 $this->consume(\substr($this->buf, 0, $p));
                 $this->buf = \substr($this->buf, $p + \strlen($this->delim));
                 $this->closePart();
-                if (!$this->afterDelim()) {
-                    $this->state = self::ST_DONE;
-                }
-                return;
+                return $this->afterDelim();
             }
             $keep = \strlen($this->delim) - 1;
             $n = \strlen($this->buf);
@@ -1847,7 +1895,7 @@ final class Multipart
             if (!$this->fill()) {
                 $this->consume($this->buf);
                 $this->buf = '';
-                return;
+                return true;
             }
         }
     }
@@ -1865,7 +1913,7 @@ final class Multipart
             return;
         }
         $this->pSize = $this->pSize + \strlen($bytes);
-        if ($this->pSize > $this->maxSize || ($this->formMax >= 0 && $this->pSize > $this->formMax)) {
+        if ($this->pSize > $this->maxSize || ($this->formMax > 0 && $this->pSize > $this->formMax)) {
             $this->pError = $this->pSize > $this->maxSize ? UploadedFile::ERR_INI_SIZE : UploadedFile::ERR_FORM_SIZE;
             $this->dropTmp();
             return;
@@ -1894,7 +1942,7 @@ final class Multipart
             if ($this->pName === 'MAX_FILE_SIZE' && \ctype_digit($this->pValue)) {
                 $this->formMax = (int)$this->pValue;
             }
-            nestedAssign($this->fields, $this->pName, $this->pValue);
+            nestedAssign($this->fields, $this->pName, $this->pValue, false);
             return;
         }
         if ($this->pError === -1) {

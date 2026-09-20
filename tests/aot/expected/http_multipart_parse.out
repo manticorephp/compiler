@@ -29,8 +29,9 @@ array(2) {
 [max-files] ok=true files=2
   field=a name=a.txt full=a.txt type= size=1 error=0 valid=yes tmp=file bytes=A same=yes
   field=b name=b.txt full=b.txt type= size=1 error=0 valid=yes tmp=file bytes=B same=yes
-[MAX_FILE_SIZE] ok=true files=1
+[MAX_FILE_SIZE] ok=true files=2
   field=f name=hello.txt full=hello.txt type= size=0 error=2 valid=no tmp=''
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
 [partial] ok=true files=1
   field=f name=hello.txt full=hello.txt type= size=0 error=3 valid=no tmp=''
 [no-boundary] ok=true files=1
@@ -38,6 +39,7 @@ array(2) {
   boundaryOf: "" "----mcb" "x y"
   parseAll: false
 [bad-head] ok=false files=0
+  orphans: 0
 [preamble] ok=true files=1
   field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
 [crlf-in-body] ok=true files=1
@@ -45,4 +47,31 @@ array(2) {
 [split] ok=true files=1
   field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
 [empty] ok=true files=0
+[partial-dropped] ok=true files=1
+  field=a name=a.txt full=a.txt type= size=1 error=0 valid=yes tmp=file bytes=A same=yes
+[partial-dropped] ok=true files=2
+  field=a name=a.txt full=a.txt type= size=1 error=0 valid=yes tmp=file bytes=A same=yes
+  field=c name= full= type= size=0 error=4 valid=no tmp=''
+[garbage-after-delim] ok=false files=0
+  orphans: 0
+[garbage-after-delim] ok=true files=1
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
+[raw-name] ok=true files=0
+array(4) {
+  ["a%20b"]=>
+  string(1) "1"
+  ["p_q"]=>
+  string(1) "2"
+  ["r"]=>
+  array(1) {
+    ["x%5D"]=>
+    string(1) "3"
+  }
+  ["xfilename=1"]=>
+  string(1) "4"
+}
+[file-no-name] ok=true files=2
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
+  field= name=x.txt full=x.txt type= size=1 error=0 valid=yes tmp=file bytes=x same=yes
+[file-no-name] ok=false files=0
 done
