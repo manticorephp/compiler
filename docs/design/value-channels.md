@@ -55,6 +55,22 @@ first decode is fine because the type now says cell and the string return
 unboxes. The by-ref capture widen runs again after the closure-capture
 convergence (a closure's params are first typed cell there).
 
+⛔ **NOT MERGED — the unlock commit breaks the THIRD generation.** gen1 and
+gen2 build and the suite is 1091/0/1093, but gen2 (the first binary whose own
+code was emitted with erased-element cells) SIGBUSes on `dump-mir` of a
+large source and on building src: the cycle collector drops a `Lexer\Token`
+whose `kind` field is the `TokenKind::Variable` LITERAL + 1 (`"ariable"`, an
+interior pointer of an immortal string; the release writes its rc into
+rodata). A parser-only driver compiled by the same gen2 (lex + parse the
+same file, the prelude, gc in between) does NOT reproduce it — the shape
+needs lowering. Bisected: the erased→cell retype alone reproduces it; the
+unlock alone makes gen2 unable to compile hello world; either half without
+the other is worse. A CC_TRACE-baked build cannot be used to find it: the
+traced gen1 traces every rc op of its own run and hits any log cap before
+pass 1 ends (and once filled the disk). Next: a driver that runs
+`lower_module` (parse + PreludeDemand) over the file with the collector
+forced, or a watchpoint on the Token's `kind` slot in gen2.
+
 **Verifier (step 3).** `MANTICORE_CELLGUARD=strict` fails the build on any
 `raw -> cell` edge the emitter-seam census sees (`EmitLlvmCellGuard`,
 `Main.php` refuses to write the object). The ratchet baseline
