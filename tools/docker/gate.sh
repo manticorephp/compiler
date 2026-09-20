@@ -12,7 +12,8 @@
 # ELF ones onto the host.
 #
 # Env:
-#   MC_GATE=0|1      0 (default) = cold seed + full AOT suite.
+#   MC_GATE=0|1      0 (default) = self-hosted cache (or cold fallback) + full
+#                    AOT suite (bin/build from the cache, cold seed otherwise).
 #                    1 = + difftest (php parity) + selfhost_fixpoint
 #                        (fixpoint, MIR golden, rebuild stability).
 #   MC_JOBS=<n>      forwarded to tests/aot/run.sh (0 = one case per core).
@@ -22,6 +23,9 @@
 #   MC_REPO          read-only source mount (default /repo)
 #   MC_WORK          writable scratch (default /build)
 #   MC_LOGDIR        where the stage logs land (default $MC_WORK)
+#   MC_COMPILER_CACHE writable directory holding a compatible self-hosted
+#                    compiler (optional; unset means always cold-seed)
+#   MC_COLD=0|1      ignore a compiler cache and force the Zend cold seed
 #
 # Exit 0 only if every stage it ran passed.
 set -uo pipefail
@@ -32,6 +36,8 @@ MC_STABILITY_N="${MC_STABILITY_N:-2}"
 MC_REPO="${MC_REPO:-/repo}"
 MC_WORK="${MC_WORK:-/build}"
 MC_LOGDIR="${MC_LOGDIR:-$MC_WORK}"
+MC_COMPILER_CACHE="${MC_COMPILER_CACHE:-}"
+MC_COLD="${MC_COLD:-0}"
 
 mkdir -p "$MC_WORK" "$MC_LOGDIR"
 
@@ -49,23 +55,80 @@ cp -a "$MC_REPO" "$TREE"
 cd "$TREE" || exit 1
 # A stale macOS bin/manticore + lib/*.o from the host tree would fake a pass (or
 # link Mach-O into an ELF build). Start from a clean slate.
-rm -rf bin/manticore lib/ tests/aot/tmp 2>/dev/null || true
+rm -rf bin/manticore bin/.manticore.prev bin/manticore.fast lib/ tests/aot/tmp 2>/dev/null || true
+
+cache_id() {
+    printf 'arch=%s\nclang=%s\nphp=%s\n' \
+        "$(uname -m)" "$(clang --version | head -1)" "$(php -r 'echo PHP_VERSION;')"
+}
+
+restore_compiler_cache() {
+    [ "$MC_COLD" != "1" ] || return 1
+    [ -n "$MC_COMPILER_CACHE" ] || return 1
+    [ -x "$MC_COMPILER_CACHE/bin/manticore" ] || return 1
+    [ -f "$MC_COMPILER_CACHE/lib/manticore_stdlib.o" ] || return 1
+    [ -f "$MC_COMPILER_CACHE/id" ] || return 1
+    cache_id | cmp -s - "$MC_COMPILER_CACHE/id" || return 1
+
+    mkdir -p bin lib
+    cp "$MC_COMPILER_CACHE/bin/manticore" bin/manticore
+    cp -a "$MC_COMPILER_CACHE/lib/." lib/
+    bin/manticore version >/dev/null 2>&1
+}
+
+save_compiler_cache() {
+    [ -n "$MC_COMPILER_CACHE" ] || return 0
+    [ -x bin/manticore ] || return 0
+    [ -f lib/manticore_stdlib.o ] || return 0
+
+    tmp="$MC_COMPILER_CACHE/.next.$$"
+    rm -rf "$tmp"
+    mkdir -p "$tmp/bin" "$tmp/lib"
+    cp bin/manticore "$tmp/bin/manticore"
+    cp -a lib/. "$tmp/lib/"
+    cache_id > "$tmp/id"
+    rm -rf "$MC_COMPILER_CACHE/bin" "$MC_COMPILER_CACHE/lib" "$MC_COMPILER_CACHE/id"
+    mv "$tmp/bin" "$tmp/lib" "$tmp/id" "$MC_COMPILER_CACHE/"
+    rmdir "$tmp"
+}
 
 echo
-echo "=== bin/compile (cold Zend seed) ==="
-# NEVER pipe this: a pipe reports tail's exit code instead of the build's.
-if bin/compile > "$MC_LOGDIR/compile.log" 2>&1; then
-    echo "bin/compile: OK"
-    tail -5 "$MC_LOGDIR/compile.log"
-else
-    rc=$?
-    echo "bin/compile: FAILED (exit $rc)"
-    echo "--- last 60 lines of the build log ---"
-    tail -60 "$MC_LOGDIR/compile.log"
-    echo
-    echo "=== RESULT: build failed, suite not run ==="
-    exit 1
+if restore_compiler_cache; then
+    # bin/build, not a bare `manticore build`: it preflights src/ against the
+    # cached (one generation behind) compiler, builds to a temp path, smoke
+    # tests, swaps, and only THEN lets the NEW binary build lib/. A one-pass
+    # build would leave the stdlib a generation behind and overwrite the running
+    # executable. A bootstrap gap exits 1 here and falls through to the seed.
+    echo "=== bin/build (self-hosted from cache) ==="
+    if bin/build > "$MC_LOGDIR/compile.log" 2>&1; then
+        echo "bin/build: OK"
+        tail -5 "$MC_LOGDIR/compile.log"
+    else
+        rc=$?
+        echo "bin/build: FAILED (exit $rc); falling back to cold seed"
+        tail -20 "$MC_LOGDIR/compile.log"
+        rm -rf bin/manticore bin/.manticore.prev lib/
+    fi
 fi
+
+if [ ! -x bin/manticore ]; then
+    echo "=== bin/compile (cold Zend seed) ==="
+    # NEVER pipe this: a pipe reports tail's exit code instead of the build's.
+    if bin/compile > "$MC_LOGDIR/compile.log" 2>&1; then
+        echo "bin/compile: OK"
+        tail -5 "$MC_LOGDIR/compile.log"
+    else
+        rc=$?
+        echo "bin/compile: FAILED (exit $rc)"
+        echo "--- last 60 lines of the build log ---"
+        tail -60 "$MC_LOGDIR/compile.log"
+        echo
+        echo "=== RESULT: build failed, suite not run ==="
+        exit 1
+    fi
+fi
+
+save_compiler_cache
 
 echo
 echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="

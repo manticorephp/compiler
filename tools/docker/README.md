@@ -30,11 +30,12 @@ re-measure, e.g. before changing one of those ABI tables.
 ## Build + run the suite
 
 ```bash
-bash tools/docker/run_tests.sh            # arm64: cold seed + full suite
+bash tools/docker/run_tests.sh            # arm64: cached self-host build + full suite
 bash tools/docker/run_tests.sh --amd64    # amd64 (emulated, slow)
 bash tools/docker/run_tests.sh --both
 bash tools/docker/run_tests.sh --shell    # interactive container
 bash tools/docker/run_tests.sh --gate     # the HEAVY gate, on Linux
+bash tools/docker/run_tests.sh --cold     # force a Zend cold seed
 ```
 
 `--gate` adds `tools/difftest.sh` (php is in the image) and
@@ -48,7 +49,7 @@ sweep.
 
 The image is the **root `Dockerfile`'s `toolchain` target** -- the same one an
 end user builds (see `docs/install.md`). It carries **PHP 8.5** (sury.org) and
-the **latest stable clang** (apt.llvm.org, currently 21) on board, deliberately
+the **latest stable clang** (apt.llvm.org, currently 22) on board, deliberately
 -- Debian bookworm's stock php 8.2 and clang 14 are both unusable here:
 
 - PHP 8.5 is manticore's target language, so the Zend seed must be 8.5.
@@ -56,10 +57,13 @@ the **latest stable clang** (apt.llvm.org, currently 21) on board, deliberately
   emits** (`ptr type is only supported in -opaque-pointers mode`). Verified.
 
 The repo is bind mounted **read-only** at `/repo` and copied to a scratch dir in
-the container. This is not incidental: `bin/compile` writes `bin/manticore` and
-`lib/`, and the host checkout is macOS -- a read-write mount would overwrite the
-host's binaries with Linux ones. The copy is also wiped of any stale
-`bin/manticore` + `lib/` first, since a stale object fakes a pass.
+the container. This is not incidental: a build writes `bin/manticore` and `lib/`,
+and the host checkout is macOS -- a read-write mount would overwrite host binaries
+with Linux ones. The copy is wiped of host artifacts first, then the runner restores
+a self-hosted Linux compiler from an architecture-specific Docker volume when its
+architecture, PHP version, and clang version match. It rebuilds the current sources
+with that compiler and refreshes the volume. A missing, incompatible, or failing
+cache automatically falls back to `bin/compile`; use `--cold` to force that path.
 
 `bin/compile` is never piped: it is redirected to a log. `set -euo pipefail`
 would report `tail`'s exit code and hide a failed build.
