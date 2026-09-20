@@ -1,3 +1,5 @@
+<?php
+
 // Http\ — an HTTP/1.1 server, and the byte-level wire codec under it.
 // DEMAND-GATED (Main.php): only a program that mentions `Http\` carries any of it.
 //

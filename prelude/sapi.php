@@ -1,3 +1,5 @@
+<?php
+
 // Response headers, cookies, and the per-request context.
 // DEMAND-GATED (Main.php): only a program that touches one of these carries it.
 //

@@ -1,3 +1,5 @@
+<?php
+
 // Error / exception handlers, the shutdown queue, and `trigger_error`.
 // DEMAND-GATED (Main.php): only a program that calls one of these carries it.
 //

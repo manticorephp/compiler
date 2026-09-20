@@ -1,3 +1,5 @@
+<?php
+
 // ext/session: $_SESSION, the session_* family, and the save-handler protocol.
 // DEMAND-GATED (Main.php): only a program that calls one of these carries it.
 //

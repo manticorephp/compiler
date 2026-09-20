@@ -1,3 +1,5 @@
+<?php
+
 // pack / unpack — the binary string codec, over the format table at
 // https://www.php.net/pack. DEMAND-GATED (Main.php).
 //

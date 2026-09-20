@@ -1,3 +1,5 @@
+<?php
+
 // Output buffering — the `ob_*` family.
 // DEMAND-GATED (Main.php): only a program that calls one of these carries it.
 //
