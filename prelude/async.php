@@ -3291,9 +3291,12 @@ namespace Async {
      */
     function shutdownOn(int ...$signals): void
     {
-        $sched = Scheduler::instance();
         foreach ($signals as $s) {
-            \pcntl_signal($s, function () use ($sched) { $sched->cancelRoot(); });
+            \pcntl_signal($s, function () {
+                if (Scheduler::hasInstance()) {
+                    Scheduler::instance()->cancelRoot();
+                }
+            });
         }
     }
 
@@ -3317,10 +3320,11 @@ namespace Async {
      */
     function dumpOn(int ...$signals): void
     {
-        $sched = Scheduler::instance();
         foreach ($signals as $s) {
-            \pcntl_signal($s, function () use ($sched) {
-                \fwrite(\STDERR, $sched->report());
+            \pcntl_signal($s, function () {
+                if (Scheduler::hasInstance()) {
+                    \fwrite(\STDERR, Scheduler::instance()->report());
+                }
             });
         }
     }

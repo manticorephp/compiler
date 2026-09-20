@@ -90,8 +90,12 @@ When the PEER is in the list:
   sets `$req->remoteAddr`. A hop `\inet_pton` rejects — `unknown`, an
   obfuscated identifier (`_gazonk`), anything malformed — is skipped exactly
   like an empty element; if every hop is junk, `remoteAddr` stays the peer.
-- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` set
-  `$req->secure`, the `Host` header, and `Request::$forwardedPort`.
+- `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` take the FIRST
+  (leftmost) comma-separated value and set `$req->secure`, the `Host` header,
+  and `Request::$forwardedPort` — the opposite end from `X-Forwarded-For`'s
+  right-to-left walk and from `Forwarded:`'s rightmost element below, since
+  each header follows its own convention (Symfony's rule for the
+  `X-Forwarded-*` family).
 - When `FORWARDED` is granted and `Forwarded:` is present, its elements'
   `for=` values form the SAME right-to-left chain as `X-Forwarded-For` (one
   walk, whichever family supplies it); `proto=`/`host=` come from the
@@ -104,7 +108,18 @@ When the PEER is in the list:
 
 These set `$req->remoteAddr`, `$req->secure`, the `Host` header, and
 `$_SERVER`'s `REMOTE_ADDR`/`HTTPS`/`SERVER_NAME`/`SERVER_PORT`.
-`$req->peerAddr` is always the socket's own answer.
+`$req->peerAddr` is always the socket's own answer. `SERVER_NAME`/`SERVER_PORT`
+are split from the `Host` header (itself rewritten by `X-Forwarded-Host` under
+`HOST`), `X-Forwarded-Port` overriding the header's own port when `PORT` is
+granted, then 443/80 by `$req->secure` — unlike php-fpm behind nginx, which
+seeds `SERVER_PORT` from the listener it was started on, not from a header a
+client can influence; that divergence is deliberate here.
+
+A dual-stack listener (`tcp://[::]:port`) hands a v4 client's connection to
+`peerAddr`/`X-Forwarded-For` as a v4-mapped address (`::ffff:a.b.c.d`) — a
+plain v4 CIDR in `trustedProxies()` never matches it (`inCidr` compares packed
+length first, so a 4-byte network against a 16-byte address fails closed);
+list the mapped form (`::ffff:10.0.0.0/104`) or a v6 prefix instead.
 
 ## Response
 
