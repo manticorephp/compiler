@@ -56,20 +56,66 @@ Promoted as guards (green on `b17ede4`): `w4_erased_elem_foreach`
 Reflection `return` sites — prints correct values: those sites are `probed`
 in effect, a census false positive to reclassify, not a producer).
 
+## The element channel — the design both earlier attempts lacked
+
+Every producer above except P5/P6 is an ARRAY in a cell channel, and the reason
+arrays "ride raw by design" is that a boxed array pointer says nothing about its
+ELEMENTS. The flags word already carries an element-kind hint nibble
+(`ARRAY_ELEM_HINT_*`, bits 4-6) and a decoder (`__mir_box_by_repr`), but the
+nibble has no code for a raw INT, FLOAT or BOOL (hint 0 = "raw scalar", decoded
+AS IS), so a cell reader of a `vec[int]` element gets a tag-0 word. The read-side
+decode was built twice (2026-07-29/30) and withdrawn twice, for two reasons that
+are the design, not the bugs:
+
+1. an UNKNOWN-typed element result was handed to consumers that deref it raw
+   (`sset()` returning `$x["k"]` into a string slot) — decoding it invented a
+   representation the static type never promised;
+2. a CELL result written back into a raw-hinted buffer (the sort family's
+   decorate → rebuild → write-back) left tagged words under a raw static type,
+   because the de-cellify at the store is driven by STATIC types.
+
+Both are the same rule violated once per direction: **the buffer's hint is the
+truth at every erased boundary, and both the read and the store consult it.**
+
+- **Hint codes** `INT=5<<4`, `FLOAT=6<<4`, `BOOL=7<<4` (the three free values).
+  Every concrete-element store and literal stamps its code
+  (`elementHintCodeForType`); `__mir_box_by_repr` becomes TOTAL — hint 0 is
+  then only an EMPTY buffer, and the verifier counts any tag-0 word it decodes.
+- **Read decode, only where the result type is CELL.** `emitArrayAccessUnified`
+  / `emitErasedIndexGet` / foreach value / cursor reads decode via the hint when
+  the static result is cell. An UNKNOWN result is never decoded; instead
+  InferTypes retypes an erased element read as CELL (the channel is honestly a
+  cell once the decode exists), so reason 1 disappears by construction and the
+  consumers unbox by type as they do for every other cell.
+- **Store encode, the mirror.** A cell value stored into a buffer whose hint is
+  not CELL goes through `__mir_elem_encode(arr, cell)`: hint == tag ⇒ payload
+  stored raw; hint 0 (empty) ⇒ stamp from the tag, store the payload; mismatch
+  ⇒ `__mir_array_cellify_inplace` (box every element, stamp CELL), then store
+  the cell. The sort family's write-back is then correct by the SAME rule that
+  makes the read correct — reason 2 is gone.
+- **Then `boxToCell` of any array is the flat `box_array`** — `emitVecToCellArray`
+  (rebuild, identity loss) retires, `isCellBoxableArg` admits arrays and
+  objects, and the slot producers P1–P3 are a store that boxes plus a read that
+  trusts.
+
+Cost: one `load flags; and; br` per cell-typed element access and store, on a
+path that already pays a tag dispatch. Nothing on the concrete paths.
+
 ## Order
 
+0. **Hint-complete elements.** The codes and the total decoder; the read decode
+   at CELL results together with the store encode in ONE commit (both halves
+   or neither); then the InferTypes retype of the erased element read. P4 and
+   P7 are its witnesses.
 1. **P1 + P2 + P3 — the SLOT producers.** One shape: the store and the read of
    one storage decided by different predicates. Fix = one repr per storage,
-   decided once (the declared/lowered type), every store boxes to it, every
-   read trusts it. P3 falls out of P2.
-2. **P4 — inference.** Literal in argument position adopts the param element
-   channel. Moves the monomorphization ladder ⇒ full suite + difftest.
-3. **P5 → P6.** By-ref repr agreement, then `settype` as a stdlib body over it.
-4. **P7.** Element store on a cell base.
-5. **Verifier.** `MANTICORE_TYPECHECK=1` hardened into a pass that fails the
+   decided once (the declared/lowered type), every store boxes to it (flat
+   `box_array` for an array), every read trusts it. P3 falls out of P2.
+2. **P5 → P6.** By-ref repr agreement, then `settype` as a stdlib body over it.
+3. **Verifier.** `MANTICORE_TYPECHECK=1` hardened into a pass that fails the
    build on a `raw → cell` edge; cellguard's ratchet baseline (288 sites)
    driven to 0, then the flag defaults on.
-6. **Unlock.** Delete the `false &&` in `arithType`; convert `plausiblePtrIr`
+4. **Unlock.** Delete the `false &&` in `arithType`; convert `plausiblePtrIr`
    sites to assertions; `MemoryAbi::VERSION` bump ⇒ one `bin/build --seed`.
 
 Every step: `tools/w4_repros.sh` + `tests/aot/run.sh -j 0` + difftest before
