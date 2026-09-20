@@ -39,8 +39,28 @@ against the php oracle recorded beside it. A passing repro is promoted into
 `arithType`'s `false &&` is gone, and `MANTICORE_TYPECHECK` is on by default.
 
 Baseline on `b17ede4` (2026-09-20): 7 open, 3 already green and promoted.
-After the element-channel, slot-producer and by-ref steps: P1–P7 promoted;
-open = `w4_cell_arith` (the tagged-arith unlock) and `w4_array_identity`.
+After the element-channel, slot-producer, by-ref and unlock steps: P1–P7 and
+`w4_cell_arith` promoted; open = `w4_array_identity` (array `===`/`==` compare
+words — a separate comparison epic, not a channel).
+
+**Unlock (step 4, first half).** `arithType`'s `false &&` is gone — a plain
+cell operand takes the tagged helpers, and the helpers decide int-or-float
+from a numeric STRING too. What it exposed, and the last producer of the
+element channel: an ERASED element read (`vec[unknown]`, a bare `array`
+param, an unknown base) typed `unknown` carried the raw word — the sort
+family's rebuild copied it into a fresh hint-0 buffer and handed it back under
+`vec[cell]`. It is now typed CELL in InferTypes (`inferArrayAccess`,
+`inferForeach`) and decoded at the read; the `sset()` witness that sank the
+first decode is fine because the type now says cell and the string return
+unboxes. The by-ref capture widen runs again after the closure-capture
+convergence (a closure's params are first typed cell there).
+
+**Verifier (step 3).** `MANTICORE_CELLGUARD=strict` fails the build on any
+`raw -> cell` edge the emitter-seam census sees (`EmitLlvmCellGuard`,
+`Main.php` refuses to write the object). The ratchet baseline
+(`tools/cellguard_baseline.txt`, `tools/cellguard_scan.sh --ratchet`, now
+parallel) is the debt list; the flag defaults on when it is empty.
+`plausiblePtrIr` → assertions is still owed.
 
 **By-ref (P5/P6).** A local handed to a `mixed &` param is one word two frames
 share and the callee may make it ANY kind, so the caller's slot is a cell for
