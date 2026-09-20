@@ -203,7 +203,7 @@ namespace {
      *
      * ⚠ Do not fork a process that is already inside Async\async(): the child
      * inherits the reactor fd, the run queue and every parked task. Fork first —
-     * Async\supervise() / Async\workers() do exactly that.
+     * Process\supervise() / Process\workers() do exactly that.
      */
     function pcntl_fork(): int
     {
