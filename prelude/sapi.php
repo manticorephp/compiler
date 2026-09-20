@@ -84,6 +84,9 @@ namespace Manticore\Sapi {
         /** @var array<int,array<string,mixed>> parked $_SESSION, by task id */
         public static array $savedSession = [];
 
+        /** @var array<int,array<string,mixed>> parked $_FILES, by task id */
+        public static array $savedFiles = [];
+
         /**
          * The reset value for a superglobal, and the reason it is a property rather
          * than a `[]` literal: an empty literal types `assoc[string, unknown]`, so
@@ -159,6 +162,7 @@ namespace Manticore\Sapi {
         Context::$savedCookie[$from] = $_COOKIE;
         Context::$savedRequest[$from] = $_REQUEST;
         Context::$savedSession[$from] = $_SESSION;
+        Context::$savedFiles[$from] = $_FILES;
         Context::$seen[$from] = true;
         Context::$cur = $to;
         // The session tier parks its own per-request half (status, id) the same way.
@@ -190,6 +194,7 @@ namespace Manticore\Sapi {
             $_COOKIE = Context::$empty;
             $_REQUEST = Context::$empty;
             $_SESSION = Context::$empty;
+            $_FILES = Context::$empty;
             return;
         }
         Context::$headers = Context::$savedHeaders[$to];
@@ -202,6 +207,7 @@ namespace Manticore\Sapi {
         $_COOKIE = Context::$savedCookie[$to];
         $_REQUEST = Context::$savedRequest[$to];
         $_SESSION = Context::$savedSession[$to];
+        $_FILES = Context::$savedFiles[$to];
     }
 
     /**
@@ -213,16 +219,16 @@ namespace Manticore\Sapi {
      * reads them while the caller supplies REQUEST_URI / REQUEST_METHOD / headers.
      * $_REQUEST is built GET-then-POST, which is php's default request_order.
      *
-     * ⚠ The parameters are `string`-valued and the seeding is ELEMENT BY ELEMENT,
-     * neither of which is style. A whole-array store of a concrete-element array
-     * into a cell-element superglobal leaves the elements RAW while every reader
-     * decodes them by tag — `echo $_GET['a']` then printed 2.1E-314. Storing one
-     * element at a time boxes each value by its static type, which is exactly what
-     * the readers expect. Flat string values are also what a query string, a form
-     * body and a cookie header actually carry; nested GPC arrays (`?a[]=1`) and
-     * $_FILES wait for the multipart parser that would produce them.
+     * ⚠ The seeding is ELEMENT BY ELEMENT, which is not style. A whole-array
+     * store of a concrete-element array into a cell-element superglobal leaves
+     * the elements RAW while every reader decodes them by tag — `echo $_GET['a']`
+     * then printed 2.1E-314. Storing one element at a time boxes each value by
+     * its static type, which is exactly what the readers expect. $get, $post and
+     * $files are `mixed`-valued because they nest (`?a[]=1`, `a[b][c]`,
+     * $_FILES['f']['size']); the caller builds every level as a cell-element
+     * array (Http\parseQueryNested) so the nested stores stay typed too.
      */
-    function requestBegin(array<string, string> $server = [], array<string, string> $get = [], array<string, string> $post = [], array<string, string> $cookie = []): void
+    function requestBegin(array<string, string> $server = [], array<string, mixed> $get = [], array<string, mixed> $post = [], array<string, string> $cookie = [], array<string, mixed> $files = []): void
     {
         foreach ($server as $k => $v) {
             $_SERVER[$k] = $v;
@@ -245,6 +251,10 @@ namespace Manticore\Sapi {
         }
         foreach ($post as $k => $v) {
             $_REQUEST[$k] = $v;
+        }
+        $_FILES = Context::$empty;
+        foreach ($files as $k => $v) {
+            $_FILES[$k] = $v;
         }
         $_SESSION = Context::$empty;
         responseBegin();

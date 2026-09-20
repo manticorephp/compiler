@@ -639,10 +639,10 @@ function normPath(string $path): string
 /**
  * Parse an `a=1&b=2` query string, flat and last-wins.
  *
- * Flat because that is what `prelude/sapi.php` already contracts for the GPC
- * arrays it seeds: nested `?a[]=1` waits for the same epic as multipart. `+` is
- * a space here (urldecode, not rawurldecode) — that is the form-encoding rule,
- * and it is why the query and the path decode differently.
+ * Flat: `?a[]=1` is the key `a[]` here. The php-shaped nested form is
+ * {@see parseQueryNested}, built separately and only on demand. `+` is a space
+ * here (urldecode, not rawurldecode) — that is the form-encoding rule, and it is
+ * why the query and the path decode differently.
  *
  * @internal
  * @return array<string,string>
@@ -664,6 +664,155 @@ function parseQuery(string $qs): array<string, string>
             continue;
         }
         $out[\urldecode(\substr($pair, 0, $e))] = \urldecode(\substr($pair, $e + 1));
+    }
+    return $out;
+}
+
+/**
+ * php's GPC key rule, one pair at a time: the WHOLE key is urldecoded first,
+ * then `.` and space in the base become `_`, brackets nest, `[]` appends, a
+ * canonical decimal segment is an int key. A copy of the stdlib's
+ * parse_str assign with a `mixed` value, because a $_FILES column is an int.
+ *
+ * Oracle: `php -r 'parse_str($qs, $r); var_dump($r);'`.
+ *
+ * The `$node = $arr[$base]; …; $arr[$base] = $node;` read-modify-write is
+ * deliberate: a by-ref into an element of a cell-element array is the erased
+ * channel W4 has not closed; a local copy plus a store keeps every level typed.
+ *
+ * @internal
+ * @param array<string, mixed> $arr
+ */
+function nestedAssign(array &$arr, string $rawKey, mixed $val): void
+{
+    $key = \urldecode($rawKey);
+    $bpos = \strpos($key, '[');
+    $base = $bpos === false ? $key : \substr($key, 0, $bpos);
+    $base = \str_replace(['.', ' '], '_', $base);
+    if ($base === '') {
+        return;
+    }
+    if ($bpos === false) {
+        $arr[$base] = $val;
+        return;
+    }
+    $segs = [];
+    $s = \substr($key, $bpos);
+    $n = \strlen($s);
+    $i = 0;
+    $broken = false;
+    while ($i < $n) {
+        if ($s[$i] !== '[') {
+            break;
+        }
+        $close = \strpos($s, ']', $i);
+        if ($close === false) {
+            $broken = true;
+            break;
+        }
+        $segs[] = \substr($s, $i + 1, $close - $i - 1);
+        $i = $close + 1;
+    }
+    if ($broken && \count($segs) === 0) {
+        // `g[` — php keeps the rest of the key literally, with `[` as `_`.
+        $arr[$base . \str_replace(['.', ' ', '['], '_', $s)] = $val;
+        return;
+    }
+    if (\count($segs) === 0) {
+        $arr[$base] = $val;
+        return;
+    }
+    if (!isset($arr[$base]) || !\is_array($arr[$base])) {
+        $arr[$base] = \Manticore\Sapi\Context::$empty;
+    }
+    $node = $arr[$base];
+    nestedWalk($node, $segs, 0, $val);
+    $arr[$base] = $node;
+}
+
+/**
+ * @internal
+ * @param array<string, mixed> $node
+ * @param array<int, string> $segs
+ */
+function nestedWalk(array &$node, array $segs, int $idx, mixed $val): void
+{
+    $seg = $segs[$idx];
+    $last = $idx === \count($segs) - 1;
+    if ($seg === '') {
+        if ($last) {
+            $node[] = $val;
+            return;
+        }
+        $child = \Manticore\Sapi\Context::$empty;
+        nestedWalk($child, $segs, $idx + 1, $val);
+        $node[] = $child;
+        return;
+    }
+    $k = canonicalIntKey($seg) ? (int)$seg : $seg;
+    if ($last) {
+        $node[$k] = $val;
+        return;
+    }
+    if (!isset($node[$k]) || !\is_array($node[$k])) {
+        $node[$k] = \Manticore\Sapi\Context::$empty;
+    }
+    $child = $node[$k];
+    nestedWalk($child, $segs, $idx + 1, $val);
+    $node[$k] = $child;
+}
+
+/** "0" or a digit run with no leading zero, optionally negated; ≤ 18 digits. @internal */
+function canonicalIntKey(string $s): bool
+{
+    $n = \strlen($s);
+    if ($n === 0) {
+        return false;
+    }
+    $i = $s[0] === '-' ? 1 : 0;
+    if ($i >= $n) {
+        return false;
+    }
+    if ($s[$i] === '0') {
+        return $n - $i === 1 && $i === 0;
+    }
+    for ($j = $i; $j < $n; $j = $j + 1) {
+        $c = \ord($s[$j]);
+        if ($c < 48 || $c > 57) {
+            return false;
+        }
+    }
+    return $n - $i <= 18;
+}
+
+/**
+ * php's $_GET/$_POST shape: nested, `max_input_vars`-capped. The flat
+ * {@see parseQuery} stays for `query()`; this one is built on first use.
+ *
+ * @internal
+ * @return array<string, mixed>
+ */
+function parseQueryNested(string $qs, int $maxVars): array<string, mixed>
+{
+    $out = \Manticore\Sapi\Context::$empty;
+    if ($qs === '') {
+        return $out;
+    }
+    $seen = 0;
+    foreach (splitStr('&', $qs) as $pair) {
+        if ($pair === '') {
+            continue;
+        }
+        if ($seen >= $maxVars) {
+            break;
+        }
+        $seen = $seen + 1;
+        $e = \strpos($pair, '=');
+        if ($e === false) {
+            nestedAssign($out, $pair, '');
+            continue;
+        }
+        nestedAssign($out, \substr($pair, 0, $e), \urldecode(\substr($pair, $e + 1)));
     }
     return $out;
 }
@@ -1321,11 +1470,17 @@ final class Request
 {
     private const P_QUERY = 1;
     private const P_COOKIE = 2;
+    private const P_QUERY_NESTED = 4;
+    private const P_POST = 8;
 
     /** @var array<string,string> */
     private array<string, string> $queryCache = [];
     /** @var array<string,string> */
     private array<string, string> $cookieCache = [];
+    /** @var array<string, mixed> */
+    private array<string, mixed> $queryNested = [];
+    /** @var array<string, mixed> */
+    private array<string, mixed> $postNested = [];
     private int $parsed = 0;
 
     public function __construct(
@@ -1355,6 +1510,9 @@ final class Request
          *  port field of its own; the port inside a `Forwarded: for=` value
          *  is part of the client address and is discarded. */
         public readonly string $forwardedPort = '',
+        /** php's `max_input_vars`: pairs past this many are dropped by
+         *  {@see queryArray} and {@see postArray}. */
+        public readonly int $maxInputVars = 1000,
         /** Present only for a streamed body. */
         private ?\Buffer\Reader $reader = null,
     ) {
@@ -1385,6 +1543,28 @@ final class Request
             $this->parsed = $this->parsed | self::P_QUERY;
         }
         return $this->queryCache;
+    }
+
+    /** php's $_GET shape: nested (`a[]`, `a[b][c]`), last-wins, max_input_vars-capped. @return array<string, mixed> */
+    public function queryArray(): array<string, mixed>
+    {
+        if (($this->parsed & self::P_QUERY_NESTED) === 0) {
+            $this->queryNested = parseQueryNested($this->queryString, $this->maxInputVars);
+            $this->parsed = $this->parsed | self::P_QUERY_NESTED;
+        }
+        return $this->queryNested;
+    }
+
+    /** php's $_POST shape from a urlencoded form (multipart fields join in Task 5). @return array<string, mixed> */
+    public function postArray(): array<string, mixed>
+    {
+        if (($this->parsed & self::P_POST) === 0) {
+            $this->postNested = $this->contentType() === 'application/x-www-form-urlencoded'
+                ? parseQueryNested($this->bodyRaw, $this->maxInputVars)
+                : \Manticore\Sapi\Context::$empty;
+            $this->parsed = $this->parsed | self::P_POST;
+        }
+        return $this->postNested;
     }
 
     public function cookie(string $k, string $d = ''): string
@@ -1710,6 +1890,7 @@ final class Parser
     /** @var array<int, array<int, string>> */
     private array $trusted = [];
     private int $proxyFlags = 0;
+    private int $maxInputVars = 1000;
 
     /** @param array<int, array<int, string>> $trusted */
     public function __construct(
@@ -1723,6 +1904,7 @@ final class Parser
         bool $streamBodies = false,
         array $trusted = [],
         int $proxyFlags = 0,
+        int $maxInputVars = 1000,
     ) {
         $this->buf = $buf;
         $this->remoteAddr = $remoteAddr;
@@ -1734,6 +1916,7 @@ final class Parser
         $this->streamBodies = $streamBodies;
         $this->trusted = $trusted;
         $this->proxyFlags = $proxyFlags;
+        $this->maxInputVars = $maxInputVars;
     }
 
     /** The request, once {@see parse} has answered {@see READY}. */
@@ -2142,6 +2325,7 @@ final class Parser
             $secure,
             $this->remoteAddr,
             $fport,
+            $this->maxInputVars,
             $this->reader,
         );
         $this->state = self::ST_DONE;
@@ -2364,6 +2548,8 @@ final class Server
     /** @var array<int, array<int, string>> parsed CIDRs, {@see trustedProxies} */
     private array $trustedProxies = [];
     private int $proxyFlags = 0;
+    /** php's `max_input_vars`, {@see maxInputVars}. */
+    private int $maxInputVars = 1000;
 
     /** How long one `accept` waits before the loop re-reads {@see $stopped}.
      *  This — not closing the listener out from under a parked accept — is what
@@ -2424,6 +2610,8 @@ final class Server
     /** '' omits the `Server:` header entirely. */
     public function serverName(string $s): Server { $this->serverName = $s; return $this; }
     public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
+    /** php's `max_input_vars` for $_GET / $_POST (1000, like php.ini's default). */
+    public function maxInputVars(int $n): Server { $this->maxInputVars = $n < 1 ? 1 : $n; return $this; }
     /** `callable(\Throwable, ?Request): Response` */
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
 
@@ -2591,6 +2779,7 @@ final class Server
             $this->streamBodies,
             $this->trustedProxies,
             $this->proxyFlags,
+            $this->maxInputVars,
         );
         try {
             $this->pump($conn, $buf, $out, $parser);
@@ -2750,8 +2939,8 @@ final class Server
         // prints 2.1E-314).
         \Manticore\Sapi\requestBegin(
             $this->serverVars($req),
-            $req->queries(),
-            $this->postVars($req),
+            $req->queryArray(),
+            $req->postArray(),
             $req->cookies(),
         );
     }
@@ -2787,20 +2976,6 @@ final class Server
             $out['HTTP_' . \strtoupper(\str_replace('-', '_', $k))] = $v;
         }
         return $out;
-    }
-
-    /**
-     * @return array<string,string> php's $_POST — a urlencoded form body, and
-     * nothing else. multipart waits for the parser that would produce it.
-     */
-    private function postVars(Request $req): array<string, string>
-    {
-        if ($req->contentType() !== 'application/x-www-form-urlencoded') {
-            // A DECLARED empty, not a `[]` literal: an empty literal in a
-            // return position erases the element type for every caller.
-            return parseQuery('');
-        }
-        return parseQuery($req->body());
     }
 
     /** Run the handler, turning any escape into a response rather than a crash. */
