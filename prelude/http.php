@@ -817,6 +817,64 @@ function parseQueryNested(string $qs, int $maxVars): array<string, mixed>
     return $out;
 }
 
+/** A chunk source over a string. @internal */
+function stringSource(string $s): \Closure
+{
+    $pos = 0;
+    return function (int $max) use ($s, &$pos): string {
+        $out = \substr($s, $pos, $max);
+        $pos = $pos + \strlen($out);
+        return $out;
+    };
+}
+
+/**
+ * `name="…"` / `filename="…"` from a Content-Disposition value. Inside the
+ * quotes only `\\` and `\"` are escapes — php's substring_conf — so a bare
+ * `C:\dir\x.txt` keeps its backslashes; `%22` decodes to `"`.
+ *
+ * @internal
+ */
+function dispositionParam(string $v, string $param): string
+{
+    $needle = $param . '=';
+    $pos = 0;
+    while (true) {
+        $p = \stripos($v, $needle, $pos);
+        if ($p === false) {
+            return '';
+        }
+        // whole-word: `filename=` must not match inside `name=` and vice versa
+        if ($p > 0 && $v[$p - 1] !== ';' && $v[$p - 1] !== ' ' && $v[$p - 1] !== "\t") {
+            $pos = $p + 1;
+            continue;
+        }
+        break;
+    }
+    $s = $p + \strlen($needle);
+    if ($s < \strlen($v) && $v[$s] === '"') {
+        $out = '';
+        $i = $s + 1;
+        $n = \strlen($v);
+        while ($i < $n) {
+            $c = $v[$i];
+            if ($c === '\\' && $i + 1 < $n && ($v[$i + 1] === '\\' || $v[$i + 1] === '"')) {
+                $out = $out . $v[$i + 1];
+                $i = $i + 2;
+                continue;
+            }
+            if ($c === '"') {
+                break;
+            }
+            $out = $out . $c;
+            $i = $i + 1;
+        }
+        return \str_replace('%22', '"', $out);
+    }
+    $semi = \strpos($v, ';', $s);
+    return \trim($semi === false ? \substr($v, $s) : \substr($v, $s, $semi - $s));
+}
+
 /**
  * Parse a `Cookie:` header value into name => value, last-wins.
  *
@@ -1453,6 +1511,423 @@ final class Headers
             $pos = $eol + 2;
         }
         $this->block = $kept;
+    }
+}
+
+/**
+ * One uploaded file, php's $_FILES row as an object. `tmpName` is '' unless
+ * `error` is ERR_OK; the temp file is the request's and goes away with it
+ * unless {@see moveTo} claims it first.
+ */
+final class UploadedFile
+{
+    public const ERR_OK = 0;
+    public const ERR_INI_SIZE = 1;
+    public const ERR_FORM_SIZE = 2;
+    public const ERR_PARTIAL = 3;
+    public const ERR_NO_FILE = 4;
+    public const ERR_NO_TMP_DIR = 6;
+    public const ERR_CANT_WRITE = 7;
+
+    private bool $moved = false;
+
+    public function __construct(
+        public readonly string $field,
+        /** basename of what the client sent */
+        public readonly string $name,
+        /** the client's filename as sent, php 8.1's `full_path` */
+        public readonly string $fullPath,
+        public readonly string $type,
+        public readonly int $size,
+        public readonly int $error,
+        public readonly string $tmpName,
+    ) {
+    }
+
+    public function isValid(): bool
+    {
+        return $this->error === self::ERR_OK && !$this->moved && $this->tmpName !== '';
+    }
+
+    /** rename(2), falling back to copy+unlink across devices. */
+    public function moveTo(string $dest): bool
+    {
+        if (!$this->isValid()) {
+            return false;
+        }
+        $ok = @\rename($this->tmpName, $dest);
+        if (!$ok) {
+            $ok = @\copy($this->tmpName, $dest);
+            if ($ok) {
+                @\unlink($this->tmpName);
+            }
+        }
+        if ($ok) {
+            $this->moved = true;
+            if (\function_exists('Manticore\Sapi\uploadMoved')) {
+                \Manticore\Sapi\uploadMoved($this->tmpName);
+            }
+        }
+        return $ok;
+    }
+
+    public function contents(): string
+    {
+        if (!$this->isValid()) {
+            return '';
+        }
+        $s = \file_get_contents($this->tmpName);
+        return $s === false ? '' : $s;
+    }
+}
+
+/**
+ * multipart/form-data, RFC 7578, as a state machine over a chunk source so
+ * the same code serves a buffered body and a streamed one. Field parts go to
+ * strings, file parts to temp files; the only scan is `strpos` for the
+ * delimiter, and bytes that could be the head of a split delimiter stay in
+ * the buffer across reads.
+ */
+final class Multipart
+{
+    private const READ = 65536;
+    private const ST_PREAMBLE = 0;
+    private const ST_HEAD = 1;
+    private const ST_BODY = 2;
+    private const ST_DONE = 3;
+
+    /** "\r\n--" . boundary */
+    private string $delim;
+    /** Closure(int $max): string */
+    private mixed $source;
+    private string $buf = '';
+    private int $state = 0;
+    private bool $eof = false;
+
+    /** @var array<string, mixed> */
+    private array $fields;
+    /** @var array<int, UploadedFile> */
+    private array $files = [];
+    private int $fileCount = 0;
+    private int $maxFiles;
+    private int $maxSize;
+    /** the MAX_FILE_SIZE field, php's per-form cap; -1 = none */
+    private int $formMax = -1;
+
+    private string $pName = '';
+    private string $pFile = '';
+    private bool $pIsFile = false;
+    private string $pType = '';
+    private string $pValue = '';
+    /** \Resource|null */
+    private mixed $pTmp = null;
+    private string $pTmpName = '';
+    private int $pSize = 0;
+    private int $pError = 0;
+
+    public function __construct(string $contentType, mixed $source, int $maxFileUploads = 20, int $uploadMaxFilesize = 2097152)
+    {
+        $this->delim = "\r\n--" . self::boundaryOf($contentType);
+        $this->source = $source;
+        $this->maxFiles = $maxFileUploads;
+        $this->maxSize = $uploadMaxFilesize;
+        $this->fields = \Manticore\Sapi\Context::$empty;
+    }
+
+    /** The boundary parameter, unquoted; '' when the header has none. */
+    public static function boundaryOf(string $ct): string
+    {
+        $p = \stripos($ct, 'boundary=');
+        if ($p === false) {
+            return '';
+        }
+        $v = \substr($ct, $p + 9);
+        $semi = \strpos($v, ';');
+        if ($semi !== false) {
+            $v = \substr($v, 0, $semi);
+        }
+        $v = \trim($v);
+        if ($v !== '' && $v[0] === '"') {
+            $v = \trim($v, '"');
+        }
+        return $v;
+    }
+
+    /** @return array<string, mixed> */
+    public function fields(): array<string, mixed>
+    {
+        return $this->fields;
+    }
+
+    /** @return array<int, UploadedFile> */
+    public function files(): array<int, UploadedFile>
+    {
+        return $this->files;
+    }
+
+    /** Run to the closing delimiter. False = malformed (the server answers 400). */
+    public function parseAll(): bool
+    {
+        if (\strlen($this->delim) <= 4) {
+            return false;
+        }
+        while ($this->state !== self::ST_DONE) {
+            if ($this->state === self::ST_PREAMBLE) {
+                if (!$this->preamble()) {
+                    return false;
+                }
+            } elseif ($this->state === self::ST_HEAD) {
+                if ($this->head() < 0) {
+                    return false;
+                }
+            } else {
+                $this->body();
+            }
+            if ($this->eof && $this->state !== self::ST_DONE) {
+                // Cut off mid-part: php marks the open file PARTIAL.
+                if ($this->state === self::ST_BODY) {
+                    $this->pError = $this->pIsFile ? UploadedFile::ERR_PARTIAL : 0;
+                    $this->closePart();
+                }
+                $this->state = self::ST_DONE;
+            }
+        }
+        return true;
+    }
+
+    private function fill(): bool
+    {
+        if ($this->eof) {
+            return false;
+        }
+        $fn = $this->source;
+        $chunk = $fn(self::READ);
+        if ($chunk === '') {
+            $this->eof = true;
+            return false;
+        }
+        $this->buf = $this->buf . $chunk;
+        return true;
+    }
+
+    /** Skip to the first delimiter. The first one has no leading CRLF. */
+    private function preamble(): bool
+    {
+        $first = \substr($this->delim, 2);
+        while (true) {
+            $p = \strpos($this->buf, $first);
+            if ($p !== false) {
+                $this->buf = \substr($this->buf, $p + \strlen($first));
+                return $this->afterDelim();
+            }
+            $keep = \strlen($first) - 1;
+            if (\strlen($this->buf) > $keep) {
+                $this->buf = \substr($this->buf, \strlen($this->buf) - $keep);
+            }
+            if (!$this->fill()) {
+                return false;
+            }
+        }
+    }
+
+    /** After a delimiter: `--` ends the message, CRLF opens a part. */
+    private function afterDelim(): bool
+    {
+        while (\strlen($this->buf) < 2) {
+            if (!$this->fill()) {
+                return false;
+            }
+        }
+        if (\strncmp($this->buf, '--', 2) === 0) {
+            $this->state = self::ST_DONE;
+            return true;
+        }
+        if (\strncmp($this->buf, "\r\n", 2) !== 0) {
+            return false;
+        }
+        $this->buf = \substr($this->buf, 2);
+        $this->state = self::ST_HEAD;
+        return true;
+    }
+
+    /** Part head: lines to the blank line. 0 = ok, -1 = malformed. */
+    private function head(): int
+    {
+        while (true) {
+            $end = \strpos($this->buf, "\r\n\r\n");
+            if ($end !== false) {
+                break;
+            }
+            if (\strlen($this->buf) > 16384 || !$this->fill()) {
+                return -1;
+            }
+        }
+        $lines = splitStr("\r\n", \substr($this->buf, 0, $end));
+        $this->buf = \substr($this->buf, $end + 4);
+        $this->pName = '';
+        $this->pFile = '';
+        $this->pIsFile = false;
+        $this->pType = '';
+        $this->pValue = '';
+        $this->pSize = 0;
+        $this->pError = 0;
+        $this->pTmp = null;
+        $this->pTmpName = '';
+        foreach ($lines as $line) {
+            $colon = \strpos($line, ':');
+            if ($colon === false) {
+                continue;
+            }
+            $hn = \strtolower(\trim(\substr($line, 0, $colon)));
+            $hv = \trim(\substr($line, $colon + 1));
+            if ($hn === 'content-disposition') {
+                $this->pName = dispositionParam($hv, 'name');
+                $this->pFile = dispositionParam($hv, 'filename');
+                $this->pIsFile = \stripos($hv, 'filename=') !== false;
+            } elseif ($hn === 'content-type') {
+                $this->pType = $hv;
+            }
+        }
+        if ($this->pName === '' && !$this->pIsFile) {
+            return -1;
+        }
+        if ($this->pIsFile) {
+            $this->openFile();
+        }
+        $this->state = self::ST_BODY;
+        return 0;
+    }
+
+    private function openFile(): void
+    {
+        if ($this->pFile === '') {
+            $this->pError = UploadedFile::ERR_NO_FILE;
+            return;
+        }
+        if ($this->fileCount >= $this->maxFiles) {
+            // dropped silently, php's max_file_uploads
+            $this->pError = -1;
+            return;
+        }
+        $this->fileCount = $this->fileCount + 1;
+        $tmp = \tempnam(\sys_get_temp_dir(), 'php');
+        if ($tmp === false) {
+            $this->pError = UploadedFile::ERR_NO_TMP_DIR;
+            return;
+        }
+        $r = @\fopen($tmp, 'wb');
+        if ($r === false) {
+            $this->pError = UploadedFile::ERR_CANT_WRITE;
+            return;
+        }
+        $this->pTmp = $r;
+        $this->pTmpName = $tmp;
+    }
+
+    /** Body bytes up to the next delimiter; everything before a possible split delimiter is consumed. */
+    private function body(): void
+    {
+        while (true) {
+            $p = \strpos($this->buf, $this->delim);
+            if ($p !== false) {
+                $this->consume(\substr($this->buf, 0, $p));
+                $this->buf = \substr($this->buf, $p + \strlen($this->delim));
+                $this->closePart();
+                if (!$this->afterDelim()) {
+                    $this->state = self::ST_DONE;
+                }
+                return;
+            }
+            $keep = \strlen($this->delim) - 1;
+            $n = \strlen($this->buf);
+            if ($n > $keep) {
+                $this->consume(\substr($this->buf, 0, $n - $keep));
+                $this->buf = \substr($this->buf, $n - $keep);
+            }
+            if (!$this->fill()) {
+                $this->consume($this->buf);
+                $this->buf = '';
+                return;
+            }
+        }
+    }
+
+    private function consume(string $bytes): void
+    {
+        if ($bytes === '') {
+            return;
+        }
+        if (!$this->pIsFile) {
+            $this->pValue = $this->pValue . $bytes;
+            return;
+        }
+        if ($this->pError !== 0) {
+            return;
+        }
+        $this->pSize = $this->pSize + \strlen($bytes);
+        if ($this->pSize > $this->maxSize || ($this->formMax >= 0 && $this->pSize > $this->formMax)) {
+            $this->pError = $this->pSize > $this->maxSize ? UploadedFile::ERR_INI_SIZE : UploadedFile::ERR_FORM_SIZE;
+            $this->dropTmp();
+            return;
+        }
+        $r = $this->pTmp;
+        if ($r !== null) {
+            \fwrite($r, $bytes);
+        }
+    }
+
+    private function dropTmp(): void
+    {
+        $r = $this->pTmp;
+        if ($r !== null) {
+            \fclose($r);
+            @\unlink($this->pTmpName);
+        }
+        $this->pTmp = null;
+        $this->pTmpName = '';
+        $this->pSize = 0;
+    }
+
+    private function closePart(): void
+    {
+        if (!$this->pIsFile) {
+            if ($this->pName === 'MAX_FILE_SIZE' && \ctype_digit($this->pValue)) {
+                $this->formMax = (int)$this->pValue;
+            }
+            nestedAssign($this->fields, $this->pName, $this->pValue);
+            return;
+        }
+        if ($this->pError === -1) {
+            // over max_file_uploads: not reported, as php
+            return;
+        }
+        if ($this->pError === UploadedFile::ERR_PARTIAL) {
+            $this->dropTmp();
+        }
+        $r = $this->pTmp;
+        if ($r !== null) {
+            \fclose($r);
+            $this->pTmp = null;
+        }
+        $name = $this->pFile;
+        $slash = \strrpos($name, '/');
+        $bslash = \strrpos($name, '\\');
+        $cut = $slash === false ? $bslash : ($bslash === false ? $slash : ($slash > $bslash ? $slash : $bslash));
+        if ($cut !== false) {
+            $name = \substr($name, $cut + 1);
+        }
+        $this->files[] = new UploadedFile(
+            $this->pName,
+            $name,
+            $this->pFile,
+            $this->pError === 0 ? $this->pType : '',
+            $this->pError === 0 ? $this->pSize : 0,
+            $this->pError,
+            $this->pError === 0 ? $this->pTmpName : '',
+        );
+        if ($this->pError !== 0 && $this->pTmpName !== '') {
+            @\unlink($this->pTmpName);
+        }
     }
 }
 

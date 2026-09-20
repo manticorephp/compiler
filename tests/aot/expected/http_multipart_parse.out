@@ -1,0 +1,48 @@
+[fields] ok=true files=0
+array(2) {
+  ["a"]=>
+  string(1) "1"
+  ["b"]=>
+  array(1) {
+    ["x"]=>
+    string(1) "2"
+  }
+}
+[file] ok=true files=1
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
+[two-in-array] ok=true files=2
+  field=f[] name=a.txt full=a.txt type= size=1 error=0 valid=yes tmp=file bytes=A same=yes
+  field=f[] name=b.txt full=b.txt type= size=2 error=0 valid=yes tmp=file bytes=BB same=yes
+  fields: 1 f=unset
+[path-basename] ok=true files=2
+  field=f name=x.txt full=C:\dir\x.txt type= size=1 error=0 valid=yes tmp=file bytes=x same=yes
+  field=g name=y.txt full=/home/u/y.txt type= size=1 error=0 valid=yes tmp=file bytes=y same=yes
+[quoted] ok=true files=4
+  field=f name=a"b.txt full=a"b.txt type= size=1 error=0 valid=yes tmp=file bytes=q same=yes
+  field=g name=c"d.txt full=c"d.txt type= size=1 error=0 valid=yes tmp=file bytes=q same=yes
+  field=h name=f.txt full=e\f.txt type= size=1 error=0 valid=yes tmp=file bytes=q same=yes
+  field=k name=k.txt full=k.txt type= size=1 error=0 valid=yes tmp=file bytes=q same=yes
+[empty-file] ok=true files=1
+  field=f name= full= type= size=0 error=4 valid=no tmp=''
+[too-big] ok=true files=1
+  field=f name=hello.txt full=hello.txt type= size=0 error=1 valid=no tmp=''
+[max-files] ok=true files=2
+  field=a name=a.txt full=a.txt type= size=1 error=0 valid=yes tmp=file bytes=A same=yes
+  field=b name=b.txt full=b.txt type= size=1 error=0 valid=yes tmp=file bytes=B same=yes
+[MAX_FILE_SIZE] ok=true files=1
+  field=f name=hello.txt full=hello.txt type= size=0 error=2 valid=no tmp=''
+[partial] ok=true files=1
+  field=f name=hello.txt full=hello.txt type= size=0 error=3 valid=no tmp=''
+[no-boundary] ok=true files=1
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
+  boundaryOf: "" "----mcb" "x y"
+  parseAll: false
+[bad-head] ok=false files=0
+[preamble] ok=true files=1
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
+[crlf-in-body] ok=true files=1
+  field=f name=c.bin full=c.bin type=application/octet-stream size=26 error=0 valid=yes tmp=file bytes=x\r\n--not\r\n--\r\n------mcc\r\ny same=yes
+[split] ok=true files=1
+  field=f name=hello.txt full=hello.txt type=text/plain size=11 error=0 valid=yes tmp=file bytes=hello world same=yes
+[empty] ok=true files=0
+done
