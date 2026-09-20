@@ -696,12 +696,20 @@ final class MemoryAbi
      * erased reader can still decode an element it finds through a cell channel
      * ({@see UnifiedArrayRuntime::emitBoxByRepr}). Also in the low byte, so
      * compaction's `and flags, 255` preserves it.
+     *
+     * The scalar codes (INT/FLOAT/BOOL) make the decode TOTAL: without them a
+     * raw `vec[int]` element found through a cell channel is a tag-0 word
+     * (the erased-element channel of docs/design/value-channels.md). Hint 0
+     * is then only an EMPTY or never-stamped buffer, passed through as is.
      */
-    public const ARRAY_ELEM_HINT_MASK = 112;  // 0b111 << 4
-    public const ARRAY_ELEM_HINT_STR  = 16;   // 1<<4 — raw string pointers
-    public const ARRAY_ELEM_HINT_OBJ  = 32;   // 2<<4 — raw object pointers
-    public const ARRAY_ELEM_HINT_ARR  = 48;   // 3<<4 — raw nested arrays
-    public const ARRAY_ELEM_HINT_CELL = 64;   // 4<<4 — already self-describing
+    public const ARRAY_ELEM_HINT_MASK  = 112;  // 0b111 << 4
+    public const ARRAY_ELEM_HINT_STR   = 16;   // 1<<4 — raw string pointers
+    public const ARRAY_ELEM_HINT_OBJ   = 32;   // 2<<4 — raw object pointers
+    public const ARRAY_ELEM_HINT_ARR   = 48;   // 3<<4 — raw nested arrays
+    public const ARRAY_ELEM_HINT_CELL  = 64;   // 4<<4 — already self-describing
+    public const ARRAY_ELEM_HINT_INT   = 80;   // 5<<4 — raw i64
+    public const ARRAY_ELEM_HINT_FLOAT = 96;   // 6<<4 — raw double bits
+    public const ARRAY_ELEM_HINT_BOOL  = 112;  // 7<<4 — raw 0/1
 
     /**
      * Bits 8-35 of the flags word: the TOMBSTONE COUNTER (how many KIND_DELETED

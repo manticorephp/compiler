@@ -1049,7 +1049,8 @@ trait EmitLlvmArrays
      * cell is later DROPPED by tag, so anything without the rc header that tag
      * implies — `#[Struct]`, `Ffi\Ptr`, a closure, an enum singleton, a
      * Generator frame (str-style header, object tag) — must stay hintless and
-     * ride raw, exactly as it does today. Scalars have nothing to decode.
+     * ride raw, exactly as it does today. A scalar has a code too: a raw int
+     * found through a cell channel is otherwise a tag-0 word.
      */
     private function elementHintCodeForType(?Type $el): ?int
     {
@@ -1058,6 +1059,9 @@ trait EmitLlvmArrays
         if ($k === Type::KIND_STRING) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR; }
         if ($k === Type::KIND_ARRAY) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR; }
         if ($k === Type::KIND_CELL) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL; }
+        if ($k === Type::KIND_INT) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_INT; }
+        if ($k === Type::KIND_FLOAT) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_FLOAT; }
+        if ($k === Type::KIND_BOOL) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_BOOL; }
         if ($k === Type::KIND_OBJ) {
             $cls = $el->class;
             if ($cls === null) { $cls = ''; }

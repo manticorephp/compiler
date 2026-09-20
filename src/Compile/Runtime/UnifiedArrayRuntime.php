@@ -5,6 +5,7 @@ namespace Compile\Runtime;
 use Codegen\Llvm\Block;
 use Codegen\Llvm\FunctionDef;
 use Codegen\Llvm\Module;
+use Codegen\Llvm\SwitchCase;
 use Codegen\Llvm\Type;
 use Codegen\Llvm\Value;
 use Compile\Debug;
@@ -43,6 +44,7 @@ final class UnifiedArrayRuntime
     private const CELL_STR = -3377699720527872;
     private const CELL_ARR = -2533274790395904;
     private const CELL_OBJ = -2251799813685248;
+    private const CELL_BOOL = -3940649673949184;
 
     public function __construct(
         private Module $module,
@@ -3941,11 +3943,11 @@ final class UnifiedArrayRuntime
     /**
      * `__mir_box_by_repr(val, hint) -> i64` — NaN-box one element by the
      * element-KIND hint its array stamped ({@see
-     * MemoryAbi::ARRAY_ELEM_HINT_MASK}, masked but still shifted). Hint 0 means
-     * "the static type says", which an erased caller does not have; the carrier
-     * is passed through untouched there, exactly as a CELL element is. The hint
-     * is deliberately NOT the ownership repr — a concrete-element array stamps
-     * shape without ever claiming its elements are droppable.
+     * MemoryAbi::ARRAY_ELEM_HINT_MASK}, masked but still shifted). TOTAL over
+     * every stamped code, scalars included; hint 0 is a never-stamped buffer and
+     * the carrier passes through untouched there, exactly as a CELL element
+     * does. The hint is deliberately NOT the ownership repr — a concrete-element
+     * array stamps shape without ever claiming its elements are droppable.
      */
     private function emitBoxByRepr(): void
     {
@@ -3953,21 +3955,43 @@ final class UnifiedArrayRuntime
         $val = $fn->param(Type::i64(), 'val');
         $repr = $fn->param(Type::i64(), 'hint');
         $e = $fn->block('entry');
-        $chkobj = $fn->block('chkobj');
-        $chkarr = $fn->block('chkarr');
         $dostr = $fn->block('dostr');
         $doobj = $fn->block('doobj');
         $doarr = $fn->block('doarr');
+        $doint = $fn->block('doint');
+        $dofloat = $fn->block('dofloat');
+        $dobool = $fn->block('dobool');
         $asis = $fn->block('asis');
         // Tagged inline rather than through __manticore_box_*: those live in the
         // tagged PRELUDE, which is demand-gated and need not be linked into a
-        // module that only ever shifts an array.
-        $e->brIf($e->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR)), $dostr, $chkobj);
+        // module that only ever shifts an array. Hint 0 (never stamped) and
+        // CELL (already a cell) both pass the carrier through.
+        $e->switch_($repr, $asis, [
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR), $dostr),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ), $doobj),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR), $doarr),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT), $doint),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT), $dofloat),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_BOOL), $dobool),
+        ]);
         $dostr->ret($this->tagPtr($dostr, $val, self::CELL_STR));
-        $chkobj->brIf($chkobj->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ)), $doobj, $chkarr);
         $doobj->ret($this->tagPtr($doobj, $val, self::CELL_OBJ));
-        $chkarr->brIf($chkarr->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR)), $doarr, $asis);
         $doarr->ret($this->tagPtr($doarr, $val, self::CELL_ARR));
+        // The overflow-aware int box: a raw i64 past signed-48 rides a heap
+        // bigint (nibble 5), exactly as __manticore_box_int does.
+        $doint->ret($doint->call('__mir_ckey_box_int', Type::i64(), [$val]));
+        // A raw double IS its own cell (canonical NaN-boxing) except a NaN,
+        // which is canonicalized so it can never spell a tag.
+        $fv = $dofloat->bitcast($val, Type::f64());
+        $dofloat->ret($dofloat->select(
+            $dofloat->fcmp('uno', $fv, $fv),
+            Value::int(Type::i64(), 9221120237041090560),
+            $val,
+        ));
+        $dobool->ret($dobool->or_(
+            $dobool->and_($val, Value::int(Type::i64(), 1)),
+            Value::int(Type::i64(), self::CELL_BOOL),
+        ));
         $asis->ret($val);
     }
 
