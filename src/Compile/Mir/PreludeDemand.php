@@ -131,6 +131,13 @@ final class PreludeDemand
                 continue;
             }
             if ($t->kind === TokenKind::Keyword && \strtolower($t->lexeme) === 'namespace') {
+                // `namespace\foo(...)` is a RELATIVE call, not a declaration —
+                // the Backslash right after the keyword is the tell. Skip past
+                // the keyword and let the normal walk see the rest.
+                if ($i + 1 < $n && $toks[$i + 1]->kind === TokenKind::Backslash) {
+                    $i = $i + 1;
+                    continue;
+                }
                 // `namespace {` = global; `namespace A\B {` = named block; `namespace A\B;` = rest of file.
                 $j = $i + 1;
                 $named = false;
