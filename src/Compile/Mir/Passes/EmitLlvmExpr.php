@@ -661,6 +661,39 @@ trait EmitLlvmExpr
     }
 
     /**
+     * `__mir_str_to_int(s)` — php's `(int)$string`: the leading integer via
+     * strtol, unless the numeric prefix continues as a FLOAT literal (`.`, `e`,
+     * `E` right after the digits — `"1e3"`, `"1.9"`), in which case the
+     * prefix is parsed as a double and truncated, as php has done since 7.1
+     * (`(int)"1e3"` is 1000, not 1). Every string→int coercion in the tree
+     * (the cast, integer arithmetic on a string operand, the tagged cast) goes
+     * through here.
+     */
+    private function strToIntRuntime(): string
+    {
+        $out  = "\ndefine i64 @__mir_str_to_int(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %endp = alloca ptr\n";
+        $out .= "  %iv = call i64 @strtol(ptr %s, ptr %endp, i32 10)\n";
+        $out .= "  %e = load ptr, ptr %endp\n";
+        $out .= "  %c = load i8, ptr %e\n";
+        $out .= "  %isdot = icmp eq i8 %c, 46\n";
+        $out .= "  %ise = icmp eq i8 %c, 101\n";
+        $out .= "  %isE = icmp eq i8 %c, 69\n";
+        $out .= "  %f1 = or i1 %isdot, %ise\n";
+        $out .= "  %f2 = or i1 %f1, %isE\n";
+        $out .= "  br i1 %f2, label %asflt, label %done\n";
+        $out .= "asflt:\n";
+        $out .= "  %d = call double @strtod(ptr %s, ptr null)\n";
+        $out .= "  %fi = fptosi double %d to i64\n";
+        $out .= "  ret i64 %fi\n";
+        $out .= "done:\n";
+        $out .= "  ret i64 %iv\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
      * `(int)$cell` — convert a NaN-boxed value to i64 by tag: int → the payload
      * int, bool → 0/1, null → 0, string → strtol(base 10), float → truncate,
      * array → 1 if non-empty else 0 (PHP semantics). Objects don't reach here
@@ -693,7 +726,7 @@ trait EmitLlvmExpr
         $out .= "asstr:\n";
         $out .= "  %sp = and i64 %v, 281474976710655\n";
         $out .= "  %sptr = inttoptr i64 %sp to ptr\n";
-        $out .= "  %sv = call i64 @strtol(ptr %sptr, ptr null, i32 10)\n";
+        $out .= "  %sv = call i64 @__mir_str_to_int(ptr %sptr)\n";
         $out .= "  ret i64 %sv\n";
         $out .= "asfloat:\n";
         $out .= "  %fd = bitcast i64 %v to double\n";
@@ -1854,7 +1887,7 @@ trait EmitLlvmExpr
             $this->rt->needsStrtol = true;
             $out = $this->coerceToPtr();
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
+            $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $this->lastValue . ')' . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
             return $out;
@@ -2640,7 +2673,7 @@ trait EmitLlvmExpr
                 $this->rt->needsStrtol = true;
                 $out .= $this->coerceToPtr();
                 $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $this->lastValue . ', ptr null, i32 10)' . "\n";
+                $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $this->lastValue . ')' . "\n";
                 $this->lastValue = $reg; $this->lastValueType = 'i64';
                 return $out;
             }

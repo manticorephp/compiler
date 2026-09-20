@@ -3309,6 +3309,14 @@ trait EmitLlvmBuiltins
             // `intval($s, $base)` — strtol handles every base natively (2/8/16,
             // and base 0 = auto-detect `0x`/`0` prefixes), matching PHP. Default
             // base 10 when the arg is omitted.
+            // With the default base 10 the cast rule applies (`intval("1e3")` is
+            // 1000 — a float-literal prefix is parsed as a double); an explicit
+            // base is strtol's own.
+            if (\count($args) < 2) {
+                $reg = $this->ssa->allocReg();
+                $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $strPtr . ")\n";
+                return $this->finishI64($out, $reg);
+            }
             $baseArg = 'i32 10';
             if (\count($args) > 1) {
                 $out .= $this->emitNode($args[1]);

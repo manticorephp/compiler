@@ -219,7 +219,11 @@ public bool $needsClosureRc = false;
         }
         if ($this->needsConcat) { $decls['strlen'] = "declare i64 @strlen(ptr)"; }
         if ($this->needsSnprintf()) { $decls['snprintf'] = "declare i32 @snprintf(ptr, i64, ptr, ...)"; }
-        if ($this->needsStrtol) { $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)"; }
+        if ($this->needsStrtol) {
+            $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)";
+            // `__mir_str_to_int` falls back to strtod for a float-literal prefix.
+            $decls['strtod'] = "declare double @strtod(ptr, ptr)";
+        }
         if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
         if ($this->needsExceptions) {
             // `_setjmp`/`_longjmp`, NOT `setjmp`/`longjmp`, and it is worth
