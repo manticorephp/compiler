@@ -117,8 +117,33 @@ final class PreludeDemand
         $out = [];
         $n = \count($toks);
         $i = 0;
+        // Only the GLOBAL namespace gates. A `namespace X {` block is skipped to
+        // its matching brace; a bare `namespace X;` hides everything after it.
+        $depth = 0;
+        $skipTo = -1;        // brace depth at which a named block closes
         while ($i + 2 < $n) {
             $t = $toks[$i];
+            if ($t->kind === TokenKind::OpenBrace) { $depth = $depth + 1; $i = $i + 1; continue; }
+            if ($t->kind === TokenKind::CloseBrace) {
+                $depth = $depth - 1;
+                if ($skipTo >= 0 && $depth === $skipTo) { $skipTo = -1; }
+                $i = $i + 1;
+                continue;
+            }
+            if ($t->kind === TokenKind::Keyword && \strtolower($t->lexeme) === 'namespace') {
+                // `namespace {` = global; `namespace A\B {` = named block; `namespace A\B;` = rest of file.
+                $j = $i + 1;
+                $named = false;
+                while ($j < $n && $toks[$j]->kind !== TokenKind::OpenBrace && $toks[$j]->kind !== TokenKind::Semicolon) {
+                    if ($toks[$j]->kind === TokenKind::Identifier) { $named = true; }
+                    $j = $j + 1;
+                }
+                if ($j < $n && $toks[$j]->kind === TokenKind::Semicolon && $named) { return $out; }
+                if ($j < $n && $toks[$j]->kind === TokenKind::OpenBrace && $named) { $skipTo = $depth; }
+                $i = $j;
+                continue;
+            }
+            if ($skipTo >= 0) { $i = $i + 1; continue; }
             if ($t->kind !== TokenKind::Keyword || \strtolower($t->lexeme) !== 'function') {
                 $i = $i + 1;
                 continue;
