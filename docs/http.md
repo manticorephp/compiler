@@ -28,8 +28,13 @@ buffering it needs, because a server without those is not a server.
 
 One process serves many requests at once. Each connection is a task under one
 `Async\TaskGroup`; the I/O is ordinary `fread`/`fwrite`, which suspends the
-fiber through the netpoller instead of blocking the process. `->workers(N)`
-forks N of those before any reactor exists, so N cores accept on one listener.
+fiber through the netpoller instead of blocking the process.
+
+`->workers(N)` binds the listener once, then forks N workers that inherit it,
+under a supervisor (`Process\supervise`) that reaps and restarts a crashed
+worker and forwards SIGTERM/SIGINT to all of them. The parent serves nothing;
+`serve()` returns once every worker has exited. `workers(0)` (the default)
+serves in-process.
 
 `->maxConnections(N)` is the ceiling per worker. The permit is taken **before**
 `accept`, so at the ceiling the worker stops accepting and the queue stays in

@@ -2146,10 +2146,44 @@ final class Server
             $this->loop();
             return;
         }
+        // Bind BEFORE any fork and before any reactor: the children inherit
+        // one listener fd and the kernel balances accepts between them.
+        $this->bind();
+        if ($this->workerCount > 0) {
+            \Process\supervise($this->workerCount, function (int $i): void {
+                \Async\async(function () {
+                    \Async\shutdownOn(\SIGTERM, \SIGINT);
+                    $this->loop();
+                });
+            });
+            if ($this->ownsListener && $this->listener !== null) {
+                \fclose($this->listener);
+                $this->listener = null;
+            }
+            return;
+        }
         \Async\async(function () {
             \Async\shutdownOn(\SIGTERM, \SIGINT);
             $this->loop();
         });
+    }
+
+    /** Open the listener once; a no-op when the caller supplied one. */
+    private function bind(): void
+    {
+        if ($this->listener !== null) {
+            return;
+        }
+        $errno = 0;
+        $errstr = '';
+        $l = $this->context === null
+            ? \stream_socket_server($this->addr, $errno, $errstr)
+            : \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $this->context);
+        if ($l === false) {
+            throw new \RuntimeException('Http\\Server: cannot bind ' . $this->addr . ': ' . $errstr);
+        }
+        \stream_set_blocking($l, false);
+        $this->listener = $l;
     }
 
     /**
@@ -2175,23 +2209,10 @@ final class Server
 
     private function loop(): void
     {
+        $this->bind();
         $listener = $this->listener;
         if ($listener === null) {
-            if ($this->workerCount > 0) {
-                // Fork BEFORE any reactor exists — the only safe order.
-                \Process\workers($this->workerCount);
-            }
-            $errno = 0;
-            $errstr = '';
-            $l = $this->context === null
-                ? \stream_socket_server($this->addr, $errno, $errstr)
-                : \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $this->context);
-            if ($l === false) {
-                throw new \RuntimeException('Http\\Server: cannot bind ' . $this->addr . ': ' . $errstr);
-            }
-            $listener = $l;
-            $this->listener = $l;
-            \stream_set_blocking($listener, false);
+            return;
         }
         $gate = new \Async\Semaphore($this->maxConnections);
         try {
