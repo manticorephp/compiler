@@ -1761,7 +1761,9 @@ final class Multipart
      * Up to $max bytes of the current part ({@see body} bounded to $max and
      * stopping AT the delimiter); '' once the part's delimiter is reached, or
      * for a Part that is no longer the current one. At EOF the remainder is
-     * the part — a body cut off mid-part ends it, as the push mode's PARTIAL.
+     * the part — a body cut off mid-part ends it silently (no PARTIAL as the
+     * push mode has); that remainder is at most `strlen(delim) - 1` bytes and
+     * may exceed $max.
      */
     public function readPart(int $max, int $seq): string
     {
@@ -2085,7 +2087,9 @@ final class Part
     public function __construct(
         /** The `name=` of the Content-Disposition. */
         public readonly string $name,
-        /** The `filename=`; '' for a field. */
+        /** The `filename=`; '' for a field — and for a file part sent with
+         *  `filename=""`, indistinguishable from a field here (the buffered
+         *  path reports it as `UPLOAD_ERR_NO_FILE`). */
         public readonly string $filename,
         /** The part's Content-Type, '' when it has none. */
         public readonly string $type,

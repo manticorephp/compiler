@@ -196,6 +196,17 @@ The body is the generator's: `allFiles()`/`postArray()` on it, or a second
 `multipart()`, throw a `LogicException`; a buffered body has no `multipart()`
 (use `allFiles()`). `$_FILES` and `$_POST` are not seeded from a streamed body.
 
+A malformed streamed body makes `multipart()` throw
+`\RuntimeException('malformed multipart')` from inside the generator — at
+iteration, not at the call; generators are lazy. Until the ledgered
+`Server::runHandler` catch-all crash is fixed, a handler without `onError()`
+can be taken down by a crafted body, so install `onError()` on any server that
+streams multipart. A client that cuts the stream mid-part ends that part
+silently — `read()` answers the remainder, then `''`, and the generator ends;
+there is no `PARTIAL` signal in pull mode (the buffered path reports
+`UPLOAD_ERR_PARTIAL`), so a handler that needs the whole part checks the byte
+count against its own expectation.
+
 ## php's builtins work inside a handler
 
 This is the part that makes existing code run. `header()`, `header_remove()`,
