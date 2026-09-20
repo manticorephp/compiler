@@ -302,6 +302,32 @@ function splitPath(string $target): array<int, string>
 }
 
 /**
+ * `host:port` / `[v6]:port` → [host, port], port '' when absent. Splits on the
+ * LAST colon so a bare v6 address is not cut at its first group.
+ *
+ * @internal
+ * @return array<int, string>
+ */
+function splitHostPort(string $hp): array<int, string>
+{
+    $out = [];
+    $colon = \strrpos($hp, ':');
+    $close = \strrpos($hp, ']');
+    // No colon, `[v6]` with no port, or a BARE v6 (two or more colons and no
+    // brackets — `2001:db8::7` has no port to split off).
+    if ($colon === false
+        || ($close !== false && $colon < $close)
+        || ($close === false && \strpos($hp, ':') !== $colon)) {
+        $out[] = \trim($hp, '[]');
+        $out[] = '';
+        return $out;
+    }
+    $out[] = \trim(\substr($hp, 0, $colon), '[]');
+    $out[] = \substr($hp, $colon + 1);
+    return $out;
+}
+
+/**
  * Percent-decode a path and collapse its `.` and `..` segments.
  *
  * A server that hands `..` to a handler is a path-traversal generator, so this
@@ -2209,7 +2235,8 @@ final class Server
     {
         $buf = new \Buffer\ByteBuffer();
         $out = new Outbox($conn);
-        $remote = '';
+        $peer = \stream_socket_get_name($conn, true);
+        $remote = $peer === false ? '' : $peer;
         // ONE parser for the connection, reset between messages. Its limits and
         // its buffer do not change, so a fresh object per request was four
         // allocations and a zeroed field block for nothing.
@@ -2395,19 +2422,15 @@ final class Server
         $out['REQUEST_URI'] = $req->target;
         $out['SERVER_PROTOCOL'] = 'HTTP/' . $req->version;
         $out['QUERY_STRING'] = $req->queryString;
-        $out['REMOTE_ADDR'] = $req->remoteAddr;
+        $peer = splitHostPort($req->remoteAddr);
+        $out['REMOTE_ADDR'] = $peer[0];
+        $out['REMOTE_PORT'] = $peer[1];
         $out['HTTPS'] = $req->secure ? 'on' : '';
         $out['CONTENT_TYPE'] = $req->header('Content-Type');
         $out['CONTENT_LENGTH'] = $req->header('Content-Length');
-        $host = $req->header('Host');
-        $colon = \strrpos($host, ':');
-        if ($colon !== false && $colon > 0) {
-            $out['SERVER_NAME'] = \substr($host, 0, $colon);
-            $out['SERVER_PORT'] = \substr($host, $colon + 1);
-        } else {
-            $out['SERVER_NAME'] = $host;
-            $out['SERVER_PORT'] = $req->secure ? '443' : '80';
-        }
+        $hp = splitHostPort($req->header('Host'));
+        $out['SERVER_NAME'] = $hp[0];
+        $out['SERVER_PORT'] = $hp[1] !== '' ? $hp[1] : ($req->secure ? '443' : '80');
         foreach ($req->headers->all() as $k => $v) {
             $out['HTTP_' . \strtoupper(\str_replace('-', '_', $k))] = $v;
         }
