@@ -1000,6 +1000,30 @@ trait EmitLlvmBuiltins
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $iSlot . "\n";
+        // The buffer's own element hint outranks the static element type: a
+        // `vec[string]` slot may hold a buffer another writer cellified in place
+        // (`natsort($v)` hands the caller's `assoc[string,string]` back as
+        // cells), and boxing THOSE words as pointers double-tags them and
+        // retains through the tag bits. Hint 0 (unstamped) or the static kind's
+        // own code takes the static path below; any other hint decodes by
+        // `__mir_box_by_repr` and co-owns by tag. Read off $src, which is the
+        // zero-word for a null source and so always has a flags word.
+        $hfp = $this->ssa->allocReg();
+        $out .= '  ' . $hfp . ' = getelementptr inbounds i8, ptr ' . $src . ', i64 '
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $hfl = $this->ssa->allocReg();
+        $out .= '  ' . $hfl . ' = load i64, ptr ' . $hfp . "\n";
+        $hint = $this->ssa->allocReg();
+        $out .= '  ' . $hint . ' = and i64 ' . $hfl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+        $staticCode = $this->elementHintCodeForType($elem) ?? 0;
+        $hIsZero = $this->ssa->allocReg();
+        $out .= '  ' . $hIsZero . ' = icmp eq i64 ' . $hint . ", 0\n";
+        $hIsStatic = $this->ssa->allocReg();
+        $out .= '  ' . $hIsStatic . ' = icmp eq i64 ' . $hint . ', ' . (string)$staticCode . "\n";
+        $useStatic = $this->ssa->allocReg();
+        $out .= '  ' . $useStatic . ' = or i1 ' . $hIsZero . ', ' . $hIsStatic . "\n";
+        $bSlot = $this->ssa->allocReg();
+        $out .= '  ' . $bSlot . " = alloca i64\n";
         $cond = $this->ssa->allocLabel('uac.cond');
         $body = $this->ssa->allocLabel('uac.body');
         $end  = $this->ssa->allocLabel('uac.end');
@@ -1014,6 +1038,11 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+        $statL = $this->ssa->allocLabel('uac.stat');
+        $dynL = $this->ssa->allocLabel('uac.dyn');
+        $joinL = $this->ssa->allocLabel('uac.join');
+        $out .= '  br i1 ' . $useStatic . ', label %' . $statL . ', label %' . $dynL . "\n";
+        $out .= $statL . ":\n";
         $boxed = $this->ssa->allocReg();
         $ek = $elem->kind;
         // ⚠ OWNERSHIP. A pointer-shaped element is boxed BY POINTER into the fresh cell array,
@@ -1082,10 +1111,29 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_int(i64 ' . $ev . ")\n";
         }
         if ($elemRetain !== '') { $out .= $this->rcRetainReg($ev, $elemRetain); }
+        $out .= '  store i64 ' . $boxed . ', ptr ' . $bSlot . "\n";
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $dynL . ":\n";
+        $dynBoxed = $this->ssa->allocReg();
+        $out .= '  ' . $dynBoxed . ' = call i64 @__mir_box_by_repr(i64 ' . $ev . ', i64 ' . $hint . ")\n";
+        // Co-own exactly what the static arm would have: an rc-carrying element
+        // kind takes its +1 through the tag (`__mir_cell_retain` is the mirror of
+        // the `__mir_cell_drop` the rebuilt array's release runs per element);
+        // a scalar kind owns nothing on either arm.
+        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || $ek === Type::KIND_ARRAY) {
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            $out .= '  call void @__mir_cell_retain(i64 ' . $dynBoxed . ")\n";
+        }
+        $out .= '  store i64 ' . $dynBoxed . ', ptr ' . $bSlot . "\n";
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $joinL . ":\n";
+        $boxedJ = $this->ssa->allocReg();
+        $out .= '  ' . $boxedJ . ' = load i64, ptr ' . $bSlot . "\n";
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
-        $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $boxed . ")\n";
+        $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $boxedJ . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
         $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";

@@ -128,6 +128,13 @@ final class UnifiedArrayRuntime
         $this->emitPop();
         $this->emitShift();
         $this->emitBoxByRepr();
+        $this->emitElemDecode();
+        $this->emitCellifyInplace();
+        $this->emitElemEncode();
+        $this->emitCellToKind();
+        $this->emitArrayConform();
+        $this->emitElemEncodeRaw();
+        $this->emitElemStampRaw();
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
         $this->emitTakeCell('__mir_array_shift_cell', '__mir_array_shift');
         $this->emitUnshift();
@@ -3993,6 +4000,327 @@ final class UnifiedArrayRuntime
             Value::int(Type::i64(), self::CELL_BOOL),
         ));
         $asis->ret($val);
+    }
+
+    /** The element-kind hint of `$arr`'s flags word, still shifted. */
+    private function elemHint(Block $b, Value $arr): Value
+    {
+        $flags = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        return $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+    }
+
+    /**
+     * `__mir_elem_decode(arr, v) -> i64` — the word an element read hands a
+     * consumer whose static type is CELL: `v` boxed by the buffer's own hint
+     * ({@see emitBoxByRepr}). This is the read half of the element-channel
+     * rule (docs/design/value-channels.md): a cell-typed channel may be
+     * backed by a raw-hinted buffer (a `vec[string]` literal assigned to an
+     * `array<string,mixed>` property, an array crossing a `mixed` slot), and
+     * the hint, not the static type, says what the word is. Null-guarded: an
+     * auto-vivifying base is genuinely null. ONLY paired with
+     * {@see emitElemEncode} on the store side — a decode alone was withdrawn
+     * twice (the sort family wrote decoded cells back into raw buffers).
+     */
+    private function emitElemDecode(): void
+    {
+        $fn = $this->module->func('__mir_elem_decode', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $asis = $fn->block('asis');
+        $dec = $fn->block('dec');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $dec);
+        $asis->ret($v);
+        $dec->ret($dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->elemHint($dec, $arr)]));
+    }
+
+    /**
+     * `__mir_array_cellify_inplace(arr, hint)` — rewrite every element of a
+     * raw-hinted buffer as the cell its hint decodes to, then stamp the hint
+     * CELL. The pointer does not move and no element is retained or released:
+     * a raw string pointer becomes the same pointer under a tag, so the count
+     * it carried is the count its cell carries. The OWNERSHIP repr is only
+     * re-encoded, never introduced: an erased owner that stamped REPR_STR now
+     * drops by tag (REPR_CELL); a concrete owner that never stamped a repr
+     * keeps 0 — its typed release already routes a CELL hint to
+     * `__mir_cell_drop`, and stamping a repr on a concrete source is what
+     * the sort family's write-back cannot survive ({@see erasedReprCode}).
+     */
+    private function emitCellifyInplace(): void
+    {
+        $fn = $this->module->func('__mir_array_cellify_inplace', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $hint = $fn->param(Type::i64(), 'hint');
+        $e = $fn->block('entry');
+        $phead = $fn->block('phead');
+        $pbody = $fn->block('pbody');
+        $hhead = $fn->block('hhead');
+        $hbody = $fn->block('hbody');
+        $hlive = $fn->block('hlive');
+        $hadv = $fn->block('hadv');
+        $stamp = $fn->block('stamp');
+        $len = $e->load(Type::i64(), $arr);
+        $fp = $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $flags = $e->load(Type::i64(), $fp);
+        $iSlot = $e->alloca(Type::i64(), 'ci');
+        $e->store(Value::int(Type::i64(), 0), $iSlot);
+        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hhead, $phead);
+
+        $pi = $phead->load(Type::i64(), $iSlot);
+        $phead->brIf($phead->icmp('sge', $pi, $len), $stamp, $pbody);
+        $ps = $this->packedSlot($pbody, $arr, $pi);
+        $pv = $pbody->load(Type::i64(), $ps);
+        $pbody->store($pbody->call('__mir_box_by_repr', Type::i64(), [$pv, $hint]), $ps);
+        $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
+        $pbody->br($phead);
+
+        $hi = $hhead->load(Type::i64(), $iSlot);
+        $hhead->brIf($hhead->icmp('sge', $hi, $len), $stamp, $hbody);
+        $kind = $hbody->load(Type::i64(), $this->entryAddr($hbody, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED)), $hadv, $hlive);
+        $va = $this->entryAddr($hlive, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET);
+        $hv = $hlive->load(Type::i64(), $va);
+        $hlive->store($hlive->call('__mir_box_by_repr', Type::i64(), [$hv, $hint]), $va);
+        $hlive->br($hadv);
+        $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hadv->br($hhead);
+
+        $fl2 = $stamp->load(Type::i64(), $fp);
+        $cleared = $stamp->and_($fl2, Value::int(Type::i64(), ~MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $hinted = $stamp->or_($cleared, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $repr = $stamp->and_($fl2, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $hasRepr = $stamp->icmp('ne', $repr, Value::int(Type::i64(), 0));
+        $reprCleared = $stamp->and_($hinted, Value::int(Type::i64(), ~MemoryAbi::ARRAY_REPR_MASK));
+        $reprCell = $stamp->or_($reprCleared, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CELL));
+        $stamp->store($stamp->select($hasRepr, $reprCell, $hinted), $fp);
+        $stamp->retVoid();
+    }
+
+    /**
+     * `__mir_array_conform(arr, kind)` — make a buffer honour a CONCRETE static
+     * element claim again: when it is CELL-hinted (a by-ref callee with an
+     * erased `array &$arr` rebuilt it as cells — the sort family) and `kind`
+     * is a raw `ARRAY_ELEM_HINT_*` code, every cell is unboxed to that kind's
+     * raw word in place and the hint becomes `kind`. Any other hint is left
+     * alone. The mirror of {@see emitCellifyInplace}: no retain, no release
+     * (a tagged pointer becomes the same pointer), and the ownership repr is
+     * only re-encoded (REPR_CELL → the kind's own repr; scalars own nothing).
+     * A cell of another kind than claimed (an int where a float was promised)
+     * is converted where a conversion exists, else its payload is taken.
+     */
+    private function emitArrayConform(): void
+    {
+        $fn = $this->module->func('__mir_array_conform', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $walk = $fn->block('walk');
+        $phead = $fn->block('phead');
+        $pbody = $fn->block('pbody');
+        $hhead = $fn->block('hhead');
+        $hbody = $fn->block('hbody');
+        $hlive = $fn->block('hlive');
+        $hadv = $fn->block('hadv');
+        $stamp = $fn->block('stamp');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $chk);
+        $done->retVoid();
+        $fp = $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $flags = $chk->load(Type::i64(), $fp);
+        $hint = $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $isCell = $chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $kindRaw = $chk->and_(
+            $chk->icmp('ne', $kind, Value::int(Type::i64(), 0)),
+            $chk->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)),
+        );
+        $chk->brIf($chk->and_($isCell, $kindRaw), $walk, $done);
+        $len = $walk->load(Type::i64(), $arr);
+        $iSlot = $walk->alloca(Type::i64(), 'cfi');
+        $walk->store(Value::int(Type::i64(), 0), $iSlot);
+        $walk->brIf($walk->icmp('ne', $this->hashedBit($walk, $flags), Value::int(Type::i64(), 0)), $hhead, $phead);
+
+        $pi = $phead->load(Type::i64(), $iSlot);
+        $phead->brIf($phead->icmp('sge', $pi, $len), $stamp, $pbody);
+        $ps = $this->packedSlot($pbody, $arr, $pi);
+        $pbody->store($pbody->call('__mir_cell_to_kind', Type::i64(), [$pbody->load(Type::i64(), $ps), $kind]), $ps);
+        $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
+        $pbody->br($phead);
+
+        $hi = $hhead->load(Type::i64(), $iSlot);
+        $hhead->brIf($hhead->icmp('sge', $hi, $len), $stamp, $hbody);
+        $ek = $hbody->load(Type::i64(), $this->entryAddr($hbody, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $hbody->brIf($hbody->icmp('eq', $ek, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED)), $hadv, $hlive);
+        $va = $this->entryAddr($hlive, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET);
+        $hlive->store($hlive->call('__mir_cell_to_kind', Type::i64(), [$hlive->load(Type::i64(), $va), $kind]), $va);
+        $hlive->br($hadv);
+        $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hadv->br($hhead);
+
+        $fl2 = $stamp->load(Type::i64(), $fp);
+        $hinted = $stamp->or_($stamp->and_($fl2, Value::int(Type::i64(), ~MemoryAbi::ARRAY_ELEM_HINT_MASK)), $kind);
+        $repr = $stamp->and_($fl2, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
+        $hasRepr = $stamp->icmp('ne', $repr, Value::int(Type::i64(), 0));
+        // STR=1<<4 → REPR_STR=1<<1, OBJ=2<<4 → 2<<1, ARR=3<<4 → 3<<1: the two
+        // nibbles share their code, three bits apart; a scalar kind (5..7) owns
+        // nothing, so its repr is 0.
+        $shifted = $stamp->lshr($kind, Value::int(Type::i64(), 3));
+        $isPtrKind = $stamp->icmp('ule', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR));
+        $newRepr = $stamp->select($isPtrKind, $shifted, Value::int(Type::i64(), 0));
+        $reprCleared = $stamp->and_($hinted, Value::int(Type::i64(), ~MemoryAbi::ARRAY_REPR_MASK));
+        $withRepr = $stamp->or_($reprCleared, $newRepr);
+        $stamp->store($stamp->select($hasRepr, $withRepr, $hinted), $fp);
+        $stamp->retVoid();
+    }
+
+    /**
+     * `__mir_cell_to_kind(cell, kind) -> i64` — one cell as the raw word of a
+     * concrete element kind ({@see emitArrayConform}). A pointer kind takes
+     * the payload (a NULL cell → 0); INT unboxes (bigint-aware); FLOAT keeps a
+     * double's bits and converts a tagged int; BOOL takes bit 0.
+     */
+    private function emitCellToKind(): void
+    {
+        $fn = $this->module->func('__mir_cell_to_kind', Type::i64());
+        $cell = $fn->param(Type::i64(), 'cell');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $e = $fn->block('entry');
+        $ptrk = $fn->block('ptrk');
+        $ptrNull = $fn->block('ptr_null');
+        $ptrPay = $fn->block('ptr_pay');
+        $intk = $fn->block('intk');
+        $intTag = $fn->block('int_tag');
+        $intRaw = $fn->block('int_raw');
+        $floatk = $fn->block('floatk');
+        $floatFromInt = $fn->block('float_from_int');
+        $floatAsIs = $fn->block('float_asis');
+        $boolk = $fn->block('boolk');
+        $asis = $fn->block('asis');
+        $mask = Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK);
+        $istag = $e->icmp('ugt', $cell, Value::int(Type::i64(), -4503599627370496));
+        $nib = $e->and_($e->lshr($cell, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $e->switch_($kind, $asis, [
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR), $ptrk),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ), $ptrk),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR), $ptrk),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT), $intk),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT), $floatk),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_BOOL), $boolk),
+        ]);
+        $asis->ret($cell);
+        $isNull = $ptrk->and_($istag, $ptrk->icmp('eq', $nib, Value::int(Type::i64(), 3)));
+        $ptrk->brIf($isNull, $ptrNull, $ptrPay);
+        $ptrNull->ret(Value::int(Type::i64(), 0));
+        $ptrPay->ret($ptrPay->select($istag, $ptrPay->and_($cell, $mask), $cell));
+        $intk->brIf($istag, $intTag, $intRaw);
+        $intTag->ret($intTag->call('__mir_ckey_unbox_int', Type::i64(), [$cell]));
+        $intRaw->ret($cell);
+        $isIntCell = $floatk->and_($istag, $floatk->or_(
+            $floatk->icmp('eq', $nib, Value::int(Type::i64(), 1)),
+            $floatk->icmp('eq', $nib, Value::int(Type::i64(), 5)),
+        ));
+        $floatk->brIf($isIntCell, $floatFromInt, $floatAsIs);
+        $iv = $floatFromInt->call('__mir_ckey_unbox_int', Type::i64(), [$cell]);
+        $floatFromInt->ret($floatFromInt->bitcast($floatFromInt->sitofp($iv, Type::f64()), Type::i64()));
+        $floatAsIs->ret($cell);
+        $boolk->ret($boolk->and_($cell, Value::int(Type::i64(), 1)));
+    }
+
+    /**
+     * `__mir_elem_encode(arr, cell) -> i64` — the word a boxed value is STORED
+     * as, and the buffer it lands in: the store half of the element-channel
+     * rule, the mirror of {@see emitElemDecode}. A cell-typed writer makes the
+     * buffer a CELL buffer — all of it, consistently:
+     *   hint CELL          → the cell;
+     *   hint 0 (unstamped) → the cell, hint stamped CELL (today's claim for a
+     *                        boxed store, kept);
+     *   any raw hint       → `__mir_array_cellify_inplace`, then the cell.
+     * Never a raw payload into a raw buffer: that would make EVERY cell-typed
+     * reader (cursor family, walkers, merges) decode by hint, where today only
+     * the keyed read, foreach and the erased index-get do. A buffer is
+     * raw-hinted exactly as long as no cell-typed store has touched it, and a
+     * raw-typed alias of a cellified buffer reads it through the CELL-hint
+     * untag that the concrete str/obj readers already carry. A REF cell
+     * (nibble 9) is a cell like any other here.
+     */
+    private function emitElemEncode(): void
+    {
+        $fn = $this->module->func('__mir_elem_encode', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $cell = $fn->param(Type::i64(), 'cell');
+        $e = $fn->block('entry');
+        $asis = $fn->block('asis');
+        $chk = $fn->block('chk');
+        $h0 = $fn->block('h0');
+        $mism = $fn->block('mism');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
+        $asis->ret($cell);
+        $fp = $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $flags = $chk->load(Type::i64(), $fp);
+        $hint = $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $chk->switch_($hint, $mism, [
+            new SwitchCase(Value::int(Type::i64(), 0), $h0),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $asis),
+        ]);
+        $h0->store($h0->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
+        $h0->ret($cell);
+        $mism->call('__mir_array_cellify_inplace', Type::void(), [$arr, $hint]);
+        $mism->ret($cell);
+    }
+
+    /**
+     * `__mir_elem_encode_raw(arr, raw, kind) -> i64` — the word a RAW value of
+     * static element-kind `kind` (an `ARRAY_ELEM_HINT_*` code, 0 for a word
+     * with no describable shape) is stored as: boxed by that kind when the
+     * buffer is already CELL-hinted, itself otherwise. The raw-store mirror of
+     * {@see emitElemEncode}: a raw store into a cell buffer used to land a
+     * bare word among tagged ones (an erased `$rec['commands'] = array_filter(…)`
+     * into a heterogeneous literal, a string into a `string[]` param that
+     * arrived as cells).
+     */
+    private function emitElemEncodeRaw(): void
+    {
+        $fn = $this->module->func('__mir_elem_encode_raw', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $raw = $fn->param(Type::i64(), 'raw');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $e = $fn->block('entry');
+        $asis = $fn->block('asis');
+        $chk = $fn->block('chk');
+        $box = $fn->block('box');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
+        $asis->ret($raw);
+        $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk->brIf($isCell, $box, $asis);
+        $box->ret($box->call('__mir_box_by_repr', Type::i64(), [$raw, $kind]));
+    }
+
+    /**
+     * `__mir_elem_stamp_raw(arr, hint, repr)` — the hint (and, when `repr` is
+     * non-zero, the ownership repr) a raw store records on the buffer it just
+     * wrote — UNLESS the buffer is CELL-hinted, in which case the value went in
+     * boxed ({@see emitElemEncodeRaw}) and the buffer's description must not
+     * change. `hint` 0 clears the hint, as a store of an undescribable word
+     * always has.
+     */
+    private function emitElemStampRaw(): void
+    {
+        $fn = $this->module->func('__mir_elem_stamp_raw', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $hint = $fn->param(Type::i64(), 'hint');
+        $repr = $fn->param(Type::i64(), 'repr');
+        $e = $fn->block('entry');
+        $done = $fn->block('done');
+        $st = $fn->block('st');
+        $fp = $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $flags = $e->load(Type::i64(), $fp);
+        $cur = $e->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $e->brIf($e->icmp('eq', $cur, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $done, $st);
+        $done->retVoid();
+        $hinted = $st->or_($st->and_($flags, Value::int(Type::i64(), ~MemoryAbi::ARRAY_ELEM_HINT_MASK)), $hint);
+        $withRepr = $st->or_($st->and_($hinted, Value::int(Type::i64(), ~MemoryAbi::ARRAY_REPR_MASK)), $repr);
+        $st->store($st->select($st->icmp('ne', $repr, Value::int(Type::i64(), 0)), $withRepr, $hinted), $fp);
+        $st->retVoid();
     }
 
     /**

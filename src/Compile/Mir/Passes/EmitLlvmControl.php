@@ -1174,23 +1174,25 @@ trait EmitLlvmControl
         // keyed read, one file over — was right. Guarded like the keyed read
         // in {@see EmitLlvmArrays::emitArrayAccessUnified}, and carrying the
         // same cross-module caveat: see docs/design/reference-cells.md.
+        $fel = $fe->array->type->element ?? null;
+        // A CELL loop variable — a cell element, or any element of a cell BASE —
+        // is decoded by the buffer's own hint, exactly as the keyed read is ({@see EmitLlvmArrays::emitArrayAccessUnified}) and
+        // for the same reason; the store side re-encodes, so a value written
+        // back into a raw-hinted buffer lands raw again. An UNKNOWN element is
+        // still never decoded — its consumers deref the word raw.
+        if (($fel !== null && $fel->kind === Type::KIND_CELL)
+            || $fe->array->type->kind === Type::KIND_CELL) {
+            $ed = $this->ssa->allocReg();
+            $out .= '  ' . $ed . ' = call i64 @__mir_elem_decode(ptr ' . $arr
+                  . ', i64 ' . $ev . ")\n";
+            $ev = $ed;
+        }
         if ($this->rt->needsRefCells) {
             $this->rt->needsTagged = true;
             $dr = $this->ssa->allocReg();
             $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $ev . ")\n";
             $ev = $dr;
         }
-        // ⚠ The value word is NOT decoded by the array's element hint, on any
-        // channel. The hint says what the elements ARE at runtime, but every
-        // STATIC type downstream still says otherwise, and the two desynchronise
-        // the moment the value is stored back: `uasort` decorates
-        // `foreach ($arr as $k => $v)` into records and rebuilds $arr from them,
-        // so a decoded $v lands as a tagged word inside the caller's
-        // `assoc[string]`, which print_r then deref'd — natsort SIGSEGV,
-        // measured twice, with and without a store-side re-encode. The decode
-        // only becomes sound once the erased element CHANNEL is retyped cell in
-        // InferTypes: that is the rest of this epic.
-        //
         // The opposite direction IS sound and is done: when the static element
         // type says STRING the value slot is read as a raw pointer everywhere, so
         // a slot that actually holds a boxed cell has to be stripped to its
@@ -1198,7 +1200,6 @@ trait EmitLlvmControl
         // array_keys($assoc)) as $n) { str_contains($n, …) }` through a `string[]`
         // param walks cells — and it hands nothing downstream that the static
         // type did not already promise. {@see EmitLlvmArrays::emitArrayAccessUnified}
-        $fel = $fe->array->type->element ?? null;
         if ($fel !== null
             && ($fel->kind === Type::KIND_STRING || $fel->kind === Type::KIND_OBJ)) {
             $this->rt->needsElemUntag = true;

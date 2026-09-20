@@ -2192,6 +2192,31 @@ trait EmitLlvmCalls
      * could over-release. User methods / static calls always +1.
      */
     /**
+     * The `ARRAY_ELEM_HINT_*` code a by-ref array lvalue must be conformed to
+     * after the call, or null when nothing can have changed its element repr:
+     * the caller's array has a CONCRETE element kind with a hint code, and the
+     * callee's param declares an erased or cell element (a bare `array &`, a
+     * `mixed[] &`), so its writes are what the callee's channel makes them.
+     * A callee that declares the same concrete element writes raw words already.
+     */
+    private function byRefConformKind(Node $a, array $ptypes, int $ai): ?int
+    {
+        $t = $a->type;
+        if (!$t->isVec() && !$t->isAssoc()) { return null; }
+        $el = $t->element;
+        if ($el === null) { return null; }
+        $code = $this->elementHintCodeForType($el);
+        if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return null; }
+        $pt = $ptypes[$ai] ?? null;
+        if ($pt === null) { return $code; }
+        if ($pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN) { return $code; }
+        if (!$pt->isArray()) { return null; }
+        $pel = $pt->element;
+        if ($pel === null || $pel->kind === Type::KIND_CELL || $pel->kind === Type::KIND_UNKNOWN) { return $code; }
+        return null;
+    }
+
+    /**
      * Whether a by-ref arg is a CELL being handed to a param that expects a raw
      * payload — the case that needs an unbox/re-box around the call.
      *
@@ -2708,6 +2733,13 @@ trait EmitLlvmCalls
         $cellBoxSlots = [];
         $cellBoxTmps = [];
         $cellBoxTypes = [];
+        // A CONCRETE-element array lvalue handed to a by-ref param whose own
+        // element channel is erased or cell: the callee may hand back a buffer
+        // it cellified (the sort family rebuilds `array &$arr` as cells), so
+        // the caller's static claim is re-established after the call
+        // (`__mir_array_conform`). Parallel slot-address / kind-code arrays.
+        $conformSlots = [];
+        $conformKinds = [];
         // Fresh owned obj/vec/assoc temps passed to a borrow param: same
         // borrow-everything contract as the string temps (a keeping callee
         // retains; see the retain categories) — the caller's transient is
@@ -2778,6 +2810,11 @@ trait EmitLlvmCalls
                 // in the caller's slot / the object's field.
                 $out .= $this->byRefAddrOf($a);
                 $argList .= 'i64 ' . $this->lastValue;
+                $ck = $this->byRefConformKind($a, $ptypes, $ai);
+                if ($ck !== null) {
+                    $conformSlots[] = $this->lastValue;
+                    $conformKinds[] = $ck;
+                }
             } elseif (($mask[$ai] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
                 // By-ref param with a non-lvalue arg — an OMITTED default
                 // (`&$r = null` called without the arg) reaches here as the
@@ -2935,6 +2972,15 @@ trait EmitLlvmCalls
         // array, which would silently break the by-ref aliasing the caller
         // expects.
         $bi = 0;
+        $ci2 = 0;
+        foreach ($conformSlots as $cslot) {
+            $csp = $this->ssa->allocReg();
+            $out .= '  ' . $csp . ' = inttoptr i64 ' . $cslot . " to ptr\n";
+            $cap = $this->ssa->allocReg();
+            $out .= '  ' . $cap . ' = load ptr, ptr ' . $csp . "\n";
+            $out .= '  call void @__mir_array_conform(ptr ' . $cap . ', i64 ' . (string)$conformKinds[$ci2] . ")\n";
+            $ci2 = $ci2 + 1;
+        }
         foreach ($reboxTmps as $rtmp) {
             $rv = $this->ssa->allocReg();
             $out .= '  ' . $rv . ' = load i64, ptr ' . $rtmp . "\n";

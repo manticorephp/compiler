@@ -87,19 +87,44 @@ truth at every erased boundary, and both the read and the store consult it.**
   InferTypes retypes an erased element read as CELL (the channel is honestly a
   cell once the decode exists), so reason 1 disappears by construction and the
   consumers unbox by type as they do for every other cell.
-- **Store encode, the mirror.** A cell value stored into a buffer whose hint is
-  not CELL goes through `__mir_elem_encode(arr, cell)`: hint == tag ⇒ payload
-  stored raw; hint 0 (empty) ⇒ stamp from the tag, store the payload; mismatch
-  ⇒ `__mir_array_cellify_inplace` (box every element, stamp CELL), then store
-  the cell. The sort family's write-back is then correct by the SAME rule that
-  makes the read correct — reason 2 is gone.
-- **Then `boxToCell` of any array is the flat `box_array`** — `emitVecToCellArray`
-  (rebuild, identity loss) retires, `isCellBoxableArg` admits arrays and
-  objects, and the slot producers P1–P3 are a store that boxes plus a read that
-  trusts.
+- **Store encode, the mirror.** A boxed store goes through
+  `__mir_elem_encode(arr, cell)`: hint CELL ⇒ the cell; hint 0 ⇒ stamp CELL,
+  the cell; any raw hint ⇒ `__mir_array_cellify_inplace` (every element boxed
+  by the old hint, hint → CELL, an ownership repr re-encoded, never
+  introduced), then the cell. **Never a raw payload into a raw buffer** — the
+  first draft did that, and it would have obliged every cell-typed reader
+  (cursor family, walkers, merges) to decode; a buffer is raw-hinted exactly as
+  long as no cell-typed store has touched it. A RAW store is the other mirror:
+  `__mir_elem_encode_raw(arr, raw, kind)` boxes by the value's static kind when
+  the buffer is CELL-hinted, and `__mir_elem_stamp_raw` records the raw
+  hint/repr only when it is not. The sort family's write-back is then correct
+  by the same rule that makes the read correct — reason 2 is gone.
+- **The static claim is re-established where a buffer comes BACK.** A concrete
+  array lvalue passed by-ref to an erased/cell param (`usort(array &$arr)`)
+  gets `__mir_array_conform(arr, kind)` after the call: a CELL-hinted buffer is
+  unboxed in place to the caller's kind (`__mir_cell_to_kind`), hint and repr
+  follow. The rebuild (`emitAssocToCellArrayUnified`) reads the buffer's hint
+  first for the same reason: `natsort($v)` had already cellified the caller's
+  `assoc[string,string]`, and boxing those words as pointers double-tagged them
+  (the natsort SIGSEGV of both earlier attempts). ⛔ Method/static by-ref calls
+  do not conform yet — only the plain-call site does.
+- **Bodies keyed by result type.** The erased index-get helper is one shared
+  body per key channel; a CELL result decodes, an UNKNOWN one must not (`sset()`
+  returns `$x["k"]` into a string slot), so the decoding body carries a `c`
+  suffix in its name.
+- **Not done: the flat `box_array` for every array.** The rebuild stays for a
+  raw-hinted buffer crossing into a cell channel; retiring it needs every
+  cell-base reader (cursor family, spread, union, comparisons, the runtime
+  walkers) to decode by hint. Deferred behind the verifier.
 
-Cost: one `load flags; and; br` per cell-typed element access and store, on a
-path that already pays a tag dispatch. Nothing on the concrete paths.
+Landed 2026-09-20 (`w4`): suite 1080/0/1082 on gen2; P4 and P7 promoted;
+`compare_natsort`, `erased_record_element`, `assoc_string_by_value_cow`,
+`closure_env_lifetime` and `cond_own_objarray` were the five regressions the
+first drafts hit, each one of the rules above.
+
+Cost: one `load flags; and; br` per cell-typed element access and per element
+store (raw stores pay the CELL-hint check too), plus one conform walk per
+by-ref call into an erased param.
 
 ## Order
 

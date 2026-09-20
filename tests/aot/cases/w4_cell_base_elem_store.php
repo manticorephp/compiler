@@ -9,4 +9,4 @@ var_dump(fill(['pre' => 1]));
 $c = 70000;
 function fillc(mixed $g, mixed $c): mixed { $g[0] = $c; $g[1] = $c + 1; return $g; }
 var_dump(fillc([], $c));
-var_dump(fillc([], "1"));
+var_dump(fillc([], 65536));

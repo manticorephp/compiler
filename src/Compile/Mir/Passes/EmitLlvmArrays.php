@@ -622,6 +622,18 @@ trait EmitLlvmArrays
         return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
     }
 
+    /** True when a container's static element type is a CLAIM the buffer may
+     *  not honour — cell or erased — so an element read whose result is a cell
+     *  must decode by the buffer's hint, and a boxed store must encode by it. */
+    private function elemMayBeRawHinted(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_CELL) { return true; }
+        if (!$t->isArray()) { return false; }
+        $el = $t->element;
+        if ($el === null) { return true; }
+        return $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
+    }
+
     /**
      * `$erased[$k]` where the subject's kind is only known at run time.
      *
@@ -669,6 +681,10 @@ trait EmitLlvmArrays
             $args .= $key;
         }
         $variant = $keyIsString ? 'str' : ($keyIsCell ? 'cell' : 'int');
+        // A CELL result is decoded by the buffer's hint inside the array arm;
+        // an UNKNOWN result is not (its consumers deref the word raw), so the
+        // two are DIFFERENT bodies — the `c` suffix keeps them apart by name.
+        if ($self->type->kind === Type::KIND_CELL) { $variant .= 'c'; }
         $this->eidxNeeded[$variant] = true;
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
@@ -705,8 +721,10 @@ trait EmitLlvmArrays
     {
         $out = '';
         foreach ($this->eidxNeeded as $variant => $ignoredFlag) {
-            $keyIsString = $variant === 'str';
-            $keyIsCell = $variant === 'cell';
+            $decode = \str_ends_with($variant, 'c');
+            $keyKind = $decode ? \substr($variant, 0, -1) : $variant;
+            $keyIsString = $keyKind === 'str';
+            $keyIsCell = $keyKind === 'cell';
             $params = 'i64 %eix.a, i64 %eix.k';
             $hashArgs = ', i64 0, i64 0';
             if ($keyIsString) {
@@ -720,7 +738,7 @@ trait EmitLlvmArrays
                 $body .= '  ' . $kp . " = inttoptr i64 %eix.k to ptr\n";
                 $key = $kp;
             }
-            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs);
+            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs, $decode);
             $out .= 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
                   . '(' . $params . ") noinline {\nentry:\n" . $body
                   . '  ret i64 ' . $this->lastValue . "\n}\n\n";
@@ -739,6 +757,7 @@ trait EmitLlvmArrays
         bool $keyIsCell,
         bool $keyIsString,
         string $hashArgs,
+        bool $decode = false,
     ): string {
         $holders = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet');
         $out = '';
@@ -849,8 +868,18 @@ trait EmitLlvmArrays
         // array runtime's own owner rather than the needsTagged-gated helper —
         // this body is emitted wherever the array runtime is, and a cell base
         // is exactly the base a reference-holding array arrives through.
+        // A cell base is the channel most likely to carry a raw-hinted buffer
+        // (an array that crossed a `mixed` slot); a CELL result is decoded by
+        // the buffer's hint first — the same rule as the concrete-base read.
+        // An UNKNOWN result is left raw (`$decode` false). A REF is
+        // CELL-hinted, so it survives the decode.
+        $avx = $av;
+        if ($decode) {
+            $avx = $this->ssa->allocReg();
+            $out .= '  ' . $avx . ' = call i64 @__mir_elem_decode(ptr ' . $ap . ', i64 ' . $av . ")\n";
+        }
         $avd = $this->ssa->allocReg();
-        $out .= '  ' . $avd . ' = call i64 @__mir_deref_cell(i64 ' . $av . ")\n";
+        $out .= '  ' . $avd . ' = call i64 @__mir_deref_cell(i64 ' . $avx . ")\n";
         $out .= '  store i64 ' . $avd . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
@@ -895,6 +924,18 @@ trait EmitLlvmArrays
         $out .= $this->baseTempRelease($aa->array, $arrPtr, true, $self->type);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        // A CELL result read out of a buffer that may be raw-hinted is decoded
+        // by the buffer's own hint: the static type promised the consumer a
+        // cell, and the hint — not the type — says what the word is (a
+        // `vec[string]` literal assigned to an `array<string,mixed>` property
+        // reads back a bare pointer otherwise). Paired with `__mir_elem_encode`
+        // on the store side, {@see emitStoreElemValue}; docs/design/value-channels.md.
+        if ($self->type->kind === Type::KIND_CELL && $this->elemMayBeRawHinted($aa->array->type)) {
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = call i64 @__mir_elem_decode(ptr ' . $arrPtr . ', i64 ' . $reg . ")\n";
+            $reg = $d;
+            $this->lastValue = $reg;
+        }
         // A REFERENCE element yields what it refers to. This is not the decode
         // the ⚠ note below refuses: that one would hand a consumer a CELL where
         // it was promised a raw word, inventing a representation. A ref deref
@@ -907,13 +948,11 @@ trait EmitLlvmArrays
             $reg = $d;
             $this->lastValue = $reg;
         }
-        // ⚠ The element is NOT decoded into a CELL by the array's hint here. Two
-        // consumers proved a plain subscript cannot be: an UNKNOWN result is
-        // deref'd raw (`function sset(array $x) { $x["k"] = "z"; return $x["k"]; }`
-        // returns the word into a string slot), and a CELL result is written back
-        // into a raw-repr array by the sort family. That decode lives where a
-        // value is genuinely CONSUMED as a cell — array_pop/array_shift and
-        // implode — until the store side learns to re-encode.
+        // ⚠ An UNKNOWN result is NOT decoded into a CELL by the array's hint:
+        // its consumers deref it raw (`function sset(array $x) { $x["k"] = "z";
+        // return $x["k"]; }` returns the word into a string slot), so a decode
+        // would invent a representation the static type never promised. The
+        // CELL result is decoded above, now that the store side re-encodes.
         //
         // The OTHER direction is sound and is done: a result the static type
         // already calls a STRING or an OBJECT must be a raw pointer, so if the
@@ -1101,6 +1140,34 @@ trait EmitLlvmArrays
         $nw = $this->ssa->allocReg();
         $out .= '  ' . $nw . ' = or i64 ' . $cl . ', ' . (string)$code . "\n";
         $out .= '  store i64 ' . $nw . ', ptr ' . $fp . "\n";
+        return $out;
+    }
+
+    /**
+     * The store half of the element-channel rule: `__mir_elem_encode` makes
+     * `$arrPtr`'s buffer a CELL buffer before {@see $elemValReg} (a boxed
+     * cell) lands in it — a raw-hinted buffer is cellified in place, an
+     * unstamped one is stamped. The mirror of the read decode in
+     * {@see emitArrayAccessUnified}.
+     */
+    private function emitElemEncode(string $arrPtr): string
+    {
+        $enc = $this->ssa->allocReg();
+        $out = '  ' . $enc . ' = call i64 @__mir_elem_encode(ptr ' . $arrPtr . ', i64 ' . $this->elemValReg . ")\n";
+        $this->elemValReg = $enc;
+        return $out;
+    }
+
+    /** The raw-store mirror of {@see emitElemEncode}: `__mir_elem_encode_raw`
+     *  boxes {@see $elemValReg} by the value's static kind when the buffer is
+     *  CELL-hinted, and leaves it raw otherwise. */
+    private function emitElemEncodeRaw(string $arrPtr, StoreElement $se): string
+    {
+        $kind = $this->elementHintCodeForType($se->value->type) ?? 0;
+        $enc = $this->ssa->allocReg();
+        $out = '  ' . $enc . ' = call i64 @__mir_elem_encode_raw(ptr ' . $arrPtr . ', i64 '
+             . $this->elemValReg . ', i64 ' . (string)$kind . ")\n";
+        $this->elemValReg = $enc;
         return $out;
     }
 
@@ -1505,6 +1572,7 @@ trait EmitLlvmArrays
         $next = $this->ssa->allocReg();
         if ($isAppend) {
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
             if ($boxVal && ($se->value instanceof \Compile\Mir\Call)) {
@@ -1516,6 +1584,7 @@ trait EmitLlvmArrays
             $out .= $this->coerceToI64();
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $curE = '';
             if ($readsOld) {
@@ -1547,6 +1616,7 @@ trait EmitLlvmArrays
             $out .= $this->coerceToPtr();
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $curE = '';
             if ($readsOld) {
@@ -1569,6 +1639,7 @@ trait EmitLlvmArrays
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $curE = '';
             if ($readsOld) {
@@ -1586,7 +1657,6 @@ trait EmitLlvmArrays
         // realloced / promoted / deimmortalised buffer) so the plain repr
         // release/retain/cow drop/co-own this erased array's raw elements.
         $reprCode = $this->erasedReprCode($se);
-        if ($reprCode !== null) { $out .= $this->emitReprStamp($next, $reprCode); }
         // The SHAPE hint is stamped whatever the ownership answer was: an
         // erased store describes the value it just wrote, a concrete container
         // describes its declared element, and a boxed (cell) store says so.
@@ -1594,7 +1664,8 @@ trait EmitLlvmArrays
         if ($reprCode !== null) {
             $hint = $this->hintForReprCode($reprCode);
         } elseif ($boxVal) {
-            $hint = \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL;
+            // `__mir_elem_encode` already stamped the buffer CELL.
+            $hint = null;
         } else {
             $et = $se->array->type->element;
             if ($et !== null && $et->kind !== Type::KIND_UNKNOWN) {
@@ -1609,7 +1680,14 @@ trait EmitLlvmArrays
                 if ($hint === null) { $hint = 0; }
             }
         }
-        if ($hint !== null) { $out .= $this->emitElemHintStamp($next, $hint); }
+        // A raw store records what it wrote — unless the buffer turned out to be
+        // CELL-hinted at run time, in which case the value went in boxed and the
+        // description stands ({@see emitElemEncodeRaw}). A boxed store's
+        // description was settled by `__mir_elem_encode` itself.
+        if ($hint !== null) {
+            $out .= '  call void @__mir_elem_stamp_raw(ptr ' . $next . ', i64 ' . (string)$hint
+                  . ', i64 ' . (string)($reprCode ?? 0) . ")\n";
+        }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
         // The store as an EXPRESSION is the value in the node's own static
         // type, not the word the slot took: a boxing store yields the raw
