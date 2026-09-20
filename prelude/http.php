@@ -1603,10 +1603,16 @@ final class UploadedFile
 
 /**
  * multipart/form-data, RFC 7578, as a state machine over a chunk source so
- * the same code serves a buffered body and a streamed one. Field parts go to
- * strings, file parts to temp files; the only scan is `strpos` for the
- * delimiter, and bytes that could be the head of a split delimiter stay in
- * the buffer across reads.
+ * the same code serves a buffered body and a streamed one. The only scan is
+ * `strpos` for the delimiter, and bytes that could be the head of a split
+ * delimiter stay in the buffer across reads.
+ *
+ * Two entry points over ONE set of state fields, differing only in who owns
+ * the body bytes: {@see parseAll} (push) runs to the end, field parts to
+ * strings and file parts to temp files; {@see parts} (pull) yields a
+ * {@see Part} per part and hands its bytes to the consumer through
+ * {@see readPart} — no temp file, nothing retained, a part the consumer stops
+ * reading is drained before the next one is opened.
  */
 final class Multipart
 {
@@ -1623,6 +1629,10 @@ final class Multipart
     private string $buf = '';
     private int $state = 0;
     private bool $eof = false;
+    /** Pull mode ({@see parts}): no temp file is opened for a file part. */
+    private bool $pull = false;
+    /** Bumped per part head; a {@see Part} reads only while it is the current one. */
+    private int $pSeq = 0;
 
     /** @var array<int|string, mixed> */
     private array $fields;
@@ -1722,6 +1732,87 @@ final class Multipart
             }
         }
         return true;
+    }
+
+    /**
+     * Pull mode: one {@see Part} per part, in wire order. A part the consumer
+     * did not read to its end is drained when the generator resumes, so the
+     * next part always starts at its head. Malformed input throws — there is
+     * no 400 to answer here, the handler is already running.
+     *
+     * @return \Generator<int, Part>
+     */
+    public function parts(): \Generator
+    {
+        $this->pull = true;
+        if (\strlen($this->delim) <= 4 || !$this->preamble()) {
+            throw new \RuntimeException('malformed multipart');
+        }
+        while ($this->state === self::ST_HEAD) {
+            if ($this->head() < 0) {
+                throw new \RuntimeException('malformed multipart');
+            }
+            yield new Part($this->pName, $this->pFile, $this->pType, $this->pSeq, $this);
+            $this->skipRest();
+        }
+    }
+
+    /**
+     * Up to $max bytes of the current part ({@see body} bounded to $max and
+     * stopping AT the delimiter); '' once the part's delimiter is reached, or
+     * for a Part that is no longer the current one. At EOF the remainder is
+     * the part — a body cut off mid-part ends it, as the push mode's PARTIAL.
+     */
+    public function readPart(int $max, int $seq): string
+    {
+        if ($seq !== $this->pSeq || $this->state !== self::ST_BODY || $max <= 0) {
+            return '';
+        }
+        while (true) {
+            $p = \strpos($this->buf, $this->delim);
+            if ($p !== false) {
+                if ($p === 0) {
+                    $this->endPart();
+                    return '';
+                }
+                return $this->take($p < $max ? $p : $max);
+            }
+            $avail = \strlen($this->buf) - (\strlen($this->delim) - 1);
+            if ($avail > 0) {
+                return $this->take($avail < $max ? $avail : $max);
+            }
+            if (!$this->fill()) {
+                $out = $this->buf;
+                $this->buf = '';
+                $this->state = self::ST_DONE;
+                return $out;
+            }
+        }
+    }
+
+    private function take(int $n): string
+    {
+        $out = \substr($this->buf, 0, $n);
+        $this->buf = \substr($this->buf, $n);
+        return $out;
+    }
+
+    /** The delimiter is at the head of the buffer: step over it, then {@see afterDelim}. */
+    private function endPart(): void
+    {
+        $this->buf = \substr($this->buf, \strlen($this->delim));
+        if (!$this->afterDelim()) {
+            $this->state = self::ST_DONE;
+            throw new \RuntimeException('malformed multipart');
+        }
+    }
+
+    /** Drain the current part to its delimiter — the consumer stopped early. */
+    private function skipRest(): void
+    {
+        while ($this->state === self::ST_BODY) {
+            $this->readPart(self::READ, $this->pSeq);
+        }
     }
 
     /** Malformed: drop the open part's temp file and every collected one. */
@@ -1841,7 +1932,8 @@ final class Multipart
             // a file part with only filename= is kept, field ''
             return -1;
         }
-        if ($this->pIsFile) {
+        $this->pSeq = $this->pSeq + 1;
+        if ($this->pIsFile && !$this->pull) {
             $this->openFile();
         }
         $this->state = self::ST_BODY;
@@ -1983,6 +2075,43 @@ final class Multipart
 }
 
 /**
+ * One part of a streamed multipart body ({@see Request::multipart}): a bounded
+ * view over the parser's current part. Its bytes are read from the wire as the
+ * handler asks for them and are retained nowhere else; once the generator
+ * moves on, {@see read} answers ''.
+ */
+final class Part
+{
+    public function __construct(
+        /** The `name=` of the Content-Disposition. */
+        public readonly string $name,
+        /** The `filename=`; '' for a field. */
+        public readonly string $filename,
+        /** The part's Content-Type, '' when it has none. */
+        public readonly string $type,
+        private int $seq,
+        private Multipart $m,
+    ) {
+    }
+
+    /** Up to $max bytes of this part; '' once its delimiter is reached. */
+    public function read(int $max): string
+    {
+        return $this->m->readPart($max, $this->seq);
+    }
+
+    /** The rest of this part as one string — the consumer's memory, uncapped. */
+    public function readAll(): string
+    {
+        $out = '';
+        while (($c = $this->read(65536)) !== '') {
+            $out = $out . $c;
+        }
+        return $out;
+    }
+}
+
+/**
  * One parsed request. Immutable to the handler.
  *
  * The public surface is `readonly`; the two memo fields and the bitfield beside
@@ -2011,6 +2140,8 @@ final class Request
 
     private ?Multipart $multipart = null;
     private bool $multipartFailed = false;
+    /** {@see multipart} ran: the streamed body is that generator's. */
+    private bool $multipartUsed = false;
     private int $maxFileUploads = 20;
     private int $uploadMaxFilesize = 2097152;
 
@@ -2098,7 +2229,7 @@ final class Request
     {
         if (($this->parsed & self::P_POST) === 0) {
             if (\strncasecmp($this->contentType(), 'multipart/form-data', 19) === 0) {
-                $this->ensureMultipart();
+                $this->ensureMultipart('postArray');
                 $m = $this->multipart;
                 $this->postNested = $m === null ? \Manticore\Sapi\Context::$emptyGpc : $m->fields();
             } else {
@@ -2111,14 +2242,20 @@ final class Request
         return $this->postNested;
     }
 
-    /** Parse a buffered multipart body once; a streamed one is the handler's ({@see multipart}). */
-    private function ensureMultipart(): void
+    /**
+     * Parse a buffered multipart body once. A streamed one is the handler's
+     * ({@see multipart}); asking for it whole here is a LogicException.
+     */
+    private function ensureMultipart(string $who): void
     {
         if ($this->multipart !== null || $this->multipartFailed) {
             return;
         }
-        if ($this->streamed || \strncasecmp($this->contentType(), 'multipart/form-data', 19) !== 0) {
+        if (\strncasecmp($this->contentType(), 'multipart/form-data', 19) !== 0) {
             return;
+        }
+        if ($this->streamed) {
+            throw new \LogicException('Http\\Request::' . $who . '(): body is streamed — use multipart()');
         }
         $m = new Multipart($this->header('Content-Type'), stringSource($this->bodyRaw), $this->maxFileUploads, $this->uploadMaxFilesize);
         if (!$m->parseAll()) {
@@ -2135,14 +2272,44 @@ final class Request
 
     public function multipartFailed(): bool
     {
-        $this->ensureMultipart();
+        if ($this->streamed) {
+            return false;
+        }
+        $this->ensureMultipart('multipartFailed');
         return $this->multipartFailed;
+    }
+
+    /**
+     * The parts of a STREAMED multipart body ({@see Server::streamBodies}),
+     * one {@see Part} at a time, read from the wire as the handler consumes
+     * them — no temp file, nothing buffered beyond one read. The body is the
+     * generator's: {@see allFiles}/{@see postArray} refuse a streamed
+     * multipart body, and a buffered one is theirs (this throws).
+     *
+     * @return \Generator<int, Part>
+     */
+    public function multipart(): \Generator
+    {
+        if (!$this->streamed) {
+            throw new \LogicException('Http\\Request::multipart(): body is buffered — use allFiles()');
+        }
+        if ($this->multipart !== null || $this->multipartUsed) {
+            throw new \LogicException('Http\\Request::multipart(): body already consumed');
+        }
+        $this->multipartUsed = true;
+        $rd = $this->reader;
+        if ($rd !== null) {
+            $m = new Multipart($this->header('Content-Type'), function (int $max) use ($rd): string {
+                return $rd->read($max);
+            }, $this->maxFileUploads, $this->uploadMaxFilesize);
+            yield from $m->parts();
+        }
     }
 
     /** Every file part, in wire order. @return array<int, UploadedFile> */
     public function allFiles(): array<int, UploadedFile>
     {
-        $this->ensureMultipart();
+        $this->ensureMultipart('allFiles');
         $m = $this->multipart;
         return $m === null ? self::$noFiles : $m->files();
     }
@@ -3269,7 +3436,11 @@ final class Server
     public function maxFileUploads(int $n): Server { $this->maxFileUploads = $n < 0 ? 0 : $n; return $this; }
     /** php's per-file `upload_max_filesize` (2 MiB). */
     public function uploadMaxFilesize(int $n): Server { $this->uploadMaxFilesize = $n < 0 ? 0 : $n; return $this; }
-    /** php's `post_max_size`; 0 defers to {@see maxBodySize}. */
+    /**
+     * Reserved — php's `post_max_size`. Stored, not enforced: a buffered body is
+     * already bounded by {@see maxBodySize}, and a streamed one's field bytes
+     * are the handler's ({@see Part::readAll}).
+     */
     public function postMaxSize(int $n): Server { $this->postMaxSize = $n < 0 ? 0 : $n; return $this; }
     /** `callable(\Throwable, ?Request): Response` */
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
@@ -3607,12 +3778,14 @@ final class Server
         // element on purpose (a whole-array store into a cell-element
         // superglobal leaves the elements raw, and `echo $_GET['a']` then
         // prints 2.1E-314).
+        // A streamed body is the handler's (Request::stream / multipart):
+        // $_POST and $_FILES are not seeded from it.
         \Manticore\Sapi\requestBegin(
             $this->serverVars($req),
             $req->queryArray(),
-            $req->postArray(),
+            $req->streamed ? \Manticore\Sapi\Context::$emptyGpc : $req->postArray(),
             $req->cookies(),
-            $req->filesArray(),
+            $req->streamed ? \Manticore\Sapi\Context::$emptyGpc : $req->filesArray(),
         );
     }
 

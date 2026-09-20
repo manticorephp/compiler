@@ -66,6 +66,7 @@ $req->filesArray()                 // php's $_FILES shape, six columns transpose
 $req->cookie('sid')                $req->cookies()
 $req->body()                       $req->hasBody()          $req->contentLength()
 $req->stream()                     // ?Buffer\Reader, only for a streamed body
+$req->multipart()                  // Generator<Http\Part>, only for a streamed multipart body
 $req->methodEnum()                 // ?Http\Method, for an exhaustive match
 $req->is(Http\Method::Post)        $req->isKeepAlive()
 ```
@@ -186,6 +187,15 @@ length as its budget. A body the handler ignores is drained before the
 connection is reused. A chunked body is always buffered — it declares no total,
 so the cap is applied per chunk, which is the only point at which it can be.
 
+A streamed `multipart/form-data` body is read one part at a time through
+`$req->multipart()`: each `Http\Part` (`name`, `filename`, `type`)
+hands its bytes out through `read($max)` (`''` at the part's end) or
+`readAll()`, straight off the wire — no temp file, nothing buffered beyond one
+read, and a part the handler stops reading is drained when the loop moves on.
+The body is the generator's: `allFiles()`/`postArray()` on it, or a second
+`multipart()`, throw a `LogicException`; a buffered body has no `multipart()`
+(use `allFiles()`). `$_FILES` and `$_POST` are not seeded from a streamed body.
+
 ## php's builtins work inside a handler
 
 This is the part that makes existing code run. `header()`, `header_remove()`,
@@ -254,7 +264,7 @@ well as the handler, so a streaming body sees it too.
 | `maxBodySize` | 8388608 | 413 (or streamed) |
 | `maxFileUploads` | 20 | further file parts dropped (php's `max_file_uploads`) |
 | `uploadMaxFilesize` | 2097152 | the part is kept with `error` 1 (`UPLOAD_ERR_INI_SIZE`), no temp file |
-| `postMaxSize` | 0 = `maxBodySize` | php's `post_max_size`; a buffered body is already bounded by `maxBodySize` (413), so only a streamed one can exceed it |
+| `postMaxSize` | 0 | reserved: php's `post_max_size`; a buffered body is already bounded by `maxBodySize` (413), and a streamed one's field bytes are the handler's (`Part::readAll()`), so nothing enforces it yet |
 | `maxInputVars` | 1000 | `queryArray()`/`postArray()` truncated (php's `max_input_vars`) |
 | `keepAliveMax` | 100 | connection closed after N requests |
 | `idleTimeout` | 5.0 | silent close between requests |

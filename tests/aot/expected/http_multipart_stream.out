@@ -1,0 +1,9 @@
+stream: HTTP/1.1 200 OK body=parts=2 bytes=1048576 md5=2aee9cebb29e5e78507a819687684779 a=1
+expect=2aee9cebb29e5e78507a819687684779
+files: HTTP/1.1 200 OK body=LogicException: Http\Request::allFiles(): body is streamed — use multipart()
+post: HTTP/1.1 200 OK body=LogicException: Http\Request::postArray(): body is streamed — use multipart()
+twice: HTTP/1.1 200 OK body=LogicException: Http\Request::multipart(): body already consumed
+buffered: HTTP/1.1 200 OK body=LogicException: Http\Request::multipart(): body is buffered — use allFiles()
+served=5 errors=0
+tmp files: none
+done
