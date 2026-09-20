@@ -129,7 +129,7 @@ class __McSession
 /**
  * Park the per-request half of the session state alongside the SAPI context.
  *
- * Called from __mc_sapi_ctx_switch behind a function_exists guard, so sapi.php
+ * Called from Manticore\Sapi\contextSwitch behind a function_exists guard, so sapi.php
  * carries no dependency on this file: a program with no session compiles the
  * guard away. The HANDLER is deliberately not parked — a save handler is
  * installed once for the process, exactly as php installs it.
@@ -514,7 +514,7 @@ function session_start(array<string, string> $options = []): bool
     }
     \__McSession::$id = $id;
     \__McSession::$status = 2;
-    $_SESSION = \__McSapi::$empty;
+    $_SESSION = \Manticore\Sapi\Context::$empty;
     $data = \__mc_sess_h_read($id);
     \__McSession::$lastRead = $data;
     if ($data !== '') {
@@ -587,7 +587,7 @@ function session_reset(): bool
     if (\__McSession::$status !== 2) {
         return false;
     }
-    $_SESSION = \__McSapi::$empty;
+    $_SESSION = \Manticore\Sapi\Context::$empty;
     $data = \__mc_sess_h_read(\__McSession::$id);
     \__McSession::$lastRead = $data;
     if ($data !== '') {
@@ -602,7 +602,7 @@ function session_unset(): bool
     if (\__McSession::$status !== 2) {
         return false;
     }
-    $_SESSION = \__McSapi::$empty;
+    $_SESSION = \Manticore\Sapi\Context::$empty;
     return true;
 }
 

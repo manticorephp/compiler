@@ -4,7 +4,7 @@
 // response, drain it. No php oracle — php's CLI has no request to begin — but
 // the Set-Cookie lines below are byte-identical to what php's own SAPI emits
 // (captured from php -S), which is the part a browser has to accept.
-__mc_request_begin(
+\Manticore\Sapi\requestBegin(
     ["REQUEST_URI" => "/x?a=1", "REQUEST_METHOD" => "POST"],
     ["a" => "1"],
     ["b" => "2"],
@@ -33,10 +33,10 @@ http_response_code(418);
 echo count(headers_list()), " queued\n";
 var_dump(http_response_code());
 
-echo "status=", __mc_response_status(), "\n";
-foreach (__mc_response_headers() as $h) {
+echo "status=", \Manticore\Sapi\responseStatus(), "\n";
+foreach (\Manticore\Sapi\responseHeaders() as $h) {
     echo $h, "\n";
 }
-__mc_request_end();
+\Manticore\Sapi\requestEnd();
 // With no request in flight the CLI answers are back.
 var_dump(headers_list(), http_response_code());

@@ -3870,7 +3870,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     }
     if ($useSession) {
         // ext/session is built ON the request seam (setcookie, headers_sent,
-        // __McSapi::$empty) and on the shutdown queue (the implicit
+        // Manticore\Sapi\Context::$empty) and on the shutdown queue (the implicit
         // end-of-request write-close). Forced HERE, before $useCli, which reads
         // $useSapi; the serialize tiers are forced below, after their own gates
         // have run — forcing them here would be overwritten.
