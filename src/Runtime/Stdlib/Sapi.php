@@ -25,17 +25,12 @@ function set_time_limit(int $seconds): bool
     return true;
 }
 
-/** Nothing was uploaded: there is no request. php answers false. */
-function is_uploaded_file(string $filename): bool
-{
-    return false;
-}
-
-/** Same reason — refuse rather than move an arbitrary file. */
-function move_uploaded_file(string $from, string $to): bool
-{
-    return false;
-}
+// is_uploaded_file() / move_uploaded_file() live in prelude/sapi.php, per
+// request, and NOT here as well: a stdlib body is a strong symbol and the
+// prelude's is linkonce_odr, so a second copy here silently won every
+// non-inlined call (move_uploaded_file answered false inside a live request).
+// A program that calls either name pulls sapi.php through the demand gate and
+// gets the CLI answer (false) outside a request from the same body.
 
 /**
  * `uniqid()` — the microsecond clock in hex, php's exact widths: 13 characters

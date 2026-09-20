@@ -695,8 +695,11 @@ function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = tr
     if ($base === '') {
         return;
     }
+    // `0=x` lands at [0], as every segment below does: php canonicalises the
+    // base too, and a runtime string key does not canonicalise on the store.
+    $bk = canonicalIntKey($base) ? (int)$base : $base;
     if ($bpos === false) {
-        $arr[$base] = $val;
+        $arr[$bk] = $val;
         return;
     }
     $segs = [];
@@ -722,15 +725,15 @@ function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = tr
         return;
     }
     if (\count($segs) === 0) {
-        $arr[$base] = $val;
+        $arr[$bk] = $val;
         return;
     }
-    if (!isset($arr[$base]) || !\is_array($arr[$base])) {
-        $arr[$base] = \Manticore\Sapi\Context::$empty;
+    if (!isset($arr[$bk]) || !\is_array($arr[$bk])) {
+        $arr[$bk] = \Manticore\Sapi\Context::$empty;
     }
-    $node = $arr[$base];
+    $node = $arr[$bk];
     nestedWalk($node, $segs, 0, $val);
-    $arr[$base] = $node;
+    $arr[$bk] = $node;
 }
 
 /**
@@ -1581,9 +1584,7 @@ final class UploadedFile
         }
         if ($ok) {
             $this->moved = true;
-            if (\function_exists('Manticore\Sapi\uploadMoved')) {
-                \Manticore\Sapi\uploadMoved($this->tmpName);
-            }
+            \Manticore\Sapi\uploadMoved($this->tmpName);
         }
         return $ok;
     }
@@ -2123,10 +2124,10 @@ final class Request
             return;
         }
         $this->multipart = $m;
+        // Registered for the request-end sweep: a temp file the handler never
+        // moves is unlinked when the request ends, thrown or not.
         foreach ($m->files() as $f) {
-            if (\function_exists('Manticore\\Sapi\\uploadRegister')) {
-                \Manticore\Sapi\uploadRegister($f->tmpName);
-            }
+            \Manticore\Sapi\uploadRegister($f->tmpName);
         }
     }
 
@@ -2154,6 +2155,55 @@ final class Request
             }
         }
         return $out;
+    }
+
+    /**
+     * php's $_FILES: six columns, nested names transposed per column
+     * (`f[]`×2 → `$_FILES['f']['name'] = [0 => …, 1 => …]`, `u[avatar]` →
+     * `$_FILES['u']['name']['avatar']`). A part with filename= but no name= is
+     * php's anonymous upload: rfc1867 files it under a running int, `$_FILES[0]`.
+     * @return array<string, mixed>
+     */
+    public function filesArray(): array<string, mixed>
+    {
+        $out = \Manticore\Sapi\Context::$empty;
+        $anon = 0;
+        foreach ($this->allFiles() as $f) {
+            $field = $f->field;
+            if ($field === '') {
+                $field = (string)$anon;
+                $anon = $anon + 1;
+            }
+            $this->filesColumn($out, $field, 'name', $f->name);
+            $this->filesColumn($out, $field, 'full_path', $f->fullPath);
+            $this->filesColumn($out, $field, 'type', $f->type);
+            $this->filesColumn($out, $field, 'tmp_name', $f->tmpName);
+            $this->filesColumn($out, $field, 'error', $f->error);
+            $this->filesColumn($out, $field, 'size', $f->size);
+        }
+        return $out;
+    }
+
+    /**
+     * `f[a][]` with column `size` → `$out['f']['size']['a'][]`: the base is the
+     * field, the column sits between the base and the bracket path. No urldecode:
+     * a multipart name is registered as sent (rfc1867), unlike a query key.
+     * @param array<string, mixed> $out
+     */
+    private function filesColumn(array &$out, string $field, string $col, mixed $val): void
+    {
+        $b = \strpos($field, '[');
+        if ($b === false) {
+            $bk = canonicalIntKey($field) ? (int)$field : $field;
+            if (!isset($out[$bk]) || !\is_array($out[$bk])) {
+                $out[$bk] = \Manticore\Sapi\Context::$empty;
+            }
+            $row = $out[$bk];
+            $row[$col] = $val;
+            $out[$bk] = $row;
+            return;
+        }
+        nestedAssign($out, \substr($field, 0, $b) . '[' . $col . ']' . \substr($field, $b), $val, false);
     }
 
     public function cookie(string $k, string $d = ''): string
@@ -3557,6 +3607,7 @@ final class Server
             $req->queryArray(),
             $req->postArray(),
             $req->cookies(),
+            $req->filesArray(),
         );
     }
 

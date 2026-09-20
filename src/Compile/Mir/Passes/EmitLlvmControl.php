@@ -1257,6 +1257,21 @@ trait EmitLlvmControl
             if ($kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
                 || $vecErased || $keyK === Type::KIND_CELL) {
                 $out .= '  ' . $kp . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
+            } elseif ($keyK === Type::KIND_STRING) {
+                // A string-KEYED array still holds INT entries: php canonicalises
+                // `"0"` to 0 on the store, and a packed buffer has only indexes.
+                // The raw key_at handed that int back as the "string pointer" —
+                // key 0 read as NULL, and `$_FILES[$k] = $v` over it SIGSEGVed.
+                // Box by entry kind and render the scalar, exactly as a cell
+                // reaching a STRING consumer does ({@see unboxCellToTypeRaw}); a
+                // real string key is stripped back to its pointer, nothing more.
+                $this->rt->needsCellToStrPtr = true;
+                $this->rt->needsTaggedToStr = true;
+                $kc = $this->ssa->allocReg();
+                $out .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
+                $ks = $this->ssa->allocReg();
+                $out .= '  ' . $ks . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $kc . ")\n";
+                $out .= '  ' . $kp . ' = ptrtoint ptr ' . $ks . " to i64\n";
             } else {
                 $out .= '  ' . $kp . ' = call i64 @__mir_array_key_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
             }

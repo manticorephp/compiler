@@ -87,6 +87,12 @@ namespace Manticore\Sapi {
         /** @var array<int,array<string,mixed>> parked $_FILES, by task id */
         public static array $savedFiles = [];
 
+        /** @var array<string,bool> tmp path → moved?, this request's uploads */
+        public static array $uploaded = [];
+
+        /** @var array<int,array<string,bool>> parked $uploaded, by task id */
+        public static array $savedUploaded = [];
+
         /**
          * The reset value for a superglobal, and the reason it is a property rather
          * than a `[]` literal: an empty literal types `assoc[string, unknown]`, so
@@ -100,6 +106,10 @@ namespace Manticore\Sapi {
         /** The reset value for the header block, typed for the same reason.
          *  @var array<int,string> */
         public static array<int, string> $emptyLines = [];
+
+        /** The reset value for $uploaded, typed for the same reason.
+         *  @var array<string,bool> */
+        public static array<string, bool> $emptyFlags = [];
 
         /** True once any request has begun, anywhere in the process — the guard that
          *  keeps the per-task swap off a program that serves none. */
@@ -163,6 +173,7 @@ namespace Manticore\Sapi {
         Context::$savedRequest[$from] = $_REQUEST;
         Context::$savedSession[$from] = $_SESSION;
         Context::$savedFiles[$from] = $_FILES;
+        Context::$savedUploaded[$from] = Context::$uploaded;
         Context::$seen[$from] = true;
         Context::$cur = $to;
         // The session tier parks its own per-request half (status, id) the same way.
@@ -195,6 +206,7 @@ namespace Manticore\Sapi {
             $_REQUEST = Context::$empty;
             $_SESSION = Context::$empty;
             $_FILES = Context::$empty;
+            Context::$uploaded = Context::$emptyFlags;
             return;
         }
         Context::$headers = Context::$savedHeaders[$to];
@@ -208,6 +220,19 @@ namespace Manticore\Sapi {
         $_REQUEST = Context::$savedRequest[$to];
         $_SESSION = Context::$savedSession[$to];
         $_FILES = Context::$savedFiles[$to];
+        Context::$uploaded = Context::$savedUploaded[$to];
+    }
+
+    /**
+     * php's canonical-int key rule for a top-level GPC name: `0` and `-7` are int
+     * keys, `01`, ` 1` and `1e3` stay strings. The nested levels are canonicalised
+     * by the caller (Http\nestedAssign); a top-level key arrives here as the
+     * string foreach hands back, and a runtime string key does not canonicalise
+     * on the store, so the seeding has to pick the int store itself.
+     */
+    function intKey(string $k): bool
+    {
+        return (string)(int)$k === $k;
     }
 
     /**
@@ -226,7 +251,9 @@ namespace Manticore\Sapi {
      * its static type, which is exactly what the readers expect. $get, $post and
      * $files are `mixed`-valued because they nest (`?a[]=1`, `a[b][c]`,
      * $_FILES['f']['size']); the caller builds every level as a cell-element
-     * array (Http\parseQueryNested) so the nested stores stay typed too.
+     * array (Http\parseQueryNested) so the nested stores stay typed too. A
+     * top-level name that is a canonical int (`?0=x`, an anonymous upload) is
+     * stored under the INT key, as php does ({@see intKey}).
      */
     function requestBegin(array<string, string> $server = [], array<string, mixed> $get = [], array<string, mixed> $post = [], array<string, string> $cookie = [], array<string, mixed> $files = []): void
     {
@@ -235,11 +262,11 @@ namespace Manticore\Sapi {
         }
         $_GET = Context::$empty;
         foreach ($get as $k => $v) {
-            $_GET[$k] = $v;
+            if (intKey($k)) { $_GET[(int)$k] = $v; } else { $_GET[$k] = $v; }
         }
         $_POST = Context::$empty;
         foreach ($post as $k => $v) {
-            $_POST[$k] = $v;
+            if (intKey($k)) { $_POST[(int)$k] = $v; } else { $_POST[$k] = $v; }
         }
         $_COOKIE = Context::$empty;
         foreach ($cookie as $k => $v) {
@@ -247,16 +274,19 @@ namespace Manticore\Sapi {
         }
         $_REQUEST = Context::$empty;
         foreach ($get as $k => $v) {
-            $_REQUEST[$k] = $v;
+            if (intKey($k)) { $_REQUEST[(int)$k] = $v; } else { $_REQUEST[$k] = $v; }
         }
         foreach ($post as $k => $v) {
-            $_REQUEST[$k] = $v;
+            if (intKey($k)) { $_REQUEST[(int)$k] = $v; } else { $_REQUEST[$k] = $v; }
         }
         $_FILES = Context::$empty;
         foreach ($files as $k => $v) {
-            $_FILES[$k] = $v;
+            if (intKey($k)) { $_FILES[(int)$k] = $v; } else { $_FILES[$k] = $v; }
         }
         $_SESSION = Context::$empty;
+        // $uploaded is NOT reset here: the multipart parse that registers this
+        // request's temp files runs while the caller builds $files, i.e. BEFORE
+        // this body. requestEnd() empties it, on every path out of a request.
         responseBegin();
     }
 
@@ -285,6 +315,10 @@ namespace Manticore\Sapi {
      * $_SESSION after this returns; the next requestBegin() on the same flow
      * resets it.
      *
+     * The upload sweep is php's: every temp file the multipart parser produced
+     * for this request and nobody moved is unlinked here, on every path out of
+     * the handler — a thrown handler leaves no file behind.
+     *
      * The status and the header block are read back through their own typed
      * accessors rather than one `['status' => …, 'headers' => …]` array: a
      * heterogeneous array erases its element type, and the reader then decodes an
@@ -293,6 +327,28 @@ namespace Manticore\Sapi {
     function requestEnd(): void
     {
         Context::$active = false;
+        foreach (Context::$uploaded as $tmp => $moved) {
+            if (!$moved) {
+                @\unlink($tmp);
+            }
+        }
+        Context::$uploaded = Context::$emptyFlags;
+    }
+
+    /** @internal a temp file the multipart parser produced for THIS request. */
+    function uploadRegister(string $tmp): void
+    {
+        if ($tmp !== '') {
+            Context::$uploaded[$tmp] = false;
+        }
+    }
+
+    /** @internal the file left the temp dir under the handler's control. */
+    function uploadMoved(string $tmp): void
+    {
+        if (isset(Context::$uploaded[$tmp])) {
+            Context::$uploaded[$tmp] = true;
+        }
     }
 
     /** The response code the handler settled on. */
@@ -526,6 +582,36 @@ namespace {
     function setrawcookie(string $name, string $value = '', mixed $expires_or_options = 0, string $path = '', string $domain = '', bool $secure = false, bool $httponly = false): bool
     {
         return \Manticore\Sapi\setCookie('setrawcookie', true, $name, $value, $expires_or_options, $path, $domain, $secure, $httponly);
+    }
+
+    /**
+     * php: true only for a file THIS request uploaded and nobody moved yet.
+     * Outside a request nothing was registered, so this is php's CLI answer
+     * (false) too — the ONE body for the name; a stdlib copy would be the strong
+     * symbol over this linkonce_odr one and win every non-inlined call.
+     */
+    function is_uploaded_file(string $filename): bool
+    {
+        return isset(\Manticore\Sapi\Context::$uploaded[$filename]) && \Manticore\Sapi\Context::$uploaded[$filename] === false;
+    }
+
+    /** rename(2), falling back to copy+unlink across devices; the moved file survives the request-end sweep. */
+    function move_uploaded_file(string $from, string $to): bool
+    {
+        if (!\is_uploaded_file($from)) {
+            return false;
+        }
+        $ok = @\rename($from, $to);
+        if (!$ok) {
+            $ok = @\copy($from, $to);
+            if ($ok) {
+                @\unlink($from);
+            }
+        }
+        if ($ok) {
+            \Manticore\Sapi\Context::$uploaded[$from] = true;
+        }
+        return $ok;
     }
 
 }

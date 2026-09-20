@@ -1,0 +1,174 @@
+=== single: HTTP/1.1 200 OK
+array(1) {
+  ["f"]=>
+  array(6) {
+    ["name"]=>
+    string(9) "hello.txt"
+    ["full_path"]=>
+    string(9) "hello.txt"
+    ["type"]=>
+    string(10) "text/plain"
+    ["tmp_name"]=>
+    string(3) "TMP"
+    ["error"]=>
+    int(0)
+    ["size"]=>
+    int(11)
+  }
+}
+tmp given=yes exists after=no
+=== array: HTTP/1.1 200 OK
+array(1) {
+  ["f"]=>
+  array(6) {
+    ["name"]=>
+    array(2) {
+      [0]=>
+      string(5) "a.txt"
+      [1]=>
+      string(5) "b.txt"
+    }
+    ["full_path"]=>
+    array(2) {
+      [0]=>
+      string(5) "a.txt"
+      [1]=>
+      string(5) "b.txt"
+    }
+    ["type"]=>
+    array(2) {
+      [0]=>
+      string(0) ""
+      [1]=>
+      string(10) "text/plain"
+    }
+    ["tmp_name"]=>
+    array(2) {
+      [0]=>
+      string(3) "TMP"
+      [1]=>
+      string(3) "TMP"
+    }
+    ["error"]=>
+    array(2) {
+      [0]=>
+      int(0)
+      [1]=>
+      int(0)
+    }
+    ["size"]=>
+    array(2) {
+      [0]=>
+      int(3)
+      [1]=>
+      int(4)
+    }
+  }
+}
+tmp given=yes exists after=no
+=== nested: HTTP/1.1 200 OK
+array(1) {
+  ["u"]=>
+  array(6) {
+    ["name"]=>
+    array(1) {
+      ["avatar"]=>
+      string(10) "avatar.png"
+    }
+    ["full_path"]=>
+    array(1) {
+      ["avatar"]=>
+      string(10) "avatar.png"
+    }
+    ["type"]=>
+    array(1) {
+      ["avatar"]=>
+      string(9) "image/png"
+    }
+    ["tmp_name"]=>
+    array(1) {
+      ["avatar"]=>
+      string(3) "TMP"
+    }
+    ["error"]=>
+    array(1) {
+      ["avatar"]=>
+      int(0)
+    }
+    ["size"]=>
+    array(1) {
+      ["avatar"]=>
+      int(7)
+    }
+  }
+}
+tmp given=yes exists after=no
+=== anon: HTTP/1.1 200 OK
+array(2) {
+  [0]=>
+  array(6) {
+    ["name"]=>
+    string(8) "anon.txt"
+    ["full_path"]=>
+    string(8) "anon.txt"
+    ["type"]=>
+    string(10) "text/plain"
+    ["tmp_name"]=>
+    string(3) "TMP"
+    ["error"]=>
+    int(0)
+    ["size"]=>
+    int(4)
+  }
+  ["g"]=>
+  array(6) {
+    ["name"]=>
+    string(5) "g.txt"
+    ["full_path"]=>
+    string(5) "g.txt"
+    ["type"]=>
+    string(10) "text/plain"
+    ["tmp_name"]=>
+    string(3) "TMP"
+    ["error"]=>
+    int(0)
+    ["size"]=>
+    int(2)
+  }
+}
+tmp given=yes exists after=no
+=== move: HTTP/1.1 200 OK
+array(1) {
+  ["f"]=>
+  array(6) {
+    ["name"]=>
+    string(9) "hello.txt"
+    ["full_path"]=>
+    string(9) "hello.txt"
+    ["type"]=>
+    string(10) "text/plain"
+    ["tmp_name"]=>
+    string(3) "TMP"
+    ["error"]=>
+    int(0)
+    ["size"]=>
+    int(11)
+  }
+}
+is_uploaded before=true
+stranger=false
+move=true
+is_uploaded after=false
+move again=false
+dest exists=true dest=hello world
+tmp given=yes exists after=no
+dest after=yes
+=== nobody: HTTP/1.1 200 OK
+array(0) {
+}
+tmp given=no exists after=no
+=== throws: HTTP/1.1 500 Internal Server Error
+Internal Server Error
+tmp given=yes exists after=no
+served=7 errors=1
+done

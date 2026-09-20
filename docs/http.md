@@ -57,7 +57,12 @@ $req->peerAddr      // the socket's answer, always
 $req->secure        // tls
 
 $req->header('Content-Type')       $req->contentType()      // type, no params
-$req->query('name', 'default')     $req->queries()          // array<string,string>
+$req->query('name', 'default')     $req->queries()          // array<string,string>, flat
+$req->queryArray()                 // php's $_GET shape: `a[]=1&b[x]=2` nests
+$req->postArray()                  // php's $_POST shape: urlencoded, or a multipart body's fields
+$req->files()                      // array<string, Http\UploadedFile>, the first file per field
+$req->allFiles()                   // every file part in wire order, `f[]` and all
+$req->filesArray()                 // php's $_FILES shape, six columns transposed
 $req->cookie('sid')                $req->cookies()
 $req->body()                       $req->hasBody()          $req->contentLength()
 $req->stream()                     // ?Buffer\Reader, only for a streamed body
@@ -68,8 +73,16 @@ $req->is(Http\Method::Post)        $req->isKeepAlive()
 `Request` is readonly to the handler. Query and cookie parsing is memoised
 behind a private bitfield — reading five parameters scans the string once.
 
-Both are flat and last-wins: `?a[]=1` gives you the key `a[]`. Nested GPC and
-`$_FILES` wait for the multipart parser that would produce them.
+`queries()` and `cookies()` are flat and last-wins: `?a[]=1` gives you the key
+`a[]`. `queryArray()`/`postArray()` nest exactly like `parse_str` (`.` and space
+in a name become `_`, `[]` appends, `max_input_vars` truncates). A
+`multipart/form-data` body is parsed once, on the first of `postArray()`,
+`files()`, `allFiles()`, `filesArray()`; each file part is streamed to a temp
+file (`tempnam`, `php` prefix) an `UploadedFile` describes: `field`, `name`,
+`fullPath`, `type`, `size`, `error` (`UPLOAD_ERR_*`), `tmpName`, plus
+`isValid()`, `moveTo($dest)` and `contents()`. A body the parser cannot frame
+is a **400** before the handler runs. Every temp file the handler did not
+`moveTo()` is unlinked when the request ends — thrown or not.
 
 ## Behind a proxy
 
@@ -203,10 +216,16 @@ answers **true**, because by then the head really is on the wire.
 
 ### `compat(true)` — the superglobals
 
-Off by default: seeding four superglobals per request for code that never reads
+Off by default: seeding the superglobals per request for code that never reads
 them is pure cost. Turn it on and `$_SERVER`, `$_GET`, `$_POST` (urlencoded
-forms), `$_COOKIE`, `$_REQUEST` and `$_SESSION` are seeded per request, and
-`session_start()` works — it rides the same per-request seam.
+forms and multipart fields, nested like `parse_str`), `$_COOKIE`, `$_REQUEST`,
+`$_FILES` and `$_SESSION` are seeded per request, and `session_start()` works —
+it rides the same per-request seam. `$_FILES` has php's shape, `full_path`
+included, with `f[]` and `u[avatar]` names transposed per column and an
+anonymous part (filename= without name=) under `$_FILES[0]`.
+`is_uploaded_file()` and `move_uploaded_file()` are per request: true only for
+a temp file THIS request produced and nobody moved yet. The temp files are
+removed at request end; a moved one survives.
 
 Every one of these is **request-bound**, keyed by task id and swapped at the one
 place the scheduler switches tasks. So is the output-buffer stack: without that
@@ -233,6 +252,10 @@ well as the handler, so a streaming body sees it too.
 | `maxHeaderBytes` | 16384 | 431 |
 | `maxHeaderCount` | 100 | 431 |
 | `maxBodySize` | 8388608 | 413 (or streamed) |
+| `maxFileUploads` | 20 | further file parts dropped (php's `max_file_uploads`) |
+| `uploadMaxFilesize` | 2097152 | the part is kept with `error` 1 (`UPLOAD_ERR_INI_SIZE`), no temp file |
+| `postMaxSize` | 0 = `maxBodySize` | php's `post_max_size`; a buffered body is already bounded by `maxBodySize` (413), so only a streamed one can exceed it |
+| `maxInputVars` | 1000 | `queryArray()`/`postArray()` truncated (php's `max_input_vars`) |
 | `keepAliveMax` | 100 | connection closed after N requests |
 | `idleTimeout` | 5.0 | silent close between requests |
 | `headerTimeout` | 10.0 | 408 mid-head |
@@ -287,9 +310,8 @@ prelude files; `compat.php`'s jump is `session` and `json`, not the server.
 
 ## Not in this layer
 
-Routing, middleware, PSR-7/PSR-15, multipart/`$_FILES`, nested GPC arrays,
-HTTP/2, WebSockets. PSR-7 wrappers are an ordinary pure-PHP package on top of
-this; the rest are their own epics.
+Routing, middleware, PSR-7/PSR-15, HTTP/2, WebSockets. PSR-7 wrappers are an
+ordinary pure-PHP package on top of this; the rest are their own epics.
 
 ## See also
 
