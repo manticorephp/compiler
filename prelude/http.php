@@ -328,6 +328,83 @@ function splitHostPort(string $hp): array<int, string>
 }
 
 /**
+ * Parse `a.b.c.d/n` / `x::y/n` / a bare address into [packed network bytes,
+ * prefix length as a decimal string], or null when malformed. The prefix is a
+ * string because the pair rides in one `array<int,string>` — a mixed tuple
+ * would make both elements cells.
+ *
+ * @internal
+ * @return ?array<int, string>
+ */
+function cidrParse(string $cidr): ?array<int, string>
+{
+    if ($cidr === '') {
+        return null;
+    }
+    $slash = \strpos($cidr, '/');
+    $addr = $slash === false ? $cidr : \substr($cidr, 0, $slash);
+    $packed = \inet_pton($addr);
+    if ($packed === false) {
+        return null;
+    }
+    $bits = \strlen($packed) * 8;
+    $len = $bits;
+    if ($slash !== false) {
+        $p = \substr($cidr, $slash + 1);
+        if ($p === '' || !\ctype_digit($p)) {
+            return null;
+        }
+        $len = (int)$p;
+        if ($len > $bits) {
+            return null;
+        }
+    }
+    $out = [];
+    $out[] = $packed;
+    $out[] = (string)$len;
+    return $out;
+}
+
+/**
+ * @internal
+ * @param array<int, string> $net from {@see cidrParse}
+ */
+function inCidrParsed(string $packedIp, array<int, string> $net): bool
+{
+    $network = $net[0];
+    $len = (int)$net[1];
+    if (\strlen($packedIp) !== \strlen($network)) {
+        return false;
+    }
+    $full = \intdiv($len, 8);
+    for ($i = 0; $i < $full; $i = $i + 1) {
+        if ($packedIp[$i] !== $network[$i]) {
+            return false;
+        }
+    }
+    $rem = $len % 8;
+    if ($rem === 0) {
+        return true;
+    }
+    $mask = (0xFF << (8 - $rem)) & 0xFF;
+    return (\ord($packedIp[$full]) & $mask) === (\ord($network[$full]) & $mask);
+}
+
+/** Is `$ip` inside `$cidr`? A bare address is /32 or /128. Malformed → false. */
+function inCidr(string $ip, string $cidr): bool
+{
+    $net = cidrParse($cidr);
+    if ($net === null) {
+        return false;
+    }
+    $packed = \inet_pton($ip);
+    if ($packed === false) {
+        return false;
+    }
+    return inCidrParsed($packed, $net);
+}
+
+/**
  * Percent-decode a path and collapse its `.` and `..` segments.
  *
  * A server that hands `..` to a handler is a path-traversal generator, so this
@@ -798,6 +875,20 @@ final class Status
         }
         return $code !== 204 && $code !== 304;
     }
+}
+
+/**
+ * Which forwarded headers a trusted proxy may set. `const int` flags, not an
+ * enum, for the same reason {@see Status} is not one.
+ */
+final class Proxy
+{
+    public const FOR = 1;
+    public const PROTO = 2;
+    public const HOST = 4;
+    public const PORT = 8;
+    public const FORWARDED = 16;
+    public const ALL = 31;
 }
 
 /**
