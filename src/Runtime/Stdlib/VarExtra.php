@@ -18,6 +18,42 @@ function strval(mixed $value): string
     return (string)$value;
 }
 
+/**
+ * `settype(&$var, $type)` — convert in place; php 8 throws a ValueError for
+ * an unknown type name. `"null"` unsets the value (php sets it to null).
+ * The by-ref `mixed` parameter is what makes the caller's slot a cell
+ * (docs/design/value-channels.md, P5/P6), so the new kind lands as itself.
+ */
+function settype(mixed &$var, string $type): bool
+{
+    switch (\strtolower($type)) {
+        case "int":
+        case "integer":
+            $var = (int)$var;
+            return true;
+        case "float":
+        case "double":
+            $var = (float)$var;
+            return true;
+        case "string":
+            $var = (string)$var;
+            return true;
+        case "bool":
+        case "boolean":
+            $var = (bool)$var;
+            return true;
+        case "array":
+            $var = (array)$var;
+            return true;
+        case "null":
+            $var = null;
+            return true;
+        case "object":
+            $var = (object)$var;
+            return true;
+    }
+    throw new \ValueError("settype(): Argument #2 (\$type) must be a valid type");
+}
 /** True for int / float / string / bool; false for null / array / object
  *  (PHP `is_scalar`). */
 function is_scalar(mixed $value): bool

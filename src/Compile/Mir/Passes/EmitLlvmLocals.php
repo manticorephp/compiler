@@ -699,10 +699,24 @@ trait EmitLlvmLocals
             && ($this->locals->refParamTypes[$sl->name] ?? null) !== null
             && $this->locals->refParamTypes[$sl->name]->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
-            && $this->isCellBoxableArg($sl->value->type)) {
+            && $this->viewSlotBoxes($sl->value->type)) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
-            $out .= $this->boxToCell($sl->value->type);
+            $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+            // An array goes in FLAT and an object by pointer, as into every other
+            // cell slot ({@see boxForViewSlot}): the caller's cell reads the
+            // elements through the buffer's hint. `$v = [$v]` through `mixed &$v`
+            // handed the caller a bare pointer under a cell claim. The slot
+            // co-owns a borrowed buffer/object exactly as a static slot does
+            // (a fresh temp transfers, a borrow is retained).
+            $vk0 = $sl->value->type->kind;
+            if ($sl->value->type->isArray() || $vk0 === Type::KIND_OBJ) {
+                $out .= $this->coerceToI64();
+                $rawV = $this->lastValue;
+                $out .= $this->rcRetainByType($sl->value, $rawV, null, 3);
+                $this->lastValue = $rawV;
+                $this->lastValueType = 'i64';
+            }
+            $out .= $this->boxForViewSlot($sl->value->type, $sl->value);
             $dv = $this->lastValue;
             $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
@@ -1100,6 +1114,13 @@ trait EmitLlvmLocals
                 $keyReg = $this->lastValue;
                 $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot_str(ptr '
                       . $slotPtr . ', ptr ' . $keyReg . ")\n";
+            } elseif ($keyKind === 'cell') {
+                $this->rt->needsCellKey = true;
+                $out .= $this->emitNode($aa->index);
+                $out .= $this->coerceToI64();
+                $keyReg = $this->lastValue;
+                $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot_cell(ptr '
+                      . $slotPtr . ', i64 ' . $keyReg . ")\n";
             } else {
                 $out .= $this->emitNode($aa->index);
                 $out .= $this->coerceToI64();

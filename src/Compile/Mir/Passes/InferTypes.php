@@ -759,6 +759,11 @@ final class InferTypes implements Pass
             $this->inferFunctionsForScope($module, 'byref_capture');
             $guard = $guard + 1;
         }
+        // A local handed to a `mixed &` parameter is likewise one word two
+        // frames share, and the callee may make it any kind.
+        if ($this->scanRefCellArgWiden($module)) {
+            $this->inferFunctionsForScope($module, 'byref_cell_arg');
+        }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
         // promoted param is a bare `array` (lowered to unknown). Retype the
