@@ -29,7 +29,8 @@ compiled programs.
 
 composer only fetches + resolves versions. `manticore` compiles + links.
 The runtime preamble is `linkonce_odr` in every `.o`, so there is NO separate
-runtime library to ship/link — compiled binaries are fully static.
+Manticore runtime library to ship/link — a binary carries libc, PCRE2 and OpenSSL
+plus any FFI-bound library it names, and nothing of ours.
 
 ## Locked decisions
 

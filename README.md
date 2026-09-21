@@ -2,7 +2,7 @@
 
 Self-hosted PHP-to-native AOT compiler. Compiles a large subset of PHP 8.5+ to
 standalone native binaries (arm64 / x86_64) through LLVM IR — no PHP runtime, no
-shared libraries beyond libc. **The compiler is written in PHP and compiles itself
+interpreter, no extension loader. **The compiler is written in PHP and compiles itself
 to a byte-identical fixpoint.**
 
 ```bash
@@ -19,15 +19,19 @@ a module system, compile-time attributes.
 
 ## Requirements
 
-**Emitted binaries need nothing but libc.** The *compiler* needs a real toolchain on
-the host, because it ends in `clang` and `cc`:
+**Emitted binaries carry no PHP runtime**; they link dynamically against libc plus
+the two system libraries the stdlib rides on — PCRE2 (`preg_*`) and OpenSSL 3
+(TLS, `hash`/`hmac`) — and, on macOS, libiconv. A program that binds a native
+library through FFI (`PDO` → sqlite3, `curl_*` → libcurl, …) adds that library to
+its link line on demand. The *compiler* needs the same libraries as dev packages,
+plus a real toolchain, because it ends in `clang` and `cc`:
 
 | What | Version | Why |
 |---|---|---|
 | `clang` + `cc` on `PATH` | **LLVM ≥ 15** | Manticore emits opaque-pointer IR; clang 14 rejects it |
 | `php` | **8.5** | cold bootstrap only — Zend runs the compiler source once to seed the first native binary |
-| libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config` |
-| OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config` |
+| libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
+| OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
 
 The `-dev` / `-devel` half matters: the headers are what the build looks for, not just
 the runtime library.
@@ -115,6 +119,7 @@ Everything else is inspection — every stage of the pipeline is dumpable:
 | `dump-ast` / `dump-mir` / `dump-llvm-mir` | parse / typed MIR / LLVM IR |
 | `dump-llvm` | LLVM IR from stdin |
 | `dump-sig <files>` | the module interface (exported symbol table) |
+| `split-ir` | split a staged `.ll` module into N parts (dev tool behind `build -j`) |
 | `version` / `help` | — |
 
 Flags: `-o <out>`, `-O<0|1|2|3|s|z>` (clang opt level, default `-O2`),
@@ -157,7 +162,9 @@ family over host PCRE2), type/reflection, math, `ctype_*`, JSON, `var_dump`/`pri
 SPL, date/time, sockets and streams, hashing and crypto. Each function is either a
 PHP-level stdlib function (`src/Runtime/Stdlib/`, compiled into
 `lib/manticore_stdlib.o` and auto-linked), an injected prelude helper, or an inlined
-codegen builtin. No imports, no registration — they are simply there.
+codegen builtin. No imports, no registration — they are simply there. The exact
+name-by-name coverage per extension — and everything Manticore adds beyond PHP —
+is generated into [`docs/builtins.md`](docs/builtins.md) (`php tools/builtins_audit.php`).
 
 Current gaps are tracked with repros in [`docs/ROADMAP.md`](docs/ROADMAP.md); the
 headline ones are listed under [Limitations](#limitations).
@@ -211,6 +218,7 @@ are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are s
 | `assoc` | 0.06 | 0.26 | 4.3× | 2.3 | 28.2 | ok |
 | `assoc_small` | 0.03 | 0.18 | 6.0× | 2.0 | 27.9 | ok |
 | `closures` | 0.03 | 0.63 | 21.0× | 2.1 | 28.0 | ok |
+| `crc32` | 0.03 | 0.25 | 8.3× | 2.1 | 28.0 | ok |
 | `dijkstra` | 0.02 | 0.34 | 17.0× | 2.5 | 29.2 | ok |
 | `explode` | 0.06 | 0.39 | 6.5× | 2.0 | 28.0 | ok |
 | `fib` | 0.11 | 12.09 | 109.9× | 2.0 | 28.1 | ok |
@@ -221,6 +229,7 @@ are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are s
 | `generator_yield` | 0.02 | 0.71 | 35.5× | 2.0 | 28.0 | ok |
 | `http_parse` | 1.08 | — | — | 3.0 | — | php-skip |
 | `http_scale` | 1.17 | — | — | 3.2 | — | php-skip |
+| `htmlspecialchars` | 0.09 | 0.41 | 4.6× | 2.2 | 28.0 | ok |
 | `implode_int` | 0.20 | 0.28 | 1.4× | 2.2 | 28.3 | ok |
 | `in_array` | 0.11 | 0.26 | 2.4× | 2.0 | 28.3 | ok |
 | `json` | 0.08 | 0.25 | 3.1× | 2.2 | 28.3 | ok |
@@ -255,7 +264,7 @@ are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are s
 | `variadic_pack` | 0.08 | 0.26 | 3.2× | 2.5 | 28.0 | ok |
 | `wordcount` | 0.02 | 0.16 | 8.0× | 2.0 | 28.1 | ok |
 
-All 45 comparable cases are faster natively; three HTTP/tokenization cases are
+All 47 comparable cases are faster natively; three HTTP/tokenization cases are
 native-only because they use Manticore prelude APIs. The sub-10 ms values are at the
 harness's two-decimal precision, so treat their speedups as directional. The table also
 shows the start-up-memory advantage: most native binaries stay near 2–3 MiB RSS, while
@@ -288,7 +297,8 @@ PHP source
   → ConstFold         │
   → DeadStore         │
   → InferTypes        │  MIR (src/Compile/Mir) — flat, typed, SSA-ish IR.
-  → NarrowReturns     │  The only backend. InferTypes re-runs after each pass
+  → VivifyRefArgs     │  The only backend. InferTypes re-runs after each pass
+  → NarrowReturns     │
   → InlineClosures    │  that makes new types concrete, which is why
   → Monomorphize      │  Monomorphize — specializing erased-array and callable
   → FuseSplitJoin     │  params per call-site shape — sits this far down.
@@ -304,7 +314,7 @@ PHP source
   → Verify           ─┘
   → EmitLlvm          (src/Compile/Mir/Passes/EmitLlvm*) → LLVM IR text
   → clang -c          IR → object
-  → cc                link static binary (libc only)
+  → cc                link (libc + pcre2 + openssl, + FFI-bound libraries on demand)
 ```
 
 **Memory** ([`docs/memory.md`](docs/memory.md)): reference counting on strings,
@@ -363,8 +373,6 @@ The Linux gate is not optional for anything touching `src/Runtime/`, syscalls or
 - **`trait`s and generic classes do not cross a compiled-library boundary.**
   Classes, interfaces, enums and constants do (`.sig` schema 2); a trait and a
   `@template` class both need their method bodies on the far side.
-- **`json_encode` of an object answers `{}`** — the encoder lives in
-  `manticore_stdlib.o`, a separate module with no user classes in its table.
 - **Regular-file I/O blocks the async loop** by design; see
   [`docs/async.md`](docs/async.md#-what-is-not-async) for the measurements and
   `Async\readFile()`.

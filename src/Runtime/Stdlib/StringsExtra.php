@@ -368,24 +368,157 @@ function strtr(string $string, string $from, string $to): string
 }
 
 /**
- * HTML-escape for `htmlspecialchars` with php 8.1+ default flags
- * (ENT_QUOTES | ENT_HTML401): `&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;`,
- * `"`→`&quot;`, `'`→`&#039;`.
+ * HTML-escape with php's flag surface: quote flags (ENT_COMPAT=2 / ENT_QUOTES=3
+ * / ENT_NOQUOTES=0), the doc type (ENT_HTML401=0 / ENT_XML1=16 / ENT_XHTML=32 /
+ * ENT_HTML5=48 — `'` is `&#039;` under HTML401 and `&apos;` elsewhere), the
+ * invalid-UTF-8 policy (ENT_IGNORE=4 drops the sequence, ENT_SUBSTITUTE=8 puts
+ * U+FFFD, neither ⇒ the whole result is ""), and `$double_encode=false`, which
+ * leaves an `&` alone when it opens an entity the doc type knows. The default
+ * flags are php 8.1's ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 = 11 (a literal:
+ * the builder is a generation behind and may not know the names yet).
+ *
+ * The hot loop reads BYTES (`ord($s[$i])` is a bounds-checked load, no
+ * allocation) and copies whole untouched runs with one substr — the previous
+ * body minted a 1-char string per byte and appended it, and ran 2× behind php on
+ * plain text. A string with nothing to escape is returned as-is, as php does.
+ * Only UTF-8 is validated; a single-byte encoding passes every byte through.
+ * ENT_DISALLOWED is not honoured (TODO).
  */
-function htmlspecialchars(string $string): string
+function htmlspecialchars(string $string, int $flags = 11, ?string $encoding = null, bool $double_encode = true): string
 {
     $n = \strlen($string);
-    $out = "";
-    for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = $string[$i];
-        if ($c === '&') { $out = $out . '&amp;'; }
-        elseif ($c === '<') { $out = $out . '&lt;'; }
-        elseif ($c === '>') { $out = $out . '&gt;'; }
-        elseif ($c === '"') { $out = $out . '&quot;'; }
-        elseif ($c === "'") { $out = $out . '&#039;'; }
-        else { $out = $out . $c; }
+    $doc = $flags & 48;
+    $apos = ($flags & 1) !== 0 ? ($doc === 0 ? '&#039;' : '&apos;') : '';
+    $quot = ($flags & 2) !== 0 ? '&quot;' : '';
+    $utf8 = $encoding === null || $encoding === 'UTF-8' || $encoding === ''
+        || \strcasecmp($encoding, 'UTF-8') === 0 || \strcasecmp($encoding, 'UTF8') === 0;
+    $out = '';
+    $start = 0;
+    $i = 0;
+    while ($i < $n) {
+        $b = \ord($string[$i]);
+        if ($b > 62) {
+            if ($b < 128 || !$utf8) { $i = $i + 1; continue; }
+            $len = __mc_utf8_seq_len($string, $i, $n, $b);
+            if ($len > 0) { $i = $i + $len; continue; }
+            // Invalid sequence: -$len bytes are consumed, php's own advance.
+            if (($flags & 12) === 0) { return ''; }
+            if ($i > $start) { $out = $out . \substr($string, $start, $i - $start); }
+            if (($flags & 12) === 8) { $out = $out . "\xEF\xBF\xBD"; }
+            $i = $i - $len;
+            $start = $i;
+            continue;
+        }
+        if ($b < 34 || ($b > 39 && $b < 60) || $b === 61) { $i = $i + 1; continue; }
+        $rep = '';
+        if ($b === 38) {
+            if (!$double_encode && __mc_hs_entity_end($string, $i, $n, $doc) > 0) { $i = $i + 1; continue; }
+            $rep = '&amp;';
+        }
+        elseif ($b === 60) { $rep = '&lt;'; }
+        elseif ($b === 62) { $rep = '&gt;'; }
+        elseif ($b === 34) { $rep = $quot; }
+        elseif ($b === 39) { $rep = $apos; }
+        if ($rep === '') { $i = $i + 1; continue; }
+        if ($i > $start) { $out = $out . \substr($string, $start, $i - $start); }
+        $out = $out . $rep;
+        $i = $i + 1;
+        $start = $i;
     }
+    if ($start === 0) { return $string; }
+    if ($start < $n) { $out = $out . \substr($string, $start); }
     return $out;
+}
+
+/**
+ * Length of the UTF-8 sequence led by byte $b at $i, or MINUS the number of
+ * bytes php's decoder skips when it is malformed (a lone lead skips 1; a
+ * truncated sequence skips up to the byte that could start a new one; an
+ * overlong form, a surrogate and a code point past U+10FFFF skip the whole
+ * sequence) — ext/standard/html.c `get_next_char`, UTF-8 arm.
+ */
+function __mc_utf8_seq_len(string $s, int $i, int $n, int $b): int
+{
+    if ($b >= 0xC2 && $b <= 0xDF) {
+        if ($i + 1 >= $n) { return -1; }
+        $b1 = \ord($s[$i + 1]);
+        if ($b1 >= 0x80 && $b1 <= 0xBF) { return 2; }
+        return __mc_utf8_lead($b1) ? -1 : -2;
+    }
+    if ($b >= 0xE0 && $b <= 0xEF) {
+        $b1 = $i + 1 < $n ? \ord($s[$i + 1]) : 0;
+        $b2 = $i + 2 < $n ? \ord($s[$i + 2]) : 0;
+        if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF) {
+            $cp = (($b & 0x0F) << 12) | (($b1 & 0x3F) << 6) | ($b2 & 0x3F);
+            return ($cp < 0x800 || ($cp >= 0xD800 && $cp <= 0xDFFF)) ? -3 : 3;
+        }
+        if ($i + 2 > $n || __mc_utf8_lead($b1)) { return -1; }
+        if ($i + 3 > $n || __mc_utf8_lead($b2)) { return -2; }
+        return -3;
+    }
+    if ($b >= 0xF0 && $b <= 0xF4) {
+        $b1 = $i + 1 < $n ? \ord($s[$i + 1]) : 0;
+        $b2 = $i + 2 < $n ? \ord($s[$i + 2]) : 0;
+        $b3 = $i + 3 < $n ? \ord($s[$i + 3]) : 0;
+        if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF && $b3 >= 0x80 && $b3 <= 0xBF) {
+            $cp = (($b & 0x07) << 18) | (($b1 & 0x3F) << 12) | (($b2 & 0x3F) << 6) | ($b3 & 0x3F);
+            return ($cp < 0x10000 || $cp > 0x10FFFF) ? -4 : 4;
+        }
+        if ($i + 2 > $n || __mc_utf8_lead($b1)) { return -1; }
+        if ($i + 3 > $n || __mc_utf8_lead($b2)) { return -2; }
+        if ($i + 4 > $n || __mc_utf8_lead($b3)) { return -3; }
+        return -4;
+    }
+    return -1;
+}
+
+/** A byte that can open a UTF-8 sequence (ASCII or a valid lead byte). */
+function __mc_utf8_lead(int $b): bool
+{
+    return $b < 0x80 || ($b >= 0xC2 && $b <= 0xF4);
+}
+
+/**
+ * Position after the `;` when the `&` at $i opens an entity the doc type
+ * accepts (a numeric reference to a code point ≤ U+10FFFF — non-zero outside
+ * HTML401 — or a named one from the HTML 4.01 table, plus `apos` outside
+ * HTML401), else 0. The `$double_encode=false` test.
+ */
+function __mc_hs_entity_end(string $s, int $i, int $n, int $doc): int
+{
+    $j = $i + 1;
+    if ($j >= $n) { return 0; }
+    if (\ord($s[$j]) === 35) {
+        $j = $j + 1;
+        $hex = $j < $n && (\ord($s[$j]) | 32) === 120;
+        if ($hex) { $j = $j + 1; }
+        $cp = 0;
+        $digits = 0;
+        while ($j < $n) {
+            $d = \ord($s[$j]);
+            if ($d >= 48 && $d <= 57) { $d = $d - 48; }
+            elseif ($hex && $d >= 97 && $d <= 102) { $d = $d - 87; }
+            elseif ($hex && $d >= 65 && $d <= 70) { $d = $d - 55; }
+            else { break; }
+            if ($cp <= 0x10FFFF) { $cp = $cp * ($hex ? 16 : 10) + $d; }
+            $digits = $digits + 1;
+            $j = $j + 1;
+        }
+        if ($digits === 0 || $j >= $n || \ord($s[$j]) !== 59) { return 0; }
+        if ($cp > 0x10FFFF || ($doc !== 0 && $cp === 0)) { return 0; }
+        return $j + 1;
+    }
+    $k = $j;
+    while ($k < $n) {
+        $d = \ord($s[$k]);
+        if (($d >= 48 && $d <= 57) || ($d >= 65 && $d <= 90) || ($d >= 97 && $d <= 122)) { $k = $k + 1; continue; }
+        break;
+    }
+    if ($k === $j || $k >= $n || \ord($s[$k]) !== 59) { return 0; }
+    $name = \substr($s, $j, $k - $j);
+    if ($name === 'apos') { return $doc !== 0 ? $k + 1 : 0; }
+    $tab = __mc_html_entities_dec();
+    return isset($tab[$name]) ? $k + 1 : 0;
 }
 
 /**

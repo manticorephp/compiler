@@ -124,6 +124,7 @@ dependency pass names), `run(Module): Module`. Each stamps `markPassApplied`.
 | 2 | **ConstFold** | `ConstFold.php` | Fold constant expressions (`interface_exists`/`trait_exists` too). |
 | 3 | **DeadStore** | `DeadStore.php` | Dead-store elimination. |
 | 4 | **InferTypes** | `InferTypes.php` | The big type-inference pass, split across `InferTypes` / `InferNodes` / `InferScans` / `InferCalls` / `InferNarrow` (~300 KB together). Refines every node's `Type`; sets `Foreach_` iterator dispatch. |
+| 4b | **VivifyRefArgs** | `VivifyRefArgs.php` | Define the locals whose ONLY definition is a by-reference argument position (`preg_match($re, $s, $m)` — php creates `$m` as NULL and the callee writes through it). |
 | 5 | **NarrowReturns(preMono=true)** | `NarrowReturns.php` | Narrow concrete, param-independent bare-`array` returns early so call-site fusion sees a concrete element. Then **re-run InferTypes**. |
 | 6 | **InlineClosures** | `InlineClosures.php` | Inline captureless arrow closures at known invoke sites; fuse `array_map`/`filter`/`reduce` over a concrete array + literal closure into a native typed loop. Then **re-run InferTypes**. |
 | 7 | **Monomorphize** | `Monomorphize.php` | Specialize erased-array / polymorphic functions per call-site shape (`<name>$mono$<key>`); repoints calls; re-runs InferTypes internally when it specializes. |

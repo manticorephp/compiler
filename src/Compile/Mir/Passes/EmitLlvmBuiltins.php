@@ -295,6 +295,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
+        if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
         if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
@@ -4068,6 +4069,22 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /** `__mc_crc32b(string): int` — the reflected CRC-32 (php's crc32()) as a
+     *  table-driven byte loop with no per-byte bounds or element checks
+     *  ({@see EmitLlvmRuntime}); the PHP body in Runtime/Stdlib/Hash.php is the
+     *  builder's fallback. @param Node[] $args */
+    private function biCrc32b(array $args): string
+    {
+        $this->rt->needsCrc32 = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_crc32b(ptr ' . $s . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        return $this->finishI64($out, $reg);
+    }
+
     /** `__float_bits(float): int` — the IEEE-754 bit pattern of a double as an
      *  i64 (bitcast, no conversion). Backs the PHP shortest-float encoder.
      *  @param Node[] $args */
@@ -7290,7 +7307,7 @@ trait EmitLlvmBuiltins
         $dp = $this->ssa->allocReg();
         $out .= '  ' . $dp . ' = inttoptr i64 ' . $di . " to ptr\n";
         $fp = $this->ssa->allocReg();
-        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $dp . ", i64 32\n";
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $dp . ', i64 ' . (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET . "\n";
         $fn = $this->ssa->allocReg();
         $out .= '  ' . $fn . ' = load ptr, ptr ' . $fp . "\n";
         $fz = $this->ssa->allocReg();

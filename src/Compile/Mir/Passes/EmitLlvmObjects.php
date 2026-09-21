@@ -4650,12 +4650,23 @@ trait EmitLlvmObjects
             }
         }
         // Default (var / property): the i64 carrier is non-zero iff set.
-        // A null was stored as 0; an unset var slot was zeroed.
+        // A null was stored as 0; an unset var slot was zeroed. A CELL (or an
+        // erased word that may hold one) carries null NaN-boxed, never as 0 —
+        // `isset($m)` on a `mixed $m = null` answered true — so that sentinel
+        // counts as unset too.
         $out = $this->emitNode($t);
         $out .= $this->coerceToI64();
         $v = $this->lastValue;
         $cmp = $this->ssa->allocReg();
         $out .= '  ' . $cmp . ' = icmp ne i64 ' . $v . ", 0\n";
+        $tk = $t->type->kind;
+        if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN) {
+            $nn = $this->ssa->allocReg();
+            $out .= '  ' . $nn . ' = icmp ne i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
+            $both = $this->ssa->allocReg();
+            $out .= '  ' . $both . ' = and i1 ' . $cmp . ', ' . $nn . "\n";
+            $cmp = $both;
+        }
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $cmp . " to i64\n";
         $this->lastValue = $z;

@@ -7,7 +7,8 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **7**.
+Current `MemoryAbi::VERSION` is **8** (v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
 > design note `docs/bootstrap/16`, which source files used to cite. Sections on the deleted
@@ -68,18 +69,24 @@ offset 8  : i64  rc_word               -- packed rc | color | buffered
 offset 16 : ...  properties
 ```
 
-The descriptor (`@__mir_cd_<id>`, `DESCRIPTOR_SIZE = 24`) is a static global, `linkonce_odr`
+The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr }`, 40 bytes) is a static global, `linkonce_odr`
 so each class has exactly one across every separately-linked object:
 
 ```
 descriptor + 0  : i64  class_id     -- never 0
 descriptor + 8  : ptr  drop_fn      -- or null
 descriptor + 16 : ptr  rmeta        -- reflection metadata, or null
+descriptor + 24 : ptr  dyn_methods  -- compiler-owned dynamic-method table, or null
+descriptor + 32 : ptr  props_fn     -- @__mir_props_<id>: declared props + bag as a FRESH
+                                       assoc; what json_encode / (array) / get_object_vars
+                                       read from inside stdlib.o. Null for a class with
+                                       neither properties nor a bag
 ```
 
 `instanceof`, method dispatch and exception catch read `class_id` at descriptor offset 0;
 object release calls `drop_fn` **indirectly**. Offsets 0 and 8 are ABI — new fields append.
-The struct is spelled in exactly one place: `Compile\Mir\RuntimeLibrary::descriptorType`.
+The struct is spelled in exactly one place: `Compile\Mir\RuntimeLibrary::descriptorType`;
+every offset is a `MemoryAbi::DESCRIPTOR_*_OFFSET` constant.
 
 `rmeta` stays null unless reflection actually reaches the class, so a binary that never
 reflects pays 8 rodata bytes per class and nothing else. Its layout (`RMETA_*`,

@@ -39,8 +39,86 @@ against the php oracle recorded beside it. A passing repro is promoted into
 `arithType`'s `false &&` is gone, and `MANTICORE_TYPECHECK` is on by default.
 
 Baseline on `b17ede4` (2026-09-20): 7 open, 3 already green and promoted.
-After the element-channel, slot-producer and by-ref steps: P1–P7 promoted;
-open = `w4_cell_arith` (the tagged-arith unlock) and `w4_array_identity`.
+After the element-channel, slot-producer, by-ref and unlock steps: P1–P7 and
+`w4_cell_arith` promoted; open = `w4_array_identity` (array `===`/`==` compare
+words — a separate comparison epic, not a channel).
+
+**Unlock (step 4, first half).** `arithType`'s `false &&` is gone — a plain
+cell operand takes the tagged helpers, and the helpers decide int-or-float
+from a numeric STRING too. What it exposed, and the last producer of the
+element channel: an ERASED element read (`vec[unknown]`, a bare `array`
+param, an unknown base) typed `unknown` carried the raw word — the sort
+family's rebuild copied it into a fresh hint-0 buffer and handed it back under
+`vec[cell]`. It is now typed CELL in InferTypes (`inferArrayAccess`,
+`inferForeach`) and decoded at the read; the `sset()` witness that sank the
+first decode is fine because the type now says cell and the string return
+unboxes. The by-ref capture widen runs again after the closure-capture
+convergence (a closure's params are first typed cell there).
+
+⛔ **NOT MERGED — the unlock commit breaks the THIRD generation.** gen1 and
+gen2 build and the suite is 1091/0/1093, but gen2 (the first binary whose own
+code was emitted with erased-element cells) SIGBUSes on `dump-mir` of a
+large source and on building src: the cycle collector drops a `Lexer\Token`
+whose `kind` field is the `TokenKind::Variable` LITERAL + 1 (`"ariable"`, an
+interior pointer of an immortal string; the release writes its rc into
+rodata). A parser-only driver compiled by the same gen2 (lex + parse the
+same file, the prelude, gc in between) does NOT reproduce it — the shape
+needs lowering. Bisected: the erased→cell retype alone reproduces it; the
+unlock alone makes gen2 unable to compile hello world; either half without
+the other is worse. A CC_TRACE-baked build cannot be used to find it: the
+traced gen1 traces every rc op of its own run and hits any log cap before
+pass 1 ends (and once filled the disk). Second day (2026-09-21): the collector walker got a VERIFY guard
+(`MANTICORE_DEBUG_VERIFY=1` — an obj-typed slot holding a non-object aborts
+with class id, offset, word, parent), and gen2 built with
+`MANTICORE_DEBUG_VERIFY=1 MANTICORE_AUTO_GC=2` (collect every 2 allocations)
+aborts on `echo 1` inside `UnifiedArrayRuntime::emitAlloc` /
+`EmitLlvm::emitFunction`: a `Codegen\Llvm\Value` whose `type` is a freed
+`Type`, a `Compile\Mir\Concat` whose `left` is a freed `StringConst`, a
+`FunctionDecl` slot — always a FIELD that lost the reference it should own,
+never an rc<=0 release (the rc verify stays silent), so some path stores an
+object into an obj-typed field WITHOUT the +1 or releases a borrowed one.
+User-program models of the shapes (the IR builder loop with erased `array
+$args`/`$indices`, `Value::int(Type::i64(), …)`, `foreach ($tokens as
+$tok)`, the token filter, `array_walk` accumulators) compiled by the SAME
+gen1 with verify + threshold 2 run clean — the defect is in a shape the
+compiler's own module takes and the corpus does not. Recipe:
+`MANTICORE_DEBUG_VERIFY=1 MANTICORE_AUTO_GC=2 bin/manticore build --apps-only
+<manifest to scratch>` then `lldb -b -o run -k "bt 12"` on `compile echo1.php`.
+FOUND (2026-09-21): not the collector. A `MANTICORE_DEBUG_VERIFY` guard in
+the string rc paths (`strRcMisrouteGuard`: the word at `p-8` above 2^31 is
+not a count) plus the runtime-armed CC trace (`MANTICORE_CC_TRACE=1` baked
+into gen2 only, `MANTICORE_CC_TRACE_RT=1` at run, `grep '<ptr>\b'` for one
+block's life, `from=` symbolized under lldb where ASLR is off) named the
+block: a doc-comment lexeme owned by `Parser::$allDocComments` (`string[]`)
+and by `Program::$docComments` — a bare `array` param that the second
+caller (`new Program(…, $docs)` in `lower_module`) widens to CELL elements.
+Co-own is per owner per element (`emitRetainVariant`: retain undoes exactly
+what release does), but `__mir_array_retain_cell` walked the RAW string
+pointers with `__mir_cell_retain` (an untagged word ⇒ no-op) while
+`__mir_array_release_ownel_str` released every element on the `string[]`
+owner's release. The strings died under `Program`; the pool handed one block
+to a `Token` (string data = base+32 = Token+24, so the string's rc word IS
+`Token::kind`); the stale `$docs[] = $d` retain added 1 to `kind`. Fix:
+`UnifiedArrayRuntime::emitElemOpByHint` — every element retain/drop, every
+flavor (`cell` included, and the cow variants), dispatches on the buffer's
+ELEMENT HINT; the static flavor is used only for an unstamped buffer.
+Witness `tests/aot/cases/w4_coown_by_hint.php`.
+
+The same guard then caught a PRE-EXISTING misinference on main: the
+docblock shape `array<int, array{0:Node,1:bool}>` lowered to an erased
+element, `detectStringElemUse` read `$pair[0]` as a char subscript, and
+`ApplyMemoryMode::demote` ran for a year with `vec[string]` — `$pair[0] === $n`
+never true (every loop demoted to RC_HEAP), `__mir_rc_retain_str` on the
+pair's ARRAY. `LowerTypes::lowerTypeHint` now lowers `array{…}` to
+`vec[cell]` / `assoc[string,cell]`. Witness `w4_array_shape_doc` (fails on
+main's binary). gen3 builds and both witnesses pass on it.
+
+**Verifier (step 3).** `MANTICORE_CELLGUARD=strict` fails the build on any
+`raw -> cell` edge the emitter-seam census sees (`EmitLlvmCellGuard`,
+`Main.php` refuses to write the object). The ratchet baseline
+(`tools/cellguard_baseline.txt`, `tools/cellguard_scan.sh --ratchet`, now
+parallel) is the debt list; the flag defaults on when it is empty.
+`plausiblePtrIr` → assertions is still owed.
 
 **By-ref (P5/P6).** A local handed to a `mixed &` param is one word two frames
 share and the callee may make it ANY kind, so the caller's slot is a cell for

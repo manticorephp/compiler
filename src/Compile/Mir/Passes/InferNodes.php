@@ -161,6 +161,21 @@ trait InferNodes
      *
      * @param array<string, bool> $out
      */
+    /** @param array<string,bool> $out */
+    private function collectCellStaticLocals(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $d = $n;
+            if ($d->init === null && !\str_starts_with($d->cell, '@g_')
+                && isset($this->staticLocalTypes[$d->cell])
+                && $this->staticLocalTypes[$d->cell]->kind === Type::KIND_CELL) {
+                $out[$d->name] = true;
+            }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectCellStaticLocals($c, $out); }
+    }
+
     private function collectRefCellLocals(Node $n, array &$out): void
     {
         // ⚠ Via Walk, never a narrowing helper: this file is a TRAIT, and there
@@ -219,6 +234,10 @@ trait InferNodes
         // The two readers below consult this set directly.
         $this->refCellLocalsCur = [];
         $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        // A `static $x;` whose stores are scalar rides a CELL for the same
+        // reason a ref-taken slot does: its null start must stay observable
+        // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
+        $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
@@ -1641,9 +1660,15 @@ trait InferNodes
             // map at runtime — its key is int-OR-string. Type the KEY as a cell
             // (emitted via __mir_array_key_cell_at, NaN-boxed) so a downstream
             // `$out[$k] = …` dispatches int/string by tag (set_cell) instead of
-            // misreading a string-key pointer as an int. The VALUE stays raw
-            // (its element storage is unchanged — only the key is re-tagged).
+            // misreading a string-key pointer as an int. The VALUE is a cell too,
+            // decoded by the buffer's hint at the read ({@see inferArrayAccess}).
             $keyT = Type::cell();
+            $elem = Type::cell();
+        }
+        // The same for a typed-but-erased element (`vec[unknown]`, a bare
+        // `array` param): the loop variable is a decoded cell, never the raw word.
+        if ($at->isArray() && $elem->kind === Type::KIND_UNKNOWN) {
+            $elem = Type::cell();
         }
         // An erased-element array (vec[cell] / vec[unknown] / cell-valued assoc)
         // may carry DYNAMIC int-OR-string keys at runtime — e.g. one built via a
@@ -1908,13 +1933,18 @@ trait InferNodes
     {
         $at = $this->inferNode($node->array);
         $this->inferNode($node->index);
-        if ($at->isArray() && $at->element !== null) {
-            $node->type = $at->element;
+        // An ERASED element read is honestly a CELL: the emitter decodes the
+        // word by the buffer's element hint at every read whose result is a
+        // cell (docs/design/value-channels.md), so an element nobody typed
+        // arrives self-describing and its consumers unbox by type. Typed
+        // `unknown` it was the raw word — right only while the buffer happened
+        // to hold raw scalars, and a raw pointer under a cell claim everywhere
+        // else (the asort/arsort rebuild handed `$len - 1` a raw 11 as a cell).
+        if ($at->isArray()) {
+            $e = $at->element;
+            $node->type = ($e === null || $e->kind === Type::KIND_UNKNOWN) ? Type::cell() : $e;
         }
-        // Indexing a `mixed`/cell base (a nested json_decode value) yields a
-        // cell: the element is itself a NaN-boxed value, so echo dispatches by
-        // tag and a deeper `$m[$a][$b]` re-unboxes the next level.
-        if ($at->kind === Type::KIND_CELL) {
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) {
             $node->type = Type::cell();
         }
         // `$s[$i]` on a string yields a 1-char string.

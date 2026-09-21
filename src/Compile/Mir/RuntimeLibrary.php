@@ -34,15 +34,12 @@ final class RuntimeLibrary
      * both MUST route through here.
      *
      * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
-     * rmeta@16, dynamic_method_table@24.
+     * rmeta@16, dynamic_method_table@24, props_fn@32.
      */
     public static function descriptorType(): string
     {
         return '{ i64, ptr, ptr, ptr, ptr }';
     }
-
-    /** Byte offset of the props_fn field inside {@see descriptorType}. */
-    public const DESC_PROPS_AT = 32;
 
     /**
      * The full `@__mir_cd_<id> = linkonce_odr global …` definition.
@@ -1211,8 +1208,17 @@ final class RuntimeLibrary
         //
         // Out of range → 0, which is exactly `ord("")`, so a demoted local keeps
         // char_at's own out-of-range behaviour. Negative counts from the end.
+        //
+        // The length is `len@-16` READ DIRECTLY, not __mir_strlen's validated
+        // one: a demoted read sits in the innermost loop of every scanner, and
+        // the plausibility test (three header loads, a libc-strlen fallback
+        // that may write) kept the length from being hoisted — 17% of
+        // htmlspecialchars, re-validating the same header per byte. The value
+        // here is one the type system calls `string`; every producer of those
+        // hands out a headered buffer ({@see stringCore}).
         $out .= "\ndefine i64 @__mir_str_byte_at(ptr %s, i64 %i) {\nentry:\n";
-        $out .= "  %len = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %lp = getelementptr inbounds i8, ptr %s, i64 -16\n";
+        $out .= "  %len = load i64, ptr %lp\n";
         $out .= "  %neg = icmp slt i64 %i, 0\n";
         $out .= "  %iadj = add i64 %i, %len\n";
         $out .= "  %ix = select i1 %neg, i64 %iadj, i64 %i\n";
@@ -1307,7 +1313,45 @@ final class RuntimeLibrary
      */
     public function strAppend(): string
     {
+        // `%b` (the appended chunk) via __mir_strlen: O(1) + binary-safe for a
+        // headered chunk, libc-strlen fallback for a raw one. The body takes
+        // an explicit byte count so a RANGE of another string can be appended
+        // without minting a substr temp first ({@see strAppendSub}).
         $out  = "\ndefine ptr @__mir_str_append(ptr %s, ptr %b) {\n";
+        $out .= "entry:\n";
+        $out .= "  %lb = call i64 @__mir_strlen(ptr %b)\n";
+        $out .= "  %r = call ptr @__mir_str_append_n(ptr %s, ptr %b, i64 %lb)\n";
+        $out .= "  ret ptr %r\n";
+        $out .= "}\n";
+        // `$acc .= substr($src, $start[, $len])` with no temp: Zend's substr
+        // normalization ({@see EmitLlvmRuntime::stringBuiltinRuntime}), then
+        // the range is appended straight out of `%src`.
+        $out .= "\ndefine ptr @__mir_str_append_sub(ptr %s, ptr %src, i64 %start, i64 %len, i64 %haveLen) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %src)\n";
+        $out .= "  %sneg = icmp slt i64 %start, 0\n";
+        $out .= "  %splusn = add i64 %start, %n\n";
+        $out .= "  %s0 = select i1 %sneg, i64 %splusn, i64 %start\n";
+        $out .= "  %slo = icmp slt i64 %s0, 0\n";
+        $out .= "  %s1 = select i1 %slo, i64 0, i64 %s0\n";
+        $out .= "  %shi = icmp sgt i64 %s1, %n\n";
+        $out .= "  %start2 = select i1 %shi, i64 %n, i64 %s1\n";
+        $out .= "  %lneg = icmp slt i64 %len, 0\n";
+        $out .= "  %endNeg = add i64 %n, %len\n";
+        $out .= "  %enLo = icmp slt i64 %endNeg, %start2\n";
+        $out .= "  %endNeg2 = select i1 %enLo, i64 %start2, i64 %endNeg\n";
+        $out .= "  %endPos = add i64 %start2, %len\n";
+        $out .= "  %epHi = icmp sgt i64 %endPos, %n\n";
+        $out .= "  %endPos2 = select i1 %epHi, i64 %n, i64 %endPos\n";
+        $out .= "  %endHave = select i1 %lneg, i64 %endNeg2, i64 %endPos2\n";
+        $out .= "  %have = icmp ne i64 %haveLen, 0\n";
+        $out .= "  %end = select i1 %have, i64 %endHave, i64 %n\n";
+        $out .= "  %rlen = sub i64 %end, %start2\n";
+        $out .= "  %p = getelementptr inbounds i8, ptr %src, i64 %start2\n";
+        $out .= "  %r = call ptr @__mir_str_append_n(ptr %s, ptr %p, i64 %rlen)\n";
+        $out .= "  ret ptr %r\n";
+        $out .= "}\n";
+        $out .= "\ndefine ptr @__mir_str_append_n(ptr %s, ptr %b, i64 %lb) {\n";
         $out .= "entry:\n";
         // sole ownership? rc@-8 == 1 (immortal -1 / shared >1 fail → grow).
         $out .= "  %rcp = getelementptr i8, ptr %s, i64 -8\n";
@@ -1318,10 +1362,7 @@ final class RuntimeLibrary
         // O(1) accumulator length via len@-16 (set_len maintains it each append)
         // — the whole point of the length-prefixed string: `\$s .= …` is O(N),
         // not O(N²) from a libc strlen rescan of the accumulator per append.
-        // `%b` (the appended chunk) via __mir_strlen too: O(1) + binary-safe for
-        // a headered chunk, libc-strlen fallback for a raw one.
         $out .= "  %la = call i64 @__mir_strlen(ptr %s)\n";
-        $out .= "  %lb = call i64 @__mir_strlen(ptr %b)\n";
         $out .= "  %need = add i64 %la, %lb\n";        // content bytes after append
         $out .= "  %capp = getelementptr i8, ptr %s, i64 -24\n";
         $out .= "  %cap = load i64, ptr %capp\n";
@@ -1329,8 +1370,9 @@ final class RuntimeLibrary
         $out .= "  br i1 %fits, label %inplace, label %growsole\n";
         $out .= "inplace:\n";
         $out .= "  %dst = getelementptr inbounds i8, ptr %s, i64 %la\n";
-        $out .= "  %lb1 = add i64 %lb, 1\n";          // copy b + its NUL
-        $out .= "  call ptr @memcpy(ptr %dst, ptr %b, i64 %lb1)\n";
+        $out .= "  call ptr @memcpy(ptr %dst, ptr %b, i64 %lb)\n";
+        $out .= "  %nulp = getelementptr inbounds i8, ptr %s, i64 %need\n";
+        $out .= "  store i8 0, ptr %nulp\n";
         $out .= "  call void @__mir_str_set_len(ptr %s, i64 %need)\n";
         // Content changed under the same ptr → invalidate the cached hash.
         $out .= "  %hinv = getelementptr inbounds i8, ptr %s, i64 " . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
@@ -1373,8 +1415,9 @@ final class RuntimeLibrary
         $out .= "  %rnd = getelementptr inbounds i8, ptr %rnb, i64 "
               . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . "\n";
         $out .= "  %rdst = getelementptr inbounds i8, ptr %rnd, i64 %la\n";
-        $out .= "  %rlb1 = add i64 %lb, 1\n";        // copy b + its NUL
-        $out .= "  call ptr @memcpy(ptr %rdst, ptr %b, i64 %rlb1)\n";
+        $out .= "  call ptr @memcpy(ptr %rdst, ptr %b, i64 %lb)\n";
+        $out .= "  %rnulp = getelementptr inbounds i8, ptr %rnd, i64 %need\n";
+        $out .= "  store i8 0, ptr %rnulp\n";
         $out .= "  %rcapp = getelementptr inbounds i8, ptr %rnd, i64 -24\n";
         $out .= "  store i64 %rcap, ptr %rcapp\n";
         $out .= "  call void @__mir_str_set_len(ptr %rnd, i64 %need)\n";
@@ -1385,15 +1428,15 @@ final class RuntimeLibrary
         $out .= "  ret ptr %rnd\n";
         $out .= "grow:\n";
         $out .= "  %la2 = call i64 @__mir_strlen(ptr %s)\n";
-        $out .= "  %lb2 = call i64 @__mir_strlen(ptr %b)\n";
-        $out .= "  %sum = add i64 %la2, %lb2\n";
+        $out .= "  %sum = add i64 %la2, %lb\n";
         $out .= "  %dbl = shl i64 %sum, 1\n";         // over-allocate ~2×(la+lb)
         $out .= "  %ncap = add i64 %dbl, 1\n";        // room for content + NUL
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %ncap)\n";
         $out .= "  call ptr @memcpy(ptr %buf, ptr %s, i64 %la2)\n";
         $out .= "  %dst2 = getelementptr inbounds i8, ptr %buf, i64 %la2\n";
-        $out .= "  %lb21 = add i64 %lb2, 1\n";
-        $out .= "  call ptr @memcpy(ptr %dst2, ptr %b, i64 %lb21)\n";
+        $out .= "  call ptr @memcpy(ptr %dst2, ptr %b, i64 %lb)\n";
+        $out .= "  %gnulp = getelementptr inbounds i8, ptr %buf, i64 %sum\n";
+        $out .= "  store i8 0, ptr %gnulp\n";
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %sum)\n";
         $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
         $out .= "  ret ptr %buf\n";
@@ -2512,7 +2555,7 @@ final class RuntimeLibrary
         $out .= "  br i1 %odn, label %tobjpunt, label %tobjpf\n";
         $out .= "tobjpf:\n";
         $out .= "  %opfp = getelementptr inbounds i8, ptr %odesc, i64 "
-              . (string)self::DESC_PROPS_AT . "\n";
+              . (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET . "\n";
         $out .= "  %opf = load ptr, ptr %opfp\n";
         $out .= "  %ohas = icmp ne ptr %opf, null\n";
         $out .= "  br i1 %ohas, label %tobjprops, label %tobjpunt\n";

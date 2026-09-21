@@ -2493,6 +2493,13 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         $sigFunctions = $emitLibrary ? $module->functions : [];
         $ir = $emit->emit($module);
         if ($emitLibrary) { $module->functions = $sigFunctions; }
+        $cgErrors = $emit->cellGuardErrors();
+        if (\count($cgErrors) > 0) {
+            foreach ($cgErrors as $ce) { dprint($ce); }
+            dprint('manticore: MANTICORE_CELLGUARD=strict: ' . (string)\count($cgErrors)
+                . ' raw word(s) stored into a cell channel — refusing to write the object');
+            return 70;
+        }
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
         $undefTraps = \array_keys($emit->undefinedCalls);
@@ -4501,6 +4508,14 @@ function compile_via_mir(array $sources, array $paths = []): ?string {
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
         $ir = $emit->emit($module);
+        $cgErrors = $emit->cellGuardErrors();
+        if (\count($cgErrors) > 0) {
+            foreach ($cgErrors as $ce) { dprint($ce); }
+            dprint('manticore: MANTICORE_CELLGUARD=strict: ' . (string)\count($cgErrors)
+                . ' raw word(s) stored into a cell channel — refusing to write the object');
+            $emit = null;
+            return null;
+        }
         // The module's link requirements, captured before $emit goes out of
         // scope — the cc step below runs long after emission.
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);

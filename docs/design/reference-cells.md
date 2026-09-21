@@ -1,8 +1,13 @@
 # Reference cells — a `&` that is a value
 
-Status: **designed, not implemented.** The refusal it replaces is
-`LowerFromAst::lowerArrayLit` ("an array literal cannot bind an element by
-reference"), which now names its site.
+Status: **implemented through main `f58e5d6` (2026-09-14).** `[&$a]`, `[&$this->p]`,
+`[&$a[$k]]`, `[$v, &$v]`, `$a[$k] = &$v`, cell-alias ownership, `unset` breaking the
+binding and a mutated `mixed` by-ref param all match php; the deepclone witness is
+byte-identical. Still open: a `PropertyAccess` as the TARGET of `=&` (a copy), the
+static-property source, `&...$vars`, `R:` in `serialize`, the var_dump `&` marker, and
+`clone` sharing the VALUE where php shares the BINDING. The refusal this replaced
+(`LowerFromAst::lowerArrayLit`, "an array literal cannot bind an element by
+reference") is gone. The rest of this document is the design as it was decided.
 
 ## Why
 

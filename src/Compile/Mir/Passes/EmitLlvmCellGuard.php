@@ -47,6 +47,7 @@ trait EmitLlvmCellGuard
 {
     /** `MANTICORE_CELLGUARD` / `MANTICORE_CELL_ASSERT`, cached per emit(). */
     private bool $cellGuard = false;
+    private bool $cellGuardStrict = false;
     private bool $cellAssert = false;
 
     /** @var array<string, string> SSA register name (`%rN`) → 'boxed'|'opaque'|'probed' */
@@ -86,8 +87,21 @@ trait EmitLlvmCellGuard
 
     private function readCellGuardFlags(): void
     {
-        $this->cellGuard = \getenv('MANTICORE_CELLGUARD') !== false;
+        $cg = \getenv('MANTICORE_CELLGUARD');
+        $this->cellGuard = $cg !== false;
+        // `strict`: the census is the VERIFIER — any `raw -> cell` edge fails the
+        // build (docs/design/value-channels.md, step 3). The driver reads the
+        // violations after emission and refuses to write the object.
+        $this->cellGuardStrict = $cg === 'strict';
         $this->cellAssert = \getenv('MANTICORE_CELL_ASSERT') !== false;
+    }
+
+    /** The build-failing lines for `MANTICORE_CELLGUARD=strict`: one per
+     *  violation, in emission order; empty when the mode is off or clean. */
+    public function cellGuardErrors(): array
+    {
+        if (!$this->cellGuardStrict) { return []; }
+        return $this->cellGuardViolations;
     }
 
     /**

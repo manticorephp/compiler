@@ -379,6 +379,17 @@ final class InferAllocKind implements Pass
         }
 
         // ── transparent: branches inherit the parent context ──
+        // A cast whose operand already has the target representation is a
+        // BORROW (`(string)$t` hands back $t itself), so the operand flows
+        // wherever the cast does: `$keep[] = (string)$t` escapes $t. Read
+        // as a plain child it stayed frame-confined, the loop's arena reset
+        // recycled its bytes and every element of $keep read the last one.
+        // (Hidden for a year by ApplyMemoryMode::demote's vec[string] pair —
+        // it never matched a loop, so every loop body left the arena.)
+        if ($k === Node::KIND_CAST) {
+            $this->traverse($n->operand, $escCtx, $collecting);
+            return;
+        }
         if ($k === Node::KIND_TERNARY) {
             $t = $n;
             $this->traverse($t->cond, false, $collecting);
@@ -420,7 +431,7 @@ final class InferAllocKind implements Pass
     {
         return $fn === 'strlen' || $fn === 'mb_strlen' || $fn === 'count' || $fn === 'sizeof'
             || $fn === 'strpos' || $fn === 'stripos' || $fn === 'strrpos' || $fn === 'strripos'
-            || $fn === 'strcspn'
+            || $fn === 'strcspn' || $fn === '__mc_crc32b'
             || $fn === 'str_contains' || $fn === 'str_starts_with' || $fn === 'str_ends_with'
             || $fn === 'substr_count' || $fn === 'ord'
             || $fn === 'strcmp' || $fn === 'strcasecmp' || $fn === 'strncmp' || $fn === 'strncasecmp'

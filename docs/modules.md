@@ -193,7 +193,8 @@ How it works: the compiler locates the bundled stdlib interface
 `MANTICORE_STDLIB_SIG` / `MANTICORE_STDLIB_O`), injects externs for the stdlib
 functions your code references, and links `lib/manticore_stdlib.o` at the final
 step **only when you actually call one** — a program that touches no stdlib
-function links nothing extra. The binary stays fully static (stdlib.o + libc).
+function links nothing extra beyond the system libraries every binary carries
+(libc, PCRE2, OpenSSL).
 
 The stdlib is **independent of the `libraries` selection**: an app that depends
 on specific user libraries (`"libraries": ["mylib"]`) still gets the stdlib. The
@@ -228,7 +229,8 @@ bin/build --verify# rebuild, then run the fixpoint + suite gate
 the manifest is the single source of truth. Only the *first* binary needs the
 Zend interpreter (the manifest build itself can't run under Zend: its file IO
 fills mutable libc buffers that Zend's immutable strings can't provide). The
-emitted binaries make no PHP-runtime calls — they link against libc only.
+emitted binaries make no PHP-runtime calls — they link against libc, PCRE2 and
+OpenSSL, plus any FFI-bound library the program names.
 
 A self-rebuild is byte-identical: gen2 and gen3 emit the same IR.
 
