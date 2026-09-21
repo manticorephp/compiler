@@ -976,6 +976,27 @@ trait EmitLlvmArrays
         // would invent a representation the static type never promised. The
         // CELL result is decoded above, now that the store side re-encodes.
         //
+        // A SHAPE read (InferNodes typed it with the FIELD, shapeCheck != 0)
+        // decodes the word by the claimed kind in one call: the buffer is a
+        // cell buffer whenever the fields differ, and `__mir_elem_untag_kind`
+        // already asks the hint at run time and hands back the raw word
+        // unchanged for a raw-hinted buffer. `__mir_cell_to_kind` handles the
+        // pointer kinds (string / object / ARRAY) and the scalars alike — the
+        // two kind-specific branches below never covered an array-typed field,
+        // which is how `emitSpreadFill`'s `array{0:string,1:string[]}` handed
+        // `vdArmSpread` a NaN-boxed word as its `$regs` array.
+        $shapeDecoded = false;
+        if ($aa->shapeCheck !== 0) {
+            $kc = $this->elementHintCodeForType($self->type);
+            if ($kc !== null && $kc !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
+                $u = $this->ssa->allocReg();
+                $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
+                      . ', i64 ' . $reg . ', i64 ' . (string)$kc . ")\n";
+                $reg = $u;
+                $this->lastValue = $reg;
+                $shapeDecoded = true;
+            }
+        }
         // The OTHER direction is sound and is done: a result the static type
         // already calls a STRING or an OBJECT must be a raw pointer, so if the
         // array says its slots are boxed cells, strip the tag. Nothing
@@ -986,7 +1007,7 @@ trait EmitLlvmArrays
         // stream_select) handed the caller boxed elements under a `vec[obj]`
         // static type — `$r[0] instanceof R` then inttoptr'd the tag.
         $rk = $self->type->kind;
-        if (($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ)
+        if (!$shapeDecoded && ($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ)
             && $this->elemMayBeCell($aa->array->type)) {
             $this->rt->needsElemUntag = true;
             $u = $this->ssa->allocReg();
@@ -999,7 +1020,7 @@ trait EmitLlvmArrays
         // a buffer some cell-typed writer cellified — `$GLOBALS['list'][] = 5`
         // on the buffer `global $list` still reads raw — is unboxed by kind
         // when, and only when, the buffer says CELL.
-        if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
+        if (!$shapeDecoded && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
             && $this->elemMayBeCellified($aa->array)) {
             $u = $this->ssa->allocReg();
             $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
