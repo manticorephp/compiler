@@ -84,6 +84,17 @@ namespace Manticore\Sapi {
         /** @var array<int,array<string,mixed>> parked $_SESSION, by task id */
         public static array $savedSession = [];
 
+        /** @var array<int,array<string,mixed>> parked $_FILES, by task id */
+        public static array $savedFiles = [];
+
+        /** tmp path → moved?, this request's uploads. Typed like $empty: the
+         *  first registration of a process lands here before any reset.
+         *  @var array<string,bool> */
+        public static array<string, bool> $uploaded = [];
+
+        /** @var array<int,array<string,bool>> parked $uploaded, by task id */
+        public static array $savedUploaded = [];
+
         /**
          * The reset value for a superglobal, and the reason it is a property rather
          * than a `[]` literal: an empty literal types `assoc[string, unknown]`, so
@@ -97,6 +108,20 @@ namespace Manticore\Sapi {
         /** The reset value for the header block, typed for the same reason.
          *  @var array<int,string> */
         public static array<int, string> $emptyLines = [];
+
+        /** The reset value for $uploaded, typed for the same reason.
+         *  @var array<string,bool> */
+        public static array<string, bool> $emptyFlags = [];
+
+        /**
+         * The seed value for a GPC-shaped array — $_GET/$_POST/$_FILES and the
+         * Request arrays they come from. php keys these int-OR-string (`?0=x`,
+         * `a[]=1`, an anonymous upload at $_FILES[0]), so the key is a tagged
+         * cell: a string-typed key over an int entry has no string to borrow and
+         * would have to MINT one per iteration. Same cell-element reason as $empty.
+         * @var array<int|string,mixed>
+         */
+        public static array<int|string, mixed> $emptyGpc = [];
 
         /** True once any request has begun, anywhere in the process — the guard that
          *  keeps the per-task swap off a program that serves none. */
@@ -159,6 +184,8 @@ namespace Manticore\Sapi {
         Context::$savedCookie[$from] = $_COOKIE;
         Context::$savedRequest[$from] = $_REQUEST;
         Context::$savedSession[$from] = $_SESSION;
+        Context::$savedFiles[$from] = $_FILES;
+        Context::$savedUploaded[$from] = Context::$uploaded;
         Context::$seen[$from] = true;
         Context::$cur = $to;
         // The session tier parks its own per-request half (status, id) the same way.
@@ -190,6 +217,8 @@ namespace Manticore\Sapi {
             $_COOKIE = Context::$empty;
             $_REQUEST = Context::$empty;
             $_SESSION = Context::$empty;
+            $_FILES = Context::$empty;
+            Context::$uploaded = Context::$emptyFlags;
             return;
         }
         Context::$headers = Context::$savedHeaders[$to];
@@ -202,6 +231,8 @@ namespace Manticore\Sapi {
         $_COOKIE = Context::$savedCookie[$to];
         $_REQUEST = Context::$savedRequest[$to];
         $_SESSION = Context::$savedSession[$to];
+        $_FILES = Context::$savedFiles[$to];
+        Context::$uploaded = Context::$savedUploaded[$to];
     }
 
     /**
@@ -213,16 +244,19 @@ namespace Manticore\Sapi {
      * reads them while the caller supplies REQUEST_URI / REQUEST_METHOD / headers.
      * $_REQUEST is built GET-then-POST, which is php's default request_order.
      *
-     * ⚠ The parameters are `string`-valued and the seeding is ELEMENT BY ELEMENT,
-     * neither of which is style. A whole-array store of a concrete-element array
-     * into a cell-element superglobal leaves the elements RAW while every reader
-     * decodes them by tag — `echo $_GET['a']` then printed 2.1E-314. Storing one
-     * element at a time boxes each value by its static type, which is exactly what
-     * the readers expect. Flat string values are also what a query string, a form
-     * body and a cookie header actually carry; nested GPC arrays (`?a[]=1`) and
-     * $_FILES wait for the multipart parser that would produce them.
+     * ⚠ The seeding is ELEMENT BY ELEMENT, which is not style. A whole-array
+     * store of a concrete-element array into a cell-element superglobal leaves
+     * the elements RAW while every reader decodes them by tag — `echo $_GET['a']`
+     * then printed 2.1E-314. Storing one element at a time boxes each value by
+     * its static type, which is exactly what the readers expect. $get, $post and
+     * $files are `mixed`-valued because they nest (`?a[]=1`, `a[b][c]`,
+     * $_FILES['f']['size']); the caller builds every level as a cell-element
+     * array (Http\parseQueryNested) so the nested stores stay typed too. Their
+     * keys are int-or-string cells ({@see Context::$emptyGpc}): `?0=x` and an
+     * anonymous upload land under the INT key, as php does, and the element
+     * store below dispatches on the key's tag.
      */
-    function requestBegin(array<string, string> $server = [], array<string, string> $get = [], array<string, string> $post = [], array<string, string> $cookie = []): void
+    function requestBegin(array<string, string> $server = [], array<int|string, mixed> $get = [], array<int|string, mixed> $post = [], array<string, string> $cookie = [], array<int|string, mixed> $files = []): void
     {
         foreach ($server as $k => $v) {
             $_SERVER[$k] = $v;
@@ -246,7 +280,14 @@ namespace Manticore\Sapi {
         foreach ($post as $k => $v) {
             $_REQUEST[$k] = $v;
         }
+        $_FILES = Context::$empty;
+        foreach ($files as $k => $v) {
+            $_FILES[$k] = $v;
+        }
         $_SESSION = Context::$empty;
+        // $uploaded is NOT reset here: the multipart parse that registers this
+        // request's temp files runs while the caller builds $files, i.e. BEFORE
+        // this body. uploadsBegin() opens it, requestEnd() empties it.
         responseBegin();
     }
 
@@ -275,6 +316,10 @@ namespace Manticore\Sapi {
      * $_SESSION after this returns; the next requestBegin() on the same flow
      * resets it.
      *
+     * The upload sweep is php's: every temp file the multipart parser produced
+     * for this request and nobody moved is unlinked here, on every path out of
+     * the handler — a thrown handler leaves no file behind.
+     *
      * The status and the header block are read back through their own typed
      * accessors rather than one `['status' => …, 'headers' => …]` array: a
      * heterogeneous array erases its element type, and the reader then decodes an
@@ -283,6 +328,38 @@ namespace Manticore\Sapi {
     function requestEnd(): void
     {
         Context::$active = false;
+        foreach (Context::$uploaded as $tmp => $moved) {
+            if (!$moved) {
+                @\unlink($tmp);
+            }
+        }
+        Context::$uploaded = Context::$emptyFlags;
+    }
+
+    /**
+     * @internal Open this request's upload registry, typed. Called by the server
+     * at the top of every request, BEFORE the multipart parse that registers
+     * into it — that parse runs while requestBegin()'s arguments are built.
+     */
+    function uploadsBegin(): void
+    {
+        Context::$uploaded = Context::$emptyFlags;
+    }
+
+    /** @internal a temp file the multipart parser produced for THIS request. */
+    function uploadRegister(string $tmp): void
+    {
+        if ($tmp !== '') {
+            Context::$uploaded[$tmp] = false;
+        }
+    }
+
+    /** @internal the file left the temp dir under the handler's control. */
+    function uploadMoved(string $tmp): void
+    {
+        if (isset(Context::$uploaded[$tmp])) {
+            Context::$uploaded[$tmp] = true;
+        }
     }
 
     /** The response code the handler settled on. */
@@ -516,6 +593,36 @@ namespace {
     function setrawcookie(string $name, string $value = '', mixed $expires_or_options = 0, string $path = '', string $domain = '', bool $secure = false, bool $httponly = false): bool
     {
         return \Manticore\Sapi\setCookie('setrawcookie', true, $name, $value, $expires_or_options, $path, $domain, $secure, $httponly);
+    }
+
+    /**
+     * php: true only for a file THIS request uploaded and nobody moved yet.
+     * Outside a request nothing was registered, so this is php's CLI answer
+     * (false) too — the ONE body for the name; a stdlib copy would be the strong
+     * symbol over this linkonce_odr one and win every non-inlined call.
+     */
+    function is_uploaded_file(string $filename): bool
+    {
+        return isset(\Manticore\Sapi\Context::$uploaded[$filename]) && \Manticore\Sapi\Context::$uploaded[$filename] === false;
+    }
+
+    /** rename(2), falling back to copy+unlink across devices; the moved file survives the request-end sweep. */
+    function move_uploaded_file(string $from, string $to): bool
+    {
+        if (!\is_uploaded_file($from)) {
+            return false;
+        }
+        $ok = @\rename($from, $to);
+        if (!$ok) {
+            $ok = @\copy($from, $to);
+            if ($ok) {
+                @\unlink($from);
+            }
+        }
+        if ($ok) {
+            \Manticore\Sapi\Context::$uploaded[$from] = true;
+        }
+        return $ok;
     }
 
 }

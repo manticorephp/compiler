@@ -1129,6 +1129,9 @@ trait LowerPrelude
             'E_COMPILE_WARNING' => 128, 'E_USER_ERROR' => 256, 'E_USER_WARNING' => 512,
             'E_USER_NOTICE' => 1024, 'E_STRICT' => 2048, 'E_RECOVERABLE_ERROR' => 4096,
             'E_DEPRECATED' => 8192, 'E_USER_DEPRECATED' => 16384, 'E_ALL' => 30719,
+            'UPLOAD_ERR_OK' => 0, 'UPLOAD_ERR_INI_SIZE' => 1, 'UPLOAD_ERR_FORM_SIZE' => 2,
+            'UPLOAD_ERR_PARTIAL' => 3, 'UPLOAD_ERR_NO_FILE' => 4, 'UPLOAD_ERR_NO_TMP_DIR' => 6,
+            'UPLOAD_ERR_CANT_WRITE' => 7, 'UPLOAD_ERR_EXTENSION' => 8,
             // php core ints
             'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80508, 'PHP_MAJOR_VERSION' => 8,
             'PHP_MINOR_VERSION' => 5, 'PHP_RELEASE_VERSION' => 8, 'PHP_FLOAT_DIG' => 15,

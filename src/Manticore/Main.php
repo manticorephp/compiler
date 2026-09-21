@@ -3820,10 +3820,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // ("Cannot redeclare function header()"), and injecting on top of it emits
     // two definitions of one symbol, which fails in clang with no useful
     // diagnostic. Bowing out is the readable answer.
-    // `definedFunctions($sapiSrc)` only sees the seven php names left in the
-    // file's global namespace — its internals live in `Manticore\Sapi\`, so a
-    // program that calls `\Manticore\Sapi\requestBegin(...)` directly without
-    // ever naming `header()`/`setcookie()`/… also needs the gate. The Lexer
+    // `definedFunctions($sapiSrc)` only sees the php names left in the file's
+    // global namespace (header()/setcookie()/…/move_uploaded_file()) — its
+    // internals live in `Manticore\Sapi\`, so a program that calls
+    // `\Manticore\Sapi\requestBegin(...)` directly without ever naming
+    // `header()`/`setcookie()`/… also needs the gate. The Lexer
     // emits the qualifier as its own Identifier, exactly as `Async`/`Process`
     // gate one block up — `mentions('Sapi')` catches the direct seam callers.
     $sapiFns = \Compile\Mir\PreludeDemand::definedFunctions($sapiSrc);

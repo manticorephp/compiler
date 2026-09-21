@@ -639,10 +639,10 @@ function normPath(string $path): string
 /**
  * Parse an `a=1&b=2` query string, flat and last-wins.
  *
- * Flat because that is what `prelude/sapi.php` already contracts for the GPC
- * arrays it seeds: nested `?a[]=1` waits for the same epic as multipart. `+` is
- * a space here (urldecode, not rawurldecode) — that is the form-encoding rule,
- * and it is why the query and the path decode differently.
+ * Flat: `?a[]=1` is the key `a[]` here. The php-shaped nested form is
+ * {@see parseQueryNested}, built separately and only on demand. `+` is a space
+ * here (urldecode, not rawurldecode) — that is the form-encoding rule, and it is
+ * why the query and the path decode differently.
  *
  * @internal
  * @return array<string,string>
@@ -666,6 +666,235 @@ function parseQuery(string $qs): array<string, string>
         $out[\urldecode(\substr($pair, 0, $e))] = \urldecode(\substr($pair, $e + 1));
     }
     return $out;
+}
+
+/**
+ * php's GPC key rule, one pair at a time: the WHOLE key is urldecoded first,
+ * then `.` and space in the base become `_`, brackets nest, `[]` appends, a
+ * canonical decimal segment is an int key. A copy of the stdlib's
+ * parse_str assign with a `mixed` value, because a $_FILES column is an int.
+ *
+ * `$decode = false` skips the urldecode: a multipart part name is already
+ * bytes, and php's rfc1867 registers it as sent (`a%20b` stays `a%20b`).
+ *
+ * Oracle: `php -r 'parse_str($qs, $r); var_dump($r);'`.
+ *
+ * The `$node = $arr[$base]; …; $arr[$base] = $node;` read-modify-write is
+ * deliberate: a by-ref into an element of a cell-element array is the erased
+ * channel W4 has not closed; a local copy plus a store keeps every level typed.
+ *
+ * @internal
+ * @param array<int|string, mixed> $arr
+ */
+function nestedAssign(array &$arr, string $rawKey, mixed $val, bool $decode = true): void
+{
+    $key = $decode ? \urldecode($rawKey) : $rawKey;
+    $bpos = \strpos($key, '[');
+    $base = $bpos === false ? $key : \substr($key, 0, $bpos);
+    $base = \str_replace(['.', ' '], '_', $base);
+    if ($base === '') {
+        return;
+    }
+    // `0=x` lands at [0], as every segment below does: php canonicalises the
+    // base too, and a runtime string key does not canonicalise on the store.
+    // The array is cell-keyed ({@see \Manticore\Sapi\Context::$emptyGpc}), so an
+    // int here is an int entry every reader — foreach included — sees as one.
+    $bk = canonicalIntKey($base) ? (int)$base : $base;
+    if ($bpos === false) {
+        $arr[$bk] = $val;
+        return;
+    }
+    $segs = [];
+    $s = \substr($key, $bpos);
+    $n = \strlen($s);
+    $i = 0;
+    $broken = false;
+    while ($i < $n) {
+        if ($s[$i] !== '[') {
+            break;
+        }
+        $close = \strpos($s, ']', $i);
+        if ($close === false) {
+            $broken = true;
+            break;
+        }
+        $segs[] = \substr($s, $i + 1, $close - $i - 1);
+        $i = $close + 1;
+    }
+    if ($broken && \count($segs) === 0) {
+        // `g[` — php keeps the rest of the key literally, with `[` as `_`.
+        $arr[$base . \str_replace(['.', ' ', '['], '_', $s)] = $val;
+        return;
+    }
+    if (\count($segs) === 0) {
+        $arr[$bk] = $val;
+        return;
+    }
+    if (!isset($arr[$bk]) || !\is_array($arr[$bk])) {
+        $arr[$bk] = \Manticore\Sapi\Context::$emptyGpc;
+    }
+    $node = $arr[$bk];
+    nestedWalk($node, $segs, 0, $val);
+    $arr[$bk] = $node;
+}
+
+/**
+ * @internal
+ * @param array<int|string, mixed> $node
+ * @param array<int, string> $segs
+ */
+function nestedWalk(array &$node, array $segs, int $idx, mixed $val): void
+{
+    $seg = $segs[$idx];
+    $last = $idx === \count($segs) - 1;
+    if ($seg === '') {
+        if ($last) {
+            $node[] = $val;
+            return;
+        }
+        $child = \Manticore\Sapi\Context::$emptyGpc;
+        nestedWalk($child, $segs, $idx + 1, $val);
+        $node[] = $child;
+        return;
+    }
+    $k = canonicalIntKey($seg) ? (int)$seg : $seg;
+    if ($last) {
+        $node[$k] = $val;
+        return;
+    }
+    if (!isset($node[$k]) || !\is_array($node[$k])) {
+        $node[$k] = \Manticore\Sapi\Context::$emptyGpc;
+    }
+    $child = $node[$k];
+    nestedWalk($child, $segs, $idx + 1, $val);
+    $node[$k] = $child;
+}
+
+/** "0" or a digit run with no leading zero, optionally negated; ≤ 18 digits. @internal */
+function canonicalIntKey(string $s): bool
+{
+    $n = \strlen($s);
+    if ($n === 0) {
+        return false;
+    }
+    $i = $s[0] === '-' ? 1 : 0;
+    if ($i >= $n) {
+        return false;
+    }
+    if ($s[$i] === '0') {
+        return $n - $i === 1 && $i === 0;
+    }
+    for ($j = $i; $j < $n; $j = $j + 1) {
+        $c = \ord($s[$j]);
+        if ($c < 48 || $c > 57) {
+            return false;
+        }
+    }
+    return $n - $i <= 18;
+}
+
+/**
+ * php's $_GET/$_POST shape: nested, `max_input_vars`-capped. The flat
+ * {@see parseQuery} stays for `query()`; this one is built on first use.
+ *
+ * @internal
+ * @return array<int|string, mixed>
+ */
+function parseQueryNested(string $qs, int $maxVars): array<int|string, mixed>
+{
+    $out = \Manticore\Sapi\Context::$emptyGpc;
+    if ($qs === '') {
+        return $out;
+    }
+    $seen = 0;
+    foreach (splitStr('&', $qs) as $pair) {
+        if ($pair === '') {
+            continue;
+        }
+        if ($seen >= $maxVars) {
+            break;
+        }
+        $seen = $seen + 1;
+        $e = \strpos($pair, '=');
+        if ($e === false) {
+            nestedAssign($out, $pair, '');
+            continue;
+        }
+        nestedAssign($out, \substr($pair, 0, $e), \urldecode(\substr($pair, $e + 1)));
+    }
+    return $out;
+}
+
+/** A chunk source over a string. @internal */
+function stringSource(string $s): \Closure
+{
+    $pos = 0;
+    return function (int $max) use ($s, &$pos): string {
+        $out = \substr($s, $pos, $max);
+        $pos = $pos + \strlen($out);
+        return $out;
+    };
+}
+
+/**
+ * Offset of the whole-word `param=` in a Content-Disposition value, -1 when
+ * absent: `filename=` must not match inside `name=` nor inside a quoted
+ * `name="xfilename=1"`, and vice versa.
+ *
+ * @internal
+ */
+function dispositionParamPos(string $v, string $param): int
+{
+    $needle = $param . '=';
+    $pos = 0;
+    while (true) {
+        $p = \stripos($v, $needle, $pos);
+        if ($p === false) {
+            return -1;
+        }
+        if ($p > 0 && $v[$p - 1] !== ';' && $v[$p - 1] !== ' ' && $v[$p - 1] !== "\t") {
+            $pos = $p + 1;
+            continue;
+        }
+        return $p;
+    }
+}
+
+/**
+ * `name="…"` / `filename="…"` from a Content-Disposition value. Inside the
+ * quotes only `\\` and `\"` are escapes — php's substring_conf — so a bare
+ * `C:\dir\x.txt` keeps its backslashes; `%22` decodes to `"`.
+ *
+ * @internal
+ */
+function dispositionParam(string $v, string $param): string
+{
+    $p = dispositionParamPos($v, $param);
+    if ($p < 0) {
+        return '';
+    }
+    $s = $p + \strlen($param) + 1;
+    if ($s < \strlen($v) && $v[$s] === '"') {
+        $out = '';
+        $i = $s + 1;
+        $n = \strlen($v);
+        while ($i < $n) {
+            $c = $v[$i];
+            if ($c === '\\' && $i + 1 < $n && ($v[$i + 1] === '\\' || $v[$i + 1] === '"')) {
+                $out = $out . $v[$i + 1];
+                $i = $i + 2;
+                continue;
+            }
+            if ($c === '"') {
+                break;
+            }
+            $out = $out . $c;
+            $i = $i + 1;
+        }
+        return \str_replace('%22', '"', $out);
+    }
+    $semi = \strpos($v, ';', $s);
+    return \trim($semi === false ? \substr($v, $s) : \substr($v, $s, $semi - $s));
 }
 
 /**
@@ -1308,6 +1537,593 @@ final class Headers
 }
 
 /**
+ * One uploaded file, php's $_FILES row as an object. `tmpName` is '' unless
+ * `error` is ERR_OK; the temp file is the request's and goes away with it
+ * unless {@see moveTo} claims it first.
+ */
+final class UploadedFile
+{
+    public const ERR_OK = 0;
+    public const ERR_INI_SIZE = 1;
+    public const ERR_FORM_SIZE = 2;
+    public const ERR_PARTIAL = 3;
+    public const ERR_NO_FILE = 4;
+    public const ERR_NO_TMP_DIR = 6;
+    public const ERR_CANT_WRITE = 7;
+
+    private bool $moved = false;
+
+    public function __construct(
+        public readonly string $field,
+        /** basename of what the client sent */
+        public readonly string $name,
+        /** the client's filename as sent, php 8.1's `full_path` */
+        public readonly string $fullPath,
+        public readonly string $type,
+        public readonly int $size,
+        public readonly int $error,
+        public readonly string $tmpName,
+    ) {
+    }
+
+    public function isValid(): bool
+    {
+        return $this->error === self::ERR_OK && !$this->moved && $this->tmpName !== '';
+    }
+
+    /** rename(2), falling back to copy+unlink across devices. */
+    public function moveTo(string $dest): bool
+    {
+        if (!$this->isValid()) {
+            return false;
+        }
+        $ok = @\rename($this->tmpName, $dest);
+        if (!$ok) {
+            $ok = @\copy($this->tmpName, $dest);
+            if ($ok) {
+                @\unlink($this->tmpName);
+            }
+        }
+        if ($ok) {
+            $this->moved = true;
+            \Manticore\Sapi\uploadMoved($this->tmpName);
+        }
+        return $ok;
+    }
+
+    public function contents(): string
+    {
+        if (!$this->isValid()) {
+            return '';
+        }
+        $s = \file_get_contents($this->tmpName);
+        return $s === false ? '' : $s;
+    }
+}
+
+/**
+ * multipart/form-data, RFC 7578, as a state machine over a chunk source so
+ * the same code serves a buffered body and a streamed one. The only scan is
+ * `strpos` for the delimiter, and bytes that could be the head of a split
+ * delimiter stay in the buffer across reads.
+ *
+ * Two entry points over ONE set of state fields, differing only in who owns
+ * the body bytes: {@see parseAll} (push) runs to the end, field parts to
+ * strings and file parts to temp files; {@see parts} (pull) yields a
+ * {@see Part} per part and hands its bytes to the consumer through
+ * {@see readPart} — no temp file, nothing retained, a part the consumer stops
+ * reading is drained before the next one is opened.
+ */
+final class Multipart
+{
+    private const READ = 65536;
+    private const ST_PREAMBLE = 0;
+    private const ST_HEAD = 1;
+    private const ST_BODY = 2;
+    private const ST_DONE = 3;
+
+    /** "\r\n--" . boundary */
+    private string $delim;
+    /** Closure(int $max): string */
+    private mixed $source;
+    private string $buf = '';
+    private int $state = 0;
+    private bool $eof = false;
+    /** Pull mode ({@see parts}): no temp file is opened for a file part. */
+    private bool $pull = false;
+    /** Bumped per part head; a {@see Part} reads only while it is the current one. */
+    private int $pSeq = 0;
+
+    /** @var array<int|string, mixed> */
+    private array $fields;
+    /** @var array<int, UploadedFile> */
+    private array $files = [];
+    private int $fileCount = 0;
+    private int $maxFiles;
+    private int $maxSize;
+    private int $fieldCount = 0;
+    private int $maxInputVars;
+    /** the MAX_FILE_SIZE field, php's per-form cap; 0 = none, as php's `max_file_size &&` */
+    private int $formMax = 0;
+
+    private string $pName = '';
+    private string $pFile = '';
+    private bool $pIsFile = false;
+    private string $pType = '';
+    private string $pValue = '';
+    /** \Resource|null */
+    private mixed $pTmp = null;
+    private string $pTmpName = '';
+    private int $pSize = 0;
+    private int $pError = 0;
+
+    public function __construct(string $contentType, mixed $source, int $maxFileUploads = 20, int $uploadMaxFilesize = 2097152, int $maxInputVars = 1000)
+    {
+        $this->delim = "\r\n--" . self::boundaryOf($contentType);
+        $this->source = $source;
+        $this->maxFiles = $maxFileUploads;
+        $this->maxSize = $uploadMaxFilesize;
+        $this->maxInputVars = $maxInputVars;
+        $this->fields = \Manticore\Sapi\Context::$emptyGpc;
+    }
+
+    /** The boundary parameter, unquoted; '' when the header has none. */
+    public static function boundaryOf(string $ct): string
+    {
+        $p = \stripos($ct, 'boundary=');
+        if ($p === false) {
+            return '';
+        }
+        $v = \substr($ct, $p + 9);
+        $semi = \strpos($v, ';');
+        if ($semi !== false) {
+            $v = \substr($v, 0, $semi);
+        }
+        $v = \trim($v);
+        if ($v !== '' && $v[0] === '"') {
+            $v = \trim($v, '"');
+        }
+        return $v;
+    }
+
+    /** @return array<int|string, mixed> */
+    public function fields(): array<int|string, mixed>
+    {
+        return $this->fields;
+    }
+
+    /** @return array<int, UploadedFile> */
+    public function files(): array<int, UploadedFile>
+    {
+        return $this->files;
+    }
+
+    /**
+     * Run to the closing delimiter. False = malformed (the server answers 400),
+     * and then no temp file survives: the open part's and every collected one's
+     * are unlinked and `files()` is empty, so a stream of bad bodies cannot
+     * fill the disk.
+     */
+    public function parseAll(): bool
+    {
+        if (\strlen($this->delim) <= 4) {
+            return false;
+        }
+        while ($this->state !== self::ST_DONE) {
+            if ($this->state === self::ST_PREAMBLE) {
+                if (!$this->preamble()) {
+                    return $this->abort();
+                }
+            } elseif ($this->state === self::ST_HEAD) {
+                if ($this->head() < 0) {
+                    return $this->abort();
+                }
+            } elseif (!$this->body()) {
+                return $this->abort();
+            }
+            if ($this->eof && $this->state !== self::ST_DONE) {
+                // Cut off mid-part: php marks the open file PARTIAL — only a
+                // file still being written; one already dropped (-1) or
+                // failed (4, 1, 2) keeps its own verdict.
+                if ($this->state === self::ST_BODY) {
+                    if ($this->pIsFile && $this->pError === 0) {
+                        $this->pError = UploadedFile::ERR_PARTIAL;
+                    }
+                    $this->closePart();
+                }
+                $this->state = self::ST_DONE;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Pull mode: one {@see Part} per part, in wire order. A part the consumer
+     * did not read to its end is drained when the generator resumes, so the
+     * next part always starts at its head. Malformed input throws — there is
+     * no 400 to answer here, the handler is already running.
+     *
+     * @return \Generator<int, Part>
+     */
+    public function parts(): \Generator
+    {
+        $this->pull = true;
+        if (\strlen($this->delim) <= 4 || !$this->preamble()) {
+            throw new \RuntimeException('malformed multipart');
+        }
+        while ($this->state === self::ST_HEAD) {
+            if ($this->head() < 0) {
+                throw new \RuntimeException('malformed multipart');
+            }
+            yield new Part($this->pName, $this->pFile, $this->pType, $this->pSeq, $this);
+            $this->skipRest();
+        }
+    }
+
+    /**
+     * Up to $max bytes of the current part ({@see body} bounded to $max and
+     * stopping AT the delimiter); '' once the part's delimiter is reached, or
+     * for a Part that is no longer the current one. At EOF the remainder is
+     * the part — a body cut off mid-part ends it silently (no PARTIAL as the
+     * push mode has); that remainder is at most `strlen(delim) - 1` bytes and
+     * may exceed $max.
+     */
+    public function readPart(int $max, int $seq): string
+    {
+        if ($seq !== $this->pSeq || $this->state !== self::ST_BODY || $max <= 0) {
+            return '';
+        }
+        while (true) {
+            $p = \strpos($this->buf, $this->delim);
+            if ($p !== false) {
+                if ($p === 0) {
+                    $this->endPart();
+                    return '';
+                }
+                return $this->take($p < $max ? $p : $max);
+            }
+            $avail = \strlen($this->buf) - (\strlen($this->delim) - 1);
+            if ($avail > 0) {
+                return $this->take($avail < $max ? $avail : $max);
+            }
+            if (!$this->fill()) {
+                $out = $this->buf;
+                $this->buf = '';
+                $this->state = self::ST_DONE;
+                return $out;
+            }
+        }
+    }
+
+    private function take(int $n): string
+    {
+        $out = \substr($this->buf, 0, $n);
+        $this->buf = \substr($this->buf, $n);
+        return $out;
+    }
+
+    /** The delimiter is at the head of the buffer: step over it, then {@see afterDelim}. */
+    private function endPart(): void
+    {
+        $this->buf = \substr($this->buf, \strlen($this->delim));
+        if (!$this->afterDelim()) {
+            $this->state = self::ST_DONE;
+            throw new \RuntimeException('malformed multipart');
+        }
+    }
+
+    /** Drain the current part to its delimiter — the consumer stopped early. */
+    private function skipRest(): void
+    {
+        while ($this->state === self::ST_BODY) {
+            $this->readPart(self::READ, $this->pSeq);
+        }
+    }
+
+    /** Malformed: drop the open part's temp file and every collected one. */
+    private function abort(): bool
+    {
+        $this->dropTmp();
+        foreach ($this->files as $f) {
+            if ($f->tmpName !== '') {
+                @\unlink($f->tmpName);
+            }
+        }
+        $this->files = [];
+        $this->state = self::ST_DONE;
+        return false;
+    }
+
+    private function fill(): bool
+    {
+        if ($this->eof) {
+            return false;
+        }
+        $fn = $this->source;
+        $chunk = $fn(self::READ);
+        if ($chunk === '') {
+            $this->eof = true;
+            return false;
+        }
+        $this->buf = $this->buf . $chunk;
+        return true;
+    }
+
+    /** Skip to the first delimiter. The first one has no leading CRLF. */
+    private function preamble(): bool
+    {
+        $first = \substr($this->delim, 2);
+        while (true) {
+            $p = \strpos($this->buf, $first);
+            if ($p !== false) {
+                $this->buf = \substr($this->buf, $p + \strlen($first));
+                return $this->afterDelim();
+            }
+            $keep = \strlen($first) - 1;
+            if (\strlen($this->buf) > $keep) {
+                $this->buf = \substr($this->buf, \strlen($this->buf) - $keep);
+            }
+            if (!$this->fill()) {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * After a delimiter: `--` ends the message, CRLF opens a part, anything
+     * else is garbage (false → 400). EOF here is a message cut right after a
+     * delimiter: the part before it is complete, so it ends as DONE.
+     */
+    private function afterDelim(): bool
+    {
+        while (\strlen($this->buf) < 2) {
+            if (!$this->fill()) {
+                $this->state = self::ST_DONE;
+                return true;
+            }
+        }
+        if (\strncmp($this->buf, '--', 2) === 0) {
+            $this->state = self::ST_DONE;
+            return true;
+        }
+        if (\strncmp($this->buf, "\r\n", 2) !== 0) {
+            return false;
+        }
+        $this->buf = \substr($this->buf, 2);
+        $this->state = self::ST_HEAD;
+        return true;
+    }
+
+    /** Part head: lines to the blank line. 0 = ok, -1 = malformed. */
+    private function head(): int
+    {
+        while (true) {
+            $end = \strpos($this->buf, "\r\n\r\n");
+            if ($end !== false) {
+                break;
+            }
+            if (\strlen($this->buf) > 16384 || !$this->fill()) {
+                return -1;
+            }
+        }
+        $lines = splitStr("\r\n", \substr($this->buf, 0, $end));
+        $this->buf = \substr($this->buf, $end + 4);
+        $this->pName = '';
+        $this->pFile = '';
+        $this->pIsFile = false;
+        $this->pType = '';
+        $this->pValue = '';
+        $this->pSize = 0;
+        $this->pError = 0;
+        $this->pTmp = null;
+        $this->pTmpName = '';
+        foreach ($lines as $line) {
+            $colon = \strpos($line, ':');
+            if ($colon === false) {
+                continue;
+            }
+            $hn = \strtolower(\trim(\substr($line, 0, $colon)));
+            $hv = \trim(\substr($line, $colon + 1));
+            if ($hn === 'content-disposition') {
+                $this->pName = dispositionParam($hv, 'name');
+                $this->pFile = dispositionParam($hv, 'filename');
+                $this->pIsFile = dispositionParamPos($hv, 'filename') >= 0;
+            } elseif ($hn === 'content-type') {
+                $this->pType = $hv;
+            }
+        }
+        if ($this->pName === '' && !$this->pIsFile) {
+            // php (rfc1867): neither name= nor filename= is "Mime headers garbled";
+            // a file part with only filename= is kept, field ''
+            return -1;
+        }
+        $this->pSeq = $this->pSeq + 1;
+        if ($this->pIsFile && !$this->pull) {
+            $this->openFile();
+        }
+        $this->state = self::ST_BODY;
+        return 0;
+    }
+
+    private function openFile(): void
+    {
+        if ($this->pFile === '') {
+            $this->pError = UploadedFile::ERR_NO_FILE;
+            return;
+        }
+        if ($this->fileCount >= $this->maxFiles) {
+            // dropped silently, php's max_file_uploads
+            $this->pError = -1;
+            return;
+        }
+        $this->fileCount = $this->fileCount + 1;
+        $tmp = \tempnam(\sys_get_temp_dir(), 'php');
+        if ($tmp === false) {
+            $this->pError = UploadedFile::ERR_NO_TMP_DIR;
+            return;
+        }
+        $r = @\fopen($tmp, 'wb');
+        if ($r === false) {
+            @\unlink($tmp);
+            $this->pError = UploadedFile::ERR_CANT_WRITE;
+            return;
+        }
+        $this->pTmp = $r;
+        $this->pTmpName = $tmp;
+    }
+
+    /**
+     * Body bytes up to the next delimiter; everything before a possible split
+     * delimiter is consumed. False = garbage after the delimiter.
+     */
+    private function body(): bool
+    {
+        while (true) {
+            $p = \strpos($this->buf, $this->delim);
+            if ($p !== false) {
+                $this->consume(\substr($this->buf, 0, $p));
+                $this->buf = \substr($this->buf, $p + \strlen($this->delim));
+                $this->closePart();
+                return $this->afterDelim();
+            }
+            $keep = \strlen($this->delim) - 1;
+            $n = \strlen($this->buf);
+            if ($n > $keep) {
+                $this->consume(\substr($this->buf, 0, $n - $keep));
+                $this->buf = \substr($this->buf, $n - $keep);
+            }
+            if (!$this->fill()) {
+                $this->consume($this->buf);
+                $this->buf = '';
+                return true;
+            }
+        }
+    }
+
+    private function consume(string $bytes): void
+    {
+        if ($bytes === '') {
+            return;
+        }
+        if (!$this->pIsFile) {
+            $this->pValue = $this->pValue . $bytes;
+            return;
+        }
+        if ($this->pError !== 0) {
+            return;
+        }
+        $this->pSize = $this->pSize + \strlen($bytes);
+        if ($this->pSize > $this->maxSize || ($this->formMax > 0 && $this->pSize > $this->formMax)) {
+            $this->pError = $this->pSize > $this->maxSize ? UploadedFile::ERR_INI_SIZE : UploadedFile::ERR_FORM_SIZE;
+            $this->dropTmp();
+            return;
+        }
+        $r = $this->pTmp;
+        if ($r !== null) {
+            \fwrite($r, $bytes);
+        }
+    }
+
+    private function dropTmp(): void
+    {
+        $r = $this->pTmp;
+        if ($r !== null) {
+            \fclose($r);
+            @\unlink($this->pTmpName);
+        }
+        $this->pTmp = null;
+        $this->pTmpName = '';
+        $this->pSize = 0;
+    }
+
+    private function closePart(): void
+    {
+        if (!$this->pIsFile) {
+            if ($this->pName === 'MAX_FILE_SIZE' && \ctype_digit($this->pValue)) {
+                $this->formMax = (int)$this->pValue;
+            }
+            if ($this->fieldCount >= $this->maxInputVars) {
+                // dropped silently, php's max_input_vars applies to rfc1867 fields too
+                return;
+            }
+            $this->fieldCount = $this->fieldCount + 1;
+            nestedAssign($this->fields, $this->pName, $this->pValue, false);
+            return;
+        }
+        if ($this->pError === -1) {
+            // over max_file_uploads: not reported, as php
+            return;
+        }
+        if ($this->pError === UploadedFile::ERR_PARTIAL) {
+            $this->dropTmp();
+        }
+        $r = $this->pTmp;
+        if ($r !== null) {
+            \fclose($r);
+            $this->pTmp = null;
+        }
+        $name = $this->pFile;
+        $slash = \strrpos($name, '/');
+        $bslash = \strrpos($name, '\\');
+        $cut = $slash === false ? $bslash : ($bslash === false ? $slash : ($slash > $bslash ? $slash : $bslash));
+        if ($cut !== false) {
+            $name = \substr($name, $cut + 1);
+        }
+        $this->files[] = new UploadedFile(
+            $this->pName,
+            $name,
+            $this->pFile,
+            $this->pError === 0 ? $this->pType : '',
+            $this->pError === 0 ? $this->pSize : 0,
+            $this->pError,
+            $this->pError === 0 ? $this->pTmpName : '',
+        );
+        if ($this->pError !== 0 && $this->pTmpName !== '') {
+            @\unlink($this->pTmpName);
+        }
+    }
+}
+
+/**
+ * One part of a streamed multipart body ({@see Request::multipart}): a bounded
+ * view over the parser's current part. Its bytes are read from the wire as the
+ * handler asks for them and are retained nowhere else; once the generator
+ * moves on, {@see read} answers ''.
+ */
+final class Part
+{
+    public function __construct(
+        /** The `name=` of the Content-Disposition. */
+        public readonly string $name,
+        /** The `filename=`; '' for a field — and for a file part sent with
+         *  `filename=""`, indistinguishable from a field here (the buffered
+         *  path reports it as `UPLOAD_ERR_NO_FILE`). */
+        public readonly string $filename,
+        /** The part's Content-Type, '' when it has none. */
+        public readonly string $type,
+        private int $seq,
+        private Multipart $m,
+    ) {
+    }
+
+    /** Up to $max bytes of this part; '' once its delimiter is reached. */
+    public function read(int $max): string
+    {
+        return $this->m->readPart($max, $this->seq);
+    }
+
+    /** The rest of this part as one string — the consumer's memory, uncapped. */
+    public function readAll(): string
+    {
+        $out = '';
+        while (($c = $this->read(65536)) !== '') {
+            $out = $out . $c;
+        }
+        return $out;
+    }
+}
+
+/**
  * One parsed request. Immutable to the handler.
  *
  * The public surface is `readonly`; the two memo fields and the bitfield beside
@@ -1321,12 +2137,28 @@ final class Request
 {
     private const P_QUERY = 1;
     private const P_COOKIE = 2;
+    private const P_QUERY_NESTED = 4;
+    private const P_POST = 8;
 
     /** @var array<string,string> */
     private array<string, string> $queryCache = [];
     /** @var array<string,string> */
     private array<string, string> $cookieCache = [];
+    /** @var array<int|string, mixed> */
+    private array<int|string, mixed> $queryNested = [];
+    /** @var array<int|string, mixed> */
+    private array<int|string, mixed> $postNested = [];
     private int $parsed = 0;
+
+    private ?Multipart $multipart = null;
+    private bool $multipartFailed = false;
+    /** {@see multipart} ran: the streamed body is that generator's. */
+    private bool $multipartUsed = false;
+    private int $maxFileUploads = 20;
+    private int $uploadMaxFilesize = 2097152;
+
+    /** @var array<int, UploadedFile> */
+    private static array<int, UploadedFile> $noFiles = [];
 
     public function __construct(
         /** The raw method token — `GET`, but also `PROPFIND`. */
@@ -1355,9 +2187,16 @@ final class Request
          *  port field of its own; the port inside a `Forwarded: for=` value
          *  is part of the client address and is discarded. */
         public readonly string $forwardedPort = '',
+        /** php's `max_input_vars`: pairs past this many are dropped by
+         *  {@see queryArray} and {@see postArray}. */
+        public readonly int $maxInputVars = 1000,
+        int $maxFileUploads = 20,
+        int $uploadMaxFilesize = 2097152,
         /** Present only for a streamed body. */
         private ?\Buffer\Reader $reader = null,
     ) {
+        $this->maxFileUploads = $maxFileUploads;
+        $this->uploadMaxFilesize = $uploadMaxFilesize;
     }
 
     public function header(string $n, string $d = ''): string
@@ -1385,6 +2224,167 @@ final class Request
             $this->parsed = $this->parsed | self::P_QUERY;
         }
         return $this->queryCache;
+    }
+
+    /** php's $_GET shape: nested (`a[]`, `a[b][c]`), last-wins, max_input_vars-capped. @return array<int|string, mixed> */
+    public function queryArray(): array<int|string, mixed>
+    {
+        if (($this->parsed & self::P_QUERY_NESTED) === 0) {
+            $this->queryNested = parseQueryNested($this->queryString, $this->maxInputVars);
+            $this->parsed = $this->parsed | self::P_QUERY_NESTED;
+        }
+        return $this->queryNested;
+    }
+
+    /** php's $_POST shape from a urlencoded form, or a multipart body's fields. @return array<int|string, mixed> */
+    public function postArray(): array<int|string, mixed>
+    {
+        if (($this->parsed & self::P_POST) === 0) {
+            if (\strncasecmp($this->contentType(), 'multipart/form-data', 19) === 0) {
+                $this->ensureMultipart('postArray');
+                $m = $this->multipart;
+                $this->postNested = $m === null ? \Manticore\Sapi\Context::$emptyGpc : $m->fields();
+            } else {
+                $this->postNested = $this->contentType() === 'application/x-www-form-urlencoded'
+                    ? parseQueryNested($this->bodyRaw, $this->maxInputVars)
+                    : \Manticore\Sapi\Context::$emptyGpc;
+            }
+            $this->parsed = $this->parsed | self::P_POST;
+        }
+        return $this->postNested;
+    }
+
+    /**
+     * Parse a buffered multipart body once. A streamed one is the handler's
+     * ({@see multipart}); asking for it whole here is a LogicException.
+     */
+    private function ensureMultipart(string $who): void
+    {
+        if ($this->multipart !== null || $this->multipartFailed) {
+            return;
+        }
+        if (\strncasecmp($this->contentType(), 'multipart/form-data', 19) !== 0) {
+            return;
+        }
+        if ($this->streamed) {
+            throw new \LogicException('Http\\Request::' . $who . '(): body is streamed — use multipart()');
+        }
+        $m = new Multipart($this->header('Content-Type'), stringSource($this->bodyRaw), $this->maxFileUploads, $this->uploadMaxFilesize, $this->maxInputVars);
+        if (!$m->parseAll()) {
+            $this->multipartFailed = true;
+            return;
+        }
+        $this->multipart = $m;
+        // Registered for the request-end sweep: a temp file the handler never
+        // moves is unlinked when the request ends, thrown or not.
+        foreach ($m->files() as $f) {
+            \Manticore\Sapi\uploadRegister($f->tmpName);
+        }
+    }
+
+    public function multipartFailed(): bool
+    {
+        if ($this->streamed) {
+            return false;
+        }
+        $this->ensureMultipart('multipartFailed');
+        return $this->multipartFailed;
+    }
+
+    /**
+     * The parts of a STREAMED multipart body ({@see Server::streamBodies}),
+     * one {@see Part} at a time, read from the wire as the handler consumes
+     * them — no temp file, nothing buffered beyond one read. The body is the
+     * generator's: {@see allFiles}/{@see postArray} refuse a streamed
+     * multipart body, and a buffered one is theirs (this throws).
+     *
+     * @return \Generator<int, Part>
+     */
+    public function multipart(): \Generator
+    {
+        if (!$this->streamed) {
+            throw new \LogicException('Http\\Request::multipart(): body is buffered — use allFiles()');
+        }
+        if ($this->multipart !== null || $this->multipartUsed) {
+            throw new \LogicException('Http\\Request::multipart(): body already consumed');
+        }
+        $this->multipartUsed = true;
+        $rd = $this->reader;
+        if ($rd !== null) {
+            $m = new Multipart($this->header('Content-Type'), function (int $max) use ($rd): string {
+                return $rd->read($max);
+            }, $this->maxFileUploads, $this->uploadMaxFilesize, $this->maxInputVars);
+            yield from $m->parts();
+        }
+    }
+
+    /** Every file part, in wire order. @return array<int, UploadedFile> */
+    public function allFiles(): array<int, UploadedFile>
+    {
+        $this->ensureMultipart('allFiles');
+        $m = $this->multipart;
+        return $m === null ? self::$noFiles : $m->files();
+    }
+
+    /** The first file per field name. @return array<string, UploadedFile> */
+    public function files(): array<string, UploadedFile>
+    {
+        $out = [];
+        foreach ($this->allFiles() as $f) {
+            if (!isset($out[$f->field])) {
+                $out[$f->field] = $f;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * php's $_FILES: six columns, nested names transposed per column
+     * (`f[]`×2 → `$_FILES['f']['name'] = [0 => …, 1 => …]`, `u[avatar]` →
+     * `$_FILES['u']['name']['avatar']`). A part with filename= but no name= is
+     * php's anonymous upload: rfc1867 files it under a running int, `$_FILES[0]`.
+     * @return array<int|string, mixed>
+     */
+    public function filesArray(): array<int|string, mixed>
+    {
+        $out = \Manticore\Sapi\Context::$emptyGpc;
+        $anon = 0;
+        foreach ($this->allFiles() as $f) {
+            $field = $f->field;
+            if ($field === '') {
+                $field = (string)$anon;
+                $anon = $anon + 1;
+            }
+            $this->filesColumn($out, $field, 'name', $f->name);
+            $this->filesColumn($out, $field, 'full_path', $f->fullPath);
+            $this->filesColumn($out, $field, 'type', $f->type);
+            $this->filesColumn($out, $field, 'tmp_name', $f->tmpName);
+            $this->filesColumn($out, $field, 'error', $f->error);
+            $this->filesColumn($out, $field, 'size', $f->size);
+        }
+        return $out;
+    }
+
+    /**
+     * `f[a][]` with column `size` → `$out['f']['size']['a'][]`: the base is the
+     * field, the column sits between the base and the bracket path. No urldecode:
+     * a multipart name is registered as sent (rfc1867), unlike a query key.
+     * @param array<int|string, mixed> $out
+     */
+    private function filesColumn(array &$out, string $field, string $col, mixed $val): void
+    {
+        $b = \strpos($field, '[');
+        if ($b === false) {
+            $bk = canonicalIntKey($field) ? (int)$field : $field;
+            if (!isset($out[$bk]) || !\is_array($out[$bk])) {
+                $out[$bk] = \Manticore\Sapi\Context::$emptyGpc;
+            }
+            $row = $out[$bk];
+            $row[$col] = $val;
+            $out[$bk] = $row;
+            return;
+        }
+        nestedAssign($out, \substr($field, 0, $b) . '[' . $col . ']' . \substr($field, $b), $val, false);
     }
 
     public function cookie(string $k, string $d = ''): string
@@ -1710,6 +2710,9 @@ final class Parser
     /** @var array<int, array<int, string>> */
     private array $trusted = [];
     private int $proxyFlags = 0;
+    private int $maxInputVars = 1000;
+    private int $maxFileUploads = 20;
+    private int $uploadMaxFilesize = 2097152;
 
     /** @param array<int, array<int, string>> $trusted */
     public function __construct(
@@ -1723,6 +2726,9 @@ final class Parser
         bool $streamBodies = false,
         array $trusted = [],
         int $proxyFlags = 0,
+        int $maxInputVars = 1000,
+        int $maxFileUploads = 20,
+        int $uploadMaxFilesize = 2097152,
     ) {
         $this->buf = $buf;
         $this->remoteAddr = $remoteAddr;
@@ -1734,6 +2740,9 @@ final class Parser
         $this->streamBodies = $streamBodies;
         $this->trusted = $trusted;
         $this->proxyFlags = $proxyFlags;
+        $this->maxInputVars = $maxInputVars;
+        $this->maxFileUploads = $maxFileUploads;
+        $this->uploadMaxFilesize = $uploadMaxFilesize;
     }
 
     /** The request, once {@see parse} has answered {@see READY}. */
@@ -2142,6 +3151,9 @@ final class Parser
             $secure,
             $this->remoteAddr,
             $fport,
+            $this->maxInputVars,
+            $this->maxFileUploads,
+            $this->uploadMaxFilesize,
             $this->reader,
         );
         $this->state = self::ST_DONE;
@@ -2364,6 +3376,12 @@ final class Server
     /** @var array<int, array<int, string>> parsed CIDRs, {@see trustedProxies} */
     private array $trustedProxies = [];
     private int $proxyFlags = 0;
+    /** php's `max_input_vars`, {@see maxInputVars}. */
+    private int $maxInputVars = 1000;
+    private int $maxFileUploads = 20;
+    private int $uploadMaxFilesize = 2097152;
+    /** php's `post_max_size`. Reserved — not enforced in either mode. */
+    private int $postMaxSize = 0;
 
     /** How long one `accept` waits before the loop re-reads {@see $stopped}.
      *  This — not closing the listener out from under a parked accept — is what
@@ -2424,6 +3442,18 @@ final class Server
     /** '' omits the `Server:` header entirely. */
     public function serverName(string $s): Server { $this->serverName = $s; return $this; }
     public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
+    /** php's `max_input_vars` for $_GET / $_POST (1000, like php.ini's default). */
+    public function maxInputVars(int $n): Server { $this->maxInputVars = $n < 1 ? 1 : $n; return $this; }
+    /** php's `max_file_uploads` (20). */
+    public function maxFileUploads(int $n): Server { $this->maxFileUploads = $n < 0 ? 0 : $n; return $this; }
+    /** php's per-file `upload_max_filesize` (2 MiB). */
+    public function uploadMaxFilesize(int $n): Server { $this->uploadMaxFilesize = $n < 0 ? 0 : $n; return $this; }
+    /**
+     * php's `post_max_size`. Reserved — not enforced in either mode: a
+     * buffered body is already bounded by {@see maxBodySize}, and a streamed
+     * one's field bytes are the handler's ({@see Part::readAll}).
+     */
+    public function postMaxSize(int $n): Server { $this->postMaxSize = $n < 0 ? 0 : $n; return $this; }
     /** `callable(\Throwable, ?Request): Response` */
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
 
@@ -2591,6 +3621,9 @@ final class Server
             $this->streamBodies,
             $this->trustedProxies,
             $this->proxyFlags,
+            $this->maxInputVars,
+            $this->maxFileUploads,
+            $this->uploadMaxFilesize,
         );
         try {
             $this->pump($conn, $buf, $out, $parser);
@@ -2700,6 +3733,13 @@ final class Server
      */
     private function serveOne(\Resource $conn, Outbox $out, Request $req, int $handled): bool
     {
+        if ($req->hasBody() && !$req->streamed
+            && \strncasecmp($req->contentType(), 'multipart/form-data', 19) === 0
+            && $req->multipartFailed()) {
+            $this->statErrors = $this->statErrors + 1;
+            $this->writeError($out, Status::BAD_REQUEST);
+            return false;
+        }
         $res = $this->dispatch($req);
         $keep = $req->isKeepAlive()
             && !$res->wantsClose()
@@ -2740,6 +3780,9 @@ final class Server
      */
     private function beginRequest(Request $req): void
     {
+        // The upload registry opens BEFORE anything can parse a body: under
+        // compat the requestBegin() arguments below run the multipart parse.
+        \Manticore\Sapi\uploadsBegin();
         if (!$this->compat) {
             \Manticore\Sapi\responseBegin();
             return;
@@ -2748,11 +3791,14 @@ final class Server
         // element on purpose (a whole-array store into a cell-element
         // superglobal leaves the elements raw, and `echo $_GET['a']` then
         // prints 2.1E-314).
+        // A streamed body is the handler's (Request::stream / multipart):
+        // $_POST and $_FILES are not seeded from it.
         \Manticore\Sapi\requestBegin(
             $this->serverVars($req),
-            $req->queries(),
-            $this->postVars($req),
+            $req->queryArray(),
+            $req->streamed ? \Manticore\Sapi\Context::$emptyGpc : $req->postArray(),
             $req->cookies(),
+            $req->streamed ? \Manticore\Sapi\Context::$emptyGpc : $req->filesArray(),
         );
     }
 
@@ -2787,20 +3833,6 @@ final class Server
             $out['HTTP_' . \strtoupper(\str_replace('-', '_', $k))] = $v;
         }
         return $out;
-    }
-
-    /**
-     * @return array<string,string> php's $_POST — a urlencoded form body, and
-     * nothing else. multipart waits for the parser that would produce it.
-     */
-    private function postVars(Request $req): array<string, string>
-    {
-        if ($req->contentType() !== 'application/x-www-form-urlencoded') {
-            // A DECLARED empty, not a `[]` literal: an empty literal in a
-            // return position erases the element type for every caller.
-            return parseQuery('');
-        }
-        return parseQuery($req->body());
     }
 
     /** Run the handler, turning any escape into a response rather than a crash. */

@@ -1257,6 +1257,38 @@ trait EmitLlvmControl
             if ($kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
                 || $vecErased || $keyK === Type::KIND_CELL) {
                 $out .= '  ' . $kp . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
+            } elseif ($keyK === Type::KIND_STRING) {
+                // A STRING-keyed array can still hold an INT entry — a `"0"`
+                // literal key canonicalises to 0 at lowering, an int store
+                // reaches an `array<string,_>` through erasure — and a packed
+                // buffer has only indexes. The raw key_at handed that int back
+                // as the "string pointer": key 0 read as NULL, and
+                // `$_FILES[$k] = $v` over it SIGSEGVed. Box by entry kind and
+                // render the scalar, exactly as a cell reaching a STRING consumer
+                // does ({@see unboxCellToTypeRaw}); a real string key is stripped
+                // back to its pointer, nothing more.
+                //
+                // ⚠ The rendered key is a MINTED heap string with no owner: the
+                // key slot is a borrow slot ({@see InsertMemoryOps} blocks it,
+                // it normally holds the hash entry's own key), so nothing
+                // releases it — one small string per int entry met under a
+                // string-typed key. This branch is the repair for a static key
+                // type the array violates, not a hot path: every GPC-shaped
+                // producer keys its arrays int|string (a tagged cell, the
+                // `$keyIsCell` arm above, no mint). The arena is NOT an option —
+                // an arena string is rc=-1, a container store keeps the raw
+                // pointer and arena_leave reclaims it (the KEY case in
+                // {@see InferAllocKind}) — and a per-loop release is not either:
+                // a borrow copy of `$k` in the body outlives the next iteration.
+                // The sound closure is co-owning the key slot the way
+                // {@see InsertMemoryOps::foreachValueCoOwns} co-owns the value.
+                $this->rt->needsCellToStrPtr = true;
+                $this->rt->needsTaggedToStr = true;
+                $kc = $this->ssa->allocReg();
+                $out .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
+                $ks = $this->ssa->allocReg();
+                $out .= '  ' . $ks . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $kc . ")\n";
+                $out .= '  ' . $kp . ' = ptrtoint ptr ' . $ks . " to i64\n";
             } else {
                 $out .= '  ' . $kp . ' = call i64 @__mir_array_key_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
             }

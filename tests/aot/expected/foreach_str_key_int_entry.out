@@ -1,0 +1,7 @@
+k=a len=1 v=1
+k=0 len=1 v=x
+k=-7 len=2 v=y
+k=b len=1 v=2
+k=x len=1 v=a
+k=0 len=1 v=b
+k=1 len=1 v=c
