@@ -227,7 +227,7 @@ final class TypeCheck
         if (\str_contains($inFn, '$mono$')) { return; }
         if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
             $rt = $this->returnTypes[$inFn] ?? null;
-            if ($rt !== null && $rt->isShape()) {
+            if ($rt !== null && $rt->hasShape()) {
                 $sw = $this->shapeConflict($this->givenShape($n->value), $rt);
                 if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): return — ' . $sw; }
             }
@@ -248,7 +248,7 @@ final class TypeCheck
                 $this->errors[] = $this->at($n) . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL && $n->declaredType !== null
-            && $n->declaredType->isShape()) {
+            && $n->declaredType->hasShape()) {
             $sw = $this->shapeConflict($this->givenShape($n->value), $n->declaredType);
             if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): $' . $n->name . ' — ' . $sw; }
         }
@@ -282,39 +282,70 @@ final class TypeCheck
             }
             $ek = Type::shapeKey($k);
             if (Type::shapeKeyIsInt($ek)) { $next = (int)Type::shapeKeyLabel($ek) + 1; }
-            $fields[$ek] = $el->value->type;
+            // A sub-literal offers ITS elements too, so a `vec[array{…}]`
+            // parameter sees `[[1, 'a']]` as the shape it spells, not as
+            // the element inference already widened the outer literal to.
+            // `shapeOf` then makes the element the sub-shape itself when every
+            // sub-literal spells the same one, which is what the element arm of
+            // {@see shapeConflict} compares.
+            $fields[$ek] = $this->givenShape($el->value);
         }
         return Type::shapeOf($fields, []);
     }
 
     /**
-     * Why `$given` cannot fill a slot of shape `$want`, or null. Skips the
-     * erased cases (a non-array, an unshaped array, a cell/unknown field on
-     * either side) and obj↔obj / scalar↔scalar, exactly as {@see fieldIncompatible}.
+     * Why `$given` cannot fill a slot of type `$want`, or null. A DECLARED
+     * shape is compared field by field with a shaped `$given` (a literal, a
+     * local that kept its record), and against the one element type of an
+     * unshaped concrete array (`vec[int]` into `array{0:int,1:string}`: the
+     * runtime guard refuses that read, so the call is refused here). Then
+     * the elements, so a `vec[array{…}]` parameter checks each sub-literal.
+     * Skips the erased cases (a non-array, a cell/unknown on either side)
+     * and obj↔obj / scalar↔scalar, exactly as {@see fieldIncompatible}.
      */
     private function shapeConflict(Type $given, Type $want): ?string
     {
-        if (!$want->isShape() || !$want->declared || !$given->isShape()) { return null; }
-        $why = null;
-        foreach ($want->fields as $ek => $ft) {
-            $gt = $given->shapeFieldAt($ek);
-            if ($gt === null) {
-                if (isset($want->nullableFields[$ek])) { continue; }
-                $why = 'key ' . Type::shapeKeyLabel($ek) . ' is missing';
-                break;
+        if (!$given->isArray() || !$want->isArray()) { return null; }
+        if ($want->isShape() && $want->declared) {
+            $why = null;
+            if ($given->isShape()) {
+                foreach ($want->fields as $ek => $ft) {
+                    $gt = $given->shapeFieldAt($ek);
+                    if ($gt === null) {
+                        if (isset($want->nullableFields[$ek])) { continue; }
+                        $why = 'key ' . Type::shapeKeyLabel($ek) . ' is missing';
+                        break;
+                    }
+                    if ($this->fieldIncompatible($gt, $ft)) {
+                        $why = 'key ' . Type::shapeKeyLabel($ek) . ' is ' . $gt->toString() . ', ' . $ft->toString() . ' expected';
+                        break;
+                    }
+                    $sub = $this->shapeConflict($gt, $ft);
+                    if ($sub !== null) {
+                        $why = 'key ' . Type::shapeKeyLabel($ek) . ': ' . $sub;
+                        break;
+                    }
+                }
+                if ($why === null) {
+                    foreach ($given->fields as $ek => $gt) {
+                        if ($want->shapeFieldAt($ek) === null) { $why = 'key ' . Type::shapeKeyLabel($ek) . ' is not in the shape'; break; }
+                    }
+                }
+            } elseif ($given->element !== null && $this->concrete($given->element)) {
+                foreach ($want->fields as $ek => $ft) {
+                    if ($this->fieldIncompatible($given->element, $ft)) {
+                        $why = 'key ' . Type::shapeKeyLabel($ek) . ' is ' . $given->element->toString() . ', ' . $ft->toString() . ' expected';
+                        break;
+                    }
+                }
             }
-            if ($this->fieldIncompatible($gt, $ft)) {
-                $why = 'key ' . Type::shapeKeyLabel($ek) . ' is ' . $gt->toString() . ', ' . $ft->toString() . ' expected';
-                break;
+            if ($why !== null) {
+                return $given->shapeString() . ' given, ' . $want->shapeString() . ' expected: ' . $why;
             }
         }
-        if ($why === null) {
-            foreach ($given->fields as $ek => $gt) {
-                if ($want->shapeFieldAt($ek) === null) { $why = 'key ' . Type::shapeKeyLabel($ek) . ' is not in the shape'; break; }
-            }
-        }
-        if ($why === null) { return null; }
-        return $given->shapeString() . ' given, ' . $want->shapeString() . ' expected: ' . $why;
+        if ($given->element === null || $want->element === null) { return null; }
+        $sub = $this->shapeConflict($given->element, $want->element);
+        return $sub === null ? null : 'element ' . $sub;
     }
 
     /**

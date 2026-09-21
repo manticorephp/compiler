@@ -5,5 +5,7 @@ tests/analyze/cases/shape_static_error.php:31:0: error: missing(): key 2 is not 
 tests/analyze/cases/shape_static_error.php:33:0: error: __main(): argument 1 to first() — array{0:int,1:string} given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
 tests/analyze/cases/shape_static_error.php:34:0: error: __main(): argument 1 to hits() — array{name:string} given, array{name:string,hits:int} expected: key hits is missing
 tests/analyze/cases/shape_static_error.php:35:0: error: __main(): argument 1 to hits() — array{name:string,hits:int,extra:int} given, array{name:string,hits:int} expected: key extra is not in the shape
+tests/analyze/cases/shape_static_error.php:37:0: error: __main(): argument 1 to first() — vec[int] given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:40:0: error: __main(): argument 1 to pairs() — element array{0:int,1:string} given, array{0:int,1:int} expected: key 1 is string, int expected
 
-Found 7 error(s), 0 warning(s).
+Found 9 error(s), 0 warning(s).

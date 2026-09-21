@@ -1018,9 +1018,17 @@ trait EmitLlvmArrays
                 $where = $aa->array->type->shapeString() . ' key ' . $keyStr;
                 $expected = $self->type->kind === Type::KIND_OBJ
                     ? \ltrim((string)$self->type->class, '\\') : $self->type->toString();
+                // The thrower names what it was GIVEN through `get_debug_type`,
+                // which reads a cell: a raw-hinted buffer's word is boxed by
+                // that hint first (`__mir_elem_decode`), so an int buffer under
+                // a string field says `int given`, not the tag bits of a
+                // pointer read as a cell. A CELL buffer's word passes through.
+                $given = $this->ssa->allocReg();
+                $out .= '  ' . $given . ' = call i64 @__mir_elem_decode(ptr ' . $arrPtr
+                      . ', i64 ' . $reg . ")\n";
                 // A prelude fn takes every argument as an i64 word and returns
                 // one, even a `void` ({@see EmitLlvmBuiltins::biGettype}).
-                $out .= '  call i64 @manticore___mir_shape_type_error(i64 ' . $reg
+                $out .= '  call i64 @manticore___mir_shape_type_error(i64 ' . $given
                       . ', i64 ptrtoint (ptr ' . $this->strRef($where) . ' to i64)'
                       . ', i64 ptrtoint (ptr ' . $this->strRef($expected) . " to i64))\n";
                 // The prelude fn throws (longjmp) and never returns; the edge

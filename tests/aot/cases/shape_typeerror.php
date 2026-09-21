@@ -33,3 +33,23 @@ $rec = json_decode('{"ratio":"x"}', true);
 try { echo ratio($rec), "\n"; }
 catch (TypeError $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 echo ratio(json_decode('{"ratio":2}', true)), "\n";
+final class Rec {
+    /** @var array{name:string,hits:int} */
+    public array $rec = [];
+    /** @var array{0:float,1:float,2:float} */
+    public array $f = [];
+    /** @var array{0:int,1:string} */
+    public array $p = [];
+    public function bump(): int { return $this->rec['hits'] + 1; }
+    public function scale(): float { return $this->f[0] * 1.5; }
+    public function two(): int { return strlen($this->p[1]); }
+}
+$o = new Rec();
+$o->p = [1, 2];
+try { echo $o->two(), "\n"; }
+catch (TypeError $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+$o->rec = ['name' => 'b', 'hits' => 'x'];
+try { echo $o->bump(), "\n"; }
+catch (TypeError $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+$o->f = [1, 2, 3];
+echo $o->scale(), "\n";

@@ -33,3 +33,8 @@ function missing(array $pair): int { return $pair[2]; }
 echo first([1, 'x'])->kind;
 echo hits(['name' => 'n']);
 echo hits(['name' => 'n', 'hits' => 1, 'extra' => 2]);
+$v = [1, 2];
+echo first($v)->kind;
+/** @param array<int, array{0:int,1:int}> $pairs */
+function pairs(array $pairs): int { return count($pairs); }
+echo pairs([[1, 'a']]);
