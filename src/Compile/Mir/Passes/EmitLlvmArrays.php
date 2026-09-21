@@ -988,6 +988,14 @@ trait EmitLlvmArrays
         $shapeDecoded = false;
         if ($aa->shapeCheck !== 0) {
             $kc = $this->elementHintCodeForType($self->type);
+            // A closure / enum / struct / Ffi\Ptr / Generator field has NO
+            // hint code (the exclusion above is about the DROP flavor, not
+            // whether the word is a pointer) — `$f = $p[0]; $f(1)` left `$f`
+            // the raw NaN-boxed word. `__mir_cell_to_kind`'s `ptrk` arm only
+            // strips the tag (NULL → 0), which is right for any pointer kind.
+            if ($kc === null && (Type::isClosureLike($self->type) || $self->type->kind === Type::KIND_OBJ)) {
+                $kc = \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
+            }
             if ($kc !== null && $kc !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
                 $u = $this->ssa->allocReg();
                 $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr

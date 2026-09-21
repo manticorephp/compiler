@@ -1453,6 +1453,9 @@ final class ArrayAccess_ extends Node
      * against this node's (field) type and throws TypeError on a mismatch;
      * 2 = the same, but a NULL word passes (a `key?:`/`?T` field, or the
      * subject of `??`). 0 = not a shaped read. Set by InferNodes on every run.
+     * `inferIsset` clears the flag only on a DIRECT array-access target — a
+     * nested probe (`isset($rec['k']->x)`) keeps the INNER read's flag, since
+     * that read is not itself the thing being probed.
      */
     public int $shapeCheck = 0;
 
