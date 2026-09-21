@@ -1063,6 +1063,20 @@ trait EmitLlvmLocals
     }
 
     /**
+     * The SUPERGLOBAL cell a local name is backed by — its own (`$_SESSION` →
+     * `@g__SESSION`) or the one a reference alias forwards to (`$s = &$_SESSION`
+     * copies `globalBacked`, {@see EmitLlvmObjects::emitRefAlias}); '' for
+     * every other name, including a plain `global $store` (`@g_store`), which
+     * keeps the refusal {@see byRefAddrOf} explains.
+     */
+    private function superglobalCellOf(string $name): string
+    {
+        $cell = $this->locals->globalBacked[$name] ?? '';
+        if ($cell === '' || !\str_starts_with($cell, '@g_')) { return ''; }
+        return $this->isSuperglobalName(\substr($cell, 3)) ? $cell : '';
+    }
+
+    /**
      * IR computing the by-ref ADDRESS of lvalue `$a` as i64 in
      * `$this->lastValue`; null when `$a` is not addressable. A plain local
      * yields its slot address (a by-ref local already HOLDS an address — it is
@@ -1097,10 +1111,10 @@ trait EmitLlvmLocals
             // seeder, not from this node's static type: at `&$_SESSION` the
             // LoadLocal can still be typed `unknown`, and asking the type here
             // refused the very shape this arm exists for.
-            if ($this->isSuperglobalName($name) && isset($this->locals->globalBacked[$name])) {
+            $sgCell = $this->superglobalCellOf($name);
+            if ($sgCell !== '') {
                 $addr = $this->ssa->allocReg();
-                $out = '  ' . $addr . ' = ptrtoint ptr '
-                     . $this->locals->globalBacked[$name] . " to i64\n";
+                $out = '  ' . $addr . ' = ptrtoint ptr ' . $sgCell . " to i64\n";
                 $this->lastValue = $addr;
                 $this->lastValueType = 'i64';
                 return $out;

@@ -1,0 +1,28 @@
+Array
+(
+    [a] => x0!
+    [b] => y0!
+)
+Array
+(
+    [c] => z0
+)
+Array
+(
+    [a] => x1!
+    [b] => y1!
+)
+Array
+(
+    [c] => z1
+)
+Array
+(
+    [a] => x2!
+    [b] => y2!
+)
+Array
+(
+    [c] => z2
+)
+done

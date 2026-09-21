@@ -789,6 +789,7 @@ final class EmitLlvm implements EmitVisitor
         // is not answerable here at all — veto every slot rather than reason about
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
+        $this->moduleIsLibrary = $module->isLibraryModule;
         $this->computeKeepsNoArg($module);
         $this->grantBagsForDynamicStores($module);
         foreach ($module->functions as $fn) {
@@ -1922,11 +1923,21 @@ final class EmitLlvm implements EmitVisitor
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             if (!$this->isGlobalsViewName($n->name)) {
                 $decl[$n->name] = $n;
+                // A LIBRARY's superglobal cell is shared with a program this
+                // module cannot see, whose stores it cannot judge — the same
+                // refusal {@see $propBorrowUnknown} makes for a property. A
+                // `static` local is module-private and stays judged.
+                if ($this->moduleIsLibrary && $this->isSuperglobalName($n->name)) {
+                    $this->globalCellVeto[$n->cell] = true;
+                }
             }
             return;
         }
         if ($n->kind === Node::KIND_REF_ALIAS) {
-            if (isset($decl[$n->source])) { $alias[$n->target] = $n->source; }
+            // The emitter follows a CHAIN (`$s = &$_SESSION; $t = &$s; $t = v`
+            // stores into the cell), so the scan must judge through one too.
+            $src = $alias[$n->source] ?? $n->source;
+            if (isset($decl[$src])) { $alias[$n->target] = $src; }
             return;
         }
         if ($n->kind === Node::KIND_STORE_LOCAL) {
@@ -1940,7 +1951,98 @@ final class EmitLlvm implements EmitVisitor
             $this->scanGlobalCellStores($n->value, $decl, $alias);
             return;
         }
+        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
+            || $n->kind === Node::KIND_METHOD_CALL) {
+            $this->scanGlobalCellByRefArgs($n, $decl, $alias);
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanGlobalCellStores($c, $decl, $alias); }
+    }
+
+    /**
+     * A cell handed to a BY-REF parameter ({@see EmitLlvmLocals::byRefAddrOf}
+     * answers its address) is stored by the callee at the PARAM's type, not at
+     * any value's: `fill($_GET)` with `array &$out` writes back what its own
+     * element channel makes. Judged like a store — the callee's write-back is
+     * one — against the decl's flavor. An erased or cell param agrees: its
+     * array comes back through the caller's conform
+     * ({@see EmitLlvmCalls::byRefConformKind}) or the cell scratch's unbox
+     * ({@see EmitLlvmCalls::emitByRefCellBox}) at the caller's own type.
+     * @param array<string, Node>   $decl
+     * @param array<string, string> $alias
+     */
+    private function scanGlobalCellByRefArgs(Node $n, array &$decl, array &$alias): void
+    {
+        // Every subclass field is read under its `kind` test — that is what
+        // narrows a `Node` here; an unnarrowed read answers nothing natively.
+        $args = [];
+        $sig = '';
+        $off = 0;
+        if ($n->kind === Node::KIND_CALL) {
+            $args = $n->args;
+            $sig = $n->function;
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $args = $n->args;
+            $cls = $this->resolveMethodClass($n->class, $n->method);
+            if ($cls === '') { $cls = $n->class; }
+            $sig = $cls . '__' . $n->method;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $args = $n->args;
+            $static = $n->object->type->class ?? '';
+            $cls = $this->resolveMethodClass($static, $n->method);
+            if ($cls === '') { $cls = $static; }
+            if ($cls === '' || !isset($this->classes[$cls])) {
+                foreach ($this->classes as $cd) {
+                    $r = $this->resolveMethodClass($cd->name, $n->method);
+                    if ($r !== '') { $cls = $r; break; }
+                }
+            }
+            $sig = $cls . '__' . $n->method;
+            $off = 1;
+        }
+        $mask = $this->sigs->refParams[$sig] ?? [];
+        if ($mask === []) { return; }
+        $ptypes = $this->sigs->paramTypes[$sig] ?? [];
+        $ahmask = $this->sigs->arrayHintedParams[$sig] ?? [];
+        $ai = 0;
+        foreach ($args as $a) {
+            $pi = $ai + $off;
+            $ai = $ai + 1;
+            if (!($mask[$pi] ?? false)) { continue; }
+            if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                $name = $alias[$a->name] ?? $a->name;
+                if (isset($decl[$name])) {
+                    $d = $decl[$name];
+                    if (!$this->globalCellByRefAgrees($ptypes[$pi] ?? null, $ahmask[$pi] ?? false, $d->type)) {
+                        $this->globalCellVeto[$d->cell] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * A bare `array &$p` lowers to UNKNOWN like an untyped `&$p`; only the
+     * hint mask tells them apart. The hinted one writes back an array, conformed
+     * to the caller's element repr; the untyped one writes back anything, and
+     * a `mixed &$p` scratch is unboxed to the caller's LOAD type — neither is
+     * a proof for a cell that releases at its decl.
+     */
+    private function globalCellByRefAgrees(?Type $pt, bool $arrayHinted, Type $dt): bool
+    {
+        $declFlavor = $this->discardReleaseFlavor($dt);
+        if ($declFlavor === '' || $pt === null) { return true; }
+        $pk = $pt->kind;
+        if ($pk === Type::KIND_UNKNOWN) { return $arrayHinted && $dt->isArray(); }
+        if ($pk === Type::KIND_CELL) { return $declFlavor === 'cell'; }
+        if ($pk === Type::KIND_ARRAY) {
+            if (!$dt->isArray()) { return false; }
+            if ($declFlavor === 'veccell' || $declFlavor === 'assoccell') { return true; }
+            $pel = $pt->element;
+            if ($pel === null || $pel->kind === Type::KIND_CELL || $pel->kind === Type::KIND_UNKNOWN) {
+                return true;
+            }
+        }
+        return $this->discardReleaseFlavor($pt) === $declFlavor;
     }
 
     private function globalCellStoreAgrees(Node $v, Type $dt): bool
@@ -2134,6 +2236,10 @@ final class EmitLlvm implements EmitVisitor
     /** True when this module cannot answer the borrow question at all (a library
      *  target). Every slot then keeps its old value — the leak, never a free. */
     private bool $propBorrowUnknown = false;
+
+    /** {@see \Compile\Mir\Module::$isLibraryModule} — a module whose superglobal
+     *  cells are shared with a program it cannot see ({@see scanGlobalCellStores}). */
+    private bool $moduleIsLibrary = false;
 
     /** @var array<string, bool> classes `clone`d somewhere in this module. */
     private array $clonedClasses = [];
@@ -4749,7 +4855,12 @@ final class EmitLlvm implements EmitVisitor
     private function isByRefAddressable(Node $a): bool
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
-            return isset($this->locals->slots[$a->name]);
+            // The SUPERGLOBAL arm of {@see EmitLlvmLocals::byRefAddrOf}: the
+            // module cell is the storage. Without it `fill($_GET)` with
+            // `array &$out` was "not an lvalue", rode the by-VALUE path, and
+            // the callee dereferenced the array pointer as a slot address.
+            return isset($this->locals->slots[$a->name])
+                || $this->superglobalCellOf($a->name) !== '';
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $a;

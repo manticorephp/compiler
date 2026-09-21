@@ -4728,8 +4728,19 @@ trait EmitLlvmObjects
                 }
                 $flavor = $this->discardReleaseFlavor($t->type);
                 if (isset($this->locals->globalBacked[$name])) {
-                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($this->locals->globalBacked[$name], $flavor); }
-                    $out .= '  store i64 0, ptr ' . $this->locals->globalBacked[$name] . "\n";
+                    $cell = $this->locals->globalBacked[$name];
+                    // A module cell releases at the DECL's flavor under the
+                    // store scan's verdict ({@see EmitLlvmLocals::globalCellOwnIr}),
+                    // never at this LOAD's: `static $v = ''; if ($c) { $v = new
+                    // O; } else { unset($v); }` typed the load `string` on a
+                    // call whose cell held the object of the call before.
+                    if (!$this->isGlobalsViewName($name)) {
+                        $dt = $this->locals->globalBackedType[$name] ?? null;
+                        $flavor = $dt === null || isset($this->globalCellVeto[$cell])
+                            ? '' : $this->discardReleaseFlavor($dt);
+                    }
+                    if ($flavor !== '') { $out .= $this->rcReleaseSlot($cell, $flavor); }
+                    $out .= '  store i64 0, ptr ' . $cell . "\n";
                 } elseif (isset($this->locals->slots[$name])) {
                     if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
                         $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
