@@ -1,0 +1,4 @@
+1
+TypeError: array{0:obj<Node>,1:bool} key 0 must be of type Node, int given
+3
+TypeError: array{0:obj<Node>,1:bool} key 0 must be of type Node, int given

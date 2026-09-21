@@ -511,7 +511,14 @@ final class Monomorphize implements Pass
         foreach ($fn->params as $idx => $p) {
             $t = $p->type;
             if (isset($isDim[$idx]) && $idx < \count($repCall->args)) {
-                $t = $repCall->args[$idx]->type;
+                $at = $repCall->args[$idx]->type;
+                // A SHAPED param keeps its declared fields: the representative
+                // arg is whichever call site came first, and a local / call
+                // result of the same repr (`vec[cell]`) carries none — the
+                // clone then read every field as a bare cell, unchecked and
+                // unboxed, or not, by call-site order. The arg's ELEMENT
+                // still specializes the buffer; the fields stay the contract.
+                $t = $p->type->hasShape() ? $this->shapedParamType($p->type, $at) : $at;
             }
             $np = new Param($p->name, $t, $p->byRef, $p->variadic, $p->default);
             $np->refOut = $p->refOut;
@@ -552,6 +559,21 @@ final class Monomorphize implements Pass
             $fn->returnsByRef,
             $fn->isPrelude,
         );
+    }
+
+    /**
+     * The clone's type for a param whose declared type carries a shape
+     * ({@see Type::hasShape}) at a call whose arg is `$arg`: the declared
+     * fields, at every depth, over the arg's element. An arg of the SAME
+     * spelling changes nothing; one that is not an array (a cell the site
+     * could not specialize on) keeps the declaration whole.
+     */
+    private function shapedParamType(Type $declared, Type $arg): Type
+    {
+        if ($arg->toString() === $declared->toString()) { return $declared; }
+        if (!$arg->isArray() || $arg->element === null || $declared->element === null) { return $declared; }
+        if ($declared->isShape()) { return $declared->withElement($arg->element); }
+        return $declared->withElement($this->shapedParamType($declared->element, $arg->element));
     }
 
     /** LLVM-symbol-safe token for a type (no brackets / spaces / commas). */
