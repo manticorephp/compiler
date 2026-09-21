@@ -2480,6 +2480,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         $statT = \Compile\Stats::now();
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
+        $emit->importsLibrary = !$emitLibrary && \count($linkObjs) > 0;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
         if ($streamIr) { $emit->streamIrPath = $llPath; }
         // A library's `.sig` is written from $module AFTER emission, but emission

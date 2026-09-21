@@ -1,0 +1,23 @@
+after 0
+prev: obj0
+bye 0
+bye 1
+after 1
+prev: int7
+after 2
+prev: obj2
+bye 2
+bye 3
+after 3
+after 10
+tprev: obj10
+bye 10
+bye 11
+after 11
+tprev: int7
+after 12
+tprev: obj12
+bye 12
+bye 13
+after 13
+done

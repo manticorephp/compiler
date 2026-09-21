@@ -582,16 +582,31 @@ trait EmitLlvmLocals
         // A GLOBAL-BACKED slot takes it too: a `static $x;` seeded cell
         // ({@see InferScans::scanStaticLocalTypes}) is pinned exactly like a
         // ref-taken local, so its stores arrive as this combo and must box
-        // into the module cell.
+        // into the module cell — under the module cell's OWN contract
+        // ({@see globalCellOwnIr}): the payload is co-owned before the box
+        // (a borrowed string / object / cell-array; a fresh producer's +1
+        // transfers, a scalar boxes by value) and the predecessor is released
+        // at the decl's `cell` flavor. Without the pair the cell held a
+        // BORROW past its owner's frame: `static $c; $c = $h->name;` read
+        // garbage on the next call once `$h` died.
         $cellDest = $this->locals->globalBacked[$sl->name] ?? $this->locals->slots[$sl->name] ?? '';
         if ($sl->type->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
             && !isset($this->locals->refLocals[$sl->name])
             && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+            $coOwn = $this->elemReadCoOwn($sl->value, $sl->type);
+            $out .= $coOwn;
+            $ownsCell = isset($this->locals->globalBacked[$sl->name])
+                && !$this->isGlobalsViewName($sl->name);
+            if ($ownsCell && $coOwn === '') {
+                $out .= $this->retainCellPayload($sl->value);
+            }
             $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
+            if ($ownsCell) {
+                $out .= $this->globalCellOwnIr($sl, $boxed, true);
+            }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             $this->lastValue = $boxed;
             $this->lastValueType = 'i64';

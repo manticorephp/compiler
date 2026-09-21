@@ -1925,9 +1925,12 @@ final class EmitLlvm implements EmitVisitor
                 $decl[$n->name] = $n;
                 // A LIBRARY's superglobal cell is shared with a program this
                 // module cannot see, whose stores it cannot judge — the same
-                // refusal {@see $propBorrowUnknown} makes for a property. A
-                // `static` local is module-private and stays judged.
-                if ($this->moduleIsLibrary && $this->isSuperglobalName($n->name)) {
+                // refusal {@see $propBorrowUnknown} makes for a property; and
+                // the mirror: a program that LINKS a library shares its cells
+                // with stores the `.sig` does not describe ({@see $importsLibrary}).
+                // A `static` local is module-private and stays judged.
+                if (($this->moduleIsLibrary || $this->importsLibrary)
+                    && $this->isSuperglobalName($n->name)) {
                     $this->globalCellVeto[$n->cell] = true;
                 }
             }
@@ -1944,7 +1947,7 @@ final class EmitLlvm implements EmitVisitor
             $name = $alias[$n->name] ?? $n->name;
             if (isset($decl[$name])) {
                 $d = $decl[$name];
-                if (!$this->globalCellStoreAgrees($n->value, $d->type)) {
+                if (!$this->globalCellStoreAgrees($n, $d->type)) {
                     $this->globalCellVeto[$d->cell] = true;
                 }
             }
@@ -1952,7 +1955,8 @@ final class EmitLlvm implements EmitVisitor
             return;
         }
         if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
-            || $n->kind === Node::KIND_METHOD_CALL) {
+            || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_INVOKE
+            || $n->kind === Node::KIND_NEW_OBJ) {
             $this->scanGlobalCellByRefArgs($n, $decl, $alias);
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanGlobalCellStores($c, $decl, $alias); }
@@ -1967,6 +1971,14 @@ final class EmitLlvm implements EmitVisitor
      * array comes back through the caller's conform
      * ({@see EmitLlvmCalls::byRefConformKind}) or the cell scratch's unbox
      * ({@see EmitLlvmCalls::emitByRefCellBox}) at the caller's own type.
+     *
+     * A closure's mask is index-parallel to its FULL param list, captures
+     * first ({@see EmitLlvmCalls::emitInvoke}); a DYNAMIC callee has no mask
+     * at all — every slot the module's by-ref union covers
+     * ({@see EmitLlvmCalls::closureRefGate}) may be written back by a closure
+     * this scan cannot name, so a cell handed there is vetoed. A constructor
+     * is a method call on the fresh object (`<class>____construct`, `$this`
+     * first).
      * @param array<string, Node>   $decl
      * @param array<string, string> $alias
      */
@@ -1977,7 +1989,32 @@ final class EmitLlvm implements EmitVisitor
         $args = [];
         $sig = '';
         $off = 0;
-        if ($n->kind === Node::KIND_CALL) {
+        if ($n->kind === Node::KIND_INVOKE) {
+            $args = $n->args;
+            $fn = $n->callee->type->class ?? '';
+            if ($fn !== '' && isset($this->closureCaptures[$fn])) {
+                $sig = $fn;
+                $off = $this->closureCaptures[$fn];
+            } else {
+                $gate = $this->closureRefGate(\count($args));
+                $ai = 0;
+                foreach ($args as $a) {
+                    $slot = $ai;
+                    $ai = $ai + 1;
+                    if ($slot > 62 || ($gate & (1 << $slot)) === 0) { continue; }
+                    if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+                    $name = $alias[$a->name] ?? $a->name;
+                    if (isset($decl[$name])) { $this->globalCellVeto[$decl[$name]->cell] = true; }
+                }
+                return;
+            }
+        } elseif ($n->kind === Node::KIND_NEW_OBJ) {
+            $args = $n->args;
+            $cls = $n->bare ? '' : $this->resolveMethodClass($n->class, '__construct');
+            if ($cls === '') { return; }
+            $sig = $cls . '____construct';
+            $off = 1;
+        } elseif ($n->kind === Node::KIND_CALL) {
             $args = $n->args;
             $sig = $n->function;
         } elseif ($n->kind === Node::KIND_STATIC_CALL) {
@@ -2045,15 +2082,20 @@ final class EmitLlvm implements EmitVisitor
         return $this->discardReleaseFlavor($pt) === $declFlavor;
     }
 
-    private function globalCellStoreAgrees(Node $v, Type $dt): bool
+    private function globalCellStoreAgrees(StoreLocal $s, Type $dt): bool
     {
         $declFlavor = $this->discardReleaseFlavor($dt);
         if ($declFlavor === '') { return true; }
+        $v = $s->value;
         $vt = $v->type;
         $vk = $vt->kind;
         $k = $v->kind;
         if ($vk === Type::KIND_NULL || $k === Node::KIND_NULL_CONST) { return true; }
-        if ($vk === Type::KIND_CELL) { return $declFlavor === 'cell'; }
+        // The flow-sensitive box-back combo — a store NODE typed cell over a
+        // concrete value — BOXES the value into the cell
+        // ({@see EmitLlvmLocals::emitStoreLocal}): judged as the cell store it
+        // emits, not by the value's own kind, which never reaches the slot raw.
+        if ($vk === Type::KIND_CELL || $s->type->kind === Type::KIND_CELL) { return $declFlavor === 'cell'; }
         if ($vk === Type::KIND_UNKNOWN) {
             return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
                 || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
@@ -2240,6 +2282,13 @@ final class EmitLlvm implements EmitVisitor
     /** {@see \Compile\Mir\Module::$isLibraryModule} — a module whose superglobal
      *  cells are shared with a program it cannot see ({@see scanGlobalCellStores}). */
     private bool $moduleIsLibrary = false;
+
+    /**
+     * The program links a library `.o` besides the stdlib — a module whose
+     * superglobal stores the `.sig` does not carry ({@see scanGlobalCellStores}).
+     * Set by the manifest build ({@see \Manticore\build_compile_module}).
+     */
+    public bool $importsLibrary = false;
 
     /** @var array<string, bool> classes `clone`d somewhere in this module. */
     private array $clonedClasses = [];

@@ -1,0 +1,10 @@
+{"p":"q0","r":"ss","ctor":"c2"} {"p":"q0","r":"ss","ctor":"c2"}
+4 3
+{"fresh":"0"} c2
+{"p":"q1","r":"sss","ctor":"c2"} {"p":"q1","r":"sss","ctor":"c2"}
+4 3
+{"fresh":"1"} c2
+{"p":"q2","r":"ssss","ctor":"c2"} {"p":"q2","r":"ssss","ctor":"c2"}
+4 3
+{"fresh":"2"} c2
+[]
