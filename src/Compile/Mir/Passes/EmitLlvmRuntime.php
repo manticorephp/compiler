@@ -54,6 +54,7 @@ trait EmitLlvmRuntime
             $raw = '[VERIFY] pool_free: block already on a free list (double free) p=%p';
             $out .= '@.vfy.pool = private unnamed_addr constant ['
                   . (string)(\strlen($raw) + 2) . ' x i8] c"' . $raw . '\0A\00", align 1' . "\n";
+
         }
 
         // Reserve the range once. mmap hands back page-aligned memory, not
@@ -2463,6 +2464,26 @@ trait EmitLlvmRuntime
                 $body .= '  %z' . $s . ' = icmp eq i64 %v' . $s . ", 0\n";
                 $body .= '  br i1 %z' . $s . ', label %n' . $s . ', label %d' . $s . "\n";
                 $body .= 'd' . $s . ":\n";
+                if (\Compile\Debug::$verify) {
+                    // A child the walker is about to rcadd MUST be a bare heap
+                    // object: a tagged word, or a pointer with no RC_TAG_MAGIC
+                    // at -8, means an obj-typed slot holds something else, and
+                    // the ±1 would land 16 bytes before a random address.
+                    $body .= '  %vt' . $s . ' = icmp ugt i64 %v' . $s . ", -4503599627370496\n";
+                    $body .= '  %vp' . $s . ' = inttoptr i64 %v' . $s . " to ptr\n";
+                    $body .= '  %vmp' . $s . ' = getelementptr inbounds i8, ptr %vp' . $s . ", i64 -8\n";
+                    $body .= '  %vsm' . $s . ' = icmp ult i64 %v' . $s . ", 65536\n";
+                    $body .= '  %vbad0' . $s . ' = or i1 %vt' . $s . ', %vsm' . $s . "\n";
+                    $body .= '  br i1 %vbad0' . $s . ', label %vf' . $s . ', label %vm' . $s . "\n";
+                    $body .= 'vm' . $s . ":\n";
+                    $body .= '  %vmg' . $s . ' = load i64, ptr %vmp' . $s . "\n";
+                    $body .= '  %vok' . $s . ' = icmp eq i64 %vmg' . $s . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+                    $body .= '  br i1 %vok' . $s . ', label %vg' . $s . ', label %vf' . $s . "\n";
+                    $body .= 'vf' . $s . ":\n";
+                    $body .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.vfy.ccchild, i64 ' . (string)$cls->classId . ', i64 ' . $off . ', i64 %v' . $s . ', ptr %s)' . "\n";
+                    $body .= "  call void @abort()\n  unreachable\n";
+                    $body .= 'vg' . $s . ":\n";
+                }
                 $body .= '  %c' . $s . ' = inttoptr i64 %v' . $s . " to ptr\n";
                 $body .= '  call void @__manticore_cc_child_apply(ptr %c' . $s . ', i64 %a)' . "\n";
                 $body .= '  br label %n' . $s . "\n";
@@ -2476,6 +2497,11 @@ trait EmitLlvmRuntime
             $cases .= '    i64 ' . $id . ', label %k' . $id . "\n";
             $dispatch .= 'k' . $id . ":\n  call void @__cc_children_" . $id
                 . "(ptr %s, i64 %a)\n  br label %end\n";
+        }
+        if (\Compile\Debug::$verify) {
+            $raw2 = '[VERIFY] cc_children: obj-typed slot of class %lld at +%lld holds a non-object word 0x%llx (parent %p)';
+            $out .= '@.vfy.ccchild = private unnamed_addr constant ['
+                  . (string)(\strlen($raw2) + 2) . ' x i8] c"' . $raw2 . '\0A\00", align 1' . "\n";
         }
         $out .= $defs;
         $out .= "define void @__manticore_cc_children(ptr %s, i64 %a) {\nentry:\n";
