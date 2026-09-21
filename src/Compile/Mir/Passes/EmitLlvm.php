@@ -759,6 +759,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropTagRead = [];
         $this->cellPropElemAsIndex = [];
         $this->propRawBorrow = [];
+        $this->globalCellVeto = [];
         $this->propElemBorrow = [];
         $this->needsObjectVarsFn = false;
         $this->needsGetClassFn = false;
@@ -796,6 +797,9 @@ final class EmitLlvm implements EmitVisitor
             // what decides whether the return retains.
             $this->scanReturnType = $fn->returnType;
             $this->scanCellPropStores($fn->body);
+            $decl = [];
+            $alias = [];
+            $this->scanGlobalCellStores($fn->body, $decl, $alias);
         }
         $this->scanReturnType = null;
         $streaming = $this->streamIrPath !== '';
@@ -1882,6 +1886,89 @@ final class EmitLlvm implements EmitVisitor
      * only cost the leak we already have.
      */
     private array $propRawBorrow = [];
+
+    /**
+     * Module cells (`@g__GET`, a `static` local's cell) whose stores do NOT all
+     * agree with the cell's declared release flavor — {@see scanGlobalCellStores}.
+     * A vetoed cell keeps the old contract (no retain, no release, no element
+     * drop, no `ownel` cow): a leak, never a free through the wrong header.
+     * @var array<string, true>
+     */
+    private array $globalCellVeto = [];
+
+    /**
+     * Pre-pass for the module-cell ownership contract
+     * ({@see EmitLlvmLocals::globalCellOwnIr}): the retain a store takes is
+     * decided from the VALUE and the release from the DECL, and the two are only
+     * a pair when every store to the cell — in EVERY function, the cell is shared
+     * — hands it a value of the decl's rc flavor. The pass makes the same
+     * demand of a frame local ({@see InsertMemoryOps} "flavor"/"repr" blocks);
+     * a cell has no pass verdict, so it is made here, module-wide, keyed by cell.
+     *
+     * Agreement, per store value:
+     *  - an rc kind whose release flavor is the decl's (arrays at the retain's
+     *    depth, {@see EmitLlvmMemory::arrayRetainFlavor} with the decl as
+     *    fallback) — or any array into a CELL-element decl, whose walker
+     *    (`__mir_cell_drop`) is tag-guarded and no-ops on a raw element;
+     *  - a cell value into a cell decl (tag-dispatched both ways);
+     *  - a fresh UNKNOWN producer (a bare-`array` call's +1 is a raw buffer);
+     *  - `null`, which the slot holds as 0 (every release helper is null-safe).
+     * Anything else — a scalar under an rc claim, a raw array under a cell
+     * claim, a cell under a raw claim, a borrowed erased word, a closure, a
+     * string where the decl says object — vetoes the cell.
+     */
+    private function scanGlobalCellStores(Node $n, array &$decl, array &$alias): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            if (!$this->isGlobalsViewName($n->name)) {
+                $decl[$n->name] = $n;
+            }
+            return;
+        }
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            if (isset($decl[$n->source])) { $alias[$n->target] = $n->source; }
+            return;
+        }
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $name = $alias[$n->name] ?? $n->name;
+            if (isset($decl[$name])) {
+                $d = $decl[$name];
+                if (!$this->globalCellStoreAgrees($n->value, $d->type)) {
+                    $this->globalCellVeto[$d->cell] = true;
+                }
+            }
+            $this->scanGlobalCellStores($n->value, $decl, $alias);
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanGlobalCellStores($c, $decl, $alias); }
+    }
+
+    private function globalCellStoreAgrees(Node $v, Type $dt): bool
+    {
+        $declFlavor = $this->discardReleaseFlavor($dt);
+        if ($declFlavor === '') { return true; }
+        $vt = $v->type;
+        $vk = $vt->kind;
+        $k = $v->kind;
+        if ($vk === Type::KIND_NULL || $k === Node::KIND_NULL_CONST) { return true; }
+        if ($vk === Type::KIND_CELL) { return $declFlavor === 'cell'; }
+        if ($vk === Type::KIND_UNKNOWN) {
+            return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+                || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+                || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
+        }
+        if ($vk === Type::KIND_ARRAY) {
+            if (!$dt->isArray()) { return false; }
+            if ($declFlavor === 'veccell' || $declFlavor === 'assoccell') { return true; }
+            return $this->arrayRetainFlavor($v, $dt) === $declFlavor;
+        }
+        if ($vk === Type::KIND_STRING) { return $declFlavor === 'str'; }
+        if ($vk === Type::KIND_OBJ || $vk === Type::KIND_UNION) {
+            if ($vk === Type::KIND_OBJ && $this->discardReleaseFlavor($vt) !== 'obj') { return false; }
+            return $declFlavor === 'obj';
+        }
+        return false;
+    }
 
     /**
      * User functions PROVEN to keep none of their arguments — the

@@ -1154,8 +1154,12 @@ final class InsertMemoryOps implements Pass
             // ({@see \Compile\Debug::$rcElemReadOwns}), so it inherits the same
             // exclusion: the box-back arm returns before the retain, and
             // claiming ownership there is a release with no matching retain.
+            // …and a STATIC vec read, owned by the COPY the general path makes
+            // ({@see isOwnedObj}): the box-back arm returns before that copy
+            // too, boxing the static's own buffer by pointer.
             $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
-                || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS);
+                || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS)
+                || ($value->kind === Node::KIND_STATIC_PROP && $value->type->isVec());
             // `$b = $a` between array locals is a COPY when either side is
             // mutated ({@see \Compile\Mir\VecCopyOnAssign}) — the emitter hands
             // the destination a fresh rc=1 buffer and adopts its elements. That

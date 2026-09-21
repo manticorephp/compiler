@@ -1240,13 +1240,32 @@ trait EmitLlvmArrays
         // — stranded one ref per element on every request whose `$_SERVER`
         // was parked before its first store, i.e. every request a server
         // serves from a task.
-        if ($base !== null && $base->kind === Node::KIND_LOAD_LOCAL
-            && $sym === '@__mir_array_cow_cell'
-            && $this->isSuperglobalName($base->name)
-            && isset($this->locals->globalBacked[$base->name])) {
+        // Only the raw-pointer channel: a base whose decl lifted to `cell`
+        // reaches cow_cell too, but its references were taken by
+        // `__mir_cell_retain` (tag 7 → rc-only) and are dropped by
+        // `__mir_cell_drop`, so the `ownel` source drop would give back element
+        // refs that reference never took.
+        if ($base !== null && $sym === '@__mir_array_cow_cell'
+            && ($t->isVec() || $t->isAssoc())
+            && $this->superglobalCellBase($base)) {
             return '@__mir_array_cow_ownel_cell';
         }
         return $sym;
+    }
+
+    /**
+     * Is `$base` a SUPERGLOBAL cell under the ownership contract — every
+     * reference it holds taken at the cell flavor and every release the `ownel`
+     * one ({@see EmitLlvmLocals::globalCellOwnIr})? A cell some store vetoed
+     * ({@see EmitLlvm::scanGlobalCellStores}) is not, and keeps the plain paths.
+     */
+    private function superglobalCellBase(Node $base): bool
+    {
+        if ($base->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        if (!$this->isSuperglobalName($base->name)) { return false; }
+        $cell = $this->locals->globalBacked[$base->name] ?? '';
+        if ($cell === '') { return false; }
+        return !isset($this->globalCellVeto[$cell]);
     }
 
     private function cowSymbolPlain(Type $t): string
@@ -1592,9 +1611,7 @@ trait EmitLlvmArrays
         // so only the keyed arms read the old word — and each of them already
         // reads it when reference cells are live, so the extra lookup is paid
         // only where the drop is what needs it.
-        $sgBase = $se->array->kind === Node::KIND_LOAD_LOCAL
-            && $this->isSuperglobalName($se->array->name)
-            && isset($this->locals->globalBacked[$se->array->name]);
+        $sgBase = $this->superglobalCellBase($se->array);
         $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type, $sgBase);
         // A REF-cell value (`$a[$k] = &$v`) REBINDS the slot: php replaces the
         // element's binding, it does not write through the reference the slot

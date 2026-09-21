@@ -658,6 +658,9 @@ trait EmitLlvmLocals
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
             if (isset($this->locals->globalBacked[$sl->name])) {
+                // The rebuild is a fresh +1 the cell takes outright; only the
+                // predecessor is owed ({@see globalCellOwnIr}).
+                $out .= $this->globalCellOwnIr($sl, $dv, true);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->globalBacked[$sl->name] . "\n";
             } elseif (isset($this->locals->refLocals[$sl->name])) {
                 $addr = $this->ssa->allocReg();
@@ -976,27 +979,43 @@ trait EmitLlvmLocals
     private function globalCellOwnIr(StoreLocal $sl, string $val, bool $ownedAlready): string
     {
         if ($this->isGlobalsViewName($sl->name)) { return ''; }
+        $cell = $this->locals->globalBacked[$sl->name];
+        // The RELEASE needs the decl's flavor and every store's agreement with
+        // it ({@see EmitLlvm::scanGlobalCellStores}); a cell without either — a
+        // decl typed `int` or `null` by its initialiser, or one some store
+        // disagrees with — releases nothing, as before. The RETAIN is taken
+        // regardless: it is by the value's own kind (or by tag), so it can never
+        // free anything, and without it the cell holds a BORROW past its owner's
+        // frame — `$_SESSION = $s->data; $_SESSION['x'] = 1;` then wrote into
+        // the property's own buffer (rc 1, so the COW copied nothing).
+        $dt = $this->locals->globalBackedType[$sl->name] ?? null;
+        $flavor = $dt === null ? '' : $this->discardReleaseFlavor($dt);
+        if (isset($this->globalCellVeto[$cell])) { $flavor = ''; }
         $out = '';
         $v = $sl->value;
         $vk = $v->type->kind;
         if (!$ownedAlready) {
             if ($vk === Type::KIND_CELL) {
-                $k = $v->kind;
-                $fresh = $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-                    || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
-                    || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
-                    || $k === Node::KIND_CLOSURE || $this->condOwnsResult($v);
-                if (!$fresh) { $out .= $this->rcRetainReg($val, 'cell'); }
+                // The one predicate for "does a cell payload need a co-owner":
+                // {@see EmitLlvm::retainCellPayload} looks through `__mir_to_cell`,
+                // skips the fresh producers, and retains by tag.
+                $sv = $this->lastValue;
+                $st = $this->lastValueType;
+                $this->lastValue = $val;
+                $this->lastValueType = 'i64';
+                $out .= $this->retainCellPayload($v);
+                $this->lastValue = $sv;
+                $this->lastValueType = $st;
             } elseif ($vk === Type::KIND_OBJ || $vk === Type::KIND_ARRAY
                 || $vk === Type::KIND_STRING || $vk === Type::KIND_UNION) {
-                $out .= $this->rcRetainByType($v, $val, null, 3);
+                // Depth follows the DECL — the release below reads it, so the
+                // retain must co-own to the same depth ({@see arrayRetainFlavor});
+                // with no release to pair, the value's own depth.
+                $out .= $this->rcRetainByType($v, $val, $flavor === '' ? null : $dt, 3);
             }
         }
-        $dt = $this->locals->globalBackedType[$sl->name] ?? null;
-        if ($dt === null) { return $out; }
-        $flavor = $this->discardReleaseFlavor($dt);
         if ($flavor === '') { return $out; }
-        return $out . $this->rcReleaseSlot($this->locals->globalBacked[$sl->name], $flavor);
+        return $out . $this->rcReleaseSlot($cell, $flavor);
     }
 
     /**

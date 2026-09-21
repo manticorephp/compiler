@@ -62,7 +62,8 @@ final class LocalSlots
      * ({@see \Compile\Mir\Passes\EmitLlvmLocals::localSlotAlloca}); the set is
      * not narrowed to "assigned inside the try" because a local is written by
      * a dozen node kinds and missing one is a silent miscompile again.
-     * Declared LAST — a field added mid-struct shifts every later offset.
+     * Declared AFTER the arrays above — a field added mid-struct shifts every
+     * later offset; the map that follows was appended later still.
      */
     public bool $sjljPinAll = false;
 

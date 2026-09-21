@@ -11,14 +11,15 @@
 // drives 20 000 GETs with compat off, then 20 000 with compat on, and what the
 // second run adds beyond the first is what the seeding costs. That keeps the
 // server's own per-request footprint out of the number. The leak was ~10 MB
-// per 20 000; the threshold leaves room for allocator slack.
+// per 20 000; the threshold leaves room for allocator slack. @serial: 40 000
+// requests are a memory measurement, not a race with nine other cases.
 
 use function Async\async;
 use function Async\spawn;
 
 $port = 0;
 $listener = false;
-for ($p = 49860; $p < 49940; $p = $p + 1) {
+for ($p = 52100; $p < 52180; $p = $p + 1) {
     $s = @stream_socket_server('tcp://127.0.0.1:' . $p);
     if ($s !== false) {
         $listener = $s;

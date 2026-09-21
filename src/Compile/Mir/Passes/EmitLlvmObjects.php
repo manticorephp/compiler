@@ -2535,6 +2535,9 @@ trait EmitLlvmObjects
             // global and to every other scope sharing it.
             // `$session = &$_SESSION;` (symfony NativeSessionStorage) is this.
             $this->locals->globalBacked[$n->target] = $this->locals->globalBacked[$n->source];
+            if (isset($this->locals->globalBackedType[$n->source])) {
+                $this->locals->globalBackedType[$n->target] = $this->locals->globalBackedType[$n->source];
+            }
         } elseif (isset($this->locals->slots[$n->source])) {
             // Remember what the target owned, so `unset($target)` can hand it
             // back instead of zeroing the slot both names now share.
@@ -4757,9 +4760,7 @@ trait EmitLlvmObjects
                     // overwrite leak ({@see \Compile\Debug::$rcElemSlotDrop}).
                     // Read the word BEFORE the helper removes the entry; drop it
                     // after, so the array never observes a freed element.
-                    $sgBase = $aa->array->kind === Node::KIND_LOAD_LOCAL
-                        && $this->isSuperglobalName($aa->array->name)
-                        && isset($this->locals->globalBacked[$aa->array->name]);
+                    $sgBase = $this->superglobalCellBase($aa->array);
                     $dropFlavor = $this->elemSlotDropFlavor($aa->array->type, $sgBase);
                     $curE = '';
                     if ($dropFlavor !== '') {
