@@ -162,7 +162,9 @@ family over host PCRE2), type/reflection, math, `ctype_*`, JSON, `var_dump`/`pri
 SPL, date/time, sockets and streams, hashing and crypto. Each function is either a
 PHP-level stdlib function (`src/Runtime/Stdlib/`, compiled into
 `lib/manticore_stdlib.o` and auto-linked), an injected prelude helper, or an inlined
-codegen builtin. No imports, no registration — they are simply there.
+codegen builtin. No imports, no registration — they are simply there. The exact
+name-by-name coverage per extension — and everything Manticore adds beyond PHP —
+is generated into [`docs/builtins.md`](docs/builtins.md) (`php tools/builtins_audit.php`).
 
 Current gaps are tracked with repros in [`docs/ROADMAP.md`](docs/ROADMAP.md); the
 headline ones are listed under [Limitations](#limitations).

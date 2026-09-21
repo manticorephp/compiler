@@ -207,5 +207,8 @@ Corollaries:
 - `docs/ROADMAP.md` — status + the gap matrix with repros. Update it when a gap
   closes.
 - `docs/*.md` — user-facing guides (async, ffi, modules, http, memory, …).
+- `docs/builtins.md` — GENERATED coverage of PHP's internal functions/classes per
+  extension and tier (`b`/`l`/`s`/`p`/`i`). Regenerate with `php tools/builtins_audit.php`
+  after adding a stdlib function, a builtin or a prelude class; never edit by hand.
 - `docs/design/*.md` — design notes; `design/memory-abi.md` is the stone tablet.
 - `docs/status/`, `docs/audit/`, `docs/superpowers/` — working notes, untracked.

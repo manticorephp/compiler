@@ -276,6 +276,8 @@ Living reference:
 
 - [`../README.md`](../README.md) — what it is, what it needs, how to use it.
 - [`superset.md`](superset.md) — everything with no Zend oracle, and what that costs.
+- [`builtins.md`](builtins.md) — generated: every PHP internal function/class, implemented or
+  missing, per extension; plus the Manticore-only namespaces. `php tools/builtins_audit.php`.
 - [`install.md`](install.md) — host dependencies and platform support.
 - [`async.md`](async.md) — structured concurrency and transparent I/O.
 - [`memory.md`](memory.md) — the memory model as a user sees it (`--memory`, env knobs).
