@@ -84,9 +84,34 @@ gen1 with verify + threshold 2 run clean — the defect is in a shape the
 compiler's own module takes and the corpus does not. Recipe:
 `MANTICORE_DEBUG_VERIFY=1 MANTICORE_AUTO_GC=2 bin/manticore build --apps-only
 <manifest to scratch>` then `lldb -b -o run -k "bt 12"` on `compile echo1.php`.
-Next: log every object free with its class (a capped `rcfree` trace filtered
-to Value/Type) between the last clean collection and the abort, and match
-the freed Type against the Value's creation site.
+FOUND (2026-09-21): not the collector. A `MANTICORE_DEBUG_VERIFY` guard in
+the string rc paths (`strRcMisrouteGuard`: the word at `p-8` above 2^31 is
+not a count) plus the runtime-armed CC trace (`MANTICORE_CC_TRACE=1` baked
+into gen2 only, `MANTICORE_CC_TRACE_RT=1` at run, `grep '<ptr>\b'` for one
+block's life, `from=` symbolized under lldb where ASLR is off) named the
+block: a doc-comment lexeme owned by `Parser::$allDocComments` (`string[]`)
+and by `Program::$docComments` — a bare `array` param that the second
+caller (`new Program(…, $docs)` in `lower_module`) widens to CELL elements.
+Co-own is per owner per element (`emitRetainVariant`: retain undoes exactly
+what release does), but `__mir_array_retain_cell` walked the RAW string
+pointers with `__mir_cell_retain` (an untagged word ⇒ no-op) while
+`__mir_array_release_ownel_str` released every element on the `string[]`
+owner's release. The strings died under `Program`; the pool handed one block
+to a `Token` (string data = base+32 = Token+24, so the string's rc word IS
+`Token::kind`); the stale `$docs[] = $d` retain added 1 to `kind`. Fix:
+`UnifiedArrayRuntime::emitElemOpByHint` — every element retain/drop, every
+flavor (`cell` included, and the cow variants), dispatches on the buffer's
+ELEMENT HINT; the static flavor is used only for an unstamped buffer.
+Witness `tests/aot/cases/w4_coown_by_hint.php`.
+
+The same guard then caught a PRE-EXISTING misinference on main: the
+docblock shape `array<int, array{0:Node,1:bool}>` lowered to an erased
+element, `detectStringElemUse` read `$pair[0]` as a char subscript, and
+`ApplyMemoryMode::demote` ran for a year with `vec[string]` — `$pair[0] === $n`
+never true (every loop demoted to RC_HEAP), `__mir_rc_retain_str` on the
+pair's ARRAY. `LowerTypes::lowerTypeHint` now lowers `array{…}` to
+`vec[cell]` / `assoc[string,cell]`. Witness `w4_array_shape_doc` (fails on
+main's binary). gen3 builds and both witnesses pass on it.
 
 **Verifier (step 3).** `MANTICORE_CELLGUARD=strict` fails the build on any
 `raw -> cell` edge the emitter-seam census sees (`EmitLlvmCellGuard`,
