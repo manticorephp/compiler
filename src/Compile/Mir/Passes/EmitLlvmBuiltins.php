@@ -886,10 +886,14 @@ trait EmitLlvmBuiltins
             $this->markCellBoxed($this->lastValue);
             return $ret;
         }
-        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION) {
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION || $k === Type::KIND_CLOSURE) {
             // A union arm is a bare object pointer (all-object union) — box it as
             // an object cell so a tagged consumer (var_dump / a mixed param)
             // dispatches on the object tag and the class_id resolves the type.
+            // A KIND_CLOSURE value (a `callable` param) is the closure struct a
+            // literal already boxes this way under `obj<__closure_N>`; falling
+            // through to box_int handed the erased consumer an INTEGER cell
+            // wrapping the struct address.
             $out = $this->coerceToPtr();
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";

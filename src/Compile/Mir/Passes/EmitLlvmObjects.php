@@ -2290,9 +2290,9 @@ trait EmitLlvmObjects
                 $val = $this->lastValue;
                 $res = $val;
                 $resTy = 'i64';
-            } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ) {
-                // rc-managed payload (string/object) — retain the RAW ptr before
-                // boxing (a tagged cell would mis-locate the rc header).
+            } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_CLOSURE) {
+                // rc-managed payload (string/object/closure) — retain the RAW ptr
+                // before boxing (a tagged cell would mis-locate the rc header).
                 $out .= $this->coerceToI64();
                 $raw = $this->lastValue;
                 $out .= $this->rcRetainByType($n->value, $raw, $propType, 4);

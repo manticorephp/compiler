@@ -1,0 +1,12 @@
+ok: HTTP/1.1 200 OK connection= body=ok /ok
+
+throw: HTTP/1.1 500 Internal Server Error connection=close body=Internal Server Error
+
+ok2: HTTP/1.1 200 OK connection= body=ok /ok
+
+throw-error: HTTP/1.1 500 Internal Server Error connection=close body=Internal Server Error
+
+ok3: HTTP/1.1 200 OK connection= body=ok /ok
+
+served=5 errors=2
+done

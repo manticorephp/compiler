@@ -1615,13 +1615,18 @@ trait EmitLlvmExpr
 
     /**
      * A value kind that NaN-boxes in place (a single box_* with no buffer
-     * rebuild): scalars, string (box_ptr), object (box_object), and an
-     * already-boxed cell. A concrete array/assoc would REBUILD (boxToCell
-     * copies into a fresh cell-array — wrong for a co-owned / SPL backing slot)
-     * and unknown/closure/generator mis-box, so those keep the slot RAW. A
-     * boxed object cell var_dumps / `instanceof`s / dispatches correctly; a
-     * chained `$cell->prop` still needs instanceof narrowing (see
-     * inferPropertyAccess path-narrowing) — unguarded it hits the bag path.
+     * rebuild): scalars, string (box_ptr), object (box_object), a closure
+     * (box_object too — the same cell a closure LITERAL, typed
+     * `obj<__closure_N>`, already makes; a `callable` param is the SAME struct
+     * under KIND_CLOSURE, and refusing it here kept every `mixed $cb = null`
+     * slot that ever took one RAW, so its null default was a bare 0 that a
+     * local copy read back as a double and then CALLED), and an already-boxed
+     * cell. A concrete array/assoc would REBUILD (boxToCell copies into a fresh
+     * cell-array — wrong for a co-owned / SPL backing slot) and unknown/generator
+     * mis-box, so those keep the slot RAW. A boxed object cell var_dumps /
+     * `instanceof`s / dispatches correctly; a chained `$cell->prop` still
+     * needs instanceof narrowing (see inferPropertyAccess path-narrowing) —
+     * unguarded it hits the bag path.
      */
     private function cellBoxableKind(Type $t): bool
     {
@@ -1629,7 +1634,7 @@ trait EmitLlvmExpr
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
             || $k === Type::KIND_BOOL || $k === Type::KIND_NULL
             || $k === Type::KIND_STRING || $k === Type::KIND_OBJ
-            || $k === Type::KIND_CELL;
+            || $k === Type::KIND_CLOSURE || $k === Type::KIND_CELL;
     }
 
     /** The property name when $n uses `$obj->name` as a RAW array base that must

@@ -1,0 +1,24 @@
+bool(true)
+bool(true)
+string(4) "NULL"
+a:done
+bool(true)
+bool(false)
+bool(true)
+a:canned
+bool(false)
+bool(true)
+bool(false)
+handled neg -2
+bool(false)
+bool(false)
+string(6) "object"
+done 3
+bool(false)
+bool(false)
+string(6) "object"
+b 4
+bool(true)
+bool(false)
+bool(true)
+b:canned
