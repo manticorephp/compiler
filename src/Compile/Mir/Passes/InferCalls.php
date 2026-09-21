@@ -120,8 +120,12 @@ trait InferCalls
             // literal (the boxed store makes the buffer a cell buffer), a raw
             // shape takes only a literal whose inferred array already IS that
             // repr. A literal that disagrees keeps its own type and the call
-            // boundary coerces as it always did (or TypeCheck refuses it).
-            if ($pt->isShape()) {
+            // boundary coerces as it always did (or TypeCheck refuses it). A
+            // parameter that only CONTAINS a shape (`vec[array{…}]`) adopts the
+            // same way — `[[new Node(1), true], …]` is `vec[vec[cell]]`, the
+            // identical repr, and without the adoption the mono clone's foreach
+            // value is a field-blind `vec[cell]`.
+            if ($pt->hasShape()) {
                 $at = $a->type;
                 if (!$at->isArray()) { continue; }
                 if (($pe !== null && $pe->kind === Type::KIND_CELL)

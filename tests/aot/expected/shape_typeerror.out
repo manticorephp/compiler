@@ -1,3 +1,8 @@
 TypeError: array{0:obj<Node>,1:bool} key 0 must be of type Node, int given
 TypeError: array{name:string,hits:int} key hits must be of type int, string given
 2
+TypeError: array{name:string,hits:int} key name must be of type string, null given
+TypeError: array{0:obj<Node>,1:bool} key 1 must be of type bool, string given
+TypeError: array{tags:vec[string]} key tags must be of type vec[string], int given
+TypeError: array{ratio:float} key ratio must be of type float, string given
+3

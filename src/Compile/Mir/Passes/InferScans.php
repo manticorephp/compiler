@@ -730,11 +730,17 @@ trait InferScans
                 // the pack ABI is one vec param either way.
                 if (($p->arrayHinted || $p->variadic) && $this->isUnknownArrayElem($p->type)) {
                     $cand[$fn->name . '#' . (string)$idx] = true;
-                } elseif (!$p->variadic && $p->type->isArray()) {
+                } elseif (!$p->variadic && $p->type->isArray() && !$p->type->hasShape()) {
                     // A param the per-fn heuristic already refined (e.g. vec[string]
                     // from an ambiguous `$x=$p[$i]; $x[j]` subscript) stays
                     // re-examinable: if call sites CONCRETELY pass a nested array,
                     // that ground truth overrides the guess (see nbody `split`).
+                    // A type that carries a SHAPE anywhere (`vec[array{…}]`) is a
+                    // docblock claim, not a guess: a site passing the same repr
+                    // (`vec[vec[cell]]`) is no new ground truth, and rebuilding
+                    // the param from it threw the fields away — the foreach
+                    // value was a field-blind `vec[cell]`. The runtime check
+                    // guards the claim; TypeCheck refuses a repr that disagrees.
                     $cand[$fn->name . '#' . (string)$idx] = true;
                     $refined[$fn->name . '#' . (string)$idx] = true;
                 }

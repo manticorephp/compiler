@@ -349,6 +349,27 @@ final class Type
         return $this->kind === self::KIND_ARRAY && $this->fields !== null;
     }
 
+    /**
+     * True when a shape sits anywhere in this type — the type itself, its
+     * element, its key, or a field of one. A literal argument adopts a
+     * parameter type that CONTAINS a shape (`vec[array{0:obj<Node>,1:bool}]`),
+     * not only one that IS a shape, or the outer literal keeps its
+     * field-blind element and a foreach over it loses the fields
+     * ({@see \Compile\Mir\Passes\InferCalls::adoptLitParamElem}).
+     */
+    public function hasShape(): bool
+    {
+        if ($this->isShape()) { return true; }
+        if ($this->element !== null && $this->element->hasShape()) { return true; }
+        if ($this->key !== null && $this->key->hasShape()) { return true; }
+        if ($this->fields !== null) {
+            foreach ($this->fields as $f) {
+                if ($f->hasShape()) { return true; }
+            }
+        }
+        return false;
+    }
+
     /** A string-keyed shape. */
     public function isRecord(): bool
     {
