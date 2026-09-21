@@ -199,7 +199,7 @@ trait LowerTypes
                     $keyStr = \substr($keyStr, 0, \strlen($keyStr) - 1);
                 }
                 $keyStr = \trim($keyStr, "'\"");
-                if ($keyStr !== '' && \ctype_digit($keyStr)) {
+                if (Type::isIntKey($keyStr)) {
                     $key = (int)$keyStr;
                 } else {
                     $key = $keyStr;

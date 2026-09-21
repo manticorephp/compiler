@@ -66,23 +66,8 @@ final class Type
     public const KIND_TYPEVAR = 'typevar';
 
     /**
-     * A constructor-promoted param's own inline `@var` is never attached to
-     * the AST ({@see \Parser\Ast\Param} carries no doc comment) — the parser
-     * drops it, so the PARAMETER (and, from it, the property) fell through
-     * to a bare `unknown`/usage-inferred repr instead of the declared type.
-     * `@param` on the constructor's OWN docblock IS read by
-     * {@see LowerTypes::docTagType}, so this gets the parameter typed.
-     *
-     * `$fields` / `$nullableFields` are keyed by {@see shapeKey}, ALWAYS a
-     * plain string — never a raw `int|string` PHP key. A `Type::tuple()`
-     * (int keys) and a `Type::record()` (string keys) shape used to flow
-     * into this ONE slot as a genuinely mixed-key PHP array, and the
-     * self-hosted compiler read that back unsoundly: `shapeString()` printed
-     * a raw heap pointer instead of a decoded string key for a `record()`
-     * shape's field name once both kinds existed in one compiled program
-     * (`tests/aot/mir/cases/shape_parse.php`). A mixed int|string-keyed
-     * PHP array is a known-unsound channel here — the encoding makes the
-     * map ALWAYS string-keyed, so it never opens that channel at all.
+     * `$fields` / `$nullableFields` keys are `shapeKey`-encoded — never a mixed
+     * int|string map, which the self-hosted compiler cannot read back.
      * @param array<string,self>|null $fields
      * @param array<string,true> $nullableFields
      */
@@ -104,8 +89,7 @@ final class Type
          * array it sits on (same `element`/`key`, same runtime buffer) — every
          * consumer that ignores this payload treats it as that array. Only
          * shape-aware code ({@see isShape}, {@see shapeField}) reads it. A
-         * control-flow merge of two DIFFERENT shapes drops it. (Typed on the
-         * CONSTRUCTOR's own `@param` above, not here — see that comment.)
+         * control-flow merge of two DIFFERENT shapes drops it.
          * @var array<string,self>|null keyed by {@see shapeKey}
          */
         public readonly ?array $fields = null,
@@ -121,8 +105,7 @@ final class Type
         /**
          * Keys of {@see $fields} whose value may be NULL at run time — declared
          * `?T`, `T|null` or `key?:` — so the runtime shape check accepts a NULL
-         * cell there and nowhere else. (Typed on the CONSTRUCTOR's own
-         * `@param` above, not here — see that comment.)
+         * cell there and nowhere else.
          * @var array<string,true> keyed by {@see shapeKey}
          */
         public readonly array $nullableFields = [],
@@ -319,7 +302,8 @@ final class Type
     /**
      * A docblock shape from its parsed fields: int keys only → tuple, string
      * keys only → record, both → a cell-keyed shape (the tag-dispatched key
-     * channel). The element is {@see shapeElement}.
+     * channel). The element is {@see shapeElement}. `$fields`/`$nullable` keys
+     * arrive PRE-ENCODED ({@see shapeKey}) — the caller has already converted.
      * @param array<string,self> $fields  @param array<string,true> $nullable
      */
     public static function shapeOf(array $fields, array $nullable): self
@@ -327,7 +311,9 @@ final class Type
         $anyStr = false;
         $anyInt = false;
         foreach ($fields as $ek => $f) {
-            if (self::shapeKeyIsInt($ek)) { $anyInt = true; } else { $anyStr = true; }
+            if (self::shapeKeyIsInt($ek)) { $anyInt = true; continue; }
+            if ($ek !== '' && $ek[0] === 's') { $anyStr = true; continue; }
+            throw new \RuntimeException('shapeOf: key not shapeKey-encoded: ' . $ek);
         }
         $el = self::shapeElement($fields);
         if (!$anyStr) { return self::tuple($fields, $el, $nullable); }
@@ -369,12 +355,27 @@ final class Type
         return $this->isShape() && $this->key !== null && $this->key->kind === self::KIND_STRING;
     }
 
+    /** True when PHP would canonicalise this STRING key to an int key at the
+     *  array boundary — `'0'` and `'-1'` are int, `'01'` and `'-0'` are not
+     *  (php's own rule: `0` or an optional `-` then a nonzero leading digit
+     *  and only digits after). Written without `preg_*` — self-host cost. */
+    public static function isIntKey(string $k): bool
+    {
+        if ($k === '0') { return true; }
+        $s = $k;
+        if ($s !== '' && $s[0] === '-') { $s = \substr($s, 1); }
+        if ($s === '' || $s[0] < '1' || $s[0] > '9') { return false; }
+        return \ctype_digit($s);
+    }
+
     /** The map key a shape field is stored under: `i<n>` for an int key, `s<name>` for a string key.
      *  A single string-keyed map on purpose — a PHP array mixing int and string keys is a
-     *  polymorphic-key channel the self-hosted compiler cannot read back reliably. */
+     *  polymorphic-key channel the self-hosted compiler cannot read back reliably. A STRING `$k`
+     *  canonicalises through {@see isIntKey} first — `'0'`/`'-1'` are int keys to PHP too. */
     public static function shapeKey(int|string $k): string
     {
         if (\is_int($k)) { return 'i' . (string)$k; }
+        if (self::isIntKey($k)) { return 'i' . $k; }
         return 's' . $k;
     }
 
