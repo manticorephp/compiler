@@ -729,6 +729,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sinc\n";
             $out .= "sinc:\n";
+            $out .= $this->strRcMisrouteGuard('%p', '%tag', 'rt');
             $out .= $this->profBump(50);
             $out .= "  %src1 = add i64 %tag, 1\n";
             $out .= "  store i64 %src1, ptr %tagp\n";
@@ -828,6 +829,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %tag, 0\n";
             $out .= "  br i1 %imm, label %done, label %sdec\n";
             $out .= "sdec:\n";
+            $out .= $this->strRcMisrouteGuard('%p', '%tag', 'rl');
             $out .= $this->profBump(51);
             $out .= "  %src1 = sub i64 %tag, 1\n";
             $out .= "  store i64 %src1, ptr %tagp\n";
@@ -866,6 +868,9 @@ trait EmitLlvmRuntime
                 }
             }
             if (\Compile\Debug::$verify) {
+                $mraw = '[VERIFY] str rc misroute: the word at p-8 is not a count (a slot address 8 past a pointer field?) p=%p word=%p ret=%p';
+                $out .= '@.vfy.strmis = private unnamed_addr constant ['
+                    . (string)(\strlen($mraw) + 2) . ' x i8] c"' . $mraw . '\0A\00", align 1' . "\n";
                 $rraw = '[VERIFY] str_retain: rc == 0 (retaining a freed string) str=%p rc=%lld';
                 $out .= '@.vfy.strret = private unnamed_addr constant ['
                     . (string)(\strlen($rraw) + 2) . ' x i8] c"' . $rraw . '\0A\00", align 1' . "\n";
@@ -896,6 +901,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %rc, 0\n";
             $out .= "  br i1 %imm, label %done, label %inc\n";
             $out .= "inc:\n";
+            $out .= $this->strRcMisrouteGuard('%p', '%rc', 'srt');
             // The RETAIN half of the guard the release has had since the
             // string path got one. A dead string is reached here at rc 0 —
             // an immortal is rc < 0 and was routed away above — and taking a
@@ -960,6 +966,7 @@ trait EmitLlvmRuntime
             $out .= "  %imm = icmp slt i64 %rc, 0\n";
             $out .= "  br i1 %imm, label %done, label %dec\n";
             $out .= "dec:\n";
+            $out .= $this->strRcMisrouteGuard('%p', '%rc', 'srl');
             $out .= $this->profBump(2);
             // The array path has had an rc<=0 guard since forever; the STRING
             // path had none, so a string double-release just corrupted the
@@ -2177,6 +2184,15 @@ trait EmitLlvmRuntime
         if (!\Compile\Debug::$ccTrace) { return ''; }
         $out = '';
         $out .= self::NOFN_GLOBAL;
+        // The trace calls are BAKED into the binary but SILENT until the
+        // runtime env `MANTICORE_CC_TRACE_RT` is set: every line goes through
+        // this function pointer, a no-op by default. A compiler built with the
+        // trace baked in would otherwise trace its OWN pass-1 self-build —
+        // gigabytes before the binary under study ever runs (it filled the disk
+        // once). `main` flips the pointer to dprintf when the env is present.
+        $out .= "@__mir_cc_trace_fn = global ptr @__mir_cc_trace_noop\n";
+        $out .= "define i32 @__mir_cc_trace_noop(i32 %fd, ptr %fmt, ...) {\nentry:\n  ret i32 0\n}\n";
+        $out .= "@.cct.env = private unnamed_addr constant [22 x i8] c\"MANTICORE_CC_TRACE_RT\\00\", align 1\n";
         foreach (self::CC_TRACE_FMTS as $id => $fmt) {
             $out .= '@.cct.' . $id . ' = private unnamed_addr constant ['
                 . (string)(\strlen($fmt) + 2) . ' x i8] c"' . $fmt . '\0A\00", align 1' . "\n";
@@ -2199,6 +2215,29 @@ trait EmitLlvmRuntime
      * gets read. `$tag` prefixes the registers so retain and release can both
      * use it in one module without colliding.
      */
+    /** `MANTICORE_DEBUG_VERIFY`: a string rc word is a small count (an
+     *  immortal is negative and was routed away before this); a word above
+     *  2^31 is not a count but the WORD AT `p-8` OF SOMETHING ELSE — the
+     *  string rc paths are self-routing, so a pointer 8 past a pointer-sized
+     *  field (`&$obj->prop`, a slot address) lands here and the increment
+     *  corrupts that field by exactly one. Abort at the first touch, naming
+     *  the pointer, the word and the return address (lldb: `image lookup -a`). */
+    private function strRcMisrouteGuard(string $p, string $w, string $tag): string
+    {
+        if (!\Compile\Debug::$verify) { return ''; }
+        $this->libcExtra['retaddr'] = 'declare ptr @llvm.returnaddress(i32)';
+        $o  = '  %' . $tag . 'mbig = icmp ugt i64 ' . $w . ", 2147483648\n";
+        $o .= '  br i1 %' . $tag . 'mbig, label %' . $tag . 'mfail, label %' . $tag . "mok\n";
+        $o .= $tag . "mfail:\n";
+        $o .= '  %' . $tag . "mra = call ptr @llvm.returnaddress(i32 0)\n";
+        if ($this->rt->needsOutBuf) { $o .= "  call void @__mir_out_flush()\n"; }
+        $o .= '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.vfy.strmis, ptr ' . $p . ', i64 ' . $w
+            . ', ptr %' . $tag . "mra)\n";
+        $o .= "  call void @abort()\n  unreachable\n";
+        $o .= $tag . "mok:\n";
+        return $o;
+    }
+
     private function btNameIr(string $tag): string
     {
         $o  = '  %' . $tag . "btd = load i64, ptr @__mir_bt_depth\n";
@@ -2228,9 +2267,14 @@ trait EmitLlvmRuntime
     private function ccTrace(string $id, string $args): string
     {
         if (!\Compile\Debug::$ccTrace) { return ''; }
-        return '  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cct.' . $id
+        $fp = '%cct.fp.' . (string)($this->ccTraceSeq++);
+        return '  ' . $fp . " = load ptr, ptr @__mir_cc_trace_fn\n"
+            . '  call i32 (i32, ptr, ...) ' . $fp . '(i32 2, ptr @.cct.' . $id
             . ', ' . $args . ")\n";
     }
+
+    /** Unique register suffix for the {@see ccTrace} function-pointer load. */
+    private int $ccTraceSeq = 0;
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -2251,6 +2295,16 @@ trait EmitLlvmRuntime
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
+        // The GARBAGE list: what CollectWhite decided is dead this cycle. Freed
+        // only after the whole root loop — a white root freed while another
+        // white root still points at it is walked again as that root's child
+        // on freed memory (a `Codegen\Llvm\Value` whose `type` was already
+        // collected as its own root). Entries carry a kind in bit 0: 0 = a
+        // white object (drop its strings, free), 1 = a black rc-0 root (drop
+        // its live children through `drop_dispatch`, free).
+        $out .= "@__manticore_cc_garbage = linkonce_odr global ptr null\n";
+        $out .= "@__manticore_cc_gcount = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_gcap = linkonce_odr global i64 0\n";
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         $this->libcExtra['free'] = 'declare void @free(ptr)';
@@ -2653,19 +2707,61 @@ trait EmitLlvmRuntime
         if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $out .= "  call void @__mir_cc_census_free(ptr %s)\n";
         }
-        $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $BLACK . ")\n";
+        // GRAY, not black: a collected object may itself be a later ROOT of
+        // this same loop, and the root arm must recognise it as already on the
+        // garbage list rather than as a black rc-0 root to free a second time.
+        $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $GRAY . ")\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 3)\n";
+        $out .= "  call void @__cc_gpush(ptr %s, i64 0)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        // ── the deferred free of one garbage entry ──
+        $out .= "define void @__cc_gfree(ptr %s, i64 %kind) {\n";
+        $out .= "entry:\n";
         $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
         $out .= "  %fr1 = add i64 %fr, 1\n";
         $out .= "  store i64 %fr1, ptr @__manticore_cc_freed\n";
+        $out .= "  %isroot = icmp ne i64 %kind, 0\n";
+        $out .= "  br i1 %isroot, label %rootk, label %whitek\n";
+        $out .= "rootk:\n";
+        $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
+        $out .= "  br label %go\n";
+        $out .= "whitek:\n";
         // Drop this node's string props (obj props handled by the recursion
         // above) so collected cycles don't leak their strings.
         $out .= "  call void @__manticore_cc_drop_strings(ptr %s)\n";
+        $out .= "  br label %go\n";
+        $out .= "go:\n";
         $out .= "  %base = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%base');
-        $out .= "  br label %done\n";
-        $out .= "done:\n  ret void\n}\n";
+        $out .= "  ret void\n}\n";
+        // ── push one garbage entry (pointer | kind bit) ──
+        $out .= "define void @__cc_gpush(ptr %s, i64 %kind) {\n";
+        $out .= "entry:\n";
+        $out .= "  %cnt = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %cap = load i64, ptr @__manticore_cc_gcap\n";
+        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
+        $out .= "  br i1 %full, label %grow, label %store\n";
+        $out .= "grow:\n";
+        $out .= "  %dbl = mul i64 %cap, 2\n";
+        $out .= "  %small = icmp slt i64 %dbl, 64\n";
+        $out .= "  %ncap = select i1 %small, i64 64, i64 %dbl\n";
+        $out .= "  %bytes = mul i64 %ncap, 8\n";
+        $out .= "  %old = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
+        $out .= "  store ptr %nb, ptr @__manticore_cc_garbage\n";
+        $out .= "  store i64 %ncap, ptr @__manticore_cc_gcap\n";
+        $out .= "  br label %store\n";
+        $out .= "store:\n";
+        $out .= "  %buf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %slot = getelementptr i64, ptr %buf, i64 %cnt\n";
+        $out .= "  %pi = ptrtoint ptr %s to i64\n";
+        $out .= "  %tagged = or i64 %pi, %kind\n";
+        $out .= "  store i64 %tagged, ptr %slot\n";
+        $out .= "  %cnt1 = add i64 %cnt, 1\n";
+        $out .= "  store i64 %cnt1, ptr @__manticore_cc_gcount\n";
+        $out .= "  ret void\n}\n";
 
         // ── gc_collect_cycles(): MarkRoots → ScanRoots → CollectRoots ──
         $out .= "define i64 @__manticore_cc_collect_cycles() {\n";
@@ -2762,6 +2858,11 @@ trait EmitLlvmRuntime
         // MarkRoots already frees `black && rc == 0` in `mrfree`; this is
         // the same test at the other end of the same collection.
         $out .= "  %ccol = call i64 @__cc_color(ptr %cs)\n";
+        // Already collected through an earlier root's walk — on the garbage
+        // list, freed after this loop; touching it here would free it twice.
+        $out .= "  %cgray = icmp eq i64 %ccol, " . $GRAY . "\n";
+        $out .= "  br i1 %cgray, label %crn, label %crlive\n";
+        $out .= "crlive:\n";
         $out .= "  %cisbk = icmp eq i64 %ccol, " . $BLACK . "\n";
         $out .= "  %crcv = call i64 @__cc_rcval(ptr %cs)\n";
         $out .= "  %crc0 = icmp sle i64 %crcv, 0\n";
@@ -2769,10 +2870,7 @@ trait EmitLlvmRuntime
         $out .= "  br i1 %cdead, label %crfree, label %crwhite\n";
         $out .= "crfree:\n";
         $out .= $this->ccTrace('mrfree', 'ptr %cs');
-        $out .= "  call void @__mir_drop_dispatch(ptr %cs)\n";
-        $out .= "  %cfbase = getelementptr i8, ptr %cs, i64 -8\n";
-        $out .= $this->profBump(30);
-        $out .= $this->poolFreeCall('%cfbase');
+        $out .= "  call void @__cc_gpush(ptr %cs, i64 1)\n";
         $out .= "  br label %crn\n";
         $out .= "crwhite:\n";
         $out .= "  call void @__manticore_cc_collect_white(ptr %cs)\n";
@@ -2782,6 +2880,26 @@ trait EmitLlvmRuntime
         $out .= "  store i64 %cin, ptr %ip\n";
         $out .= "  br label %cr\n";
         $out .= "crd:\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %gr\n";
+        $out .= "gr:\n";
+        $out .= "  %gi = load i64, ptr %ip\n";
+        $out .= "  %gcnt = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %ggo = icmp slt i64 %gi, %gcnt\n";
+        $out .= "  br i1 %ggo, label %grb, label %grd\n";
+        $out .= "grb:\n";
+        $out .= "  %gbuf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %gsp = getelementptr i64, ptr %gbuf, i64 %gi\n";
+        $out .= "  %gw = load i64, ptr %gsp\n";
+        $out .= "  %gkind = and i64 %gw, 1\n";
+        $out .= "  %gpi = and i64 %gw, -2\n";
+        $out .= "  %gp = inttoptr i64 %gpi to ptr\n";
+        $out .= "  call void @__cc_gfree(ptr %gp, i64 %gkind)\n";
+        $out .= "  %gin = add i64 %gi, 1\n";
+        $out .= "  store i64 %gin, ptr %ip\n";
+        $out .= "  br label %gr\n";
+        $out .= "grd:\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_gcount\n";
         $out .= "  %endcnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %endbuf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= $this->ccTrace('end', 'i64 %endcnt, ptr %endbuf');
