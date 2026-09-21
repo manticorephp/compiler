@@ -1,0 +1,3 @@
+TypeError: array{0:obj<Node>,1:bool} key 0 must be of type Node, int given
+TypeError: array{name:string,hits:int} key hits must be of type int, string given
+2

@@ -135,6 +135,7 @@ final class UnifiedArrayRuntime
         $this->emitCellToKind();
         $this->emitArrayConform();
         $this->emitElemUntagKind();
+        $this->emitElemKindIs();
         $this->emitElemEncodeRaw();
         $this->emitElemStampRaw();
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
@@ -4333,6 +4334,61 @@ final class UnifiedArrayRuntime
         $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
         $chk->brIf($isCell, $dec, $asis);
         $dec->ret($dec->call('__mir_cell_to_kind', Type::i64(), [$v, $kind]));
+    }
+
+    /**
+     * `__mir_elem_kind_is(arr, v, kind, nullok) -> i64` — 1 when the word `v`
+     * read out of `arr` may be handed to a consumer that claims element kind
+     * `kind` (an `ARRAY_ELEM_HINT_*` code), 0 when the claim is a lie. A shape
+     * read's guard: the static type came from a docblock, the buffer's hint is
+     * the fact. A RAW-hinted buffer has nothing to check (its writer typed the
+     * words) and answers 1; a CELL buffer is checked by the NaN-box nibble —
+     * INT=1 BOOL=2 NULL=3 STR=4 BIGINT=5 FLOAT=untagged ARRAY=7 OBJECT=8
+     * ({@see \Compile\MemoryAbi::CELL_TAG_REF}). An int passes a FLOAT claim
+     * (php widens); NULL passes only with `nullok` (a `key?:`/`?T` field).
+     */
+    private function emitElemKindIs(): void
+    {
+        $fn = $this->module->func('__mir_elem_kind_is', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $nullOk = $fn->param(Type::i64(), 'nullok');
+        $e = $fn->block('entry');
+        $yes = $fn->block('yes');
+        $chk = $fn->block('chk');
+        $tagged = $fn->block('tagged');
+        $one = Value::int(Type::i64(), 1);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $yes, $chk);
+        $yes->ret($one);
+        $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk->brIf($isCell, $tagged, $yes);
+        $istag = $tagged->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $nibInt = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 1)));
+        $nibBool = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 2)));
+        $nibNull = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 3)));
+        $nibStr = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 4)));
+        $nibBigInt = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 5)));
+        $nibArr = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 7)));
+        $nibObj = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 8)));
+        $isInt = $tagged->or_($nibInt, $nibBigInt);
+        $isFloat = $tagged->or_($tagged->xor_($istag, Value::int(Type::i1(), 1)), $isInt);
+        $kindStr = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR));
+        $kindObj = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ));
+        $kindArr = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR));
+        $kindInt = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT));
+        $kindFloat = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT));
+        $kindBool = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_BOOL));
+        $want = $tagged->select($kindStr, $nibStr,
+            $tagged->select($kindObj, $nibObj,
+            $tagged->select($kindArr, $nibArr,
+            $tagged->select($kindInt, $isInt,
+            $tagged->select($kindFloat, $isFloat,
+            $tagged->select($kindBool, $nibBool,
+                Value::int(Type::i1(), 1)))))));
+        $nullPass = $tagged->and_($nibNull, $tagged->icmp('ne', $nullOk, Value::int(Type::i64(), 0)));
+        $tagged->ret($tagged->zext($tagged->or_($want, $nullPass), Type::i64()));
     }
 
     /**

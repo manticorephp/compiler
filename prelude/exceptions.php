@@ -111,6 +111,18 @@ class LogicException extends Exception {}
 class InvalidArgumentException extends LogicException {}
 class OutOfRangeException extends LogicException {}
 class TypeError extends Error {}
+
+/**
+ * The shape read's throw: a docblock `array{…}` claimed field `$where` holds
+ * a `$expected`, the buffer's word says otherwise. Called from the IR the
+ * shape check emits ({@see \Compile\Mir\Passes\EmitLlvmArrays}), never from
+ * PHP source — it lives here because this file is linked into every module.
+ */
+function __mir_shape_type_error(mixed $v, string $where, string $expected): void
+{
+    throw new TypeError($where . ' must be of type ' . $expected . ', ' . get_debug_type($v) . ' given');
+}
+
 class ArgumentCountError extends TypeError {}
 class ValueError extends Error {}
 class AssertionError extends Error {}

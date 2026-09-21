@@ -997,6 +997,35 @@ trait EmitLlvmArrays
                 $kc = \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
             }
             if ($kc !== null && $kc !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
+                // A SHAPE read: the static type is a docblock claim, so before
+                // the untag below trusts it, ask the buffer. `__mir_elem_kind_is`
+                // answers 1 for a raw-hinted buffer (nothing to check) and for
+                // a cell whose nibble matches the claim; 0 throws TypeError
+                // through the prelude. Checked on the still-boxed word. A
+                // cell-typed field never sets shapeCheck ({@see InferNodes}).
+                $ok = $this->ssa->allocReg();
+                $out .= '  ' . $ok . ' = call i64 @__mir_elem_kind_is(ptr ' . $arrPtr . ', i64 ' . $reg
+                      . ', i64 ' . (string)$kc . ', i64 ' . ($aa->shapeCheck === 2 ? '1' : '0') . ")\n";
+                $okb = $this->ssa->allocReg();
+                $out .= '  ' . $okb . ' = icmp ne i64 ' . $ok . ", 0\n";
+                $badL = $this->ssa->allocLabel('shape.bad');
+                $contL = $this->ssa->allocLabel('shape.ok');
+                $out .= '  br i1 ' . $okb . ', label %' . $contL . ', label %' . $badL . "\n";
+                $out .= $badL . ":\n";
+                $keyStr = $aa->index->kind === Node::KIND_STRING_CONST
+                    ? $aa->index->value : (string)$aa->index->value;
+                $where = $aa->array->type->shapeString() . ' key ' . $keyStr;
+                $expected = $self->type->kind === Type::KIND_OBJ
+                    ? \ltrim((string)$self->type->class, '\\') : $self->type->toString();
+                // A prelude fn takes every argument as an i64 word and returns
+                // one, even a `void` ({@see EmitLlvmBuiltins::biGettype}).
+                $out .= '  call i64 @manticore___mir_shape_type_error(i64 ' . $reg
+                      . ', i64 ptrtoint (ptr ' . $this->strRef($where) . ' to i64)'
+                      . ', i64 ptrtoint (ptr ' . $this->strRef($expected) . " to i64))\n";
+                // The prelude fn throws (longjmp) and never returns; the edge
+                // only satisfies the verifier.
+                $out .= '  br label %' . $contL . "\n";
+                $out .= $contL . ":\n";
                 $u = $this->ssa->allocReg();
                 $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
                       . ', i64 ' . $reg . ', i64 ' . (string)$kc . ")\n";
