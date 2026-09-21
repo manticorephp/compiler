@@ -55,7 +55,7 @@ final class TypeCheck
     {
         foreach ($module->functions as $fn) {
             $this->paramsByFn[$fn->name] = $fn->params;
-            $this->returnTypes[$fn->name] = $fn->returnType;
+            $this->returnTypes[$fn->name] = $module->declaredReturnTypes[$fn->name] ?? $fn->returnType;
         }
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
@@ -214,7 +214,10 @@ final class TypeCheck
     /**
      * Shape rules — unconditional, like {@see arrayReprConflict}: a shape is a
      * repr claim every constant-key read now unboxes by, so a literal or a
-     * store that contradicts it is a wrong read, not a style opinion.
+     * store that contradicts it is a wrong read, not a style opinion. The
+     * key-set rules (an unnamed key, a missing or extra key in a literal)
+     * hold a DECLARED shape only ({@see Type::$declared}): a shape inferred
+     * from a literal describes that literal, it does not seal the program.
      */
     private function checkShapeNode(Node $n, string $inFn): void
     {
@@ -241,7 +244,7 @@ final class TypeCheck
         } elseif ($n->kind === Node::KIND_ARRAY_ACCESS) {
             $at = $n->array->type;
             $k = $this->constKey($n->index);
-            if ($k !== null && $at->isShape() && $at->shapeField($k) === null) {
+            if ($k !== null && !$n->probe && $at->isShape() && $at->declared && $at->shapeField($k) === null) {
                 $this->errors[] = $this->at($n) . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL && $n->declaredType !== null
@@ -277,8 +280,9 @@ final class TypeCheck
                 $k = $this->constKey($el->key);
                 if ($k === null) { return Type::unknown(); }
             }
-            if (\is_int($k)) { $next = $k + 1; }
-            $fields[Type::shapeKey($k)] = $el->value->type;
+            $ek = Type::shapeKey($k);
+            if (Type::shapeKeyIsInt($ek)) { $next = (int)Type::shapeKeyLabel($ek) + 1; }
+            $fields[$ek] = $el->value->type;
         }
         return Type::shapeOf($fields, []);
     }
@@ -290,7 +294,7 @@ final class TypeCheck
      */
     private function shapeConflict(Type $given, Type $want): ?string
     {
-        if (!$want->isShape() || !$given->isShape()) { return null; }
+        if (!$want->isShape() || !$want->declared || !$given->isShape()) { return null; }
         $why = null;
         foreach ($want->fields as $ek => $ft) {
             $gt = $given->shapeFieldAt($ek);

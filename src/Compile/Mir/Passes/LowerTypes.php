@@ -217,7 +217,7 @@ trait LowerTypes
         if (!$sealed || \count($fields) === 0) {
             return $list ? Type::vec(Type::cell()) : Type::assoc(Type::string_(), Type::cell());
         }
-        return Type::shapeOf($fields, $nullable);
+        return Type::shapeOf($fields, $nullable, true);
     }
 
     /**

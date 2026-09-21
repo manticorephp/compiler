@@ -1459,6 +1459,14 @@ final class ArrayAccess_ extends Node
      */
     public int $shapeCheck = 0;
 
+    /**
+     * The direct subject of `isset()`, `empty()` or `??`: a PROBE for a key,
+     * which php answers false / the default without a warning even when a
+     * sealed shape does not name the key. Set at lowering; TypeCheck's
+     * unnamed-key rule skips a probe.
+     */
+    public bool $probe = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitArrayAccess($this);

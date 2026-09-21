@@ -24,6 +24,9 @@ function store2(array $pair): int
     return $pair[1] ? 1 : 0;
 }
 
+/** @param array{name: string, hits: int} $rec */
+function probe(array $rec): int { return isset($rec['extra']) ? 1 : ($rec['extra'] ?? 0); }
+
 /** @param array{0:Node,1:bool} $pair */
 function missing(array $pair): int { return $pair[2]; }
 

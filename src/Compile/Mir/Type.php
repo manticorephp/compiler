@@ -109,6 +109,16 @@ final class Type
          * @var array<string,true> keyed by {@see shapeKey}
          */
         public readonly array $nullableFields = [],
+        /**
+         * The shape is a DOCBLOCK claim (`@param array{…}`, `@return`, `@var`):
+         * its fields are the whole key set and every field type is the
+         * author's word, so TypeCheck refuses a literal, a return or a
+         * constant-key read that contradicts it. A shape INFERRED from a
+         * literal's own elements is a description, not a claim — the same
+         * program may read a key the literal never spelled (php answers null
+         * with a warning) or hand a wider literal to the same parameter.
+         */
+        public readonly bool $declared = false,
     ) {
         self::$nextId = self::$nextId + 1;
         $this->id = self::$nextId;
@@ -256,10 +266,10 @@ final class Type
      *
      * @param array<string,self>|null $fields  @param array<string,true> $nullable
      */
-    private static function arrayOf(?self $element, ?self $key, ?array $fields, array $nullable = []): self
+    private static function arrayOf(?self $element, ?self $key, ?array $fields, array $nullable = [], bool $declared = false): self
     {
         if ($fields !== null) {
-            return new self(self::KIND_ARRAY, element: $element, key: $key, fields: $fields, nullableFields: $nullable);
+            return new self(self::KIND_ARRAY, element: $element, key: $key, fields: $fields, nullableFields: $nullable, declared: $declared);
         }
         $el = $element ?? self::unknown();
         return $key === null ? self::vec($el) : self::assoc($key, $el);
@@ -270,9 +280,9 @@ final class Type
      * `vec[$element]`; only `fields` is extra.
      * @param array<string,self> $fields  @param array<string,true> $nullable
      */
-    public static function tuple(array $fields, self $element, array $nullable = []): self
+    public static function tuple(array $fields, self $element, array $nullable = [], bool $declared = false): self
     {
-        return new self(self::KIND_ARRAY, element: $element, fields: $fields, nullableFields: $nullable);
+        return new self(self::KIND_ARRAY, element: $element, fields: $fields, nullableFields: $nullable, declared: $declared);
     }
 
     public static function assoc(self $key, self $value): self
@@ -294,9 +304,9 @@ final class Type
      * as `assoc[string, $element]`.
      * @param array<string,self> $fields  @param array<string,true> $nullable
      */
-    public static function record(array $fields, self $element, array $nullable = []): self
+    public static function record(array $fields, self $element, array $nullable = [], bool $declared = false): self
     {
-        return new self(self::KIND_ARRAY, element: $element, key: self::string_(), fields: $fields, nullableFields: $nullable);
+        return new self(self::KIND_ARRAY, element: $element, key: self::string_(), fields: $fields, nullableFields: $nullable, declared: $declared);
     }
 
     /**
@@ -304,9 +314,10 @@ final class Type
      * keys only → record, both → a cell-keyed shape (the tag-dispatched key
      * channel). The element is {@see shapeElement}. `$fields`/`$nullable` keys
      * arrive PRE-ENCODED ({@see shapeKey}) — the caller has already converted.
+     * `$declared` marks a docblock claim ({@see $declared}).
      * @param array<string,self> $fields  @param array<string,true> $nullable
      */
-    public static function shapeOf(array $fields, array $nullable): self
+    public static function shapeOf(array $fields, array $nullable, bool $declared = false): self
     {
         $anyStr = false;
         $anyInt = false;
@@ -316,9 +327,9 @@ final class Type
             throw new \RuntimeException('shapeOf: key not shapeKey-encoded: ' . $ek);
         }
         $el = self::shapeElement($fields);
-        if (!$anyStr) { return self::tuple($fields, $el, $nullable); }
-        if (!$anyInt) { return self::record($fields, $el, $nullable); }
-        return new self(self::KIND_ARRAY, element: $el, key: self::cell(), fields: $fields, nullableFields: $nullable);
+        if (!$anyStr) { return self::tuple($fields, $el, $nullable, $declared); }
+        if (!$anyInt) { return self::record($fields, $el, $nullable, $declared); }
+        return new self(self::KIND_ARRAY, element: $el, key: self::cell(), fields: $fields, nullableFields: $nullable, declared: $declared);
     }
 
     /**
@@ -434,7 +445,7 @@ final class Type
     /** The same array with another element — the shape rides along. */
     public function withElement(self $el): self
     {
-        return self::arrayOf($el, $this->key, $this->fields, $this->nullableFields);
+        return self::arrayOf($el, $this->key, $this->fields, $this->nullableFields, $this->declared);
     }
 
     /** `array{0:obj<Node>,1?:bool}` — diagnostics only; {@see toString} stays golden-stable. */
@@ -584,7 +595,7 @@ final class Type
             // shared body already fixed the buffer repr (a typevar field made
             // it a cell buffer), and a call site typing `array{0:Node,1:int}`
             // over that buffer must keep reading cells.
-            return self::arrayOf($el, $ky, $fs, $this->nullableFields);
+            return self::arrayOf($el, $ky, $fs, $this->nullableFields, $this->declared);
         }
         return $this;
     }
@@ -641,6 +652,7 @@ final class Type
                 $this->key !== null ? $this->key->eraseTypeVars() : null,
                 $fs,
                 $this->nullableFields,
+                $this->declared,
             );
         }
         return $this;

@@ -2465,7 +2465,7 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
  * push a canned response into the server end, and parse it from the client end —
  * offline and deterministic. The transport itself is covered by net_tcp_loopback.
  *
- * Returns [body|false, location]. `location` is non-empty only when $followable
+ * Returns [body|false, location, code]. `location` is non-empty only when $followable
  * and the status is a 3xx carrying one — the caller owns the redirect loop,
  * because it needs a NEW connection.
  *
