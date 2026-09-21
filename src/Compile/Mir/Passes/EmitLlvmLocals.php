@@ -579,16 +579,20 @@ trait EmitLlvmLocals
         // precise signal — box the concrete value into the slot, making it a
         // self-describing cell past the merge. No effect on any genuine cell
         // store (those have a cell value → fall through to the raw path).
+        // A GLOBAL-BACKED slot takes it too: a `static $x;` seeded cell
+        // ({@see InferScans::scanStaticLocalTypes}) is pinned exactly like a
+        // ref-taken local, so its stores arrive as this combo and must box
+        // into the module cell.
+        $cellDest = $this->locals->globalBacked[$sl->name] ?? $this->locals->slots[$sl->name] ?? '';
         if ($sl->type->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
             && !isset($this->locals->refLocals[$sl->name])
-            && !isset($this->locals->globalBacked[$sl->name])
-            && isset($this->locals->slots[$sl->name])) {
+            && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
         $out .= $this->elemReadCoOwn($sl->value, $sl->type);
             $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
-            $out .= '  store i64 ' . $boxed . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             $this->lastValue = $boxed;
             $this->lastValueType = 'i64';
             return $out;

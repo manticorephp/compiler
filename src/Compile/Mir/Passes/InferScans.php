@@ -44,6 +44,7 @@ use Compile\Mir\If_;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\MethodCall_;
 use Compile\Mir\Mod;
+use Compile\Mir\IntConst;
 use Compile\Mir\Module;
 use Compile\Mir\Mul;
 use Compile\Mir\Neg;
@@ -1148,10 +1149,30 @@ trait InferScans
             $elemBad = [];
             $strKey = [];
             $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
-            foreach ($observed as $name => $t) {
-                if ($t->kind === Type::KIND_UNKNOWN) { continue; }
+            /** @var array<string,array<string,bool>> $kinds */
+            $kinds = [];
+            $this->collectStaticStoreKinds($fn->body, $active, $kinds);
+            foreach ($kinds as $name => $ks) {
+                if (isset($ks[Type::KIND_UNKNOWN])) { continue; }
                 $cell = $cells[$name] ?? '';
                 if ($cell === '') { continue; }
+                $t = $observed[$name] ?? Type::unknown();
+                // The slot starts NULL and that null is observable (`static $f;
+                // if ($f === null) { $f = 1.5; }`). ONE pointer kind carries it
+                // as the 0 word; a SCALAR kind cannot (int 0 IS 0, so `=== null`
+                // folded to false and the init branch never ran), and neither
+                // can a slot two kinds share. Such a slot is a CELL: NaN-boxed
+                // null at link time, every store boxes
+                // ({@see inferFunctionOnce} pins it via refCellLocalsCur).
+                $ptrOnly = \count($ks) === 1 && !isset($ks[Type::KIND_INT])
+                    && !isset($ks[Type::KIND_FLOAT]) && !isset($ks[Type::KIND_BOOL])
+                    && !isset($ks[Type::KIND_CELL]) && !isset($ks[Type::KIND_NULL]);
+                if (!$ptrOnly) {
+                    $t = Type::cell();
+                    $this->setGlobalCellDefault($module, $cell,
+                        new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_()));
+                }
+                if ($t->kind === Type::KIND_UNKNOWN) { continue; }
                 $prev = $this->staticLocalTypes[$cell] ?? null;
                 if ($prev !== null && $prev->kind === $t->kind) { continue; }
                 $this->staticLocalTypes[$cell] = $t;
@@ -1164,6 +1185,30 @@ trait InferScans
     /** Uninitialised, non-global-backed static locals: name → true, name → cell.
      *  @param array<string,bool>   $active
      *  @param array<string,string> $cells */
+    /** The value KINDS every real (non-self) store hands an active static local.
+     *  @param array<string,bool> $active @param array<string,array<string,bool>> $kinds */
+    private function collectStaticStoreKinds(Node $n, array $active, array &$kinds): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $s = $n;
+            $selfStore = $s->value->kind === Node::KIND_LOAD_LOCAL && $s->value->name === $s->name;
+            if (isset($active[$s->name]) && !$selfStore) {
+                $kinds[$s->name][$s->value->type->kind] = true;
+            }
+        }
+        foreach (Walk::children($n) as $ch) { $this->collectStaticStoreKinds($ch, $active, $kinds); }
+    }
+
+    /** Replace a module global cell's link-time initialiser. */
+    private function setGlobalCellDefault(Module $module, string $cell, Node $default): void
+    {
+        $gi = 0;
+        foreach ($module->globalNames as $g) {
+            if ($g === $cell) { $module->globalDefaults[$gi] = $default; return; }
+            $gi = $gi + 1;
+        }
+    }
+
     private function collectPlainStaticLocals(Node $n, array &$active, array &$cells): void
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {

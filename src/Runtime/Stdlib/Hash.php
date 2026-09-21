@@ -174,21 +174,29 @@ function crc32(string $string): int
 
 /**
  * Reflected CRC-32 (poly 0xEDB88320, init/xorout 0xFFFFFFFF) — the crc32()
- * value and hash('crc32b'). Bitwise (no table); $crc stays masked to 32 bits so
- * `>>` is a logical shift on a positive int.
+ * value and hash('crc32b'). Byte-wise over a 256-entry table (php's own
+ * ext/standard/crc32.c shape), built on the first call: the bitwise loop it
+ * replaces did eight shift/xor rounds per byte and ran 2.5× behind php. $crc
+ * stays within 32 bits so `>>` is a logical shift on a positive int.
  */
 function __mc_crc32b(string $s): int
 {
+    static $t = [];
+    if (\count($t) === 0) {
+        for ($i = 0; $i < 256; $i = $i + 1) {
+            $c = $i;
+            for ($j = 0; $j < 8; $j = $j + 1) {
+                $c = ($c & 1) !== 0 ? (($c >> 1) ^ 0xEDB88320) : ($c >> 1);
+            }
+            $t[$i] = $c;
+        }
+    }
     $crc = 0xFFFFFFFF;
     $n = \strlen($s);
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $crc = $crc ^ \ord($s[$i]);
-        for ($j = 0; $j < 8; $j = $j + 1) {
-            $mask = -($crc & 1);
-            $crc = (($crc >> 1) ^ (0xEDB88320 & $mask)) & 0xFFFFFFFF;
-        }
+        $crc = $t[($crc ^ \ord($s[$i])) & 0xFF] ^ ($crc >> 8);
     }
-    return ($crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+    return $crc ^ 0xFFFFFFFF;
 }
 
 /** MSB-first CRC-32/BZIP2 (poly 0x04C11DB7, init/xorout 0xFFFFFFFF, no reflect) —

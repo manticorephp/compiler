@@ -1432,7 +1432,12 @@ final class InferTypes implements Pass
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
             $s = $n;
-            if (isset($active[$s->name])) {
+            // A self-store (`$x = $x`) is a merge shadow planMergeShadow planted,
+            // not a definition: its value is the slot's own hard-lowered `int`,
+            // and joining that with the real store (`string ∪ int` → unknown)
+            // erased the seed the scan exists to find.
+            $selfStore = $s->value->kind === Node::KIND_LOAD_LOCAL && $s->value->name === $s->name;
+            if (isset($active[$s->name]) && !$selfStore) {
                 $t = $s->value->type;
                 $tk = $t->kind;
                 if ($tk !== Type::KIND_UNKNOWN) {

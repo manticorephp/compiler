@@ -161,6 +161,21 @@ trait InferNodes
      *
      * @param array<string, bool> $out
      */
+    /** @param array<string,bool> $out */
+    private function collectCellStaticLocals(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $d = $n;
+            if ($d->init === null && !\str_starts_with($d->cell, '@g_')
+                && isset($this->staticLocalTypes[$d->cell])
+                && $this->staticLocalTypes[$d->cell]->kind === Type::KIND_CELL) {
+                $out[$d->name] = true;
+            }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectCellStaticLocals($c, $out); }
+    }
+
     private function collectRefCellLocals(Node $n, array &$out): void
     {
         // ⚠ Via Walk, never a narrowing helper: this file is a TRAIT, and there
@@ -219,6 +234,10 @@ trait InferNodes
         // The two readers below consult this set directly.
         $this->refCellLocalsCur = [];
         $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        // A `static $x;` whose stores are scalar rides a CELL for the same
+        // reason a ref-taken slot does: its null start must stay observable
+        // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
+        $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
