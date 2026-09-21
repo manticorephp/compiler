@@ -1178,14 +1178,18 @@ trait EmitLlvmControl
         // A CELL loop variable — a cell element, or any element of a cell BASE —
         // is decoded by the buffer's own hint, exactly as the keyed read is ({@see EmitLlvmArrays::emitArrayAccessUnified}) and
         // for the same reason; the store side re-encodes, so a value written
-        // back into a raw-hinted buffer lands raw again. An UNKNOWN element is
-        // still never decoded — its consumers deref the word raw.
-        if (($fel !== null && $fel->kind === Type::KIND_CELL)
-            || $fe->array->type->kind === Type::KIND_CELL) {
+        // back into a raw-hinted buffer lands raw again. An ERASED element is a
+        // cell too since InferTypes types it so ({@see InferNodes::inferForeach}).
+        $fvT = $this->locals->localTypes[$fe->valueVar] ?? null;
+        if (($fel !== null && ($fel->kind === Type::KIND_CELL || $fel->kind === Type::KIND_UNKNOWN))
+            || $fel === null
+            || $fe->array->type->kind === Type::KIND_CELL
+            || $fe->array->type->kind === Type::KIND_UNKNOWN) {
             $ed = $this->ssa->allocReg();
             $out .= '  ' . $ed . ' = call i64 @__mir_elem_decode(ptr ' . $arr
                   . ', i64 ' . $ev . ")\n";
             $ev = $ed;
+            $this->markCellOpaque($ev);
         }
         if ($this->rt->needsRefCells) {
             $this->rt->needsTagged = true;

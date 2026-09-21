@@ -705,6 +705,9 @@ trait EmitLlvmArrays
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
               . '(' . $args . ")\n";
+        // CELLGUARD: the `c` body decodes its array arm by the buffer hint and
+        // boxes its string/object arms — a cell read, `opaque`.
+        if ($self->type->kind === Type::KIND_CELL) { $this->markCellOpaque($r); }
 
         // The callee is done with the key, so a fresh temp dies once
         // ({@see EmitLlvm::keyTempRelease}). The BOXED copy the object arm
@@ -951,6 +954,9 @@ trait EmitLlvmArrays
             $out .= '  ' . $d . ' = call i64 @__mir_elem_decode(ptr ' . $arrPtr . ', i64 ' . $reg . ")\n";
             $reg = $d;
             $this->lastValue = $reg;
+            // CELLGUARD: decoded by the buffer's hint — an element read from a
+            // cell channel, `opaque` like every other slot read typed cell.
+            $this->markCellOpaque($reg);
         }
         // A REFERENCE element yields what it refers to. This is not the decode
         // the ⚠ note below refuses: that one would hand a consumer a CELL where

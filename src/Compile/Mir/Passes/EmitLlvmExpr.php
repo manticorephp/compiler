@@ -1489,9 +1489,47 @@ trait EmitLlvmExpr
      */
     private function taggedArithRuntime(): string
     {
-        return $this->taggedArithOne('add', 'add', 'fadd')
+        return $this->cellNumIsFloatRuntime()
+            . $this->taggedArithOne('add', 'add', 'fadd')
             . $this->taggedArithOne('sub', 'sub', 'fsub')
             . $this->taggedArithOne('mul', 'mul', 'fmul');
+    }
+
+    /**
+     * `__mir_cell_num_is_float(cell) -> i1` — whether a numeric operand takes
+     * the FLOAT arm: a float cell, or a STRING cell whose numeric prefix is a
+     * float literal (`"2.5"`, `"1e3"` — php's `"2.5" + 1` is 3.5, not 3). An
+     * int / bool / null string-free operand answers false.
+     */
+    private function cellNumIsFloatRuntime(): string
+    {
+        $this->rt->needsStrtol = true;
+        $out  = "\ndefine i1 @__mir_cell_num_is_float(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %ts, 15\n";
+        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
+        $out .= "  %isf = icmp eq i64 %tag, 6\n";
+        $out .= "  %iss = icmp eq i64 %tag, 4\n";
+        $out .= "  br i1 %iss, label %str, label %done\n";
+        $out .= "str:\n";
+        $out .= "  %sp = and i64 %v, 281474976710655\n";
+        $out .= "  %sptr = inttoptr i64 %sp to ptr\n";
+        $out .= "  %endp = alloca ptr\n";
+        $out .= "  %iv = call i64 @strtol(ptr %sptr, ptr %endp, i32 10)\n";
+        $out .= "  %e = load ptr, ptr %endp\n";
+        $out .= "  %c = load i8, ptr %e\n";
+        $out .= "  %isdot = icmp eq i8 %c, 46\n";
+        $out .= "  %ise = icmp eq i8 %c, 101\n";
+        $out .= "  %isE = icmp eq i8 %c, 69\n";
+        $out .= "  %f1 = or i1 %isdot, %ise\n";
+        $out .= "  %f2 = or i1 %f1, %isE\n";
+        $out .= "  ret i1 %f2\n";
+        $out .= "done:\n";
+        $out .= "  ret i1 %isf\n";
+        $out .= "}\n";
+        return $out;
     }
 
     private function taggedArithOne(string $name, string $iop, string $fop): string
@@ -1510,8 +1548,8 @@ trait EmitLlvmExpr
         $out .= "  %tbs = lshr i64 %b, 48\n";
         $out .= "  %tbn = and i64 %tbs, 15\n";
         $out .= "  %tbb = select i1 %bistag, i64 %tbn, i64 6\n";
-        $out .= "  %afl = icmp eq i64 %taa, 6\n";
-        $out .= "  %bfl = icmp eq i64 %tbb, 6\n";
+        $out .= "  %afl = call i1 @__mir_cell_num_is_float(i64 %a)\n";
+        $out .= "  %bfl = call i1 @__mir_cell_num_is_float(i64 %b)\n";
         $out .= "  %isf = or i1 %afl, %bfl\n";
         $out .= "  br i1 %isf, label %flt, label %int\n";
         $out .= "flt:\n";

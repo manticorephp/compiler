@@ -823,6 +823,16 @@ final class InferTypes implements Pass
             $this->inferFunctionsForScope($module, 'prop_elem_post_capture');
             $guard = $guard + 1;
         }
+        // The by-ref CAPTURE widen once more, for the same reason: the capture
+        // convergence above is where a closure body's params are first typed
+        // cell, and only then does `$sum += $v` over a captured int become a
+        // cell store the outer frame cannot read raw. The earlier run saw the
+        // add as `unknown` and found no disagreement; this one sees the cell.
+        $guard = 0;
+        while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
+            $this->inferFunctionsForScope($module, 'byref_capture_post');
+            $guard = $guard + 1;
+        }
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -1689,26 +1699,15 @@ final class InferTypes implements Pass
         // partner has its own arithmetic path (strtol coercion, array union, …)
         // and must not be dragged into the tagged helpers.
         //
-        // ⛔ HELD BACK, and NOT for the reason the old comment gave ("SIGKILLs
-        // the self-build" — it does not; two generations build). Tagged arith is
-        // the first consumer that TRUSTS `cell` to mean "the word carries a
-        // tag", and that guarantee is not yet true at the producer side. Three
-        // channels say cell and hold a RAW word, each found by turning this on:
-        //   · the `$GLOBALS['x']` view (lowered cell; `global $x` types the same
-        //     storage from the join, and both read it raw — they agree only by
-        //     accident);
-        //   · an UNHINTED static property read (typed `unknown` while the store
-        //     boxes by the DECLARED type — and typing that read cell was already
-        //     tried and reverted, because an ARRAY rides the same slot raw);
-        //   · the elements of an erased array (`array_combine` + `array_map`),
-        //     whose foreach value types cell and arrives raw — `var_dump($len)`
-        //     answers `float(5.4E-323)` on its own, with no arithmetic involved.
-        // Every one is a PRE-EXISTING producer gap that the integer path hides
-        // by being raw at both ends. Turn this on again once §3's "erased ⟹
-        // cell" holds at the producers, not before — the fix belongs there, and
-        // carving out each consumer one at a time only moves the lie around.
+        // Tagged arith is the first consumer that TRUSTS `cell` to mean "the
+        // word carries a tag". It was held back while three producers said cell
+        // and stored a RAW word (the `$GLOBALS['x']` view, an unhinted static
+        // property, the elements of an erased array); each is closed at the
+        // producer (docs/design/value-channels.md, P1–P4, 2026-09-20), so the
+        // consumer may trust the claim. A string operand is a numeric cell too:
+        // the helper decides int-or-float from the string itself.
         // {@see docs/design/unknown-cell-soundness.md §18.3}
-        if (false && ($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
+        if (($lt->kind === Type::KIND_CELL || $rt->kind === Type::KIND_CELL)
             && $this->cellArithOperand($lt) && $this->cellArithOperand($rt)) {
             return Type::numericCell();
         }

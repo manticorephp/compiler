@@ -360,6 +360,30 @@ trait LowerTypes
             return Type::vec($this->lowerTypeHint($elem));
         }
         // Generic array: `array<V>` → vec[V]; `array<K, V>` → assoc[V].
+        // An array SHAPE — `array{0:Node,1:bool}`, `array{name:string,age:int}`
+        // — names heterogeneous ELEMENTS, and the honest element type for a
+        // slot that holds a Node here and a bool there is the tag-dispatched
+        // CELL (an `[$n, true]` literal lowers to vec[cell] for the same
+        // reason). Unrecognised, the shape lowered to an ERASED element, and
+        // the body-usage guess ({@see detectStringElemUse}) then read a
+        // `$pair[0]` subscript as a CHAR offset and retyped the parameter to
+        // vec[string]: `ApplyMemoryMode::demote` compared `$pair[0]`, a 1-char
+        // string, against a Node (never equal) and, once a VERIFY guard looked,
+        // retained each pair's ARRAY as a string. Int keys (or none) make a
+        // list; any other key a string-keyed map.
+        if (\strncmp($low, 'array{', 6) === 0) {
+            $base = \ltrim($hint, '?\\');
+            $lb = \strpos($base, '{');
+            $inner = \substr($base, $lb + 1, \strlen($base) - $lb - 2);
+            $list = true;
+            foreach (\explode(',', $inner) as $ent) {
+                $colon = \strpos($ent, ':');
+                if ($colon === false || $colon < 0) { continue; }
+                $key = \trim(\substr($ent, 0, $colon));
+                if ($key !== '' && !\ctype_digit(\rtrim($key, '?'))) { $list = false; }
+            }
+            return $list ? Type::vec(Type::cell()) : Type::assoc(Type::string_(), Type::cell());
+        }
         if (\strncmp($low, 'array<', 6) === 0) {
             $base = \ltrim($hint, '?\\');
             $lt = \strpos($base, '<');

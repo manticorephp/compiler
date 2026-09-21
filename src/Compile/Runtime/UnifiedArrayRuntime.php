@@ -1678,7 +1678,7 @@ final class UnifiedArrayRuntime
         // __mir_rc_retain_str. An unstamped array (hint 0) keeps the old path
         // exactly. Retain and release read the SAME nibble: one side alone is a
         // leak, the other a double free.
-        $isCellHint = $this->elemHintIsCell($bump, $flags, $valueFlavor);
+        $elemHint = $this->ownedElemHint($bump, $flags, $valueFlavor);
         $hhead = $fn->block('rt_hhead');
         if ($valueFlavor === '') {
             $bump->brIf($isH, $hhead, $ret);
@@ -1701,7 +1701,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp', $isCellHint);
+            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp', $elemHint);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         }
@@ -1727,7 +1727,7 @@ final class UnifiedArrayRuntime
         } else {
             if ($valueFlavor !== '') {
                 $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth', $isCellHint);
+                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth', $elemHint);
             }
             $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hval->br($hhead);
@@ -1860,18 +1860,73 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * "Do these slots hold BOXED CELLS?" — read from the array's own element-hint
-     * nibble (`ARRAY_ELEM_HINT_*` at flags bits 4-6, stamped by every literal,
-     * element store and native builder). Null for the flavors that already ask
-     * the array itself ('repr'), have nothing to drop ('') or are already
-     * self-describing ('cell') — only the CONCRETE pointer flavors can be lied
-     * to by a static type.
+     * The array's ELEMENT HINT (`ARRAY_ELEM_HINT_*` at flags bits 4-6, stamped
+     * by every literal, element store and native builder) — what the slots
+     * ACTUALLY hold. It outranks the caller's static flavor on BOTH sides of a
+     * co-own: a `string[]` buffer reaches a cell-flavored owner (the parser's
+     * doc comments into `Program`'s bare `array` param) and a cell-flavored
+     * walk sees raw pointers as untagged words and co-owns NOTHING, while the
+     * `string[]` owner's release walks the same slots as strings — the strings
+     * die under the second owner (the gen3 `Token::kind + 1` SIGBUS: a doc
+     * comment freed, its block reused by a Token, the stale retain landing on
+     * `kind`). Null for the flavors that have nothing to own ('') or ask the
+     * repr bits instead ('repr').
      */
-    private function elemHintIsCell(Block $b, Value $flags, string $valueFlavor): ?Value
+    private function ownedElemHint(Block $b, Value $flags, string $valueFlavor): ?Value
     {
-        if ($valueFlavor !== 'str' && $valueFlavor !== 'obj') { return null; }
-        $hint = $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
-        return $b->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        if ($valueFlavor === '' || $valueFlavor === 'repr') { return null; }
+        return $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+    }
+
+    /**
+     * One element rc op dispatched by the runtime hint, falling through to
+     * the static flavor's op only for an UNSTAMPED buffer (hint 0). The op
+     * per hint: CELL → tag dispatch, STR → string rc, OBJ → object rc
+     * (guarded), ARR → the flavor's nested op when the flavor is `arr*`,
+     * else the repr-driven plain one; INT / FLOAT / BOOL own nothing.
+     * `$cellOp` / `$strOp` / `$objOp` / `$arrOp` / `$staticOp` name the
+     * helpers; `$staticOp` is what the flavor alone would have called.
+     * Returns the continuation block.
+     */
+    private function emitElemOpByHint(FunctionDef $fn, Block $b, Value $v, Value $hint, string $tag,
+        string $cellOp, string $strOp, string $objOp, string $arrOp, string $staticOp, bool $staticIsCell): Block
+    {
+        $join = $fn->block('eh_join_' . $tag);
+        $cellB = $fn->block('eh_cell_' . $tag);
+        $strB = $fn->block('eh_str_' . $tag);
+        $objB = $fn->block('eh_obj_' . $tag);
+        $arrB = $fn->block('eh_arr_' . $tag);
+        $rawB = $fn->block('eh_raw_' . $tag);
+        $b->switch_($hint, $join, [
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $cellB),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR), $strB),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ), $objB),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR), $arrB),
+            new SwitchCase(Value::int(Type::i64(), 0), $rawB),
+        ]);
+        $cellB->call($cellOp, Type::void(), [$v]);
+        $cellB->br($join);
+        $this->emitGuardedPtrOp($fn, $strB, $v, $strOp, 'eh_s_' . $tag, $join);
+        $this->emitGuardedPtrOp($fn, $objB, $v, $objOp, 'eh_o_' . $tag, $join);
+        $this->emitGuardedPtrOp($fn, $arrB, $v, $arrOp, 'eh_a_' . $tag, $join);
+        if ($staticIsCell) {
+            $rawB->call($staticOp, Type::void(), [$v]);
+            $rawB->br($join);
+        } else {
+            $this->emitGuardedPtrOp($fn, $rawB, $v, $staticOp, 'eh_r_' . $tag, $join);
+        }
+        return $join;
+    }
+
+    /** `op(inttoptr v)` when `v > 0xFFFF` — a slot whose hint says pointer
+     *  can still hold a bare scalar sentinel, and an rc helper on a `1` reads
+     *  its header at address -7. Branches to `$join` either way. */
+    private function emitGuardedPtrOp(FunctionDef $fn, Block $b, Value $v, string $op, string $tag, Block $join): void
+    {
+        $doit = $fn->block($tag . '_do');
+        $b->brIf($b->icmp('ugt', $v, Value::int(Type::i64(), 65535)), $doit, $join);
+        $doit->call($op, Type::void(), [$doit->inttoptr($v, Type::ptr())]);
+        $doit->br($join);
     }
 
     /**
@@ -1883,30 +1938,13 @@ final class UnifiedArrayRuntime
      * (`array_values(array_keys($assoc))`), and the static flavor then walked
      * tagged words as raw `char*`. Returns the continuation block.
      */
-    private function emitDropValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $isCell = null): Block
+    private function emitDropValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $hint = null): Block
     {
         if ($flavor === '') { return $b; }
-        if ($flavor === 'cell') { $b->call('__mir_cell_drop', Type::void(), [$v]); return $b; }
-        if ($isCell !== null) {
-            $cellB = $fn->block('dv_cell_' . $tag);
-            $rawB  = $fn->block('dv_raw_' . $tag);
-            $join  = $fn->block('dv_join_' . $tag);
-            $b->brIf($isCell, $cellB, $rawB);
-            $cellB->call('__mir_cell_drop', Type::void(), [$v]);
-            $cellB->br($join);
-            $b = $rawB;
-        } else {
-            $join = null;
-        }
-        $p = $b->inttoptr($v, Type::ptr());
-        // An ARRAY element — the member the family was missing. Its drop is the
-        // repr-driven `__mir_array_release`, which self-guards on the array tag
-        // and goes as deep as the element's OWN bits describe it. It shares the
-        // cell-hint dispatch above on purpose: an erased slot whose runtime hint
-        // says CELL outranks any static flavor, this one included.
-        $name = '__mir_rc_release';
-        if ($flavor === 'str') { $name = '__mir_rc_release_str'; }
-        elseif ($flavor === 'arr') { $name = '__mir_array_release'; }
+        // The static flavor's own op. An ARRAY element — the member the
+        // family was missing. Its drop is the repr-driven `__mir_array_release`,
+        // which self-guards on the array tag and goes as deep as the element's
+        // OWN bits describe it.
         // A nested array whose OWN element flavor the outer type knows —
         // `vec[vec[string]]` releases each element as `vecstr`, which the
         // repr-driven `arr` cannot: the inner buffer's producer stamps no
@@ -1917,14 +1955,22 @@ final class UnifiedArrayRuntime
         // `arr<rest>` where <rest> is the element's OWN suffix, at any depth:
         // `arrstr` releases each element as a vecstr, `arrarrstr` as a
         // vecarrstr. One rule, so a third level costs a name and not a branch.
+        $name = '__mir_rc_release';
+        if ($flavor === 'cell') { $name = '__mir_cell_drop'; }
+        elseif ($flavor === 'str') { $name = '__mir_rc_release_str'; }
+        elseif ($flavor === 'arr') { $name = '__mir_array_release'; }
         elseif (\str_starts_with($flavor, 'arr')) {
             $rest = \substr($flavor, 3);
             $name = $rest === '' ? '__mir_array_release' : '__mir_array_release_' . $rest;
         }
-        $b->call($name, Type::void(), [$p]);
-        if ($join === null) { return $b; }
-        $b->br($join);
-        return $join;
+        if ($hint !== null) {
+            $arrOp = \str_starts_with($flavor, 'arr') ? $name : '__mir_array_release';
+            return $this->emitElemOpByHint($fn, $b, $v, $hint, $tag,
+                '__mir_cell_drop', '__mir_rc_release_str', '__mir_rc_release', $arrOp, $name, $flavor === 'cell');
+        }
+        if ($flavor === 'cell') { $b->call($name, Type::void(), [$v]); return $b; }
+        $b->call($name, Type::void(), [$b->inttoptr($v, Type::ptr())]);
+        return $b;
     }
 
     /**
@@ -1938,40 +1984,30 @@ final class UnifiedArrayRuntime
      * release side has always had the same exposure and simply never
      * dereferenced first; the retain does, so it must guard.
      */
-    private function emitRetainValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $isCell = null): Block
+    private function emitRetainValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $hint = null): Block
     {
         if ($flavor === '') { return $b; }
-        if ($flavor === 'cell') { $b->call('__mir_cell_retain', Type::void(), [$v]); return $b; }
-        $join = null;
-        if ($isCell !== null) {
-            // Runtime shape beats the static flavor — see {@see emitDropValue}.
-            $cellB = $fn->block('rv_cell_' . $tag);
-            $rawB  = $fn->block('rv_raw_' . $tag);
-            $join  = $fn->block('rv_join_' . $tag);
-            $b->brIf($isCell, $cellB, $rawB);
-            $cellB->call('__mir_cell_retain', Type::void(), [$v]);
-            $cellB->br($join);
-            $b = $rawB;
-        }
         $fnName = '__mir_rc_retain';
-        if ($flavor === 'str') { $fnName = '__mir_rc_retain_str'; }
+        if ($flavor === 'cell') { $fnName = '__mir_cell_retain'; }
+        elseif ($flavor === 'str') { $fnName = '__mir_rc_retain_str'; }
         elseif ($flavor === 'arr') { $fnName = '__mir_array_retain'; }
         // The mirror of the arr* drop: co-own the nested BUFFER and nothing
         // below it. Its own elements are its own, given back when its rc
         // reaches zero — a deeper retain here would be a +1 per element per
         // retain against a release that only fires once.
-        elseif (\str_starts_with($flavor, 'arr') && $flavor !== 'arr') {
-            $fnName = '__mir_array_retain_buf';
+        elseif (\str_starts_with($flavor, 'arr')) { $fnName = '__mir_array_retain_buf'; }
+        if ($hint !== null) {
+            $arrOp = \str_starts_with($flavor, 'arr') ? $fnName : '__mir_array_retain';
+            return $this->emitElemOpByHint($fn, $b, $v, $hint, $tag,
+                '__mir_cell_retain', '__mir_rc_retain_str', '__mir_rc_retain', $arrOp, $fnName, $flavor === 'cell');
         }
+        if ($flavor === 'cell') { $b->call($fnName, Type::void(), [$v]); return $b; }
         $doit = $fn->block('rv_do_' . $tag);
         $skip = $fn->block('rv_skip_' . $tag);
         $b->brIf($b->icmp('ugt', $v, Value::int(Type::i64(), 65535)), $doit, $skip);
-        $p = $doit->inttoptr($v, Type::ptr());
-        $doit->call($fnName, Type::void(), [$p]);
+        $doit->call($fnName, Type::void(), [$doit->inttoptr($v, Type::ptr())]);
         $doit->br($skip);
-        if ($join === null) { return $skip; }
-        $skip->br($join);
-        return $join;
+        return $skip;
     }
 
     /**
@@ -2236,7 +2272,7 @@ final class UnifiedArrayRuntime
         $hasCells = $repr ? $free->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
         // The runtime element hint outranks the static flavor — the mirror of
         // the retain side, and it MUST stay the mirror.
-        $isCellHint = $this->elemHintIsCell($free, $flags, $valueFlavor);
+        $elemHint = $this->ownedElemHint($free, $flags, $valueFlavor);
 
         $hhead = $fn->block('hhead');
         if ($valueFlavor === '') {
@@ -2264,7 +2300,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $freeb, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $pbody = $this->emitDropValue($fn, $pbody, $pv, $valueFlavor, 'dp', $isCellHint);
+            $pbody = $this->emitDropValue($fn, $pbody, $pv, $valueFlavor, 'dp', $elemHint);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         }
@@ -2298,7 +2334,7 @@ final class UnifiedArrayRuntime
         } else {
             if ($valueFlavor !== '') {
                 $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-                $hval = $this->emitDropValue($fn, $hval, $vv, $valueFlavor, 'dh', $isCellHint);
+                $hval = $this->emitDropValue($fn, $hval, $vv, $valueFlavor, 'dh', $elemHint);
             }
             $hval->br($hadv);
         }
@@ -3135,7 +3171,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $copy, $pi));
-            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'cowp');
+            $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'cowp', $this->ownedElemHint($pbody, $flags, $valueFlavor));
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         }
@@ -3162,7 +3198,7 @@ final class UnifiedArrayRuntime
         } else {
             if ($valueFlavor !== '') {
                 $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'cowh');
+                $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'cowh', $this->ownedElemHint($hval, $flags, $valueFlavor));
             }
             $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hval->br($hhead);

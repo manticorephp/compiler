@@ -1737,6 +1737,18 @@ trait EmitLlvmModule
         $header .= '  ' . $ac . ' = sext i32 %argc to i64' . "\n";
         $header .= '  store i64 ' . $ac . ", ptr @__manticore_argc\n";
         $header .= "  store ptr %argv, ptr @__manticore_argv\n";
+        if (\Compile\Debug::$ccTrace) {
+            // Arm the baked collector trace only when the RUNTIME env says so
+            // ({@see EmitLlvmRuntime::ccTraceGlobals}).
+            $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+            $te = $this->ssa->allocReg();
+            $header .= '  ' . $te . " = call ptr @getenv(ptr @.cct.env)\n";
+            $tn = $this->ssa->allocReg();
+            $header .= '  ' . $tn . ' = icmp ne ptr ' . $te . ", null\n";
+            $tf = $this->ssa->allocReg();
+            $header .= '  ' . $tf . ' = select i1 ' . $tn . ", ptr @dprintf, ptr @__mir_cc_trace_noop\n";
+            $header .= '  store ptr ' . $tf . ", ptr @__mir_cc_trace_fn\n";
+        }
         $body = $this->preallocateLocals($fn->body);
         $body .= $this->initRcObjSlots($fn->body);
         // Top-level code takes references too — `$refs = [&$a];` at file scope
