@@ -620,7 +620,8 @@ trait EmitLlvmArrays
         if (!$t->isArray()) { return false; }
         $el = $t->element;
         if ($el === null) { return false; }
-        return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
+        return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ
+            || $el->kind === Type::KIND_ARRAY || Type::isClosureLike($el);
     }
 
     /**
@@ -1044,7 +1045,9 @@ trait EmitLlvmArrays
         // stream_select) handed the caller boxed elements under a `vec[obj]`
         // static type — `$r[0] instanceof R` then inttoptr'd the tag.
         $rk = $self->type->kind;
-        if (!$shapeDecoded && ($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ)
+        if (!$shapeDecoded
+            && ($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ || $rk === Type::KIND_ARRAY
+                || Type::isClosureLike($self->type))
             && $this->elemMayBeCell($aa->array->type)) {
             $this->rt->needsElemUntag = true;
             $u = $this->ssa->allocReg();

@@ -1204,8 +1204,13 @@ trait EmitLlvmControl
         // array_keys($assoc)) as $n) { str_contains($n, …) }` through a `string[]`
         // param walks cells — and it hands nothing downstream that the static
         // type did not already promise. {@see EmitLlvmArrays::emitArrayAccessUnified}
+        // An ARRAY (or closure-like) element is a pointer too: `foreach
+        // (json_decode($rows, true) as $p)` under a `vec[array{…}]` docblock
+        // handed `$p` the NaN-boxed ARR word, and the shaped read then loaded
+        // a header off the unmasked bits.
         if ($fel !== null
-            && ($fel->kind === Type::KIND_STRING || $fel->kind === Type::KIND_OBJ)) {
+            && ($fel->kind === Type::KIND_STRING || $fel->kind === Type::KIND_OBJ
+                || $fel->kind === Type::KIND_ARRAY || Type::isClosureLike($fel))) {
             $this->rt->needsElemUntag = true;
             $eu = $this->ssa->allocReg();
             $out .= '  ' . $eu . ' = call i64 @__mir_elem_untag(ptr ' . $arr

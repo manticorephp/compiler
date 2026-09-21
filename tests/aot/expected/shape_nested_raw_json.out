@@ -1,0 +1,4 @@
+14
+14
+14
+TypeError: array{0:int,1:int} key 1 must be of type int, string given

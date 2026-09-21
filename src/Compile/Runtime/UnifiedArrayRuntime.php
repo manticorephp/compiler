@@ -4088,6 +4088,19 @@ final class UnifiedArrayRuntime
         $asis->ret($val);
     }
 
+    /**
+     * The base a shape guard loads its header from. The emitter hands the
+     * static base word `inttoptr`'d, and a base that itself came out of a
+     * CELL buffer (a foreach value under a `vec[array{…}]` claim) is a
+     * NaN-boxed ARR word whenever the untag upstream missed it; the guard
+     * strips the tag rather than trust the claim.
+     */
+    private function shapeBase(Block $b, Value $arr): Value
+    {
+        $ai = $b->ptrtoint($arr, Type::i64());
+        return $b->inttoptr($b->and_($ai, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+    }
+
     /** The element-kind hint of `$arr`'s flags word, still shifted. */
     private function elemHint(Block $b, Value $arr): Value
     {
@@ -4329,6 +4342,7 @@ final class UnifiedArrayRuntime
         $asis = $fn->block('asis');
         $chk = $fn->block('chk');
         $dec = $fn->block('dec');
+        $arr = $this->shapeBase($e, $arr);
         $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
         $asis->ret($v);
         $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
@@ -4359,6 +4373,7 @@ final class UnifiedArrayRuntime
         $chk = $fn->block('chk');
         $tagged = $fn->block('tagged');
         $one = Value::int(Type::i64(), 1);
+        $arr = $this->shapeBase($e, $arr);
         $e->brIf($e->icmp('eq', $arr, Value::null()), $yes, $chk);
         $yes->ret($one);
         $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
