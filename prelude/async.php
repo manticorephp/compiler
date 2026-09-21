@@ -3037,7 +3037,6 @@ namespace Async {
         $group->site = $site;
         $group->deadline = \microtime(true) + $seconds;
         $effective = $group->deadlineAt();   // an enclosing deadline still wins if nearer
-        $prev = $cur->scope;
         $cur->scope = $group;
 
         // The body runs as a CHILD, not in this fiber: only a separate task can be
@@ -3053,7 +3052,7 @@ namespace Async {
                 $group->joinAll();
             }
         } finally {
-            $cur->scope = $prev;
+            $cur->scope = $group->parent;
         }
 
         if (!$settled) {

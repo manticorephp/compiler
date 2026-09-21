@@ -11,8 +11,13 @@
 // drives 20 000 GETs with compat off, then 20 000 with compat on, and what the
 // second run adds beyond the first is what the seeding costs. That keeps the
 // server's own per-request footprint out of the number. The leak was ~10 MB
-// per 20 000; the threshold leaves room for allocator slack. @serial: 40 000
-// requests are a memory measurement, not a race with nine other cases.
+// per 20 000; the threshold leaves room for allocator slack — and the slack is
+// real: with the per-request TaskGroup leak closed the two runs no longer
+// share a 2.8 KB/request floor that swamped it, and the compat run, which
+// churns ~1 KB/request more through the allocator, pins ~3 MB more of peak RSS
+// over 20 000 requests while `heap` shows the two live heaps growing by the
+// same one 64-byte block per request. @serial: 40 000 requests are a memory
+// measurement, not a race with nine other cases.
 
 use function Async\async;
 use function Async\spawn;
@@ -129,7 +134,7 @@ async(function () use ($server, $port) {
     $c->close();
 
     $extra = $compat[0] - $plain[0];
-    if ($extra < 2 * 1024 * 1024) {
+    if ($extra < 4 * 1024 * 1024) {
         echo "compat growth ok\n";
     } else {
         echo 'compat growth=', round($extra / 1048576, 1), "MB over ", $n, " requests\n";

@@ -2467,7 +2467,22 @@ final class EmitLlvm implements EmitVisitor
             $base = $parent->array;
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c === $base) { continue; }
+                if ($c === $parent->value && $this->storeCoOwnsPropRead($c)) { continue; }
                 $this->markPropBorrowsIn($c, 'store-element operand');
+            }
+            return;
+        }
+        // The VALUE of a property store is RETAINED by the store — a property
+        // read is not an owned producer, so {@see EmitLlvmMemory::rcRetainByType}
+        // gives the destination a reference of its own, on either side of the
+        // cell box. The source slot may then release what it overwrites without
+        // stranding that copy. `$s->ctxBlob = $ctx->rbuf;` was the one read
+        // that vetoed `Resource::rbuf` for the whole stdlib, and with it every
+        // `$s->rbuf = ''` compaction: one read buffer per request.
+        if ($k === Node::KIND_STORE_PROPERTY && $this->propStoreDeclared($parent)) {
+            foreach (\Compile\Mir\Walk::children($parent) as $c) {
+                if ($c === $parent->value && $this->storeCoOwnsPropRead($c)) { continue; }
+                $this->markPropBorrowsIn($c, 'store-property operand');
             }
             return;
         }
@@ -2520,9 +2535,14 @@ final class EmitLlvm implements EmitVisitor
             // vetoed `Buffer\ByteBuffer::buf` for the whole program.
             // A NAME list, like {@see EmitLlvmMemory::mutatesArg0} — the
             // contract is php's, not our implementation's.
-            $pureArg = $k === Node::KIND_CALL
-                && ($this->callKeepsNoArg($parent->function)
-                    || ($this->fnKeepsNoArg[$parent->function] ?? false));
+            // And a `new` whose constructor keeps its arguments only through
+            // stores that RETAIN — `new Request($this->method, …)` in the
+            // parser vetoed every per-request slot of `Http\Parser`, and
+            // `new TaskGroup($cur->scope)` vetoed `Task::scope` for every
+            // program with a scope: the old value of each was never released,
+            // yet the only thing holding it after the call was the new
+            // object's own +1.
+            $pureArg = $this->consumerKeepsNoArg($parent);
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c->kind === Node::KIND_PROPERTY_ACCESS
                     && ($c->type->isArray()
@@ -2581,7 +2601,28 @@ final class EmitLlvm implements EmitVisitor
             || $k === Node::KIND_UNSET) {
             return;
         }
+        // A conditional the emitter normalizes hands out a +1 from EVERY arm
+        // ({@see EmitLlvmControl::armRetainPostBox} retains a property-read
+        // arm), so `$r === null ? null : $r->scope` is as owned as a getter's
+        // `return $this->scope`. Judged by the same predicate the emitter
+        // uses; the veto stood on `Scheduler::currentGroup()` alone and cost
+        // every program a TaskGroup per scope.
+        $ownedArms = [];
+        if (\Compile\Mir\CondOwn::isConditional($parent) && $this->condOwnsResult($parent)) {
+            $cf = $this->condFlavor($parent->type);
+            if ($cf === 'obj' || $cf === 'str') {
+                foreach (\Compile\Mir\CondOwn::arms($parent) as $arm) {
+                    if ($arm->kind === Node::KIND_PROPERTY_ACCESS
+                        && ($arm->type->kind === Type::KIND_OBJ || $arm->type->kind === Type::KIND_STRING)) {
+                        $ownedArms[] = $arm;
+                    }
+                }
+            }
+        }
         foreach (\Compile\Mir\Walk::children($parent) as $c) {
+            foreach ($ownedArms as $arm) {
+                if ($c === $arm) { continue 2; }
+            }
             $this->markPropBorrowsIn($c, 'node kind ' . (string)$k);
         }
     }
@@ -2660,9 +2701,16 @@ final class EmitLlvm implements EmitVisitor
      */
     private function elemReadIsOwned(Node $aa): bool
     {
-        if (!\Compile\Debug::$rcElemOwns) { return false; }
         $p = $this->scanParent;
         if ($p === null) { return false; }
+        // A callee that keeps nothing of its arguments: the word never
+        // outlives the call, so there is nothing for a later drop to strand —
+        // no reference is claimed, which is why this stands outside the
+        // opt-in below. `\\fwrite($this->conn, $this->parts[0])` in the
+        // response outbox is the shape: its buffer-only drop stranded every
+        // part string, three per response.
+        if ($this->consumerKeepsNoArg($p)) { return true; }
+        if (!\Compile\Debug::$rcElemOwns) { return false; }
         $k = $aa->type->kind;
         if ($k !== Type::KIND_OBJ && $k !== Type::KIND_STRING) { return false; }
         if ($k === Type::KIND_OBJ) {
@@ -2869,6 +2917,11 @@ final class EmitLlvm implements EmitVisitor
         $taint = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) { return true; }
+            // The receiver is not an argument, and a scalar slot never holds a
+            // pointer to keep — without both exemptions every method escaped
+            // (`$this->x = …` aliases `this`) and so did every constructor with
+            // a `bool` to store.
+            if ($p->name === 'this' || (!$p->variadic && $this->paramNeverPointer($p->type))) { continue; }
             $taint[$p->name] = true;
         }
         if ($taint === []) { return false; }
@@ -2894,6 +2947,12 @@ final class EmitLlvm implements EmitVisitor
             || $k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_LIT
             || $k === Node::KIND_CLOSURE || $k === Node::KIND_REF_ADDR) {
             foreach (\Compile\Mir\Walk::children($n) as $c) {
+                // A property store that RETAINS keeps a reference of its own,
+                // not the caller's — the promoted `$this->parent = $parent` of
+                // every constructor. The slot it fills gives that reference
+                // back on its own overwrite / drop.
+                if ($k === Node::KIND_STORE_PROPERTY && $c === $n->value
+                    && $this->propStoreCoOwns($n)) { continue; }
                 if ($this->aliasesTaint($c, $taint)) { return true; }
             }
         }
@@ -2901,6 +2960,8 @@ final class EmitLlvm implements EmitVisitor
             $safe = false;
             if ($k === Node::KIND_CALL) {
                 $safe = $this->callKeepsNoArg($n->function) || ($keeps[$n->function] ?? false);
+            } elseif ($k === Node::KIND_NEW_OBJ) {
+                $safe = $this->newObjKeepsNoArg($n, $keeps);
             }
             if (!$safe) {
                 foreach (\Compile\Mir\Walk::children($n) as $c) {
@@ -2928,6 +2989,119 @@ final class EmitLlvm implements EmitVisitor
             }
         }
         return false;
+    }
+
+    /** A slot of this static type holds a scalar, never a pointer anyone
+     *  could keep. Everything else — erased, cell, array, object, string —
+     *  is tainted. */
+    private function paramNeverPointer(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
+    /**
+     * Does `new C(…)` keep none of its arguments as a BORROW? The class's
+     * constructor is one of the module's own functions and the fixpoint has
+     * judged it — with `this` out of the taint and a retaining property store
+     * not counted as an escape ({@see propStoreCoOwns}). A class the module
+     * does not declare, or one without a constructor of its own to judge,
+     * stays a borrow.
+     * @param array<string,bool> $keeps
+     */
+    /**
+     * A STRING / OBJ property read handed to a container or property store as
+     * its VALUE is co-owned by that store ({@see EmitLlvmMemory::rcRetainByType}
+     * on the raw path, {@see EmitLlvm::retainCellPayload} on the boxed one),
+     * so the read cannot be stranded by its slot's later release. The same
+     * narrowing {@see elemReadIsOwned} makes: a struct, a closure, an enum and
+     * a foreign pointer take no retain and keep the veto.
+     */
+    private function storeCoOwnsPropRead(Node $c): bool
+    {
+        return $c->kind === Node::KIND_PROPERTY_ACCESS && $this->storeRetainsKind($c->type);
+    }
+
+    /** The value kinds a container / property store takes a reference on:
+     *  a string, and an object with an rc header. */
+    private function storeRetainsKind(Type $t): bool
+    {
+        $tk = $t->kind;
+        if ($tk === Type::KIND_STRING) { return true; }
+        if ($tk !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        if ($cls === '' || $cls === 'Ffi\\Ptr') { return false; }
+        if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return false; }
+        if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        return true;
+    }
+
+    /** A property store whose destination is a DECLARED slot of a known class
+     *  — the shape whose retain arms are the two {@see storeCoOwnsPropRead}
+     *  names. A union receiver, a classless one (the bag) and an undeclared
+     *  name (`__set`) take other paths and keep the strict rule. */
+    private function propStoreDeclared(\Compile\Mir\StoreProperty $n): bool
+    {
+        $rcls = $n->object->type->class ?? '';
+        if ($n->object->type->kind !== Type::KIND_OBJ || $rcls === '' || !isset($this->classes[$rcls])) {
+            return false;
+        }
+        return $this->classes[$rcls]->propertyOffset($n->property) !== -1;
+    }
+
+    /** Does this consumer — a call, a `new`, an enum `from` — keep nothing
+     *  of what it is handed, so a borrowed operand cannot outlive it? The one
+     *  owner of that question for a whole-property read and an element read
+     *  alike. */
+    private function consumerKeepsNoArg(Node $p): bool
+    {
+        $k = $p->kind;
+        if ($k === Node::KIND_CALL) {
+            return $this->callKeepsNoArg($p->function) || ($this->fnKeepsNoArg[$p->function] ?? false);
+        }
+        if ($k === Node::KIND_NEW_OBJ) { return $this->newObjKeepsNoArg($p, $this->fnKeepsNoArg); }
+        if ($k === Node::KIND_STATIC_CALL) { return $this->enumFromKeepsNoArg($p); }
+        return false;
+    }
+
+    /** A backed enum's `from` / `tryFrom` is {@see EmitLlvmObjects::emitEnumFrom}:
+     *  an unrolled compare against the case values that yields a singleton and
+     *  keeps nothing of its argument. `Method::tryFrom($this->method)` alone
+     *  vetoed the parser's per-request method slot. Same condition as the
+     *  dispatch. */
+    private function enumFromKeepsNoArg(\Compile\Mir\StaticCall_ $n): bool
+    {
+        return isset($this->enums[$n->class]) && \count($n->args) === 1
+            && ($n->method === 'from' || $n->method === 'tryFrom');
+    }
+
+    private function newObjKeepsNoArg(\Compile\Mir\NewObj $n, array $keeps): bool
+    {
+        if ($n->bare) { return false; }
+        $cls = $n->class;
+        if ($cls === '' || !isset($this->classes[$cls])) { return false; }
+        $ctorClass = $this->resolveMethodClass($cls, '__construct');
+        if ($ctorClass === '') { return false; }
+        return $keeps[$ctorClass . '____construct'] ?? false;
+    }
+
+    /**
+     * Does this property store take a reference of its own on the local it
+     * stores? Mirrors the two retain arms of {@see EmitLlvmObjects::
+     * emitStoreProperty}: a boxed slot retains a STRING / OBJ payload before
+     * boxing, and a raw slot retains through {@see EmitLlvmMemory::
+     * rcRetainByType} — both by the VALUE's static kind, both refusing a
+     * struct, a closure, an enum and a foreign pointer. A cell, an erased or
+     * an array value is left to the escape rule; a receiver whose class is
+     * unknown, or that does not declare the property (the bag / `__set`
+     * paths), too.
+     */
+    private function propStoreCoOwns(\Compile\Mir\StoreProperty $n): bool
+    {
+        return $n->value->kind === Node::KIND_LOAD_LOCAL
+            && $this->propStoreDeclared($n)
+            && $this->storeRetainsKind($n->value->type);
     }
 
     /**
@@ -2963,6 +3137,10 @@ final class EmitLlvm implements EmitVisitor
             // in the result. It is what `Http\splitStr` delegates to, and the
             // one call that vetoed `Headers::block` for the whole program.
             'substr', 'mb_substr', 'str_repeat', 'explode',
+            // A write hands the BYTES to the stream and returns a count; php
+            // keeps nothing of the buffer after the call. The response outbox
+            // writes `$this->parts[0]` this way.
+            'fwrite', 'fputs',
             // `$s[$i]` after DemoteCharLocals. An INT of one byte — the only
             // internal desugar that reaches this scan with a property operand,
             // and the reason a class with a `byteAt()` never released an

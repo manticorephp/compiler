@@ -3125,10 +3125,7 @@ final class Parser
     /** Materialise the Request and stop. */
     private function finish(): void
     {
-        $h = $this->headers;
-        if ($h === null) {
-            $h = new Headers();
-        }
+        $h = $this->headers ?? new Headers();
         $remote = $this->remoteAddr;
         $secure = $this->secure;
         $fport = '';

@@ -951,6 +951,13 @@ trait EmitLlvmMemory
         // immortal (retain is a sentinel no-op — skip it).
         if ($tk === Type::KIND_STRING
             && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return ''; }
+        // A `(string)` cast that mints or retains its result is +1 already —
+        // the verdict of {@see EmitLlvm::isFreshStringTemp} and its two twins.
+        // A co-owner retain on top double-counted it: `$chunks[] = (string)$c`
+        // over a `mixed` element stranded every string, which is the vectored
+        // `fwrite` path — two strings per HTTP response. Exactly a call's case.
+        if ($tk === Type::KIND_STRING && $k === Node::KIND_CAST
+            && $this->isFreshStringTemp($valueNode)) { return ''; }
         $p = $this->ssa->allocReg();
         $out  = $this->profBump(7 + $cat);
         $out .= '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n";
