@@ -1448,6 +1448,14 @@ final class ArrayAccess_ extends Node
         parent::__construct(Node::KIND_ARRAY_ACCESS, $type);
     }
 
+    /**
+     * A constant-key read off a SHAPE: 1 = the emitter checks the word's tag
+     * against this node's (field) type and throws TypeError on a mismatch;
+     * 2 = the same, but a NULL word passes (a `key?:`/`?T` field, or the
+     * subject of `??`). 0 = not a shaped read. Set by InferNodes on every run.
+     */
+    public int $shapeCheck = 0;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitArrayAccess($this);

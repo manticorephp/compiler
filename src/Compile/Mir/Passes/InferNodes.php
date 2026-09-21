@@ -1074,7 +1074,10 @@ trait InferNodes
 
     private function inferIsset(Isset_ $n): Type
     {
-        foreach ($n->targets as $t) { $this->inferNode($t); }
+        foreach ($n->targets as $t) {
+            $this->inferNode($t);
+            if ($t->kind === Node::KIND_ARRAY_ACCESS) { $t->shapeCheck = 0; }
+        }
         $n->type = Type::bool_();
         return $n->type;
     }
@@ -1406,6 +1409,11 @@ trait InferNodes
     private function inferNullCoalesce(NullCoalesce_ $node): Type
     {
         $lt = $this->inferNode($node->left);
+        // `$rec['k'] ?? d`: a NULL word is the whole point of the operator, so
+        // the shape check must let it through and hand it to the fallback.
+        if ($node->left->kind === Node::KIND_ARRAY_ACCESS && $node->left->shapeCheck === 1) {
+            $node->left->shapeCheck = 2;
+        }
         $rt = $this->inferNode($node->right);
         // `$a ?? throw …`: the fallback diverges (never), so the result is
         // simply the left's type — never the throw's void.
@@ -1929,6 +1937,14 @@ trait InferNodes
         return $node->type;
     }
 
+    /** The literal key of an index node — an int or string constant — or null. */
+    private function constKeyOf(Node $index): int|string|null
+    {
+        if ($index->kind === Node::KIND_INT_CONST) { return $index->value; }
+        if ($index->kind === Node::KIND_STRING_CONST) { return $index->value; }
+        return null;
+    }
+
     private function inferArrayAccess(ArrayAccess_ $node): Type
     {
         $at = $this->inferNode($node->array);
@@ -1940,9 +1956,25 @@ trait InferNodes
         // `unknown` it was the raw word — right only while the buffer happened
         // to hold raw scalars, and a raw pointer under a cell claim everywhere
         // else (the asort/arsort rebuild handed `$len - 1` a raw 11 as a cell).
+        $node->shapeCheck = 0;
         if ($at->isArray()) {
             $e = $at->element;
             $node->type = ($e === null || $e->kind === Type::KIND_UNKNOWN) ? Type::cell() : $e;
+            // A constant key on a SHAPE reads the FIELD type — the early unbox
+            // the shape exists for. The emitter strips the tag by this type and
+            // checks it first ({@see ArrayAccess_::$shapeCheck}); a cell field
+            // stays a cell and needs neither. A key the shape does not name
+            // keeps the element type here and is a TypeCheck error.
+            $k = $this->constKeyOf($node->index);
+            if ($k !== null && $at->isShape()) {
+                $ft = $at->shapeField($k);
+                if ($ft !== null) {
+                    $node->type = $ft;
+                    if ($ft->kind !== Type::KIND_CELL && $ft->kind !== Type::KIND_UNKNOWN) {
+                        $node->shapeCheck = $at->shapeFieldNullable($k) ? 2 : 1;
+                    }
+                }
+            }
         }
         if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) {
             $node->type = Type::cell();
