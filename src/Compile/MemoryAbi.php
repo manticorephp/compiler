@@ -322,9 +322,13 @@ final class MemoryAbi
     /** `ptr` — compiler-owned lightweight dynamic-method table, or null. */
     public const DESCRIPTOR_DYN_METHODS_OFFSET = 24;
 
-    /** Bytes. Nothing allocates a descriptor at runtime — they are static
-     *  globals — so this exists for readers/asserts, not for a malloc. */
-    public const DESCRIPTOR_SIZE = 32;
+    /**
+     * `ptr` — `@__mir_props_<id>`, or null for a class with neither declared
+     * properties nor a bag. Returns the object's properties as a FRESH assoc
+     * (declared first, then the bag); how `json_encode` / `(array)` /
+     * `get_object_vars` inside `manticore_stdlib.o` reach an application class.
+     */
+    public const DESCRIPTOR_PROPS_FN_OFFSET = 32;
 
     // ─── Reflection metadata (`@__mc_rmeta_<id>`) ─────────────────
 

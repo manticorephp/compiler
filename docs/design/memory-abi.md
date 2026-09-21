@@ -85,9 +85,8 @@ descriptor + 32 : ptr  props_fn     -- @__mir_props_<id>: declared props + bag a
 
 `instanceof`, method dispatch and exception catch read `class_id` at descriptor offset 0;
 object release calls `drop_fn` **indirectly**. Offsets 0 and 8 are ABI — new fields append.
-The struct is spelled in exactly one place: `Compile\Mir\RuntimeLibrary::descriptorType`
-(⚠ `props_fn`'s offset lives there as `DESC_PROPS_AT`, and `MemoryAbi::DESCRIPTOR_SIZE`
-still says 32 — an unused constant, but the one-owner rule wants both in `MemoryAbi`).
+The struct is spelled in exactly one place: `Compile\Mir\RuntimeLibrary::descriptorType`;
+every offset is a `MemoryAbi::DESCRIPTOR_*_OFFSET` constant.
 
 `rmeta` stays null unless reflection actually reaches the class, so a binary that never
 reflects pays 8 rodata bytes per class and nothing else. Its layout (`RMETA_*`,

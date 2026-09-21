@@ -34,15 +34,12 @@ final class RuntimeLibrary
      * both MUST route through here.
      *
      * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
-     * rmeta@16, dynamic_method_table@24.
+     * rmeta@16, dynamic_method_table@24, props_fn@32.
      */
     public static function descriptorType(): string
     {
         return '{ i64, ptr, ptr, ptr, ptr }';
     }
-
-    /** Byte offset of the props_fn field inside {@see descriptorType}. */
-    public const DESC_PROPS_AT = 32;
 
     /**
      * The full `@__mir_cd_<id> = linkonce_odr global …` definition.
@@ -2558,7 +2555,7 @@ final class RuntimeLibrary
         $out .= "  br i1 %odn, label %tobjpunt, label %tobjpf\n";
         $out .= "tobjpf:\n";
         $out .= "  %opfp = getelementptr inbounds i8, ptr %odesc, i64 "
-              . (string)self::DESC_PROPS_AT . "\n";
+              . (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET . "\n";
         $out .= "  %opf = load ptr, ptr %opfp\n";
         $out .= "  %ohas = icmp ne ptr %opf, null\n";
         $out .= "  br i1 %ohas, label %tobjprops, label %tobjpunt\n";

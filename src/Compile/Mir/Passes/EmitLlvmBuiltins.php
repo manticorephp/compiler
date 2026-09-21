@@ -7303,7 +7303,7 @@ trait EmitLlvmBuiltins
         $dp = $this->ssa->allocReg();
         $out .= '  ' . $dp . ' = inttoptr i64 ' . $di . " to ptr\n";
         $fp = $this->ssa->allocReg();
-        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $dp . ", i64 32\n";
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $dp . ', i64 ' . (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET . "\n";
         $fn = $this->ssa->allocReg();
         $out .= '  ' . $fn . ' = load ptr, ptr ' . $fp . "\n";
         $fz = $this->ssa->allocReg();
