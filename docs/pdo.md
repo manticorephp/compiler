@@ -164,11 +164,6 @@ are fixed with it — all four have PDO-free regression cases in
 root — an untyped property is `mixed`, and `new $cls()` never boxed its result — which is
 fixed in this tree.
 
-One gap remains, and it is **not** PDO's: `json_encode()` of any object (a plain `stdClass`
-included) renders `{}`, because the stdlib's json encoder walks the operand's STATIC class
-from a separate module. `get_object_vars()` on the same object is correct, so
-`json_encode(get_object_vars($row))` is the workaround until the module-boundary fix lands.
-
 ## Tests
 
 `tests/aot/cases/pdo_sqlite_*.php` — seven cases, every one graded against the **real `php`

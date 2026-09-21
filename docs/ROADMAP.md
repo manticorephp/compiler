@@ -2,7 +2,7 @@
 
 **Single source of truth for "where the compiler is and what's next."**
 
-_Last updated: 2026-07-30 · branch `main` · HEAD `dea8a63`._
+_Last updated: 2026-09-21 · branch `main` · HEAD `49ced4d`._
 
 ## Current state
 
@@ -173,8 +173,10 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
 9. **`R:` is never emitted.** It marks a php REFERENCE, and a Manticore array carries no
    is_ref bit, so there is no runtime fact to emit it from. It is accepted on input as a
    value copy.
-10. **`(array)$obj` yields the dynamic-property BAG only**, where php returns the declared
-    properties too. `var_dump` / `serialize` / `var_export` compose the two themselves.
+10. **`(array)$obj` does not mangle private/protected keys.** Declared and dynamic
+    properties both come back, but a private `$h` arrives as `"h"` where php writes
+    `"\0P\0h"` (protected: `"\0*\0h"`). Manticore enforces no visibility, so there is
+    no scope to encode.
 11. **A bare `array` property hint erases its element**, so the elements of `public array $a`
     read raw — `var_dump` and `var_export` print ints as denormal floats. A `@var int[]` on
     the same property is correct. This is the parked element-repr work.
@@ -210,19 +212,18 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
     The application object is linked first, so its richer copy wins — deterministic given
     how the link line is built, but an invariant rather than a guarantee. The fix is the
     descriptor extension below.
-- **EPIC: per-class function pointers in the class descriptor.** `__mc_json_enc` lives in
-  `manticore_stdlib.o`, whose class table is empty, so `(array)$obj` inside it yields `[]`
-  and `json_encode` of ANY object — imported or local — answers `{}`. Same shape for
-  `__manticore_tagged_to_str`. Extend `{ i64 class_id, ptr drop_fn, ptr rmeta }` with
-  `props_fn` / `tostr_fn` / `debug_fn`, generated once by whichever module OWNS the class,
-  so the definition travels with the class and a generic walker in `stdlib.o` reaches an
-  application class without knowing its name. Bumps `MemoryAbi::VERSION` (⇒ one
-  `bin/build --seed`) and lets four of the five `LowerPrelude::*ObjectSrc()` generators go.
-- **No dependency resolution, no build cache, no packaging bootstrap.** `MANTICORE_HOME`,
+- **Per-class function pointers in the class descriptor — partly done.** `json_encode`
+  and `(array)$obj` of an application class now answer correctly from inside
+  `manticore_stdlib.o` (the object-walking producers were fixed 2026-09). What remains of
+  the epic: `__manticore_tagged_to_str` and the `LowerPrelude::*ObjectSrc()` generators
+  still synthesize per-program walkers instead of reading `props_fn` / `tostr_fn` /
+  `debug_fn` off `{ i64 class_id, ptr drop_fn, ptr rmeta }`. Finishing it bumps
+  `MemoryAbi::VERSION` (⇒ one `bin/build --seed`).
+- **No dependency resolution, no cross-build module cache, no packaging bootstrap.** `MANTICORE_HOME`,
   `~/.manticore/cache` and a `compiler_abi` field appear in
   [`design/module-system.md`](design/module-system.md) but nowhere in `src/`. Manifest targets
   and Composer source discovery work; transitive dependency fetch does not.
-- **The ABI version is not surfaced.** `MemoryAbi::VERSION` is 7 and `manticore version`
+- **The ABI version is not surfaced.** `MemoryAbi::VERSION` is 8 and `manticore version`
   prints only `manticore 0.10.0`, so a vendored `.o` cannot detect a mismatch.
 - **`dump-mir --after=<pass>`** is described in [`design/mir.md`](design/mir.md) but not
   implemented.
@@ -231,7 +232,8 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
 - **Monomorphize has no `$cell` fallback.** `Monomorphize.php` calls it "future, Phase 3"; the
   "every monomorphized function keeps exactly one name-addressable `$cell` entry" invariant in
   [`design/monomorphization.md`](design/monomorphization.md) is aspirational, not upheld.
-- **No CI, no prebuilt binaries.** Every install compiles from source.
+- **CI is parked, no prebuilt binaries.** `.github/workflows/{ci,nightly}.yml` exist over
+  `tools/docker/gate.sh` but run on manual dispatch only. Every install compiles from source.
 
 ## Tier 4 — performance
 
@@ -246,12 +248,13 @@ remaining levers:
 - Array / JSON / sort helpers sit at roughly 2× php and are competing with hand-tuned C —
   that is close to the ceiling, not a bug.
 
-- **Name comparison emitted as CODE is the next volume lever**: 516 539 `strcmp` sites on
-  `7b8a02f`, `dynm`+`dynf`+`newdyn` = 315 MB of a 1.20 GB T5 `.ll`. Intern names to i64 ids
-  and dispatch through a per-module table — see the strategy doc, W2.
-- **No incremental build.** Every build is whole-program; a module `.o` cache keyed on source
-  hash ⊕ dependency `.sig` hashes ⊕ `MemoryAbi::VERSION` ⊕ opt level ⊕ emitter flags is the
-  largest developer-velocity lever we have — see W3.
+- **W2 done (2026-09-07): dynamic-name calls dispatch through a per-module table**, not a
+  `strcmp` chain (`912b440`, `0023ef1`): t2 IR −12.3%, build −31%. `newdyn` still emits one
+  chain per module per arg shape; `dynf` is not out-lined.
+- **W3 half done: a content-addressed `.o` cache over the split parts** (`9edfe5f`) serves
+  `bin/build --fast` (44 of 64 parts from cache, clang 26.7 → 8.4 s). Per-file keys are
+  impossible — the module is whole-program — so a shipped build is still whole-program
+  and a split build is never the artifact.
 - **Opt-level policy** — see "Direction (2026-09)" above. `-O2` ships, `-O1 -j0` iterates.
 ## How to build the plans (the method that works here)
 

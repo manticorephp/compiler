@@ -12,7 +12,7 @@ subset of PHP 8.5+ to standalone arm64 / x86_64 binaries through LLVM IR, and it
 compiles its own `src/` to a byte-identical fixpoint. The Zend interpreter is the
 oracle: if `php` runs a program, the native binary must print the same bytes.
 
-There is no Rust, no C, no runtime dependency. `src/` is pure PHP, one class per
+There is no Rust, no C, no PHP runtime in the output. `src/` is pure PHP, one class per
 file, path mirrors FQN. `bin/manticore` and `lib/*.o` are build artifacts and
 are gitignored.
 
@@ -189,7 +189,10 @@ Corollaries:
 1. **Correctness first** — match Zend semantics for the supported subset;
    `tools/difftest.sh` is the gate. Where Zend emits a warning and carries on,
    Manticore throws.
-2. **No runtime dependencies** — output binaries are fully static (libc only).
+2. **No PHP runtime in the output** — a binary links libc, PCRE2 and OpenSSL,
+   plus whatever an FFI binding names (`#[Library]`) — nothing that has to be
+   installed at run time beyond those system libraries. No interpreter, no `.ini`,
+   no extension loader.
 3. **Linux first** — macOS is a development host, Linux is the target that must
    be green.
 4. **Self-hosting is the floor, real-world applications are the goal** — every
