@@ -31,12 +31,13 @@ stream_set_blocking($listener, false);
 final class Sender
 {
     public string $buf = '';
+    public int $sent = 0;
 
     public function __construct(private \Resource $sock) {}
 
-    public function send(): int
+    public function send(): void
     {
-        return fwrite($this->sock, $this->buf);
+        $this->sent = fwrite($this->sock, $this->buf);
     }
 
     public function clear(): void
@@ -59,20 +60,21 @@ async(function () use ($listener, $port) {
     }
     stream_set_blocking($srv, false);
 
-    $want = 16 * 262144;
+    // 16 MB: four times Linux's tcp_wmem ceiling, so the write parks on
+    // loopback there too (macOS parks at 4 MB already).
+    $want = 16 * 1048576;
     $sender = new Sender($c);
-    $sender->buf = str_repeat('0123456789abcdef', 262144);
+    $sender->buf = str_repeat('0123456789abcdef', 1048576);
 
     spawn(function () use ($sender) {
-        $n = $sender->send();
-        echo 'sent=', $n, "\n";
+        $sender->send();
     });
     spawn(function () use ($sender, $want) {
         delay(0.05);
         $sender->clear();
         $junk = [];
         for ($i = 0; $i < 4; $i++) {
-            $junk[] = str_repeat('JUNKJUNKJUNKJUNK', 262144);
+            $junk[] = str_repeat('JUNKJUNKJUNKJUNK', 1048576);
         }
         echo 'cleared junk=', count($junk), "\n";
     });
@@ -87,6 +89,7 @@ async(function () use ($listener, $port) {
         $got .= $part;
     }
     echo 'got=', strlen($got), ' crc=', crc32($got), "\n";
+    echo 'sent=', $sender->sent, "\n";
     fclose($srv);
     fclose($c);
 });

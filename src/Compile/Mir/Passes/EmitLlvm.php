@@ -2921,7 +2921,11 @@ final class EmitLlvm implements EmitVisitor
             // import (`fwrite` — whose real body parks on back-pressure) and an
             // FFI binding both carry an empty block, and "keeps nothing" is
             // exactly what an empty block answers. Both stay escapes.
-            $keeps[$fn->name] = !$fn->isExtern && $fn->ffiSymbol === null;
+            // A GENERATOR is a body that parks by construction: its frame is
+            // seeded with the raw `%arg` words ({@see EmitLlvmGenerator}), no
+            // retain, and every `yield` hands control to a caller that may
+            // overwrite the slot the argument came from.
+            $keeps[$fn->name] = !$fn->isExtern && $fn->ffiSymbol === null && !$fn->isGenerator;
         }
         for ($round = 0; $round < 6; $round++) {
             $changed = false;
@@ -2995,6 +2999,13 @@ final class EmitLlvm implements EmitVisitor
         // callee is park-free by the same induction, so a body of pure calls
         // and retaining stores — every promoted constructor — still qualifies.
         if ($this->isCallLike($k) && !$this->consumerKeepsNoArg($n, $keeps)) { return true; }
+        // A `foreach` over anything but a concrete array RESUMES user code — a
+        // Generator, an Iterator, an erased subject that may be either — and
+        // that code can park, holding the subject as the borrow it arrived as.
+        if ($k === Node::KIND_FOREACH) {
+            $bt = $n->array->type;
+            if (!$bt->isVec() && !$bt->isAssoc()) { return true; }
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             if ($this->nodeEscapes($c, $taint, $keeps)) { return true; }
         }
@@ -3175,11 +3186,13 @@ final class EmitLlvm implements EmitVisitor
             // one call that vetoed `Headers::block` for the whole program.
             'substr', 'mb_substr', 'str_repeat', 'explode',
             // By-reference array MUTATORS and key probes: each edits or reads
-            // the buffer through the reference it was handed and keeps
-            // nothing, runs no user code (the callback sorts are NOT here) and
-            // cannot park. Without them the scheduler's own queues —
-            // `array_shift($this->waitQ)`, `array_pop($this->tmTask)` — read
-            // as borrows the moment an array operand stopped being exempt.
+            // the buffer through the reference it was handed, runs no user
+            // code (the callback sorts are NOT here) and cannot park. What the
+            // list certifies is park-free + no UNCOUNTED keep: `array_push` /
+            // `array_unshift` DO keep their value arguments, through an
+            // element store that retains them. Without these the scheduler's
+            // own queues — `array_shift($this->waitQ)`, `array_pop($this->tmTask)`
+            // — read as borrows the moment an array operand stopped being exempt.
             'array_shift', 'array_pop', 'array_push', 'array_unshift',
             'array_key_exists', 'array_key_first', 'array_key_last',
             'sort', 'rsort', 'ksort', 'krsort', 'asort', 'arsort',
