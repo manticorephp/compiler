@@ -67,9 +67,26 @@ needs lowering. Bisected: the erased→cell retype alone reproduces it; the
 unlock alone makes gen2 unable to compile hello world; either half without
 the other is worse. A CC_TRACE-baked build cannot be used to find it: the
 traced gen1 traces every rc op of its own run and hits any log cap before
-pass 1 ends (and once filled the disk). Next: a driver that runs
-`lower_module` (parse + PreludeDemand) over the file with the collector
-forced, or a watchpoint on the Token's `kind` slot in gen2.
+pass 1 ends (and once filled the disk). Second day (2026-09-21): the collector walker got a VERIFY guard
+(`MANTICORE_DEBUG_VERIFY=1` — an obj-typed slot holding a non-object aborts
+with class id, offset, word, parent), and gen2 built with
+`MANTICORE_DEBUG_VERIFY=1 MANTICORE_AUTO_GC=2` (collect every 2 allocations)
+aborts on `echo 1` inside `UnifiedArrayRuntime::emitAlloc` /
+`EmitLlvm::emitFunction`: a `Codegen\Llvm\Value` whose `type` is a freed
+`Type`, a `Compile\Mir\Concat` whose `left` is a freed `StringConst`, a
+`FunctionDecl` slot — always a FIELD that lost the reference it should own,
+never an rc<=0 release (the rc verify stays silent), so some path stores an
+object into an obj-typed field WITHOUT the +1 or releases a borrowed one.
+User-program models of the shapes (the IR builder loop with erased `array
+$args`/`$indices`, `Value::int(Type::i64(), …)`, `foreach ($tokens as
+$tok)`, the token filter, `array_walk` accumulators) compiled by the SAME
+gen1 with verify + threshold 2 run clean — the defect is in a shape the
+compiler's own module takes and the corpus does not. Recipe:
+`MANTICORE_DEBUG_VERIFY=1 MANTICORE_AUTO_GC=2 bin/manticore build --apps-only
+<manifest to scratch>` then `lldb -b -o run -k "bt 12"` on `compile echo1.php`.
+Next: log every object free with its class (a capped `rcfree` trace filtered
+to Value/Type) between the last clean collection and the abort, and match
+the freed Type against the Value's creation site.
 
 **Verifier (step 3).** `MANTICORE_CELLGUARD=strict` fails the build on any
 `raw -> cell` edge the emitter-seam census sees (`EmitLlvmCellGuard`,
