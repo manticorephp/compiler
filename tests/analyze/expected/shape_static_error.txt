@@ -1,0 +1,9 @@
+tests/analyze/cases/shape_static_error.php:11:0: error: make(): return — array{0:int,1:string} given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:16:0: error: store(): store to key 0 — string given, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:23:0: error: store2(): store to key 0 — bool given, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:28:0: error: missing(): key 2 is not in array{0:obj<Node>,1:bool}
+tests/analyze/cases/shape_static_error.php:30:0: error: __main(): argument 1 to first() — array{0:int,1:string} given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:31:0: error: __main(): argument 1 to hits() — array{name:string} given, array{name:string,hits:int} expected: key hits is missing
+tests/analyze/cases/shape_static_error.php:32:0: error: __main(): argument 1 to hits() — array{name:string,hits:int,extra:int} given, array{name:string,hits:int} expected: key extra is not in the shape
+
+Found 7 error(s), 0 warning(s).

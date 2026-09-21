@@ -48,10 +48,14 @@ final class TypeCheck
     /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
     private array $paramsByFn = [];
 
+    /** @var array<string, Type> fn name → declared return type */
+    private array $returnTypes = [];
+
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
             $this->paramsByFn[$fn->name] = $fn->params;
+            $this->returnTypes[$fn->name] = $fn->returnType;
         }
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
@@ -83,6 +87,7 @@ final class TypeCheck
                 $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1);
             }
         }
+        $this->checkShapeNode($n, $inFn);
         foreach (Walk::children($n) as $c) { $this->checkNode($c, $inFn); }
     }
 
@@ -98,6 +103,9 @@ final class TypeCheck
     {
         $params = $this->paramsByFn[$fnName] ?? null;
         if ($params === null) { return; }
+        // A Monomorphize clone is named `first$mono$p0_vec_cell`; the message names the source function.
+        $m = \strpos($label, '$mono$');
+        if ($m !== false) { $label = \substr($label, 0, $m); }
         // Apply the implicit-receiver offset only when the callee actually has a
         // leading `this` param (guards a malformed resolution).
         $offset = 0;
@@ -118,6 +126,11 @@ final class TypeCheck
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $why . ' (' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected)';
+            }
+            $sw = $this->shapeConflict($this->givenShape($arg), $p->type);
+            if ($sw !== null) {
+                $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
+                    . $label . '() — ' . $sw;
             }
         }
     }
@@ -196,6 +209,126 @@ final class TypeCheck
         $aArr = $a->kind === Type::KIND_ARRAY;
         $bArr = $b->kind === Type::KIND_ARRAY;
         return $aArr !== $bArr;
+    }
+
+    /**
+     * Shape rules — unconditional, like {@see arrayReprConflict}: a shape is a
+     * repr claim every constant-key read now unboxes by, so a literal or a
+     * store that contradicts it is a wrong read, not a style opinion.
+     */
+    private function checkShapeNode(Node $n, string $inFn): void
+    {
+        // A Monomorphize clone shares its generic's docblock shapes and body;
+        // the generic stays in the module and its nodes keep their source
+        // lines, so the clone would only repeat every finding without one.
+        if (\str_contains($inFn, '$mono$')) { return; }
+        if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
+            $rt = $this->returnTypes[$inFn] ?? null;
+            if ($rt !== null && $rt->isShape()) {
+                $sw = $this->shapeConflict($this->givenShape($n->value), $rt);
+                if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): return — ' . $sw; }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $at = $n->array->type;
+            $k = $this->constKey($n->index);
+            if ($k !== null && $at->isShape()) {
+                $ft = $at->shapeField($k);
+                if ($ft !== null && $this->fieldIncompatible($n->value->type, $ft)) {
+                    $this->errors[] = $this->at($n) . $inFn . '(): store to key ' . (string)$k . ' — '
+                        . $n->value->type->toString() . ' given, ' . $ft->toString() . ' expected';
+                }
+            }
+        } elseif ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $at = $n->array->type;
+            $k = $this->constKey($n->index);
+            if ($k !== null && $at->isShape() && $at->shapeField($k) === null) {
+                $this->errors[] = $this->at($n) . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
+            }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL && $n->declaredType !== null
+            && $n->declaredType->isShape()) {
+            $sw = $this->shapeConflict($this->givenShape($n->value), $n->declaredType);
+            if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): $' . $n->name . ' — ' . $sw; }
+        }
+    }
+
+    /** The literal key of an index node — an int or string constant — or null. */
+    private function constKey(Node $index): int|string|null
+    {
+        if ($index->kind === Node::KIND_INT_CONST) { return $index->value; }
+        if ($index->kind === Node::KIND_STRING_CONST) { return $index->value; }
+        return null;
+    }
+
+    /**
+     * The shape a VALUE offers: an array literal's own per-element types (its
+     * `type` may already have been retyped to the slot's shape by inference,
+     * but its children keep theirs), else the node's static type. A literal
+     * with a dynamic key or a spread offers nothing checkable.
+     */
+    private function givenShape(Node $v): Type
+    {
+        if ($v->kind !== Node::KIND_ARRAY_LIT) { return $v->type; }
+        $fields = [];
+        $next = 0;
+        foreach ($v->elements as $el) {
+            if ($el->value->kind === Node::KIND_SPREAD) { return Type::unknown(); }
+            if ($el->key === null) { $k = $next; }
+            else {
+                $k = $this->constKey($el->key);
+                if ($k === null) { return Type::unknown(); }
+            }
+            if (\is_int($k)) { $next = $k + 1; }
+            $fields[Type::shapeKey($k)] = $el->value->type;
+        }
+        return Type::shapeOf($fields, []);
+    }
+
+    /**
+     * Why `$given` cannot fill a slot of shape `$want`, or null. Skips the
+     * erased cases (a non-array, an unshaped array, a cell/unknown field on
+     * either side) and obj↔obj / scalar↔scalar, exactly as {@see fieldIncompatible}.
+     */
+    private function shapeConflict(Type $given, Type $want): ?string
+    {
+        if (!$want->isShape() || !$given->isShape()) { return null; }
+        $why = null;
+        foreach ($want->fields as $ek => $ft) {
+            $gt = $given->shapeFieldAt($ek);
+            if ($gt === null) {
+                if (isset($want->nullableFields[$ek])) { continue; }
+                $why = 'key ' . Type::shapeKeyLabel($ek) . ' is missing';
+                break;
+            }
+            if ($this->fieldIncompatible($gt, $ft)) {
+                $why = 'key ' . Type::shapeKeyLabel($ek) . ' is ' . $gt->toString() . ', ' . $ft->toString() . ' expected';
+                break;
+            }
+        }
+        if ($why === null) {
+            foreach ($given->fields as $ek => $gt) {
+                if ($want->shapeFieldAt($ek) === null) { $why = 'key ' . Type::shapeKeyLabel($ek) . ' is not in the shape'; break; }
+            }
+        }
+        if ($why === null) { return null; }
+        return $given->shapeString() . ' given, ' . $want->shapeString() . ' expected: ' . $why;
+    }
+
+    /**
+     * Field-level disagreement: array-ness, object-ness or a pointer kind vs a
+     * scalar kind. Scalar↔scalar (php coerces) and obj↔obj (subtyping not
+     * modelled) are not conflicts; an erased side never is.
+     */
+    private function fieldIncompatible(Type $a, Type $b): bool
+    {
+        if (!$this->concrete($a) || !$this->concrete($b)) { return false; }
+        if ($a->kind === $b->kind) { return false; }
+        if ($this->isPtrKind($a) || $this->isPtrKind($b)) { return true; }
+        return false;
+    }
+
+    private function isPtrKind(Type $t): bool
+    {
+        return $t->kind === Type::KIND_ARRAY || $t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_STRING;
     }
 
     /**
