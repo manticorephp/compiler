@@ -125,9 +125,10 @@ prints its opt level.
 
 `tools/docker/gate.sh` is now the ONE definition of a Linux gate — `tools/docker/run_tests.sh`
 and both workflows call it, so a CI green and a local green mean the same thing.
-`.github/workflows/ci.yml` runs the cold seed + full suite on arm64 and amd64 per push;
+`.github/workflows/ci.yml` runs the cold seed + full suite on arm64 and amd64;
 `nightly.yml` runs the heavy gate (+ difftest + fixpoint) plus a macOS suite, and writes the
-commit into the run summary. ⛔ Not yet exercised on GitHub — nothing is pushed.
+commit into the run summary. ⚠ Both are PARKED on `workflow_dispatch` only (`dcc7566`) —
+the per-push trigger is commented out until the signal is wanted; neither has run on GitHub.
 There is none today, which is why the status file is full of "⛔ not run". A nightly
 `tools/docker/run_tests.sh --gate` on arm64 **and** amd64 plus `tests/aot` + `difftest` on
 macOS would have caught the `RC_ELEM_READ_OWNS` Linux miscompile weeks earlier, and would end
@@ -135,7 +136,7 @@ the "which commit is this green result from?" problem outright.
 Exit: a nightly run whose result is attached to a commit hash, and a red one is a mail, not a
 discovery three weeks later.
 
-### W2 — kill IR volume with DATA, not code. 1–2 weeks. Bounded, measurable.
+### W2 — kill IR volume with DATA, not code. ✅ done 2026-09-07 (`912b440`, `0023ef1`: t2 IR −12.3%, build −31%; `newdyn`/`dynf` remain)
 Measured on `7b8a02f`: 516 539 `strcmp` sites; `dynm 197 + dynf 81 + newdyn 36.5 = 315 MB` of
 a 1.20 GB `.ll` — 26% of t2. The out-lining lever is spent; the remaining shape is a
 comparison CHAIN emitted as code.
@@ -152,7 +153,7 @@ Loop: `php tools/prof/ircensus.php` for bytes-per-`define` by family;
 Exit: the three families under 50 MB, T5 IR under 1.0 GB, and the clang wall down with it
 (it tracks IR bytes near-linearly).
 
-### W3 — incremental build / module `.o` cache. 2–3 weeks. Biggest velocity win.
+### W3 — incremental build / module `.o` cache. ◐ half done 2026-09-08 (`9edfe5f`: content-addressed cache over the split parts, `bin/build --fast` only; per-file keys impossible on a whole-program module)
 Every build today is whole-program. `.sig` v2 and the module system already give us the
 inputs; `MANTICORE_HOME` / `~/.manticore/cache` are designed in `design/module-system.md` and
 absent from `src/`.

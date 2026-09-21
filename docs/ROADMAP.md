@@ -214,11 +214,11 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
     descriptor extension below.
 - **Per-class function pointers in the class descriptor — partly done.** `json_encode`
   and `(array)$obj` of an application class now answer correctly from inside
-  `manticore_stdlib.o` (the object-walking producers were fixed 2026-09). What remains of
-  the epic: `__manticore_tagged_to_str` and the `LowerPrelude::*ObjectSrc()` generators
-  still synthesize per-program walkers instead of reading `props_fn` / `tostr_fn` /
-  `debug_fn` off `{ i64 class_id, ptr drop_fn, ptr rmeta }`. Finishing it bumps
-  `MemoryAbi::VERSION` (⇒ one `bin/build --seed`).
+  `manticore_stdlib.o`: the descriptor carries `props_fn@32` (`@__mir_props_<id>`) and the
+  json/`(array)` walkers read it. What remains: `tostr_fn` / `debug_fn` are not on the
+  descriptor, so `__manticore_tagged_to_str` and three `LowerPrelude::*ObjectSrc()`
+  generators still synthesize per-program walkers. Finishing it bumps `MemoryAbi::VERSION`
+  (⇒ one `bin/build --seed`).
 - **No dependency resolution, no cross-build module cache, no packaging bootstrap.** `MANTICORE_HOME`,
   `~/.manticore/cache` and a `compiler_abi` field appear in
   [`design/module-system.md`](design/module-system.md) but nowhere in `src/`. Manifest targets
