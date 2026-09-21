@@ -579,16 +579,20 @@ trait EmitLlvmLocals
         // precise signal — box the concrete value into the slot, making it a
         // self-describing cell past the merge. No effect on any genuine cell
         // store (those have a cell value → fall through to the raw path).
+        // A GLOBAL-BACKED slot takes it too: a `static $x;` seeded cell
+        // ({@see InferScans::scanStaticLocalTypes}) is pinned exactly like a
+        // ref-taken local, so its stores arrive as this combo and must box
+        // into the module cell.
+        $cellDest = $this->locals->globalBacked[$sl->name] ?? $this->locals->slots[$sl->name] ?? '';
         if ($sl->type->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
             && !isset($this->locals->refLocals[$sl->name])
-            && !isset($this->locals->globalBacked[$sl->name])
-            && isset($this->locals->slots[$sl->name])) {
+            && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
         $out .= $this->elemReadCoOwn($sl->value, $sl->type);
             $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
-            $out .= '  store i64 ' . $boxed . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             $this->lastValue = $boxed;
             $this->lastValueType = 'i64';
             return $out;
@@ -958,6 +962,47 @@ trait EmitLlvmLocals
         $this->rt->needsStrRc = true;
         $this->rt->needsConcat = true; // pulls strlen + the string runtime decls
         $slot = $this->locals->slots[$sl->name];
+        // `$acc .= substr($src, $a[, $b])` — a scanner copying a run of its
+        // input — appends the range straight out of `$src`: the substr temp
+        // (alloc + copy + free per run) was 40% of htmlspecialchars. Never
+        // when `$src` may be the accumulator itself (`$s .= substr($s, …)`, or
+        // either side a reference): the range pointer is taken before the
+        // append, and a grow would move it out from under the copy.
+        $r = $c->right;
+        if ($r->kind === Node::KIND_CALL && \strtolower(\ltrim($r->function, '\\')) === 'substr'
+            && (\count($r->args) === 2 || \count($r->args) === 3)
+            && $r->args[0]->type->kind === Type::KIND_STRING
+            && $r->args[0]->kind === Node::KIND_LOAD_LOCAL
+            && $r->args[0]->name !== $sl->name
+            && !isset($this->locals->refLocals[$r->args[0]->name])
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$r->args[0]->name])) {
+            $out = $this->emitPtrArg($r->args[0]);
+            $src = $this->lastValue;
+            $out .= $this->emitIntArg($r->args[1]);
+            $start = $this->lastValue;
+            $len = '0';
+            $haveLen = '0';
+            if (\count($r->args) === 3) {
+                $out .= $this->emitIntArg($r->args[2]);
+                $len = $this->lastValue;
+                $haveLen = '1';
+            }
+            $curI = $this->ssa->allocReg();
+            $out .= '  ' . $curI . ' = load i64, ptr ' . $slot . "\n";
+            $curP = $this->ssa->allocReg();
+            $out .= '  ' . $curP . ' = inttoptr i64 ' . $curI . " to ptr\n";
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call ptr @__mir_str_append_sub(ptr ' . $curP . ', ptr ' . $src
+                  . ', i64 ' . $start . ', i64 ' . $len . ', i64 ' . $haveLen . ")\n";
+            $out .= $this->freeStrTemp($r->args[0], $src);
+            $ri = $this->ssa->allocReg();
+            $out .= '  ' . $ri . ' = ptrtoint ptr ' . $reg . " to i64\n";
+            $out .= '  store i64 ' . $ri . ', ptr ' . $slot . "\n";
+            $this->lastValue = $ri;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $out = $this->emitNode($c->right);
         $out .= $this->coerceToStr($c->right, false);
         $rp = $this->lastValue;

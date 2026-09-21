@@ -3456,6 +3456,103 @@ trait EmitLlvmRuntime
             $out .= "  ret i64 %lim\n";
             $out .= "}\n";
         }
+        if ($this->rt->needsCrc32) {
+            // Reflected CRC-32 (poly 0xEDB88320), slicing-by-8: eight bytes per
+            // step through eight 256-entry tables, the tail byte-wise. Backs
+            // `__mc_crc32b` ({@see EmitLlvmBuiltins::biCrc32b}); the PHP loop
+            // paid a string bounds check and an element decode per byte, and
+            // php's own byte-wise table is 4x slower than this. Little-endian
+            // i32 loads (every target here is).
+            $t0 = [];
+            for ($i = 0; $i < 256; $i = $i + 1) {
+                $c = $i;
+                for ($j = 0; $j < 8; $j = $j + 1) {
+                    $c = ($c & 1) !== 0 ? (($c >> 1) ^ 0xEDB88320) : ($c >> 1);
+                }
+                $t0[] = $c;
+            }
+            $tabs = [$t0];
+            for ($k = 1; $k < 8; $k = $k + 1) {
+                $prev = $tabs[$k - 1];
+                $tk = [];
+                for ($i = 0; $i < 256; $i = $i + 1) {
+                    $tk[] = ($prev[$i] >> 8) ^ $t0[$prev[$i] & 0xFF];
+                }
+                $tabs[] = $tk;
+            }
+            $rows = [];
+            foreach ($tabs as $tk) {
+                $ents = [];
+                foreach ($tk as $c) { $ents[] = 'i32 ' . (string)($c >= 0x80000000 ? $c - 0x100000000 : $c); }
+                $rows[] = '[256 x i32] [' . \implode(', ', $ents) . ']';
+            }
+            $out .= "\n@__mir_crc32_tab = private unnamed_addr constant [8 x [256 x i32]] [" . \implode(', ', $rows) . "]\n";
+            $out .= "define i64 @__mir_crc32b(ptr %s) {\n";
+            $out .= "entry:\n";
+            $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+            $out .= "  %n8 = and i64 %n, -8\n";
+            $out .= "  br label %loop8\n";
+            $out .= "loop8:\n";
+            $out .= "  %i = phi i64 [ 0, %entry ], [ %i8, %body8 ]\n";
+            $out .= "  %crc = phi i32 [ -1, %entry ], [ %crc8, %body8 ]\n";
+            $out .= "  %more8 = icmp slt i64 %i, %n8\n";
+            $out .= "  br i1 %more8, label %body8, label %loop1\n";
+            $out .= "body8:\n";
+            $out .= "  %p0 = getelementptr inbounds i8, ptr %s, i64 %i\n";
+            $out .= "  %w0 = load i32, ptr %p0, align 1\n";
+            $out .= "  %p4 = getelementptr inbounds i8, ptr %p0, i64 4\n";
+            $out .= "  %w1 = load i32, ptr %p4, align 1\n";
+            $out .= "  %lo = xor i32 %crc, %w0\n";
+            // Byte k of the low word indexes table 7-k, byte k of the high word table 3-k.
+            $terms = [];
+            $q = 0;
+            foreach ([[0, 'lo'], [1, 'lo'], [2, 'lo'], [3, 'lo'], [0, 'w1'], [1, 'w1'], [2, 'w1'], [3, 'w1']] as $bk) {
+                $k = $bk[0];
+                $w = $bk[1];
+                $sh = '%' . $w;
+                if ($k > 0) {
+                    $out .= '  %s' . (string)$q . ' = lshr i32 %' . $w . ', ' . (string)($k * 8) . "\n";
+                    $sh = '%s' . (string)$q;
+                }
+                $out .= '  %m' . (string)$q . ' = and i32 ' . $sh . ", 255\n";
+                $out .= '  %z' . (string)$q . ' = zext i32 %m' . (string)$q . " to i64\n";
+                $out .= '  %tp' . (string)$q . ' = getelementptr inbounds [8 x [256 x i32]], ptr @__mir_crc32_tab, i64 0, i64 ' . (string)(7 - $q) . ', i64 %z' . (string)$q . "\n";
+                $out .= '  %t' . (string)$q . ' = load i32, ptr %tp' . (string)$q . "\n";
+                $terms[] = '%t' . (string)$q;
+                $q = $q + 1;
+            }
+            $prev = $terms[0];
+            for ($q = 1; $q < 8; $q = $q + 1) {
+                $name = $q === 7 ? '%crc8' : '%x' . (string)$q;
+                $out .= '  ' . $name . ' = xor i32 ' . $prev . ', ' . $terms[$q] . "\n";
+                $prev = $name;
+            }
+            $out .= "  %i8 = add i64 %i, 8\n";
+            $out .= "  br label %loop8\n";
+            $out .= "loop1:\n";
+            $out .= "  %j = phi i64 [ %i, %loop8 ], [ %j1, %body1 ]\n";
+            $out .= "  %c1 = phi i32 [ %crc, %loop8 ], [ %c2, %body1 ]\n";
+            $out .= "  %more1 = icmp slt i64 %j, %n\n";
+            $out .= "  br i1 %more1, label %body1, label %done\n";
+            $out .= "body1:\n";
+            $out .= "  %bp = getelementptr inbounds i8, ptr %s, i64 %j\n";
+            $out .= "  %b = load i8, ptr %bp\n";
+            $out .= "  %bz = zext i8 %b to i32\n";
+            $out .= "  %bx = xor i32 %c1, %bz\n";
+            $out .= "  %bi = and i32 %bx, 255\n";
+            $out .= "  %biz = zext i32 %bi to i64\n";
+            $out .= "  %btp = getelementptr inbounds [8 x [256 x i32]], ptr @__mir_crc32_tab, i64 0, i64 0, i64 %biz\n";
+            $out .= "  %bt = load i32, ptr %btp\n";
+            $out .= "  %bsh = lshr i32 %c1, 8\n";
+            $out .= "  %c2 = xor i32 %bt, %bsh\n";
+            $out .= "  %j1 = add i64 %j, 1\n";
+            $out .= "  br label %loop1\n";
+            $out .= "done:\n";
+            $out .= "  %f = xor i32 %c1, -1\n";
+            $out .= "  %r = zext i32 %f to i64\n";
+            $out .= "  ret i64 %r\n";
+            $out .= "}\n";
+        }
         if ($this->rt->needsElemUntag) {
             // `__mir_elem_untag(arr, v) -> i64` — the element `v`, read out of
             // `arr` at a site whose STATIC element type is pointer-shaped

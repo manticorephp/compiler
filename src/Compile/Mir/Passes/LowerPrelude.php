@@ -1159,8 +1159,10 @@ trait LowerPrelude
             'PREG_BACKTRACK_LIMIT_ERROR' => 2, 'PREG_RECURSION_LIMIT_ERROR' => 3,
             'PREG_BAD_UTF8_ERROR' => 4, 'PREG_BAD_UTF8_OFFSET_ERROR' => 5,
             'PREG_JIT_STACKLIMIT_ERROR' => 6,
-            // htmlspecialchars / entities (common subset)
-            'ENT_NOQUOTES' => 0, 'ENT_COMPAT' => 2, 'ENT_QUOTES' => 3, 'ENT_HTML5' => 48,
+            // htmlspecialchars / entities
+            'ENT_NOQUOTES' => 0, 'ENT_COMPAT' => 2, 'ENT_QUOTES' => 3,
+            'ENT_IGNORE' => 4, 'ENT_SUBSTITUTE' => 8, 'ENT_DISALLOWED' => 128,
+            'ENT_HTML401' => 0, 'ENT_XML1' => 16, 'ENT_XHTML' => 32, 'ENT_HTML5' => 48,
             // filesystem: fseek whence + file_put_contents / flock flags
             'SEEK_SET' => 0, 'SEEK_CUR' => 1, 'SEEK_END' => 2,
             'FILE_USE_INCLUDE_PATH' => 1, 'FILE_APPEND' => 8,

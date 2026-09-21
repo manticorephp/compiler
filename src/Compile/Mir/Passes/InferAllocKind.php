@@ -420,7 +420,7 @@ final class InferAllocKind implements Pass
     {
         return $fn === 'strlen' || $fn === 'mb_strlen' || $fn === 'count' || $fn === 'sizeof'
             || $fn === 'strpos' || $fn === 'stripos' || $fn === 'strrpos' || $fn === 'strripos'
-            || $fn === 'strcspn'
+            || $fn === 'strcspn' || $fn === '__mc_crc32b'
             || $fn === 'str_contains' || $fn === 'str_starts_with' || $fn === 'str_ends_with'
             || $fn === 'substr_count' || $fn === 'ord'
             || $fn === 'strcmp' || $fn === 'strcasecmp' || $fn === 'strncmp' || $fn === 'strncasecmp'

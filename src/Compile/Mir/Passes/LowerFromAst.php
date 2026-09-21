@@ -3354,9 +3354,19 @@ final class LowerFromAst implements Pass
             $guard = '';
             $init = null;
             if ($d->default !== null) {
+                $init = $this->lowerExpr($d->default);
+            }
+            // `static $x = null;` IS `static $x;` — the cell already starts as
+            // null, and typing the local from a null initialiser hid every later
+            // store ($x === null stayed true on every call, so the array behind
+            // it was rebuilt each time). Init-less, the decl is typed from the
+            // join of its stores ({@see InferTypes::scanStaticLocalTypes}).
+            if ($init !== null && $init->kind === Node::KIND_NULL_CONST) {
+                $init = null;
+            }
+            if ($init !== null) {
                 $guard = $cell . '__init';
                 $this->module->addGlobalCell($guard, new IntConst(0, Type::int_()));
-                $init = $this->lowerExpr($d->default);
             }
             $nodes[] = new StaticLocalDecl_($d->name, $cell, $guard, $init, Type::int_());
         }

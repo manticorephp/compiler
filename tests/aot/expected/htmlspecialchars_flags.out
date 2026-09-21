@@ -1,0 +1,19 @@
+a&lt;b&gt;&#039;c&#039;&quot;d&quot;&amp;e
+a&lt;b&gt;&#039;c&#039;&quot;d&quot;&amp;e
+a&lt;b&gt;'c'&quot;d&quot;&amp;e
+a&lt;b&gt;'c'"d"&amp;e
+a&apos;b
+a&apos;b
+a&apos;b
+a&#039;b
+&amp; &lt; &#x41; &#65; &amp;#9999999; &amp;foo; &amp;apos; &amp;
+&apos;
+78efbfbd266c743b79
+78266c743b79
+|
+efbfbd266c743bc3a9f09f9880efbfbd
+636166e9
+|plain text 123
+25200 0b47646451a59eb220dee7f464b0de39
+2191738434 0 33768446
+3610a686 8 128
