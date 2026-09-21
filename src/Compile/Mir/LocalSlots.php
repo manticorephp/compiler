@@ -66,6 +66,13 @@ final class LocalSlots
      */
     public bool $sjljPinAll = false;
 
+    /** @var array<string, Type> static-local / superglobal name → the DECL's
+     *  unified type, which is what the cell's release-before-overwrite dispatches
+     *  on ({@see \Compile\Mir\Passes\EmitLlvmLocals::emitStoreLocal}): the
+     *  store node carries the VALUE's type, and the old value need not share it.
+     *  Declared LAST — a field added mid-struct shifts every later offset. */
+    public array $globalBackedType = [];
+
     /**
      * Locals a reference CELL points at ({@see \Compile\Mir\RefCell_}). Only a
      * plain local is collected here — a property / element / static-prop source
@@ -117,6 +124,7 @@ final class LocalSlots
         $k = $n->kind;
         if ($k === Node::KIND_STATIC_LOCAL_DECL) {
             $this->globalBacked[$n->name] = $n->cell;
+            $this->globalBackedType[$n->name] = $n->type;
             return;
         }
         if ($k === Node::KIND_BLOCK) {

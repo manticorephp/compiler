@@ -779,6 +779,16 @@ final class InsertMemoryOps implements Pass
         if ($k === Node::KIND_PROPERTY_ACCESS && $this->erasedArrayPropRead($value)) {
             return true;
         }
+        // A VEC read of a STATIC property is answered with `__mir_array_copy`
+        // ({@see EmitLlvmLocals::emitStoreLocal}'s $copiedVecProp — the same
+        // snapshot the instance-property arm above takes), so the local holds
+        // a fresh rc=1 buffer of its own. {@see storeMakesArrayCopy} already
+        // named the pair; this half did not, so the copy was never released:
+        // `$out = Context::$emptyGpc; …; return $out;` in Http\Request::
+        // filesArray() left one buffer behind per compat request.
+        if ($k === Node::KIND_STATIC_PROP && $value->type->isVec()) {
+            return true;
+        }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so

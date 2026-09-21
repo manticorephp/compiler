@@ -1232,6 +1232,20 @@ trait EmitLlvmArrays
                 || $sym === '@__mir_array_cow_cell')) {
             return \str_replace('_cow_', '_cow_ownel_', $sym);
         }
+        // A SUPERGLOBAL cell is in the same regime: every reference it holds
+        // was taken at the cell flavor (the restore in `contextSwitch` is an
+        // element read co-owned by `__mir_array_retain_cell`) and every release
+        // of it is the `ownel` one, so a plain cow — which clones with one ref
+        // per element and drops the source's reference WITHOUT its element refs
+        // — stranded one ref per element on every request whose `$_SERVER`
+        // was parked before its first store, i.e. every request a server
+        // serves from a task.
+        if ($base !== null && $base->kind === Node::KIND_LOAD_LOCAL
+            && $sym === '@__mir_array_cow_cell'
+            && $this->isSuperglobalName($base->name)
+            && isset($this->locals->globalBacked[$base->name])) {
+            return '@__mir_array_cow_ownel_cell';
+        }
         return $sym;
     }
 
@@ -1578,7 +1592,10 @@ trait EmitLlvmArrays
         // so only the keyed arms read the old word — and each of them already
         // reads it when reference cells are live, so the extra lookup is paid
         // only where the drop is what needs it.
-        $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type);
+        $sgBase = $se->array->kind === Node::KIND_LOAD_LOCAL
+            && $this->isSuperglobalName($se->array->name)
+            && isset($this->locals->globalBacked[$se->array->name]);
+        $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type, $sgBase);
         // A REF-cell value (`$a[$k] = &$v`) REBINDS the slot: php replaces the
         // element's binding, it does not write through the reference the slot
         // held. So the old word is neither read for write-through nor treated

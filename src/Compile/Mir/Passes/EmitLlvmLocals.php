@@ -850,7 +850,12 @@ trait EmitLlvmLocals
         $aliasArrayProp = $v->kind === Node::KIND_PROPERTY_ACCESS
             && ($v->type->isArray()
                 || $this->slotIsArrayHinted($v->object, $v->property, $v->type));
-        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal) {
+        // The copied STATIC vec snapshot takes the same adopt as the instance
+        // one: the copy is a flat buffer copy, so without it the local's
+        // release ({@see InsertMemoryOps::isOwnedObj}, which owns exactly this
+        // shape) would give back element refs the copy never took.
+        $aliasStaticVecCopy = $copiedVecProp && $v->kind === Node::KIND_STATIC_PROP;
+        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal || $aliasStaticVecCopy) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;
             // An array-HINTED slot whose type erased to unknown carries no kind
@@ -921,6 +926,12 @@ trait EmitLlvmLocals
             $val = $reg;
         }
         if (isset($this->locals->globalBacked[$sl->name])) {
+            $elemOwned = \Compile\Debug::$rcElemReadOwns
+                && $v->kind === Node::KIND_ARRAY_ACCESS
+                && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes);
+            $out .= $this->globalCellOwnIr($sl, $val,
+                $copiedVecLocal || $copiedVecProp || $aliasObjStr || $aliasArrayProp
+                || $aliasArrayLocal || $elemOwned);
             $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->globalBacked[$sl->name] . "\n";
         } elseif (isset($this->locals->refLocals[$sl->name])) {
             $addr = $this->ssa->allocReg();
@@ -943,6 +954,49 @@ trait EmitLlvmLocals
         $this->lastValue = $val;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * A module cell — a superglobal or a `static` local — OWNS what it holds:
+     * {@see EmitLlvm::collectRcObjLocals} drops the frame's scope-exit release
+     * for exactly that reason, a return of the name is retained as a borrow, and
+     * `unset()` releases the cell. The store had neither half of that contract:
+     * a borrow went in uncounted and the value already held was never released,
+     * so every whole store leaked its predecessor — `$_GET = Context::$empty` at
+     * the top of each request stranded the previous request's buffer, ~80 B per
+     * seeded element per request in a compat server (67 MB at 200k), and a COW
+     * behind the next element store trusted a count the cell never took.
+     *
+     * Retain first, release second: the new value may be the old one. The
+     * release dispatches on the DECL's unified type, never the value's — the old
+     * value need not share the new one's shape. A `$GLOBALS`-viewed name is left
+     * alone: its slot is boxed for a second reader ({@see boxForViewSlot}), and
+     * that pairing is not this one.
+     */
+    private function globalCellOwnIr(StoreLocal $sl, string $val, bool $ownedAlready): string
+    {
+        if ($this->isGlobalsViewName($sl->name)) { return ''; }
+        $out = '';
+        $v = $sl->value;
+        $vk = $v->type->kind;
+        if (!$ownedAlready) {
+            if ($vk === Type::KIND_CELL) {
+                $k = $v->kind;
+                $fresh = $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+                    || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+                    || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+                    || $k === Node::KIND_CLOSURE || $this->condOwnsResult($v);
+                if (!$fresh) { $out .= $this->rcRetainReg($val, 'cell'); }
+            } elseif ($vk === Type::KIND_OBJ || $vk === Type::KIND_ARRAY
+                || $vk === Type::KIND_STRING || $vk === Type::KIND_UNION) {
+                $out .= $this->rcRetainByType($v, $val, null, 3);
+            }
+        }
+        $dt = $this->locals->globalBackedType[$sl->name] ?? null;
+        if ($dt === null) { return $out; }
+        $flavor = $this->discardReleaseFlavor($dt);
+        if ($flavor === '') { return $out; }
+        return $out . $this->rcReleaseSlot($this->locals->globalBacked[$sl->name], $flavor);
     }
 
     /**

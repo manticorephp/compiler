@@ -4757,7 +4757,10 @@ trait EmitLlvmObjects
                     // overwrite leak ({@see \Compile\Debug::$rcElemSlotDrop}).
                     // Read the word BEFORE the helper removes the entry; drop it
                     // after, so the array never observes a freed element.
-                    $dropFlavor = $this->elemSlotDropFlavor($aa->array->type);
+                    $sgBase = $aa->array->kind === Node::KIND_LOAD_LOCAL
+                        && $this->isSuperglobalName($aa->array->name)
+                        && isset($this->locals->globalBacked[$aa->array->name]);
+                    $dropFlavor = $this->elemSlotDropFlavor($aa->array->type, $sgBase);
                     $curE = '';
                     if ($dropFlavor !== '') {
                         $curE = $this->ssa->allocReg();

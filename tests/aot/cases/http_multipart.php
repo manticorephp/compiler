@@ -142,18 +142,9 @@ if ($listener2 === false) {
 }
 stream_set_blocking($listener2, false);
 
-// ⚠ onError() is installed to route the /throws case's exception through the
-// handler-supplied path rather than Server::runHandler's own default 500,
-// which SIGSEGVs when reached through the real socket pump — pre-existing,
-// reproducible on unmodified http.php, unrelated to multipart; out of scope
-// here (compiler-level, cross-checkout). Every OTHER case never throws, so
-// this changes nothing about what they exercise.
 $server = \Http\Server::onListener($listener)
     ->serverName('')
-    ->acceptWait(0.02)
-    ->onError(function (\Throwable $e, ?\Http\Request $req): \Http\Response {
-        return (new \Http\Response(500))->text("Internal Server Error\n")->close();
-    });
+    ->acceptWait(0.02);
 
 $server2 = \Http\Server::onListener($listener2)
     ->serverName('')

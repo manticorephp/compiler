@@ -3863,16 +3863,24 @@ final class EmitLlvm implements EmitVisitor
      *    the repr nibble it does carry is stamped only by the stores that erase;
      *  - a CELL element — `cell` is a static CLAIM, not a runtime guarantee, so
      *    `__mir_cell_drop` would dispatch on bits that may be a bare address
-     *    (the same refusal the property slot drop makes).
+     *    (the same refusal the property slot drop makes). EXCEPT on a
+     *    SUPERGLOBAL base (`$cellElemOwned`): its cell is filled by the seeding
+     *    in `prelude/sapi.php` (element stores, each retaining what it boxes),
+     *    by `contextSwitch`'s restore (an element read, co-owned at the cell
+     *    flavor) and by the CLI seed, so every word it holds is a cell the
+     *    buffer owns — or a raw word from a whole-array store, on which
+     *    `__mir_cell_drop` is a no-op. Refusing it left every `$_SERVER[$k] =
+     *    $v` of the per-request merge holding the previous request's value.
      */
-    private function elemSlotDropFlavor(Type $arrType): string
+    private function elemSlotDropFlavor(Type $arrType, bool $cellElemOwned = false): string
     {
         if (!\Compile\Debug::$rcElemSlotDrop) { return ''; }
         if (!$arrType->isVec() && !$arrType->isAssoc()) { return ''; }
         $el = $arrType->element;
         if ($el === null) { return ''; }
         $k = $el->kind;
-        if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_CELL) { return ''; }
+        if ($k === Type::KIND_UNKNOWN) { return ''; }
+        if ($k === Type::KIND_CELL) { return $cellElemOwned ? 'cell' : ''; }
         // Which element KINDS may drop — `obj,arr` by default, because a
         // compiler built with STRING-element drops miscompiles itself
         // ({@see \Compile\Debug::$elemDropKinds} carries the repro). Also the

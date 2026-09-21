@@ -864,6 +864,7 @@ trait EmitLlvmModule
         $this->arena->vecLocals = [];
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
+        $this->locals->globalBackedType = [];
         $this->locals->sjljPinAll = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
