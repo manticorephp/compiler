@@ -390,8 +390,8 @@ function htmlspecialchars(string $string, int $flags = 11, ?string $encoding = n
     $doc = $flags & 48;
     $apos = ($flags & 1) !== 0 ? ($doc === 0 ? '&#039;' : '&apos;') : '';
     $quot = ($flags & 2) !== 0 ? '&quot;' : '';
-    $utf8 = $encoding === null || $encoding === '' || \strcasecmp($encoding, 'UTF-8') === 0
-        || \strcasecmp($encoding, 'UTF8') === 0;
+    $utf8 = $encoding === null || $encoding === 'UTF-8' || $encoding === ''
+        || \strcasecmp($encoding, 'UTF-8') === 0 || \strcasecmp($encoding, 'UTF8') === 0;
     $out = '';
     $start = 0;
     $i = 0;

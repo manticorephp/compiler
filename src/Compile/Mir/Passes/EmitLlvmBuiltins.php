@@ -295,6 +295,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
+        if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
         if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
@@ -4061,6 +4062,22 @@ trait EmitLlvmBuiltins
               . ', i64 ' . $off . ', i64 ' . $len . ', i64 ' . $haveLen . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
         $out .= $this->freeStrTemp($args[1], $cs);
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__mc_crc32b(string): int` — the reflected CRC-32 (php's crc32()) as a
+     *  table-driven byte loop with no per-byte bounds or element checks
+     *  ({@see EmitLlvmRuntime}); the PHP body in Runtime/Stdlib/Hash.php is the
+     *  builder's fallback. @param Node[] $args */
+    private function biCrc32b(array $args): string
+    {
+        $this->rt->needsCrc32 = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_crc32b(ptr ' . $s . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
         return $this->finishI64($out, $reg);
     }
 

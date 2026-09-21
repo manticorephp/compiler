@@ -2364,6 +2364,11 @@ final class UnifiedArrayRuntime
      * `__mir_array_get_int(arr, idx) -> i64`. PACKED: bounds-checked
      * slot load. HASHED: linear scan for a KIND_INT entry with key==idx.
      * Miss / NULL / OOB → 0.
+     *
+     * Two bodies on purpose. The packed path is ~10 instructions and sits in
+     * every `$a[$i]` loop; with the hashed scan (two allocas, a loop) in the
+     * same function the inliner passed on it and every typed vec read paid a
+     * CALL — 36% of a table-driven crc32. Alone it inlines at -O2.
      */
     private function emitGetInt(): void
     {
@@ -2375,7 +2380,35 @@ final class UnifiedArrayRuntime
         $chk = $fn->block('chk');
         $packed = $fn->block('packed');
         $pload = $fn->block('pload');
-        $doidx = $fn->block('doidx');
+        $hashed = $fn->block('hashed');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $retzero, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
+
+        // PACKED: idx in [0,len) ?
+        $oobLo = $packed->icmp('slt', $idx, Value::int(Type::i64(), 0));
+        $oobHi = $packed->icmp('sge', $idx, $len);
+        $packed->brIf($packed->or_($oobLo, $oobHi), $retzero, $pload);
+        $pload->ret($pload->load(Type::i64(), $this->packedSlot($pload, $arr, $idx)));
+        $hashed->ret($hashed->call('__mir_array_get_int_hashed', Type::i64(), [$arr, $idx, $len]));
+        $retzero->ret(Value::int(Type::i64(), 0));
+        $this->emitGetIntHashed();
+    }
+
+    /** The HASHED half of {@see emitGetInt}: index lookup, else a linear scan. */
+    private function emitGetIntHashed(): void
+    {
+        $fn = $this->module->func('__mir_array_get_int_hashed', Type::i64());
+        // Kept OUT of the packed body: inlined back in, the bottom-up inliner
+        // put get_int at cost 260 against a 225 threshold and no caller got it.
+        $fn->attrs = 'noinline';
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $idx = $fn->param(Type::i64(), 'idx');
+        $len = $fn->param(Type::i64(), 'len');
+        $doidx = $fn->block('entry');
+        $retzero = $fn->block('retzero');
         $chkmiss = $fn->block('chkmiss');
         $idxhit = $fn->block('idxhit');
         $head = $fn->block('head');
@@ -2383,20 +2416,9 @@ final class UnifiedArrayRuntime
         $kok = $fn->block('kind_ok');
         $next = $fn->block('next');
         $hit = $fn->block('hit');
-
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $retzero, $chk);
-        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $len = $chk->load(Type::i64(), $arr);
-        $iSlot = $chk->alloca(Type::i64(), 'i');
-        $rSlot = $chk->alloca(Type::i64(), 'r');
-        $chk->store(Value::int(Type::i64(), 0), $iSlot);
-        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $doidx, $packed);
-
-        // PACKED: idx in [0,len) ?
-        $oobLo = $packed->icmp('slt', $idx, Value::int(Type::i64(), 0));
-        $oobHi = $packed->icmp('sge', $idx, $len);
-        $packed->brIf($packed->or_($oobLo, $oobHi), $retzero, $pload);
-        $pload->ret($pload->load(Type::i64(), $this->packedSlot($pload, $arr, $idx)));
+        $iSlot = $doidx->alloca(Type::i64(), 'i');
+        $rSlot = $doidx->alloca(Type::i64(), 'r');
+        $doidx->store(Value::int(Type::i64(), 0), $iSlot);
 
         // HASHED index fast path: -2 → linear, -1 → miss, else hit.
         $rf = $doidx->call('__mir_array_index_find', Type::i64(),
