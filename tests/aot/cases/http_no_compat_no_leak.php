@@ -10,8 +10,11 @@
 //
 // memory_get_usage() answers the peak RSS (ru_maxrss), which a leak can only
 // raise: one keep-alive client drives 1 000 warm-up requests, then 20 000
-// measured ones, and the growth over the measured run is the pin. @serial: a
-// memory measurement, not a race with nine other cases.
+// measured ones, and the growth over the measured run is the pin. The bound is
+// peak RSS, not live bytes: the fixed tree measures ~2.8 MB here, of which
+// ~1.6 MB is one ~64-byte string per request still unreleased and the rest is
+// allocator slack. @serial: a memory measurement, not a race with nine other
+// cases.
 
 use function Async\async;
 use function Async\spawn;

@@ -3220,11 +3220,12 @@ final class Outbox
         if ($this->n === 0) {
             return;
         }
-        if ($this->n === 1) {
-            \fwrite($this->conn, $this->parts[0]);
-        } else {
-            \fwrite($this->conn, $this->parts);
-        }
+        // Always the vectored form, one part or many: `fwrite` copies each
+        // part into a buffer of its own BEFORE it can park on back-pressure,
+        // so a flush from another task while this one is parked cannot free
+        // a string under the writer — reading `$this->parts[0]` handed it a
+        // borrow across that park.
+        \fwrite($this->conn, $this->parts);
         $this->parts = self::$empty;
         $this->n = 0;
         $this->bytes = 0;

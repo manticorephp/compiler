@@ -2465,9 +2465,15 @@ final class EmitLlvm implements EmitVisitor
         $k = $parent->kind;
         if ($k === Node::KIND_STORE_ELEMENT) {
             $base = $parent->array;
+            // The value co-own holds for an ARRAY base only: an `ArrayAccess`
+            // object base is rewritten to `$obj->offsetSet($k, $v)`
+            // ({@see EmitLlvmArrays::emitStoreElement}), a method call nobody
+            // judged whose `mixed $value` arrives as a cell; a cell / erased
+            // base may be that same object at runtime.
+            $arrayBase = $base->type->isArray();
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c === $base) { continue; }
-                if ($c === $parent->value && $this->storeCoOwnsPropRead($c)) { continue; }
+                if ($arrayBase && $c === $parent->value && $this->storeCoOwnsPropRead($c)) { continue; }
                 $this->markPropBorrowsIn($c, 'store-element operand');
             }
             return;
@@ -2957,13 +2963,7 @@ final class EmitLlvm implements EmitVisitor
             }
         }
         if ($this->isCallLike($k)) {
-            $safe = false;
-            if ($k === Node::KIND_CALL) {
-                $safe = $this->callKeepsNoArg($n->function) || ($keeps[$n->function] ?? false);
-            } elseif ($k === Node::KIND_NEW_OBJ) {
-                $safe = $this->newObjKeepsNoArg($n, $keeps);
-            }
-            if (!$safe) {
+            if (!$this->consumerKeepsNoArg($n, $keeps)) {
                 foreach (\Compile\Mir\Walk::children($n) as $c) {
                     if ($this->aliasesTaint($c, $taint)) { return true; }
                 }
@@ -2983,9 +2983,11 @@ final class EmitLlvm implements EmitVisitor
     {
         $k = $n->kind;
         if ($k === Node::KIND_LOAD_LOCAL) { return isset($taint[$n->name]); }
-        if ($k === Node::KIND_TERNARY) {
-            foreach (\Compile\Mir\Walk::children($n) as $c) {
-                if ($this->aliasesTaint($c, $taint)) { return true; }
+        // Every conditional the emitter normalizes hands an arm back as-is;
+        // the shape list is {@see \Compile\Mir\CondOwn}'s so the two cannot drift.
+        if (\Compile\Mir\CondOwn::isConditional($n)) {
+            foreach (\Compile\Mir\CondOwn::arms($n) as $arm) {
+                if ($this->aliasesTaint($arm, $taint)) { return true; }
             }
         }
         return false;
@@ -3001,15 +3003,6 @@ final class EmitLlvm implements EmitVisitor
             || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
     }
 
-    /**
-     * Does `new C(…)` keep none of its arguments as a BORROW? The class's
-     * constructor is one of the module's own functions and the fixpoint has
-     * judged it — with `this` out of the taint and a retaining property store
-     * not counted as an escape ({@see propStoreCoOwns}). A class the module
-     * does not declare, or one without a constructor of its own to judge,
-     * stays a borrow.
-     * @param array<string,bool> $keeps
-     */
     /**
      * A STRING / OBJ property read handed to a container or property store as
      * its VALUE is co-owned by that store ({@see EmitLlvmMemory::rcRetainByType}
@@ -3040,27 +3033,36 @@ final class EmitLlvm implements EmitVisitor
     /** A property store whose destination is a DECLARED slot of a known class
      *  — the shape whose retain arms are the two {@see storeCoOwnsPropRead}
      *  names. A union receiver, a classless one (the bag) and an undeclared
-     *  name (`__set`) take other paths and keep the strict rule. */
+     *  name (`__set`) take other paths and keep the strict rule, and so does
+     *  a property with a `set` hook: {@see EmitLlvmObjects::emitStoreProperty}
+     *  hands the value to the hook as a call argument before any store. */
     private function propStoreDeclared(\Compile\Mir\StoreProperty $n): bool
     {
         $rcls = $n->object->type->class ?? '';
         if ($n->object->type->kind !== Type::KIND_OBJ || $rcls === '' || !isset($this->classes[$rcls])) {
             return false;
         }
-        return $this->classes[$rcls]->propertyOffset($n->property) !== -1;
+        $cd = $this->classes[$rcls];
+        if (($cd->propHooks[$n->property]['set'] ?? '') !== '') { return false; }
+        return $cd->propertyOffset($n->property) !== -1;
     }
 
-    /** Does this consumer — a call, a `new`, an enum `from` — keep nothing
-     *  of what it is handed, so a borrowed operand cannot outlive it? The one
-     *  owner of that question for a whole-property read and an element read
-     *  alike. */
-    private function consumerKeepsNoArg(Node $p): bool
+    /**
+     * Does this consumer — a call, a `new`, an enum `from` — keep nothing of
+     * what it is handed, so a borrowed operand cannot outlive it? The one
+     * owner of that question for a whole-property read, an element read and
+     * the escape fixpoint alike; $keeps is the fixpoint's in-progress summary
+     * (the finished {@see $fnKeepsNoArg} when null).
+     * @param array<string,bool>|null $keeps
+     */
+    private function consumerKeepsNoArg(Node $p, ?array $keeps = null): bool
     {
+        $keeps = $keeps ?? $this->fnKeepsNoArg;
         $k = $p->kind;
         if ($k === Node::KIND_CALL) {
-            return $this->callKeepsNoArg($p->function) || ($this->fnKeepsNoArg[$p->function] ?? false);
+            return $this->callKeepsNoArg($p->function) || ($keeps[$p->function] ?? false);
         }
-        if ($k === Node::KIND_NEW_OBJ) { return $this->newObjKeepsNoArg($p, $this->fnKeepsNoArg); }
+        if ($k === Node::KIND_NEW_OBJ) { return $this->newObjKeepsNoArg($p, $keeps); }
         if ($k === Node::KIND_STATIC_CALL) { return $this->enumFromKeepsNoArg($p); }
         return false;
     }
@@ -3076,6 +3078,15 @@ final class EmitLlvm implements EmitVisitor
             && ($n->method === 'from' || $n->method === 'tryFrom');
     }
 
+    /**
+     * Does `new C(…)` keep none of its arguments as a BORROW? The class's
+     * constructor is one of the module's own functions and the fixpoint has
+     * judged it — with `this` out of the taint and a retaining property store
+     * not counted as an escape ({@see propStoreCoOwns}). A class the module
+     * does not declare, or one without a constructor of its own to judge,
+     * stays a borrow.
+     * @param array<string,bool> $keeps
+     */
     private function newObjKeepsNoArg(\Compile\Mir\NewObj $n, array $keeps): bool
     {
         if ($n->bare) { return false; }
@@ -3137,10 +3148,11 @@ final class EmitLlvm implements EmitVisitor
             // in the result. It is what `Http\splitStr` delegates to, and the
             // one call that vetoed `Headers::block` for the whole program.
             'substr', 'mb_substr', 'str_repeat', 'explode',
-            // A write hands the BYTES to the stream and returns a count; php
-            // keeps nothing of the buffer after the call. The response outbox
-            // writes `$this->parts[0]` this way.
-            'fwrite', 'fputs',
+            // ⚠ NOT a stream write (`fwrite` / `fputs`): its stdlib body PARKS
+            // on back-pressure with the argument still borrowed, and another
+            // task's overwrite of the source slot would then free it under the
+            // parked writer. "Keeps nothing for the duration of the call" is
+            // not a fiber-safe notion for a callee that suspends.
             // `$s[$i]` after DemoteCharLocals. An INT of one byte — the only
             // internal desugar that reaches this scan with a property operand,
             // and the reason a class with a `byteAt()` never released an
