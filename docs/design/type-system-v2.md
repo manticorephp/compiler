@@ -434,3 +434,42 @@ element/key fidelity gap); float formatting precision (`var_dump(0.1+0.2)` →
 - Representation ≠ type: many "wrong" concrete types are harmless because every
   value is i64 — but DISPATCH and var_dump/checking read the type, so precision
   matters there.
+
+## Array shapes (2026-09-21)
+
+A docblock `array{k:T, k2?:U, V}` / `list{…}` / `non-empty-*{…}` lowers
+(`LowerTypes::lowerArrayShape`, depth-aware `splitTopLevel` counting `{}`) to
+`Type::$fields`, keyed by `Type::shapeKey` (`i<n>` / `s<name>`, php-canonicalised
+numeric strings — never a mixed int|string PHP map, which the self-hosted
+compiler cannot read back), plus `Type::$nullableFields` (`key?:` or `?T`/`T|null`)
+and `Type::$declared` (true only for a docblock shape; an inferred literal record
+is not a contract). `...` lowers the shape flat, unsealed. Accessors:
+`Type::tuple/record/shapeOf/hasShape/isShape/shapeField/shapeFieldAt/shapeString/
+sameShape/withElement`.
+
+A constant-key read is typed with the FIELD (`InferNodes::inferArrayAccess`),
+which sets `ArrayAccess_::$shapeCheck` (0/1/2 — `isset` clears it, `??` admits
+null); `LowerFromAst::markProbe` sets `ArrayAccess_::$probe` for isset/empty/
+??/??= down the base spine. The emitter decodes a shaped read ONCE
+(`EmitLlvmArrays::emitArrayAccessUnified`) via `__mir_elem_untag_kind(arr, v,
+kc)` (OBJ code for a hintless pointer field), guarded by `__mir_elem_kind_is(arr,
+v, kind, nullok)`; a mismatch throws `TypeError` from
+`prelude/exceptions.php::__mir_shape_type_error` (`<shape> key <k> must be of
+type <T>, <get_debug_type> given`).
+
+`TypeCheck::checkShapeNode`/`shapeConflict`/`fieldIncompatible` run in BOTH
+modes — a literal, return, `@var` or constant-key store that contradicts a
+declared shape is an unconditional compile error, the same class as an
+array-repr conflict, skipping `$mono$` clones; findings surface through
+`bin/manticore analyze --deep`. A literal argument adopts a parameter whose
+type contains a shape (`hasShape`) when the repr agrees, and
+`InferScans::scanCallSiteArrayElems` never refines a `hasShape` param, so a
+shaped local survives a const-key store and a same-shape merge. The native
+`json_decode` stamps the element hint CELL. The tree's own `Net.php
+__mc_http_read_response` docblock — a 2-tuple over a 3-tuple body — was caught
+by this at the first build.
+
+Known limits: class identity of an object field is not checked at run time; a
+RAW-hinted buffer is never checked (nothing to check); a `list<array{…}>`
+docblock form is not recognised; the parser drops an inline `/** @var */` on a
+promoted ctor param (separate follow-up); `Dump` prints a nested shape flat.

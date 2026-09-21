@@ -105,6 +105,8 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
   per-case deadline in the harness so a liveness bug fails the suite instead of hanging it.
 - **Dynamic resolution** — dynamic function names, `new $cls`, `$cls::method()`, `$o->$m()`,
   `$o->$p`, `$obj instanceof $cls`, and Reflection through Tier 3.
+- ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
+  errors (br `shapes`, 2026-09-21).
 
 ## symfony-demo T5 — it builds, it runs (2026-09-08)
 
