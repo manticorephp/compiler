@@ -68,10 +68,10 @@ final class Dump implements EmitVisitor
         foreach ($fn->params as $p) {
             if (!$first) { $paramStr .= ', '; }
             $first = false;
-            $paramStr .= $p->type->toString() . ' %' . $p->name;
+            $paramStr .= self::ty($p->type) . ' %' . $p->name;
         }
         $out = "\nfn " . $fn->name . '(' . $paramStr . ') -> '
-             . $fn->returnType->toString() . " {\n";
+             . self::ty($fn->returnType) . " {\n";
         if ($showEffects) {
             $agg = \Compile\Mir\Effects::toString($fn->effects);
             $out .= '  ; effects: ' . ($agg === '' ? '(none)' : $agg) . "\n";
@@ -83,6 +83,12 @@ final class Dump implements EmitVisitor
         $out .= $body->accept($printer);
         $out .= "}\n";
         return $out;
+    }
+
+    /** A signature type: a shape prints its fields, everything else `toString()`. */
+    private static function ty(Type $t): string
+    {
+        return $t->isShape() ? $t->shapeString() : $t->toString();
     }
 
     private bool $showEffects = false;

@@ -131,15 +131,9 @@ trait InferCalls
             $ek = $ae->kind;
             if ($ek !== Type::KIND_STRING && $ek !== Type::KIND_OBJ
                 && $ek !== Type::KIND_ARRAY && $ek !== Type::KIND_CLOSURE) { continue; }
-            // Keep the SHAPE: a record is the same memory as its assoc and only
+            // Keep the SHAPE: a shape is the same memory as its array and only
             // `fields` is extra, so re-channelling must not throw it away.
-            if ($at->isRecord()) {
-                $a->type = Type::record($at->fields, Type::cell());
-            } elseif ($at->key !== null) {
-                $a->type = Type::assoc($at->key, Type::cell());
-            } else {
-                $a->type = Type::vec(Type::cell());
-            }
+            $a->type = $at->withElement(Type::cell());
         }
     }
 
