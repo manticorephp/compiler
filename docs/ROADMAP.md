@@ -54,6 +54,11 @@ Built on branch `ci` (2026-09-07): **`bin/build --fast`** (`-O1`, apps only, to
 `bin/manticore.fast`, never the canonical slot — 71 s vs 83 s), **`tests/aot/run.sh -O <n>`**,
 and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, consumed by
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
+### Recently completed (2026-09)
+
+- ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
+  errors (br `shapes`, 2026-09-21).
+
 ### Recently completed (2026-07)
 
 - **`ext/pdo` + `pdo_sqlite` — a database layer** (`docs/pdo.md`). `PDO` / `PDOStatement`
@@ -105,8 +110,6 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
   per-case deadline in the harness so a liveness bug fails the suite instead of hanging it.
 - **Dynamic resolution** — dynamic function names, `new $cls`, `$cls::method()`, `$o->$m()`,
   `$o->$p`, `$obj instanceof $cls`, and Reflection through Tier 3.
-- ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
-  errors (br `shapes`, 2026-09-21).
 
 ## symfony-demo T5 — it builds, it runs (2026-09-08)
 
