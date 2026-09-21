@@ -3220,15 +3220,17 @@ final class Outbox
         if ($this->n === 0) {
             return;
         }
-        // Always the vectored form, one part or many: `fwrite` copies each
-        // part into a buffer of its own BEFORE it can park on back-pressure,
-        // so a flush from another task while this one is parked cannot free
-        // a string under the writer — reading `$this->parts[0]` handed it a
-        // borrow across that park.
-        \fwrite($this->conn, $this->parts);
+        // Take the queue OUT of the slot before the write: the snapshot is a
+        // reference of this frame's own, so the write may park on back-pressure
+        // and another task may queue and flush meanwhile without either
+        // freeing a part under the parked writer — and the slot is free to
+        // release its previous buffer on every reset. Always the vectored
+        // form, one part or many.
+        $parts = $this->parts;
         $this->parts = self::$empty;
         $this->n = 0;
         $this->bytes = 0;
+        \fwrite($this->conn, $parts);
     }
 
     public function pending(): int

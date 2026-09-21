@@ -1,19 +1,23 @@
 <?php
 
-// A `set` hook receives the value as a CALL argument before any store — the
-// hook body may keep it anywhere, so the source slot must stay vetoed.
+// A `set` hook receives the value as a CALL argument before any store, and
+// this one PARKS with `$v` held only as its parameter. If the read let
+// `Source::name` drop what it overwrites, task B's rename would free the
+// string under task A's hook, and the pool would hand the block to B's next
+// name — the hook then stores B's bytes. Expected output is php's.
 
-final class Keeper
-{
-    /** @var string[] */
-    public static array $seen = [];
-}
+use function Async\async;
+use function Async\spawn;
+use function Async\delay;
 
 final class Hooked
 {
+    public string $seen = '';
+
     public string $label {
         set(string $v) {
-            Keeper::$seen[] = $v;
+            delay(0.03);
+            $this->seen = strlen($v) . ':' . $v[0] . ':' . substr($v, 0, 4);
             $this->label = strtoupper($v);
         }
     }
@@ -31,14 +35,20 @@ final class Source
     }
 }
 
-$h = new Hooked();
-$s = new Source();
-for ($i = 0; $i < 5; $i++) {
-    $s->rename('lbl-' . $i . str_repeat('z', 40));
-    $s->push($h);
-}
-$s->rename('final' . str_repeat('q', 40));
-echo count(Keeper::$seen), "\n";
-echo substr(Keeper::$seen[0], 0, 5), "\n";
-echo substr(Keeper::$seen[4], 0, 5), "\n";
-echo substr($h->label, 0, 5), "\n";
+async(function () {
+    $h = new Hooked();
+    $s = new Source();
+    $s->rename('lbl-' . str_repeat('q', 22));
+    spawn(function () use ($h, $s) {
+        $s->push($h);
+    });
+    spawn(function () use ($s) {
+        delay(0.01);
+        for ($i = 0; $i < 8; $i++) {
+            $s->rename('oth-' . $i . str_repeat('w', 21));
+        }
+    });
+    delay(0.1);
+    echo $h->seen, "\n";
+    echo $h->label, "\n";
+});

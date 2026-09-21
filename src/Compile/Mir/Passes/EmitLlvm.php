@@ -2492,6 +2492,23 @@ final class EmitLlvm implements EmitVisitor
             }
             return;
         }
+        // An array LITERAL retains each STRING / OBJ element it is built from
+        // ({@see EmitLlvmArrays::emitArrayLit}, raw or boxed), exactly as an
+        // element store does — `[$this->pending]` is how a slot's value is
+        // handed to a suspending write as an OWNED copy.
+        if ($k === Node::KIND_ARRAY_LIT) {
+            $values = [];
+            foreach ($parent->elements as $el) { $values[] = $el->value; }
+            foreach (\Compile\Mir\Walk::children($parent) as $c) {
+                $isValue = false;
+                foreach ($values as $v) {
+                    if ($c === $v) { $isValue = true; break; }
+                }
+                if ($isValue && $this->storeCoOwnsPropRead($c)) { continue; }
+                $this->markPropBorrowsIn($c, 'array-literal element');
+            }
+            return;
+        }
         if ($k === Node::KIND_ARRAY_ACCESS && $parent->array->kind === Node::KIND_PROPERTY_ACCESS
             && ($parent->array->type->isArray()
                 || $this->slotIsArrayHinted($parent->array->object, $parent->array->property, $parent->array->type))) {
@@ -2548,13 +2565,16 @@ final class EmitLlvm implements EmitVisitor
             // program with a scope: the old value of each was never released,
             // yet the only thing holding it after the call was the new
             // object's own +1.
+            // ⚠ An ARRAY operand used to be exempt for EVERY callee ("held for
+            // the duration of the call, and a keeper stores it, which
+            // retains") — but a callee that PARKS holds the borrow across
+            // other tasks' stores, and the slot's release then frees the
+            // buffer under it. "For the duration of the call" is only a
+            // bound when the callee cannot suspend, which is what the
+            // keep-nothing judgement now certifies; an array operand of any
+            // other call is a borrow like the rest.
             $pureArg = $this->consumerKeepsNoArg($parent);
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($c->kind === Node::KIND_PROPERTY_ACCESS
-                    && ($c->type->isArray()
-                        || $this->slotIsArrayHinted($c->object, $c->property, $c->type))) {
-                    continue;
-                }
                 if ($pureArg) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand');
             }
@@ -2896,7 +2916,13 @@ final class EmitLlvm implements EmitVisitor
     {
         if (!\Compile\Debug::$propBorrowEscape) { $this->fnKeepsNoArg = []; return; }
         $keeps = [];
-        foreach ($module->functions as $fn) { $keeps[$fn->name] = true; }
+        foreach ($module->functions as $fn) {
+            // A body that is not HERE cannot be judged: a signature-only stdlib
+            // import (`fwrite` — whose real body parks on back-pressure) and an
+            // FFI binding both carry an empty block, and "keeps nothing" is
+            // exactly what an empty block answers. Both stay escapes.
+            $keeps[$fn->name] = !$fn->isExtern && $fn->ffiSymbol === null;
+        }
         for ($round = 0; $round < 6; $round++) {
             $changed = false;
             foreach ($module->functions as $fn) {
@@ -2962,13 +2988,13 @@ final class EmitLlvm implements EmitVisitor
                 if ($this->aliasesTaint($c, $taint)) { return true; }
             }
         }
-        if ($this->isCallLike($k)) {
-            if (!$this->consumerKeepsNoArg($n, $keeps)) {
-                foreach (\Compile\Mir\Walk::children($n) as $c) {
-                    if ($this->aliasesTaint($c, $taint)) { return true; }
-                }
-            }
-        }
+        // Any call that is not itself keep-nothing disqualifies the body,
+        // tainted argument or not: it may PARK (a stream, a timer, `Async\\`,
+        // user code), and a parameter still held only as the borrow it
+        // arrived as is then freed by the slot it came from. A keep-nothing
+        // callee is park-free by the same induction, so a body of pure calls
+        // and retaining stores — every promoted constructor — still qualifies.
+        if ($this->isCallLike($k) && !$this->consumerKeepsNoArg($n, $keeps)) { return true; }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             if ($this->nodeEscapes($c, $taint, $keeps)) { return true; }
         }
@@ -3148,6 +3174,15 @@ final class EmitLlvm implements EmitVisitor
             // in the result. It is what `Http\splitStr` delegates to, and the
             // one call that vetoed `Headers::block` for the whole program.
             'substr', 'mb_substr', 'str_repeat', 'explode',
+            // By-reference array MUTATORS and key probes: each edits or reads
+            // the buffer through the reference it was handed and keeps
+            // nothing, runs no user code (the callback sorts are NOT here) and
+            // cannot park. Without them the scheduler's own queues —
+            // `array_shift($this->waitQ)`, `array_pop($this->tmTask)` — read
+            // as borrows the moment an array operand stopped being exempt.
+            'array_shift', 'array_pop', 'array_push', 'array_unshift',
+            'array_key_exists', 'array_key_first', 'array_key_last',
+            'sort', 'rsort', 'ksort', 'krsort', 'asort', 'arsort',
             // ⚠ NOT a stream write (`fwrite` / `fputs`): its stdlib body PARKS
             // on back-pressure with the argument still borrowed, and another
             // task's overwrite of the source slot would then free it under the

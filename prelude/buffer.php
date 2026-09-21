@@ -434,7 +434,11 @@ final class Writer
         if ($this->pending === '') {
             return;
         }
-        $n = \fwrite($this->dst, $this->pending);
+        // As a one-part vector: the literal hands `fwrite` an OWNED copy of
+        // the reference, and its array arm copies again before it can park,
+        // so the slot below may release the old buffer while a write from
+        // another task is still parked on it. Same bytes on the wire.
+        $n = \fwrite($this->dst, [$this->pending]);
         $this->written += $n;
         $this->pending = '';
     }
