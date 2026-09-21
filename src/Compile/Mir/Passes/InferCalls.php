@@ -115,6 +115,21 @@ trait InferCalls
             $pt = $p->type;
             if (!$pt->isArray()) { continue; }
             $pe = $pt->element;
+            // A SHAPED parameter types its literal argument as the shape when the
+            // two agree on the buffer repr: a cell-element shape takes any array
+            // literal (the boxed store makes the buffer a cell buffer), a raw
+            // shape takes only a literal whose inferred array already IS that
+            // repr. A literal that disagrees keeps its own type and the call
+            // boundary coerces as it always did (or TypeCheck refuses it).
+            if ($pt->isShape()) {
+                $at = $a->type;
+                if (!$at->isArray()) { continue; }
+                if (($pe !== null && $pe->kind === Type::KIND_CELL)
+                    || $at->toString() === $pt->toString()) {
+                    $a->type = $pt;
+                }
+                continue;
+            }
             if ($pe === null || $pe->kind !== Type::KIND_CELL) { continue; }
             $at = $a->type;
             if (!$at->isArray()) { continue; }

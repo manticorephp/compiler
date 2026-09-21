@@ -350,6 +350,13 @@ trait InferNodes
             // has raw==boxed and reconciles). So a lone `null` also forces a cell.
             if (\count($classes) < 2 && !isset($classes['null'])) { continue; }
             if (isset($this->recordLocals[$name])) { continue; } // record keeps its shape
+            // A SHAPED param/local (declared or `@var`-bound) legitimately holds
+            // different kinds at different fields — that disagreement is the
+            // shape, not a mixed array. Demoting it here would run BEFORE
+            // inferStoreElement ever sees the store and would throw the fields
+            // away for the WHOLE function, defeating {@see inferStoreElement}'s
+            // constant-key preservation.
+            if (($this->localTypes[$name] ?? null)?->isShape()) { continue; }
             $this->cellElemLocals[$name] = true;
             if (isset($this->assocLocals[$name])) {
                 $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
@@ -1996,6 +2003,18 @@ trait InferNodes
         $at = $this->inferNode($node->array);
         $it = $this->inferNode($node->index);
         $vt = $this->inferNode($node->value);
+        // A constant-key store into a SHAPED local writes one declared field:
+        // the local keeps its shape (the re-narrowing arms below would drop the
+        // fields). A key the shape does not name, or a dynamic key, falls
+        // through — the shape no longer describes the buffer. The value/field
+        // kind agreement is TypeCheck's.
+        if ($node->array->kind === Node::KIND_LOAD_LOCAL && $at->isShape()) {
+            $k = $this->constKeyOf($node->index);
+            if ($k !== null && $at->shapeField($k) !== null) {
+                $node->type = $vt;
+                return $vt;
+            }
+        }
         // `$out[] = v` on a vec local refines its element type, so a
         // freshly-`[]`-built vec picks up its element shape (e.g. cell
         // when appending boxed JSON values).

@@ -30,26 +30,27 @@ fn read_tuple(array{0:obj<Node>,1:bool} %pair) -> int {
   mem_rc_release obj n
 }
 
-fn read_tuple$mono$p0_vec_cell(vec[cell] %pair) -> int {
+fn read_tuple$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
   ; effects: escape
   %0 = load_local pair : vec[cell]
   %1 = int_const 0 : int
-  %2 = array_access %0[%1] : cell
-  %3 = store_local n <- %2 : cell
+  %2 = array_access %0[%1] : obj<Node>
+  %3 = store_local n <- %2 : obj<Node>
   %4 = load_local pair : vec[cell]
   %5 = int_const 1 : int
-  %6 = array_access %4[%5] : cell
-  %7 = store_local ok <- %6 : cell
-  %8 = load_local ok : cell
+  %6 = array_access %4[%5] : bool
+  %7 = store_local ok <- %6 : bool
+  %8 = load_local ok : bool
   ternary %8 then {
-    %9 = load_local n : cell
-    %10 = property_access %9->kind : cell
+    %9 = load_local n : obj<Node>
+    %10 = property_access %9->kind : int
     -> %10
   } else {
     %11 = int_const 0 : int
     -> %11
-  } => %12 : cell
+  } => %12 : int
   return %12  ; eff: escape
+  mem_rc_release obj n
 }
 
 fn read_record(array{name:string,hits:int,maybe?:obj<Node>} %rec) -> string {
@@ -98,19 +99,19 @@ fn read_record(array{name:string,hits:int,maybe?:obj<Node>} %rec) -> string {
   mem_rc_release obj m
 }
 
-fn read_record$mono$p0_assoc_str_cell(array{name:string,hits:int} %rec) -> string {
+fn read_record$mono$p0_assoc_str_cell(array{name:string,hits:int,maybe?:obj<Node>} %rec) -> string {
   ; effects: alloc,escape
   %0 = load_local rec : assoc[string, cell]
   %1 = string_const "maybe" : string
-  %2 = array_access %0[%1] : cell
+  %2 = array_access %0[%1] : obj<Node>
   nullcoalesce %2 else {
     %3 = null_const : null
     -> %3
-  } => %4 : cell
-  %5 = store_local m <- %4 : cell
+  } => %4 : obj<Node>
+  %5 = store_local m <- %4 : obj<Node>
   %6 = load_local rec : assoc[string, cell]
   %7 = string_const "maybe" : string
-  %8 = array_access %6[%7] : cell
+  %8 = array_access %6[%7] : obj<Node>
   %9 = isset %8 : bool
   if %9 then {
     %10 = load_local rec : assoc[string, cell]
@@ -129,7 +130,7 @@ fn read_record$mono$p0_assoc_str_cell(array{name:string,hits:int} %rec) -> strin
   %21 = int_const 1 : int
   %22 = add %20, %21 : int
   %23 = concat %17, %22 : string  ; eff: alloc alloc=NoRefcount
-  %24 = load_local m : cell
+  %24 = load_local m : obj<Node>
   %25 = null_const : null
   %26 = cmp === %24, %25 : bool
   ternary %26 then {
@@ -141,7 +142,7 @@ fn read_record$mono$p0_assoc_str_cell(array{name:string,hits:int} %rec) -> strin
   } => %29 : string
   %30 = concat %23, %29 : string  ; eff: alloc alloc=RcHeap
   return %30  ; eff: escape
-  mem_rc_release cell m
+  mem_rc_release obj m
 }
 
 fn read_dynamic(array{0:obj<Node>,1:bool} %pair, int %i) -> cell {
@@ -177,28 +178,29 @@ fn destructure(array{0:obj<Node>,1:bool} %pair) -> int {
   mem_rc_release obj n
 }
 
-fn destructure$mono$p0_vec_cell(vec[cell] %pair) -> int {
+fn destructure$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
   ; effects: escape
   %0 = load_local pair : vec[cell]
   %1 = store_local __destr_0 <- %0 : vec[cell]
   %2 = load_local __destr_0 : vec[cell]
   %3 = int_const 0 : int
-  %4 = array_access %2[%3] : cell
-  %5 = store_local n <- %4 : cell
+  %4 = array_access %2[%3] : obj<Node>
+  %5 = store_local n <- %4 : obj<Node>
   %6 = load_local __destr_0 : vec[cell]
   %7 = int_const 1 : int
-  %8 = array_access %6[%7] : cell
-  %9 = store_local ok <- %8 : cell
-  %10 = load_local ok : cell
+  %8 = array_access %6[%7] : bool
+  %9 = store_local ok <- %8 : bool
+  %10 = load_local ok : bool
   ternary %10 then {
-    %11 = load_local n : cell
-    %12 = property_access %11->kind : cell
+    %11 = load_local n : obj<Node>
+    %12 = property_access %11->kind : int
     -> %12
   } else {
     %13 = int_const -1 : int
     -> %13
-  } => %14 : cell
+  } => %14 : int
   return %14  ; eff: escape
+  mem_rc_release obj n
 }
 
 fn __main() -> int {

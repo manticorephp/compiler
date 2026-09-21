@@ -12,7 +12,7 @@ fn tuple_keyed(array{0:obj<Node>,1:bool} %pair) -> int {
   return %1
 }
 
-fn tuple_keyed$mono$p0_vec_cell(vec[cell] %pair) -> int {
+fn tuple_keyed$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
   %0 = load_local pair : vec[cell]
   %1 = call count(%0) : int
   return %1
@@ -24,7 +24,7 @@ fn tuple_positional(array{0:obj<Node>,1:bool} %pair) -> int {
   return %1
 }
 
-fn tuple_positional$mono$p0_vec_cell(vec[cell] %pair) -> int {
+fn tuple_positional$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
   %0 = load_local pair : vec[cell]
   %1 = call count(%0) : int
   return %1
@@ -36,7 +36,7 @@ fn list_shape(array{0:string,1:int} %pair) -> int {
   return %1
 }
 
-fn list_shape$mono$p0_vec_cell(vec[cell] %pair) -> int {
+fn list_shape$mono$p0_vec_cell(array{0:string,1:int} %pair) -> int {
   %0 = load_local pair : vec[cell]
   %1 = call count(%0) : int
   return %1
@@ -48,7 +48,7 @@ fn record_optional(array{name:string,tags:vec[string],hits?:int} %rec) -> int {
   return %1
 }
 
-fn record_optional$mono$p0_assoc_str_cell(array{name:string,tags:vec[unknown]} %rec) -> int {
+fn record_optional$mono$p0_assoc_str_cell(array{name:string,tags:vec[string],hits?:int} %rec) -> int {
   %0 = load_local rec : assoc[string, cell]
   %1 = call count(%0) : int
   return %1
@@ -60,7 +60,7 @@ fn nested(array{a:array{b:int},c:cell} %nested) -> int {
   return %1
 }
 
-fn nested$mono$p0_assoc_str_cell(array{a:array{b:int},c:int} %nested) -> int {
+fn nested$mono$p0_assoc_str_cell(array{a:array{b:int},c:cell} %nested) -> int {
   %0 = load_local nested : assoc[string, cell]
   %1 = call count(%0) : int
   return %1
