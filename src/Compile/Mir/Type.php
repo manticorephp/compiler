@@ -69,20 +69,22 @@ final class Type
      * A constructor-promoted param's own inline `@var` is never attached to
      * the AST ({@see \Parser\Ast\Param} carries no doc comment) — the parser
      * drops it, so the PARAMETER (and, from it, the property) fell through
-     * to a bare `unknown`/usage-inferred repr instead of the declared
-     * `int|string` (cell) key channel. `@param` on the constructor's OWN
-     * docblock IS read by {@see LowerTypes::docTagType}, so this at least
-     * gets the parameter typed. ⚠ Not the whole story: `Type::tuple()` (int
-     * keys) and `Type::record()` (string keys) both flow into this SAME
-     * `$fields` slot, and self-hosted `shapeString()` was STILL observed
-     * printing a raw pointer instead of a decoded string key for a
-     * `record()`-built shape's field name once BOTH kinds exist in one
-     * compiled program (`tests/aot/mir/cases/shape_parse.php`, no stable
-     * golden yet) — a real, deeper, still-open gap in how a cell-keyed
-     * array's STRING arm round-trips through self-host, not fixed by this
-     * comment alone.
-     * @param array<int|string,self>|null $fields
-     * @param array<int|string,true> $nullableFields
+     * to a bare `unknown`/usage-inferred repr instead of the declared type.
+     * `@param` on the constructor's OWN docblock IS read by
+     * {@see LowerTypes::docTagType}, so this gets the parameter typed.
+     *
+     * `$fields` / `$nullableFields` are keyed by {@see shapeKey}, ALWAYS a
+     * plain string — never a raw `int|string` PHP key. A `Type::tuple()`
+     * (int keys) and a `Type::record()` (string keys) shape used to flow
+     * into this ONE slot as a genuinely mixed-key PHP array, and the
+     * self-hosted compiler read that back unsoundly: `shapeString()` printed
+     * a raw heap pointer instead of a decoded string key for a `record()`
+     * shape's field name once both kinds existed in one compiled program
+     * (`tests/aot/mir/cases/shape_parse.php`). A mixed int|string-keyed
+     * PHP array is a known-unsound channel here — the encoding makes the
+     * map ALWAYS string-keyed, so it never opens that channel at all.
+     * @param array<string,self>|null $fields
+     * @param array<string,true> $nullableFields
      */
     public function __construct(
         public readonly string $kind,
@@ -104,6 +106,7 @@ final class Type
          * shape-aware code ({@see isShape}, {@see shapeField}) reads it. A
          * control-flow merge of two DIFFERENT shapes drops it. (Typed on the
          * CONSTRUCTOR's own `@param` above, not here — see that comment.)
+         * @var array<string,self>|null keyed by {@see shapeKey}
          */
         public readonly ?array $fields = null,
         /**
@@ -120,6 +123,7 @@ final class Type
          * `?T`, `T|null` or `key?:` — so the runtime shape check accepts a NULL
          * cell there and nowhere else. (Typed on the CONSTRUCTOR's own
          * `@param` above, not here — see that comment.)
+         * @var array<string,true> keyed by {@see shapeKey}
          */
         public readonly array $nullableFields = [],
     ) {
@@ -267,7 +271,7 @@ final class Type
      * rebuilt the type with a bare `new self`. One constructor for the shape,
      * so a new caller cannot quietly opt out of the cache again.
      *
-     * @param array<int|string,self>|null $fields  @param array<int|string,true> $nullable
+     * @param array<string,self>|null $fields  @param array<string,true> $nullable
      */
     private static function arrayOf(?self $element, ?self $key, ?array $fields, array $nullable = []): self
     {
@@ -281,7 +285,7 @@ final class Type
     /**
      * A tuple shape — int keys, packed (`array{0:Node,1:bool}`). Same memory as
      * `vec[$element]`; only `fields` is extra.
-     * @param array<int|string,self> $fields  @param array<int|string,true> $nullable
+     * @param array<string,self> $fields  @param array<string,true> $nullable
      */
     public static function tuple(array $fields, self $element, array $nullable = []): self
     {
@@ -305,7 +309,7 @@ final class Type
      * type), so a record is IDENTICAL in memory to the plain assoc; only
      * `fields` is extra. Key is string. Every shape-unaware consumer treats it
      * as `assoc[string, $element]`.
-     * @param array<int|string,self> $fields  @param array<int|string,true> $nullable
+     * @param array<string,self> $fields  @param array<string,true> $nullable
      */
     public static function record(array $fields, self $element, array $nullable = []): self
     {
@@ -316,14 +320,14 @@ final class Type
      * A docblock shape from its parsed fields: int keys only → tuple, string
      * keys only → record, both → a cell-keyed shape (the tag-dispatched key
      * channel). The element is {@see shapeElement}.
-     * @param array<int|string,self> $fields  @param array<int|string,true> $nullable
+     * @param array<string,self> $fields  @param array<string,true> $nullable
      */
     public static function shapeOf(array $fields, array $nullable): self
     {
         $anyStr = false;
         $anyInt = false;
-        foreach ($fields as $k => $f) {
-            if (\is_int($k)) { $anyInt = true; } else { $anyStr = true; }
+        foreach ($fields as $ek => $f) {
+            if (self::shapeKeyIsInt($ek)) { $anyInt = true; } else { $anyStr = true; }
         }
         $el = self::shapeElement($fields);
         if (!$anyStr) { return self::tuple($fields, $el, $nullable); }
@@ -336,7 +340,7 @@ final class Type
      * every field spells the SAME type, else a tagged CELL. A typevar, union,
      * null or cell field forces the cell — the shared generic body sees `T`
      * as a cell, so the buffer must be a cell buffer at every instantiation.
-     * @param array<int|string,self> $fields
+     * @param array<string,self> $fields
      */
     private static function shapeElement(array $fields): self
     {
@@ -365,16 +369,44 @@ final class Type
         return $this->isShape() && $this->key !== null && $this->key->kind === self::KIND_STRING;
     }
 
+    /** The map key a shape field is stored under: `i<n>` for an int key, `s<name>` for a string key.
+     *  A single string-keyed map on purpose — a PHP array mixing int and string keys is a
+     *  polymorphic-key channel the self-hosted compiler cannot read back reliably. */
+    public static function shapeKey(int|string $k): string
+    {
+        if (\is_int($k)) { return 'i' . (string)$k; }
+        return 's' . $k;
+    }
+
+    /** The user-facing key of an encoded shape key (`i0` → `0`, `sname` → `name`). */
+    public static function shapeKeyLabel(string $ek): string
+    {
+        return \substr($ek, 1);
+    }
+
+    /** True when an encoded shape key is an int key. */
+    public static function shapeKeyIsInt(string $ek): bool
+    {
+        return $ek !== '' && $ek[0] === 'i';
+    }
+
     /** The declared type of field `$k`, or null when the shape has no such key. */
     public function shapeField(int|string $k): ?self
     {
         if ($this->fields === null) { return null; }
-        return $this->fields[$k] ?? null;
+        return $this->fields[self::shapeKey($k)] ?? null;
+    }
+
+    /** Direct lookup by an already-ENCODED key — for a caller iterating {@see $fields} itself. */
+    public function shapeFieldAt(string $ek): ?self
+    {
+        if ($this->fields === null) { return null; }
+        return $this->fields[$ek] ?? null;
     }
 
     public function shapeFieldNullable(int|string $k): bool
     {
-        return isset($this->nullableFields[$k]);
+        return isset($this->nullableFields[self::shapeKey($k)]);
     }
 
     /** The same array with another element — the shape rides along. */
@@ -388,8 +420,8 @@ final class Type
     {
         if (!$this->isShape()) { return $this->toString(); }
         $parts = [];
-        foreach ($this->fields as $k => $f) {
-            $parts[] = (string)$k . (isset($this->nullableFields[$k]) ? '?' : '') . ':' . $f->shapeString();
+        foreach ($this->fields as $ek => $f) {
+            $parts[] = self::shapeKeyLabel($ek) . (isset($this->nullableFields[$ek]) ? '?' : '') . ':' . $f->shapeString();
         }
         return 'array{' . \implode(',', $parts) . '}';
     }

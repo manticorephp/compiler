@@ -1,0 +1,181 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, vivify-ref-args, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn Node____construct(obj<Node> %this, int %kind) -> unknown {
+  ; effects: escape,storeHeap
+  %0 = load_local this : obj<Node>
+  %1 = load_local kind : int
+  %2 = store_property %0->kind <- %1 : int  ; eff: escape,storeHeap
+}
+
+fn tuple_keyed(array{0:obj<Node>,1:bool} %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn tuple_keyed$mono$p0_vec_cell(vec[cell] %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn tuple_positional(array{0:obj<Node>,1:bool} %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn tuple_positional$mono$p0_vec_cell(vec[cell] %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn list_shape(array{0:string,1:int} %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn list_shape$mono$p0_vec_cell(vec[cell] %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn record_optional(array{name:string,tags:vec[string],hits?:int} %rec) -> int {
+  ; effects: escape,throw
+  %0 = load_local rec : assoc[string, cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn record_optional$mono$p0_assoc_str_cell(array{name:string,tags:vec[unknown]} %rec) -> int {
+  ; effects: escape,throw
+  %0 = load_local rec : assoc[string, cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn nested(array{a:array{b:int},c:cell} %nested) -> int {
+  ; effects: escape,throw
+  %0 = load_local nested : assoc[string, cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn nested$mono$p0_assoc_str_cell(array{a:array{b:int},c:int} %nested) -> int {
+  ; effects: escape,throw
+  %0 = load_local nested : assoc[string, cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn homogeneous(array{0:int,1:int} %pair) -> int {
+  ; effects: escape,throw
+  %0 = load_local pair : vec[int]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn nullable_fields(array{get?:string,set?:string} %hooks) -> int {
+  ; effects: escape,throw
+  %0 = load_local hooks : assoc[string, string]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn unsealed(assoc[string, cell] %open) -> int {
+  ; effects: escape,throw
+  %0 = load_local open : assoc[string, cell]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn unsealed$mono$p0_assoc_str_int(array{id:int} %open) -> int {
+  ; effects: escape,throw
+  %0 = load_local open : assoc[string, int]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn union_false(cell %u) -> int {
+  ; effects: escape
+  %0 = int_const 0 : int
+  return %0  ; eff: escape
+}
+
+fn outer(vec[vec[cell]] %loops) -> int {
+  ; effects: escape,throw
+  %0 = load_local loops : vec[vec[cell]]
+  %1 = call count(%0) : int  ; eff: throw
+  return %1  ; eff: escape
+}
+
+fn ret() -> array{0:string,1:int} {
+  ; effects: alloc,escape
+  %0 = string_const "x" : string
+  %1 = int_const 1 : int
+  %2 = array_lit [_ => %0, _ => %1] : vec[cell]  ; eff: alloc alloc=RcHeap
+  return %2  ; eff: escape
+}
+
+fn __main() -> int {
+  ; effects: alloc,throw
+  %0 = int_const 1 : int
+  %1 = new Node(%0) : obj<Node>  ; eff: alloc,throw alloc=RcHeap
+  %2 = bool_const true : bool
+  %3 = array_lit [_ => %1, _ => %2] : vec[cell]  ; eff: alloc alloc=RcHeap
+  %4 = call tuple_keyed$mono$p0_vec_cell(%3) : int  ; eff: throw
+  %5 = int_const 1 : int
+  %6 = new Node(%5) : obj<Node>  ; eff: alloc,throw alloc=RcHeap
+  %7 = bool_const false : bool
+  %8 = array_lit [_ => %6, _ => %7] : vec[cell]  ; eff: alloc alloc=RcHeap
+  %9 = call tuple_positional$mono$p0_vec_cell(%8) : int  ; eff: throw
+  %10 = string_const "a" : string
+  %11 = int_const 1 : int
+  %12 = array_lit [_ => %10, _ => %11] : vec[cell]  ; eff: alloc alloc=RcHeap
+  %13 = call list_shape$mono$p0_vec_cell(%12) : int  ; eff: throw
+  %14 = string_const "name" : string
+  %15 = string_const "n" : string
+  %16 = string_const "tags" : string
+  %17 = array_lit [] : vec[unknown]  ; eff: alloc alloc=RcHeap
+  %18 = array_lit [%14 => %15, %16 => %17] : assoc[string, cell]  ; eff: alloc alloc=RcHeap
+  %19 = call record_optional$mono$p0_assoc_str_cell(%18) : int  ; eff: throw
+  %20 = string_const "a" : string
+  %21 = string_const "b" : string
+  %22 = int_const 1 : int
+  %23 = array_lit [%21 => %22] : assoc[string, int]  ; eff: alloc alloc=RcHeap
+  %24 = string_const "c" : string
+  %25 = int_const 2 : int
+  %26 = array_lit [%20 => %23, %24 => %25] : assoc[string, cell]  ; eff: alloc alloc=RcHeap
+  %27 = call nested$mono$p0_assoc_str_cell(%26) : int  ; eff: throw
+  %28 = int_const 1 : int
+  %29 = int_const 2 : int
+  %30 = array_lit [_ => %28, _ => %29] : vec[int]  ; eff: alloc alloc=RcHeap
+  %31 = call homogeneous(%30) : int  ; eff: throw
+  %32 = string_const "get" : string
+  %33 = null_const : null
+  %34 = string_const "set" : string
+  %35 = string_const "s" : string
+  %36 = array_lit [%32 => %33, %34 => %35] : assoc[string, cell]  ; eff: alloc alloc=RcHeap
+  %37 = call nullable_fields(%36) : int  ; eff: throw
+  %38 = string_const "id" : string
+  %39 = int_const 1 : int
+  %40 = array_lit [%38 => %39] : assoc[string, int]  ; eff: alloc alloc=RcHeap
+  %41 = call unsealed$mono$p0_assoc_str_int(%40) : int  ; eff: throw
+  %42 = bool_const false : bool
+  %43 = call union_false(%42) : int  ; eff: throw
+  %44 = array_lit [] : vec[unknown]  ; eff: alloc alloc=RcHeap
+  %45 = call outer(%44) : int  ; eff: throw
+  %46 = call ret() : vec[cell]  ; eff: throw
+  %47 = call count(%46) : int  ; eff: throw
+  %48 = string_const "\n" : string
+  echo %4, %9, %13, %19, %27, %31, %37, %41, %43, %45, %47, %48
+}

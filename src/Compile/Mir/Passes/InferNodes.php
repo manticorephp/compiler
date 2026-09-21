@@ -1843,7 +1843,7 @@ trait InferNodes
             }
             if ($allStrConstKeys && $el->key !== null
                 && $el->key->kind === Node::KIND_STRING_CONST) {
-                $recordFields[$el->key->value] = $vt;
+                $recordFields[Type::shapeKey($el->key->value)] = $vt;
             }
             // A literal of distinct closures (each obj<__closure_N>) must keep a
             // dispatchable KIND_CLOSURE element, not collapse to unknown→cell that

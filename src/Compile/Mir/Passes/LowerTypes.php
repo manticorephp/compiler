@@ -208,10 +208,10 @@ trait LowerTypes
             }
             if (\is_int($key)) { $next = $key + 1; }
             if ($tyStr === '') { $tyStr = 'mixed'; }
-            $fields[$key] = $this->lowerTypeHint($tyStr);
-            if ($opt || $tyStr[0] === '?') { $nullable[$key] = true; }
+            $fields[Type::shapeKey($key)] = $this->lowerTypeHint($tyStr);
+            if ($opt || $tyStr[0] === '?') { $nullable[Type::shapeKey($key)] = true; }
             foreach ($this->topLevelUnionArms($tyStr) as $arm) {
-                if (\strtolower($arm) === 'null') { $nullable[$key] = true; }
+                if (\strtolower($arm) === 'null') { $nullable[Type::shapeKey($key)] = true; }
             }
         }
         if (!$sealed || \count($fields) === 0) {
