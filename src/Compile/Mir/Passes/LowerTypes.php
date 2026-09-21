@@ -116,19 +116,108 @@ trait LowerTypes
      */
     private function topLevelUnionArms(string $hint): array
     {
-        $arms = [];
+        return $this->splitTopLevel($hint, '|');
+    }
+
+    /**
+     * Split on a TOP-LEVEL `$sep` only — depth-aware on `<>`, `()`, `[]` and
+     * `{}`. A `|` or `,` inside `array{a:int|string}` / `array<int, array{…}>`
+     * belongs to the inner type; splitting there invents arms that do not
+     * exist. (`{}` was not counted before this, and a shape with a union field
+     * collapsed to a bare cell.)
+     * @return string[]
+     */
+    private function splitTopLevel(string $s, string $sep): array
+    {
+        $parts = [];
         $depth = 0;
         $cur = '';
-        $n = \strlen($hint);
+        $n = \strlen($s);
         for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = $hint[$i];
-            if ($c === '<' || $c === '(' || $c === '[') { $depth = $depth + 1; }
-            elseif ($c === '>' || $c === ')' || $c === ']') { $depth = $depth - 1; }
-            if ($c === '|' && $depth === 0) { $arms[] = \trim($cur); $cur = ''; continue; }
+            $c = $s[$i];
+            if ($c === '<' || $c === '(' || $c === '[' || $c === '{') { $depth = $depth + 1; }
+            elseif ($c === '>' || $c === ')' || $c === ']' || $c === '}') { $depth = $depth - 1; }
+            if ($c === $sep && $depth === 0) { $parts[] = \trim($cur); $cur = ''; continue; }
             $cur = $cur . $c;
         }
-        $arms[] = \trim($cur);
-        return $arms;
+        $parts[] = \trim($cur);
+        return $parts;
+    }
+
+    /**
+     * Offset of the first top-level single `:` (a `::` is a class constant,
+     * not a key separator), or -1. `cb: callable(int): string` splits at the
+     * first one: the key never contains a colon.
+     */
+    private function topLevelColon(string $s): int
+    {
+        $depth = 0;
+        $n = \strlen($s);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $c = $s[$i];
+            if ($c === '<' || $c === '(' || $c === '[' || $c === '{') { $depth = $depth + 1; }
+            elseif ($c === '>' || $c === ')' || $c === ']' || $c === '}') { $depth = $depth - 1; }
+            if ($c !== ':' || $depth !== 0) { continue; }
+            if ($i + 1 < $n && $s[$i + 1] === ':') { $i = $i + 1; continue; }
+            return $i;
+        }
+        return -1;
+    }
+
+    /**
+     * `array{k:T, k2?:U, V}` → a SHAPE ({@see Type::shapeOf}): each field is
+     * lowered on its own, so a nested shape, a union field, a `?T` and a
+     * typevar all fall out of the recursion. A `\d+` key is an int key, a
+     * bare entry takes the next int key, any other key is a string (quotes
+     * stripped). `key?:` and a nullable field type mark the key NULL-able for
+     * the runtime check. A `...` entry makes the shape UNSEALED — then no key
+     * is a claim, and the hint lowers flat, as before this existed.
+     */
+    private function lowerArrayShape(string $base): Type
+    {
+        $lb = \strpos($base, '{');
+        $inner = \substr($base, $lb + 1, \strlen($base) - $lb - 2);
+        if (\trim($inner) === '') { return Type::vec(Type::cell()); }
+        $fields = [];
+        $nullable = [];
+        $next = 0;
+        $list = true;
+        $sealed = true;
+        foreach ($this->splitTopLevel($inner, ',') as $ent) {
+            if ($ent === '') { continue; }
+            if (\strncmp($ent, '...', 3) === 0) { $sealed = false; continue; }
+            $colon = $this->topLevelColon($ent);
+            $opt = false;
+            if ($colon < 0) {
+                $key = $next;
+                $tyStr = $ent;
+            } else {
+                $keyStr = \trim(\substr($ent, 0, $colon));
+                $tyStr = \trim(\substr($ent, $colon + 1));
+                if ($keyStr !== '' && $keyStr[\strlen($keyStr) - 1] === '?') {
+                    $opt = true;
+                    $keyStr = \substr($keyStr, 0, \strlen($keyStr) - 1);
+                }
+                $keyStr = \trim($keyStr, "'\"");
+                if ($keyStr !== '' && \ctype_digit($keyStr)) {
+                    $key = (int)$keyStr;
+                } else {
+                    $key = $keyStr;
+                    $list = false;
+                }
+            }
+            if (\is_int($key)) { $next = $key + 1; }
+            if ($tyStr === '') { $tyStr = 'mixed'; }
+            $fields[$key] = $this->lowerTypeHint($tyStr);
+            if ($opt || $tyStr[0] === '?') { $nullable[$key] = true; }
+            foreach ($this->topLevelUnionArms($tyStr) as $arm) {
+                if (\strtolower($arm) === 'null') { $nullable[$key] = true; }
+            }
+        }
+        if (!$sealed || \count($fields) === 0) {
+            return $list ? Type::vec(Type::cell()) : Type::assoc(Type::string_(), Type::cell());
+        }
+        return Type::shapeOf($fields, $nullable);
     }
 
     /**
@@ -371,30 +460,21 @@ trait LowerTypes
         // string, against a Node (never equal) and, once a VERIFY guard looked,
         // retained each pair's ARRAY as a string. Int keys (or none) make a
         // list; any other key a string-keyed map.
-        if (\strncmp($low, 'array{', 6) === 0) {
-            $base = \ltrim($hint, '?\\');
-            $lb = \strpos($base, '{');
-            $inner = \substr($base, $lb + 1, \strlen($base) - $lb - 2);
-            $list = true;
-            foreach (\explode(',', $inner) as $ent) {
-                $colon = \strpos($ent, ':');
-                if ($colon === false || $colon < 0) { continue; }
-                $key = \trim(\substr($ent, 0, $colon));
-                if ($key !== '' && !\ctype_digit(\rtrim($key, '?'))) { $list = false; }
-            }
-            return $list ? Type::vec(Type::cell()) : Type::assoc(Type::string_(), Type::cell());
+        if (\strncmp($low, 'array{', 6) === 0 || \strncmp($low, 'list{', 5) === 0
+            || \strncmp($low, 'non-empty-array{', 16) === 0
+            || \strncmp($low, 'non-empty-list{', 15) === 0) {
+            return $this->lowerArrayShape(\ltrim($hint, '?\\'));
         }
         if (\strncmp($low, 'array<', 6) === 0) {
             $base = \ltrim($hint, '?\\');
             $lt = \strpos($base, '<');
             $inner = \substr($base, $lt + 1, \strlen($base) - $lt - 2);
-            // self-host strpos returns -1 (not false) on miss; guard both.
-            $comma = \strpos($inner, ',');
-            if ($comma === false || $comma < 0) {
-                return Type::vec($this->lowerTypeHint($inner));
+            $kv = $this->splitTopLevel($inner, ',');
+            if (\count($kv) < 2) {
+                return Type::vec($this->lowerTypeHint($kv[0]));
             }
-            $keyStr = \trim(\substr($inner, 0, $comma));
-            $valStr = \trim(\substr($inner, $comma + 1, \strlen($inner) - $comma - 1));
+            $keyStr = $kv[0];
+            $valStr = $kv[1];
             // A key written as a CLASS CONSTANT is not a key type at all — it is
             // a docblock naming which VALUES may appear (`array<Foo::BAR, V>`,
             // `array<Foo::*, V>`, a union of those). Lowered as written it
@@ -730,7 +810,7 @@ trait LowerTypes
     {
         if ($this->isBareArrayHint($hint)
             && $docType !== null && $docType !== ''
-            && $this->looksLikeArrayElemType($docType)) {
+            && ($this->looksLikeArrayElemType($docType) || $this->looksLikeArrayShapeType($docType))) {
             return $docType;
         }
         // No source hint at all → the docblock IS the type. This is what every
@@ -784,6 +864,20 @@ trait LowerTypes
         if ($n > 2 && \substr($t, $n - 2) === '[]') { return true; }
         if (\strncmp(\strtolower(\ltrim($t, '?\\')), 'array<', 6) === 0) { return true; }
         return false;
+    }
+
+    /** True for a docblock array SHAPE (`array{…}`, `list{…}`,
+     *  `non-empty-array{…}`, `non-empty-list{…}`) — kept separate from
+     *  {@see looksLikeArrayElemType} so its two other callers (the nullable-
+     *  union collapse, the elem-type union check) keep their existing
+     *  behaviour; only {@see effectiveHint} needs a shape docblock to win
+     *  over a bare `array` native hint. */
+    private function looksLikeArrayShapeType(string $t): bool
+    {
+        $low = \strtolower(\ltrim($t, '?\\'));
+        return \strncmp($low, 'array{', 6) === 0 || \strncmp($low, 'list{', 5) === 0
+            || \strncmp($low, 'non-empty-array{', 16) === 0
+            || \strncmp($low, 'non-empty-list{', 15) === 0;
     }
 
     /**
@@ -1043,6 +1137,10 @@ trait LowerTypes
             // Angle-bracket-aware: a generic like `array<string, ClassDef>`
             // carries a space after the comma — don't stop the type token
             // on whitespace while inside `<...>`, or the value type is lost.
+            // Brace-aware too: a shape (`array{name: string, tags: string[]}`)
+            // carries the same space-after-comma / space-after-colon — without
+            // tracking `{}` depth the token cut off at the first field's
+            // comma, and `array{name:string,` (unbalanced) reached the parser.
             $depth = 0;
             while ($j < $n) {
                 $c = \substr($doc, $j, 1);
@@ -1055,6 +1153,8 @@ trait LowerTypes
                 // of an un-hinted param, that segfaulted instead of being ignored.
                 elseif ($c === '(') { $depth = $depth + 1; }
                 elseif ($c === ')') { if ($depth > 0) { $depth = $depth - 1; } }
+                elseif ($c === '{') { $depth = $depth + 1; }
+                elseif ($c === '}') { if ($depth > 0) { $depth = $depth - 1; } }
                 elseif ($depth === 0 && $c === ':') { $j = $this->skipDocSpaces($doc, $j + 1, $n); continue; }
                 elseif ($depth === 0
                     && ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r")) {

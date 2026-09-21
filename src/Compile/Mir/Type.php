@@ -65,6 +65,25 @@ final class Type
      */
     public const KIND_TYPEVAR = 'typevar';
 
+    /**
+     * A constructor-promoted param's own inline `@var` is never attached to
+     * the AST ({@see \Parser\Ast\Param} carries no doc comment) — the parser
+     * drops it, so the PARAMETER (and, from it, the property) fell through
+     * to a bare `unknown`/usage-inferred repr instead of the declared
+     * `int|string` (cell) key channel. `@param` on the constructor's OWN
+     * docblock IS read by {@see LowerTypes::docTagType}, so this at least
+     * gets the parameter typed. ⚠ Not the whole story: `Type::tuple()` (int
+     * keys) and `Type::record()` (string keys) both flow into this SAME
+     * `$fields` slot, and self-hosted `shapeString()` was STILL observed
+     * printing a raw pointer instead of a decoded string key for a
+     * `record()`-built shape's field name once BOTH kinds exist in one
+     * compiled program (`tests/aot/mir/cases/shape_parse.php`, no stable
+     * golden yet) — a real, deeper, still-open gap in how a cell-keyed
+     * array's STRING arm round-trips through self-host, not fixed by this
+     * comment alone.
+     * @param array<int|string,self>|null $fields
+     * @param array<int|string,true> $nullableFields
+     */
     public function __construct(
         public readonly string $kind,
         public readonly ?self $element = null,
@@ -83,8 +102,8 @@ final class Type
          * array it sits on (same `element`/`key`, same runtime buffer) — every
          * consumer that ignores this payload treats it as that array. Only
          * shape-aware code ({@see isShape}, {@see shapeField}) reads it. A
-         * control-flow merge of two DIFFERENT shapes drops it.
-         * @var array<int|string,self>|null
+         * control-flow merge of two DIFFERENT shapes drops it. (Typed on the
+         * CONSTRUCTOR's own `@param` above, not here — see that comment.)
          */
         public readonly ?array $fields = null,
         /**
@@ -99,8 +118,8 @@ final class Type
         /**
          * Keys of {@see $fields} whose value may be NULL at run time — declared
          * `?T`, `T|null` or `key?:` — so the runtime shape check accepts a NULL
-         * cell there and nowhere else.
-         * @var array<int|string,true>
+         * cell there and nowhere else. (Typed on the CONSTRUCTOR's own
+         * `@param` above, not here — see that comment.)
          */
         public readonly array $nullableFields = [],
     ) {
