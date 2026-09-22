@@ -247,4 +247,13 @@ jobs:
           Built cold from \`${GITHUB_REF_NAME}\` — no cached compiler took part.
           EOF
           )"
-          gh release create "$GITHUB_REF_NAME" dl/* --title "$GITHUB_REF_NAME" --notes "$notes"
+          # Both ways in: pushing the tag alone (this job then creates the
+          # release), and clicking "Create release" in the UI (which creates the
+          # tag, fires this workflow, and leaves a release already sitting there
+          # for `create` to fail on). Upload into whatever exists instead.
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists — uploading the artifacts into it"
+            gh release upload "$GITHUB_REF_NAME" dl/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dl/* --title "$GITHUB_REF_NAME" --notes "$notes"
+          fi
