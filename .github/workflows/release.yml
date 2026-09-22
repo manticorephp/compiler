@@ -154,8 +154,8 @@ jobs:
       - name: Tarball
         run: |
           name="manticore-${{ steps.v.outputs.version }}-macos-arm64"
-          mkdir -p "dist/$name"
-          cp -R bin/manticore "dist/$name/bin" 2>/dev/null || { mkdir -p "dist/$name/bin"; cp bin/manticore "dist/$name/bin/"; }
+          mkdir -p "dist/$name/bin"
+          cp bin/manticore "dist/$name/bin/manticore"
           cp -R lib "dist/$name/lib"
           cp README.md LICENSE "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
@@ -213,7 +213,7 @@ jobs:
 
       - name: Checksums
         run: |
-          cp tools/install.sh dl/install.sh
+          cp install.sh dl/install.sh
           cd dl && sha256sum ./*.tar.gz install.sh > SHA256SUMS && cat SHA256SUMS
 
       - name: Release
