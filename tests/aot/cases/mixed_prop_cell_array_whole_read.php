@@ -1,10 +1,9 @@
 <?php
 // Whole read (var_dump / is_array / gettype / return / pass) of a mixed prop
-// holding a flat STRING-KEYED heterogeneous cell-array boxes as a tagged array
-// cell, so it dispatches correctly instead of misreading a raw pointer. A VEC
-// cell-array (the SPL key-buffer shape `$ks[]=$k; $this->k=$ks`) stays raw — an
-// ArrayIterator in the same module must still iterate, and a user key-buffer
-// class too.
+// holding an array reads a tagged array cell, so it dispatches correctly
+// instead of misreading a raw pointer — every array in a `mixed` slot is boxed
+// FLAT, the SPL key-buffer shape (`$ks[]=$k; $this->k=$ks`) included, and an
+// ArrayIterator in the same module iterates through the cell base.
 
 class Cfg { public mixed $d; }
 $c = new Cfg();
@@ -22,16 +21,14 @@ $bg = new Bag();
 $bg->b = ["a" => 1.5, "z" => null, "s" => "t"];
 var_dump($bg->all());
 
-// SPL in the same module — the vec key-buffer stays raw, iteration works
+// SPL in the same module — the vec key-buffer is a boxed cell, iteration works
 $it = new ArrayIterator(["p" => 10, "q" => 20, "r" => 30]);
 foreach ($it as $k => $v) { echo "$k=$v "; }
 echo "\n";
 $it["s"] = 40;
 echo $it["s"], " ", count($it), "\n";
 
-// VEC value container (int-keyed heterogeneous) whole-read by a tag consumer
-// boxes too — gated on the tag-read signal with no element-as-index veto, so it
-// is distinguished from the VEC key-buffer shape below.
+// VEC value container (int-keyed heterogeneous) whole-read by a tag consumer.
 class VBag { public mixed $v; }
 $vb = new VBag();
 $vb->v = ["a", null, 3, "d"];

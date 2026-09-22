@@ -1,8 +1,8 @@
 <?php
-// A `mixed` scalar-bag property must not be poisoned into a raw store by an
-// UNRELATED class whose same-named property is used as a raw array base — the
-// reader assumes a tagged cell, so a raw scalar came back as garbage float
-// (int 1 -> 4.94e-324). cellPropBoxed is keyed by declaring class + name.
+// A `mixed` property boxes every store, whatever an UNRELATED class does with
+// a same-named property (an element-written array base once made this one a
+// raw slot, and a raw scalar came back as garbage float: int 1 -> 4.94e-324).
+// The array-base slots box FLAT and are element-written through the cell.
 class Bag {
     public mixed $v = [];
     public function add($x): void { $this->v[] = $x; }
