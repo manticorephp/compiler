@@ -8,16 +8,17 @@
 # tools/docker/run_tests.sh builds `toolchain` too — one image definition, two
 # consumers.
 #
-# Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian
-# bookworm's stock php (8.2) and clang (14) are both wrong for this compiler:
+# Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian's
+# stock php and clang are both wrong for this compiler:
 #   * PHP 8.5 is manticore's target language version, so the Zend seed must be
 #     8.5 or the seed disagrees with what it is compiling.
 #   * clang 14 predates LLVM 15's opaque pointers and REJECTS the IR manticore
 #     emits ("ptr type is only supported in -opaque-pointers mode"). Verified,
-#     not assumed -- stock bookworm clang-14 fails the seed assemble step.
+#     not assumed -- bookworm's stock clang-14 failed the seed assemble step.
 # So: php from sury.org, clang from apt.llvm.org.
 
-FROM debian:12 AS toolchain
+ARG DEBIAN_TAG=13
+FROM debian:${DEBIAN_TAG} AS toolchain
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -51,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # FFI bindings link against — `libsqlite3-dev` without `php8.5-sqlite3` links
 # fine and leaves the oracle unable to run a single pdo_* case.
 RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ bookworm main" \
+    && echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $(. /etc/os-release; echo "$VERSION_CODENAME") main" \
         > /etc/apt/sources.list.d/php.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -61,7 +62,7 @@ RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.or
 
 # ---- latest stable clang/LLVM (apt.llvm.org) ----
 # NOT `llvm.sh` with no argument: that targets the development version (23 at time of
-# writing), which publishes no bookworm packages and hard-fails the build. Walk
+# writing), which publishes no packages for this suite and hard-fails the build. Walk
 # candidate versions newest-first and keep the first that actually installs, so
 # this tracks "latest that exists" without pinning to a version that will rot.
 ARG LLVM_VERSIONS="22 21 20"
