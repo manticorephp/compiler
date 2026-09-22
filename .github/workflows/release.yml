@@ -66,11 +66,19 @@ jobs:
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # DEBIAN_TAG=12, while ci.yml and the development image track 13. glibc is
+      # backwards compatible and not forwards: a binary built against 2.41 (trixie)
+      # refuses to start on 2.36 (bookworm), so a release built on the newest base
+      # would run only on the newest distributions. The two axes are separate —
+      # develop on the fresh toolchain, ship against the older floor — and this is
+      # the whole of the difference, one build arg.
       - name: Build the runtime image
         uses: docker/build-push-action@v6
         with:
           context: .
           target: runtime
+          build-args: |
+            DEBIAN_TAG=12
           tags: manticore-runtime:${{ matrix.arch }}
           load: true
           cache-from: type=gha,scope=release-${{ matrix.arch }}

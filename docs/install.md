@@ -1,9 +1,11 @@
 # Installing Manticore — host dependencies and platform support
 
-Manticore compiles PHP to a native binary. The *output* binaries are fully
-static and have no runtime dependencies — they call libc and nothing else. The
-*compiler*, however, shells out to a real toolchain and links against a few
-system libraries, so the host needs those present at build time.
+Manticore compiles PHP to a native binary with no PHP runtime in it — no
+interpreter, no `php.ini`, no extension loader. It is not statically linked,
+though: an output binary links libc, PCRE2 and OpenSSL dynamically, plus whatever
+a program's FFI bindings name (libcurl, libsqlite3, …), so the machine that RUNS
+it needs those libraries too. The *compiler* additionally shells out to a real
+toolchain, so the host needs clang and `cc` present at build time.
 
 This is an end-user guide. Quick version lives in the README's `Requirements`.
 
@@ -11,23 +13,30 @@ This is an end-user guide. Quick version lives in the README's `Requirements`.
 
 ## Quick install
 
-Manticore builds **from source** — there is no prebuilt binary to download; the
-compiler compiles itself. The installer needs the [host toolchain](#what-the-host-needs-and-why)
-present (it checks and tells you what is missing), then puts everything under
-`$MANTICORE_HOME` (default `~/.manticore`).
+The installer takes a published build when one exists for your platform (linux
+and macOS, arm64 and amd64), verified against the release's `SHA256SUMS`, and
+otherwise builds **from source** — the compiler compiles itself. Either way it
+needs the [host toolchain](#what-the-host-needs-and-why) present (it checks and
+tells you what is missing), then puts everything under `$MANTICORE_HOME`
+(default `~/.manticore`).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 # then, as the script prints:
 export PATH="$HOME/.manticore/bin:$PATH"
-manticore version        # -> manticore 0.10.0
+manticore version        # -> manticore 0.11.0
 ```
 
-Re-running the installer **upgrades in place**: once a working `manticore` is
-installed it rebuilds the new version *with itself* (self-host, fast); the Zend
-seed is only the cold first boot. Knobs: `MANTICORE_HOME`, `MANTICORE_REF`
-(branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (build a local checkout instead
-of cloning).
+Re-running the installer **upgrades in place**. When it builds from source, a
+working `manticore` rebuilds the new version *with itself* (self-host, fast) and
+the Zend seed is only the cold first boot. Knobs: `MANTICORE_HOME`,
+`MANTICORE_VERSION` (a specific release), `MANTICORE_FROM_SOURCE=1` (skip the
+download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
+(build a local checkout instead of cloning).
+
+A published tarball is built on **Debian 12** (glibc 2.36) even though the
+development image tracks Debian 13: a release has to run on the distribution
+someone already has, and glibc is backwards compatible, not forwards.
 
 ### Via Composer
 

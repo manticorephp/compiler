@@ -41,15 +41,25 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  generic_link_flags() needs one of them — `pkg-config --libs
 #                  curl` fails everywhere, since the module is called libcurl.
 # wget + gnupg + lsb-release are llvm.sh's own dependencies, and `wget` is not a
-# stand-in for the `curl` next to it: llvm.sh calls wget by name. What is NOT
-# here is `software-properties-common` — trixie dropped the package, and
-# llvm.sh stopped needing it in the same breath: on a new Debian it writes the
-# deb822 source file itself instead of calling add-apt-repository.
+# stand-in for the `curl` next to it: llvm.sh calls wget by name.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget gnupg lsb-release \
         gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config \
         binutils bash file make \
         netbase \
+    && rm -rf /var/lib/apt/lists/*
+
+# `software-properties-common` exists on bookworm and NOT on trixie — Debian
+# dropped it — and this image is built on both: 13 for development, 12 for the
+# release tarballs, because glibc is backwards compatible and not forwards.
+# llvm.sh needs it on exactly the base where it exists: on bookworm it calls
+# add-apt-repository, and on a newer Debian it writes the deb822 source itself.
+# Hence a probe rather than a package in the list above — naming it unconditionally
+# fails trixie, and dropping it unconditionally fails bookworm. Both happened.
+RUN apt-get update \
+    && if apt-cache show software-properties-common > /dev/null 2>&1; then \
+           apt-get install -y --no-install-recommends software-properties-common; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- latest stable clang/LLVM (apt.llvm.org) ----

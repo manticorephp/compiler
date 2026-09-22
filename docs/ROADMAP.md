@@ -229,7 +229,7 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
   [`design/module-system.md`](design/module-system.md) but nowhere in `src/`. Manifest targets
   and Composer source discovery work; transitive dependency fetch does not.
 - **The ABI version is not surfaced.** `MemoryAbi::VERSION` is 8 and `manticore version`
-  prints only `manticore 0.10.0`, so a vendored `.o` cannot detect a mismatch.
+  prints only `manticore 0.11.0`, so a vendored `.o` cannot detect a mismatch.
 - **`dump-mir --after=<pass>`** is described in [`design/mir.md`](design/mir.md) but not
   implemented.
 - **Cycle collector: manual trigger only**, and it does not scan static or global roots. A
