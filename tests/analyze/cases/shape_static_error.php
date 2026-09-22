@@ -42,3 +42,5 @@ echo pairs([[1, 'a']]);
 function storeFloat(array $q): int { $q[1] = 2.5; return $q[1]; }
 /** @param array{0:Node,1:bool} $pair */
 function storeInt(array $pair): int { $pair[1] = 5; return $pair[0]->kind; }
+/** @var array{a:int} $x */
+$x = ['a' => 'no'];

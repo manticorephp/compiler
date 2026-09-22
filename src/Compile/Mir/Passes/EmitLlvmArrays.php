@@ -1015,9 +1015,8 @@ trait EmitLlvmArrays
                 $out .= $badL . ":\n";
                 $keyStr = $aa->index->kind === Node::KIND_STRING_CONST
                     ? $aa->index->value : (string)$aa->index->value;
-                $where = $aa->array->type->shapeString() . ' key ' . $keyStr;
-                $expected = $self->type->kind === Type::KIND_OBJ
-                    ? \ltrim((string)$self->type->class, '\\') : $self->type->toString();
+                $where = $aa->array->type->phpString() . ' key ' . $keyStr;
+                $expected = $self->type->phpString();
                 // The thrower names what it was GIVEN through `get_debug_type`,
                 // which reads a cell: a raw-hinted buffer's word is boxed by
                 // that hint first (`__mir_elem_decode`), so an int buffer under

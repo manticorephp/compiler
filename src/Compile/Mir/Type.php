@@ -459,6 +459,50 @@ final class Type
         return 'array{' . \implode(',', $parts) . '}';
     }
 
+    /**
+     * The php / PHPStan spelling, for a message a php programmer reads:
+     * `array{0: Node, 1: ?bool}`, `string[]`, `array<string, int>`, a class by
+     * its name, `cell` as `mixed`. Diagnostics only — {@see toString} is the
+     * golden-stable MIR spelling.
+     */
+    public function phpString(): string
+    {
+        if ($this->isShape()) {
+            $parts = [];
+            foreach ($this->fields as $ek => $f) {
+                $fs = $f->phpString();
+                if (isset($this->nullableFields[$ek]) && $f->kind !== self::KIND_CELL
+                    && $f->kind !== self::KIND_UNION && $f->kind !== self::KIND_NULL) {
+                    $fs = '?' . $fs;
+                }
+                $parts[] = self::shapeKeyLabel($ek) . ': ' . $fs;
+            }
+            return 'array{' . \implode(', ', $parts) . '}';
+        }
+        if ($this->kind === self::KIND_ARRAY) {
+            $el = $this->element === null ? 'mixed' : $this->element->phpString();
+            if ($this->key !== null && $this->key->kind !== self::KIND_INT) {
+                return 'array<' . $this->key->phpString() . ', ' . $el . '>';
+            }
+            return $el . '[]';
+        }
+        if ($this->kind === self::KIND_OBJ) { return \ltrim($this->class ?? 'object', '\\'); }
+        if ($this->kind === self::KIND_CLOSURE) { return 'Closure'; }
+        if ($this->kind === self::KIND_CELL) {
+            if ($this->atoms === []) { return 'mixed'; }
+            $parts = [];
+            foreach ($this->atoms as $atom) { $parts[] = $atom->phpString(); }
+            return \implode('|', $parts);
+        }
+        if ($this->kind === self::KIND_UNION) {
+            $parts = [];
+            foreach ($this->atoms as $atom) { $parts[] = $atom->phpString(); }
+            return \implode('|', $parts);
+        }
+        if ($this->kind === self::KIND_UNKNOWN) { return 'mixed'; }
+        return $this->kind;
+    }
+
     /** Same keys, same nullability, same field types. */
     public function sameShape(self $o): bool
     {

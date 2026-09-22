@@ -23,6 +23,9 @@
  *   MANTICORE_PRELUDE=$PWD/prelude php -d memory_limit=2048M \
  *     tools/compile_user_mir.php prog.php > prog.ll
  *
+ * `MC_DUMP_MIR=1` prints the typed MIR instead of the IR (exit 70 on a
+ * TypeCheck error) — the 3 s loop for a pass or a type-check change.
+ *
  * Emits `LINK_STDLIB=0|1` on stderr: whether the module referenced any bundled
  * stdlib extern, i.e. whether `lib/manticore_stdlib.o` must be linked. Linking
  * it unconditionally duplicates every symbol the prelude also defines.
