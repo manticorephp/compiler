@@ -43,6 +43,7 @@ bash tests/aot/run.sh -k <substr>    # filter cases (do this first — the full 
 bash tests/aot/run.sh -j 0           # all cores (note: `-j 0` is two args)
 bash tools/difftest.sh               # byte parity vs the `php` interpreter over the corpus
 bash tools/selfhost_fixpoint.sh      # gen2 IR == gen3 IR, self-host suite, rebuild stability
+bash tools/install_smoke.sh          # an INSTALLED compiler (on $PATH, behind a symlink) finds its own lib/
 bash tools/docker/run_tests.sh --gate [--amd64]   # the same on Linux (~2 h arm64)
 ```
 
