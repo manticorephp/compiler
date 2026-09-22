@@ -1015,6 +1015,12 @@ trait EmitLlvmLocals
         // the property's own buffer (rc 1, so the COW copied nothing).
         $dt = $this->locals->globalBackedType[$sl->name] ?? null;
         $flavor = $dt === null ? '' : $this->discardReleaseFlavor($dt);
+        // A closure env carries its own lifetime header, but nothing else in
+        // the compiler releases one by slot, so {@see EmitLlvm::discardReleaseFlavor}
+        // answers '' for it. A module cell OWNS what it holds, so name the
+        // flavor here: `__mir_closure_release` self-guards on the magic, so a
+        // slot that disagrees with its decl releases nothing.
+        if ($flavor === '' && $dt !== null && $this->isClosureValueType($dt)) { $flavor = 'closure'; }
         if (isset($this->globalCellVeto[$cell])) { $flavor = ''; }
         $out = '';
         $v = $sl->value;
@@ -1032,7 +1038,8 @@ trait EmitLlvmLocals
                 $this->lastValue = $sv;
                 $this->lastValueType = $st;
             } elseif ($vk === Type::KIND_OBJ || $vk === Type::KIND_ARRAY
-                || $vk === Type::KIND_STRING || $vk === Type::KIND_UNION) {
+                || $vk === Type::KIND_STRING || $vk === Type::KIND_UNION
+                || $vk === Type::KIND_CLOSURE) {
                 // Depth follows the DECL — the release below reads it, so the
                 // retain must co-own to the same depth ({@see arrayRetainFlavor});
                 // with no release to pair, the value's own depth.

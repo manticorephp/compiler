@@ -4794,6 +4794,14 @@ final class EmitLlvm implements EmitVisitor
         return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
     }
 
+    /** A value that IS a closure env — `callable`/`Closure` under KIND_CLOSURE,
+     *  or the `obj<__closure_N>` / `obj<Closure>` handle a literal carries. */
+    private function isClosureValueType(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
+        return $t->kind === Type::KIND_OBJ && $this->isClosureClass($t->class ?? '');
+    }
+
     /** An enum case is a value-type ORDINAL (no rc header) — never rc-managed,
      *  like an int. `$cls` is an obj type's class name. */
     private function isEnumClass(string $cls): bool
