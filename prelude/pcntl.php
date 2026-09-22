@@ -412,6 +412,19 @@ namespace Process {
         private bool $stopping = false;
         /** @var array<int, int> worker index → live pid */
         private array $pids = [];
+        /** @var array<int, float> worker index → when its restart is due */
+        private array $dueAt = [];
+        /** @var array<int, int> worker index → consecutive crashes */
+        private array $fails = [];
+        /** @var array<int, float> worker index → when it was last started */
+        private array $bornAt = [];
+
+        /** A worker that stayed up this long is healthy: its crash starts a
+         *  fresh backoff rather than continuing the previous one. */
+        private const HEALTHY_AFTER = 10.0;
+        /** First delay, and the ceiling it doubles towards. */
+        private const BACKOFF_MIN = 0.1;
+        private const BACKOFF_MAX = 5.0;
 
         public function run(int $n, callable $worker): void
         {
@@ -422,7 +435,7 @@ namespace Process {
             \pcntl_signal(\SIGTERM, function () { $this->stop(\SIGTERM); });
             \pcntl_signal(\SIGINT, function () { $this->stop(\SIGINT); });
 
-            while (\count($this->pids) > 0) {
+            while (\count($this->pids) > 0 || \count($this->dueAt) > 0) {
                 \pcntl_signal_dispatch();
                 $status = 0;
                 $pid = \pcntl_waitpid(-1, $status, \WNOHANG);
@@ -434,10 +447,11 @@ namespace Process {
                     $crashed = \pcntl_wifsignaled($status)
                         || (\pcntl_wifexited($status) && \pcntl_wexitstatus($status) !== 0);
                     if ($idx >= 0 && !$this->stopping && $crashed) {
-                        $this->start($idx, $worker);
+                        $this->schedule($idx);
                     }
                     continue;
                 }
+                $this->startDue($worker);
                 \usleep(50000);
             }
         }
@@ -451,14 +465,59 @@ namespace Process {
             }
             if ($pid > 0) {
                 $this->pids[$idx] = $pid;
+                $this->bornAt[$idx] = \microtime(true);
             }
             // pid < 0: fork failed — carry on with fewer workers.
+        }
+
+        /**
+         * Put a crashed worker back on a BACKOFF rather than immediately.
+         *
+         * A worker that dies on startup — a port that went away, a config the
+         * child rejects — used to be re-forked the instant it was reaped, so the
+         * supervisor span at fork speed and the failure showed up as load rather
+         * than as an error. The delay doubles from 0.1 s to a 5 s ceiling, and a
+         * worker that stayed up {@see HEALTHY_AFTER} seconds is treated as
+         * healthy, so an unrelated later crash starts over at the bottom.
+         */
+        private function schedule(int $idx): void
+        {
+            $now = \microtime(true);
+            $born = $this->bornAt[$idx] ?? $now;
+            $n = ($now - $born) >= self::HEALTHY_AFTER ? 0 : ($this->fails[$idx] ?? 0);
+            $n = $n + 1;
+            $this->fails[$idx] = $n;
+            $wait = self::BACKOFF_MIN;
+            for ($i = 1; $i < $n; $i = $i + 1) {
+                $wait = $wait * 2.0;
+                if ($wait >= self::BACKOFF_MAX) { $wait = self::BACKOFF_MAX; break; }
+            }
+            $this->dueAt[$idx] = $now + $wait;
+        }
+
+        /** Fork every worker whose backoff has elapsed. */
+        private function startDue(callable $worker): void
+        {
+            if (\count($this->dueAt) === 0) { return; }
+            $now = \microtime(true);
+            /** @var array<int, float> $keep */
+            $keep = [];
+            foreach ($this->dueAt as $idx => $when) {
+                if ($this->stopping) { continue; }
+                if ($when > $now) { $keep[$idx] = $when; continue; }
+                $this->start($idx, $worker);
+            }
+            $this->dueAt = $keep;
         }
 
         /** Forward the shutdown to every child; the reap loop then drains. */
         private function stop(int $signo): void
         {
             $this->stopping = true;
+            // A pending restart must not hold the reap loop open: its condition
+            // counts these too, so leaving one queued would never let the
+            // supervisor return.
+            $this->dueAt = [];
             foreach ($this->pids as $pid) {
                 \posix_kill($pid, $signo);
             }
