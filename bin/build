@@ -60,15 +60,19 @@ cd "$ROOT"
 # canonical dir, as tools/selfhost.sh does for the same reason.
 export MANTICORE_PRELUDE="$ROOT/prelude"
 
-# MANTICORE_CELL_ASSERT is a per-compile diagnostic that BAKES __mir_assert_cell
-# calls into whatever it compiles (a flag's default is baked into the installed
-# binary) — never into a self build. The cell VERIFIER is the opposite: it emits
-# no IR, it only refuses to write an object in which a raw word reaches a cell
-# channel (docs/design/value-channels.md, step 3), so the compiler and the stdlib
-# are built under it by default. MANTICORE_CELLGUARD=1 turns it back into the
-# report-only census.
-unset MANTICORE_CELL_ASSERT
-export MANTICORE_CELLGUARD="${MANTICORE_CELLGUARD:-strict}"
+# The cellguard flags are per-compile diagnostics. MANTICORE_CELL_ASSERT BAKES
+# __mir_assert_cell calls into whatever it compiles (a flag's default is baked
+# into the installed binary) — never into a self build. The cell VERIFIER
+# (MANTICORE_CELLGUARD=strict) emits no IR; it refuses to write an object in
+# which a raw word reaches a cell channel (docs/design/value-channels.md, step
+# 3). Pass 2 runs under it by default — the NEW compiler's verifier over the
+# stdlib. Pass 1 does not: it is the PREVIOUS generation's verifier, and a
+# binary from before the instrument was fixed refuses a clean tree; the
+# compiler's own module is verified by the next generation's pass 1 instead
+# (`bin/build --verify`). MANTICORE_CELLGUARD=1 turns pass 2 into the
+# report-only census (CELLGUARD_PASS2=1); CELLGUARD_PASS1=strict verifies pass 1 too.
+unset MANTICORE_CELLGUARD MANTICORE_CELL_ASSERT
+CELLGUARD_PASS2="${CELLGUARD_PASS2:-strict}"
 
 SEED=0
 AUTOSEED=0
@@ -218,8 +222,10 @@ else
     fi
     set +e
     # shellcheck disable=SC2086
+    if [[ -n "${CELLGUARD_PASS1:-}" ]]; then export MANTICORE_CELLGUARD="$CELLGUARD_PASS1"; fi
     bin/manticore build $APPS_ONLY $OPT_FLAG "$TMP_MANIFEST" 2>&1 | tee "$BUILD_LOG"
     BUILD_RC="${PIPESTATUS[0]}"
+    unset MANTICORE_CELLGUARD
     set -e
     [[ $BUILD_RC -eq 0 ]] || { echo "fatal: self build failed (rc=$BUILD_RC)" >&2; exit 1; }
     # The emitter reports every call it compiled into an undefined-function
@@ -254,8 +260,8 @@ else
         exit 0
     fi
 
-    echo "── self-host pass 2: $OUT build --libs-only (stdlib rebuilt by the NEW compiler) ──"
-    "$OUT" build --libs-only manticore.json
+    echo "── self-host pass 2: $OUT build --libs-only (stdlib rebuilt by the NEW compiler, cell verifier $CELLGUARD_PASS2) ──"
+    MANTICORE_CELLGUARD="$CELLGUARD_PASS2" "$OUT" build --libs-only manticore.json
     # A library's .sig is its whole reason to exist, and it can come out EMPTY
     # while every other signal stays green: the .o is full of symbols, pass 2
     # exits 0, and nothing fails until a user program calls one and clang says
