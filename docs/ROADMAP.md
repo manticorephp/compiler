@@ -248,8 +248,14 @@ remaining levers:
 - **IR volume is the build-time lever** — `clang -O2` is ~66% of `bin/build`. Emitting less IR
   beats optimising the front end.
 - SSO / interning for dynamic small strings; property-bag literal hashes.
-- Harden the gated `TypeCheck` pass (`MANTICORE_TYPECHECK=1`) toward on-by-default — it would
-  have caught the `str_replace`-array misuse at compile time instead of as a runtime SIGBUS.
+- ✅ **`TypeCheck` is ON by default** (2026-09-22; `MANTICORE_TYPECHECK=0` turns it off) — it
+  catches the `str_replace`-array misuse at compile time instead of as a runtime SIGBUS. Two of
+  its own rules had kept it gated, not the corpus: a spread argument was checked as "argument
+  1", and arithmetic on any string operand was rejected where php coerces a numeric one
+  (`docs/design/value-channels.md`).
+- ⛔ **`plausiblePtrIr` → assertions** — 15 sites dereference an unvalidated word after a bounds
+  guess (`> 0xFFFF && < 2^48`). Each sits in an ERASED channel, so they can only become
+  assertions once those producers are self-describing: the sequel to the value-channel epic.
 - Array / JSON / sort helpers sit at roughly 2× php and are competing with hand-tuned C —
   that is close to the ceiling, not a bug.
 

@@ -76,7 +76,7 @@ poisons the oracle). Run it with `bash tests/aot/run.sh -k <name>`.
 PHP source → Lexer → Parser → AST
   → LowerFromAst → ConstFold → DeadStore → InferTypes → VivifyRefArgs
   → NarrowReturns → InferTypes → InlineClosures → InferTypes → Monomorphize
-  → FuseSplitJoin → TypeCheck (reprOnly unless MANTICORE_TYPECHECK=1) → NarrowReturns → CheckTypeDefs
+  → FuseSplitJoin → TypeCheck (full; MANTICORE_TYPECHECK=0 → reprOnly) → NarrowReturns → CheckTypeDefs
   → ReflectAnalysis → DemoteCharLocals → InferEffects → InferAllocKind
   → ApplyMemoryMode → InsertMemoryOps → Verify
   → EmitLlvm (+ HoistAllocas, PruneIr) → LLVM IR → clang -c → cc → static binary
