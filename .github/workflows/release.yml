@@ -1,0 +1,240 @@
+# What a release IS: a container image on Docker Hub, and per-platform tarballs
+# on the GitHub release. Nothing else is published, and nothing is published
+# from a cache — every artifact here is cold-seeded from the tagged source, so a
+# release owes nothing to a compiler that was already lying around.
+#
+# The image is the primary artifact and the tarball is the secondary one, for a
+# reason worth writing down: the compiler shells out to `clang` to assemble its
+# IR and to `cc` to link, and it links against the host pcre2/openssl/sqlite/
+# curl. A tarball therefore cannot be self-contained — it needs a toolchain on
+# the far side — while the image carries exactly the one it was built with.
+#
+#   git tag v0.11.0 && git push origin v0.11.0
+#   gh workflow run release.yml            # dry run: builds and smokes, publishes nothing
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'push to Docker Hub and create the GitHub release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: manticorephp/manticore
+
+jobs:
+  linux:
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # A tag names the version; a dispatch has no tag and must not be able to
+      # masquerade as one, so it is stamped with the commit instead.
+      - name: Version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "publish=${{ github.event_name == 'push' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+            echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          tags: manticore-runtime:${{ matrix.arch }}
+          load: true
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+
+      # The version lives in one `puts()` in Main.php, so a tag can disagree with
+      # the binary it ships. Catch that here rather than in a user's bug report.
+      - name: The binary agrees with the tag
+        if: github.ref_type == 'tag'
+        run: |
+          got="$(docker run --rm manticore-runtime:${{ matrix.arch }} manticore version)"
+          want="manticore ${{ steps.v.outputs.version }}"
+          echo "binary: $got"
+          [ "$got" = "$want" ] || { echo "tag says '$want' — see Main.php cmd_version" >&2; exit 1; }
+
+      # Compile something THROUGH the image, the way a user would: bind mount,
+      # bare `manticore` off $PATH, and a stdlib function that only links when
+      # the prelude and manticore_stdlib.o were both found.
+      - name: Smoke the image
+        run: |
+          mkdir -p smoke && printf '<?php\necho str_pad("ok", 4, "!"), "\\n";\n' > smoke/app.php
+          docker run --rm -v "$PWD/smoke":/work -u "$(id -u):$(id -g)" \
+            manticore-runtime:${{ matrix.arch }} manticore compile app.php -o app
+          got="$(./smoke/app)"
+          [ "$got" = "ok!!" ] || { echo "smoke printed '$got'" >&2; exit 1; }
+
+      # bin/ + lib/ exactly as the image lays them out, so the tarball and the
+      # image ship one layout and Main.php's <exe>/../lib lookup holds in both.
+      - name: Tarball
+        run: |
+          name="manticore-${{ steps.v.outputs.version }}-linux-${{ matrix.arch }}"
+          cid="$(docker create manticore-runtime:${{ matrix.arch }})"
+          mkdir -p "dist/$name"
+          docker cp "$cid:/opt/manticore/bin" "dist/$name/bin"
+          docker cp "$cid:/opt/manticore/lib" "dist/$name/lib"
+          docker rm "$cid" > /dev/null
+          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+          ls -la dist/
+
+      - name: Push the arch image
+        if: steps.v.outputs.publish == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          docker tag manticore-runtime:${{ matrix.arch }} \
+            "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
+          docker push "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  macos:
+    name: macos-arm64
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          brew install php pcre2 openssl@3 sqlite
+          php -v
+
+      - name: Version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Cold, like the image: a release is built from the tagged source by the
+      # interpreter, never from a cached compiler.
+      - name: Cold seed
+        run: bin/compile
+
+      - name: Installed layout holds
+        run: bash tools/install_smoke.sh
+
+      - name: Tarball
+        run: |
+          name="manticore-${{ steps.v.outputs.version }}-macos-arm64"
+          mkdir -p "dist/$name"
+          cp -R bin/manticore "dist/$name/bin" 2>/dev/null || { mkdir -p "dist/$name/bin"; cp bin/manticore "dist/$name/bin/"; }
+          cp -R lib "dist/$name/lib"
+          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-macos-arm64
+          path: dist/*.tar.gz
+
+  # One multi-arch tag out of the two single-arch ones, by digest — no rebuild,
+  # no emulation, and `docker pull manticorephp/manticore` resolves per host.
+  manifest:
+    needs: linux
+    if: github.ref_type == 'tag' || inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          v="${{ steps.v.outputs.version }}"
+          docker buildx imagetools create -t "$IMAGE:$v" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
+          # `latest` follows tags only: a dispatch build must never become it.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
+          fi
+          docker buildx imagetools inspect "$IMAGE:$v"
+
+  release:
+    needs: [linux, macos]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cp tools/install.sh dl/install.sh
+          cd dl && sha256sum ./*.tar.gz install.sh > SHA256SUMS && cat SHA256SUMS
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          notes="$(cat <<EOF
+          \`\`\`
+          docker run --rm -v "\$PWD":/work -u "\$(id -u):\$(id -g)" \\
+              $IMAGE:$v manticore compile app.php -o app
+
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.sh | sh
+          \`\`\`
+
+          The tarballs carry the compiler and its stdlib, not a toolchain: manticore
+          assembles its IR with \`clang\` and links with \`cc\`, against the host's
+          pcre2, openssl, sqlite3 and curl. install.sh checks for those and says
+          which are missing. The image carries the toolchain it was built with.
+
+          Built cold from \`${GITHUB_REF_NAME}\` — no cached compiler took part.
+          EOF
+          )"
+          gh release create "$GITHUB_REF_NAME" dl/* --title "$GITHUB_REF_NAME" --notes "$notes"

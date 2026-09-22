@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 #
-# Manticore installer — builds the compiler FROM SOURCE into $MANTICORE_HOME
-# (default ~/.manticore) and tells you how to put `manticore` on your PATH.
+# Manticore installer — puts the compiler into $MANTICORE_HOME (default
+# ~/.manticore) and tells you how to put `manticore` on your PATH.
 #
 #   curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 #   ./install.sh                      # from a checkout
 #
-# No prebuilt binary is downloaded — Manticore compiles ITSELF from PHP source:
+# Two paths, in this order:
+#   * a PUBLISHED build for this platform (linux/macos × arm64/amd64), verified
+#     against the release's SHA256SUMS. Needs no php: the compiler is native and
+#     CI already paid the bootstrap. MANTICORE_FROM_SOURCE=1 skips it.
+#   * otherwise Manticore compiles ITSELF from PHP source:
 #   * first install (no $MANTICORE_HOME/bin/manticore yet): cold bootstrap via
 #     the Zend seed (bin/compile).
 #   * upgrade (a working binary already installed): the installed compiler
@@ -20,7 +24,8 @@
 #   $MANTICORE_HOME/lib/manticore_stdlib.o(.sig)
 #   $MANTICORE_HOME/lib/prelude/*.php
 #
-# Env knobs: MANTICORE_HOME, MANTICORE_REPO, MANTICORE_REF, MANTICORE_SRC.
+# Env knobs: MANTICORE_HOME, MANTICORE_REPO, MANTICORE_REF, MANTICORE_SRC,
+#           MANTICORE_VERSION (a specific release), MANTICORE_FROM_SOURCE=1.
 
 set -euo pipefail
 
@@ -41,6 +46,90 @@ case "$OS" in
 esac
 log "platform $OS/$ARCH -> prefix $PREFIX"
 
+# ---- 1b. a published build, if there is one for this platform -------------
+# The fast path, and since 0.11 the usual one: a release tarball is steps 3-5
+# below, already done on CI and cold-seeded from the tag. It costs a download
+# instead of a bootstrap, and it needs no php at all — the compiler is native.
+# Skipped for an explicitly source-flavoured install (MANTICORE_SRC, a
+# non-default MANTICORE_REF, MANTICORE_FROM_SOURCE=1), and ANY miss falls
+# through to the build rather than failing: a platform with no published build,
+# an unreachable github, a checksum that does not match.
+REL_OS=""; REL_ARCH=""
+case "$OS" in Darwin) REL_OS=macos;; Linux) REL_OS=linux;; esac
+case "$ARCH" in arm64|aarch64) REL_ARCH=arm64;; x86_64|amd64) REL_ARCH=amd64;; esac
+
+fetch() {
+    if have curl; then curl -fsSL "$1" -o "$2"
+    elif have wget; then wget -qO "$2" "$1"
+    else return 1
+    fi
+}
+
+try_prebuilt() {
+    [ "${MANTICORE_FROM_SOURCE:-0}" = 0 ] || return 1
+    [ -z "${MANTICORE_SRC:-}" ] || return 1
+    [ "$REF" = main ] || return 1
+    [ -n "$REL_OS" ] && [ -n "$REL_ARCH" ] || return 1
+    have curl || have wget || return 1
+
+    local api="https://api.github.com/repos/manticorephp/compiler/releases"
+    local dl="https://github.com/manticorephp/compiler/releases"
+    local tmp ver base name
+    tmp="$(mktemp -d)"
+
+    ver="${MANTICORE_VERSION:-}"
+    if [ -z "$ver" ]; then
+        fetch "$api/latest" "$tmp/latest.json" || { rm -rf "$tmp"; return 1; }
+        ver="$(sed -n 's/.*"tag_name"[^"]*"v\{0,1\}\([^"]*\)".*/\1/p' "$tmp/latest.json" | head -1)"
+    fi
+    [ -n "$ver" ] || { rm -rf "$tmp"; return 1; }
+
+    base="$dl/download/v$ver"
+    name="manticore-$ver-$REL_OS-$REL_ARCH"
+    log "published build $ver ($REL_OS/$REL_ARCH) — downloading (MANTICORE_FROM_SOURCE=1 to build instead)"
+    fetch "$base/$name.tar.gz" "$tmp/$name.tar.gz" || { rm -rf "$tmp"; return 1; }
+
+    # An unverified download is still better than no install, but say which it was.
+    if fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
+        local want got sum
+        sum=""
+        have sha256sum && sum="sha256sum"
+        [ -n "$sum" ] || { have shasum && sum="shasum -a 256"; }
+        if [ -n "$sum" ]; then
+            want="$(sed -n "s|^\([0-9a-f]\{64\}\)[ *]*\./\{0,1\}$name\.tar\.gz\$|\1|p" "$tmp/SHA256SUMS" | head -1)"
+            got="$($sum "$tmp/$name.tar.gz" | cut -d' ' -f1)"
+            if [ -n "$want" ] && [ "$want" != "$got" ]; then
+                warn "checksum mismatch for $name.tar.gz — building from source instead"
+                rm -rf "$tmp"; return 1
+            fi
+        else
+            warn "no sha256sum/shasum here — the download is unverified"
+        fi
+    fi
+
+    tar -xzf "$tmp/$name.tar.gz" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+    [ -x "$tmp/$name/bin/manticore" ] || { rm -rf "$tmp"; return 1; }
+
+    log "installing into $PREFIX"
+    mkdir -p "$PREFIX/bin" "$PREFIX/lib"
+    rm -rf "$PREFIX/lib/prelude"
+    # macOS refuses to overwrite a RUNNING or signed binary in place (SIGKILL);
+    # removing first is the difference between an upgrade and a dead install.
+    rm -f "$PREFIX/bin/manticore"
+    cp "$tmp/$name/bin/manticore" "$PREFIX/bin/manticore"
+    cp -R "$tmp/$name/lib/." "$PREFIX/lib/"
+    if [ "$OS" = Darwin ]; then
+        # Downloaded and unsigned: without this Gatekeeper answers with a dialog
+        # about an unverified developer, which names nothing that would fix it.
+        xattr -d com.apple.quarantine "$PREFIX/bin/manticore" 2>/dev/null || true
+    fi
+    rm -rf "$tmp"
+    return 0
+}
+
+PREBUILT=0
+if try_prebuilt; then PREBUILT=1; fi
+
 # ---- 2. toolchain ---------------------------------------------------------
 # Hard requirements to BUILD the compiler: php (seed), clang>=15, cc. The
 # stdlib's preg/TLS/hash bindings are declare-only in the object, resolved at
@@ -48,7 +137,9 @@ log "platform $OS/$ARCH -> prefix $PREFIX"
 # program actually calls preg_*/https/hash. Missing them is a warning, not a
 # blocker.
 hard=()
-have php   || hard+=("php 8.5        (the cold-bootstrap seed)")
+# php seeds the bootstrap and nothing else — a published build has already been
+# through it, so an install that took the fast path does not want php at all.
+[ "$PREBUILT" = 1 ] || have php || hard+=("php 8.5        (the cold-bootstrap seed)")
 have clang || hard+=("clang/LLVM>=15  (opaque-pointer IR)")
 have cc    || hard+=("cc             (final link driver)")
 soft=()
@@ -75,6 +166,12 @@ fi
 cmajor="$(clang --version | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1)"
 [ -n "$cmajor" ] && [ "$cmajor" -ge 15 ] 2>/dev/null \
     || die "clang ${cmajor:-?} is too old — Manticore emits opaque-pointer IR (needs LLVM >= 15)."
+
+# ---- 3-5. source, build, install ------------------------------------------
+# Everything below the guard is the FROM-SOURCE path; a published build has
+# already landed in $PREFIX. Left unindented on purpose — the diff that added
+# the guard should not be a diff that rewrote the build.
+if [ "$PREBUILT" = 0 ]; then
 
 # ---- 3. source ------------------------------------------------------------
 CLEAN_SRC=0
@@ -120,6 +217,8 @@ cp "$SRC"/lib/manticore_stdlib.o.sig "$PREFIX/lib/" 2>/dev/null || true
 # prelude: bin/compile installs lib/prelude itself; the self-host path does not,
 # so publish it from source unconditionally (idempotent, covers both paths).
 cp "$SRC"/prelude/*.php "$PREFIX/lib/prelude/"
+
+fi   # end of the from-source path
 
 # ---- 6. verify ------------------------------------------------------------
 ver="$("$PREFIX/bin/manticore" version 2>/dev/null || true)"
