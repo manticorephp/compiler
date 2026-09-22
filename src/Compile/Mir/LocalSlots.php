@@ -32,6 +32,11 @@ final class LocalSlots
     public array $globalBacked = [];
     /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
     public array $byRefCaptured = [];
+
+    /** @var array<string, true> locals this function `unset()`s anywhere — the
+     *  one thing that can make a raw scalar slot mean "not set" rather than
+     *  "holds zero" ({@see \Compile\Mir\Passes\EmitLlvmObjects::emitIssetTarget}) */
+    public array $unsetNames = [];
     /** @var array<string, string> name → the slot it owned BEFORE `$name = &$src`
      *  rebound it to `$src`'s slot ('' when it owned none). Presence means the
      *  name is currently an ALIAS, which `unset($name)` has to know: php's
@@ -94,6 +99,36 @@ final class LocalSlots
         }
         foreach (Walk::children($n) as $c) {
             $this->collectRefCellTargets($c);
+        }
+    }
+
+    /**
+     * Every local name whose raw slot can mean "not set" rather than "holds
+     * zero": one this function `unset()`s, and a `static` declared with no
+     * initialiser or a null one.
+     *
+     * The static half is a TYPE LIE the emitter has to work around —
+     * `static $d = null` is typed `int` in MIR (the null rides the slot's zero),
+     * so its kind cannot be asked. The decl node can: no init child, or a
+     * null-const one.
+     */
+    public function collectUnsetNames(Node $n): void
+    {
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach (Walk::children($n) as $t) {
+                if ($t->kind === Node::KIND_LOAD_LOCAL) { $this->unsetNames[$t->name] = true; }
+            }
+            return;
+        }
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $kids = Walk::children($n);
+            if (\count($kids) === 0 || $kids[0]->kind === Node::KIND_NULL_CONST) {
+                $this->unsetNames[$n->name] = true;
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectUnsetNames($c);
         }
     }
 

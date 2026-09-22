@@ -4699,12 +4699,29 @@ trait EmitLlvmObjects
         // erased word that may hold one) carries null NaN-boxed, never as 0 —
         // `isset($m)` on a `mixed $m = null` answered true — so that sentinel
         // counts as unset too.
+        $tk = $t->type->kind;
+        // A raw INT / FLOAT / BOOL slot has no null to test for: 0, 0.0 and
+        // false are VALUES, and php's isset() is true for all three. Comparing
+        // the word against 0 — which is what every other kind needs, a null
+        // pointer being 0 — answered `unset` for `$e = 0` and for
+        // `static $a = 0`. A nullable `?int` rides a CELL, so KIND_INT here
+        // really is non-nullable and the variable is set by construction.
+        //
+        // Except when this function `unset()`s the name: that zeroes the slot
+        // ({@see emitUnset}) and the zero then means "not set" after all, which
+        // is the one case a raw slot cannot tell apart. Those keep the test.
+        if (($tk === Type::KIND_INT || $tk === Type::KIND_FLOAT || $tk === Type::KIND_BOOL)
+            && $t->kind === Node::KIND_LOAD_LOCAL
+            && !isset($this->locals->unsetNames[$t->name])) {
+            $this->lastValue = '1';
+            $this->lastValueType = 'i64';
+            return '';
+        }
         $out = $this->emitNode($t);
         $out .= $this->coerceToI64();
         $v = $this->lastValue;
         $cmp = $this->ssa->allocReg();
         $out .= '  ' . $cmp . ' = icmp ne i64 ' . $v . ", 0\n";
-        $tk = $t->type->kind;
         if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN) {
             $nn = $this->ssa->allocReg();
             $out .= '  ' . $nn . ' = icmp ne i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";

@@ -1108,6 +1108,8 @@ trait EmitLlvmModule
         // branch in emitClosure. Params are excluded (a by-ref capture param
         // already holds an inherited box ptr). The box leaks (bounded — one
         // per by-ref-captured local per call), like the generator frame.
+        $this->locals->unsetNames = [];
+        $this->locals->collectUnsetNames($fn->body);
         $this->locals->byRefCaptured = [];
         $this->locals->collectByRefCaptured($fn->body);
         foreach ($this->locals->byRefCaptured as $bname => $_) {
