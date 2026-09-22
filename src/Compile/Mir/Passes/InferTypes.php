@@ -1795,11 +1795,17 @@ final class InferTypes implements Pass
             if (isset($this->keyUsedLocals[$name])
                 || isset($this->refPinnedLocals[$name])) { continue; }
             $this->cellMergeLocals[$name] = true;
-            $node->then->stmts[] = $this->boxBackStore($name, $tT);
-            if ($hasElse) {
-                $node->else->stmts[] = $this->boxBackStore($name, $oT);
-            } else {
+            // Idempotent across the re-runs of this pass: the arm's FLOW type
+            // after `$f = 1.5` is still float on the next run, so without this
+            // every run appended one more `$f = $f` per arm (four per arm at
+            // the fixpoint, each an own_alias + drop + store in the binary).
+            if (!self::endsWithBoxBack($node->then, $name)) {
+                $node->then->stmts[] = $this->boxBackStore($name, $tT);
+            }
+            if (!$hasElse) {
                 $node->else = new Block([$this->boxBackStore($name, $oT)], Type::void());
+            } elseif (!self::endsWithBoxBack($node->else, $name)) {
+                $node->else->stmts[] = $this->boxBackStore($name, $oT);
             }
         }
     }
@@ -1813,6 +1819,23 @@ final class InferTypes implements Pass
     {
         $dest = $slot ?? Type::cell();
         return new StoreLocal($name, new LoadLocal($name, $concrete), $dest);
+    }
+
+    /** Does `$block` already end in the `$name = $name` box-back store
+     *  {@see boxBackStore} appends? Any trailing run of box-backs for other
+     *  names is looked through, so the order they were appended in does not
+     *  matter. */
+    private static function endsWithBoxBack(Block $block, string $name): bool
+    {
+        for ($i = \count($block->stmts) - 1; $i >= 0; $i--) {
+            $st = $block->stmts[$i];
+            if (!($st instanceof StoreLocal) || !($st->value instanceof LoadLocal)
+                || $st->value->name !== $st->name) {
+                return false;
+            }
+            if ($st->name === $name) { return true; }
+        }
+        return false;
     }
 
     /** A scalar value kind (or an already-boxed cell) — boxable into a slot. */
