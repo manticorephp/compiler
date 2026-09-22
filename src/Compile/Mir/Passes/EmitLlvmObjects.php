@@ -900,9 +900,9 @@ trait EmitLlvmObjects
             if ($getCls !== '') {
                 $out = $this->emitNode($pa->object);
                 $out .= $this->coerceToPtr();
-                // Boxed by the getter's declared return when that is concrete;
-                // a `mixed` getter already hands back a cell.
-                return $out . $this->emitMagicGetCell($getCls, $this->lastValue, $pa->property);
+                // Boxed for a CELL consumer only — this access carries its own
+                // type, and a concrete one wants the getter's raw value.
+                return $out . $this->emitMagicGetCell($getCls, $this->lastValue, $pa->property, $pa->type);
             }
         }
         if (($pa->object->type->class ?? '') === '' && \getenv('MANTICORE_UNKNOWN_PROP_TRACE')) {
@@ -2113,9 +2113,23 @@ trait EmitLlvmObjects
      * as a denormal double (2.15E-314) because the cell→string dispatch saw no
      * NaN-box and fell to the float arm.
      */
-    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop): string
+    /**
+     * `$obj->undeclared` through `__get`, boxed for a CELL consumer.
+     *
+     * The box is the consumer's, not the getter's: `__get(): mixed` already
+     * hands back a cell and `boxRawValue` passes it through, but a getter with a
+     * CONCRETE return (`__get(): string`) yields a raw pointer, and inference
+     * types the access with that same concrete type — so boxing it
+     * unconditionally handed `echo` a NaN-boxed word to dereference (`Echoer`
+     * in magic_get_set: a tag-4 address, SIGSEGV). `$want` is the access node's
+     * own type; a concrete one wants the raw value and gets it.
+     */
+    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop, ?Type $want = null): string
     {
         $out = $this->emitMagicCall($declCls, '__get', $objPtrReg, $prop, null);
+        if ($want !== null && $want->kind !== Type::KIND_CELL && $want->kind !== Type::KIND_UNKNOWN) {
+            return $out;
+        }
         return $out . $this->boxRawValue($this->lastValue,
             $this->sigs->returnType[$declCls . '____get'] ?? null);
     }
