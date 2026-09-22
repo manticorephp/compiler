@@ -2185,6 +2185,8 @@ trait EmitLlvmModule
             || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST) {
             return false; // owned producer (+1 already) or immortal
         }
+        // `(object)$v` is owned on every path ({@see EmitLlvmExpr::emitCast}).
+        if ($v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
         if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
             && isset($this->frame->rcObjLocals[$returnedLocal])) {
             return false; // transfer of an owned local
@@ -2221,6 +2223,8 @@ trait EmitLlvmModule
         // here would hand the caller two references and free none.
         if ($this->condOwnsResult($v)) { return false; }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
+        // A fresh stdClass from `(object)$arr` is +1 like a `new`.
+        if ($tk === Type::KIND_OBJ && $v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
         if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
         // A concat is an owned +1; a literal is immortal — neither needs a
         // borrow retain. (rcRetainByType also no-ops these, but short-

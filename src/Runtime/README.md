@@ -33,10 +33,11 @@ self-contained compiler.
   param, because the self-host compiler drops writes through `&$pos`
   across recursive calls. Objects → assoc arrays, arrays → vecs;
   scalars → int/float/string/bool/null.
-- `stdClass.php` — the built-in empty class, `#[Struct,
-  AllowDynamicProperties]`. Declared here (not synthesised in the
-  lowering pass) so both backends register a real `stdClass` that
-  `(object)` casts and dynamic-property stores can name.
+- `stdClass.php` — the built-in empty class, `#[AllowDynamicProperties]`,
+  the SAME layout every program synthesises for itself (class id, rc, bag
+  — its `linkonce_odr` descriptor coalesces with the program's). It was
+  `#[Struct]` once, a bag-only value layout the program's readers did not
+  share: an object the compiled JSON parser made read back as `(0) {}`.
 - `AsyncHook.php` — the eleven callbacks the async runtime installs so
   ordinary stream I/O parks a fiber instead of the process (readable /
   writable, bounded variants, close, sleep, the DNS cache pair, and the

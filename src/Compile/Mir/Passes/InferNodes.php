@@ -1405,7 +1405,20 @@ trait InferNodes
 
     private function inferCast(Cast $node): Type
     {
-        $this->inferNode($node->operand);
+        $ot = $this->inferNode($node->operand);
+        // `(object)$v` is a stdClass only for an array / scalar / null operand.
+        // An object is ITSELF (its class), and a value classified at run time
+        // (cell / erased / union) yields a CELL — the boxed object of whatever
+        // class the tag dispatch found — never `obj<stdClass>`: that claim sent
+        // `$q->n` on a cast `P` to the stdClass bag offset, which on `P` is its
+        // first declared slot.
+        if ($node->target === 'object') {
+            $k = $ot->kind;
+            if ($k === Type::KIND_OBJ) { $node->type = $ot; }
+            elseif ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN
+                || $k === Type::KIND_UNION || $k === Type::KIND_TYPEVAR) { $node->type = Type::cell(); }
+            else { $node->type = Type::obj('stdClass'); }
+        }
         return $node->type;
     }
 

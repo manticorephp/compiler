@@ -944,6 +944,9 @@ trait EmitLlvmMemory
         // into every property / array-element / cell store.
         if ($this->condOwnsResult($valueNode)) { return ''; }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return ''; }
+        // `(object)$v` is owned on every path: a fresh stdClass, or the object
+        // itself retained by the cast ({@see EmitLlvmExpr::emitCast}).
+        if (($tk === Type::KIND_OBJ || $tk === Type::KIND_CELL) && $valueNode instanceof \Compile\Mir\Cast && $valueNode->target === 'object') { return ''; }
         // An array literal / spread is a fresh +1 that transfers; only
         // borrowed arrays (alias / read) need a co-owner retain.
         if ($tk === Type::KIND_ARRAY && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return ''; }

@@ -1973,6 +1973,8 @@ trait EmitLlvmExpr
                   . ', i64 ' . $xc . ")\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
+            // The helper re-boxes on every path.
+            $this->markCellBoxed($reg);
             return $out;
         }
         $out = $this->emitNode($neg->operand);
@@ -2735,17 +2737,103 @@ trait EmitLlvmExpr
             // element's static type — rather than teaching each reader to guess.
             $srcT = $c->operand->type;
             $srcElem = $srcT->element;
+            $cellified = false;
             if ($srcT->isArray() && $srcElem !== null
                 && $srcElem->kind !== Type::KIND_CELL
                 && $srcElem->kind !== Type::KIND_UNKNOWN) {
                 $out .= $this->emitCellifyArrayRaw($srcElem, $this->cellifySourceFlavor($c->operand));
+                $cellified = true;
             }
             $std = $this->classes['stdClass'] ?? null;
             $bagOff = $std === null ? 16 : $std->bagOffset();
             $size = $std === null ? 24 : $std->instanceSize();
+            // A value whose kind is only known at run time takes php's rules
+            // per kind, like the `(array)` cast below: an OBJECT is itself
+            // (retained — the result is owned on every path), anything else
+            // becomes a fresh stdClass over the bag `__mir_cell_to_bag` builds
+            // (an array's copy with cell elements, an empty bag for null,
+            // `['scalar' => $v]` for a scalar). Reading every cell as the
+            // assoc pointer — what this did — inttoptr'd a tagged word:
+            // `settype($v, 'object')` over `mixed &$v` SIGSEGV'd in var_dump.
+            if ($ok === Type::KIND_OBJ) {
+                // An object is itself — retained, so the result is owned like
+                // every other path of this cast (an enum ordinal / struct /
+                // closure carries no count).
+                $out .= $this->coerceToPtr();
+                $ot = $c->operand->type;
+                if (!$this->objTypeIsStruct($ot) && !$this->isClosureClass($ot->class ?? '')
+                    && !$this->isEnumClass($ot->class ?? '')) {
+                    $this->rt->needsRc = true;
+                    $out .= '  call void @__mir_rc_retain(ptr ' . $this->lastValue . ")\n";
+                }
+                return $out;
+            }
+            if ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN
+                || $ok === Type::KIND_UNION || $ok === Type::KIND_STRING
+                || $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+                || $ok === Type::KIND_BOOL || $ok === Type::KIND_NULL) {
+                $out .= $this->boxToCell($c->operand->type);
+                $out .= $this->coerceToI64();
+                $v = $this->lastValue;
+                $this->rt->needsTagged = true;
+                $this->rt->needsRc = true;
+                $slot = $this->ssa->allocReg();
+                $out .= '  ' . $slot . " = alloca ptr\n";
+                $out .= $this->cellTagIr($v);
+                $tag = $this->cellTagReg;
+                $objL = $this->ssa->allocLabel('co.obj');
+                $bagL = $this->ssa->allocLabel('co.bag');
+                $endL = $this->ssa->allocLabel('co.end');
+                $isObj = $this->ssa->allocReg();
+                $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
+                $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $bagL . "\n";
+                $out .= $objL . ":\n";
+                $op = $this->ssa->allocReg();
+                $out .= '  ' . $op . ' = and i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $opp = $this->ssa->allocReg();
+                $out .= '  ' . $opp . ' = inttoptr i64 ' . $op . " to ptr\n";
+                $out .= '  call void @__mir_rc_retain(ptr ' . $opp . ")\n";
+                $out .= '  store ptr ' . $opp . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $bagL . ":\n";
+                $keyP = $this->strLitId($this->pool->intern('scalar'));
+                $bagP = $this->ssa->allocReg();
+                $out .= '  ' . $bagP . ' = call ptr @__mir_cell_to_bag(i64 ' . $v . ', ptr ' . $keyP . ")\n";
+                $bagW = $this->ssa->allocReg();
+                $out .= '  ' . $bagW . ' = ptrtoint ptr ' . $bagP . " to i64\n";
+                $nobj = $this->ssa->allocReg();
+                $out .= '  ' . $nobj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
+                $out .= '  store i64 ' . $this->lib->descSlotValue($std) . ', ptr ' . $nobj . "\n";
+                $nrc = $this->ssa->allocReg();
+                $out .= '  ' . $nrc . ' = getelementptr inbounds i64, ptr ' . $nobj . ", i64 1\n";
+                $out .= '  store i64 1, ptr ' . $nrc . "\n";
+                $nbg = $this->ssa->allocReg();
+                $out .= '  ' . $nbg . ' = getelementptr inbounds i8, ptr ' . $nobj . ', i64 ' . (string)$bagOff . "\n";
+                $out .= '  store i64 ' . $bagW . ', ptr ' . $nbg . "\n";
+                $out .= '  store ptr ' . $nobj . ', ptr ' . $slot . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $endL . ":\n";
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+                // The node is typed CELL (InferNodes::inferCast): the object of
+                // whatever class the dispatch found, boxed.
+                $boxed = $this->ssa->allocReg();
+                $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $res . ")\n";
+                $this->markCellBoxed($boxed);
+                $this->lastValue = $boxed; $this->lastValueType = 'i64';
+                return $out;
+            }
             $out .= $this->coerceToPtr();
             $bagI = $this->ssa->allocReg();
             $out .= '  ' . $bagI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            // The object co-owns the buffer it takes as its bag: a cellified
+            // rebuild is a fresh +1, anything else is retained unless it is an
+            // owned producer (a literal, a call) — `return (object)$obj` off a
+            // local handed the caller a bag the local's release then freed
+            // (json_decode through the compiled parser answered `(0) {}`).
+            if (!$cellified) {
+                $out .= $this->rcRetainByType($c->operand, $bagI, $srcT->isArray() ? $srcT : null, 4);
+            }
             $obj = $this->ssa->allocReg();
             $out .= '  ' . $obj . ' = call ptr @__mir_alloc_tagged(i64 ' . (string)$size . ")\n";
             $out .= '  store i64 ' . $this->lib->descSlotValue($std) . ', ptr ' . $obj . "\n";

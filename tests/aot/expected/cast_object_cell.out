@@ -1,0 +1,49 @@
+(object) array(
+   'x' => 1,
+   'y' => 'two',
+)int(1)
+string(3) "two"
+(object) array(
+)(object) array(
+   'scalar' => 5,
+)(object) array(
+   'scalar' => 's',
+)(object) array(
+   'scalar' => 2.5,
+)(object) array(
+   'scalar' => true,
+)bool(true)
+int(7)
+(object) array(
+   'k' => 
+  array (
+    0 => 1,
+    1 => 2,
+  ),
+)bool(true)
+int(2)
+int(9)
+array(2) {
+  ["a"]=>
+  int(1)
+  ["c"]=>
+  int(4)
+}
+(object) array(
+   'a' => 2,
+   'b' => 3,
+)bool(true)
+string(1) "v"
+(object) array(
+   'scalar' => 1,
+){"j":[1,"x"]}
+(object) array(
+   'd' => 1,
+   'e' => 
+  array (
+    0 => 2,
+  ),
+)bool(true)
+int(8)
+int(1)
+int(2)

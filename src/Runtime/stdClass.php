@@ -6,9 +6,15 @@
  * both backends register a real `stdClass` and `(object)` casts /
  * json_decode can name it.
  *
- *   #[Struct]                  — value layout, no class-id / rc header.
  *   #[AllowDynamicProperties]  — carries a dynamic-property bag so
  *                                `$o->$key = …` and `(object)$assoc` work.
+ *
+ * ONE layout, the one every program synthesises for itself (class id, rc,
+ * bag — {@see \Compile\Mir\Passes\LowerFromAst}): the descriptor is
+ * `linkonce_odr` and coalesces with the program's. It was `#[Struct]` once —
+ * a bag-only value layout — so an object this library built (the compiled
+ * JSON parser's `(object)$o`) reached the program under a layout its readers
+ * did not share and read back as `(0) {}`.
  */
-#[Struct, AllowDynamicProperties]
+#[AllowDynamicProperties]
 class stdClass {}

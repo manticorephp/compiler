@@ -132,6 +132,7 @@ final class UnifiedArrayRuntime
         $this->emitElemDecode();
         $this->emitCellifyInplace();
         $this->emitElemEncode();
+        $this->emitCellToBag();
         $this->emitCellToKind();
         $this->emitArrayConform();
         $this->emitElemUntagKind();
@@ -4473,6 +4474,65 @@ final class UnifiedArrayRuntime
         $h0->ret($cell);
         $mism->call('__mir_array_cellify_inplace', Type::void(), [$arr, $hint]);
         $mism->ret($cell);
+    }
+
+    /**
+     * `__mir_cell_to_bag(v, scalarKey) -> ptr` — the OWNED dynamic-property bag
+     * `(object)$v` gives a runtime-classified value, php's rules per kind: an
+     * ARRAY → a copy of it whose elements are cells (the bag is a cell channel,
+     * so a raw-hinted buffer is cellified after the copy co-owns its elements;
+     * the copy is what makes `$o->k = …` invisible to the source array); NULL
+     * → an empty bag; any SCALAR → `['scalar' => $v]` (the key string is the
+     * caller's interned literal — a runtime body has no string pool). An
+     * OBJECT is not a bag question at all and never reaches here: the caller
+     * dispatches tag 8 to the object itself first.
+     */
+    private function emitCellToBag(): void
+    {
+        $fn = $this->module->func('__mir_cell_to_bag', Type::ptr());
+        $v = $fn->param(Type::i64(), 'v');
+        $key = $fn->param(Type::ptr(), 'scalarKey');
+        $e = $fn->block('entry');
+        $tagged = $fn->block('tagged');
+        $chkarr = $fn->block('chkarr');
+        $doarr = $fn->block('doarr');
+        $cellify = $fn->block('cellify');
+        $arrdone = $fn->block('arrdone');
+        $donull = $fn->block('donull');
+        $scalar = $fn->block('scalar');
+        $mask = Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK);
+        // A raw double (no NaN-box) is a scalar.
+        $e->brIf($e->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496)), $tagged, $scalar);
+        $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $tagged->brIf($tagged->icmp('eq', $nib, Value::int(Type::i64(), 3)), $donull, $chkarr);
+        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $scalar);
+        // ARRAY: copy, co-own the elements by the buffer's hint, then cellify a
+        // raw-hinted buffer in place (an unstamped one is empty).
+        $src = $doarr->inttoptr($doarr->and_($v, $mask), Type::ptr());
+        $copy = $doarr->call('__mir_array_copy', Type::ptr(), [$src]);
+        $doarr->call('__mir_array_adopt_cell', Type::void(), [$copy]);
+        $hint = $this->elemHint($doarr, $copy);
+        $doarr->switch_($hint, $cellify, [
+            new SwitchCase(Value::int(Type::i64(), 0), $arrdone),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $arrdone),
+        ]);
+        $cellify->call('__mir_array_cellify_inplace', Type::void(), [$copy, $hint]);
+        $cellify->br($arrdone);
+        $arrdone->ret($copy);
+        // NULL: an empty bag.
+        $empty = $donull->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
+        $donull->store(Value::int(Type::i64(), 0), $empty);
+        $donull->ret($empty);
+        // SCALAR: `['scalar' => $v]`, a CELL buffer (the word is already a cell).
+        $one = $scalar->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
+        $scalar->store(Value::int(Type::i64(), 0), $one);
+        $scalar->call('__mir_rc_retain_str', Type::void(), [$key]);
+        $bag = $scalar->call('__mir_array_set_str', Type::ptr(),
+            [$one, $key, $v, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $fp = $this->hdr($scalar, $bag, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $scalar->store($scalar->or_($scalar->load(Type::i64(), $fp),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CELL | MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
+        $scalar->ret($bag);
     }
 
     /**
