@@ -20,10 +20,19 @@ FROM alpine:${ALPINE_TAG} AS base
 # musl-dev's crt files with it. pkgconf provides pkg-config, pcre2-dev provides
 # pcre2-config, curl-dev provides curl-config — the three probes Main.php runs.
 # /etc/services ships in alpine-baselayout, so there is no netbase to add.
+# The last line is what a first musl run costs, and none of it is guesswork —
+# each package is one cluster of suite failures:
+#   tzdata        -> /usr/share/zoneinfo, which TzInfo.php reads directly. Alpine
+#                    ships no tz database at all, so every date_* case failed.
+#   libxml2-dev   -> prelude/xml.php binds libxml2 through FFI (`#[Library('xml2')]`),
+#                    and the dev package is what provides the linkable .so.
+#   gnu-libiconv  -> musl keeps iconv INSIDE libc and ships no libiconv.so, while
+#                    src/Runtime/Iconv.php binds `#[Library('iconv')]` by name.
 RUN apk add --no-cache \
         clang lld gcc musl-dev binutils \
         pcre2-dev openssl-dev curl-dev sqlite-dev pkgconf \
-        bash file make curl ca-certificates
+        bash file make curl ca-certificates \
+        tzdata libxml2-dev gnu-libiconv
 
 RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
