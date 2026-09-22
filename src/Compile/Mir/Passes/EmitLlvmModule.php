@@ -1109,6 +1109,8 @@ trait EmitLlvmModule
         // already holds an inherited box ptr). The box leaks (bounded — one
         // per by-ref-captured local per call), like the generator frame.
         $this->locals->unsetNames = [];
+        $this->locals->unsetTargets = [];
+        $this->locals->unsetBound = [];
         $this->locals->collectUnsetNames($fn->body);
         $this->locals->byRefCaptured = [];
         $this->locals->collectByRefCaptured($fn->body);
@@ -1123,6 +1125,17 @@ trait EmitLlvmModule
             $bodySink->write('  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n");
             $bodySink->write('  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n");
             $this->locals->refLocals[$bname] = true;
+        }
+        // One i1 per global-backed name this function unsets: `unset($static)`
+        // breaks the BINDING for the rest of this call and leaves the storage
+        // alone ({@see EmitLlvmObjects::emitUnset}). The flag is what `isset()`
+        // reads afterwards, since the cell still holds the value.
+        foreach ($this->locals->unsetTargets as $uname => $_) {
+            if (!isset($this->locals->globalBacked[$uname])) { continue; }
+            $fl = $this->ssa->allocReg();
+            $bodySink->write('  ' . $fl . " = alloca i64\n");
+            $bodySink->write('  store i64 1, ptr ' . $fl . "\n");
+            $this->locals->unsetBound[$uname] = $fl;
         }
         $bodySink->write($this->emitRefCellBoxes($fn->body, $paramNames));
         // Stamp the correct backtrace frame name for a method now that the

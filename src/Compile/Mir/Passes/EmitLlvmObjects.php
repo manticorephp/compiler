@@ -4700,6 +4700,15 @@ trait EmitLlvmObjects
         // `isset($m)` on a `mixed $m = null` answered true — so that sentinel
         // counts as unset too.
         $tk = $t->type->kind;
+        // A name this call unbound with `unset()` is not set, whatever the
+        // storage behind it still holds ({@see emitUnset}).
+        if ($t->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->unsetBound[$t->name])) {
+            $b = $this->ssa->allocReg();
+            $out = '  ' . $b . ' = load i64, ptr ' . $this->locals->unsetBound[$t->name] . "\n";
+            $this->lastValue = $b;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // A raw INT / FLOAT / BOOL slot has no null to test for: 0, 0.0 and
         // false are VALUES, and php's isset() is true for all three. Comparing
         // the word against 0 — which is what every other kind needs, a null
@@ -4800,6 +4809,18 @@ trait EmitLlvmObjects
                     continue;
                 }
                 $flavor = $this->discardReleaseFlavor($t->type);
+                // A global-backed name — a `static` local, a `global $x`, a
+                // superglobal — is a BINDING to storage the call does not own.
+                // php's unset() breaks that binding and leaves the storage:
+                // `static $n = 0; … unset($n);` keeps the value, and the next
+                // call resumes from it (measured: php answers 1,-2,3,4 where we
+                // answered 1,0,1,0 — the release + `store 0` below destroyed the
+                // very thing `static` exists to keep). Only the frame's own flag
+                // moves; `isset()` reads it, since the cell still holds a value.
+                if (isset($this->locals->unsetBound[$name])) {
+                    $out .= '  store i64 0, ptr ' . $this->locals->unsetBound[$name] . "\n";
+                    continue;
+                }
                 if (isset($this->locals->globalBacked[$name])) {
                     $cell = $this->locals->globalBacked[$name];
                     // A module cell releases at the DECL's flavor under the

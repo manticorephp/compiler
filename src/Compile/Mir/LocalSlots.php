@@ -37,6 +37,16 @@ final class LocalSlots
      *  one thing that can make a raw scalar slot mean "not set" rather than
      *  "holds zero" ({@see \Compile\Mir\Passes\EmitLlvmObjects::emitIssetTarget}) */
     public array $unsetNames = [];
+
+    /** @var array<string, true> the subset an `unset()` actually NAMES. The set
+     *  above is wider — it also holds null-initialised statics, which block the
+     *  isset() fold for a different reason and must NOT get a binding flag. */
+    public array $unsetTargets = [];
+
+    /** @var array<string, string> a global-backed name this function `unset()`s
+     *  → the i1 slot holding whether the NAME is still bound in this call.
+     *  `unset($static)` breaks the binding, it does not destroy the storage. */
+    public array $unsetBound = [];
     /** @var array<string, string> name → the slot it owned BEFORE `$name = &$src`
      *  rebound it to `$src`'s slot ('' when it owned none). Presence means the
      *  name is currently an ALIAS, which `unset($name)` has to know: php's
@@ -116,7 +126,10 @@ final class LocalSlots
     {
         if ($n->kind === Node::KIND_UNSET) {
             foreach (Walk::children($n) as $t) {
-                if ($t->kind === Node::KIND_LOAD_LOCAL) { $this->unsetNames[$t->name] = true; }
+                if ($t->kind === Node::KIND_LOAD_LOCAL) {
+                    $this->unsetNames[$t->name] = true;
+                    $this->unsetTargets[$t->name] = true;
+                }
             }
             return;
         }
