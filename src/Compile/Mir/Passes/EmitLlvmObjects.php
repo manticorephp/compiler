@@ -1160,6 +1160,8 @@ trait EmitLlvmObjects
             $outChunks[] = '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
+            // The helper's contract: a boxed cell from every arm.
+            $this->markCellOpaque($r);
             return \implode('', $outChunks);
         }
         // Runtime dispatch on the object's class_id.
@@ -1227,6 +1229,8 @@ trait EmitLlvmObjects
         $outChunks[] = '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        // Every arm above stored a boxed cell.
+        $this->markCellOpaque($r);
         return \implode('', $outChunks);
     }
 
@@ -2366,6 +2370,7 @@ trait EmitLlvmObjects
             $n->property,
             $val,
         );
+        $this->noteCellSinkStored($val);
         $this->lastValue = $res;
         $this->lastValueType = $resTy;
         return $out;
@@ -4994,6 +4999,7 @@ trait EmitLlvmObjects
             $out .= $this->boxToCell($n->value->type, $n->value);
             $val = $this->lastValue;
             $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
+            $this->noteCellSinkStored($val);
             $this->lastValue = $res;
             $this->lastValueType = $resTy;
             return $out;
@@ -5032,6 +5038,7 @@ trait EmitLlvmObjects
             $val = $this->lastValue;
         }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
+        $this->noteCellSinkStored($val);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;

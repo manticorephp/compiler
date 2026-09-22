@@ -2221,8 +2221,9 @@ trait EmitLlvmExpr
             } else {
                 $out .= $this->coerceToI64();
             }
-            $out .= $this->armRetainPostBox($n, $nc->left, $this->lastValue);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $leftVal = $this->lastValue;
+            $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
+            $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
             $out .= $this->emitNode($nc->right);
@@ -2232,12 +2233,14 @@ trait EmitLlvmExpr
             } else {
                 $out .= $this->coerceToI64();
             }
-            $out .= $this->armRetainPostBox($n, $nc->right, $this->lastValue);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $rightVal = $this->lastValue;
+            $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
+            $out .= '  store i64 ' . $rightVal . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $end . ":\n";
             $loaded = $this->ssa->allocReg();
             $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+            if ($wantCell) { $this->joinCellProvenance([$leftVal, $rightVal], $loaded); }
             $this->lastValue = $loaded;
             $this->lastValueType = 'i64';
             return $out;
@@ -2288,9 +2291,11 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             $out .= $this->armRetainPreBox($n, $nc->left);
             $out .= $this->boxToCell($nc->left->type);
-            $out .= $this->armRetainPostBox($n, $nc->left, $this->lastValue);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $leftVal = $this->lastValue;
+            $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
+            $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         } else {
+            $leftVal = $lv;
             $out .= $this->armRetainPostBox($n, $nc->left, $lv);
             $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
         }
@@ -2303,12 +2308,14 @@ trait EmitLlvmExpr
         } else {
             $out .= $this->coerceToI64();
         }
-        $out .= $this->armRetainPostBox($n, $nc->right, $this->lastValue);
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $rightVal = $this->lastValue;
+        $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
+        $out .= '  store i64 ' . $rightVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        if ($wantCell) { $this->joinCellProvenance([$leftVal, $rightVal], $loaded); }
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         return $out;
@@ -4821,7 +4828,7 @@ trait EmitLlvmExpr
         // here with no parameter type at all — genuinely indeterminate, not
         // "checked and not cell" — so it counts `unchecked` rather than guess.
         if ($pt !== null) {
-            $this->checkCellSink('call_arg', $pt, $a);
+            $this->checkCellSink('call_arg', $pt, $a, $a);
         } else {
             $this->checkCellSinkUnchecked();
         }
@@ -4885,6 +4892,7 @@ trait EmitLlvmExpr
         $this->rt->needsTagged = true;
         $dr = $this->ssa->allocReg();
         $pre = '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
+        $this->propagateCellProvenance($this->lastValue, $dr);
         $this->lastValue = $dr;
         $this->lastValueType = 'i64';
         return $pre . $this->unboxCellToTypeRaw($pt);

@@ -968,6 +968,7 @@ trait EmitLlvmArrays
             $this->rt->needsTagged = true;
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $reg . ")\n";
+            $this->propagateCellProvenance($reg, $d);
             $reg = $d;
             $this->lastValue = $reg;
         }
@@ -1256,6 +1257,8 @@ trait EmitLlvmArrays
     {
         $enc = $this->ssa->allocReg();
         $out = '  ' . $enc . ' = call i64 @__mir_elem_encode(ptr ' . $arrPtr . ', i64 ' . $this->elemValReg . ")\n";
+        // The cell goes in as it came: a pass-through for the guard.
+        $this->propagateCellProvenance($this->elemValReg, $enc);
         $this->elemValReg = $enc;
         return $out;
     }
@@ -1269,6 +1272,9 @@ trait EmitLlvmArrays
         $enc = $this->ssa->allocReg();
         $out = '  ' . $enc . ' = call i64 @__mir_elem_encode_raw(ptr ' . $arrPtr . ', i64 '
              . $this->elemValReg . ', i64 ' . (string)$kind . ")\n";
+        // Boxed or raw by the buffer's RUNTIME hint — a probe's answer, not a
+        // static box, so the guard counts it as such.
+        $this->markCellProbed($enc);
         $this->elemValReg = $enc;
         return $out;
     }
@@ -1617,6 +1623,9 @@ trait EmitLlvmArrays
         $out .= '  store i64 ' . $val . ', ptr ' . $dst . "\n";
         $out .= '  ' . $keep . ' = select i1 ' . $both . ', i64 ' . $cur
               . ', i64 ' . $val . "\n";
+        // The slot keeps either its own REF cell (a slot read) or the value.
+        $this->markCellOpaque($cur);
+        $this->joinCellProvenance([$cur, $val], $keep);
         $this->elemValReg = $keep;
         $this->elemWroteThroughRef = $both;
         return $out;
@@ -1837,6 +1846,7 @@ trait EmitLlvmArrays
                   . ', i64 ' . (string)($reprCode ?? 0) . ")\n";
         }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
+        $this->noteCellSinkStored($val);
         // The store as an EXPRESSION is the value in the node's own static
         // type, not the word the slot took: a boxing store yields the raw
         // operand, or a chained `$a[$k] = $b[$k] = v` reads a cell as a value.

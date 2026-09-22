@@ -85,6 +85,24 @@ trait EmitLlvmCellGuard
     /** @var string[] site id (index) → `fn=… kind=… slot=… decl=…`, for CELLASSERT attribution */
     private array $cellAssertSites = [];
 
+    /**
+     * The register a store emitter actually wrote into the slot, when that is
+     * not what it left in `$lastValue`: an assignment is an EXPRESSION whose
+     * value is the value ASSIGNED in the RHS repr, so a boxing store hands the
+     * PRE-box word onward (`$v = ($o->mixed = 'x')` must not see a tagged
+     * pointer under `string`) while the slot received the box. The sink check
+     * reads this first, once, and clears it — a nested store consumes its own
+     * before the enclosing emitter records its own.
+     */
+    private ?string $cellSinkStored = null;
+
+    /** A store emitter's note: `$reg` is the word that landed in the slot;
+     *  '' withdraws a note no sink will consume (a valueless return). */
+    private function noteCellSinkStored(string $reg): void
+    {
+        if ($this->cellGuard) { $this->cellSinkStored = $reg !== '' ? $reg : null; }
+    }
+
     private function readCellGuardFlags(): void
     {
         $cg = \getenv('MANTICORE_CELLGUARD');
@@ -154,6 +172,31 @@ trait EmitLlvmCellGuard
         if ($this->cellGuard && $reg !== '') { $this->cellProv[$reg] = 'probed'; }
     }
 
+    /**
+     * A callee is trusted by its signature: a call of any flavor (free,
+     * static, method, closure invoke, the dynamic-`new` chain) and a `yield`
+     * resume-slot read whose static type is cell hand back a cell, so the
+     * result is `opaque` — one rule in the dispatcher instead of a mark in
+     * every emitter arm. A stronger claim an emitter already made (`boxed`,
+     * `probed`) is kept.
+     */
+    private function markCellCalleeResult(\Compile\Mir\Node $n): void
+    {
+        if ($n->type->kind !== \Compile\Mir\Type::KIND_CELL) { return; }
+        switch ($n->kind) {
+            case \Compile\Mir\Node::KIND_CALL:
+            case \Compile\Mir\Node::KIND_STATIC_CALL:
+            case \Compile\Mir\Node::KIND_METHOD_CALL:
+            case \Compile\Mir\Node::KIND_INVOKE:
+            case \Compile\Mir\Node::KIND_NEW_DYN_OBJ:
+            case \Compile\Mir\Node::KIND_YIELD:
+                $this->markCellOpaque($this->lastValue);
+                return;
+            default:
+                return;
+        }
+    }
+
     private function cellProvenance(string $reg): string
     {
         return $this->cellProv[$reg] ?? 'raw';
@@ -166,11 +209,31 @@ trait EmitLlvmCellGuard
         if (isset($this->cellProv[$from])) { $this->cellProv[$to] = $this->cellProv[$from]; }
     }
 
+    /**
+     * A phi transmits the WEAKEST of its arms: one raw arm makes the join raw,
+     * one probed arm makes it probed, all-boxed stays boxed, any other mix of
+     * boxed and opaque is opaque. `$arms` are the registers stored on each
+     * path, `$to` the register loaded after the join.
+     * @param string[] $arms
+     */
+    private function joinCellProvenance(array $arms, string $to): void
+    {
+        if (!$this->cellGuard || $to === '') { return; }
+        $rank = ['raw' => 0, 'probed' => 1, 'opaque' => 2, 'boxed' => 3];
+        $best = 'boxed';
+        foreach ($arms as $a) {
+            $p = $this->cellProvenance($a);
+            if ($rank[$p] < $rank[$best]) { $best = $p; }
+        }
+        if ($best !== 'raw') { $this->cellProv[$to] = $best; }
+    }
+
     /** Registers are numbered per function, so the map must not outlive one. */
     private function resetCellGuardFrame(): void
     {
         $this->cellProv = [];
         $this->cellSinkOrd = 0;
+        $this->cellSinkStored = null;
     }
 
     /**
@@ -181,12 +244,15 @@ trait EmitLlvmCellGuard
     private function checkCellSink(
         string $sinkKind,
         \Compile\Mir\Type $destType,
-        \Compile\Mir\Node $site
+        \Compile\Mir\Node $site,
+        ?\Compile\Mir\Node $src = null
     ): void {
         if (!$this->cellGuard) { return; }
+        $stored = $this->cellSinkStored ?? $this->lastValue;
+        $this->cellSinkStored = null;
         if ($destType->kind !== \Compile\Mir\Type::KIND_CELL) { return; }
         $ord = $this->cellSinkOrd++;
-        $prov = $this->cellProvenance($this->lastValue);
+        $prov = $this->cellProvenance($stored);
         $this->cellGuardCounts[$prov] = ($this->cellGuardCounts[$prov] ?? 0) + 1;
         if ($prov !== 'raw') { return; }
         $fn = $this->cellSinkFnOverride
@@ -195,8 +261,19 @@ trait EmitLlvmCellGuard
             . ' fn=' . $fn
             . ' ord=' . (string)$ord
             . ' line=' . (string)$site->line
-            . ' node=' . $site->kind;
+            . ' node=' . $site->kind
+            . ' src=' . ($src !== null ? $this->cellSinkSrcName($src) . ':' . $src->type->kind : '-');
         \error_log($this->cellGuardViolations[\count($this->cellGuardViolations) - 1]);
+    }
+
+    /** The value node's kind, with the callee named for a call — the census
+     *  buckets by producer, and "call" alone names none. */
+    private function cellSinkSrcName(\Compile\Mir\Node $src): string
+    {
+        if ($src instanceof \Compile\Mir\Call) { return 'call(' . $src->function . ')'; }
+        if ($src instanceof \Compile\Mir\StaticCall_) { return 'static_call(' . $src->class . '::' . $src->method . ')'; }
+        if ($src instanceof \Compile\Mir\MethodCall_) { return 'method_call(' . $src->method . ')'; }
+        return $src->kind;
     }
 
     /**
@@ -210,6 +287,7 @@ trait EmitLlvmCellGuard
     private function checkCellSinkUnchecked(): void
     {
         if (!$this->cellGuard) { return; }
+        $this->cellSinkStored = null;
         $this->cellGuardCounts['unchecked'] = ($this->cellGuardCounts['unchecked'] ?? 0) + 1;
     }
 

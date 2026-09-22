@@ -145,7 +145,7 @@ trait EmitLlvmVisit
     public function visitStoreLocal(StoreLocal $n): string
     {
         $out = $this->emitStoreLocal($n);
-        $this->checkCellSink('store_local', $n->type, $n);
+        $this->checkCellSink('store_local', $n->type, $n, $n->value);
         return $out;
     }
 
@@ -207,57 +207,30 @@ trait EmitLlvmVisit
     public function visitReturn(Return_ $n): string
     {
         $out = $this->emitReturn($n);
-        // The return-sink cell guard. `$this->frame->returnType` is NOT the
-        // declared return type here — EmitLlvmModule seeds it straight from
-        // `$fn->returnType`, and InferNodes' return-type adoption rewrites
-        // that field in place on every pass, so by emission it holds "what the
-        // last adoption decided", not "what the source declared" (the same
-        // fate `$n->type` meets at every store sink). The DECLARED type
-        // survives only in `Module::$declaredReturnTypes`, copied here as
-        // `$this->declaredReturnTypes` keyed by function name. A function this
-        // module never registered one for (a synthesized/trampoline body with
-        // no FunctionDef of its own) is a genuinely indeterminate destination
-        // — count it `unchecked` rather than fall back to the rewritten field.
+        // The return-sink cell guard. The slot is `$this->frame->returnType`:
+        // NOT the source declaration but what the function actually returns
+        // — NarrowReturns and the per-clone return-type adoption rewrite the
+        // FunctionDef field in place, EmitLlvmModule seeds the frame from it,
+        // its return-boxing decision consults it, and every caller reads the
+        // same narrowed signature. A `mixed` declared and narrowed to `int`
+        // returns a raw int by that agreed ABI; checking it against the
+        // declaration (`Module::$declaredReturnTypes`) fabricated a
+        // `raw->cell` violation at every narrowed return. A frame-less
+        // synthesized body is a genuinely indeterminate destination — count
+        // it `unchecked`.
         // A bare `return;` (`$n->value === null`) never assigns
         // `$this->lastValue` — `emitReturn`'s `$v === null` arm hands
         // `finishReturn` a literal ('0', or CELL_NULL for a closure/
         // trampoline) straight as the `ret` operand, bypassing lastValue
         // entirely. Checking provenance here would read whatever unrelated
         // register an earlier expression left behind and could fabricate a
-        // phantom `raw->cell` violation. There is also no live "unchecked"
-        // case to count: the destination slot IS known (cell or not), only
-        // the source is a compile-time constant with no provenance question
-        // to ask. So this sink is simply skipped for a valueless return,
-        // never mis-classified and never force-counted into a bucket that
-        // does not describe it.
-        if ($n->value !== null) {
-            $fn = $this->frame !== null ? $this->frame->name : '';
-            $rt = null;
-            if ($fn !== '' && \str_contains($fn, '$mono$')) {
-                // A Monomorphize clone (name carries the `$mono$` infix —
-                // the same signal `Monomorphize::isCandidate` itself uses)
-                // has no source declaration to read: `cloneWith` seeds its
-                // FunctionDef->returnType from the GENERIC's
-                // declaredReturnTypes entry (Monomorphize.php:544-545), and
-                // this pass's own first-wins registration above then locks
-                // `declaredReturnTypes[clone]` to that same un-narrowed
-                // union forever. Meanwhile per-clone return-type adoption
-                // narrows `$fn->returnType` in place from THIS clone's own
-                // body, and that narrowed field is exactly what
-                // `$this->frame->returnType` is seeded from
-                // (EmitLlvmModule::emitFunction, `:893`) and exactly what
-                // EmitLlvmModule's own return-boxing decision consults
-                // (`:1977-2042`) — the real, agreed-both-ends ABI of this
-                // specialization. Use that live field instead of the
-                // generic's stale declaration; a clone whose narrowed return
-                // is still genuinely cell stays checked, just against the
-                // right type.
-                $rt = $this->frame !== null ? $this->frame->returnType : null;
-            } else {
-                $rt = $fn !== '' ? ($this->declaredReturnTypes[$fn] ?? null) : null;
-            }
+        // phantom `raw->cell` violation, so a valueless return is skipped.
+        if ($n->value === null) {
+            $this->noteCellSinkStored('');
+        } else {
+            $rt = $this->frame !== null ? $this->frame->returnType : null;
             if ($rt !== null) {
-                $this->checkCellSink('return', $rt, $n);
+                $this->checkCellSink('return', $rt, $n, $n->value);
             } else {
                 $this->checkCellSinkUnchecked();
             }
@@ -348,7 +321,7 @@ trait EmitLlvmVisit
         // seeded one for (e.g. `unset($GLOBALS['x'])`'s NullConst store); count
         // it `unchecked` rather than guess or skip silently.
         if ($n->declared !== null) {
-            $this->checkCellSink('store_static_prop', $n->declared, $n);
+            $this->checkCellSink('store_static_prop', $n->declared, $n, $n->value);
         } else {
             $this->checkCellSinkUnchecked();
         }
@@ -522,7 +495,7 @@ trait EmitLlvmVisit
         // heuristic, not a field); those stores land in `unchecked` here too.
         $elemT = $n->array->type->element;
         if ($elemT !== null) {
-            $this->checkCellSink('store_element', $elemT, $n);
+            $this->checkCellSink('store_element', $elemT, $n, $n->value);
         } else {
             $this->checkCellSinkUnchecked();
         }
@@ -592,7 +565,7 @@ trait EmitLlvmVisit
             ? ($this->classes[$cls]->propertyTypes[$n->property] ?? null)
             : null;
         if ($pt !== null) {
-            $this->checkCellSink('store_property', $pt, $n);
+            $this->checkCellSink('store_property', $pt, $n, $n->value);
         } else {
             $this->checkCellSinkUnchecked();
         }

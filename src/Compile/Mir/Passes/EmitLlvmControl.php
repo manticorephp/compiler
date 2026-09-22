@@ -849,12 +849,14 @@ trait EmitLlvmControl
         } else {
             $out .= $this->coerceToI64();
         }
-        $out .= $this->armRetainPostBox($n, $t->else_, $this->lastValue);
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $elseVal = $this->lastValue;
+        $out .= $this->armRetainPostBox($n, $t->else_, $elseVal);
+        $out .= '  store i64 ' . $elseVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        if ($wantCell) { $this->joinCellProvenance([$thenVal, $elseVal], $loaded); }
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {
@@ -1195,6 +1197,7 @@ trait EmitLlvmControl
             $this->rt->needsTagged = true;
             $dr = $this->ssa->allocReg();
             $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $ev . ")\n";
+            $this->propagateCellProvenance($ev, $dr);
             $ev = $dr;
         }
         // The opposite direction IS sound and is done: when the static element
@@ -1557,6 +1560,7 @@ trait EmitLlvmControl
         $subjStrish = $subjK === Type::KIND_STRING || $subjK === Type::KIND_UNKNOWN;
         // Heterogeneous arms (see inferMatch) → box each arm to a uniform cell.
         $wantCell = $n->type->kind === Type::KIND_CELL;
+        $armVals = [];
         // A boxed-cell subject (e.g. an untyped `$x` param) carries NaN-boxed
         // bits — a raw `icmp eq` against a literal cond NEVER matches, so every
         // arm fell through to default. Compare by tag instead: int/bool conds vs
@@ -1638,6 +1642,7 @@ trait EmitLlvmControl
             }
             $out .= $this->armRetainPostBox($n, $arm->body, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $armVals[] = $this->lastValue;
             $out .= '  br label %' . $endLabel . "\n";
             $out .= $afterLabel . ":\n";
         }
@@ -1646,6 +1651,7 @@ trait EmitLlvmControl
         $out .= $endLabel . ":\n";
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        if ($wantCell) { $this->joinCellProvenance($armVals, $loaded); }
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         if ($n->type->kind === Type::KIND_FLOAT) {

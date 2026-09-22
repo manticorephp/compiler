@@ -451,6 +451,9 @@ trait EmitLlvmLocals
             } else {
                 $this->lastValue = $reg;
                 $this->lastValueType = 'i64';
+                // A global-backed slot (static local, `global $x`) typed cell is
+                // a slot read like any other: its stores are the checked sinks.
+                if ($ll->type->kind === Type::KIND_CELL) { $this->markCellOpaque($reg); }
             }
             return $out;
         }
@@ -909,6 +912,9 @@ trait EmitLlvmLocals
                 // word now co-owned.
                 $owned = $this->ssa->allocReg();
                 $out .= '  ' . $owned . ' = call i64 @__mir_cell_own_alias(i64 ' . $aliasV . ")\n";
+                // A pass-through for the guard: the helper returns the same
+                // cell or a boxed clone of its payload, never a raw word.
+                $this->propagateCellProvenance($aliasV, $owned);
                 $aliasV = $owned;
             } else {
                 $out .= $copiedVecProp

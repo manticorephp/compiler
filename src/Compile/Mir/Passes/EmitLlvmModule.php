@@ -2095,6 +2095,9 @@ trait EmitLlvmModule
         // try's jmp slot would stay claimed for the rest of the PROCESS (the
         // depth is a global). Give it back — after the finallys above, which run
         // inside the try region and manage their own depth.
+        // The finally bodies left their own last value behind; the sink guard
+        // must see what `ret` carries.
+        $this->noteCellSinkStored($valReg);
         return $out . $leave . $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot())
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }

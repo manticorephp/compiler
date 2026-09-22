@@ -571,21 +571,6 @@ final class EmitLlvm implements EmitVisitor
     /** "<declClass>|<kind>|<member>|<k>" → newInstance()'s baked \Error message.
      *  @var array<string, string> */
     private array $attrSiteErrors = [];
-    /**
-     * DECLARED return type per function, from {@see Module::$declaredReturnTypes}
-     * — the return-sink cell guard's destination type. `$fn->returnType` (and
-     * every copy of it taken here, {@see FunctionEmitFrame::$returnType} and
-     * {@see FunctionSignatures::$returnType} included) is rewritten in place by
-     * InferNodes' return-type adoption, so by the time this pass runs it holds
-     * "what the last pass decided", not "what the source declared". Only this
-     * module field survives untouched.
-     *
-     * Declared LAST (true tail of the field list) — a new field mid-class
-     * shifts every later field's offset, a self-host layout hazard (the
-     * ClassDef::$isPreludeClass lesson: clean in one generation, SIGSEGV in
-     * the next once the offset-shifted layout is what compiles the compiler).
-     * @var array<string, \Compile\Mir\Type> */
-    private array $declaredReturnTypes = [];
 
     public function emit(Module $module): string
     {
@@ -631,7 +616,6 @@ final class EmitLlvm implements EmitVisitor
         $this->propertyReadHelpers = [];
         $this->dynamicMethodHelpers = [];
         $this->dynamicMethodAbiDisabled = false;
-        $this->declaredReturnTypes = $module->declaredReturnTypes;
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
         $this->hasClassAlias = $module->hasClassAlias;
@@ -3665,7 +3649,9 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitNode(Node $n): string
     {
-        return $n->accept($this);
+        $out = $n->accept($this);
+        if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        return $out;
     }
 
     /** `$left <op> $right` where the result is a numeric (int|float) cell: box
