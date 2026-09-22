@@ -11,6 +11,12 @@
 #   bash tools/docker/run_tests.sh --both
 #   bash tools/docker/run_tests.sh --shell         # drop into the container
 #   bash tools/docker/run_tests.sh --cold          # ignore the self-host cache
+#   bash tools/docker/run_tests.sh -k http_workers # ONE case (or a substring)
+#
+# `-k` is what makes a Linux-only failure debuggable: the full suite is the gate,
+# but chasing one red case through it costs the whole run. The build is the same
+# either way — only the suite step narrows — so a filtered green proves nothing
+# about the others.
 #
 # The repo is mounted READ-ONLY and copied to a scratch dir inside the
 # container: a self-hosted build writes bin/manticore + lib/, and the host
@@ -26,21 +32,35 @@ PLATFORMS=(linux/arm64)
 SHELL_MODE=0
 GATE_MODE=0
 COLD_MODE=0
+FILTER=""
+want_filter=0
 for arg in "$@"; do
+    if [ "$want_filter" = "1" ]; then FILTER="$arg"; want_filter=0; continue; fi
     case "$arg" in
         --amd64) PLATFORMS=(linux/amd64) ;;
         --both)  PLATFORMS=(linux/arm64 linux/amd64) ;;
         --shell) SHELL_MODE=1 ;;
         --cold)  COLD_MODE=1 ;;
+        # Narrow the SUITE step to the cases whose name contains this substring
+        # — the same `-k` tests/aot/run.sh takes. Refused together with --gate:
+        # difftest and the fixpoint are whole-tree answers, and a gate that ran
+        # a filtered suite would report a green nobody may rely on.
+        -k)      want_filter=1 ;;
+        -k*)     FILTER="${arg#-k}" ;;
         # The HEAVY gate, on Linux: self-host build (or cold fallback) + full suite
         # + difftest (php is in the image) + selfhost_fixpoint (fixpoint, MIR golden,
         # rebuild-stability). macOS green proves nothing about the epoll path, the
         # Linux socket/errno constants or a glibc free(), so this is the only honest
         # gate for anything touching them.
         --gate)  GATE_MODE=1 ;;
-        *) echo "usage: $0 [--amd64|--both|--shell|--gate|--cold]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--amd64|--both|--shell|--gate|--cold] [-k <substr>]" >&2; exit 2 ;;
     esac
 done
+if [ "$want_filter" = "1" ]; then echo "usage: $0 -k <substr>" >&2; exit 2; fi
+if [ -n "$FILTER" ] && [ "$GATE_MODE" = "1" ]; then
+    echo "-k narrows the suite; --gate is the whole-tree answer. Pick one." >&2
+    exit 2
+fi
 
 
 IMAGE_BASE=manticore-toolchain
@@ -77,6 +97,7 @@ for platform in "${PLATFORMS[@]}"; do
         -e MC_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
         -e MC_COLD="$COLD_MODE" \
         -e MC_COMPILER_CACHE=/compiler-cache \
+        -e MC_FILTER="$FILTER" \
         -e MC_STABILITY_N="${MC_STABILITY_N:-2}" \
         -e MC_JOBS="${MC_JOBS:-0}" \
         "$image" /bin/bash /repo/tools/docker/gate.sh \

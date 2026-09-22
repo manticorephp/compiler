@@ -18,6 +18,8 @@
 #                        (fixpoint, MIR golden, rebuild stability).
 #   MC_JOBS=<n>      forwarded to tests/aot/run.sh (0 = one case per core).
 #                    Default 0 here: a gate machine is idle otherwise.
+#   MC_FILTER=<sub>  narrow the suite step to matching case names (`-k`), for
+#                    chasing ONE Linux-only failure. Never with MC_GATE=1.
 #   MC_STABILITY_N   rebuild-stability rounds (default 2 — a container cold seed
 #                    is minutes, and the local default of 5 is a different budget).
 #   MC_REPO          read-only source mount (default /repo)
@@ -131,8 +133,13 @@ fi
 save_compiler_cache
 
 echo
-echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
-MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
+if [ -n "${MC_FILTER:-}" ]; then
+    echo "=== tests/aot/run.sh (-k $MC_FILTER, -j $MC_JOBS) — NOT the gate ==="
+    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh -k "$MC_FILTER" > "$MC_LOGDIR/suite.log" 2>&1
+else
+    echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
+    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
+fi
 suite_rc=$?
 tail -15 "$MC_LOGDIR/suite.log"
 
