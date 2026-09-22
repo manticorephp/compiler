@@ -1010,6 +1010,63 @@ function mimeFor(string $path): string
 }
 
 /**
+ * Does `Accept-Encoding` grant gzip? A `gzip` token whose q is not 0, or a `*`
+ * that grants it when no `gzip` token settles the question first.
+ *
+ * @internal
+ */
+function acceptsGzip(string $ae): bool
+{
+    if ($ae === '') {
+        return false;
+    }
+    $star = false;
+    foreach (splitStr(',', $ae) as $part) {
+        $p = \trim($part);
+        $q = 1.0;
+        $semi = \strpos($p, ';');
+        $name = $p;
+        if ($semi !== false) {
+            $name = \trim(\substr($p, 0, $semi));
+            $params = \strtolower(\substr($p, $semi + 1));
+            $qp = \strpos($params, 'q=');
+            if ($qp !== false) {
+                $q = (float)\trim(\substr($params, $qp + 2));
+            }
+        }
+        $name = \strtolower($name);
+        if ($name === 'gzip') {
+            return $q > 0.0;
+        }
+        if ($name === '*') {
+            $star = $q > 0.0;
+        }
+    }
+    return $star;
+}
+
+/** Text-like content types worth deflating. @internal */
+function compressible(string $ct): bool
+{
+    $semi = \strpos($ct, ';');
+    $t = \strtolower(\trim($semi === false ? $ct : \substr($ct, 0, $semi)));
+    if (\strncmp($t, 'text/', 5) === 0) {
+        return true;
+    }
+    if ($t === 'application/json' || $t === 'application/javascript' || $t === 'application/xml'
+        || $t === 'application/xhtml+xml' || $t === 'image/svg+xml' || $t === 'application/wasm'
+        || $t === 'application/manifest+json') {
+        return true;
+    }
+    $plus = \strrpos($t, '+');
+    if ($plus !== false) {
+        $suffix = \substr($t, $plus + 1);
+        return $suffix === 'json' || $suffix === 'xml';
+    }
+    return false;
+}
+
+/**
  * Does an `If-None-Match` list match `$etag`? WEAK comparison, which is the
  * only one RFC 9110 §13.1.2 allows for `If-None-Match`: both `W/` prefixes are
  * dropped before comparing, and `*` matches anything.
@@ -2833,6 +2890,40 @@ final class Response
         $this->fileLen = $len;
     }
 
+    /**
+     * Serve `<path>.gz` in place of the file when it exists and is not OLDER
+     * than it — a stale sibling is a build artefact nobody refreshed, and
+     * sending it would serve yesterday's asset for ever.
+     *
+     * `fileMtime` deliberately stays the ORIGINAL's, so `Last-Modified` and
+     * `If-Modified-Since` keep meaning the source file; only the ETag gains a
+     * `-gz` suffix, because the two representations are not byte-identical.
+     *
+     * @internal
+     */
+    public function useGzSibling(): void
+    {
+        if ($this->fileRes === null) {
+            return;
+        }
+        $r = @\fopen($this->filePath . '.gz', 'rb');
+        if ($r === false) {
+            return;
+        }
+        $st = \fstat($r);
+        if ($st === false || (int)$st['mtime'] < $this->fileMtime) {
+            \fclose($r);
+            return;
+        }
+        \fclose($this->fileRes);
+        $this->fileRes = $r;
+        $this->fileSize = (int)$st['size'];
+        $this->fileOff = 0;
+        $this->fileLen = $this->fileSize;
+        $this->headers->set('Content-Encoding', 'gzip');
+        $this->headers->set('ETag', 'W/"' . \dechex($this->fileMtime) . '-' . \dechex($this->fileSize) . '-gz"');
+    }
+
     /** A body of another kind replaces a file — and closes its fd. */
     private function dropFile(): void
     {
@@ -3633,6 +3724,11 @@ final class Server
     private int $maxHeaderCount = 100;
     private int $maxBodySize = 8388608;
     private bool $streamBodies = false;
+    /** gzip, off by default — {@see compression}. The FLAG is what keeps the
+     *  pure-PHP deflater out of a program that never asks for it. */
+    private bool $compress = false;
+    private int $compressMin = 1024;
+    private int $compressLevel = 6;
     /** Requests per connection before it is closed. 100 tore a connection
      *  down and rebuilt it — accept, close, and a TLS handshake if any — every
      *  hundred requests; nginx's equivalent default is 1000. It is a DoS knob,
@@ -3705,6 +3801,23 @@ final class Server
     public function maxHeaderCount(int $n): Server { $this->maxHeaderCount = $n; return $this; }
     public function maxBodySize(int $n): Server { $this->maxBodySize = $n; return $this; }
     public function streamBodies(bool $on): Server { $this->streamBodies = $on; return $this; }
+
+    /**
+     * gzip buffered bodies of text-like types of at least `$minBytes`, to a
+     * client whose `Accept-Encoding` grants it. Off by default: the deflater is
+     * pure PHP and a program that never calls this carries none of it.
+     *
+     * A FILE is never deflated on the fly — a `<path>.gz` sibling is served
+     * instead ({@see Response::useGzSibling}). Streamed bodies are not
+     * compressed at all: `gzencode` is one-shot.
+     */
+    public function compression(bool $on, int $minBytes = 1024, int $level = 6): Server
+    {
+        $this->compress = $on;
+        $this->compressMin = $minBytes < 0 ? 0 : $minBytes;
+        $this->compressLevel = $level;
+        return $this;
+    }
     public function keepAliveMax(int $n): Server { $this->keepAliveMax = $n; return $this; }
     /** '' omits the `Server:` header entirely. */
     public function serverName(string $s): Server { $this->serverName = $s; return $this; }
@@ -4234,6 +4347,9 @@ final class Server
         if (!$hasBody) {
             $body = '';
         }
+        if ($this->compress && $hasBody) {
+            $body = $this->gzipBody($req, $res, $body);
+        }
         $head = $this->renderHead($res, $req->version, $keep, \strlen($body), $hasBody);
         \Manticore\Sapi\responseSent();
         // HEAD carries the headers of the GET it mirrors — Content-Length
@@ -4297,6 +4413,54 @@ final class Server
         // peer waits for a body that never ends.
         $w->end();
         return $keep;
+    }
+
+    /**
+     * `Vary: Accept-Encoding`, appended rather than replacing — a cache must
+     * key on the header whether or not THIS response came out encoded, or the
+     * identity copy it stored is handed to a client that asked for gzip.
+     */
+    private function addVary(Headers $h): void
+    {
+        $v = $h->get('vary');
+        if ($v === '') {
+            $h->add('Vary', 'Accept-Encoding');
+        } elseif (\stripos($v, 'accept-encoding') === false && \trim($v) !== '*') {
+            $h->set('Vary', $v . ', Accept-Encoding');
+        }
+    }
+
+    /**
+     * The buffered body, gzipped when everything lines up: a compressible type,
+     * at least `compressMin` bytes, no encoding already chosen, and a client
+     * that asked. `Vary` goes on every compressible-type response either way.
+     *
+     * Called only under `$this->compress`, which is what keeps `gzencode` — the
+     * pure-PHP deflater — out of a program that never turns compression on.
+     */
+    private function gzipBody(Request $req, Response $res, string $body): string
+    {
+        $h = $res->headers;
+        $ct = $h->get('content-type');
+        if ($ct === '' || !compressible($ct)) {
+            return $body;
+        }
+        $this->addVary($h);
+        if (\strlen($body) < $this->compressMin || $h->has('content-encoding')
+            || !acceptsGzip($req->header('Accept-Encoding'))) {
+            return $body;
+        }
+        $out = \gzencode($body, $this->compressLevel);
+        $h->set('Content-Encoding', 'gzip');
+        $h->remove('content-length');
+        // The encoded bytes are a different representation of the same
+        // resource, so a STRONG validator no longer describes what is on the
+        // wire (RFC 9110 §8.8.1).
+        $etag = $h->get('etag');
+        if ($etag !== '' && \strncmp($etag, 'W/', 2) !== 0) {
+            $h->set('ETag', 'W/' . $etag);
+        }
+        return $out;
     }
 
     /**
@@ -4379,11 +4543,22 @@ final class Server
      */
     private function writeFile(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
     {
+        // The precompressed sibling is chosen BEFORE the conditionals: it
+        // changes the ETag and the length those answer with.
+        if ($this->compress && compressible($res->headers->get('content-type'))) {
+            $this->addVary($res->headers);
+            if (!$res->headers->has('content-encoding')
+                && acceptsGzip($req->header('Accept-Encoding'))) {
+                $res->useGzSibling();
+            }
+        }
+        $res->status = $this->conditional($req, $res);
+        // AFTER the sibling swap: `useGzSibling()` closes the Resource it
+        // replaces, so a handle taken before it would be a closed FILE*.
         $in = $res->fileResource();
         if ($in === null) {
             return $keep;
         }
-        $res->status = $this->conditional($req, $res);
         $hasBody = Status::hasBody($res->status) && $res->fileLength() > 0;
         $h = $res->headers;
         $h->remove('content-length');

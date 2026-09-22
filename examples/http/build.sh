@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 MC=${MC:-bin/manticore}
 
-demos=(hello stream compat)
+demos=(hello stream compat static)
 for d in "${demos[@]}"; do
     [ -f "examples/http/$d.php" ] || continue
     printf '%-10s' "$d"

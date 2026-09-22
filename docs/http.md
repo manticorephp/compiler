@@ -211,6 +211,64 @@ there is no `PARTIAL` signal in pull mode (the buffered path reports
 `UPLOAD_ERR_PARTIAL`), so a handler that needs the whole part checks the byte
 count against its own expectation.
 
+## Files
+
+```php
+$p = Http\safePath('/srv/app/public', $req->path);
+return $p === null
+    ? (new Response(404))->text('not found')
+    : (new Response())->file($p);
+```
+
+`file()` stats the OPENED fd once — the length on the wire is the length of the
+file the body reads — and sends the bytes with `sendfile(2)`, so they never
+enter the process. A TLS connection has to encrypt them, so it takes a
+`fread` loop instead; the wire format is identical either way. The head carries
+`Content-Type` from the extension (`Http\mimeFor()`, override with the second
+argument), `Last-Modified`, a weak `ETag` of mtime and size, and
+`Accept-Ranges: bytes`. A missing or unreadable path is a handler bug and
+THROWS — it is not a 404.
+
+`Http\safePath($root, $path)` is the only way a request path should become a
+file path: both sides go through `realpath`, so `..` and a symlink that leaves
+the root are refused by construction. A directory answers null — which index
+file it stands for is the handler's policy (`safePath($root, $req->path .
+'/index.html')`).
+
+## Conditional requests
+
+On a file response the handler left at **200**, and only for GET/HEAD:
+
+- `If-None-Match` — weak comparison, `*` and lists honoured — answers **304**
+  with the validators and no body.
+- `If-Modified-Since` answers **304**, and is consulted only when there is no
+  `If-None-Match`.
+- A single `Range: bytes=a-b` (`a-`, `-n` and `a-b` forms) answers **206** with
+  `Content-Range`; an unsatisfiable one **416**. A multi-range, another unit or
+  garbage is ignored and the full representation goes out, as the RFC allows.
+- `If-Range` narrows only on the exact `Last-Modified` date. Our ETags are all
+  weak, and a weak tag never satisfies `If-Range` (RFC 9110 §13.1.5).
+
+A handler that set its own status is answering something other than "here is
+this file", so its status is left alone and no conditional runs.
+
+## Compression
+
+```php
+$server->compression(true, minBytes: 1024, level: 6);
+```
+
+Off by default. On, a BUFFERED body of a text-like type, at least `minBytes`
+long, to a client whose `Accept-Encoding` grants gzip, goes out
+`Content-Encoding: gzip` through the pure-PHP `gzencode()`; a strong `ETag`
+becomes weak, since the encoded bytes are a different representation.
+`Vary: Accept-Encoding` is set on every compressible-type response whether or
+not that response came out encoded — a cache must key on it both ways.
+
+A file is never deflated on the fly: a sibling `<path>.gz` that is not OLDER
+than the file is served in its place, with the original's `Last-Modified` and a
+`-gz` ETag. Streamed bodies are not compressed — `gzencode()` is one-shot.
+
 ## php's builtins work inside a handler
 
 This is the part that makes existing code run. `header()`, `header_remove()`,
@@ -335,10 +393,11 @@ prelude files; `compat.php`'s jump is `session` and `json`, not the server.
 
 ## Not in this layer
 
-Routing, middleware, PSR-7/PSR-15, HTTP/2, WebSockets. PSR-7 wrappers are an
+Routing, middleware, PSR-7/PSR-15, HTTP/2, WebSockets, multi-range
+(`multipart/byteranges`), brotli, and compression of a STREAMED body. PSR-7 wrappers are an
 ordinary pure-PHP package on top of this; the rest are their own epics.
 
 ## See also
 
 `docs/async.md` (the scheduler and the netpoller this rides on) ·
-`examples/http/` (`hello`, `stream`, `compat`) · `tests/aot/cases/http_*.php`.
+`examples/http/` (`hello`, `stream`, `compat`, `static`) · `tests/aot/cases/http_*.php`.
