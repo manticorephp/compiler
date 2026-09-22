@@ -20,6 +20,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -28,6 +31,9 @@ jobs:
   linux:
     name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -59,12 +65,35 @@ jobs:
       # (a cache entry is immutable), so the restore-keys prefix is what actually
       # hits — the newest entry for this arch and this image definition.
       - name: Restore the compiler cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: ci-cache
           key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
           restore-keys: |
             mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-
+
+      # Second warm source, reached only when the cache missed — which it does on
+      # every Dockerfile change, after a week of not being touched (GitHub evicts
+      # it), and on any branch that cannot see main's. The published image does
+      # not evict, so this is what keeps the Zend seed for the cases that
+      # genuinely need one: a bootstrap gap, an unpublished platform, no network.
+      # A miss here is not an error — `|| true`, and gate.sh falls through.
+      - name: Fetch the published compiler
+        if: steps.cache.outputs.cache-matched-key == ''
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if docker pull -q "$IMAGE:main-${{ matrix.arch }}" 2>/dev/null; then
+            cid="$(docker create "$IMAGE:main-${{ matrix.arch }}")"
+            mkdir -p ci-seed
+            docker cp "$cid:/opt/manticore/bin" ci-seed/bin
+            docker cp "$cid:/opt/manticore/lib" ci-seed/lib
+            docker rm "$cid" > /dev/null
+            chmod -R 777 ci-seed
+            echo "seed: $IMAGE:main-${{ matrix.arch }}"
+          else
+            echo "seed: nothing published for ${{ matrix.arch }} yet — the Zend seed it is"
+          fi || true
 
       # /logs and /compiler-cache are mounts the unprivileged container user
       # (uid 1000) must be able to write; /build stays inside the container (the
@@ -76,15 +105,17 @@ jobs:
           # RUNNER, and the container is uid 1000 — unlinking an entry needs write
           # permission on the directory that holds it, so a restored lib/ is
           # unremovable from inside without this and the cache never updates.
-          mkdir -p ci-logs ci-cache && chmod -R 777 ci-logs ci-cache
+          mkdir -p ci-logs ci-cache ci-seed && chmod -R 777 ci-logs ci-cache ci-seed
           docker run --rm \
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
             -v "$PWD/ci-cache":/compiler-cache \
+            -v "$PWD/ci-seed":/seed:ro \
             -e MC_GATE=0 \
             -e MC_JOBS=0 \
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
+            -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
             manticore-toolchain:${{ matrix.arch }} \
             /bin/bash /repo/tools/docker/gate.sh
@@ -97,6 +128,26 @@ jobs:
         with:
           path: ci-cache
           key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
+
+      # Publish what this run just built and tested, from the artifacts it
+      # already has — NOT by building a second compiler. The runtime target in
+      # the root Dockerfile cold-seeds from source, which is what a release
+      # wants and what a push must not pay twice for the same bytes.
+      #
+      # Only on main, and only after the suite: a red suite never reaches here,
+      # and what is published is therefore always a compiler that passed.
+      - name: Publish this compiler as the seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker build --target base -t manticore-base:local -f Dockerfile .
+          docker build -f tools/docker/Dockerfile.publish \
+            --build-arg BASE=manticore-base:local \
+            -t "$IMAGE:main-${{ matrix.arch }}" \
+            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.arch }}" \
+            ci-cache
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:main-${{ matrix.arch }}"
+          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.arch }}"
 
       - name: Summary
         if: always()
@@ -179,3 +230,22 @@ jobs:
           name: logs-macos-arm64
           path: ci-logs/
           if-no-files-found: warn
+
+  # `:main` as one multi-arch tag, from the two the jobs above pushed. Merged by
+  # digest — nothing is rebuilt and nothing is emulated, and `docker pull
+  # ghcr.io/manticorephp/compiler:main` resolves to the right architecture.
+  seed-manifest:
+    needs: linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Merge
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx imagetools create -t "$IMAGE:main" \
+            "$IMAGE:main-arm64" "$IMAGE:main-amd64"
+          docker buildx imagetools create -t "$IMAGE:${GITHUB_SHA::12}" \
+            "$IMAGE:${GITHUB_SHA::12}-arm64" "$IMAGE:${GITHUB_SHA::12}-amd64"
+          docker buildx imagetools inspect "$IMAGE:main"

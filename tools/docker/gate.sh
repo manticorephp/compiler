@@ -31,6 +31,9 @@
 #   MC_REPO          read-only source mount (default /repo)
 #   MC_WORK          writable scratch (default /build)
 #   MC_LOGDIR        where the stage logs land (default $MC_WORK)
+#   MC_SEED_DIR      a directory holding a PUBLISHED compiler (bin/ + lib/), used
+#                    when the cache misses and before the Zend seed. Validated by
+#                    running it, not by an id — it came from another machine.
 #   MC_COMPILER_CACHE writable directory holding a compatible self-hosted
 #                    compiler (optional; unset means always cold-seed)
 #   MC_COLD=0|1      ignore a compiler cache and force the Zend cold seed
@@ -74,9 +77,16 @@ cd "$TREE" || exit 1
 # link Mach-O into an ELF build). Start from a clean slate.
 rm -rf bin/manticore bin/.manticore.prev bin/manticore.fast lib/ tests/aot/tmp 2>/dev/null || true
 
+# libc belongs in here with the rest: a glibc compiler does not run under musl
+# and the loader's refusal is not a diagnosis. `ldd --version` names the
+# implementation on both (glibc prints its version, musl prints its own banner
+# on stderr and exits 1, which is why the output is merged and the exit ignored).
 cache_id() {
-    printf 'arch=%s\nclang=%s\nphp=%s\n' \
-        "$(uname -m)" "$(clang --version | head -1)" "$(php -r 'echo PHP_VERSION;')"
+    printf 'arch=%s\nlibc=%s\nclang=%s\nphp=%s\n' \
+        "$(uname -m)" \
+        "$( (ldd --version 2>&1 || true) | head -1 )" \
+        "$(clang --version | head -1)" \
+        "$(php -r 'echo PHP_VERSION;')"
 }
 
 restore_compiler_cache() {
@@ -91,6 +101,35 @@ restore_compiler_cache() {
     cp "$MC_COMPILER_CACHE/bin/manticore" bin/manticore
     cp -a "$MC_COMPILER_CACHE/lib/." lib/
     bin/manticore version >/dev/null 2>&1
+}
+
+# The PUBLISHED compiler, as a second warm source between the cache and Zend.
+#
+# The cache is the fast path and a fragile one: its key carries the Dockerfile
+# hash, GitHub evicts an entry after a week idle, and a branch cannot see another
+# branch's. A published image does not evict, so `MC_SEED_DIR` — a directory the
+# caller extracted one into — is what keeps the cold seed for the cases that
+# genuinely need it: a bootstrap gap, a new platform, no network.
+#
+# Validated by BEHAVIOUR, not by an id file: it comes from another machine and
+# possibly another image, so the question is not "was it built here" but "does it
+# run here and can it build". If it cannot, bin/build fails and the seed follows.
+restore_published_seed() {
+    [ "$MC_COLD" != "1" ] || return 1
+    [ -n "${MC_SEED_DIR:-}" ] || return 1
+    [ -x "$MC_SEED_DIR/bin/manticore" ] || return 1
+    [ -f "$MC_SEED_DIR/lib/manticore_stdlib.o" ] || return 1
+
+    mkdir -p bin lib
+    cp "$MC_SEED_DIR/bin/manticore" bin/manticore
+    cp -a "$MC_SEED_DIR/lib/." lib/
+    chmod u+x bin/manticore
+    if ! bin/manticore version >/dev/null 2>&1; then
+        echo "seed: $MC_SEED_DIR holds a compiler that does not run here — ignoring it"
+        rm -rf bin/manticore lib
+        return 1
+    fi
+    return 0
 }
 
 # SAYS whether it worked, and that is the point. The cache directory is a host
@@ -128,13 +167,25 @@ save_compiler_cache() {
 }
 
 echo
+# Three sources, in falling order of cheapness: the cache this runner wrote, the
+# compiler the project publishes, and Zend. The third is a RECOVERY path, not a
+# step — it is what crosses a bootstrap gap, reaches a platform nothing has been
+# published for, and re-derives the compiler from source when the chain is in
+# doubt, which is why the release builds that way on purpose.
+WARM=""
 if restore_compiler_cache; then
+    WARM="cache"
+elif restore_published_seed; then
+    WARM="published seed"
+fi
+
+if [ -n "$WARM" ]; then
     # bin/build, not a bare `manticore build`: it preflights src/ against the
-    # cached (one generation behind) compiler, builds to a temp path, smoke
+    # warm (one generation behind) compiler, builds to a temp path, smoke
     # tests, swaps, and only THEN lets the NEW binary build lib/. A one-pass
     # build would leave the stdlib a generation behind and overwrite the running
     # executable. A bootstrap gap exits 1 here and falls through to the seed.
-    echo "=== bin/build (self-hosted from cache) ==="
+    echo "=== bin/build (self-hosted from the $WARM) ==="
     if bin/build > "$MC_LOGDIR/compile.log" 2>&1; then
         echo "bin/build: OK"
         tail -5 "$MC_LOGDIR/compile.log"

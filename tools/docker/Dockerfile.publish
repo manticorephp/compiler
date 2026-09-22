@@ -1,0 +1,34 @@
+# The published compiler image, assembled from a compiler that ALREADY EXISTS.
+#
+# The root Dockerfile's `runtime` target cold-seeds from source, which is right
+# for a release and wrong for every push: CI has just built and tested a compiler,
+# and building a second one to ship would double the most expensive step in the
+# pipeline to produce the same bytes.
+#
+#   docker build -f tools/docker/Dockerfile.publish \
+#       --build-arg BASE=manticore-base:local ci-cache -t <image>:main-arm64
+#
+# The build CONTEXT is the compiler directory — `bin/manticore` + `lib/` as
+# gate.sh leaves them — and BASE is the root Dockerfile's `base` stage, so the
+# toolchain around it is the one the compiler was built against, not a second
+# opinion.
+ARG BASE
+FROM ${BASE}
+
+# `base` ends as the unprivileged user; COPY needs root, and the image must not
+# be left that way.
+USER root
+COPY bin/manticore /opt/manticore/bin/manticore
+COPY lib /opt/manticore/lib
+RUN chmod 0755 /opt/manticore/bin/manticore
+
+ENV PATH="/opt/manticore/bin:${PATH}"
+WORKDIR /work
+
+# By the bare name, through $PATH — the shape that used to lose the prelude and
+# the stdlib before self_dir() resolved the real executable. A compiler that
+# cannot answer this must not be published.
+RUN manticore version
+
+USER manticore
+CMD ["manticore", "--help"]
