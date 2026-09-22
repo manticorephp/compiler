@@ -116,17 +116,33 @@ trait EmitLlvmBuiltins
     private function emitArrPtrArg(Node $a): string
     {
         $out = $this->emitNode($a);
+        // The TAGGED word, kept before the mask: `__mir_cell_drop` dispatches on
+        // the tag, and handing it the payload makes it a no-op — the release was
+        // emitted and freed nothing.
+        $cellWord = $a->type->kind === Type::KIND_CELL ? $this->lastValue : '';
         if ($a->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
         } else {
             $out .= $this->coerceToPtr();
         }
         $f = $this->freshRcArgFlavor($a);
+        $reg = $this->lastValue;
         // Only an SSA REGISTER can be released: a const-folded array literal is
         // emitted as a global address LITERAL, and `ptrtoint ptr 53270227616`
         // is not even valid IR.
-        if ($f !== '' && \str_starts_with($this->lastValue, '%')) {
-            $this->arrArgTempRegs[] = $this->lastValue;
+        if ($f === 'cell' && \str_starts_with($reg, '%')) {
+            // INVARIANT: a 'cell' temp is registered as an i64. The tagged word
+            // when this operand had one, otherwise the pointer converted here —
+            // never a `ptr`, because {@see freeArrArgTempsFrom} hands it
+            // straight to `__mir_cell_drop(i64)`.
+            $reg = $cellWord;
+            if ($reg === '') {
+                $reg = $this->ssa->allocReg();
+                $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            }
+        }
+        if ($f !== '' && \str_starts_with($reg, '%')) {
+            $this->arrArgTempRegs[] = $reg;
             $this->arrArgTempFlavors[] = $f;
         }
         return $out;
@@ -139,6 +155,14 @@ trait EmitLlvmBuiltins
         while (\count($this->arrArgTempRegs) > $mark) {
             $reg = (string)\array_pop($this->arrArgTempRegs);
             $flavor = (string)\array_pop($this->arrArgTempFlavors);
+            // A CELL temp is registered as the TAGGED i64 word, not as a
+            // pointer: `__mir_cell_drop` dispatches on the tag, and the two
+            // registrars ({@see emitArrPtrArg}, {@see biCount}) keep that word
+            // from before the mask. Every other flavor registers a `ptr`.
+            if ($flavor === 'cell') {
+                $out .= $this->rcReleaseReg($reg, $flavor);
+                continue;
+            }
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = ptrtoint ptr ' . $reg . " to i64\n";
             $out .= $this->rcReleaseReg($r, $flavor);
@@ -2194,6 +2218,7 @@ trait EmitLlvmBuiltins
             return $this->emitCountableOrArray($out, $this->lastValue, $args[0]);
         }
         $out = $this->emitNode($args[0]);
+        $arrPtrCellWord = $this->lastValue;
         if ($args[0]->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
         } elseif ($args[0]->type->kind === Type::KIND_UNKNOWN) {
@@ -2215,13 +2240,26 @@ trait EmitLlvmBuiltins
         $arrPtr = $this->lastValue;
         $out .= $this->arrayCountFromPtrIr($arrPtr);
         $cnt = $this->lastValue;
+        // A 'cell' release wants the TAGGED word; handing it the masked payload
+        // makes `__mir_cell_drop` a no-op, so the release was emitted and freed
+        // nothing ({@see emitArrPtrArg}, which had the same hole).
+        $cellWord = $args[0]->type->kind === Type::KIND_CELL ? $arrPtrCellWord : '';
         // ★ A FRESH array temp dies here. `count()` answers an int, so nothing
         // it returns can reference an element — the one array builtin where
         // that needs no further proof. `count(explode($d, $s))` leaked the
         // whole exploded vec on every call, 3.2 KB a call.
         $af = $this->freshRcArgFlavor($args[0]);
-        if ($af !== '' && \str_starts_with($arrPtr, '%')) {
-            $this->arrArgTempRegs[] = $arrPtr;
+        $relReg = $arrPtr;
+        // The same i64 invariant {@see emitArrPtrArg} keeps.
+        if ($af === 'cell' && \str_starts_with($relReg, '%')) {
+            $relReg = $cellWord;
+            if ($relReg === '') {
+                $relReg = $this->ssa->allocReg();
+                $out .= '  ' . $relReg . ' = ptrtoint ptr ' . $arrPtr . " to i64\n";
+            }
+        }
+        if ($af !== '' && \str_starts_with($relReg, '%')) {
+            $this->arrArgTempRegs[] = $relReg;
             $this->arrArgTempFlavors[] = $af;
         }
         return $this->finishI64($out, $cnt);

@@ -2163,7 +2163,12 @@ trait EmitLlvmExpr
             $out .= $this->emitNode($nc->left);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->left);
-                $out .= $this->boxToCell($nc->left->type);
+                // The arm NODE goes with the type: a concrete-element array is
+                // REBUILT here, and without it {@see cellifySourceFlavor} cannot
+                // tell an owned producer from a borrow, so the source of the
+                // rebuild was dropped on the floor — `count($m ?? mk())` leaked
+                // the whole assoc `mk()` returned, once per call.
+                $out .= $this->boxToCell($nc->left->type, $nc->left);
             } else {
                 $out .= $this->coerceToI64();
             }
@@ -2175,7 +2180,7 @@ trait EmitLlvmExpr
             $out .= $this->emitNode($nc->right);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->right);
-                $out .= $this->boxToCell($nc->right->type);
+                $out .= $this->boxToCell($nc->right->type, $nc->right);
             } else {
                 $out .= $this->coerceToI64();
             }

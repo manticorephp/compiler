@@ -4511,8 +4511,16 @@ final class EmitLlvm implements EmitVisitor
         // first: its result type may be a UNION (which the obj/array gate below
         // would reject) and the flavor comes from condFlavor, not the arm.
         if ($this->condOwnsResult($a)) {
-            $cf = $this->condFlavor($a->type);
-            return $cf === 'cell' ? '' : $cf;
+            // A CELL result is released like any other owned temp. It was
+            // exempted when this contract was written, with no reason recorded,
+            // and the exemption disagreed with {@see isFreshCellTemp} two lines
+            // down — which answers 'cell' for exactly this shape, an owned
+            // cell-typed argument temp. `count($m ?? mk())` on a `mixed $m`
+            // therefore stranded the whole assoc `mk()` built, once per call
+            // (measured: 2.5 MB at 1k iterations, 131 MB at 400k).
+            // `__mir_cell_drop` dispatches on the tag, so a scalar or `false`
+            // payload is a no-op.
+            return $this->condFlavor($a->type);
         }
         // A cell CALL result is owned by the caller under the same +1 return
         // convention ({@see isFreshCellTemp}); `f(json_encode($v))` leaked the
