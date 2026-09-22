@@ -1,7 +1,7 @@
-# What a release IS: a container image on Docker Hub, and per-platform tarballs
-# on the GitHub release. Nothing else is published, and nothing is published
-# from a cache — every artifact here is cold-seeded from the tagged source, so a
-# release owes nothing to a compiler that was already lying around.
+# What a release IS: a container image on GitHub's registry (ghcr.io), and
+# per-platform tarballs on the GitHub release. Nothing else is published, and
+# nothing is published from a cache — every artifact here is cold-seeded from the
+# tagged source, so a release owes nothing to a compiler already lying around.
 #
 # The image is the primary artifact and the tarball is the secondary one, for a
 # reason worth writing down: the compiler shells out to `clang` to assemble its
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 'push to Docker Hub and create the GitHub release'
+        description: 'push the image and create the GitHub release'
         type: boolean
         default: false
 
@@ -28,12 +28,18 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: manticorephp/manticore
+  # ghcr, not docker.io: the manticorephp namespace already exists here, a
+  # public package costs nothing, and the push authenticates with the workflow's
+  # own token — no registry secret to hand out, rotate or leak.
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   linux:
     name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -108,11 +114,8 @@ jobs:
 
       - name: Push the arch image
         if: steps.v.outputs.publish == 'true'
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker tag manticore-runtime:${{ matrix.arch }} \
             "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
           docker push "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
@@ -168,9 +171,11 @@ jobs:
           path: dist/*.tar.gz
 
   # One multi-arch tag out of the two single-arch ones, by digest — no rebuild,
-  # no emulation, and `docker pull manticorephp/manticore` resolves per host.
+  # no emulation, and one `docker pull` resolves to the right arch per host.
   manifest:
     needs: linux
+    permissions:
+      packages: write
     if: github.ref_type == 'tag' || inputs.publish
     runs-on: ubuntu-latest
     steps:
@@ -184,11 +189,8 @@ jobs:
           fi
 
       - name: Merge
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           v="${{ steps.v.outputs.version }}"
           docker buildx imagetools create -t "$IMAGE:$v" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
           # `latest` follows tags only: a dispatch build must never become it.

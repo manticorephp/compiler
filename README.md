@@ -77,7 +77,7 @@ In a container, with the toolchain already in it:
 
 ```bash
 docker run --rm -v "$PWD":/work -u "$(id -u):$(id -g)" \
-    manticorephp/manticore manticore compile app.php -o app
+    ghcr.io/manticorephp/compiler manticore compile app.php -o app
 ```
 
 A tarball carries the compiler and its stdlib, not a toolchain: `manticore`
