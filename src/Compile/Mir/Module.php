@@ -105,6 +105,16 @@ final class Module
      */
     public array $globalVarNames = [];
 
+    /**
+     * The subset of {@see $globalVarNames} actually reached through `$GLOBALS['x']`
+     * SYNTAX. Those cells hold their value BOXED, so the view and the top-level
+     * variable read the same word ({@see \Compile\Mir\Passes\EmitLlvmLocals::
+     * boxForViewSlot}); a plain `global $x` needs no such second reader, and
+     * boxing it was what made its slot un-addressable for a by-ref argument.
+     * @var string[]
+     */
+    public array $globalsViewNames = [];
+
     /** The program asks for a stack trace (an exception trace query or a
      *  backtrace call): emit the runtime call-stack and instrument every user
      *  call with push/pop. Off by default so a program that never asks pays zero
@@ -235,6 +245,15 @@ final class Module
             if ($existing === $name) { return; }
         }
         $this->globalVarNames[] = $name;
+    }
+
+    /** Record a `$GLOBALS['name']` access (idempotent) — see {@see $globalsViewNames}. */
+    public function addGlobalsViewName(string $name): void
+    {
+        foreach ($this->globalsViewNames as $existing) {
+            if ($existing === $name) { return; }
+        }
+        $this->globalsViewNames[] = $name;
     }
 
     /** @var array<string, true> Names of passes that have run. */

@@ -423,7 +423,13 @@ trait EmitLlvmLocals
     private function isGlobalsViewName(string $name): bool
     {
         if ($this->isSuperglobalName($name)) { return false; }
-        foreach ($this->globalVarNames as $g) {
+        // The names REACHED through `$GLOBALS['x']`, not every `global $x`.
+        // A boxed slot has two readers by construction, and that is exactly
+        // what a by-ref argument cannot hand over — it passes the slot ADDRESS
+        // and the callee writes a raw word into it. Boxing every `global $x`
+        // made `global $g; fill($g)` un-addressable, so it rode the by-VALUE
+        // path and the callee dereferenced the array pointer as an address.
+        foreach ($this->globalsViewNames as $g) {
             if ($g === $name) { return true; }
         }
         return false;
@@ -1150,6 +1156,23 @@ trait EmitLlvmLocals
     }
 
     /**
+     * The module cell a by-ref argument can hand over as its slot ADDRESS —
+     * every global-backed name: a superglobal, a plain `global $g`, and a
+     * `static $v` local, whose cell is the storage exactly as an alloca is a
+     * plain local's.
+     *
+     * The one exclusion is a `$GLOBALS`-viewed name, whose cell holds the value
+     * BOXED for the second reader ({@see boxForViewSlot}); a callee writing a
+     * raw word through that address would leave the view's own reads
+     * dereferencing an untagged payload, so it keeps the refusal.
+     */
+    private function byRefGlobalCellOf(string $name): string
+    {
+        if ($this->isGlobalsViewName($name)) { return ''; }
+        return $this->locals->globalBacked[$name] ?? '';
+    }
+
+    /**
      * IR computing the by-ref ADDRESS of lvalue `$a` as i64 in
      * `$this->lastValue`; null when `$a` is not addressable. A plain local
      * yields its slot address (a by-ref local already HOLDS an address — it is
@@ -1168,23 +1191,23 @@ trait EmitLlvmLocals
             // (symfony/runtime GenericRuntime.php:162) was refused as "no
             // address", and the tier-4 build stopped there.
             //
-            // ⚠ SUPERGLOBALS only. A reference writes THROUGH the cell channel,
-            // and a superglobal's storage is cell-elemented by construction —
-            // {@see LowerSuperglobals::superglobalInit} seeds every one of them
-            // as `assoc[string, cell]`. A plain `global $store` is the same
-            // STORAGE class with a different element repr
-            // (`$store = ['x' => 1]` → assoc[string,int]), and handing that one
-            // an address made `$store['y']` read back a denormal: the write
-            // boxed, the owner's own read did not. It keeps the loud refusal
-            // below rather than becoming a silent wrong answer — closing it is
-            // the ref-taken-slot-is-CELL-for-its-lifetime rule
-            // (docs/design/reference-cells.md) applied to global storage.
-            //
             // The predicate is the NAME because the guarantee comes from the
             // seeder, not from this node's static type: at `&$_SESSION` the
             // LoadLocal can still be typed `unknown`, and asking the type here
             // refused the very shape this arm exists for.
-            $sgCell = $this->superglobalCellOf($name);
+            //
+            // It was SUPERGLOBALS only for a while: their storage is
+            // cell-elemented by construction ({@see LowerSuperglobals::
+            // superglobalInit} seeds every one as `assoc[string, cell]`), while
+            // a plain `global $store` or a `static $v` is the same STORAGE
+            // class with whatever element repr its initialiser inferred. But
+            // the refusal was never loud — it fell through to the by-VALUE path
+            // and the callee dereferenced the ARRAY POINTER as a slot address:
+            // `static $v = []; fill($v)` SIGSEGV'd and `count()` answered an
+            // address. The repr question belongs to the ELEMENT channel, which
+            // {@see EmitLlvm::byRefNeedsCellBox} / `byRefNeedsCellUnbox`
+            // already translate on both sides of the call; the SLOT is a slot.
+            $sgCell = $this->byRefGlobalCellOf($name);
             if ($sgCell !== '') {
                 $addr = $this->ssa->allocReg();
                 $out = '  ' . $addr . ' = ptrtoint ptr ' . $sgCell . " to i64\n";

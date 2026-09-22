@@ -549,6 +549,9 @@ final class EmitLlvm implements EmitVisitor
     private array $globalIsExtern = [];
     /** @var string[] names declared `global $x` — __main shares the cell */
     private array $globalVarNames = [];
+    /** @var string[] the subset reached through `$GLOBALS['x']` syntax
+     *  ({@see \Compile\Mir\Module::$globalsViewNames}) — those slots box. */
+    private array $globalsViewNames = [];
 
     /** Per-module runtime-feature demand set (fresh each {@see emit}). */
     private ?RuntimeFeatures $rt = null;
@@ -638,6 +641,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalIsPrelude = $module->globalIsPrelude;
         $this->globalIsExtern = $module->globalIsExtern;
         $this->globalVarNames = $module->globalVarNames;
+        $this->globalsViewNames = $module->globalsViewNames;
         $this->includeSlots = $module->includeSlots;
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
@@ -5040,12 +5044,14 @@ final class EmitLlvm implements EmitVisitor
     private function isByRefAddressable(Node $a): bool
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
-            // The SUPERGLOBAL arm of {@see EmitLlvmLocals::byRefAddrOf}: the
+            // The GLOBAL-CELL arm of {@see EmitLlvmLocals::byRefAddrOf}: the
             // module cell is the storage. Without it `fill($_GET)` with
             // `array &$out` was "not an lvalue", rode the by-VALUE path, and
-            // the callee dereferenced the array pointer as a slot address.
+            // the callee dereferenced the array pointer as a slot address —
+            // and so did `static $v = []; fill($v)` and `global $g; fill($g)`,
+            // which reached the same by-VALUE path and SIGSEGV'd.
             return isset($this->locals->slots[$a->name])
-                || $this->superglobalCellOf($a->name) !== '';
+                || $this->byRefGlobalCellOf($a->name) !== '';
         }
         if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $a;

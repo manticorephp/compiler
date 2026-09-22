@@ -148,8 +148,11 @@ trait LowerSuperglobals
         $cell = '@g_' . $name;
         $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
         // Also route `__main`'s own `$name` to this cell, so the top-level
-        // variable and the $GLOBALS view are one storage location.
+        // variable and the $GLOBALS view are one storage location — and record
+        // the name as a VIEWED one, which is what makes its slot carry a boxed
+        // word for both readers.
         $this->module->addGlobalVarName($name);
+        $this->module->addGlobalsViewName($name);
         return $cell;
     }
 
