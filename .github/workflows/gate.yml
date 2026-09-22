@@ -16,6 +16,10 @@ on:
     - cron: '0 2 * * 0'
   workflow_dispatch:
     inputs:
+      parity:
+        description: 'run the glibc parity gate (suite + difftest) — off to test musl alone'
+        type: boolean
+        default: true
       fixpoint:
         description: 'also run tools/selfhost_fixpoint.sh (hours)'
         type: boolean
@@ -32,6 +36,8 @@ concurrency:
 jobs:
   linux:
     name: gate-${{ matrix.arch }}
+    # A schedule carries no inputs, so the weekly parity run must not depend on one.
+    if: github.event_name == 'schedule' || inputs.parity
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     strategy:
