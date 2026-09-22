@@ -17,8 +17,9 @@
 #     8.5 or the seed disagrees with what it is compiling.
 #   * clang 14 predates LLVM 15's opaque pointers and REJECTS the IR manticore
 #     emits ("ptr type is only supported in -opaque-pointers mode"). Verified,
-#     not assumed -- bookworm's stock clang-14 failed the seed assemble step.
-# So: php from sury.org, clang from apt.llvm.org.
+#     not assumed -- bookworm's DEFAULT clang-14 failed the seed assemble step.
+# So: php from sury.org, and clang-22 from Debian's own archive — the DEFAULT
+# clang is 14 on bookworm, but a versioned clang-22 sits in both suites.
 
 ARG DEBIAN_TAG=13
 FROM debian:${DEBIAN_TAG} AS base
@@ -40,51 +41,40 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  `curl-config` and the `libcurl.so` symlink, and Main.php's
 #                  generic_link_flags() needs one of them — `pkg-config --libs
 #                  curl` fails everywhere, since the module is called libcurl.
-# wget + gnupg + lsb-release are llvm.sh's own dependencies, and `wget` is not a
-# stand-in for the `curl` next to it: llvm.sh calls wget by name.
+# curl + gnupg fetch and verify sury's signing key for php; nothing here is for
+# clang any more — that comes from the distribution's own archive below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl wget gnupg lsb-release \
+        ca-certificates curl gnupg \
         gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config \
         binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*
 
-# `software-properties-common` exists on bookworm and NOT on trixie — Debian
-# dropped it — and this image is built on both: 13 for development, 12 for the
-# release tarballs, because glibc is backwards compatible and not forwards.
-# llvm.sh needs it on exactly the base where it exists: on bookworm it calls
-# add-apt-repository, and on a newer Debian it writes the deb822 source itself.
-# Hence a probe rather than a package in the list above — naming it unconditionally
-# fails trixie, and dropping it unconditionally fails bookworm. Both happened.
+# ---- clang/LLVM, from Debian itself ----
+# NOT apt.llvm.org's llvm.sh any more. That script was here because bookworm's
+# DEFAULT clang is 14, which predates LLVM 15's opaque pointers and rejects the
+# IR manticore emits ("ptr type is only supported in -opaque-pointers mode").
+# But the default is not the whole archive: both bases carry a versioned
+# clang-22 in their own repositories — 1:22.1.8-1~deb13u4 on trixie and
+# 1:22.1.8-1~deb12u1 on bookworm — so the third-party script was fetching what
+# apt already had. It cost a network dependency on every image build, two
+# packages that exist on one base and not the other (wget for the script,
+# software-properties-common for the branch it takes on bookworm), and a failure
+# mode with no diagnosis: it went down on amd64 in CI while arm64 passed.
+#
+# Take the highest clang-NN the distribution offers, and refuse loudly below 15
+# rather than discovering it as a wall of IR errors during the seed.
 RUN apt-get update \
-    && if apt-cache show software-properties-common > /dev/null 2>&1; then \
-           apt-get install -y --no-install-recommends software-properties-common; \
-       fi \
-    && rm -rf /var/lib/apt/lists/*
-
-# ---- latest stable clang/LLVM (apt.llvm.org) ----
-# NOT `llvm.sh` with no argument: that targets the development version (23 at time of
-# writing), which publishes no packages for this suite and hard-fails the build. Walk
-# candidate versions newest-first and keep the first that actually installs, so
-# this tracks "latest that exists" without pinning to a version that will rot.
-ARG LLVM_VERSIONS="22 21 20"
-RUN curl -sSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
-    && chmod +x /tmp/llvm.sh \
-    && installed="" \
-    && for v in $LLVM_VERSIONS; do \
-           echo "--- trying LLVM $v"; \
-           if /tmp/llvm.sh "$v"; then installed="$v"; break; fi; \
-       done \
-    && test -n "$installed" || { echo "no LLVM version installable"; exit 1; } \
-    && echo "installed LLVM $installed" \
-    && rm -rf /var/lib/apt/lists/* /tmp/llvm.sh
-
-# apt.llvm.org installs versioned binaries (clang-21); manticore invokes bare
-# `clang`. Point `clang` and `cc` at the newest installed version.
-RUN CLANG_BIN="$(ls -1 /usr/bin/clang-[0-9]* | grep -E 'clang-[0-9]+$' | sort -V | tail -1)" \
-    && echo "using $CLANG_BIN" \
-    && ln -sf "$CLANG_BIN" /usr/local/bin/clang \
-    && ln -sf "$CLANG_BIN" /usr/local/bin/cc
+    && CLANG_PKG="$(apt-cache pkgnames clang- | grep -E '^clang-[0-9]+$' | sort -V | tail -1)" \
+    && test -n "$CLANG_PKG" || { echo "no versioned clang package in this suite" >&2; exit 1; } \
+    && CLANG_VER="${CLANG_PKG#clang-}" \
+    && [ "$CLANG_VER" -ge 15 ] \
+        || { echo "$CLANG_PKG is too old: manticore emits opaque-pointer IR, LLVM >= 15" >&2; exit 1; } \
+    && echo "using $CLANG_PKG from $(. /etc/os-release; echo "$VERSION_CODENAME")" \
+    && apt-get install -y --no-install-recommends "$CLANG_PKG" "lld-$CLANG_VER" \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf "/usr/bin/$CLANG_PKG" /usr/local/bin/clang \
+    && ln -sf "/usr/bin/$CLANG_PKG" /usr/local/bin/cc
 
 RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
