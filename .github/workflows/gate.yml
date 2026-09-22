@@ -1,0 +1,99 @@
+# The heavy answer: the AOT suite PLUS difftest (byte parity against the `php`
+# interpreter), on both Linux arches. Weekly, and on demand.
+#
+# Why not nightly, and why no fixpoint by default: ci.yml already answers "is
+# the suite green" on every push, and the self-host fixpoint answers a question
+# only a bootstrap or a MemoryAbi change can re-open — it is hours, and the tree
+# has been at a fixpoint for long enough that running it nightly buys nothing.
+# Ask for it explicitly (the `fixpoint` input) after a bootstrap, an ABI VERSION
+# bump, or a codegen change big enough to doubt gen2 == gen3.
+#
+# The steps live in tools/docker/gate.sh — never inline them here.
+name: gate
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      fixpoint:
+        description: 'also run tools/selfhost_fixpoint.sh (hours)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: gate
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: gate-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: toolchain
+          tags: manticore-toolchain:${{ matrix.arch }}
+          load: true
+          cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
+
+      # Read-only: this job is a verdict on the tree, not a producer of
+      # compilers. ci.yml owns the cache, and a gate run writing it back would
+      # hand every later run a compiler built by a path nobody iterates on.
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-cache
+          key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-
+
+      - name: Suite + difftest
+        run: |
+          mkdir -p ci-logs ci-cache && chmod 777 ci-logs ci-cache
+          docker run --rm \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -v "$PWD/ci-cache":/compiler-cache \
+            -e MC_DIFFTEST=1 \
+            -e MC_FIXPOINT=${{ inputs.fixpoint && '1' || '0' }} \
+            -e MC_JOBS=0 \
+            -e MC_STABILITY_N=2 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMPILER_CACHE=/compiler-cache \
+            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+            manticore-toolchain:${{ matrix.arch }} \
+            /bin/bash /repo/tools/docker/gate.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## linux-${{ matrix.arch }} — \`${GITHUB_SHA::12}\`"
+            echo '```'
+            tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
+            tail -8  ci-logs/difftest.log 2>/dev/null || true
+            tail -12 ci-logs/fixpoint.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs-${{ matrix.arch }}
+          path: ci-logs/
+          if-no-files-found: warn

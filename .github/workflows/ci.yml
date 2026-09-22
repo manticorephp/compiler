@@ -1,20 +1,24 @@
-# Per-push smoke: cold Zend seed + the whole AOT suite, on both Linux arches.
+# Per-push: build the compiler and run the whole AOT suite, on both Linux
+# arches and on macOS.
 #
 # The steps are NOT written here. They live in tools/docker/gate.sh, which is
 # also what `bash tools/docker/run_tests.sh` runs locally — one definition, so a
 # CI green and a local green mean the same thing. This file only supplies a
-# machine, the image, and the environment.
+# machine, the image, the cache and the environment.
+#
+# WARM, NOT COLD. Every job restores the compiler it built last time and
+# self-hosts from it (`bin/build`), the way a developer does; the Zend cold seed
+# is the fallback, not the loop. gate.sh validates the cache against
+# arch + clang + php before trusting it, and a bootstrap gap (a MemoryAbi
+# VERSION bump, new syntax) fails `bin/build` and falls through to the seed on
+# its own — so a stale cache costs one slow run, never a wrong answer.
 name: ci
 
-# PARKED: manual only. The gate is built and lint-clean, but CI is not the priority
-# right now — pushing it with `push`/`pull_request` triggers live would spend runner
-# minutes on every commit for a signal nobody is reading yet. Re-arm by restoring the
-# two triggers below; nothing else in this file changes.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
-  # push:
-  #   branches: ['**']
-  # pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -51,26 +55,123 @@ jobs:
           cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
 
-      # /logs is a mount the unprivileged container user must be able to write;
-      # /build stays inside the container (the gate copies the tree into it, and
-      # that copy has no business crossing a bind mount).
-      - name: Seed + suite
+      # ~15 MB: bin/manticore + lib/*.o + lib/prelude. The key is unique per run
+      # (a cache entry is immutable), so the restore-keys prefix is what actually
+      # hits — the newest entry for this arch and this image definition.
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-cache
+          key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
+          restore-keys: |
+            mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-
+
+      # /logs and /compiler-cache are mounts the unprivileged container user
+      # (uid 1000) must be able to write; /build stays inside the container (the
+      # gate copies the tree into it, and that copy has no business crossing a
+      # bind mount).
+      - name: Build + suite
         run: |
-          mkdir -p ci-logs && chmod 777 ci-logs
+          mkdir -p ci-logs ci-cache && chmod 777 ci-logs ci-cache
           docker run --rm \
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
+            -v "$PWD/ci-cache":/compiler-cache \
             -e MC_GATE=0 \
             -e MC_JOBS=0 \
             -e MC_LOGDIR=/logs \
+            -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
             manticore-toolchain:${{ matrix.arch }} \
             /bin/bash /repo/tools/docker/gate.sh
+
+      # A red suite on top of a good build still leaves a compiler worth keeping —
+      # save before the job's result is decided, not after.
+      - name: Save the compiler cache
+        if: always() && hashFiles('ci-cache/bin/manticore') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-cache
+          key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## linux-${{ matrix.arch }} — \`${GITHUB_SHA::12}\`"
+            echo '```'
+            tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.arch }}
+          path: ci-logs/
+          if-no-files-found: warn
+
+  macos:
+    name: macos-arm64
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # Homebrew's `php` is the SEED interpreter and the difftest oracle. With a
+      # warm cache neither is touched — it is installed for the run where the
+      # cache misses, which is the only one that needs Zend.
+      - name: Toolchain
+        run: |
+          brew install php pcre2 openssl@3 sqlite
+          php -v
+          clang --version | head -1
+
+      - name: Restore the compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-cache
+          key: mc-compiler-macos-arm64-${{ github.run_id }}
+          restore-keys: |
+            mc-compiler-macos-arm64-
+
+      # The same gate.sh, run bare: it copies the checkout to a scratch tree
+      # (RUNNER_TEMP, never the checkout itself — the build writes bin/ and lib/
+      # into whatever it is pointed at) and does the same steps the container does.
+      - name: Build + suite
+        run: |
+          mkdir -p ci-logs ci-cache
+          MC_GATE=0 \
+          MC_JOBS=0 \
+          MC_REPO="$PWD" \
+          MC_WORK="$RUNNER_TEMP/build" \
+          MC_LOGDIR="$PWD/ci-logs" \
+          MC_COMPILER_CACHE="$PWD/ci-cache" \
+          MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+          bash tools/docker/gate.sh
+
+      - name: Save the compiler cache
+        if: always() && hashFiles('ci-cache/bin/manticore') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-cache
+          key: mc-compiler-macos-arm64-${{ github.run_id }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## macos-arm64 — \`${GITHUB_SHA::12}\`"
+            echo '```'
+            tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-macos-arm64
           path: ci-logs/
           if-no-files-found: warn
