@@ -3320,6 +3320,8 @@ trait EmitLlvmBuiltins
             if (\count($args) < 2) {
                 $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $strPtr . ")\n";
+                // A fresh operand is dead once parsed ({@see EmitLlvmExpr::emitCast}).
+                $out .= $this->freeStrTemp($args[0], $strPtr);
                 return $this->finishI64($out, $reg);
             }
             $baseArg = 'i32 10';
@@ -3332,6 +3334,7 @@ trait EmitLlvmBuiltins
             }
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $strPtr . ', ptr null, ' . $baseArg . ")\n";
+            $out .= $this->freeStrTemp($args[0], $strPtr);
             return $this->finishI64($out, $reg);
         }
         // A CELL / UNKNOWN (a `mixed` arg) must be DECODED by tag, not read raw:
@@ -3367,8 +3370,10 @@ trait EmitLlvmBuiltins
         if ($ak === Type::KIND_STRING) {
             $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
             $out .= $this->coerceToPtr();
+            $sp = $this->lastValue;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ", ptr null)\n";
+            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
+            $out .= $this->freeStrTemp($args[0], $sp);
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
         }

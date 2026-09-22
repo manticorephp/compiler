@@ -1732,6 +1732,14 @@ trait EmitLlvmModule
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";
         }
+        // php's CLI ignores SIGPIPE before it runs a line of the script
+        // (sapi/cli/php_cli.c: `signal(SIGPIPE, SIG_IGN)`), so a peer that
+        // closes mid-write is an EPIPE the stream layer reports, never death
+        // with the stdout buffer unflushed. The spelling must match the
+        // `Runtime\Libc\sys_signal` binding: one C symbol, one declare.
+        // SIGPIPE is 13 and SIG_IGN is 1 on Darwin and Linux alike.
+        $this->libcExtra['signal'] = 'declare i64 @signal(i32, ptr)';
+        $header .= "  call i64 @signal(i32 13, ptr inttoptr (i64 1 to ptr))\n";
         // Capture argc/argv into module globals so the FFI-bound
         // manticore_cli_argc/argv (Main.php #[Symbol]) can read them.
         $ac = $this->ssa->allocReg();

@@ -1,0 +1,7 @@
+concat cell: sum=2797560 growth ok
+concat coalesce: sum=2307780 growth ok
+append cell: sum=3201560 growth ok
+builtin coalesce: sum=2999560 growth ok
+cast coalesce: sum=1499780 growth ok
+int cast of temp: sum=8484000 growth ok
+done

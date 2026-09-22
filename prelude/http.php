@@ -3580,6 +3580,7 @@ final class Server
                     }
                     $this->statAccepted = $this->statAccepted + 1;
                     \stream_set_blocking($conn, false);
+                    $this->noDelay($conn);
                     $g->spawn(function () use ($conn, $gate) {
                         $this->statOpen = $this->statOpen + 1;
                         try {
@@ -3598,6 +3599,25 @@ final class Server
         if ($this->ownsListener) {
             \fclose($listener);
         }
+    }
+
+    /**
+     * TCP_NODELAY on every accepted connection, as nginx and Go's net/http
+     * do. Without it Nagle holds every small write behind the peer's delayed
+     * ACK: a streamed response flushed chunk by chunk left the head on the
+     * wire and the chunks in the send buffer for the ACK timer (20–40 ms on
+     * Linux loopback), so each flush() cost a round trip of silence and a
+     * 5 000-request run took two minutes instead of two seconds.
+     */
+    private function noDelay(\Resource $conn): void
+    {
+        $one = \Runtime\Libc\calloc(4, 1);
+        if ($one === null) {
+            return;
+        }
+        \poke_i32($one, 0, 1);
+        \Runtime\Libc\sys_setsockopt(\__mc_stream_fd($conn), SOL_TCP, TCP_NODELAY, $one, 4);
+        \Runtime\Libc\free($one);
     }
 
     /** One connection: parse, dispatch and answer until it must close. */

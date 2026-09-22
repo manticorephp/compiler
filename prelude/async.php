@@ -316,6 +316,16 @@ namespace Async {
 
         /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
         public bool $timerActive = false;
+        /**
+         * Which arming the heap slot belongs to. A task that woke from the
+         * reactor leaves its bounded wait's slot in the heap (lazy delete),
+         * then re-arms for the next wait: $timerActive is true again, so the
+         * STALE slot read as live and fired at its OLD deadline — a kept-alive
+         * connection's first idle timer closed it 5 s after accept, mid-request.
+         * The slot carries the sequence it was pushed under; only the latest is
+         * the task's timer.
+         */
+        public int $timerSeq = 0;
 
         /** Head of this task's own {@see SelectReg} list, and how many it holds. */
         public ?SelectReg $selHead = null;
@@ -1661,6 +1671,8 @@ namespace Async {
         private array $tmDeadline = [];
         /** @var Task[] the task each heap slot belongs to */
         private array $tmTask = [];
+        /** @var int[] the {@see Task::$timerSeq} each slot was pushed under */
+        private array $tmSeq = [];
         /** Live (non-cancelled) timer count — cancelled slots are deleted lazily. */
         private int $tmLive = 0;
 
@@ -2491,14 +2503,17 @@ namespace Async {
 
         private function timerPush(float $deadline, Task $t): void
         {
+            $t->timerSeq = $t->timerSeq + 1;
             $this->tmDeadline[] = $deadline;
             $this->tmTask[] = $t;
+            $this->tmSeq[] = $t->timerSeq;
             $i = \count($this->tmDeadline) - 1;
             while ($i > 0) {
                 $p = (int)(($i - 1) / 2);
                 if ($this->tmDeadline[$p] <= $this->tmDeadline[$i]) { break; }
                 $d = $this->tmDeadline[$p]; $this->tmDeadline[$p] = $this->tmDeadline[$i]; $this->tmDeadline[$i] = $d;
                 $k = $this->tmTask[$p]; $this->tmTask[$p] = $this->tmTask[$i]; $this->tmTask[$i] = $k;
+                $q = $this->tmSeq[$p]; $this->tmSeq[$p] = $this->tmSeq[$i]; $this->tmSeq[$i] = $q;
                 $i = $p;
             }
         }
@@ -2510,8 +2525,10 @@ namespace Async {
             $last = $n - 1;
             $this->tmDeadline[0] = $this->tmDeadline[$last];
             $this->tmTask[0] = $this->tmTask[$last];
+            $this->tmSeq[0] = $this->tmSeq[$last];
             \array_pop($this->tmDeadline);
             \array_pop($this->tmTask);
+            \array_pop($this->tmSeq);
             $n = $n - 1;
             $i = 0;
             while (true) {
@@ -2523,6 +2540,7 @@ namespace Async {
                 if ($m === $i) { break; }
                 $d = $this->tmDeadline[$m]; $this->tmDeadline[$m] = $this->tmDeadline[$i]; $this->tmDeadline[$i] = $d;
                 $k = $this->tmTask[$m]; $this->tmTask[$m] = $this->tmTask[$i]; $this->tmTask[$i] = $k;
+                $q = $this->tmSeq[$m]; $this->tmSeq[$m] = $this->tmSeq[$i]; $this->tmSeq[$i] = $q;
                 $i = $m;
             }
         }
@@ -2532,7 +2550,7 @@ namespace Async {
         {
             while (\count($this->tmTask) > 0) {
                 $t = $this->tmTask[0];
-                if ($t->timerActive && $t->state === Task::PENDING) { return; }
+                if ($t->timerActive && $t->state === Task::PENDING && $this->tmSeq[0] === $t->timerSeq) { return; }
                 $this->timerPop();
             }
         }
