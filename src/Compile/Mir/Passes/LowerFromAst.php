@@ -2765,18 +2765,25 @@ final class LowerFromAst implements Pass
         $savedParams = $this->currentLowerParams;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
+        // A yield in the body makes it a GENERATOR, exactly as in a closure:
+        // `fn() => yield 42` is `function () { return yield 42; }`, which php
+        // runs as one. Saved and restored around the body the way
+        // {@see lowerClosure} does it, so an arrow fn inside a generator does
+        // not claim its enclosing function's yield.
+        $savedSawYield = $this->sawYield;
+        $this->sawYield = false;
         $this->setCurrentLowerParams($expr->params);
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $afIsGen = $this->sawYield;
+        $this->sawYield = $savedSawYield;
         $afUsesFa = $this->sawFuncArgs;
         if ($afUsesFa) {
             $body = $this->withFuncArgsPrologue($body, \count($expr->params));
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
-        // An arrow fn has no captures list and cannot be a generator, so the two
-        // middle arguments stay at their defaults; the by-ref RETURN is the one
-        // thing it can carry.
-        return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], false,
+        // An arrow fn has no captures list — that argument stays at its default.
+        return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
             (bool)($expr->returnsByRef ?? false), $afUsesFa);
     }
 

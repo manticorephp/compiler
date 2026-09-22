@@ -1,0 +1,6 @@
+one: 42
+class: Generator
+keyed: a=1
+plain: 42
+outer: 2
+outer: 11

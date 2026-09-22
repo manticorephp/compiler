@@ -2266,7 +2266,10 @@ final class Multipart
     private function closePart(): void
     {
         if (!$this->pIsFile) {
-            if ($this->pName === 'MAX_FILE_SIZE' && \ctype_digit($this->pValue)) {
+            // php's rfc1867.c compares this field name with `strcasecmp`, so
+            // `max_file_size` and `Max_File_Size` arm the cap exactly as the
+            // canonical spelling does.
+            if (\strcasecmp($this->pName, 'MAX_FILE_SIZE') === 0 && \ctype_digit($this->pValue)) {
                 $this->formMax = (int)$this->pValue;
             }
             if ($this->fieldCount >= $this->maxInputVars) {

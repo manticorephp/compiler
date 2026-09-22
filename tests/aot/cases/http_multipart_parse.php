@@ -122,6 +122,11 @@ $all[] = run('max-files', body([
 // a later MAX_FILE_SIZE=0 lifts the cap: php's `max_file_size &&` treats 0 as none
 $all[] = run('MAX_FILE_SIZE', body([part('name="MAX_FILE_SIZE"', '5'), $hello, part('name="MAX_FILE_SIZE"', '0'), $hello]), 7);
 
+// php's rfc1867.c matches the field name with strcasecmp, so a lower-case
+// spelling arms the same cap — the file below is over it and comes back with
+// UPLOAD_ERR_FORM_SIZE, exactly as the canonical spelling would.
+$all[] = run('max_file_size-lower', body([part('name="max_file_size"', '2'), $hello]), 7);
+
 $all[] = run('partial', "------mcb\r\n" . part('name="a"', '1') . "\r\n------mcb\r\n" . substr($hello, 0, strlen($hello) - 3), 7);
 
 $m = run('no-boundary', body([$hello]), 7);
