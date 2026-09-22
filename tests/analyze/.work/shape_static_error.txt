@@ -1,0 +1,14 @@
+tests/analyze/cases/shape_static_error.php:11:0: error: make(): return — array{0:int,1:string} given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:16:0: error: store(): store to key 0 — string given, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:23:0: error: store2(): store to key 0 — bool given, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:31:0: error: missing(): key 2 is not in array{0:obj<Node>,1:bool}
+tests/analyze/cases/shape_static_error.php:33:0: error: __main(): argument 1 to first() — array{0:int,1:string} given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:34:0: error: __main(): argument 1 to hits() — array{name:string} given, array{name:string,hits:int} expected: key hits is missing
+tests/analyze/cases/shape_static_error.php:35:0: error: __main(): argument 1 to hits() — array{name:string,hits:int,extra:int} given, array{name:string,hits:int} expected: key extra is not in the shape
+tests/analyze/cases/shape_static_error.php:37:0: error: __main(): argument 1 to first() — vec[int] given, array{0:obj<Node>,1:bool} expected: key 0 is int, obj<Node> expected
+tests/analyze/cases/shape_static_error.php:40:0: error: __main(): argument 1 to pairs() — element array{0:int,1:string} given, array{0:int,1:int} expected: key 1 is string, int expected
+tests/analyze/cases/shape_static_error.php:42:0: error: storeFloat(): store to key 1 — float given, int expected
+tests/analyze/cases/shape_static_error.php:44:0: error: storeInt(): store to key 1 — int given, bool expected
+tests/analyze/cases/shape_static_error.php:46:0: error: __main(): $x — array{a:string} given, array{a:int} expected: key a is string, int expected
+
+Found 12 error(s), 0 warning(s).

@@ -61,9 +61,12 @@ off was two of its own rules, not the corpus:
   while the flag was off. It reads its operands through `Walk::children` now.
 
 Whole corpus (1148 cases) + the compiler's own module + the stdlib: zero.
-⛔ Follow-up, not this epic: `src/Analyze/Rules/StringArithmetic.php` is a
-SECOND copy of the arithmetic rule and still calls `"2026" + "06"` an *error*
-in `analyze` output.
+✅ Follow-up done: `src/Analyze/Rules/StringArithmetic.php`, the analyzer's own
+copy of the arithmetic rule, now reports at the severity php justifies — a
+literal with no numeric prefix is an ERROR (php raises a TypeError), one with a
+numeric prefix and trailing text is a WARNING (php warns and computes on the
+prefix), a string-typed operand whose value is a run-time fact is a WARNING, and
+a fully numeric literal is nothing at all. Case `tests/analyze/cases/arith_string.php`.
 
 Baseline on `b17ede4` (2026-09-20): 7 open, 3 already green and promoted.
 After the element-channel, slot-producer, by-ref and unlock steps: P1–P7 and
