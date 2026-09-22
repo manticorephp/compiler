@@ -311,6 +311,34 @@ function sys_mkstemp(Ptr $template): int {}
 #[Library('c'), Symbol('close'), CType('int')]
 function sys_close(#[CType('int')] int $fd): int {}
 
+// ── process plumbing: what proc_open() needs beyond fork/waitpid/kill ───
+// `int pipe(int fds[2])` — $fds points at two ints: [0] read end, [1] write end.
+#[Library('c'), Symbol('pipe'), CType('int')]
+function sys_pipe(Ptr $fds): int {}
+
+// `int dup2(int oldfd, int newfd)` — rebind newfd onto oldfd's description,
+// closing whatever newfd was. This is how a child's stdin/stdout/stderr become
+// the parent's pipe ends.
+#[Library('c'), Symbol('dup2'), CType('int')]
+function sys_dup2(#[CType('int')] int $oldfd, #[CType('int')] int $newfd): int {}
+
+// `int execv(const char *path, char *const argv[])` — replaces the image and
+// only RETURNS on failure. $argv is a NULL-terminated array of char*.
+#[Library('c'), Symbol('execv'), CType('int')]
+function sys_execv(string $path, Ptr $argv): int {}
+
+// `FILE *fdopen(int fd, const char *mode)` — wrap an existing descriptor in a
+// stdio stream, so the f* family reads a pipe end unchanged. It ADOPTS the fd:
+// fclose on the result closes it.
+#[Library('c'), Symbol('fdopen'), Give]
+function sys_fdopen(#[CType('int')] int $fd, string $mode): Ptr {}
+
+// `void _exit(int)` — leave a FAILED exec's child WITHOUT running atexit
+// handlers: it shares the parent's buffers, and flushing them would duplicate
+// whatever the parent had pending.
+#[Library('c'), Symbol('_exit')]
+function sys_exit_raw(#[CType('int')] int $status): void {}
+
 #[Library('c'), Symbol('getcwd'), Give]
 function sys_getcwd(Ptr $buf, #[CType('size_t')] int $size): Ptr {}
 

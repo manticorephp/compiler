@@ -1,0 +1,6 @@
+running: yes
+pid>0: yes
+after term running: no
+signaled: yes
+termsig: 9
+done

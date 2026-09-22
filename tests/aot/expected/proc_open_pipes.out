@@ -1,0 +1,5 @@
+stdout: from-stdin
+stderr: to-err
+exit: 3
+second: second
+second exit: 0

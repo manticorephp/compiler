@@ -166,6 +166,14 @@ final class Resource
      */
     public const KIND_OUTPUT = 7;
 
+    /**
+     * A child process from `proc_open()`. `$addr` is its PID, not a handle —
+     * there is nothing here for `fclose()` to take, and handing it one treated
+     * the pid as a FILE* and crashed inside libc. `proc_close()` is what reaps
+     * it; close() leaves it alone.
+     */
+    public const KIND_PROCESS = 8;
+
 
     /** php numbers resources from 1 and never reuses an id within a run. */
     private static int $nextId = 1;
@@ -275,6 +283,11 @@ final class Resource
             $this->closed = true;
             $this->type = 'Unknown';
             return true;
+        }
+        // A process handle carries a PID. Nothing to release here: proc_close()
+        // reaps the child, and fclose() on the pid would read it as a FILE*.
+        if ($this->kind === self::KIND_PROCESS) {
+            return false;
         }
         if ($this->closed || $this->addr === 0 || $this->persistent) {
             return false;
