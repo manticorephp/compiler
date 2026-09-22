@@ -2577,6 +2577,15 @@ final class Response
      *  `http_response_code()` win only when the Response stayed silent. */
     private bool $statusSet = false;
 
+    /** A file body ({@see file}): the bytes never enter this object. The
+     *  Resource stays OPEN until {@see Server::writeFile} has sent it. */
+    private string $filePath = '';
+    private ?\Resource $fileRes = null;
+    private int $fileSize = 0;
+    private int $fileMtime = 0;
+    private int $fileOff = 0;
+    private int $fileLen = 0;
+
     private bool $close = false;
 
     public function __construct(int $status = 200, string $body = '')
@@ -2624,6 +2633,7 @@ final class Response
 
     public function text(string $s): Response
     {
+        $this->dropFile();
         $this->headers->set('Content-Type', 'text/plain; charset=utf-8');
         $this->body = $s;
         return $this;
@@ -2631,6 +2641,7 @@ final class Response
 
     public function html(string $s): Response
     {
+        $this->dropFile();
         $this->headers->set('Content-Type', 'text/html; charset=utf-8');
         $this->body = $s;
         return $this;
@@ -2638,6 +2649,7 @@ final class Response
 
     public function body(string $b): Response
     {
+        $this->dropFile();
         $this->body = $b;
         return $this;
     }
@@ -2645,6 +2657,7 @@ final class Response
     /** Append to the body — the in-place amortized `.=`, not a fresh string. */
     public function write(string $b): Response
     {
+        $this->dropFile();
         $this->body .= $b;
         return $this;
     }
@@ -2658,8 +2671,92 @@ final class Response
      */
     public function stream(callable $fn): Response
     {
+        $this->dropFile();
         $this->bodyFn = $fn;
         return $this;
+    }
+
+    /**
+     * Send a file from disk. The head is built from ONE `fstat` of the OPENED
+     * fd, so the length on the wire is the length of the file the body will
+     * read — a path stat'ed and then opened is two different files under a
+     * concurrent write.
+     *
+     * A missing or unreadable path is the HANDLER's bug and throws here, not on
+     * the wire; {@see safePath} is the one that answers null for a request path
+     * that names nothing.
+     */
+    public function file(string $path, ?string $type = null): Response
+    {
+        $r = @\fopen($path, 'rb');
+        if ($r === false) {
+            throw new \RuntimeException('Http\\Response::file: cannot open ' . $path);
+        }
+        $st = \fstat($r);
+        if ($st === false || ($st['mode'] & 0170000) !== 0100000) {
+            \fclose($r);
+            throw new \RuntimeException('Http\\Response::file: not a regular file ' . $path);
+        }
+        $this->dropFile();
+        $this->body = '';
+        $this->bodyFn = null;
+        $this->filePath = $path;
+        $this->fileRes = $r;
+        $this->fileSize = (int)$st['size'];
+        $this->fileMtime = (int)$st['mtime'];
+        $this->fileOff = 0;
+        $this->fileLen = $this->fileSize;
+        $h = $this->headers;
+        if (!$h->has('content-type')) {
+            $h->add('Content-Type', $type ?? mimeFor($path));
+        } elseif ($type !== null) {
+            $h->set('Content-Type', $type);
+        }
+        if (!$h->has('last-modified')) {
+            $h->add('Last-Modified', httpDate($this->fileMtime));
+        }
+        if (!$h->has('etag')) {
+            $h->add('ETag', $this->fileEtag());
+        }
+        if (!$h->has('accept-ranges')) {
+            $h->add('Accept-Ranges', 'bytes');
+        }
+        return $this;
+    }
+
+    public function isFile(): bool { return $this->fileRes !== null; }
+    public function fileResource(): ?\Resource { return $this->fileRes; }
+    public function filePath(): string { return $this->filePath; }
+    public function fileSize(): int { return $this->fileSize; }
+    public function fileMtime(): int { return $this->fileMtime; }
+    public function fileOffset(): int { return $this->fileOff; }
+    public function fileLength(): int { return $this->fileLen; }
+
+    /** WEAK: a byte-identical copy on another host carries another mtime. */
+    public function fileEtag(): string
+    {
+        return 'W/"' . \dechex($this->fileMtime) . '-' . \dechex($this->fileSize) . '"';
+    }
+
+    /** @internal the byte window {@see Server::conditional} settles for a Range. */
+    public function setFileWindow(int $off, int $len): void
+    {
+        $this->fileOff = $off;
+        $this->fileLen = $len;
+    }
+
+    /** A body of another kind replaces a file — and closes its fd. */
+    private function dropFile(): void
+    {
+        if ($this->fileRes !== null) {
+            \fclose($this->fileRes);
+            $this->fileRes = null;
+            $this->filePath = '';
+            $this->fileSize = 0;
+            $this->fileMtime = 0;
+            $this->fileOff = 0;
+            $this->fileLen = 0;
+        }
     }
 
     public function redirect(string $loc, int $code = 302): Response
@@ -4024,7 +4121,9 @@ final class Server
         if (!$res->statusWasSet()) {
             $res->status(\Manticore\Sapi\responseStatus());
         }
-        if ($echoed !== '' && $res->getBody() === '' && !$res->isStreaming()) {
+        // A file body, like a streamed one, is EXPLICIT: echoed bytes are the
+        // fallback for a handler that wrote nothing, and `file()` wrote.
+        if ($echoed !== '' && $res->getBody() === '' && !$res->isStreaming() && !$res->isFile()) {
             $res->body($echoed);
         }
         return $res;
@@ -4036,6 +4135,9 @@ final class Server
      */
     private function writeResponse(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
     {
+        if ($res->isFile()) {
+            return $this->writeFile($conn, $out, $req, $res, $keep);
+        }
         if ($res->isStreaming() && Status::hasBody($res->status)) {
             return $this->writeStreamed($conn, $out, $req, $res, $keep);
         }
@@ -4106,6 +4208,80 @@ final class Server
         // returned without ending still has to leave the framing valid, or the
         // peer waits for a body that never ends.
         $w->end();
+        return $keep;
+    }
+
+    /**
+     * A file body: the head, then the bytes straight from the page cache.
+     *
+     * `sendfile(2)` on a plain socket — the bytes never enter the process. A
+     * TLS connection has to encrypt them, so it takes the `fread` loop, and so
+     * does a host whose `__mc_sendfile` answers -3. Either way the fd is closed
+     * on every exit: the Response opened it and this is where it dies.
+     */
+    private function writeFile(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
+    {
+        $in = $res->fileResource();
+        if ($in === null) {
+            return $keep;
+        }
+        $hasBody = Status::hasBody($res->status) && $res->fileLength() > 0;
+        $h = $res->headers;
+        $h->remove('content-length');
+        $head = $this->renderHead($res, $req->version, $keep, $hasBody ? $res->fileLength() : 0, $hasBody);
+        \Manticore\Sapi\responseSent();
+        // The queue drains BEFORE the first sendfile: a pipelined response
+        // still sitting in the Outbox would otherwise arrive after the file.
+        $out->sendNow($head);
+        if (!$hasBody || $req->method === 'HEAD') {
+            \fclose($in);
+            return $keep;
+        }
+        $off = $res->fileOffset();
+        $left = $res->fileLength();
+        $ok = true;
+        $useSendfile = $conn->kind === \Resource::KIND_SOCKET;
+        while ($left > 0) {
+            if ($useSendfile) {
+                $n = \__mc_sendfile($conn, $in, $off, $left);
+                if ($n === -3) {
+                    $useSendfile = false;
+                    continue;
+                }
+                if ($n === -2) {
+                    if (\__mc_wait_write($conn) === 0) {
+                        $ok = false;
+                        break;
+                    }
+                    continue;
+                }
+                if ($n < 0) {
+                    $ok = false;
+                    break;
+                }
+                $off = $off + $n;
+                $left = $left - $n;
+                continue;
+            }
+            \fseek($in, $off);
+            $chunk = \fread($in, $left < 65536 ? $left : 65536);
+            if ($chunk === '') {
+                $ok = false;
+                break;
+            }
+            $w = \fwrite($conn, $chunk);
+            if ($w !== \strlen($chunk)) {
+                $ok = false;
+                break;
+            }
+            $off = $off + $w;
+            $left = $left - $w;
+        }
+        \fclose($in);
+        if (!$ok) {
+            $this->statErrors = $this->statErrors + 1;
+            return false;
+        }
         return $keep;
     }
 

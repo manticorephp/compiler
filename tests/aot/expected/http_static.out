@@ -1,0 +1,35 @@
+get: HTTP/1.1 200 OK
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 100000
+  Date: present
+  Server: mc-test
+  body[100000] match=yes
+head: HTTP/1.1 200 OK
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 100000
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+small: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 5
+  Date: present
+  Server: mc-test
+  body[5] match=yes
+nf: HTTP/1.1 404 Not Found
+  Content-Type: text/plain; charset=utf-8
+  Content-Length: 2
+  Date: present
+  Server: mc-test
+  body[2] match=yes
+throws: HTTP/1.1 500 Internal Server Error
+done
