@@ -214,7 +214,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history and tags: the changelog below is the range between the
+      # previous tag and this one, and a depth-1 checkout has neither end of it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dl
@@ -231,6 +235,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${GITHUB_REF_NAME#v}"
+
+          # NOT `gh release create --generate-notes`: that builds the list from
+          # merged PRs, and this tree is pushed to directly — 144 commits since
+          # v0.10.0 and one of them arrived through a PR, so the generated
+          # section would be empty and look like a release that changed nothing.
+          # The commits are the record instead. Their subjects are written as
+          # "<what changed>: <why>", so the part before the first colon is the
+          # summary line and the rationale stays in the history where it belongs.
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$prev" ]; then
+            range="$prev..$GITHUB_REF_NAME"
+            since="since \`$prev\`"
+          else
+            range="$GITHUB_REF_NAME"
+            since="all of it"
+          fi
+          git log --no-merges --pretty='%s' "$range" \
+            | sed 's/^\(.\{0,110\}\):.*/\1/' \
+            | sed 's/^\(.\{110\}\).*/\1…/' \
+            | sed 's/^/- /' > /tmp/changes.md
+          count="$(wc -l < /tmp/changes.md | tr -d ' ')"
+          changes="$(head -80 /tmp/changes.md)"
+          [ "$count" -le 80 ] || changes="$changes
+          - … and $((count - 80)) more, see the full log"
+
           notes="$(cat <<EOF
           \`\`\`
           docker run --rm -v "\$PWD":/work -u "\$(id -u):\$(id -g)" \\
@@ -245,6 +274,12 @@ jobs:
           which are missing. The image carries the toolchain it was built with.
 
           Built cold from \`${GITHUB_REF_NAME}\` — no cached compiler took part.
+
+          ## Changes ($count commits, $since)
+
+          $changes
+
+          **Full log:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev:-$GITHUB_REF_NAME}...${GITHUB_REF_NAME}
           EOF
           )"
           # Both ways in: pushing the tag alone (this job then creates the
