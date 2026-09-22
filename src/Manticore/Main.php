@@ -4344,16 +4344,16 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\FuseSplitJoin())->run($module);
         \Compile\Stats::step('FuseSplitJoin', $statT, \count($module->functions), -1);
-        // Gated compile-time type checker (MANTICORE_TYPECHECK=1). Off by
-        // default — it never runs during a normal build / self-host. When on,
-        // any genuinely-incompatible type use (array↔scalar / object↔scalar at
-        // a call arg or return) is fatal.
-        // Strict static analyzer (MANTICORE_TYPECHECK=1) — OFF by default for
-        // now; turning it on is a larger epic (the cold-seed / self-host corpus
-        // still leans on patterns it would flag). The pass already emits clean
-        // `line N: error: …` diagnostics (string arithmetic, array-ness arg /
-        // return mismatches) when enabled. Any reported error is fatal — a clean
-        // diagnostic beats a downstream clang failure or wrong codegen.
+        // Compile-time type checker. ON by default (`MANTICORE_TYPECHECK=0`
+        // turns it off) — the last step of the value-channel epic
+        // ({@see docs/design/value-channels.md}). It emits `line N: error: …`
+        // diagnostics (string arithmetic, array-ness arg / return mismatches,
+        // genuinely-incompatible array↔scalar / object↔scalar uses) and any one
+        // of them is fatal: a clean diagnostic beats a downstream clang failure
+        // or wrong codegen. It was gated off for a year because the self-host
+        // corpus leaned on patterns it flagged; those are gone (the channel
+        // producers were the last of them), and the compiler, the stdlib and
+        // the whole AOT corpus report zero.
         // ANALYSIS MODE ($collect set): run the checker unconditionally and
         // COLLECT its findings for the `analyze` command instead of aborting.
         // The array-REPRESENTATION conflict check ({@see TypeCheck::$reprOnly})
@@ -4369,7 +4369,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // 573 AOT cases report zero hits, so a NEW conflict is a compile error
         // instead of a SIGSEGV at run time.
         $tcFlag = \getenv("MANTICORE_TYPECHECK");
-        $tcOn = $collect !== null || (\is_string($tcFlag) && $tcFlag !== "" && $tcFlag !== "0");
+        // Unset (getenv answers false) is ON; only an explicit "0" / "" is off.
+        $tcOn = $collect !== null || !\is_string($tcFlag)
+            || ($tcFlag !== "" && $tcFlag !== "0");
         {
             $statT = \Compile\Stats::now();
             $tc = new \Compile\Mir\Passes\TypeCheck();

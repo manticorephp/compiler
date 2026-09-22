@@ -80,7 +80,7 @@ InlineClosures    inline captureless arrow closures; fuse map/filter/reduce to l
 InferTypes        re-run on the spliced / fused expressions
 Monomorphize      specialize erased-array and callable params per call-site shape
 FuseSplitJoin     implode(explode(…)) → one native str_replace
-TypeCheck         array-REPR conflicts (fatal); full checker under MANTICORE_TYPECHECK=1
+TypeCheck         array-REPR conflicts + the full checker, both fatal (MANTICORE_TYPECHECK=0 → repr only)
 NarrowReturns     final return narrowing, post-specialization
 CheckTypeDefs     the `#[TypeDef]` soundness gate
 ReflectAnalysis   decide which classes carry reflection metadata

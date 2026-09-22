@@ -14,7 +14,8 @@ use Compile\Mir\Type;
 use Compile\Mir\Walk;
 
 /**
- * Gated compile-time type checker (`MANTICORE_TYPECHECK=1`). Reports
+ * Compile-time type checker, ON by default (`MANTICORE_TYPECHECK=0` turns it
+ * off; `reprOnly` is what the flag actually drives). Reports
  * GENUINELY-incompatible type uses — the kind PHP rejects even with
  * strict_types off — at two boundaries:
  *   - a call argument vs the callee parameter type, and
@@ -111,6 +112,14 @@ final class TypeCheck
         $offset = 0;
         if ($recv === 1 && \count($params) > 0 && $params[0]->name === 'this') { $offset = 1; }
         foreach ($args as $ai => $arg) {
+            // `f(...$arr)` is ONE argument node supplying N of them, so from here
+            // on the positional mapping is a run-time fact: the array's length
+            // decides which param each element lands in, and an assoc spread
+            // names them. Checking the ARRAY against the next param's type read
+            // `join2(...["hi", "yo"])` as "vec[string] given, string expected"
+            // and would have failed three green cases the moment this checker
+            // became fatal. Stop, exactly as a variadic param does.
+            if ($arg->kind === Node::KIND_SPREAD) { break; }
             $pi = $ai + $offset;
             if (!isset($params[$pi])) { break; }
             $p = $params[$pi];
@@ -136,26 +145,49 @@ final class TypeCheck
     }
 
     /**
-     * Strict arithmetic: `+ - * / %` on a DEFINITELY-string operand is rejected
-     * (Manticore follows strict_types and a bit beyond — a numeric string is not
-     * silently coerced to a number; cast explicitly). Only fires when an operand
-     * is statically KIND_STRING — a `cell`/`unknown`/scalar operand is left
-     * alone, so the self-host corpus (which never does string arithmetic) is
-     * unaffected. The `.` concat operator is the string path and is not checked.
+     * Arithmetic `+ - * / %` on a string operand the compiler can PROVE is not
+     * numeric — `"abc" + 1`, which php 8 raises a TypeError for.
+     *
+     * ⚠ NOT every string operand. php coerces a NUMERIC string and so do we:
+     * `"2026" + "06"` is 2032 and `$p = explode(",", …); $p[0] + $p[1]` sums,
+     * both asserted by the corpus (`string_numeric_arith`, `explode_builtin`).
+     * Whether a run-time string is numeric is not a static fact, so the only
+     * sound fatal case is a CONSTANT that is provably not — anything else is a
+     * style opinion and belongs to `analyze`, which still reports every string
+     * operand as a non-fatal finding. This rule read every string operand as an
+     * error while the runtime coerced correctly, which is why the checker could
+     * not be turned on. The `.` concat operator is the string path, not checked.
      */
-    // Add/Sub/Mul/Div/Mod share the (left, right) layout — typing the param as
-    // Add (the load-bearing-subclass idiom; identical offsets) lets the field
-    // reads resolve. The dispatch only ever calls this for the five arith kinds.
-    private function checkArith(\Compile\Mir\Add $n, string $inFn): void
+    // Add/Sub/Mul/Div/Mod are five distinct classes sharing the (left, right)
+    // layout. The param was typed `Add` so the field reads resolve — the native
+    // compiler accepts that (identical offsets), but ZEND enforces the
+    // declaration and threw `Mul given` the moment this pass ran under the
+    // fast loop (`tools/compile_user_mir.php`). Take a `Node` and pull the two
+    // operands through {@see Walk::children}, which every arith node answers in
+    // (left, right) order — one spelling both hosts agree on.
+    private function checkArith(Node $n, string $inFn): void
     {
-        $bad = $n->left->type->kind === Type::KIND_STRING
-            || $n->right->type->kind === Type::KIND_STRING;
-        if ($bad) {
+        $kids = \Compile\Mir\Walk::children($n);
+        if (\count($kids) < 2) { return; }
+        $left = $kids[0];
+        $right = $kids[1];
+        if ($this->provablyNonNumericString($left)
+            || $this->provablyNonNumericString($right)) {
             $op = $this->arithOp($n->kind);
             $this->errors[] = $this->at($n) . 'arithmetic (`' . $op
-                . '`) on a string operand in ' . $inFn
-                . '() — cast explicitly ((int)/(float)) to compute on it';
+                . '`) on a NON-NUMERIC string constant in ' . $inFn
+                . '() — php raises a TypeError; cast explicitly ((int)/(float))';
         }
+    }
+
+    /** A string CONSTANT whose text php would refuse to compute on: not a
+     *  numeric string by php's own rule (leading whitespace allowed, an
+     *  optional sign, digits with an optional fraction / exponent). */
+    private function provablyNonNumericString(Node $n): bool
+    {
+        if ($n->kind !== Node::KIND_STRING_CONST) { return false; }
+        if ($n->type->kind !== Type::KIND_STRING) { return false; }
+        return !\is_numeric(\ltrim($n->value));
     }
 
     private function arithOp(string $kind): string

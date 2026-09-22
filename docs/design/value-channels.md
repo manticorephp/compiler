@@ -38,6 +38,36 @@ against the php oracle recorded beside it. A passing repro is promoted into
 `tests/aot/cases/` + `expected/`. The epic exits when the directory is empty,
 `arithType`'s `false &&` is gone, and `MANTICORE_TYPECHECK` is on by default.
 
+✅ **ALL THREE MET (2026-09-22).** The directory is empty — P1–P7 are promoted
+and `w4_array_identity` moved to `tests/aot/repro/compare/`, because array
+`===` comparing carrier words is not a channel bug (the words it compares are
+correctly-formed cells) but php's per-kind comparison, its own epic. The
+`false &&` went with the unlock. The checker is on by default; what had kept it
+off was two of its own rules, not the corpus:
+
+- **a spread argument** (`join2(...['hi','yo'])`) was checked as "argument 1",
+  so the ARRAY was compared against the first parameter's type. One node
+  supplies N arguments and only the run time knows how many, so a spread ends
+  positional checking exactly as a variadic parameter does.
+- **arithmetic on a string operand** was rejected outright, but php coerces a
+  NUMERIC string and so does the runtime — `"2026" + "06"` is 2032 and
+  `explode()`'s elements sum, both asserted by the corpus. Only a CONSTANT that
+  is provably non-numeric is an error now (php raises a TypeError for it);
+  everything else is a style opinion and stays with `analyze`, which reports
+  every string operand as a non-fatal finding.
+- ⚠ `checkArith` took a `Compile\Mir\Add` for all five arithmetic kinds (same
+  field offsets, which the native compiler accepts). Zend enforces it, so the
+  pass threw `Mul given` the moment it ran under the Zend fast loop — invisible
+  while the flag was off. It reads its operands through `Walk::children` now.
+
+Whole corpus (1148 cases) + the compiler's own module + the stdlib: zero.
+✅ Follow-up done: `src/Analyze/Rules/StringArithmetic.php`, the analyzer's own
+copy of the arithmetic rule, now reports at the severity php justifies — a
+literal with no numeric prefix is an ERROR (php raises a TypeError), one with a
+numeric prefix and trailing text is a WARNING (php warns and computes on the
+prefix), a string-typed operand whose value is a run-time fact is a WARNING, and
+a fully numeric literal is nothing at all. Case `tests/analyze/cases/arith_string.php`.
+
 Baseline on `b17ede4` (2026-09-20): 7 open, 3 already green and promoted.
 After the element-channel, slot-producer, by-ref and unlock steps: P1–P7 and
 `w4_cell_arith` promoted; open = `w4_array_identity` (array `===`/`==` compare
@@ -293,8 +323,11 @@ by-ref call into an erased param.
 3. **Verifier.** ✅ `MANTICORE_CELLGUARD=strict` fails the build on a `raw →
    cell` edge; the ratchet baseline 288 → 2 (the by-ref closure return);
    `bin/build` exports strict by default.
-4. **Unlock.** Delete the `false &&` in `arithType`; convert `plausiblePtrIr`
-   sites to assertions; `MemoryAbi::VERSION` bump ⇒ one `bin/build --seed`.
+4. **Unlock.** ✅ The `false &&` in `arithType` is gone and `MANTICORE_TYPECHECK`
+   is on by default. ⛔ `plausiblePtrIr` → assertions is NOT part of this epic:
+   its 15 sites dereference an unvalidated word in an ERASED channel, so they
+   need the erased producers to become self-describing first — a separate epic,
+   tracked in ROADMAP.
 
 Every step: `tools/w4_repros.sh` + `tests/aot/run.sh -j 0` + difftest before
 merge; a repr change shows only in the generation AFTER the one that emits it,

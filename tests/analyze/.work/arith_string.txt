@@ -1,0 +1,9 @@
+tests/analyze/cases/arith_string.php:14:14: warning: arithmetic (`+`) on the leading-numeric string "12abc" — php warns and computes on the numeric prefix; cast explicitly ((int)/(float))
+tests/analyze/cases/arith_string.php:15:12: warning: arithmetic (`+`) on the leading-numeric string "5 x" — php warns and computes on the numeric prefix; cast explicitly ((int)/(float))
+tests/analyze/cases/arith_string.php:17:11: warning: arithmetic (`+`) on the leading-numeric string "1e" — php warns and computes on the numeric prefix; cast explicitly ((int)/(float))
+tests/analyze/cases/arith_string.php:20:12: error: arithmetic (`-`) on the non-numeric string "abc" — php raises a TypeError; cast explicitly ((int)/(float))
+tests/analyze/cases/arith_string.php:21:9: error: arithmetic (`+`) on the non-numeric string "" — php raises a TypeError; cast explicitly ((int)/(float))
+tests/analyze/cases/arith_string.php:24:55: warning: arithmetic (`-`) on a string operand — php raises a TypeError unless the value is numeric; cast explicitly ((int)/(float))
+tests/analyze/cases/arith_string.php:25:71: warning: arithmetic (`*`) on a string operand — php raises a TypeError unless the value is numeric; cast explicitly ((int)/(float))
+
+Found 2 error(s), 5 warning(s).

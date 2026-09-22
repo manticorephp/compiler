@@ -8,12 +8,22 @@
 # Exit 0 only when every repro still listed passes. Not part of run.sh — the
 # suite must stay green while these are open. See docs/design/value-channels.md.
 set -uo pipefail
+# An EMPTY w4/ is the epic's exit condition, not a glob to compile: without
+# nullglob the literal `*.php` reached `manticore compile` and reported FAIL *.
+shopt -s nullglob
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 WORK="${W4_WORK:-tests/aot/.work/w4}"
 mkdir -p "$WORK"
 pass=0; fail=0
-for src in tests/aot/repro/w4/*.php; do
+srcs=(tests/aot/repro/w4/*.php)
+if [[ ${#srcs[@]} -eq 0 ]]; then
+    echo "w4 repros: none open — the value-channel epic's exit gate is met"
+    echo "(a NEW producer that stores a raw word into a cell channel goes here;"
+    echo " docs/design/value-channels.md)"
+    exit 0
+fi
+for src in "${srcs[@]}"; do
     name="$(basename "$src" .php)"
     exp="tests/aot/repro/w4/$name.expected"
     bin="$WORK/$name.bin"

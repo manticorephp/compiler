@@ -12,7 +12,7 @@ class Point
     public function __construct(int $x, int $y) {}
 }
 
-echo "5" - 1, "\n";            // arith on string
+echo "5" - 1, "\n";            // numeric string: php computes 4, not flagged
 echo 10 + 2, "\n";            // ok
 echo "a" . "b", "\n";         // concat ok
 

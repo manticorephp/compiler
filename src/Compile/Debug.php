@@ -45,7 +45,7 @@ namespace Compile;
  *                                         CALLER and not just the leaf.
  *
  * The two array flags are ON by default; every other switch is off.
- * `MANTICORE_TYPECHECK=1` gates the TypeCheck pass and is read in the driver,
+ * `MANTICORE_TYPECHECK=0` narrows the TypeCheck pass to its repr rules and is read in the driver,
  * not here. User-facing documentation: `docs/memory.md`.
  */
 final class Debug
