@@ -37,8 +37,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  `curl-config` and the `libcurl.so` symlink, and Main.php's
 #                  generic_link_flags() needs one of them — `pkg-config --libs
 #                  curl` fails everywhere, since the module is called libcurl.
+# wget + gnupg + lsb-release are llvm.sh's own dependencies, and `wget` is not a
+# stand-in for the `curl` next to it: llvm.sh calls wget by name. What is NOT
+# here is `software-properties-common` — trixie dropped the package, and
+# llvm.sh stopped needing it in the same breath: on a new Debian it writes the
+# deb822 source file itself instead of calling add-apt-repository.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg lsb-release software-properties-common \
+        ca-certificates curl wget gnupg lsb-release \
         gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config \
         binutils bash file make \
         netbase \
