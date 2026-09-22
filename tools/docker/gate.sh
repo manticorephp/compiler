@@ -147,6 +147,15 @@ fi
 
 save_compiler_cache
 
+# Before the suite, because it is seconds and it covers what the suite cannot:
+# the suite always calls `bin/manticore` by path, so it never notices a compiler
+# that cannot find its own prelude when it is reached the way an installed one is.
+echo
+echo "=== tools/install_smoke.sh (an installed layout finds its own lib/) ==="
+bash tools/install_smoke.sh > "$MC_LOGDIR/install_smoke.log" 2>&1
+install_rc=$?
+tail -5 "$MC_LOGDIR/install_smoke.log"
+
 echo
 if [ -n "${MC_FILTER:-}" ]; then
     echo "=== tests/aot/run.sh (-k $MC_FILTER, -j $MC_JOBS) — NOT the gate ==="
@@ -160,8 +169,9 @@ tail -15 "$MC_LOGDIR/suite.log"
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=$suite_rc ==="
-    exit $suite_rc
+    echo "=== RESULT: suite=$suite_rc install_smoke=$install_rc ==="
+    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] || exit 1
+    exit 0
 fi
 
 diff_rc=0
@@ -185,6 +195,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=$suite_rc difftest=$diff_rc fixpoint=$fix_rc ==="
-[ "$suite_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+echo "=== RESULT (gate): suite=$suite_rc install_smoke=$install_rc difftest=$diff_rc fixpoint=$fix_rc ==="
+[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0
