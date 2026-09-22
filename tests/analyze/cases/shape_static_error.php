@@ -38,3 +38,7 @@ echo first($v)->kind;
 /** @param array<int, array{0:int,1:int}> $pairs */
 function pairs(array $pairs): int { return count($pairs); }
 echo pairs([[1, 'a']]);
+/** @param array{0:int,1:int} $q */
+function storeFloat(array $q): int { $q[1] = 2.5; return $q[1]; }
+/** @param array{0:Node,1:bool} $pair */
+function storeInt(array $pair): int { $pair[1] = 5; return $pair[0]->kind; }

@@ -1496,6 +1496,18 @@ trait EmitLlvmArrays
         }
         $dcT = $this->storeElemDeCellifyType($se);
         if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); }
+        // An int (or bool) into a FLOAT slot is converted, not bit-stored —
+        // the float-slot local rule ({@see EmitLlvmLocals::emitStoreLocal})
+        // for an element: `$f[0] = 3` over `vec[float]` read back a denormal.
+        $elT = $se->array->type->element ?? null;
+        if ($dcT === null && $elT !== null && $elT->kind === Type::KIND_FLOAT
+            && ($se->value->type->kind === Type::KIND_INT || $se->value->type->kind === Type::KIND_BOOL)) {
+            $out .= $this->coerceToI64();
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
+            $this->lastValue = $d;
+            $this->lastValueType = 'double';
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $fallback = $dcT ?? $this->storeRetainFallback($se);

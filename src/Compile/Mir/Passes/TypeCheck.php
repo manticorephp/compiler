@@ -236,7 +236,7 @@ final class TypeCheck
             $k = $this->constKey($n->index);
             if ($k !== null && $at->isShape()) {
                 $ft = $at->shapeField($k);
-                if ($ft !== null && $this->fieldIncompatible($n->value->type, $ft)) {
+                if ($ft !== null && $this->storeIncompatible($n->value->type, $ft, $at->declared)) {
                     $this->errors[] = $this->at($n) . $inFn . '(): store to key ' . (string)$k . ' — '
                         . $n->value->type->toString() . ' given, ' . $ft->toString() . ' expected';
                 }
@@ -359,6 +359,23 @@ final class TypeCheck
         if ($a->kind === $b->kind) { return false; }
         if ($this->isPtrKind($a) || $this->isPtrKind($b)) { return true; }
         return false;
+    }
+
+    /**
+     * A constant-key STORE is held to the field's exact kind when the shape
+     * is DECLARED: the read side unboxes by the docblock, so a scalar of
+     * another kind is not php's coercion but the wrong bits (`$q[1] = 2.5`
+     * into `array{0:int,1:int}` read back the double's bit pattern as an int).
+     * An int into a `float` field is the one widening the store converts
+     * ({@see \Compile\Mir\Passes\EmitLlvmArrays::emitStoreElemValue}); an
+     * inferred shape keeps the pointer-vs-scalar rule of {@see fieldIncompatible}.
+     */
+    private function storeIncompatible(Type $given, Type $field, bool $declared): bool
+    {
+        if (!$declared) { return $this->fieldIncompatible($given, $field); }
+        if (!$this->concrete($given) || !$this->concrete($field)) { return false; }
+        if ($given->kind === $field->kind) { return false; }
+        return !($given->kind === Type::KIND_INT && $field->kind === Type::KIND_FLOAT);
     }
 
     private function isPtrKind(Type $t): bool
