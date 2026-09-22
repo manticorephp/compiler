@@ -136,6 +136,7 @@ final class UnifiedArrayRuntime
         $this->emitCellToKind();
         $this->emitArrayConform();
         $this->emitElemUntagKind();
+        $this->emitElemEnumOrdinal();
         $this->emitElemKindIs();
         $this->emitElemEncodeRaw();
         $this->emitElemStampRaw();
@@ -4361,6 +4362,52 @@ final class UnifiedArrayRuntime
         );
         $raw->brIf($intUnderFloat, $widen, $asis);
         $widen->ret($widen->bitcast($widen->sitofp($v, Type::f64()), Type::i64()));
+    }
+
+    /**
+     * `__mir_elem_enum_ordinal(arr, v) -> i64` — the ENUM half of the sound
+     * untag, and the mirror of {@see emitElemUntagKind} one kind over.
+     *
+     * An enum VALUE is an ordinal; an enum ELEMENT of a cell buffer is
+     * `box_object(<Enum>__cases[ordinal])`, the per-case singleton
+     * ({@see \Compile\Mir\Passes\EmitLlvmBuiltins::emitEnumSingletonPtr} is
+     * the one owner of that direction). A shape read typed by the FIELD asks
+     * for the ordinal, so stripping the tag like any other object pointer —
+     * which is what an enum field got, it being `KIND_OBJ` — handed the
+     * consumer the SINGLETON ADDRESS: `$m = ["k" => Suit::C]; $m["k"] ===
+     * Suit::C` was false and `<Enum>__cases[<address>]` SIGBUS'd.
+     *
+     * The ordinal is at +16 of the singleton ({@see \Compile\Mir\Passes\
+     * EmitLlvm::emitEnumCellSingletons}'s `{ MAGIC, desc, 0, ordinal }`).
+     * A RAW-hinted buffer already holds the ordinal, so it passes through —
+     * the same discrimination `__mir_elem_untag_kind` makes, by the hint and
+     * not by the word. A NULL cell (a `?Suit` field) answers 0 rather than
+     * dereferencing the payload, exactly as the `ptrk` arm does.
+     */
+    private function emitElemEnumOrdinal(): void
+    {
+        $fn = $this->module->func('__mir_elem_enum_ordinal', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $asis = $fn->block('asis');
+        $chk = $fn->block('chk');
+        $dec = $fn->block('dec');
+        $ord = $fn->block('ord');
+        $zero = $fn->block('zero');
+        $arr = $this->shapeBase($e, $arr);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
+        $asis->ret($v);
+        $hint = $this->elemHint($chk, $arr);
+        $isCell = $chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk->brIf($isCell, $dec, $asis);
+        $istag = $dec->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $dec->and_($dec->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isObj = $dec->and_($istag, $dec->icmp('eq', $nib, Value::int(Type::i64(), 8)));
+        $dec->brIf($isObj, $ord, $zero);
+        $zero->ret(Value::int(Type::i64(), 0));
+        $p = $ord->inttoptr($ord->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $ord->ret($ord->load(Type::i64(), $ord->gep(Type::i8(), $p, [Value::int(Type::i64(), 16)])));
     }
 
     /**

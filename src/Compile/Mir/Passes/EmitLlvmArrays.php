@@ -1036,8 +1036,17 @@ trait EmitLlvmArrays
                 $out .= '  br label %' . $contL . "\n";
                 $out .= $contL . ":\n";
                 $u = $this->ssa->allocReg();
-                $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
-                      . ', i64 ' . $reg . ', i64 ' . (string)$kc . ")\n";
+                // An ENUM field is KIND_OBJ, so it took the pointer untag and
+                // the consumer got the per-case SINGLETON ADDRESS where it
+                // expects an ORDINAL. `__mir_elem_enum_ordinal` is that one
+                // kind's decode; every other object field is a real pointer.
+                if ($this->isEnumType($self->type)) {
+                    $out .= '  ' . $u . ' = call i64 @__mir_elem_enum_ordinal(ptr ' . $arrPtr
+                          . ', i64 ' . $reg . ")\n";
+                } else {
+                    $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
+                          . ', i64 ' . $reg . ', i64 ' . (string)$kc . ")\n";
+                }
                 $reg = $u;
                 $this->lastValue = $reg;
                 $shapeDecoded = true;
