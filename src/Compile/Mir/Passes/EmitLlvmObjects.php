@@ -900,7 +900,9 @@ trait EmitLlvmObjects
             if ($getCls !== '') {
                 $out = $this->emitNode($pa->object);
                 $out .= $this->coerceToPtr();
-                return $out . $this->emitMagicCall($getCls, '__get', $this->lastValue, $pa->property, null);
+                // Boxed by the getter's declared return when that is concrete;
+                // a `mixed` getter already hands back a cell.
+                return $out . $this->emitMagicGetCell($getCls, $this->lastValue, $pa->property);
             }
         }
         if (($pa->object->type->class ?? '') === '' && \getenv('MANTICORE_UNKNOWN_PROP_TRACE')) {
@@ -1412,6 +1414,8 @@ trait EmitLlvmObjects
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        // A bag element (a CELL-hinted buffer) or the boxed null.
+        $this->markCellOpaque($r);
         return $out;
     }
 
@@ -1958,6 +1962,9 @@ trait EmitLlvmObjects
               . '__' . $method . '(' . $args . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        // Trusted by signature, as every call is.
+        $mrt = $this->sigs->returnType[$methodCls . '__' . $method] ?? null;
+        if ($mrt !== null && $mrt->kind === Type::KIND_CELL) { $this->markCellOpaque($r); }
         return $out;
     }
 
@@ -2868,6 +2875,9 @@ trait EmitLlvmObjects
         $out .= '  ' . $rv . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $rv;
         $this->lastValueType = 'i64';
+        // Every arm of the name chain stored a boxed cell (a reader helper, the
+        // bag lookup or a boxed null).
+        $this->markCellOpaque($rv);
         return $out;
     }
 
