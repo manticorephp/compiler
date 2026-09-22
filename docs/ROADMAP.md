@@ -54,6 +54,11 @@ Built on branch `ci` (2026-09-07): **`bin/build --fast`** (`-O1`, apps only, to
 `bin/manticore.fast`, never the canonical slot — 71 s vs 83 s), **`tests/aot/run.sh -O <n>`**,
 and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, consumed by
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
+### Recently completed (2026-09)
+
+- ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
+  errors (br `shapes`, 2026-09-21).
+
 ### Recently completed (2026-07)
 
 - **`ext/pdo` + `pdo_sqlite` — a database layer** (`docs/pdo.md`). `PDO` / `PDOStatement`

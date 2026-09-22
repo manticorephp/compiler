@@ -1448,6 +1448,25 @@ final class ArrayAccess_ extends Node
         parent::__construct(Node::KIND_ARRAY_ACCESS, $type);
     }
 
+    /**
+     * A constant-key read off a SHAPE: 1 = the emitter checks the word's tag
+     * against this node's (field) type and throws TypeError on a mismatch;
+     * 2 = the same, but a NULL word passes (a `key?:`/`?T` field, or the
+     * subject of `??`). 0 = not a shaped read. Set by InferNodes on every run.
+     * `inferIsset` clears the flag only on a DIRECT array-access target — a
+     * nested probe (`isset($rec['k']->x)`) keeps the INNER read's flag, since
+     * that read is not itself the thing being probed.
+     */
+    public int $shapeCheck = 0;
+
+    /**
+     * The direct subject of `isset()`, `empty()` or `??`: a PROBE for a key,
+     * which php answers false / the default without a warning even when a
+     * sealed shape does not name the key. Set at lowering; TypeCheck's
+     * unnamed-key rule skips a probe.
+     */
+    public bool $probe = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitArrayAccess($this);

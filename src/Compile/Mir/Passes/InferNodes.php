@@ -350,6 +350,13 @@ trait InferNodes
             // has raw==boxed and reconciles). So a lone `null` also forces a cell.
             if (\count($classes) < 2 && !isset($classes['null'])) { continue; }
             if (isset($this->recordLocals[$name])) { continue; } // record keeps its shape
+            // A SHAPED param/local (declared or `@var`-bound) legitimately holds
+            // different kinds at different fields — that disagreement is the
+            // shape, not a mixed array. Demoting it here would run BEFORE
+            // inferStoreElement ever sees the store and would throw the fields
+            // away for the WHOLE function, defeating {@see inferStoreElement}'s
+            // constant-key preservation.
+            if (($this->localTypes[$name] ?? null)?->isShape()) { continue; }
             $this->cellElemLocals[$name] = true;
             if (isset($this->assocLocals[$name])) {
                 $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
@@ -1074,7 +1081,10 @@ trait InferNodes
 
     private function inferIsset(Isset_ $n): Type
     {
-        foreach ($n->targets as $t) { $this->inferNode($t); }
+        foreach ($n->targets as $t) {
+            $this->inferNode($t);
+            if ($t->kind === Node::KIND_ARRAY_ACCESS) { $t->shapeCheck = 0; }
+        }
         $n->type = Type::bool_();
         return $n->type;
     }
@@ -1406,6 +1416,11 @@ trait InferNodes
     private function inferNullCoalesce(NullCoalesce_ $node): Type
     {
         $lt = $this->inferNode($node->left);
+        // `$rec['k'] ?? d`: a NULL word is the whole point of the operator, so
+        // the shape check must let it through and hand it to the fallback.
+        if ($node->left->kind === Node::KIND_ARRAY_ACCESS && $node->left->shapeCheck === 1) {
+            $node->left->shapeCheck = 2;
+        }
         $rt = $this->inferNode($node->right);
         // `$a ?? throw …`: the fallback diverges (never), so the result is
         // simply the left's type — never the throw's void.
@@ -1843,7 +1858,7 @@ trait InferNodes
             }
             if ($allStrConstKeys && $el->key !== null
                 && $el->key->kind === Node::KIND_STRING_CONST) {
-                $recordFields[$el->key->value] = $vt;
+                $recordFields[Type::shapeKey($el->key->value)] = $vt;
             }
             // A literal of distinct closures (each obj<__closure_N>) must keep a
             // dispatchable KIND_CLOSURE element, not collapse to unknown→cell that
@@ -1929,6 +1944,14 @@ trait InferNodes
         return $node->type;
     }
 
+    /** The literal key of an index node — an int or string constant — or null. */
+    private function constKeyOf(Node $index): int|string|null
+    {
+        if ($index->kind === Node::KIND_INT_CONST) { return $index->value; }
+        if ($index->kind === Node::KIND_STRING_CONST) { return $index->value; }
+        return null;
+    }
+
     private function inferArrayAccess(ArrayAccess_ $node): Type
     {
         $at = $this->inferNode($node->array);
@@ -1940,9 +1963,25 @@ trait InferNodes
         // `unknown` it was the raw word — right only while the buffer happened
         // to hold raw scalars, and a raw pointer under a cell claim everywhere
         // else (the asort/arsort rebuild handed `$len - 1` a raw 11 as a cell).
+        $node->shapeCheck = 0;
         if ($at->isArray()) {
             $e = $at->element;
             $node->type = ($e === null || $e->kind === Type::KIND_UNKNOWN) ? Type::cell() : $e;
+            // A constant key on a SHAPE reads the FIELD type — the early unbox
+            // the shape exists for. The emitter strips the tag by this type and
+            // checks it first ({@see ArrayAccess_::$shapeCheck}); a cell field
+            // stays a cell and needs neither. A key the shape does not name
+            // keeps the element type here and is a TypeCheck error.
+            $k = $this->constKeyOf($node->index);
+            if ($k !== null && $at->isShape()) {
+                $ft = $at->shapeField($k);
+                if ($ft !== null) {
+                    $node->type = $ft;
+                    if ($ft->kind !== Type::KIND_CELL && $ft->kind !== Type::KIND_UNKNOWN) {
+                        $node->shapeCheck = $at->shapeFieldNullable($k) ? 2 : 1;
+                    }
+                }
+            }
         }
         if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) {
             $node->type = Type::cell();
@@ -1964,6 +2003,18 @@ trait InferNodes
         $at = $this->inferNode($node->array);
         $it = $this->inferNode($node->index);
         $vt = $this->inferNode($node->value);
+        // A constant-key store into a SHAPED local writes one declared field:
+        // the local keeps its shape (the re-narrowing arms below would drop the
+        // fields). A key the shape does not name, or a dynamic key, falls
+        // through — the shape no longer describes the buffer. The value/field
+        // kind agreement is TypeCheck's.
+        if ($node->array->kind === Node::KIND_LOAD_LOCAL && $at->isShape()) {
+            $k = $this->constKeyOf($node->index);
+            if ($k !== null && $at->shapeField($k) !== null) {
+                $node->type = $vt;
+                return $vt;
+            }
+        }
         // `$out[] = v` on a vec local refines its element type, so a
         // freshly-`[]`-built vec picks up its element shape (e.g. cell
         // when appending boxed JSON values).

@@ -1,0 +1,184 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, vivify-ref-args, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn Node____construct(obj<Node> %this, int %kind) -> unknown {
+  %0 = load_local this : obj<Node>
+  %1 = load_local kind : int
+  %2 = store_property %0->kind <- %1 : int
+}
+
+fn take(array{0:obj<Node>,1:bool} %pair) -> int {
+  %0 = load_local pair : vec[cell]
+  %1 = int_const 1 : int
+  %2 = array_access %0[%1] : bool
+  ternary %2 then {
+    %3 = load_local pair : vec[cell]
+    %4 = int_const 0 : int
+    %5 = array_access %3[%4] : obj<Node>
+    %6 = property_access %5->kind : int
+    -> %6
+  } else {
+    %7 = int_const 0 : int
+    -> %7
+  } => %8 : int
+  return %8
+}
+
+fn take$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
+  %0 = load_local pair : vec[cell]
+  %1 = int_const 1 : int
+  %2 = array_access %0[%1] : bool
+  ternary %2 then {
+    %3 = load_local pair : vec[cell]
+    %4 = int_const 0 : int
+    %5 = array_access %3[%4] : obj<Node>
+    %6 = property_access %5->kind : int
+    -> %6
+  } else {
+    %7 = int_const 0 : int
+    -> %7
+  } => %8 : int
+  return %8
+}
+
+fn mutate(array{0:obj<Node>,1:bool} %pair) -> int {
+  %0 = load_local pair : vec[cell]
+  %1 = int_const 1 : int
+  %2 = bool_const false : bool
+  %3 = store_element %0[%1] <- %2 : bool
+  %4 = load_local pair : vec[cell]
+  %5 = int_const 0 : int
+  %6 = int_const 9 : int
+  %7 = new Node(%6) : obj<Node>
+  %8 = store_element %4[%5] <- %7 : obj<Node>
+  %9 = load_local pair : vec[cell]
+  %10 = int_const 0 : int
+  %11 = array_access %9[%10] : obj<Node>
+  %12 = property_access %11->kind : int
+  return %12
+}
+
+fn mutate$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
+  %0 = load_local pair : vec[cell]
+  %1 = int_const 1 : int
+  %2 = bool_const false : bool
+  %3 = store_element %0[%1] <- %2 : bool
+  %4 = load_local pair : vec[cell]
+  %5 = int_const 0 : int
+  %6 = int_const 9 : int
+  %7 = new Node(%6) : obj<Node>
+  %8 = store_element %4[%5] <- %7 : obj<Node>
+  %9 = load_local pair : vec[cell]
+  %10 = int_const 0 : int
+  %11 = array_access %9[%10] : obj<Node>
+  %12 = property_access %11->kind : int
+  return %12
+}
+
+fn widen(array{0:obj<Node>,1:bool} %pair, int %i) -> int {
+  %0 = load_local pair : vec[cell]
+  %1 = load_local i : int
+  %2 = int_const 1 : int
+  %3 = new Node(%2) : obj<Node>
+  %4 = store_element %0[%1] <- %3 : obj<Node>
+  %5 = load_local pair : vec[cell]
+  %6 = call count(%5) : int
+  return %6
+}
+
+fn widen$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair, int %i) -> int {
+  %0 = load_local pair : vec[cell]
+  %1 = load_local i : int
+  %2 = int_const 1 : int
+  %3 = new Node(%2) : obj<Node>
+  %4 = store_element %0[%1] <- %3 : obj<Node>
+  %5 = load_local pair : vec[cell]
+  %6 = call count(%5) : int
+  return %6
+}
+
+fn build() -> int {
+  %0 = string_const "name" : string
+  %1 = string_const "a" : string
+  %2 = string_const "hits" : string
+  %3 = int_const 1 : int
+  %4 = array_lit [%0 => %1, %2 => %3] : assoc[string, cell]
+  %5 = store_local rec <- %4 : assoc[string, cell]
+  %6 = load_local rec : assoc[string, cell]
+  %7 = string_const "hits" : string
+  %8 = array_access %6[%7] : int
+  %9 = load_local rec : assoc[string, cell]
+  %10 = string_const "name" : string
+  %11 = array_access %9[%10] : string
+  %12 = call strlen(%11) : int
+  %13 = add %8, %12 : int
+  return %13
+  mem_rc_release assoc rec
+}
+
+fn merge(array{0:obj<Node>,1:bool} %p, array{0:obj<Node>,1:bool} %q, bool %c) -> int {
+  %0 = load_local c : bool
+  ternary %0 then {
+    %1 = load_local p : vec[cell]
+    -> %1
+  } else {
+    %2 = load_local q : vec[cell]
+    -> %2
+  } => %3 : vec[cell]
+  %4 = store_local r <- %3 : vec[cell]
+  %5 = load_local r : vec[cell]
+  %6 = int_const 0 : int
+  %7 = array_access %5[%6] : obj<Node>
+  %8 = property_access %7->kind : int
+  return %8
+  mem_rc_release vec r
+}
+
+fn merge$mono$p0_vec_cell_p1_vec_cell(array{0:obj<Node>,1:bool} %p, array{0:obj<Node>,1:bool} %q, bool %c) -> int {
+  %0 = load_local c : bool
+  ternary %0 then {
+    %1 = load_local p : vec[cell]
+    -> %1
+  } else {
+    %2 = load_local q : vec[cell]
+    -> %2
+  } => %3 : vec[cell]
+  %4 = store_local r <- %3 : vec[cell]
+  %5 = load_local r : vec[cell]
+  %6 = int_const 0 : int
+  %7 = array_access %5[%6] : obj<Node>
+  %8 = property_access %7->kind : int
+  return %8
+  mem_rc_release vec r
+}
+
+fn __main() -> int {
+  %0 = int_const 4 : int
+  %1 = new Node(%0) : obj<Node>
+  %2 = bool_const true : bool
+  %3 = array_lit [_ => %1, _ => %2] : vec[cell]
+  %4 = call take$mono$p0_vec_cell(%3) : int
+  %5 = int_const 1 : int
+  %6 = new Node(%5) : obj<Node>
+  %7 = bool_const true : bool
+  %8 = array_lit [_ => %6, _ => %7] : vec[cell]
+  %9 = call mutate$mono$p0_vec_cell(%8) : int
+  %10 = int_const 1 : int
+  %11 = new Node(%10) : obj<Node>
+  %12 = bool_const true : bool
+  %13 = array_lit [_ => %11, _ => %12] : vec[cell]
+  %14 = int_const 0 : int
+  %15 = call widen$mono$p0_vec_cell(%13, %14) : int
+  %16 = call build() : int
+  %17 = int_const 5 : int
+  %18 = new Node(%17) : obj<Node>
+  %19 = bool_const true : bool
+  %20 = array_lit [_ => %18, _ => %19] : vec[cell]
+  %21 = int_const 6 : int
+  %22 = new Node(%21) : obj<Node>
+  %23 = bool_const false : bool
+  %24 = array_lit [_ => %22, _ => %23] : vec[cell]
+  %25 = bool_const true : bool
+  %26 = call merge$mono$p0_vec_cell_p1_vec_cell(%20, %24, %25) : int
+  %27 = string_const "\n" : string
+  echo %4, %9, %15, %16, %26, %27
+}

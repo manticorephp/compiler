@@ -2465,7 +2465,7 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
  * push a canned response into the server end, and parse it from the client end —
  * offline and deterministic. The transport itself is covered by net_tcp_loopback.
  *
- * Returns [body|false, location]. `location` is non-empty only when $followable
+ * Returns [body|false, location, code]. `location` is non-empty only when $followable
  * and the status is a 3xx carrying one — the caller owns the redirect loop,
  * because it needs a NEW connection.
  *
@@ -2473,7 +2473,7 @@ function __mc_http_get(string $url, int $maxRedirects = 20, string $method = 'GE
  * call. A chunk boundary never lines up with a recv boundary; the read buffer is
  * what makes that a non-issue here.
  *
- * @return array{0: string|false, 1: string}
+ * @return array{0: string|false, 1: string, 2: int} body (false on a failed read), redirect target ('' = none), status code
  */
 function __mc_http_read_response(\Resource $sock, bool $followable = false): array
 {

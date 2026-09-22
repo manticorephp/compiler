@@ -65,6 +65,12 @@ final class Type
      */
     public const KIND_TYPEVAR = 'typevar';
 
+    /**
+     * `$fields` / `$nullableFields` keys are `shapeKey`-encoded — never a mixed
+     * int|string map, which the self-hosted compiler cannot read back.
+     * @param array<string,self>|null $fields
+     * @param array<string,true> $nullableFields
+     */
     public function __construct(
         public readonly string $kind,
         public readonly ?self $element = null,
@@ -78,14 +84,13 @@ final class Type
          *  not a Type[] atom list — the latter is a self-host miscompile hazard. */
         public readonly bool $numeric = false,
         /**
-         * RECORD shape: a string-key literal's per-field types, in insertion
-         * order (`{id:int, name:string, …}`). A record is REPRESENTATIONALLY an
-         * `assoc[string, <join of field types>]` (same runtime PhpArray, same
-         * `element`/`key`) — every consumer that ignores this payload treats it
-         * as that assoc. Only shape-aware code ({@see isRecord}) reads it. Any
-         * control-flow merge or element mutation drops it (the array-join branch
-         * rebuilds a plain array), degrading to today's `assoc[string,cell]`.
-         * @var array<string,self>|null
+         * SHAPE: per-field types of a docblock `array{…}` or a string-key
+         * literal, in declared order. A shape is REPRESENTATIONALLY the plain
+         * array it sits on (same `element`/`key`, same runtime buffer) — every
+         * consumer that ignores this payload treats it as that array. Only
+         * shape-aware code ({@see isShape}, {@see shapeField}) reads it. A
+         * control-flow merge of two DIFFERENT shapes drops it.
+         * @var array<string,self>|null keyed by {@see shapeKey}
          */
         public readonly ?array $fields = null,
         /**
@@ -97,6 +102,23 @@ final class Type
          * @var self[]
          */
         public readonly array $typeArgs = [],
+        /**
+         * Keys of {@see $fields} whose value may be NULL at run time — declared
+         * `?T`, `T|null` or `key?:` — so the runtime shape check accepts a NULL
+         * cell there and nowhere else.
+         * @var array<string,true> keyed by {@see shapeKey}
+         */
+        public readonly array $nullableFields = [],
+        /**
+         * The shape is a DOCBLOCK claim (`@param array{…}`, `@return`, `@var`):
+         * its fields are the whole key set and every field type is the
+         * author's word, so TypeCheck refuses a literal, a return or a
+         * constant-key read that contradicts it. A shape INFERRED from a
+         * literal's own elements is a description, not a claim — the same
+         * program may read a key the literal never spelled (php answers null
+         * with a warning) or hand a wider literal to the same parameter.
+         */
+        public readonly bool $declared = false,
     ) {
         self::$nextId = self::$nextId + 1;
         $this->id = self::$nextId;
@@ -242,15 +264,25 @@ final class Type
      * rebuilt the type with a bare `new self`. One constructor for the shape,
      * so a new caller cannot quietly opt out of the cache again.
      *
-     * @param array<string,self>|null $fields
+     * @param array<string,self>|null $fields  @param array<string,true> $nullable
      */
-    private static function arrayOf(?self $element, ?self $key, ?array $fields): self
+    private static function arrayOf(?self $element, ?self $key, ?array $fields, array $nullable = [], bool $declared = false): self
     {
         if ($fields !== null) {
-            return new self(self::KIND_ARRAY, element: $element, key: $key, fields: $fields);
+            return new self(self::KIND_ARRAY, element: $element, key: $key, fields: $fields, nullableFields: $nullable, declared: $declared);
         }
         $el = $element ?? self::unknown();
         return $key === null ? self::vec($el) : self::assoc($key, $el);
+    }
+
+    /**
+     * A tuple shape — int keys, packed (`array{0:Node,1:bool}`). Same memory as
+     * `vec[$element]`; only `fields` is extra.
+     * @param array<string,self> $fields  @param array<string,true> $nullable
+     */
+    public static function tuple(array $fields, self $element, array $nullable = [], bool $declared = false): self
+    {
+        return new self(self::KIND_ARRAY, element: $element, fields: $fields, nullableFields: $nullable, declared: $declared);
     }
 
     public static function assoc(self $key, self $value): self
@@ -270,22 +302,212 @@ final class Type
      * type), so a record is IDENTICAL in memory to the plain assoc; only
      * `fields` is extra. Key is string. Every shape-unaware consumer treats it
      * as `assoc[string, $element]`.
+     * @param array<string,self> $fields  @param array<string,true> $nullable
+     */
+    public static function record(array $fields, self $element, array $nullable = [], bool $declared = false): self
+    {
+        return new self(self::KIND_ARRAY, element: $element, key: self::string_(), fields: $fields, nullableFields: $nullable, declared: $declared);
+    }
+
+    /**
+     * A docblock shape from its parsed fields: int keys only → tuple, string
+     * keys only → record, both → a cell-keyed shape (the tag-dispatched key
+     * channel). The element is {@see shapeElement}. `$fields`/`$nullable` keys
+     * arrive PRE-ENCODED ({@see shapeKey}) — the caller has already converted.
+     * `$declared` marks a docblock claim ({@see $declared}).
+     * @param array<string,self> $fields  @param array<string,true> $nullable
+     */
+    public static function shapeOf(array $fields, array $nullable, bool $declared = false): self
+    {
+        $anyStr = false;
+        $anyInt = false;
+        foreach ($fields as $ek => $f) {
+            if (self::shapeKeyIsInt($ek)) { $anyInt = true; continue; }
+            if ($ek !== '' && $ek[0] === 's') { $anyStr = true; continue; }
+            throw new \RuntimeException('shapeOf: key not shapeKey-encoded: ' . $ek);
+        }
+        $el = self::shapeElement($fields);
+        if (!$anyStr) { return self::tuple($fields, $el, $nullable, $declared); }
+        if (!$anyInt) { return self::record($fields, $el, $nullable, $declared); }
+        return new self(self::KIND_ARRAY, element: $el, key: self::cell(), fields: $fields, nullableFields: $nullable, declared: $declared);
+    }
+
+    /**
+     * The one element repr a shape's buffer holds: the fields' common type when
+     * every field spells the SAME type, else a tagged CELL. A typevar, union,
+     * null or cell field forces the cell — the shared generic body sees `T`
+     * as a cell, so the buffer must be a cell buffer at every instantiation.
      * @param array<string,self> $fields
      */
-    public static function record(array $fields, self $element): self
+    private static function shapeElement(array $fields): self
     {
-        return new self(
-            self::KIND_ARRAY,
-            element: $element,
-            key: self::string_(),
-            fields: $fields,
-        );
+        $first = null;
+        foreach ($fields as $f) {
+            $k = $f->kind;
+            if ($k === self::KIND_CELL || $k === self::KIND_NULL || $k === self::KIND_UNKNOWN
+                || $k === self::KIND_UNION || $k === self::KIND_TYPEVAR || $f->hasTypeVar()) {
+                return self::cell();
+            }
+            if ($first === null) { $first = $f; continue; }
+            if ($first->toString() !== $f->toString()) { return self::cell(); }
+        }
+        return $first ?? self::cell();
     }
 
     /** True when this array carries a known per-field shape ({@see $fields}). */
-    public function isRecord(): bool
+    public function isShape(): bool
     {
         return $this->kind === self::KIND_ARRAY && $this->fields !== null;
+    }
+
+    /**
+     * True when a shape sits anywhere in this type — the type itself, its
+     * element, its key, or a field of one. A literal argument adopts a
+     * parameter type that CONTAINS a shape (`vec[array{0:obj<Node>,1:bool}]`),
+     * not only one that IS a shape, or the outer literal keeps its
+     * field-blind element and a foreach over it loses the fields
+     * ({@see \Compile\Mir\Passes\InferCalls::adoptLitParamElem}).
+     */
+    public function hasShape(): bool
+    {
+        if ($this->isShape()) { return true; }
+        if ($this->element !== null && $this->element->hasShape()) { return true; }
+        if ($this->key !== null && $this->key->hasShape()) { return true; }
+        if ($this->fields !== null) {
+            foreach ($this->fields as $f) {
+                if ($f->hasShape()) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /** A string-keyed shape. */
+    public function isRecord(): bool
+    {
+        return $this->isShape() && $this->key !== null && $this->key->kind === self::KIND_STRING;
+    }
+
+    /** True when PHP would canonicalise this STRING key to an int key at the
+     *  array boundary — `'0'` and `'-1'` are int, `'01'` and `'-0'` are not
+     *  (php's own rule: `0` or an optional `-` then a nonzero leading digit
+     *  and only digits after). Written without `preg_*` — self-host cost. */
+    public static function isIntKey(string $k): bool
+    {
+        if ($k === '0') { return true; }
+        $s = $k;
+        if ($s !== '' && $s[0] === '-') { $s = \substr($s, 1); }
+        if ($s === '' || $s[0] < '1' || $s[0] > '9') { return false; }
+        return \ctype_digit($s);
+    }
+
+    /** The map key a shape field is stored under: `i<n>` for an int key, `s<name>` for a string key.
+     *  A single string-keyed map on purpose — a PHP array mixing int and string keys is a
+     *  polymorphic-key channel the self-hosted compiler cannot read back reliably. A STRING `$k`
+     *  canonicalises through {@see isIntKey} first — `'0'`/`'-1'` are int keys to PHP too. */
+    public static function shapeKey(int|string $k): string
+    {
+        if (\is_int($k)) { return 'i' . (string)$k; }
+        if (self::isIntKey($k)) { return 'i' . $k; }
+        return 's' . $k;
+    }
+
+    /** The user-facing key of an encoded shape key (`i0` → `0`, `sname` → `name`). */
+    public static function shapeKeyLabel(string $ek): string
+    {
+        return \substr($ek, 1);
+    }
+
+    /** True when an encoded shape key is an int key. */
+    public static function shapeKeyIsInt(string $ek): bool
+    {
+        return $ek !== '' && $ek[0] === 'i';
+    }
+
+    /** The declared type of field `$k`, or null when the shape has no such key. */
+    public function shapeField(int|string $k): ?self
+    {
+        if ($this->fields === null) { return null; }
+        return $this->fields[self::shapeKey($k)] ?? null;
+    }
+
+    /** Direct lookup by an already-ENCODED key — for a caller iterating {@see $fields} itself. */
+    public function shapeFieldAt(string $ek): ?self
+    {
+        if ($this->fields === null) { return null; }
+        return $this->fields[$ek] ?? null;
+    }
+
+    public function shapeFieldNullable(int|string $k): bool
+    {
+        return isset($this->nullableFields[self::shapeKey($k)]);
+    }
+
+    /** The same array with another element — the shape rides along. */
+    public function withElement(self $el): self
+    {
+        return self::arrayOf($el, $this->key, $this->fields, $this->nullableFields, $this->declared);
+    }
+
+    /** `array{0:obj<Node>,1?:bool}` — diagnostics only; {@see toString} stays golden-stable. */
+    public function shapeString(): string
+    {
+        if (!$this->isShape()) { return $this->toString(); }
+        $parts = [];
+        foreach ($this->fields as $ek => $f) {
+            $parts[] = self::shapeKeyLabel($ek) . (isset($this->nullableFields[$ek]) ? '?' : '') . ':' . $f->shapeString();
+        }
+        return 'array{' . \implode(',', $parts) . '}';
+    }
+
+    /**
+     * The php / PHPStan spelling, for a message a php programmer reads:
+     * `array{0: Node, 1: ?bool}`, `string[]`, `array<string, int>`, a class by
+     * its name, `cell` as `mixed`. Diagnostics only — {@see toString} is the
+     * golden-stable MIR spelling.
+     */
+    public function phpString(): string
+    {
+        if ($this->isShape()) {
+            $parts = [];
+            foreach ($this->fields as $ek => $f) {
+                $fs = $f->phpString();
+                if (isset($this->nullableFields[$ek]) && $f->kind !== self::KIND_CELL
+                    && $f->kind !== self::KIND_UNION && $f->kind !== self::KIND_NULL) {
+                    $fs = '?' . $fs;
+                }
+                $parts[] = self::shapeKeyLabel($ek) . ': ' . $fs;
+            }
+            return 'array{' . \implode(', ', $parts) . '}';
+        }
+        if ($this->kind === self::KIND_ARRAY) {
+            $el = $this->element === null ? 'mixed' : $this->element->phpString();
+            if ($this->key !== null && $this->key->kind !== self::KIND_INT) {
+                return 'array<' . $this->key->phpString() . ', ' . $el . '>';
+            }
+            return $el . '[]';
+        }
+        if ($this->kind === self::KIND_OBJ) { return \ltrim($this->class ?? 'object', '\\'); }
+        if ($this->kind === self::KIND_CLOSURE) { return 'Closure'; }
+        if ($this->kind === self::KIND_CELL) {
+            if ($this->atoms === []) { return 'mixed'; }
+            $parts = [];
+            foreach ($this->atoms as $atom) { $parts[] = $atom->phpString(); }
+            return \implode('|', $parts);
+        }
+        if ($this->kind === self::KIND_UNION) {
+            $parts = [];
+            foreach ($this->atoms as $atom) { $parts[] = $atom->phpString(); }
+            return \implode('|', $parts);
+        }
+        if ($this->kind === self::KIND_UNKNOWN) { return 'mixed'; }
+        return $this->kind;
+    }
+
+    /** Same keys, same nullability, same field types. */
+    public function sameShape(self $o): bool
+    {
+        if (!$this->isShape() || !$o->isShape()) { return false; }
+        return $this->shapeString() === $o->shapeString();
     }
 
     /** Any array (vec or assoc — they share {@see KIND_ARRAY}). */
@@ -401,8 +623,23 @@ final class Type
         if ($this->kind === self::KIND_ARRAY) {
             $el = $this->element !== null ? $this->element->substitute($bindings) : null;
             $ky = $this->key !== null ? $this->key->substitute($bindings) : null;
-            if ($el === $this->element && $ky === $this->key) { return $this; }
-            return self::arrayOf($el, $ky, $this->fields);
+            $fs = $this->fields;
+            $changed = false;
+            if ($fs !== null) {
+                $nf = [];
+                foreach ($fs as $k => $f) {
+                    $s = $f->substitute($bindings);
+                    if ($s !== $f) { $changed = true; }
+                    $nf[$k] = $s;
+                }
+                if ($changed) { $fs = $nf; }
+            }
+            if ($el === $this->element && $ky === $this->key && !$changed) { return $this; }
+            // The ELEMENT is never recomputed from the substituted fields: the
+            // shared body already fixed the buffer repr (a typevar field made
+            // it a cell buffer), and a call site typing `array{0:Node,1:int}`
+            // over that buffer must keep reading cells.
+            return self::arrayOf($el, $ky, $fs, $this->nullableFields, $this->declared);
         }
         return $this;
     }
@@ -413,6 +650,9 @@ final class Type
         if ($this->kind === self::KIND_TYPEVAR) { return true; }
         if ($this->element !== null && $this->element->hasTypeVar()) { return true; }
         if ($this->key !== null && $this->key->hasTypeVar()) { return true; }
+        if ($this->fields !== null) {
+            foreach ($this->fields as $f) { if ($f->hasTypeVar()) { return true; } }
+        }
         return false;
     }
 
@@ -445,10 +685,18 @@ final class Type
             return self::cell();
         }
         if ($this->kind === self::KIND_ARRAY && $this->hasTypeVar()) {
+            $fs = $this->fields;
+            if ($fs !== null) {
+                $nf = [];
+                foreach ($fs as $k => $f) { $nf[$k] = $f->eraseTypeVars(); }
+                $fs = $nf;
+            }
             return self::arrayOf(
                 $this->element !== null ? $this->element->eraseTypeVars() : null,
                 $this->key !== null ? $this->key->eraseTypeVars() : null,
-                $this->fields,
+                $fs,
+                $this->nullableFields,
+                $this->declared,
             );
         }
         return $this;
@@ -642,6 +890,10 @@ final class Type
         // key 0. An UNREFINED `[]` still defers — it has no keys at all, which
         // is what lets `if (!$xs) return []; return ["k" => …];` stay an assoc.
         if ($this->kind === self::KIND_ARRAY) {
+            // The SAME shape on both arms survives the merge; any other pair of
+            // arrays drops the fields (the element/key join below is the
+            // honest answer for "one of two different shapes").
+            if ($this->isShape() && $other->isShape() && $this->sameShape($other)) { return $this; }
             $key = self::joinArrayKey($this, $other);
             return self::arrayOf($this->joinElement($this->element, $other->element), $key, null);
         }
