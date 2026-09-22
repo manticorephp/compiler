@@ -115,6 +115,25 @@ trait InferCalls
             $pt = $p->type;
             if (!$pt->isArray()) { continue; }
             $pe = $pt->element;
+            // A SHAPED parameter types its literal argument as the shape when the
+            // two agree on the buffer repr: a cell-element shape takes any array
+            // literal (the boxed store makes the buffer a cell buffer), a raw
+            // shape takes only a literal whose inferred array already IS that
+            // repr. A literal that disagrees keeps its own type and the call
+            // boundary coerces as it always did (or TypeCheck refuses it). A
+            // parameter that only CONTAINS a shape (`vec[array{…}]`) adopts the
+            // same way — `[[new Node(1), true], …]` is `vec[vec[cell]]`, the
+            // identical repr, and without the adoption the mono clone's foreach
+            // value is a field-blind `vec[cell]`.
+            if ($pt->hasShape()) {
+                $at = $a->type;
+                if (!$at->isArray()) { continue; }
+                if (($pe !== null && $pe->kind === Type::KIND_CELL)
+                    || $at->toString() === $pt->toString()) {
+                    $a->type = $pt;
+                }
+                continue;
+            }
             if ($pe === null || $pe->kind !== Type::KIND_CELL) { continue; }
             $at = $a->type;
             if (!$at->isArray()) { continue; }
@@ -131,15 +150,9 @@ trait InferCalls
             $ek = $ae->kind;
             if ($ek !== Type::KIND_STRING && $ek !== Type::KIND_OBJ
                 && $ek !== Type::KIND_ARRAY && $ek !== Type::KIND_CLOSURE) { continue; }
-            // Keep the SHAPE: a record is the same memory as its assoc and only
+            // Keep the SHAPE: a shape is the same memory as its array and only
             // `fields` is extra, so re-channelling must not throw it away.
-            if ($at->isRecord()) {
-                $a->type = Type::record($at->fields, Type::cell());
-            } elseif ($at->key !== null) {
-                $a->type = Type::assoc($at->key, Type::cell());
-            } else {
-                $a->type = Type::vec(Type::cell());
-            }
+            $a->type = $at->withElement(Type::cell());
         }
     }
 

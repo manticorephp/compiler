@@ -5,7 +5,7 @@ namespace Analyze;
 /**
  * Extracts the type string a docblock associates with a `@param $x`,
  * `@return`, or `@var $x` tag. A faithful port of the compiler's own
- * `LowerTypes::docTagType` single-forward-scan (same `<…>` / `(…)` /
+ * `LowerTypes::docTagType` single-forward-scan (same `<…>` / `(…)` / `{…}` /
  * `callable(): T` awareness), so the analyzer reads docblocks exactly the way
  * the codegen does — no second, diverging interpretation.
  *
@@ -38,6 +38,8 @@ final class DocType
                 elseif ($c === '>') { if ($depth > 0) { $depth = $depth - 1; } }
                 elseif ($c === '(') { $depth = $depth + 1; }
                 elseif ($c === ')') { if ($depth > 0) { $depth = $depth - 1; } }
+                elseif ($c === '{') { $depth = $depth + 1; }
+                elseif ($c === '}') { if ($depth > 0) { $depth = $depth - 1; } }
                 elseif ($depth === 0 && $c === ':') { $j = self::skipSpaces($doc, $j + 1, $n); continue; }
                 elseif ($depth === 0
                     && ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r")) {

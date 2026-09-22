@@ -1,0 +1,230 @@
+; passes: lower-from-ast, const-fold, dead-store, infer-types, vivify-ref-args, narrow-returns, inline-closures, monomorphize, fuse-split-join, infer-effects, infer-alloc-kind, apply-memory-mode, insert-memory-ops, verify
+
+fn Node____construct(obj<Node> %this, int %kind) -> unknown {
+  ; effects: escape,storeHeap
+  %0 = load_local this : obj<Node>
+  %1 = load_local kind : int
+  %2 = store_property %0->kind <- %1 : int  ; eff: escape,storeHeap
+}
+
+fn read_tuple(array{0:obj<Node>,1:bool} %pair) -> int {
+  ; effects: escape
+  %0 = load_local pair : vec[cell]
+  %1 = int_const 0 : int
+  %2 = array_access %0[%1] : obj<Node>
+  %3 = store_local n <- %2 : obj<Node>
+  %4 = load_local pair : vec[cell]
+  %5 = int_const 1 : int
+  %6 = array_access %4[%5] : bool
+  %7 = store_local ok <- %6 : bool
+  %8 = load_local ok : bool
+  ternary %8 then {
+    %9 = load_local n : obj<Node>
+    %10 = property_access %9->kind : int
+    -> %10
+  } else {
+    %11 = int_const 0 : int
+    -> %11
+  } => %12 : int
+  return %12  ; eff: escape
+  mem_rc_release obj n
+}
+
+fn read_tuple$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
+  ; effects: escape
+  %0 = load_local pair : vec[cell]
+  %1 = int_const 0 : int
+  %2 = array_access %0[%1] : obj<Node>
+  %3 = store_local n <- %2 : obj<Node>
+  %4 = load_local pair : vec[cell]
+  %5 = int_const 1 : int
+  %6 = array_access %4[%5] : bool
+  %7 = store_local ok <- %6 : bool
+  %8 = load_local ok : bool
+  ternary %8 then {
+    %9 = load_local n : obj<Node>
+    %10 = property_access %9->kind : int
+    -> %10
+  } else {
+    %11 = int_const 0 : int
+    -> %11
+  } => %12 : int
+  return %12  ; eff: escape
+  mem_rc_release obj n
+}
+
+fn read_record(array{name:string,hits:int,maybe?:obj<Node>} %rec) -> string {
+  ; effects: alloc,escape
+  mem_arena_enter
+  %0 = load_local rec : assoc[string, cell]
+  %1 = string_const "maybe" : string
+  %2 = array_access %0[%1] : obj<Node>
+  nullcoalesce %2 else {
+    %3 = null_const : null
+    -> %3
+  } => %4 : obj<Node>
+  %5 = store_local m <- %4 : obj<Node>
+  %6 = load_local rec : assoc[string, cell]
+  %7 = string_const "maybe" : string
+  %8 = array_access %6[%7] : obj<Node>
+  %9 = isset %8 : bool
+  if %9 then {
+    %10 = load_local rec : assoc[string, cell]
+    %11 = string_const "name" : string
+    %12 = array_access %10[%11] : string
+    return %12  ; eff: escape
+  }
+  %13 = load_local rec : assoc[string, cell]
+  %14 = string_const "name" : string
+  %15 = array_access %13[%14] : string
+  %16 = string_const ":" : string
+  %17 = concat %15, %16 : string  ; eff: alloc alloc=Arena
+  %18 = load_local rec : assoc[string, cell]
+  %19 = string_const "hits" : string
+  %20 = array_access %18[%19] : int
+  %21 = int_const 1 : int
+  %22 = add %20, %21 : int
+  %23 = concat %17, %22 : string  ; eff: alloc alloc=Arena
+  %24 = load_local m : obj<Node>
+  %25 = null_const : null
+  %26 = cmp === %24, %25 : bool
+  ternary %26 then {
+    %27 = string_const "-" : string
+    -> %27
+  } else {
+    %28 = string_const "+" : string
+    -> %28
+  } => %29 : string
+  %30 = concat %23, %29 : string  ; eff: alloc alloc=RcHeap
+  return %30  ; eff: escape
+  mem_rc_release obj m
+  mem_arena_leave
+}
+
+fn read_record$mono$p0_assoc_str_cell(array{name:string,hits:int,maybe?:obj<Node>} %rec) -> string {
+  ; effects: alloc,escape
+  mem_arena_enter
+  %0 = load_local rec : assoc[string, cell]
+  %1 = string_const "maybe" : string
+  %2 = array_access %0[%1] : obj<Node>
+  nullcoalesce %2 else {
+    %3 = null_const : null
+    -> %3
+  } => %4 : obj<Node>
+  %5 = store_local m <- %4 : obj<Node>
+  %6 = load_local rec : assoc[string, cell]
+  %7 = string_const "maybe" : string
+  %8 = array_access %6[%7] : obj<Node>
+  %9 = isset %8 : bool
+  if %9 then {
+    %10 = load_local rec : assoc[string, cell]
+    %11 = string_const "name" : string
+    %12 = array_access %10[%11] : string
+    return %12  ; eff: escape
+  }
+  %13 = load_local rec : assoc[string, cell]
+  %14 = string_const "name" : string
+  %15 = array_access %13[%14] : string
+  %16 = string_const ":" : string
+  %17 = concat %15, %16 : string  ; eff: alloc alloc=Arena
+  %18 = load_local rec : assoc[string, cell]
+  %19 = string_const "hits" : string
+  %20 = array_access %18[%19] : int
+  %21 = int_const 1 : int
+  %22 = add %20, %21 : int
+  %23 = concat %17, %22 : string  ; eff: alloc alloc=Arena
+  %24 = load_local m : obj<Node>
+  %25 = null_const : null
+  %26 = cmp === %24, %25 : bool
+  ternary %26 then {
+    %27 = string_const "-" : string
+    -> %27
+  } else {
+    %28 = string_const "+" : string
+    -> %28
+  } => %29 : string
+  %30 = concat %23, %29 : string  ; eff: alloc alloc=RcHeap
+  return %30  ; eff: escape
+  mem_rc_release obj m
+  mem_arena_leave
+}
+
+fn read_dynamic(array{0:obj<Node>,1:bool} %pair, int %i) -> cell {
+  ; effects: escape
+  %0 = load_local pair : vec[cell]
+  %1 = load_local i : int
+  %2 = array_access %0[%1] : cell
+  return %2  ; eff: escape
+}
+
+fn destructure(array{0:obj<Node>,1:bool} %pair) -> int {
+  ; effects: escape
+  %0 = load_local pair : vec[cell]
+  %1 = store_local __destr_0 <- %0 : vec[cell]
+  %2 = load_local __destr_0 : vec[cell]
+  %3 = int_const 0 : int
+  %4 = array_access %2[%3] : obj<Node>
+  %5 = store_local n <- %4 : obj<Node>
+  %6 = load_local __destr_0 : vec[cell]
+  %7 = int_const 1 : int
+  %8 = array_access %6[%7] : bool
+  %9 = store_local ok <- %8 : bool
+  %10 = load_local ok : bool
+  ternary %10 then {
+    %11 = load_local n : obj<Node>
+    %12 = property_access %11->kind : int
+    -> %12
+  } else {
+    %13 = int_const -1 : int
+    -> %13
+  } => %14 : int
+  return %14  ; eff: escape
+  mem_rc_release obj n
+}
+
+fn destructure$mono$p0_vec_cell(array{0:obj<Node>,1:bool} %pair) -> int {
+  ; effects: escape
+  %0 = load_local pair : vec[cell]
+  %1 = store_local __destr_0 <- %0 : vec[cell]
+  %2 = load_local __destr_0 : vec[cell]
+  %3 = int_const 0 : int
+  %4 = array_access %2[%3] : obj<Node>
+  %5 = store_local n <- %4 : obj<Node>
+  %6 = load_local __destr_0 : vec[cell]
+  %7 = int_const 1 : int
+  %8 = array_access %6[%7] : bool
+  %9 = store_local ok <- %8 : bool
+  %10 = load_local ok : bool
+  ternary %10 then {
+    %11 = load_local n : obj<Node>
+    %12 = property_access %11->kind : int
+    -> %12
+  } else {
+    %13 = int_const -1 : int
+    -> %13
+  } => %14 : int
+  return %14  ; eff: escape
+  mem_rc_release obj n
+}
+
+fn __main() -> int {
+  ; effects: alloc,throw
+  %0 = int_const 3 : int
+  %1 = new Node(%0) : obj<Node>  ; eff: alloc,throw alloc=RcHeap
+  %2 = bool_const true : bool
+  %3 = array_lit [_ => %1, _ => %2] : vec[cell]  ; eff: alloc alloc=RcHeap
+  %4 = call read_tuple$mono$p0_vec_cell(%3) : int  ; eff: throw
+  %5 = string_const "name" : string
+  %6 = string_const "a" : string
+  %7 = string_const "hits" : string
+  %8 = int_const 1 : int
+  %9 = array_lit [%5 => %6, %7 => %8] : assoc[string, cell]  ; eff: alloc alloc=RcHeap
+  %10 = call read_record$mono$p0_assoc_str_cell(%9) : string  ; eff: throw
+  %11 = int_const 2 : int
+  %12 = new Node(%11) : obj<Node>  ; eff: alloc,throw alloc=RcHeap
+  %13 = bool_const true : bool
+  %14 = array_lit [_ => %12, _ => %13] : vec[cell]  ; eff: alloc alloc=RcHeap
+  %15 = call destructure$mono$p0_vec_cell(%14) : int  ; eff: throw
+  %16 = string_const "\n" : string
+  echo %4, %10, %15, %16
+}

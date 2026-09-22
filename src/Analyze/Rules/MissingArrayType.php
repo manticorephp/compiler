@@ -105,10 +105,18 @@ final class MissingArrayType
         return $h === 'array';
     }
 
-    /** True when a docblock type string pins an array element/value type. */
+    /** True when a docblock type string pins an array element/value type. A
+     *  shape (`array{…}`, `list{…}`, `non-empty-*{…}`) pins every field's type;
+     *  {@see GenericType::parse} reads only its `array` head. */
     private function docHasElement(?string $docType): bool
     {
         if ($docType === null) { return false; }
+        $low = \strtolower(\ltrim($docType, '?\\'));
+        if (\strncmp($low, 'array{', 6) === 0 || \strncmp($low, 'list{', 5) === 0
+            || \strncmp($low, 'non-empty-array{', 16) === 0
+            || \strncmp($low, 'non-empty-list{', 15) === 0) {
+            return true;
+        }
         $g = GenericType::parse($docType);
         if ($g === null) { return false; }
         return $g->isArraySugar || \count($g->params) > 0;

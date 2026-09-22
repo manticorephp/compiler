@@ -3575,15 +3575,18 @@ final class RuntimeLibrary
     /**
      * `@__mir_json_dec(ptr s, i64 n, ptr pp) -> i64` — one value, boxed, with
      * `*pp` advanced past it. Containers are built as CELL arrays directly
-     * (repr nibble stamped at {@see \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET}) so
-     * no consumer has to rebuild them, and both start at capacity 8 instead of
-     * growing from zero. An object's key is handed to `__mir_array_set_str`,
+     * (BOTH the repr nibble — what a release drops — and the element-hint
+     * nibble — what a reader decodes by — stamped CELL at
+     * {@see \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET}; a repr-only stamp left the
+     * buffer hint 0, so the by-hint readers took its NaN-boxed words for raw
+     * ones) so no consumer has to rebuild them, and both start at capacity 8
+     * instead of growing from zero. An object's key is handed to `__mir_array_set_str`,
      * which takes its own reference, so the parser drops the one it minted.
      */
     private function jsonDecValue(int $stdSize, int $stdBagOff, string $stdDesc): string
     {
-        $cellRepr = (string)\Compile\MemoryAbi::ARRAY_REPR_CELL;
-        $notRepr  = (string)(~\Compile\MemoryAbi::ARRAY_REPR_MASK);
+        $cellRepr = (string)(\Compile\MemoryAbi::ARRAY_REPR_CELL | \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
+        $notRepr  = (string)(~(\Compile\MemoryAbi::ARRAY_REPR_MASK | \Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK));
         $flagsOff = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
 
         $stamp = static function (string $tag, string $arr) use ($cellRepr, $notRepr, $flagsOff): string {

@@ -4888,7 +4888,7 @@ final class LowerFromAst implements Pass
         $value = $this->lowerExpr($expr->value);
         // `$t ??= v` → `$t = $t ?? v`.
         if ($expr->op === '??=') {
-            return $this->storeToTarget($expr->target, new NullCoalesce_($read, $value, Type::unknown()));
+            return $this->storeToTarget($expr->target, new NullCoalesce_($this->markProbe($read), $value, Type::unknown()));
         }
         $base = \substr($expr->op, 0, \strlen($expr->op) - 1); // strip '='
         return $this->storeToTarget($expr->target, $this->buildBinop($base, $read, $value));
@@ -4948,10 +4948,27 @@ final class LowerFromAst implements Pass
         // (the compiler's own `??` chains over erased types crash Stage-2 emit),
         // so it stays a bare read for now — use `$a->b?->c ?? $d` explicitly.
         return new NullCoalesce_(
-            $this->lowerExpr($e->left),
+            $this->markProbe($this->lowerExpr($e->left)),
             $this->lowerExpr($e->right),
             Type::unknown(),
         );
+    }
+
+    /**
+     * The subject of `isset` / `empty` / `??` is a key PROBE ({@see
+     * ArrayAccess_::$probe}) — every element read down its base spine, since
+     * php answers `$a['x']['y'] ?? $d` and `isset($a['x']->p)` silently
+     * when the OUTER key is the missing one too.
+     */
+    private function markProbe(Node $n): Node
+    {
+        $b = $n;
+        while (true) {
+            if ($b->kind === Node::KIND_ARRAY_ACCESS) { $b->probe = true; $b = $b->array; continue; }
+            if ($b->kind === Node::KIND_PROPERTY_ACCESS) { $b = $b->object; continue; }
+            break;
+        }
+        return $n;
     }
 
     /**

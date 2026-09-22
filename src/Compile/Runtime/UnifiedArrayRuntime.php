@@ -135,6 +135,7 @@ final class UnifiedArrayRuntime
         $this->emitCellToKind();
         $this->emitArrayConform();
         $this->emitElemUntagKind();
+        $this->emitElemKindIs();
         $this->emitElemEncodeRaw();
         $this->emitElemStampRaw();
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
@@ -4087,6 +4088,19 @@ final class UnifiedArrayRuntime
         $asis->ret($val);
     }
 
+    /**
+     * The base a shape guard loads its header from. The emitter hands the
+     * static base word `inttoptr`'d, and a base that itself came out of a
+     * CELL buffer (a foreach value under a `vec[array{…}]` claim) is a
+     * NaN-boxed ARR word whenever the untag upstream missed it; the guard
+     * strips the tag rather than trust the claim.
+     */
+    private function shapeBase(Block $b, Value $arr): Value
+    {
+        $ai = $b->ptrtoint($arr, Type::i64());
+        return $b->inttoptr($b->and_($ai, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+    }
+
     /** The element-kind hint of `$arr`'s flags word, still shifted. */
     private function elemHint(Block $b, Value $arr): Value
     {
@@ -4315,8 +4329,8 @@ final class UnifiedArrayRuntime
      * `__mir_elem_untag_kind(arr, v, kind) -> i64` — the scalar half of the
      * sound untag: an element read under a concrete INT/FLOAT/BOOL claim comes
      * back as that kind's raw word when the buffer is CELL-hinted
-     * ({@see emitCellToKind}), and untouched otherwise. Null-guarded like
-     * `__mir_elem_untag`.
+     * ({@see emitCellToKind}), widened when an INT buffer meets a FLOAT
+     * claim, and untouched otherwise. Null-guarded like `__mir_elem_untag`.
      */
     private function emitElemUntagKind(): void
     {
@@ -4328,11 +4342,95 @@ final class UnifiedArrayRuntime
         $asis = $fn->block('asis');
         $chk = $fn->block('chk');
         $dec = $fn->block('dec');
+        $raw = $fn->block('raw');
+        $widen = $fn->block('widen');
+        $arr = $this->shapeBase($e, $arr);
         $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
         $asis->ret($v);
-        $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
-        $chk->brIf($isCell, $dec, $asis);
+        $hint = $this->elemHint($chk, $arr);
+        $isCell = $chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk->brIf($isCell, $dec, $raw);
         $dec->ret($dec->call('__mir_cell_to_kind', Type::i64(), [$v, $kind]));
+        // The one raw mismatch {@see emitElemKindIs} admits: an INT buffer
+        // under a FLOAT claim hands out the int's bits, which a `double`
+        // consumer reads as a denormal — widen here, as php does.
+        $intUnderFloat = $raw->and_(
+            $raw->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT)),
+            $raw->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT)),
+        );
+        $raw->brIf($intUnderFloat, $widen, $asis);
+        $widen->ret($widen->bitcast($widen->sitofp($v, Type::f64()), Type::i64()));
+    }
+
+    /**
+     * `__mir_elem_kind_is(arr, v, kind, nullok) -> i64` — 1 when the word `v`
+     * read out of `arr` may be handed to a consumer that claims element kind
+     * `kind` (an `ARRAY_ELEM_HINT_*` code), 0 when the claim is a lie. A shape
+     * read's guard: the static type came from a docblock, the buffer's hint is
+     * the fact. A RAW-hinted buffer is checked by the hint itself (its writer
+     * typed every word the same way); a CELL buffer by the NaN-box nibble —
+     * INT=1 BOOL=2 NULL=3 STR=4 BIGINT=5 FLOAT=untagged ARRAY=7 OBJECT=8
+     * ({@see \Compile\MemoryAbi::CELL_TAG_REF}). An int passes a FLOAT claim
+     * (php widens); NULL passes only with `nullok` (a `key?:`/`?T` field).
+     */
+    private function emitElemKindIs(): void
+    {
+        $fn = $this->module->func('__mir_elem_kind_is', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $nullOk = $fn->param(Type::i64(), 'nullok');
+        $e = $fn->block('entry');
+        $yes = $fn->block('yes');
+        $chk = $fn->block('chk');
+        $tagged = $fn->block('tagged');
+        $raw = $fn->block('raw');
+        $one = Value::int(Type::i64(), 1);
+        $arr = $this->shapeBase($e, $arr);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $yes, $chk);
+        $yes->ret($one);
+        $hint = $this->elemHint($chk, $arr);
+        $isCell = $chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk->brIf($isCell, $tagged, $raw);
+        // A RAW hint is the writer's word on every element at once: it passes
+        // when it IS the claim, when nothing stamped it (0 — an empty
+        // literal, a fresh buffer), or when an INT buffer meets a FLOAT claim
+        // (php widens; {@see emitElemUntagKind} converts). Anything else is a
+        // homogeneous literal or a typed result under a docblock that lies —
+        // `strlen($p[1])` over `[1, 2]` walked an int as a string pointer.
+        $rawOk = $raw->or_($raw->icmp('eq', $hint, $kind),
+            $raw->or_($raw->icmp('eq', $hint, Value::int(Type::i64(), 0)),
+                $raw->and_(
+                    $raw->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT)),
+                    $raw->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT)),
+                )));
+        $raw->ret($raw->zext($rawOk, Type::i64()));
+        $istag = $tagged->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $nibInt = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 1)));
+        $nibBool = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 2)));
+        $nibNull = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 3)));
+        $nibStr = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 4)));
+        $nibBigInt = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 5)));
+        $nibArr = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 7)));
+        $nibObj = $tagged->and_($istag, $tagged->icmp('eq', $nib, Value::int(Type::i64(), 8)));
+        $isInt = $tagged->or_($nibInt, $nibBigInt);
+        $isFloat = $tagged->or_($tagged->xor_($istag, Value::int(Type::i1(), 1)), $isInt);
+        $kindStr = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR));
+        $kindObj = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ));
+        $kindArr = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR));
+        $kindInt = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT));
+        $kindFloat = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT));
+        $kindBool = $tagged->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_BOOL));
+        $want = $tagged->select($kindStr, $nibStr,
+            $tagged->select($kindObj, $nibObj,
+            $tagged->select($kindArr, $nibArr,
+            $tagged->select($kindInt, $isInt,
+            $tagged->select($kindFloat, $isFloat,
+            $tagged->select($kindBool, $nibBool,
+                Value::int(Type::i1(), 1)))))));
+        $nullPass = $tagged->and_($nibNull, $tagged->icmp('ne', $nullOk, Value::int(Type::i64(), 0)));
+        $tagged->ret($tagged->zext($tagged->or_($want, $nullPass), Type::i64()));
     }
 
     /**

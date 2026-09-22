@@ -161,7 +161,7 @@ trait LowerExprs
             }
             if ($fn === 'isset') {
                 $ts = [];
-                foreach ($expr->args as $a) { $ts[] = $this->lowerExpr($a); }
+                foreach ($expr->args as $a) { $ts[] = $this->markProbe($this->lowerExpr($a)); }
                 return new Isset_($ts, Type::bool_());
             }
             if ($fn === 'unset') {
@@ -184,7 +184,7 @@ trait LowerExprs
             // self-host usage (bool / null / `?? false` flags); the
             // string-"0"/"" subtlety is not exercised by the compiler.
             if ($fn === 'empty' && \count($expr->args) === 1) {
-                return new Not_($this->lowerExpr($expr->args[0]));
+                return new Not_($this->markProbe($this->lowerExpr($expr->args[0])));
             }
             // By-ref `sscanf($str, $fmt, $a, $b, …)` — the array-return form
             // (`$r = sscanf($s, $f)`) is a plain stdlib call; the trailing-lvalue

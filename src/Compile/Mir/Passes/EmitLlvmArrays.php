@@ -620,7 +620,8 @@ trait EmitLlvmArrays
         if (!$t->isArray()) { return false; }
         $el = $t->element;
         if ($el === null) { return false; }
-        return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ;
+        return $el->kind === Type::KIND_STRING || $el->kind === Type::KIND_OBJ
+            || $el->kind === Type::KIND_ARRAY || Type::isClosureLike($el);
     }
 
     /**
@@ -976,6 +977,71 @@ trait EmitLlvmArrays
         // would invent a representation the static type never promised. The
         // CELL result is decoded above, now that the store side re-encodes.
         //
+        // A SHAPE read (InferNodes typed it with the FIELD, shapeCheck != 0)
+        // decodes the word by the claimed kind in one call: the buffer is a
+        // cell buffer whenever the fields differ, and `__mir_elem_untag_kind`
+        // already asks the hint at run time and hands back the raw word
+        // unchanged for a raw-hinted buffer. `__mir_cell_to_kind` handles the
+        // pointer kinds (string / object / ARRAY) and the scalars alike — the
+        // two kind-specific branches below never covered an array-typed field,
+        // which is how `emitSpreadFill`'s `array{0:string,1:string[]}` handed
+        // `vdArmSpread` a NaN-boxed word as its `$regs` array.
+        $shapeDecoded = false;
+        if ($aa->shapeCheck !== 0) {
+            $kc = $this->elementHintCodeForType($self->type);
+            // A closure / enum / struct / Ffi\Ptr / Generator field has NO
+            // hint code (the exclusion above is about the DROP flavor, not
+            // whether the word is a pointer) — `$f = $p[0]; $f(1)` left `$f`
+            // the raw NaN-boxed word. `__mir_cell_to_kind`'s `ptrk` arm only
+            // strips the tag (NULL → 0), which is right for any pointer kind.
+            if ($kc === null && (Type::isClosureLike($self->type) || $self->type->kind === Type::KIND_OBJ)) {
+                $kc = \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
+            }
+            if ($kc !== null && $kc !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
+                // A SHAPE read: the static type is a docblock claim, so before
+                // the untag below trusts it, ask the buffer. `__mir_elem_kind_is`
+                // answers 1 for a raw-hinted buffer (nothing to check) and for
+                // a cell whose nibble matches the claim; 0 throws TypeError
+                // through the prelude. Checked on the still-boxed word. A
+                // cell-typed field never sets shapeCheck ({@see InferNodes}).
+                $ok = $this->ssa->allocReg();
+                $out .= '  ' . $ok . ' = call i64 @__mir_elem_kind_is(ptr ' . $arrPtr . ', i64 ' . $reg
+                      . ', i64 ' . (string)$kc . ', i64 ' . ($aa->shapeCheck === 2 ? '1' : '0') . ")\n";
+                $okb = $this->ssa->allocReg();
+                $out .= '  ' . $okb . ' = icmp ne i64 ' . $ok . ", 0\n";
+                $badL = $this->ssa->allocLabel('shape.bad');
+                $contL = $this->ssa->allocLabel('shape.ok');
+                $out .= '  br i1 ' . $okb . ', label %' . $contL . ', label %' . $badL . "\n";
+                $out .= $badL . ":\n";
+                $keyStr = $aa->index->kind === Node::KIND_STRING_CONST
+                    ? $aa->index->value : (string)$aa->index->value;
+                $where = $aa->array->type->phpString() . ' key ' . $keyStr;
+                $expected = $self->type->phpString();
+                // The thrower names what it was GIVEN through `get_debug_type`,
+                // which reads a cell: a raw-hinted buffer's word is boxed by
+                // that hint first (`__mir_elem_decode`), so an int buffer under
+                // a string field says `int given`, not the tag bits of a
+                // pointer read as a cell. A CELL buffer's word passes through.
+                $given = $this->ssa->allocReg();
+                $out .= '  ' . $given . ' = call i64 @__mir_elem_decode(ptr ' . $arrPtr
+                      . ', i64 ' . $reg . ")\n";
+                // A prelude fn takes every argument as an i64 word and returns
+                // one, even a `void` ({@see EmitLlvmBuiltins::biGettype}).
+                $out .= '  call i64 @manticore___mir_shape_type_error(i64 ' . $given
+                      . ', i64 ptrtoint (ptr ' . $this->strRef($where) . ' to i64)'
+                      . ', i64 ptrtoint (ptr ' . $this->strRef($expected) . " to i64))\n";
+                // The prelude fn throws (longjmp) and never returns; the edge
+                // only satisfies the verifier.
+                $out .= '  br label %' . $contL . "\n";
+                $out .= $contL . ":\n";
+                $u = $this->ssa->allocReg();
+                $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
+                      . ', i64 ' . $reg . ', i64 ' . (string)$kc . ")\n";
+                $reg = $u;
+                $this->lastValue = $reg;
+                $shapeDecoded = true;
+            }
+        }
         // The OTHER direction is sound and is done: a result the static type
         // already calls a STRING or an OBJECT must be a raw pointer, so if the
         // array says its slots are boxed cells, strip the tag. Nothing
@@ -986,7 +1052,9 @@ trait EmitLlvmArrays
         // stream_select) handed the caller boxed elements under a `vec[obj]`
         // static type — `$r[0] instanceof R` then inttoptr'd the tag.
         $rk = $self->type->kind;
-        if (($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ)
+        if (!$shapeDecoded
+            && ($rk === Type::KIND_STRING || $rk === Type::KIND_OBJ || $rk === Type::KIND_ARRAY
+                || Type::isClosureLike($self->type))
             && $this->elemMayBeCell($aa->array->type)) {
             $this->rt->needsElemUntag = true;
             $u = $this->ssa->allocReg();
@@ -999,7 +1067,7 @@ trait EmitLlvmArrays
         // a buffer some cell-typed writer cellified — `$GLOBALS['list'][] = 5`
         // on the buffer `global $list` still reads raw — is unboxed by kind
         // when, and only when, the buffer says CELL.
-        if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
+        if (!$shapeDecoded && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
             && $this->elemMayBeCellified($aa->array)) {
             $u = $this->ssa->allocReg();
             $out .= '  ' . $u . ' = call i64 @__mir_elem_untag_kind(ptr ' . $arrPtr
@@ -1460,6 +1528,18 @@ trait EmitLlvmArrays
         }
         $dcT = $this->storeElemDeCellifyType($se);
         if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); }
+        // An int (or bool) into a FLOAT slot is converted, not bit-stored —
+        // the float-slot local rule ({@see EmitLlvmLocals::emitStoreLocal})
+        // for an element: `$f[0] = 3` over `vec[float]` read back a denormal.
+        $elT = $se->array->type->element ?? null;
+        if ($dcT === null && $elT !== null && $elT->kind === Type::KIND_FLOAT
+            && ($se->value->type->kind === Type::KIND_INT || $se->value->type->kind === Type::KIND_BOOL)) {
+            $out .= $this->coerceToI64();
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
+            $this->lastValue = $d;
+            $this->lastValueType = 'double';
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $fallback = $dcT ?? $this->storeRetainFallback($se);

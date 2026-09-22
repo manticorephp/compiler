@@ -166,7 +166,7 @@ final class NodeClone
             }
             return new ArrayLit($els, $n->type);
         }
-        if ($k === Node::KIND_ARRAY_ACCESS) { $x = self::asArrayAccess($n); return new ArrayAccess_(self::node($x->array), self::node($x->index), $n->type); }
+        if ($k === Node::KIND_ARRAY_ACCESS) { $x = self::asArrayAccess($n); $c = new ArrayAccess_(self::node($x->array), self::node($x->index), $n->type); $c->shapeCheck = $x->shapeCheck; $c->probe = $x->probe; return $c; }
         if ($k === Node::KIND_STORE_ELEMENT) { $x = self::asStoreElement($n); return new StoreElement(self::node($x->array), self::node($x->index), self::node($x->value), $n->type); }
 
         // ── Objects ───────────────────────────────────────────────

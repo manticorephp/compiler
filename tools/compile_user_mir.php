@@ -23,6 +23,9 @@
  *   MANTICORE_PRELUDE=$PWD/prelude php -d memory_limit=2048M \
  *     tools/compile_user_mir.php prog.php > prog.ll
  *
+ * `MC_DUMP_MIR=1` prints the typed MIR instead of the IR (exit 70 on a
+ * TypeCheck error) — the 3 s loop for a pass or a type-check change.
+ *
  * Emits `LINK_STDLIB=0|1` on stderr: whether the module referenced any bundled
  * stdlib extern, i.e. whether `lib/manticore_stdlib.o` must be linked. Linking
  * it unconditionally duplicates every symbol the prelude also defines.
@@ -87,12 +90,22 @@ if (\is_string($sig) && $sig !== '' && \is_file($sig)) {
 }
 
 \Manticore\CompileArgs::$files = [$file];
-
-$ir = \Manticore\compile_via_mir([\file_get_contents($file)]);
+$src = [\file_get_contents($file)];
+// MC_DUMP_MIR=1: the typed MIR instead of the IR — the 3 s answer to "what
+// did inference decide", without a self-build. Same pipeline `dump-mir` runs.
+if (\getenv('MC_DUMP_MIR') === '1') {
+    $module = \Manticore\lower_module($src);
+    if ($module === null) {
+        \fwrite(STDERR, "compile error (MIR)\n");
+        exit(70);
+    }
+    echo \Compile\Mir\Dump::module($module, false, false);
+    exit(0);
+}
+$ir = \Manticore\compile_via_mir($src);
 if ($ir === null) {
     \fwrite(STDERR, "compile error (MIR)\n");
     exit(70);
 }
-
 \fwrite(STDERR, 'LINK_STDLIB=' . (\Manticore\CompileArgs::$linkStdlib ? '1' : '0') . "\n");
 echo $ir;
