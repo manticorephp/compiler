@@ -1,0 +1,4 @@
+read: x0|x1|
+child exit: 255
+reached end: no
+done

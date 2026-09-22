@@ -2947,6 +2947,10 @@ trait EmitLlvmRuntime
         // reentrancy hazard structurally, with no guard the caller can forget.
         $out .= '@__mir_ob_inuse = linkonce_odr global ' . $arrI . " zeroinitializer\n";
         $out .= "@__mir_ob_implicit = linkonce_odr global i64 0\n";
+        // Non-zero once a write to stdout has failed. php's CLI ends the script
+        // there ({@see outRuntime}); the flag is what stops the atexit handlers
+        // — a shutdown function that echoes — from re-entering that ending.
+        $out .= "@__mir_out_dead = linkonce_odr global i64 0\n";
         // Non-zero while an ob_start() handler is running. php DISCARDS whatever
         // a handler echoes — it does not forward it downstream, and it does not
         // fold it back into the buffer being handled (verified against the
@@ -3051,16 +3055,40 @@ trait EmitLlvmRuntime
         $out .= "  %buffered = icmp sgt i64 %lvl, 0\n";
         $out .= "  br i1 %buffered, label %buf, label %std\n";
         $out .= "std:\n";
+        // Once stdout is gone there is nothing to write to and nothing to
+        // report: the ending below has already been decided, and the atexit
+        // handlers running into this arm must fall straight through.
+        $out .= "  %deadw = load i64, ptr @__mir_out_dead\n";
+        $out .= "  %isdead = icmp ne i64 %deadw, 0\n";
+        $out .= "  br i1 %isdead, label %done, label %stdgo\n";
+        $out .= "stdgo:\n";
         // One stdio stream for every producer, so ordering between echo, printf
         // and a user fwrite(STDOUT, …) is the stream's problem, not ours.
         $out .= "  %f = call ptr @manticore_stdout()\n";
         $out .= "  call i64 @fwrite(ptr %d, i64 1, i64 %n, ptr %f)\n";
         $out .= "  %imp = load i64, ptr @__mir_ob_implicit\n";
         $out .= "  %doimp = icmp ne i64 %imp, 0\n";
-        $out .= "  br i1 %doimp, label %impf, label %done\n";
+        $out .= "  br i1 %doimp, label %impf, label %chkerr\n";
         $out .= "impf:\n";
         $out .= "  call i32 @fflush(ptr %f)\n";
-        $out .= "  br label %done\n";
+        $out .= "  br label %chkerr\n";
+        // A reader that walked away — `prog | head` — is a FAILED WRITE here
+        // and not a signal: SIGPIPE is ignored for the whole program, as php's
+        // CLI ignores it ({@see EmitLlvmModule}), so nothing else would ever
+        // notice. php's `sapi_cli_ub_write` treats it as an aborted connection
+        // and bails out of the script with status 255, which is `exit(255)`
+        // down to the detail that the shutdown functions still run and a
+        // `finally` does not. The error flag is STICKY, so checking it after
+        // the write (and after the implicit flush, which is where a buffered
+        // stream actually meets the pipe) catches it wherever it surfaced.
+        $out .= "chkerr:\n";
+        $out .= "  %ferr = call i32 @ferror(ptr %f)\n";
+        $out .= "  %broke = icmp ne i32 %ferr, 0\n";
+        $out .= "  br i1 %broke, label %died, label %done\n";
+        $out .= "died:\n";
+        $out .= "  store i64 1, ptr @__mir_out_dead\n";
+        $out .= "  call void @exit(i32 255)\n";
+        $out .= "  unreachable\n";
         $out .= "buf:\n";
         $out .= "  %bidx = sub i64 %lvl, 1\n";
         $out .= '  %sp = getelementptr inbounds ' . $arrP

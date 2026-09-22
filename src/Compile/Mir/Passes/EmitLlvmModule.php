@@ -140,6 +140,9 @@ trait EmitLlvmModule
             // what that check exists to catch.
             $this->libcExtra['fwrite'] = 'declare i64 @fwrite(ptr, i64, i64, ptr)';
             $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
+            // The broken-stdout check ({@see EmitLlvmRuntime::outRuntime}).
+            $this->libcExtra['ferror'] = 'declare i32 @ferror(ptr)';
+            $this->libcExtra['exit'] = 'declare void @exit(i32)';
         }
         $out  = "; ModuleID = 'mir'\n";
         $out .= "source_filename = \"mir\"\n\n";
