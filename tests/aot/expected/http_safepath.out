@@ -1,0 +1,25 @@
+/index.html                              => /index.html
+/css/app.css                             => /css/app.css
+/css/../index.html                       => /index.html
+/../outside_PID/secret.txt               => null
+/%2e%2e/index.html                       => null
+/link.txt                                => null
+/css                                     => null
+/css/                                    => null
+/                                        => null
+/missing.html                            => null
+(empty)                                  => null
+/index.html/                             => null
+a.html     text/html; charset=utf-8
+x/y.css    text/css; charset=utf-8
+a.js       text/javascript; charset=utf-8
+a.mjs      text/javascript; charset=utf-8
+a.json     application/json
+a.png      image/png
+a.svg      image/svg+xml
+a.woff2    font/woff2
+a.wasm     application/wasm
+a.txt      text/plain; charset=utf-8
+a.unknown  application/octet-stream
+noext      application/octet-stream
+a.JPG      image/jpeg

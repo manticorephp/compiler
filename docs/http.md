@@ -202,14 +202,102 @@ iteration, not at the call; generators are lazy. Garbage right after a
 delimiter throws the same way from the handler's own `Part::read()`/
 `readAll()` call, when that garbage follows the part currently being read, not
 only when the generator resumes to drain a part the handler stopped short of.
-Until the ledgered
-`Server::runHandler` catch-all crash is fixed, a handler without `onError()`
-can be taken down by a crafted body, so install `onError()` on any server that
-streams multipart. A client that cuts the stream mid-part ends that part
+Either way the connection is what suffers, not the server: `runHandler` catches
+every `Throwable` and answers **500**, so a crafted body cannot take the accept
+loop down. `onError($e, $req)` is where you turn one into your own response.
+A client that cuts the stream mid-part ends that part
 silently — `read()` answers the remainder, then `''`, and the generator ends;
 there is no `PARTIAL` signal in pull mode (the buffered path reports
 `UPLOAD_ERR_PARTIAL`), so a handler that needs the whole part checks the byte
 count against its own expectation.
+
+## Files
+
+```php
+$p = Http\safePath('/srv/app/public', $req->path);
+return $p === null
+    ? (new Response(404))->text('not found')
+    : (new Response())->file($p);
+```
+
+`file()` stats the OPENED fd once — the length on the wire is the length of the
+file the body reads — and sends the bytes with `sendfile(2)`, so they never
+enter the process. A TLS connection has to encrypt them, so it takes a
+`fread` loop instead; the wire format is identical either way. The head carries
+`Content-Type` from the extension (`Http\mimeFor()`, override with the second
+argument), `Last-Modified`, a weak `ETag` of mtime and size, and
+`Accept-Ranges: bytes`. A missing or unreadable path is a handler bug and
+THROWS — it is not a 404.
+
+`Http\safePath($root, $path)` is the only way a request path should become a
+file path: both sides go through `realpath`, so `..` and a symlink that leaves
+the root are refused by construction. A path ending in `/` answers null by rule
+rather than by `realpath` — Darwin resolves `/pub/index.html/` to the file and
+Linux refuses it, and one request must not answer differently per host.
+
+Three things catch people out.
+
+**A directory answers null.** `safePath` does not guess an index file; which
+one a directory stands for is the handler's policy:
+
+```php
+$path = $req->path === '/' ? '/index.html' : $req->path;
+$file = Http\safePath($root, $path);
+```
+
+**`__DIR__` is not "next to the binary".** It is resolved when the program is
+COMPILED and names the directory of the *source* on the build machine — which
+after a deploy may not exist. To serve a directory beside the executable, ask
+the executable:
+
+```php
+$root = dirname(realpath($argv[0])) . '/public';
+```
+
+**A file is never gzipped on the fly** — see below. `Accept-Encoding: gzip` on a
+`file()` response with no `<path>.gz` sibling gets the plain bytes (with `Vary`,
+so a cache still keys correctly). Precompress at build time.
+
+## Conditional requests
+
+On a file response the handler left at **200**, and only for GET/HEAD:
+
+- `If-None-Match` — weak comparison, `*` and lists honoured — answers **304**
+  with the validators and no body.
+- `If-Modified-Since` answers **304**, and is consulted only when there is no
+  `If-None-Match`.
+- A single `Range: bytes=a-b` (`a-`, `-n` and `a-b` forms) answers **206** with
+  `Content-Range`; an unsatisfiable one **416**. A multi-range, another unit or
+  garbage is ignored and the full representation goes out, as the RFC allows.
+- `If-Range` narrows only on the exact `Last-Modified` date. Our ETags are all
+  weak, and a weak tag never satisfies `If-Range` (RFC 9110 §13.1.5).
+
+A handler that set its own status is answering something other than "here is
+this file", so its status is left alone and no conditional runs.
+
+## Compression
+
+```php
+$server->compression(true, minBytes: 1024, level: 6);
+```
+
+Off by default. On, a BUFFERED body of a text-like type, at least `minBytes`
+long, to a client whose `Accept-Encoding` grants gzip, goes out
+`Content-Encoding: gzip` through the pure-PHP `gzencode()`; a strong `ETag`
+becomes weak, since the encoded bytes are a different representation.
+`Vary: Accept-Encoding` is set on every compressible-type response whether or
+not that response came out encoded — a cache must key on it both ways.
+
+A file is never deflated on the fly: a sibling `<path>.gz` that is not OLDER
+than the file is served in its place, with the original's `Last-Modified` and a
+`-gz` ETag. A stale sibling is a build artefact nobody refreshed, so it is
+ignored rather than served for ever. Streamed bodies are not compressed —
+`gzencode()` is one-shot.
+
+```
+public/app.css      2160 B   →  Content-Length: 2160
+public/app.css.gz     91 B   →  Content-Encoding: gzip, ETag W/"…-gz"
+```
 
 ## php's builtins work inside a handler
 
@@ -281,10 +369,22 @@ well as the handler, so a streaming body sees it too.
 | `uploadMaxFilesize` | 2097152 | the part is kept with `error` 1 (`UPLOAD_ERR_INI_SIZE`), no temp file |
 | `postMaxSize` | 0 | reserved: php's `post_max_size`; not enforced in either mode — a buffered body is already bounded by `maxBodySize` (413), and a streamed one's field bytes are the handler's (`Part::readAll()`) |
 | `maxInputVars` | 1000 | `queryArray()`, urlencoded and multipart `postArray()` truncated silently (php's `max_input_vars`) |
-| `keepAliveMax` | 100 | connection closed after N requests |
+| `keepAliveMax` | 1000 | connection closed after N requests |
 | `idleTimeout` | 5.0 | silent close between requests |
 | `headerTimeout` | 10.0 | 408 mid-head |
 | `writeTimeout` | 30.0 | the write is bounded |
+
+The rest of the knobs, none of which has a section of its own:
+
+```php
+$server->serverName('acme/1.0')   // the Server: header, default 'manticore'
+    ->acceptWait(0.25)            // how long an idle accept parks before a scheduler turn
+    ->captureEcho(true)           // fold echoed bytes into the body (see Absorption)
+    ->compat(false)               // seed the superglobals per request
+    ->onError(fn (\Throwable $e, Request $r) => (new Response(500))->text('…'));
+
+$server->stats();                 // ['served'=>, 'accepted'=>, 'errors'=>, 'stopped'=>]
+```
 
 Also refused, always: a malformed request line, a header name with whitespace
 before its colon, 1.1 without `Host`, a version other than 1.1/1.0 (**505**), a
@@ -325,20 +425,28 @@ request. The divergence from `strpos` is deliberate and local.
 
 | program | LLVM lines |
 |---|---|
-| `echo "hi";` | 8.8k |
-| the same inside `Async\async()` | 46k |
-| `examples/http/hello.php` | 82k |
-| `examples/http/compat.php` (sessions + superglobals) | 191k |
+| `echo "hi";` | 7.2k |
+| the same inside `Async\async()` | 49k |
+| `examples/http/hello.php` | 104k |
+| `examples/http/static.php` (files + gzip) | 103k |
+| `examples/http/compat.php` (sessions + superglobals) | 163k |
 
 The marginal cost of `Http\` over a program that is already async is the two
 prelude files; `compat.php`'s jump is `session` and `json`, not the server.
 
+`static.php` is no dearer than `hello.php`: `prelude/http.php` is ONE unit, so
+every program that mentions `Http\` carries the file and compression code
+whether or not it calls it — about 6 k lines and 1.6 % of the binary. What that
+code REACHES stays gated: `gzencode` is a stdlib symbol the linker resolves only
+where compression is on, and a program that never mentions `Http\` is untouched.
+
 ## Not in this layer
 
-Routing, middleware, PSR-7/PSR-15, HTTP/2, WebSockets. PSR-7 wrappers are an
+Routing, middleware, PSR-7/PSR-15, HTTP/2, WebSockets, multi-range
+(`multipart/byteranges`), brotli, and compression of a STREAMED body. PSR-7 wrappers are an
 ordinary pure-PHP package on top of this; the rest are their own epics.
 
 ## See also
 
 `docs/async.md` (the scheduler and the netpoller this rides on) ·
-`examples/http/` (`hello`, `stream`, `compat`) · `tests/aot/cases/http_*.php`.
+`examples/http/` (`hello`, `stream`, `compat`, `static`) · `tests/aot/cases/http_*.php`.

@@ -3817,7 +3817,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // namespace whose members are fork/pid/workers/supervise; those are gated on
     // the `Process` qualifier instead, exactly as async.php is on `Async`,
     // because a program may very well own a function called `workers()`.
-    $pcntlFns = [];
+    // `getmypid` is php CORE, not ext/posix — it carries no prefix to gate on,
+    // and a program that calls it and nothing else in this file got `Call to
+    // undefined function getmypid()`.
+    $pcntlFns = ['getmypid'];
     foreach (\Compile\Mir\PreludeDemand::definedFunctions($pcntlSrc) as $fn) {
         if (\str_starts_with($fn, 'pcntl_') || \str_starts_with($fn, 'posix_')) { $pcntlFns[] = $fn; }
     }

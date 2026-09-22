@@ -1,0 +1,12 @@
+json: 200 enc=gzip vary=Accept-Encoding smaller=yes body=ok
+json-noae: 200 enc=- vary=Accept-Encoding smaller=- body=ok
+json-q0: 200 enc=- vary=Accept-Encoding smaller=- body=ok
+json-star: 200 enc=gzip vary=Accept-Encoding smaller=yes body=ok
+small: 200 enc=- vary=Accept-Encoding smaller=- body=ok
+png: 200 enc=- vary=- smaller=- body=ok
+pre: 200 enc=identity vary=Accept-Encoding smaller=- body=ok
+head-json: gzip len match=yes
+file: 200 enc=gzip vary=Accept-Encoding smaller=yes body=ok
+file-noae: 200 enc=- vary=Accept-Encoding smaller=- body=ok
+stale: 200 enc=- vary=Accept-Encoding smaller=- body=ok
+done

@@ -928,6 +928,233 @@ function parseCookies(string $line): array<string, string>
 }
 
 /**
+ * A request path mapped under `$root`, or null when it does not name a regular
+ * file inside it.
+ *
+ * Both sides go through `realpath`, so a symlink that leaves the root is
+ * refused by construction rather than by string surgery on `..`. A DIRECTORY
+ * answers null: which index file a directory stands for is the handler's
+ * policy, not this function's (`safePath($root, $req->path . '/index.html')`).
+ *
+ * The path arrives already percent-decoded and `..`-collapsed by the server
+ * ({@see normPath}), so an encoded `%2e%2e` is a literal path segment here and
+ * simply names nothing.
+ */
+function safePath(string $root, string $reqPath): ?string
+{
+    if ($reqPath === '' || $reqPath[0] !== '/') {
+        return null;
+    }
+    // A trailing slash spells a DIRECTORY in a URL, and a directory answers
+    // null here. Without the test `realpath` decides: Darwin resolves
+    // `/pub/index.html/` to the file and Linux refuses it, which would make
+    // the same request answer differently per host.
+    if (\substr($reqPath, -1) === '/') {
+        return null;
+    }
+    $base = \realpath($root);
+    if ($base === false) {
+        return null;
+    }
+    $base = \rtrim($base, '/');
+    $full = \realpath($base . $reqPath);
+    if ($full === false || !\is_file($full)) {
+        return null;
+    }
+    if (\strncmp($full, $base . '/', \strlen($base) + 1) !== 0) {
+        return null;
+    }
+    return $full;
+}
+
+/** Content-Type from the extension; `application/octet-stream` when unknown. */
+function mimeFor(string $path): string
+{
+    $dot = \strrpos($path, '.');
+    $slash = \strrpos($path, '/');
+    if ($dot === false || ($slash !== false && $dot < $slash)) {
+        return 'application/octet-stream';
+    }
+    $ext = \strtolower(\substr($path, $dot + 1));
+    return match ($ext) {
+        'html', 'htm' => 'text/html; charset=utf-8',
+        'css' => 'text/css; charset=utf-8',
+        'js', 'mjs' => 'text/javascript; charset=utf-8',
+        'json', 'map' => 'application/json',
+        'txt', 'md', 'log' => 'text/plain; charset=utf-8',
+        'xml' => 'application/xml',
+        'svg' => 'image/svg+xml',
+        'png' => 'image/png',
+        'jpg', 'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'avif' => 'image/avif',
+        'ico' => 'image/x-icon',
+        'woff' => 'font/woff',
+        'woff2' => 'font/woff2',
+        'ttf' => 'font/ttf',
+        'otf' => 'font/otf',
+        'wasm' => 'application/wasm',
+        'pdf' => 'application/pdf',
+        'zip' => 'application/zip',
+        'gz' => 'application/gzip',
+        'mp4' => 'video/mp4',
+        'webm' => 'video/webm',
+        'mp3' => 'audio/mpeg',
+        'ogg' => 'audio/ogg',
+        'wav' => 'audio/wav',
+        'csv' => 'text/csv; charset=utf-8',
+        'webmanifest' => 'application/manifest+json',
+        default => 'application/octet-stream',
+    };
+}
+
+/**
+ * Does `Accept-Encoding` grant gzip? A `gzip` token whose q is not 0, or a `*`
+ * that grants it when no `gzip` token settles the question first.
+ *
+ * @internal
+ */
+function acceptsGzip(string $ae): bool
+{
+    if ($ae === '') {
+        return false;
+    }
+    $star = false;
+    foreach (splitStr(',', $ae) as $part) {
+        $p = \trim($part);
+        $q = 1.0;
+        $semi = \strpos($p, ';');
+        $name = $p;
+        if ($semi !== false) {
+            $name = \trim(\substr($p, 0, $semi));
+            $params = \strtolower(\substr($p, $semi + 1));
+            $qp = \strpos($params, 'q=');
+            if ($qp !== false) {
+                $q = (float)\trim(\substr($params, $qp + 2));
+            }
+        }
+        $name = \strtolower($name);
+        if ($name === 'gzip') {
+            return $q > 0.0;
+        }
+        if ($name === '*') {
+            $star = $q > 0.0;
+        }
+    }
+    return $star;
+}
+
+/** Text-like content types worth deflating. @internal */
+function compressible(string $ct): bool
+{
+    $semi = \strpos($ct, ';');
+    $t = \strtolower(\trim($semi === false ? $ct : \substr($ct, 0, $semi)));
+    if (\strncmp($t, 'text/', 5) === 0) {
+        return true;
+    }
+    if ($t === 'application/json' || $t === 'application/javascript' || $t === 'application/xml'
+        || $t === 'application/xhtml+xml' || $t === 'image/svg+xml' || $t === 'application/wasm'
+        || $t === 'application/manifest+json') {
+        return true;
+    }
+    $plus = \strrpos($t, '+');
+    if ($plus !== false) {
+        $suffix = \substr($t, $plus + 1);
+        return $suffix === 'json' || $suffix === 'xml';
+    }
+    return false;
+}
+
+/**
+ * Does an `If-None-Match` list match `$etag`? WEAK comparison, which is the
+ * only one RFC 9110 §13.1.2 allows for `If-None-Match`: both `W/` prefixes are
+ * dropped before comparing, and `*` matches anything.
+ *
+ * @internal
+ */
+function etagMatches(string $list, string $etag): bool
+{
+    $want = \strncmp($etag, 'W/', 2) === 0 ? \substr($etag, 2) : $etag;
+    foreach (splitStr(',', $list) as $t) {
+        $tag = \trim($t);
+        if ($tag === '*') {
+            return true;
+        }
+        if (\strncmp($tag, 'W/', 2) === 0) {
+            $tag = \substr($tag, 2);
+        }
+        if ($tag === $want) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * `bytes=a-b` → `[first, last]`, inclusive and clamped to the file.
+ *
+ * null means UNSATISFIABLE (416). `[-1, -1]` means "not a single byte range I
+ * serve" — a multi-range, another unit, or garbage — which the RFC lets a
+ * server answer with the full representation.
+ *
+ * @internal
+ * @return ?array<int, int>
+ */
+function parseRange(string $spec, int $size): ?array<int, int>
+{
+    $ignore = [];
+    $ignore[] = -1;
+    $ignore[] = -1;
+    if (\strncmp($spec, 'bytes=', 6) !== 0 || \strpos($spec, ',') !== false) {
+        return $ignore;
+    }
+    $r = \trim(\substr($spec, 6));
+    $dash = \strpos($r, '-');
+    if ($dash === false) {
+        return $ignore;
+    }
+    $a = \substr($r, 0, $dash);
+    $b = \substr($r, $dash + 1);
+    if ($a === '') {
+        // `-n`: the LAST n bytes. An empty suffix and a zero-length one are
+        // unsatisfiable, and so is any suffix of an empty file.
+        if ($b === '' || !\ctype_digit($b)) {
+            return $ignore;
+        }
+        $n = (int)$b;
+        if ($n === 0 || $size === 0) {
+            return null;
+        }
+        if ($n > $size) {
+            $n = $size;
+        }
+        $out = [];
+        $out[] = $size - $n;
+        $out[] = $size - 1;
+        return $out;
+    }
+    if (!\ctype_digit($a) || ($b !== '' && !\ctype_digit($b))) {
+        return $ignore;
+    }
+    $first = (int)$a;
+    if ($first >= $size) {
+        return null;
+    }
+    $last = $b === '' ? $size - 1 : (int)$b;
+    if ($last < $first) {
+        return $ignore;
+    }
+    if ($last >= $size) {
+        $last = $size - 1;
+    }
+    $out = [];
+    $out[] = $first;
+    $out[] = $last;
+    return $out;
+}
+
+/**
  * Byte length of the chunk size-line starting at $pos, CRLF included; -1 when
  * the buffer does not hold a complete one yet, -2 when it is too long to be one.
  *
@@ -2495,6 +2722,15 @@ final class Response
      *  `http_response_code()` win only when the Response stayed silent. */
     private bool $statusSet = false;
 
+    /** A file body ({@see file}): the bytes never enter this object. The
+     *  Resource stays OPEN until {@see Server::writeFile} has sent it. */
+    private string $filePath = '';
+    private ?\Resource $fileRes = null;
+    private int $fileSize = 0;
+    private int $fileMtime = 0;
+    private int $fileOff = 0;
+    private int $fileLen = 0;
+
     private bool $close = false;
 
     public function __construct(int $status = 200, string $body = '')
@@ -2542,6 +2778,7 @@ final class Response
 
     public function text(string $s): Response
     {
+        $this->dropFile();
         $this->headers->set('Content-Type', 'text/plain; charset=utf-8');
         $this->body = $s;
         return $this;
@@ -2549,6 +2786,7 @@ final class Response
 
     public function html(string $s): Response
     {
+        $this->dropFile();
         $this->headers->set('Content-Type', 'text/html; charset=utf-8');
         $this->body = $s;
         return $this;
@@ -2556,6 +2794,7 @@ final class Response
 
     public function body(string $b): Response
     {
+        $this->dropFile();
         $this->body = $b;
         return $this;
     }
@@ -2563,6 +2802,7 @@ final class Response
     /** Append to the body — the in-place amortized `.=`, not a fresh string. */
     public function write(string $b): Response
     {
+        $this->dropFile();
         $this->body .= $b;
         return $this;
     }
@@ -2576,8 +2816,126 @@ final class Response
      */
     public function stream(callable $fn): Response
     {
+        $this->dropFile();
         $this->bodyFn = $fn;
         return $this;
+    }
+
+    /**
+     * Send a file from disk. The head is built from ONE `fstat` of the OPENED
+     * fd, so the length on the wire is the length of the file the body will
+     * read — a path stat'ed and then opened is two different files under a
+     * concurrent write.
+     *
+     * A missing or unreadable path is the HANDLER's bug and throws here, not on
+     * the wire; {@see safePath} is the one that answers null for a request path
+     * that names nothing.
+     */
+    public function file(string $path, ?string $type = null): Response
+    {
+        $r = @\fopen($path, 'rb');
+        if ($r === false) {
+            throw new \RuntimeException('Http\\Response::file: cannot open ' . $path);
+        }
+        $st = \fstat($r);
+        if ($st === false || ($st['mode'] & 0170000) !== 0100000) {
+            \fclose($r);
+            throw new \RuntimeException('Http\\Response::file: not a regular file ' . $path);
+        }
+        $this->dropFile();
+        $this->body = '';
+        $this->bodyFn = null;
+        $this->filePath = $path;
+        $this->fileRes = $r;
+        $this->fileSize = (int)$st['size'];
+        $this->fileMtime = (int)$st['mtime'];
+        $this->fileOff = 0;
+        $this->fileLen = $this->fileSize;
+        $h = $this->headers;
+        if (!$h->has('content-type')) {
+            $h->add('Content-Type', $type ?? mimeFor($path));
+        } elseif ($type !== null) {
+            $h->set('Content-Type', $type);
+        }
+        if (!$h->has('last-modified')) {
+            $h->add('Last-Modified', httpDate($this->fileMtime));
+        }
+        if (!$h->has('etag')) {
+            $h->add('ETag', $this->fileEtag());
+        }
+        if (!$h->has('accept-ranges')) {
+            $h->add('Accept-Ranges', 'bytes');
+        }
+        return $this;
+    }
+
+    public function isFile(): bool { return $this->fileRes !== null; }
+    public function fileResource(): ?\Resource { return $this->fileRes; }
+    public function filePath(): string { return $this->filePath; }
+    public function fileSize(): int { return $this->fileSize; }
+    public function fileMtime(): int { return $this->fileMtime; }
+    public function fileOffset(): int { return $this->fileOff; }
+    public function fileLength(): int { return $this->fileLen; }
+
+    /** WEAK: a byte-identical copy on another host carries another mtime. */
+    public function fileEtag(): string
+    {
+        return 'W/"' . \dechex($this->fileMtime) . '-' . \dechex($this->fileSize) . '"';
+    }
+
+    /** @internal the byte window {@see Server::conditional} settles for a Range. */
+    public function setFileWindow(int $off, int $len): void
+    {
+        $this->fileOff = $off;
+        $this->fileLen = $len;
+    }
+
+    /**
+     * Serve `<path>.gz` in place of the file when it exists and is not OLDER
+     * than it — a stale sibling is a build artefact nobody refreshed, and
+     * sending it would serve yesterday's asset for ever.
+     *
+     * `fileMtime` deliberately stays the ORIGINAL's, so `Last-Modified` and
+     * `If-Modified-Since` keep meaning the source file; only the ETag gains a
+     * `-gz` suffix, because the two representations are not byte-identical.
+     *
+     * @internal
+     */
+    public function useGzSibling(): void
+    {
+        if ($this->fileRes === null) {
+            return;
+        }
+        $r = @\fopen($this->filePath . '.gz', 'rb');
+        if ($r === false) {
+            return;
+        }
+        $st = \fstat($r);
+        if ($st === false || (int)$st['mtime'] < $this->fileMtime) {
+            \fclose($r);
+            return;
+        }
+        \fclose($this->fileRes);
+        $this->fileRes = $r;
+        $this->fileSize = (int)$st['size'];
+        $this->fileOff = 0;
+        $this->fileLen = $this->fileSize;
+        $this->headers->set('Content-Encoding', 'gzip');
+        $this->headers->set('ETag', 'W/"' . \dechex($this->fileMtime) . '-' . \dechex($this->fileSize) . '-gz"');
+    }
+
+    /** A body of another kind replaces a file — and closes its fd. */
+    private function dropFile(): void
+    {
+        if ($this->fileRes !== null) {
+            \fclose($this->fileRes);
+            $this->fileRes = null;
+            $this->filePath = '';
+            $this->fileSize = 0;
+            $this->fileMtime = 0;
+            $this->fileOff = 0;
+            $this->fileLen = 0;
+        }
     }
 
     public function redirect(string $loc, int $code = 302): Response
@@ -3366,6 +3724,11 @@ final class Server
     private int $maxHeaderCount = 100;
     private int $maxBodySize = 8388608;
     private bool $streamBodies = false;
+    /** gzip, off by default — {@see compression}. The FLAG is what keeps the
+     *  pure-PHP deflater out of a program that never asks for it. */
+    private bool $compress = false;
+    private int $compressMin = 1024;
+    private int $compressLevel = 6;
     /** Requests per connection before it is closed. 100 tore a connection
      *  down and rebuilt it — accept, close, and a TLS handshake if any — every
      *  hundred requests; nginx's equivalent default is 1000. It is a DoS knob,
@@ -3438,6 +3801,23 @@ final class Server
     public function maxHeaderCount(int $n): Server { $this->maxHeaderCount = $n; return $this; }
     public function maxBodySize(int $n): Server { $this->maxBodySize = $n; return $this; }
     public function streamBodies(bool $on): Server { $this->streamBodies = $on; return $this; }
+
+    /**
+     * gzip buffered bodies of text-like types of at least `$minBytes`, to a
+     * client whose `Accept-Encoding` grants it. Off by default: the deflater is
+     * pure PHP and a program that never calls this carries none of it.
+     *
+     * A FILE is never deflated on the fly — a `<path>.gz` sibling is served
+     * instead ({@see Response::useGzSibling}). Streamed bodies are not
+     * compressed at all: `gzencode` is one-shot.
+     */
+    public function compression(bool $on, int $minBytes = 1024, int $level = 6): Server
+    {
+        $this->compress = $on;
+        $this->compressMin = $minBytes < 0 ? 0 : $minBytes;
+        $this->compressLevel = $level;
+        return $this;
+    }
     public function keepAliveMax(int $n): Server { $this->keepAliveMax = $n; return $this; }
     /** '' omits the `Server:` header entirely. */
     public function serverName(string $s): Server { $this->serverName = $s; return $this; }
@@ -3942,7 +4322,9 @@ final class Server
         if (!$res->statusWasSet()) {
             $res->status(\Manticore\Sapi\responseStatus());
         }
-        if ($echoed !== '' && $res->getBody() === '' && !$res->isStreaming()) {
+        // A file body, like a streamed one, is EXPLICIT: echoed bytes are the
+        // fallback for a handler that wrote nothing, and `file()` wrote.
+        if ($echoed !== '' && $res->getBody() === '' && !$res->isStreaming() && !$res->isFile()) {
             $res->body($echoed);
         }
         return $res;
@@ -3954,6 +4336,9 @@ final class Server
      */
     private function writeResponse(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
     {
+        if ($res->isFile()) {
+            return $this->writeFile($conn, $out, $req, $res, $keep);
+        }
         if ($res->isStreaming() && Status::hasBody($res->status)) {
             return $this->writeStreamed($conn, $out, $req, $res, $keep);
         }
@@ -3961,6 +4346,9 @@ final class Server
         $hasBody = Status::hasBody($res->status);
         if (!$hasBody) {
             $body = '';
+        }
+        if ($this->compress && $hasBody) {
+            $body = $this->gzipBody($req, $res, $body);
         }
         $head = $this->renderHead($res, $req->version, $keep, \strlen($body), $hasBody);
         \Manticore\Sapi\responseSent();
@@ -4024,6 +4412,210 @@ final class Server
         // returned without ending still has to leave the framing valid, or the
         // peer waits for a body that never ends.
         $w->end();
+        return $keep;
+    }
+
+    /**
+     * `Vary: Accept-Encoding`, appended rather than replacing — a cache must
+     * key on the header whether or not THIS response came out encoded, or the
+     * identity copy it stored is handed to a client that asked for gzip.
+     */
+    private function addVary(Headers $h): void
+    {
+        $v = $h->get('vary');
+        if ($v === '') {
+            $h->add('Vary', 'Accept-Encoding');
+        } elseif (\stripos($v, 'accept-encoding') === false && \trim($v) !== '*') {
+            $h->set('Vary', $v . ', Accept-Encoding');
+        }
+    }
+
+    /**
+     * The buffered body, gzipped when everything lines up: a compressible type,
+     * at least `compressMin` bytes, no encoding already chosen, and a client
+     * that asked. `Vary` goes on every compressible-type response either way.
+     *
+     * Called only under `$this->compress`, which is what keeps `gzencode` — the
+     * pure-PHP deflater — out of a program that never turns compression on.
+     */
+    private function gzipBody(Request $req, Response $res, string $body): string
+    {
+        $h = $res->headers;
+        $ct = $h->get('content-type');
+        if ($ct === '' || !compressible($ct)) {
+            return $body;
+        }
+        $this->addVary($h);
+        if (\strlen($body) < $this->compressMin || $h->has('content-encoding')
+            || !acceptsGzip($req->header('Accept-Encoding'))) {
+            return $body;
+        }
+        $out = \gzencode($body, $this->compressLevel);
+        $h->set('Content-Encoding', 'gzip');
+        $h->remove('content-length');
+        // The encoded bytes are a different representation of the same
+        // resource, so a STRONG validator no longer describes what is on the
+        // wire (RFC 9110 §8.8.1).
+        $etag = $h->get('etag');
+        if ($etag !== '' && \strncmp($etag, 'W/', 2) !== 0) {
+            $h->set('ETag', 'W/' . $etag);
+        }
+        return $out;
+    }
+
+    /**
+     * RFC 9110 §13.2 over a file response the HANDLER left at 200: the status
+     * to send, with the file window and the headers settled for it.
+     *
+     * A handler that set its own status is answering something other than "here
+     * is this file" — 201 on an upload, say — and its answer is not the
+     * server's to turn into a 304. A non-GET/HEAD is left alone too (v1: php's
+     * own `If-Match` / 412 half is not implemented).
+     */
+    private function conditional(Request $req, Response $res): int
+    {
+        // The predicate is the STATUS, not `statusWasSet()`: {@see absorb} calls
+        // `status()` on every response that did not set one, to let an ambient
+        // `http_response_code()` win, and `status()` marks the flag — so by the
+        // time a response is written the flag is true for all of them.
+        if ($res->status !== 200 || ($req->method !== 'GET' && $req->method !== 'HEAD')) {
+            return $res->status;
+        }
+        $h = $res->headers;
+        $etag = $h->get('etag');
+        $inm = $req->header('If-None-Match');
+        $notModified = false;
+        if ($inm !== '') {
+            // `If-None-Match` present WINS: a date is the weaker validator and
+            // §13.1.3 says it is only consulted when there is no entity tag.
+            $notModified = $etag !== '' && etagMatches($inm, $etag);
+        } else {
+            $ims = $req->header('If-Modified-Since');
+            if ($ims !== '') {
+                $since = \strtotime($ims);
+                $notModified = $since !== false && $res->fileMtime() <= $since;
+            }
+        }
+        if ($notModified) {
+            $h->remove('content-type');
+            $h->remove('content-length');
+            $h->remove('accept-ranges');
+            $res->setFileWindow(0, 0);
+            return Status::NOT_MODIFIED;
+        }
+        $range = $req->header('Range');
+        if ($range === '') {
+            return $res->status;
+        }
+        $ifRange = $req->header('If-Range');
+        if ($ifRange !== '') {
+            // §13.1.5: an entity tag in `If-Range` must match STRONGLY. Ours are
+            // all weak, so a tag never narrows — only the exact date does.
+            $ok = \strpos($ifRange, '"') !== false
+                ? ($etag !== '' && $ifRange === $etag && \strncmp($etag, 'W/', 2) !== 0)
+                : (\strtotime($ifRange) === $res->fileMtime());
+            if (!$ok) {
+                return $res->status;
+            }
+        }
+        $win = parseRange($range, $res->fileSize());
+        if ($win === null) {
+            $h->set('Content-Range', 'bytes */' . $res->fileSize());
+            $h->remove('content-type');
+            $res->setFileWindow(0, 0);
+            return Status::RANGE_NOT_SATISFIABLE;
+        }
+        if ($win[0] < 0) {
+            return $res->status;
+        }
+        $h->set('Content-Range', 'bytes ' . $win[0] . '-' . $win[1] . '/' . $res->fileSize());
+        $res->setFileWindow($win[0], $win[1] - $win[0] + 1);
+        return Status::PARTIAL_CONTENT;
+    }
+
+    /**
+     * A file body: the head, then the bytes straight from the page cache.
+     *
+     * `sendfile(2)` on a plain socket — the bytes never enter the process. A
+     * TLS connection has to encrypt them, so it takes the `fread` loop, and so
+     * does a host whose `__mc_sendfile` answers -3. Either way the fd is closed
+     * on every exit: the Response opened it and this is where it dies.
+     */
+    private function writeFile(\Resource $conn, Outbox $out, Request $req, Response $res, bool $keep): bool
+    {
+        // The precompressed sibling is chosen BEFORE the conditionals: it
+        // changes the ETag and the length those answer with.
+        if ($this->compress && compressible($res->headers->get('content-type'))) {
+            $this->addVary($res->headers);
+            if (!$res->headers->has('content-encoding')
+                && acceptsGzip($req->header('Accept-Encoding'))) {
+                $res->useGzSibling();
+            }
+        }
+        $res->status = $this->conditional($req, $res);
+        // AFTER the sibling swap: `useGzSibling()` closes the Resource it
+        // replaces, so a handle taken before it would be a closed FILE*.
+        $in = $res->fileResource();
+        if ($in === null) {
+            return $keep;
+        }
+        $hasBody = Status::hasBody($res->status) && $res->fileLength() > 0;
+        $h = $res->headers;
+        $h->remove('content-length');
+        $head = $this->renderHead($res, $req->version, $keep, $hasBody ? $res->fileLength() : 0, $hasBody);
+        \Manticore\Sapi\responseSent();
+        // The queue drains BEFORE the first sendfile: a pipelined response
+        // still sitting in the Outbox would otherwise arrive after the file.
+        $out->sendNow($head);
+        if (!$hasBody || $req->method === 'HEAD') {
+            \fclose($in);
+            return $keep;
+        }
+        $off = $res->fileOffset();
+        $left = $res->fileLength();
+        $ok = true;
+        $useSendfile = $conn->kind === \Resource::KIND_SOCKET;
+        while ($left > 0) {
+            if ($useSendfile) {
+                $n = \__mc_sendfile($conn, $in, $off, $left);
+                if ($n === -3) {
+                    $useSendfile = false;
+                    continue;
+                }
+                if ($n === -2) {
+                    if (\__mc_wait_write($conn) === 0) {
+                        $ok = false;
+                        break;
+                    }
+                    continue;
+                }
+                if ($n < 0) {
+                    $ok = false;
+                    break;
+                }
+                $off = $off + $n;
+                $left = $left - $n;
+                continue;
+            }
+            \fseek($in, $off);
+            $chunk = \fread($in, $left < 65536 ? $left : 65536);
+            if ($chunk === '') {
+                $ok = false;
+                break;
+            }
+            $w = \fwrite($conn, $chunk);
+            if ($w !== \strlen($chunk)) {
+                $ok = false;
+                break;
+            }
+            $off = $off + $w;
+            $left = $left - $w;
+        }
+        \fclose($in);
+        if (!$ok) {
+            $this->statErrors = $this->statErrors + 1;
+            return false;
+        }
         return $keep;
     }
 

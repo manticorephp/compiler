@@ -386,6 +386,25 @@ function sys_send_buf(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int 
 #[Library('c'), Symbol('writev')]
 function sys_writev(#[CType('int')] int $fd, Ptr $iov, #[CType('int')] int $iovcnt): int {}
 
+// A kernel-side file → socket copy: the bytes never enter the process. The two
+// hosts spell it `sendfile` and mean DIFFERENT things by it, and one C symbol
+// may carry only one shape here (the emitter rejects a module that declares two
+// — see docs/ffi.md), so Linux is bound through its `sendfile64` alias instead.
+// glibc and musl both export that name; Darwin does not, hence #[Weak], and
+// `__mc_sendfile` calls only the branch for the running host.
+//
+// `ssize_t sendfile64(int out_fd, int in_fd, off_t *offset, size_t count)` —
+// advances *offset by what it sent and returns that count, or -1.
+#[Library('c'), Symbol('sendfile64'), Weak]
+function sys_sendfile_linux(#[CType('int')] int $out_fd, #[CType('int')] int $in_fd, Ptr $offset, #[CType('size_t')] int $count): int {}
+
+// `int sendfile(int fd, int s, off_t offset, off_t *len, struct sf_hdtr *hdtr,
+// int flags)` — Darwin/BSD. The FILE fd comes FIRST, the byte count is in/out
+// through *len (0 = to EOF), and the return is 0 or -1 — on EAGAIN *len still
+// holds what went out.
+#[Library('c'), Symbol('sendfile'), CType('int')]
+function sys_sendfile_bsd(#[CType('int')] int $fd, #[CType('int')] int $s, #[CType('off_t')] int $offset, Ptr $len, Ptr $hdtr, #[CType('int')] int $flags): int {}
+
 // `ssize_t recv(int fd, void *buf, size_t n, int flags)` — bytes read, 0 at the
 // peer's orderly shutdown, -1 on error.
 #[Library('c'), Symbol('recv')]
