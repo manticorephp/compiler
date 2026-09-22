@@ -1012,7 +1012,72 @@ function collect_stdlib_extern_decls(): array
 }
 
 /**
- * Locate the prebuilt `stdlib.o` relative to argv[0] (one file → robust):
+ * Directory of the RUNNING compiler, symlinks resolved — the anchor every
+ * bundled asset (stdlib.o, its .sig, the prelude) is found relative to.
+ *
+ * Not argv[0] as it arrives: argv[0] is what the caller TYPED. Reached through
+ * $PATH it is a bare "manticore" with no slash in it at all, and the finders
+ * below used to give up on that — which is why the dev tree's `bin/manticore`
+ * worked while an INSTALLED compiler (the container image, a release tarball on
+ * $PATH) lost its prelude and its stdlib and died with "prelude not found".
+ *   1. argv[0] with a slash → realpath, so a symlinked install
+ *      (/usr/local/bin/manticore → …/lib/manticore/bin/manticore) anchors at
+ *      the REAL directory rather than at the symlink's.
+ *   2. /proc/self/exe — the kernel's own answer, immune to argv games.
+ *   3. a $PATH walk for a bare name — macOS has no /proc.
+ * "" when nothing resolves; every caller keeps its env override.
+ */
+function self_dir(): string
+{
+    // GUARDED: the libc `argv` binding and `cstr_to_str` are throwing stubs
+    // under the Zend cold-seed, where the env overrides are the resolution path.
+    $self = "";
+    try {
+        $self = \cstr_to_str(argv(0));
+    } catch (\Throwable $e) {
+        $self = "";
+    }
+
+    if ($self !== "" && \strpos($self, "/") !== false) {
+        $real = \realpath($self);
+        if (\is_string($real) && $real !== "") { $self = $real; }
+    } elseif (file_exists("/proc/self/exe")) {
+        $exe = \readlink("/proc/self/exe");
+        if (\is_string($exe) && $exe !== "") { $self = $exe; }
+    } elseif ($self !== "") {
+        $self = path_lookup($self);
+    }
+
+    if ($self === "") { return ""; }
+    $slashAt = \strrpos($self, "/");
+    if ($slashAt === false || $slashAt < 0) { return ""; }
+    return \substr($self, 0, $slashAt);
+}
+
+/**
+ * First executable named `$name` on $PATH, symlinks resolved; the name itself
+ * when $PATH holds no such file. `is_executable` and not `file_exists`: an
+ * earlier directory holding a same-named data file must not win over the real
+ * program.
+ */
+function path_lookup(string $name): string
+{
+    $path = \getenv("PATH");
+    if (!\is_string($path) || $path === "") { return $name; }
+    foreach (\explode(":", $path) as $dir) {
+        if ($dir === "") { continue; }
+        $cand = $dir . "/" . $name;
+        if (\is_executable($cand)) {
+            $real = \realpath($cand);
+            if (\is_string($real) && $real !== "") { return $real; }
+            return $cand;
+        }
+    }
+    return $name;
+}
+
+/**
+ * Locate the prebuilt `stdlib.o` relative to the compiler (one file → robust):
  *   - MANTICORE_STDLIB_O env override
  *   - <argv0_dir>/../lib/manticore_stdlib.o   (dev tree: bin/manticore)
  *   - <argv0_dir>/lib/manticore_stdlib.o      (installed)
@@ -1025,11 +1090,8 @@ function find_stdlib_object(): string
     if (\is_string($envPath) && $envPath !== "" && file_exists($envPath)) {
         return $envPath;
     }
-    $rawSelf = argv(0);
-    $self = \cstr_to_str($rawSelf);
-    $slashAt = \strrpos($self, "/");
-    if ($slashAt === false || $slashAt < 0) { return ""; }
-    $selfDir = \substr($self, 0, $slashAt);
+    $selfDir = self_dir();
+    if ($selfDir === "") { return ""; }
     $c1 = $selfDir . "/../lib/manticore_stdlib.o";
     if (file_exists($c1)) { return $c1; }
     $c2 = $selfDir . "/lib/manticore_stdlib.o";
@@ -1053,11 +1115,8 @@ function find_stdlib_sig(): string
     if (\is_string($envPath) && $envPath !== "" && file_exists($envPath)) {
         return $envPath;
     }
-    $rawSelf = argv(0);
-    $self = \cstr_to_str($rawSelf);
-    $slashAt = \strrpos($self, "/");
-    if ($slashAt === false || $slashAt < 0) { return ""; }
-    $selfDir = \substr($self, 0, $slashAt);
+    $selfDir = self_dir();
+    if ($selfDir === "") { return ""; }
     // Preferred: the manifest's `<output>.sig` (manticore_stdlib.o.sig).
     $p1 = $selfDir . "/../lib/manticore_stdlib.o.sig";
     if (file_exists($p1)) { return $p1; }
@@ -1109,24 +1168,15 @@ function find_prelude_src(string $file): string
     if (\is_string($envDir) && $envDir !== "") {
         $cands[] = $envDir . "/" . $file;
     }
-    // argv0-relative candidates. GUARDED: the libc `argv` binding + `cstr_to_str`
-    // are absent under the Zend cold-seed (Call-to-undefined Error) — without the
-    // catch the throw escapes before the env candidate is ever read, so a prelude
-    // fn the compiler itself uses (explode) never injects into the seed. Under
-    // Zend MANTICORE_PRELUDE (added above) is the resolution path.
-    try {
-        $rawSelf = argv(0);
-        $self = \cstr_to_str($rawSelf);
-        $slashAt = \strrpos($self, "/");
-        if ($slashAt !== false && $slashAt >= 0) {
-            $selfDir = \substr($self, 0, $slashAt);
-            $cands[] = $selfDir . "/../prelude/" . $file;
-            $cands[] = $selfDir . "/prelude/" . $file;
-            $cands[] = $selfDir . "/../lib/prelude/" . $file;
-            $cands[] = $selfDir . "/lib/prelude/" . $file;
-        }
-    } catch (\Throwable $e) {
-        // Zend cold-seed — rely on MANTICORE_PRELUDE.
+    // Compiler-relative candidates. self_dir() swallows the cold-seed throw (the
+    // libc `argv` binding + `cstr_to_str` are absent under Zend) and answers ""
+    // there, so MANTICORE_PRELUDE above stays the seed's resolution path.
+    $selfDir = self_dir();
+    if ($selfDir !== "") {
+        $cands[] = $selfDir . "/../prelude/" . $file;
+        $cands[] = $selfDir . "/prelude/" . $file;
+        $cands[] = $selfDir . "/../lib/prelude/" . $file;
+        $cands[] = $selfDir . "/lib/prelude/" . $file;
     }
     foreach ($cands as $path) {
         // `\file_get_contents` (global) works in BOTH worlds: PHP's builtin
