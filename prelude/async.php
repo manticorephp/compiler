@@ -2138,6 +2138,13 @@ namespace Async {
                 }
                 if ($t0 > 0.0) { $this->watchdogCheck($task, $t0); }
                 $this->settle($task, Task::FAILED, null, $e);
+                // Settled: the id is dead and can never be switched to again, so
+                // the SAPI seam's parked context for it is garbage. Nothing
+                // dropped it before, and a server that runs a request per task
+                // grew twelve maps for ever ({@see \Manticore\Sapi\contextDrop}).
+                if (\function_exists('Manticore\\Sapi\\contextDrop')) {
+                    \Manticore\Sapi\contextDrop($task->id);
+                }
                 $task->fiber->reclaim();      // terminated via exception → free stack now
                 return;
             }
@@ -2148,6 +2155,9 @@ namespace Async {
             if ($t0 > 0.0) { $this->watchdogCheck($task, $t0); }
             if ($task->fiber->isTerminated()) {
                 $this->settle($task, Task::DONE, $task->fiber->getReturn(), null);
+                if (\function_exists('Manticore\\Sapi\\contextDrop')) {
+                    \Manticore\Sapi\contextDrop($task->id);
+                }
                 $task->fiber->reclaim();      // free+pool the stack now, not at __destruct
             }
         }
@@ -2503,6 +2513,12 @@ namespace Async {
 
         private function timerPush(float $deadline, Task $t): void
         {
+            // Dead slots accumulate wherever they landed ({@see timerCompact});
+            // 32 is the floor below which the walk is not worth its own cost.
+            $held = \count($this->tmDeadline);
+            if ($held > 32 && $held > 2 * $this->tmLive) {
+                $this->timerCompact();
+            }
             $t->timerSeq = $t->timerSeq + 1;
             $this->tmDeadline[] = $deadline;
             $this->tmTask[] = $t;
@@ -2542,6 +2558,58 @@ namespace Async {
                 $k = $this->tmTask[$m]; $this->tmTask[$m] = $this->tmTask[$i]; $this->tmTask[$i] = $k;
                 $q = $this->tmSeq[$m]; $this->tmSeq[$m] = $this->tmSeq[$i]; $this->tmSeq[$i] = $q;
                 $i = $m;
+            }
+        }
+
+        /**
+         * Rebuild the heap without its DEAD slots.
+         *
+         * {@see disarmTimer} only clears the flag — the slot stays, and
+         * {@see timerPrune} reaches a dead one only when it surfaces at the TOP.
+         * A server arms a timeout per request and disarms it microseconds later,
+         * so the dead slot keeps a deadline seconds out and never surfaces while
+         * newer timers keep arriving: the three parallel arrays grew ONE SLOT PER
+         * REQUEST for ever (measured 46 B/req; the heap showed three int-keyed
+         * buffers at 2.1 MB each after 200k requests, ~264k slots, while the
+         * allocation COUNT stayed flat — capacity, not objects).
+         *
+         * Amortised: {@see timerPush} calls this only when the array has grown
+         * past twice the live count, so the heap is bounded at ~2× live timers
+         * and the walk is paid once per doubling.
+         */
+        private function timerCompact(): void
+        {
+            $n = \count($this->tmDeadline);
+            $dl = [];
+            $tk = [];
+            $sq = [];
+            for ($i = 0; $i < $n; $i++) {
+                $t = $this->tmTask[$i];
+                if ($t->timerActive && $t->state === Task::PENDING && $this->tmSeq[$i] === $t->timerSeq) {
+                    $dl[] = $this->tmDeadline[$i];
+                    $tk[] = $t;
+                    $sq[] = $this->tmSeq[$i];
+                }
+            }
+            $this->tmDeadline = $dl;
+            $this->tmTask = $tk;
+            $this->tmSeq = $sq;
+            $m = \count($dl);
+            $start = \intdiv($m, 2) - 1;
+            for ($j = $start; $j >= 0; $j--) {
+                $i = $j;
+                while (true) {
+                    $l = 2 * $i + 1;
+                    $r = $l + 1;
+                    $mi = $i;
+                    if ($l < $m && $this->tmDeadline[$l] < $this->tmDeadline[$mi]) { $mi = $l; }
+                    if ($r < $m && $this->tmDeadline[$r] < $this->tmDeadline[$mi]) { $mi = $r; }
+                    if ($mi === $i) { break; }
+                    $d = $this->tmDeadline[$mi]; $this->tmDeadline[$mi] = $this->tmDeadline[$i]; $this->tmDeadline[$i] = $d;
+                    $k = $this->tmTask[$mi]; $this->tmTask[$mi] = $this->tmTask[$i]; $this->tmTask[$i] = $k;
+                    $q = $this->tmSeq[$mi]; $this->tmSeq[$mi] = $this->tmSeq[$i]; $this->tmSeq[$i] = $q;
+                    $i = $mi;
+                }
             }
         }
 

@@ -134,6 +134,16 @@ class __McSession
  * guard away. The HANDLER is deliberately not parked — a save handler is
  * installed once for the process, exactly as php installs it.
  */
+/** Forget a settled task's parked session half — the mirror of the park below
+ *  ({@see \Manticore\Sapi\contextDrop} is the one caller). */
+function __mc_session_ctx_drop(int $id): void
+{
+    unset(\__McSession::$savedStatus[$id]);
+    unset(\__McSession::$savedId[$id]);
+    unset(\__McSession::$savedLastRead[$id]);
+    unset(\__McSession::$seen[$id]);
+}
+
 function __mc_session_ctx_switch(int $from, int $to): void
 {
     \__McSession::$savedStatus[$from] = \__McSession::$status;

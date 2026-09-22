@@ -325,6 +325,44 @@ namespace Manticore\Sapi {
      * heterogeneous array erases its element type, and the reader then decodes an
      * int as a cell (`status=2.06E-321`). Three accessors, three concrete types.
      */
+    /**
+     * Forget a task's parked context. Called from `Scheduler::step` the moment a
+     * task SETTLES, which is the only point at which its id can never come back.
+     *
+     * {@see contextSwitch} parks twelve maps under the task id and nothing ever
+     * removed an entry, so a server that runs each request in its own task grew
+     * them for ever: measured at 46 B per request, and the heap showed it as
+     * three int-keyed buffers reaching 2.1 MB each at 200k requests while the
+     * node COUNT stayed flat — not a leak of objects, a set of maps nobody
+     * pruned. The session and output-buffer tiers park under the same id and are
+     * dropped through the same guarded hooks.
+     */
+    function contextDrop(int $id): void
+    {
+        if (!Context::$everActive) {
+            return;
+        }
+        unset(Context::$savedHeaders[$id]);
+        unset(Context::$savedStatus[$id]);
+        unset(Context::$savedActive[$id]);
+        unset(Context::$savedSent[$id]);
+        unset(Context::$savedServer[$id]);
+        unset(Context::$savedGet[$id]);
+        unset(Context::$savedPost[$id]);
+        unset(Context::$savedCookie[$id]);
+        unset(Context::$savedRequest[$id]);
+        unset(Context::$savedSession[$id]);
+        unset(Context::$savedFiles[$id]);
+        unset(Context::$savedUploaded[$id]);
+        unset(Context::$seen[$id]);
+        if (\function_exists('__mc_session_ctx_drop')) {
+            \__mc_session_ctx_drop($id);
+        }
+        if (\function_exists('__mc_ob_ctx_drop')) {
+            \__mc_ob_ctx_drop($id);
+        }
+    }
+
     function requestEnd(): void
     {
         Context::$active = false;

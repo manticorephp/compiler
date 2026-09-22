@@ -95,6 +95,16 @@ class __McOb
  * Called from `Manticore\Sapi\contextSwitch`, guarded by function_exists, so a program
  * that never buffers never links it.
  */
+/** Forget a settled task's parked buffers — the mirror of the park below
+ *  ({@see \Manticore\Sapi\contextDrop} is the one caller). */
+function __mc_ob_ctx_drop(int $id): void
+{
+    unset(__McOb::$savedBufs[$id]);
+    unset(__McOb::$savedHandlers[$id]);
+    unset(__McOb::$savedChunks[$id]);
+    unset(__McOb::$savedFlags[$id]);
+}
+
 function __mc_ob_ctx_switch(int $from, int $to): void
 {
     if ($from === $to) {
