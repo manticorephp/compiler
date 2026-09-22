@@ -3929,6 +3929,24 @@ final class EmitLlvm implements EmitVisitor
             $this->rt->needsStrRc = true;
             return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
         }
+        if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN || $op->type->isArray()) {
+            // A cell / erased operand's text is uniformly OWNED: {@see
+            // EmitLlvmExpr::cellStrResultOwnIr} retains the payload it
+            // aliases, the other arms mint (int_to_str, __toString) or are
+            // immortal ("Array", ""), where a release is a no-op. Reading it
+            // as a borrow leaked one string per `'x' . $_GET['a']` — a
+            // compat handler's three superglobal reads were 255 B per request.
+            // A fresh cell temp (`$cell ?? '-'`, a cell call) owes its tagged
+            // word too; {@see EmitLlvmExpr::coerceToStr} parks it by this ptr.
+            $this->rt->needsStrRc = true;
+            $out = '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+            $cell = $this->ptrArgCellByReg[$ptr] ?? '';
+            if ($cell !== '') {
+                unset($this->ptrArgCellByReg[$ptr]);
+                $out .= $this->rcReleaseReg($cell, 'cell');
+            }
+            return $out;
+        }
         return $this->freeStrTemp($op, $ptr);
     }
 
@@ -4080,6 +4098,13 @@ final class EmitLlvm implements EmitVisitor
     private function isFreshCellTemp(Node $n): bool
     {
         if ($n->type->kind !== Type::KIND_CELL) { return false; }
+        // A normalized conditional hands out +1 from every arm ({@see
+        // EmitLlvmControl::armRetainPreBox} retains the borrowed one), so a
+        // cell-typed `$_GET['a'] ?? '-'` is a fresh temp its consumer
+        // drops by the tagged word — exactly like a cell call result. Without
+        // this arm the +1 had no taker anywhere but an assignment: a concat
+        // operand, a builtin argument and a cast each stranded the payload.
+        if (\Compile\Mir\CondOwn::isConditional($n)) { return $this->condOwnsResult($n); }
         $k = $n->kind;
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }

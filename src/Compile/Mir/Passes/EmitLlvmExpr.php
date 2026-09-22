@@ -2715,8 +2715,13 @@ trait EmitLlvmExpr
             if ($ok === Type::KIND_STRING) {
                 $this->rt->needsStrtol = true;
                 $out .= $this->coerceToPtr();
+                $sp = $this->lastValue;
                 $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $this->lastValue . ')' . "\n";
+                $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $sp . ')' . "\n";
+                // A number cannot reference the text, so a FRESH operand is
+                // dead once parsed: `(int)trim(substr($line, 15))` stranded one
+                // buffer per header line read. Same rule as the cell arm below.
+                $out .= $this->freeStrTemp($c->operand, $sp);
                 $this->lastValue = $reg; $this->lastValueType = 'i64';
                 return $out;
             }
@@ -2747,8 +2752,10 @@ trait EmitLlvmExpr
             if ($ok === Type::KIND_STRING) {
                 $this->rt->needsStrtod = true;
                 $out .= $this->coerceToPtr();
+                $sp = $this->lastValue;
                 $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ', ptr null)' . "\n";
+                $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $sp . ', ptr null)' . "\n";
+                $out .= $this->freeStrTemp($c->operand, $sp);
                 $this->lastValue = $reg; $this->lastValueType = 'double';
                 return $out;
             }
@@ -3106,10 +3113,10 @@ trait EmitLlvmExpr
         $fn = $arena ? '@__mir_concat_arena' : '@__mir_concat';
         $out .= '  ' . $reg . ' = call ptr ' . $fn . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
         // The concat copied both operands' bytes; a freshly-produced operand
-        // (int/float/bool coercion temp, or a nested concat / string-builtin
-        // call result) is now dead and freed here. Borrowed operands (a
-        // literal, a local, a property / element read) and cell coercions
-        // (tagged_to_str may hand back a borrowed inner ptr) are left alone.
+        // (int/float/bool coercion temp, a cell / erased coercion — owned
+        // uniformly by {@see cellStrResultOwnIr} — or a nested concat /
+        // string-builtin call result) is now dead and freed here. Borrowed
+        // operands (a literal, a local, a property / element read) are left alone.
         $out .= $this->concatTempRelease($l, $lp);
         $out .= $this->concatTempRelease($r, $rp);
         $this->lastValue = $reg;
@@ -3363,10 +3370,15 @@ trait EmitLlvmExpr
             $this->lastValueType = 'ptr';
             return '';
         }
-        // A tagged cell (mixed) → dispatch on its tag at runtime.
+        // A tagged cell (mixed) → dispatch on its tag at runtime. A FRESH
+        // cell temp keeps its tagged word parked by the result ptr, so the
+        // concat's release ({@see EmitLlvm::concatTempRelease}) can drop the
+        // cell as well as the text it owns.
         if ($operand->type->kind === Type::KIND_CELL) {
             $out = $this->coerceToI64();
-            $out .= $this->coerceCellToStr($this->lastValue);
+            $cv = $this->lastValue;
+            $out .= $this->coerceCellToStr($cv);
+            if ($this->isFreshCellTemp($operand)) { $this->ptrArgCellByReg[$this->lastValue] = $cv; }
             return $out;
         }
         // An ERASED operand may carry either a boxed cell or a raw i64, and
