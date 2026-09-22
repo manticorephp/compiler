@@ -1737,47 +1737,22 @@ trait EmitLlvmExpr
     }
 
     /**
-     * A cell/`mixed` property that is self-describing (boxed NULL default +
-     * box-store) rather than a raw cell-array backing slot. True iff the
-     * declared type is a cell and the name is never used as a raw array base
-     * (`$this->p[...]` / `foreach ($this->p)`) — that SPL-backing pattern reads
-     * the buffer directly and must stay raw. An array-only slot boxes too (as a
-     * cell-array): a stored array's elements are then tagged, so reading a nested
-     * value back preserves its array-ness — `$c->data = ['x'=>[1,2]]` then
-     * `is_array($c->data['x'])` is TRUE, not garbage from a raw untagged pointer.
+     * A cell/`mixed` property is self-describing: a boxed NULL default and a
+     * box at every store — an array boxed FLAT (the buffer under a tag, its
+     * element hint intact), a scalar/string/object by its static kind. ONE
+     * repr per storage, decided by the declaration alone; every read trusts
+     * it and every element consumer of the cell base decodes by the hint.
      *
-     * The usage flags are keyed by DECLARING CLASS + name (plus a bare-name
-     * global fallback for erased-receiver usages), so an unrelated class whose
-     * same-named property IS a raw array base can no longer poison this one into
-     * a raw store while the reader assumes a tagged cell (int 1 → 4.94e-324).
+     * It used to be decided by a usage census (raw when the slot only ever
+     * held arrays, or was an element-written base, or a vec with no tag-read
+     * signal …) while the READ side was typed by the declaration — two
+     * predicates over one word. `$o->u = [5]; var_dump($o->u)` printed a
+     * denormal, an SPL key buffer read whole came back as float(2.16E-314),
+     * and a raw slot could never be released by tag (a leak per overwrite).
      */
     private function cellPropBoxed(?Type $ptype, string $class, string $prop): bool
     {
-        if ($ptype === null || $ptype->kind !== Type::KIND_CELL) { return false; }
-        $qk = $this->cellPropKey($class, $prop);
-        if (isset($this->cellPropNotBoxable[$qk]) || isset($this->cellPropNotBoxable[$prop])) { return false; }
-        if (isset($this->cellPropArrayBase[$qk]) || isset($this->cellPropArrayBase[$prop])) { return false; }
-        // An array-only slot: box it only when it holds NESTED arrays (so a
-        // read-back preserves array-ness — `is_array($c->data['x'])`). An
-        // array-of-SCALARS slot (a key/index buffer read raw, e.g. the SPL
-        // iterator's `__k`) stays raw — boxing would turn a raw key into a cell.
-        $hasArr = isset($this->cellPropHasArrayStore[$qk]) || isset($this->cellPropHasArrayStore[$prop]);
-        $hasBox = isset($this->cellPropHasInPlaceBox[$qk]) || isset($this->cellPropHasInPlaceBox[$prop]);
-        $hasNested = isset($this->cellPropHasNestedArrayStore[$qk]) || isset($this->cellPropHasNestedArrayStore[$prop]);
-        $hasCellArr = isset($this->cellPropHasCellArrayStore[$qk]) || isset($this->cellPropHasCellArrayStore[$prop]);
-        // A VEC cell-array is ambiguous (value container vs SPL key buffer). Box it
-        // ONLY under a positive tag-read signal AND no element-as-index veto — a key
-        // buffer is never tag-consumed, so it never boxes even if an indirect
-        // index-flow escaped the veto scan (the crash-safe direction).
-        $vecCellArr = isset($this->cellPropHasVecCellArrayStore[$qk]) || isset($this->cellPropHasVecCellArrayStore[$prop]);
-        $tagRead = isset($this->cellPropTagRead[$qk]) || isset($this->cellPropTagRead[$prop]);
-        $elemIdx = isset($this->cellPropElemAsIndex[$qk]) || isset($this->cellPropElemAsIndex[$prop]);
-        $boxVecCell = $vecCellArr && $tagRead && !$elemIdx;
-        // A flat cell-element array whole-store (heterogeneous / null) boxes too, so
-        // a whole-read (var_dump / return) reads a tagged array cell. A raw array
-        // base (element-written, SPL `__s`) already returned above and stays raw.
-        if ($hasArr && !$hasBox && !$hasNested && !$hasCellArr && !$boxVecCell) { return false; }
-        return true;
+        return $ptype !== null && $ptype->kind === Type::KIND_CELL;
     }
 
     /**

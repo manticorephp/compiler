@@ -1,0 +1,119 @@
+array(2) {
+  [0]=>
+  int(5)
+  [1]=>
+  int(6)
+}
+array(2) {
+  [0]=>
+  int(3)
+  [1]=>
+  int(4)
+}
+int(2)
+int(4)
+array(2) {
+  ["k"]=>
+  string(1) "v"
+  [2]=>
+  array(2) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+  }
+}
+string(1) "v"
+int(2)
+bool(true)
+bool(true)
+bool(false)
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  int(7)
+  [2]=>
+  string(1) "z"
+}
+string(1) "x"
+string(11) "a=1 7=x z= "
+array(4) {
+  [0]=>
+  int(3)
+  [1]=>
+  int(1)
+  ["s"]=>
+  string(3) "str"
+  ["n"]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    string(1) "b"
+  }
+}
+array(4) {
+  [0]=>
+  int(3)
+  [1]=>
+  int(1)
+  ["s"]=>
+  string(3) "str"
+  ["n"]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    string(1) "b"
+  }
+}
+int(4)
+bool(true)
+bool(false)
+array(3) {
+  [0]=>
+  int(0)
+  [1]=>
+  int(1)
+  [2]=>
+  string(1) "n"
+}
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+}
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+}
+0:3
+1:1
+n:ab
+int(5)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+string(1) "z"
+int(3)
+int(30)
+array(2) {
+  [0]=>
+  int(10)
+  [1]=>
+  int(20)
+}
+int(2)
+string(19) "{"k":"v","2":[1,2]}"
+string(27) "{"0":3,"1":1,"n":["a","b"]}"

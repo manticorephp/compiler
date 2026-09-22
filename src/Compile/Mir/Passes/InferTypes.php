@@ -460,6 +460,11 @@ final class InferTypes implements Pass
      *  {@see scanStaticLocalTypes}. */
     private array $staticLocalTypes = [];
 
+    /** @var array<string,bool> the global-backed names (`static $x`, `global $x`) of
+     *  the function being inferred — one slot whose repr its decl decides for the
+     *  whole program, never a branch merge. Reset per function. */
+    private array $globalBackedNames = [];
+
     /** @var array<string,bool> every `global $x` name in the module. In `__main`
      *  these are global-backed WITHOUT a decl node ({@see EmitLlvmModule::
      *  emitFunction}), so a top-level store to one must not undo the unified
@@ -1794,6 +1799,11 @@ final class InferTypes implements Pass
             if (isset($this->cellMergeLocals[$name])) { continue; }
             if (isset($this->keyUsedLocals[$name])
                 || isset($this->refPinnedLocals[$name])) { continue; }
+            // A static / global-backed slot has ONE repr, its decl's (the join of
+            // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
+            // planted here would retype the local cell against a string slot.
+            if (isset($this->globalBackedNames[$name])
+                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
             $this->cellMergeLocals[$name] = true;
             // Idempotent across the re-runs of this pass: the arm's FLOW type
             // after `$f = 1.5` is still float on the next run, so without this
@@ -1818,7 +1828,15 @@ final class InferTypes implements Pass
     private function boxBackStore(string $name, Type $concrete, ?Type $slot = null): StoreLocal
     {
         $dest = $slot ?? Type::cell();
-        return new StoreLocal($name, new LoadLocal($name, $concrete), $dest);
+        $st = new StoreLocal($name, new LoadLocal($name, $concrete), $dest);
+        // The store's type IS the slot repr, and it must survive every later
+        // re-inference: `declaredType` is the one field inferStoreLocal treats
+        // as authoritative. Without it the next run retyped the planted store
+        // to the arm's concrete flow type (int / string), the emitter stored
+        // RAW into the cell slot, and only the fresh box-back each run
+        // appended behind it kept the slot boxed by accident.
+        $st->declaredType = $dest;
+        return $st;
     }
 
     /** Does `$block` already end in the `$name = $name` box-back store

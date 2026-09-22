@@ -469,6 +469,7 @@ trait InferNodes
         $this->genKeyType = null;
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
+        $this->globalBackedNames = [];
         $this->keyUsedLocals = [];
         $this->arithUsedLocals = [];
         $this->refPinnedLocals = [];
@@ -1114,6 +1115,7 @@ trait InferNodes
             $t = $this->staticLocalTypes[$n->cell];
         }
         $this->localTypes[$n->name] = $t;
+        $this->globalBackedNames[$n->name] = true;
         $n->type = $t;
         return $t;
     }

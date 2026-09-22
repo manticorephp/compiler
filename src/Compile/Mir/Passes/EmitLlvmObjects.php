@@ -2301,6 +2301,22 @@ trait EmitLlvmObjects
                 $val = $this->lastValue;
                 $res = $val;
                 $resTy = 'i64';
+            } elseif ($vk === Type::KIND_ARRAY) {
+                // An array is boxed FLAT — the same buffer under a tag, its
+                // element hint intact, never the cell rebuild — exactly as a
+                // static-prop / $GLOBALS slot holds one ({@see boxForViewSlot}):
+                // every element consumer of a cell base decodes by the hint. The
+                // slot co-owns the buffer, so retain the RAW pointer first.
+                $out .= $this->coerceToI64();
+                $raw = $this->lastValue;
+                $out .= $this->rcRetainByType($n->value, $raw, $propType, 4);
+                $this->lastValue = $raw;
+                $this->lastValueType = 'i64';
+                $out .= $this->coerceToPtr();
+                $out .= $this->boxForViewSlot($n->value->type, $n->value);
+                $val = $this->lastValue;
+                $res = $raw;
+                $resTy = 'i64';
             } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_CLOSURE) {
                 // rc-managed payload (string/object/closure) — retain the RAW ptr
                 // before boxing (a tagged cell would mis-locate the rc header).
