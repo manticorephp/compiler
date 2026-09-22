@@ -3,12 +3,24 @@
 // MANTICORE-ONLY. The supervisor blocks the process, so the server lives in a
 // forked child and the parent is the client. Pids are never printed.
 
+// ⚠ This is the ONE case in the suite that scans a port, CLOSES the probe and
+// lets something else bind it later — every other loopback case keeps its
+// listener and hands it to `Server::onListener`. Here the server has to bind the
+// address itself, because binding once and forking workers onto it is the thing
+// under test. So there is a window between the probe closing and the child
+// binding, and under `-j 0` a concurrent case scanning the same numbers walks
+// into it: the child's bind fails, the server never comes up, and the client's
+// retries all time out. That is why this range is DISJOINT from every other
+// case's (checked: nothing else scans 53100-53180) and why the probe is closed
+// as late as possible.
 $port = 0;
-for ($p = 49540; $p < 49620; $p = $p + 1) {
+$probe = false;
+for ($p = 53100; $p < 53180; $p = $p + 1) {
     $s = @stream_socket_server('tcp://127.0.0.1:' . $p);
-    if ($s !== false) { fclose($s); $port = $p; break; }
+    if ($s !== false) { $probe = $s; $port = $p; break; }
 }
 if ($port === 0) { echo "no free port\n"; return; }
+fclose($probe);
 
 $sup = pcntl_fork();
 if ($sup === 0) {
