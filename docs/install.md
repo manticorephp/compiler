@@ -148,8 +148,24 @@ a specific toolchain; otherwise follow the Dockerfile's approach.
 ### Alpine (musl)
 
 ```bash
-apk add clang lld musl-dev pcre2-dev openssl-dev curl-dev pkgconf bash php85-cli
+apk add clang lld gcc musl-dev binutils pcre2-dev openssl-dev curl-dev sqlite-dev \
+        pkgconf bash file make \
+        php85 php85-ctype php85-mbstring php85-tokenizer php85-openssl \
+        php85-phar php85-session php85-posix php85-iconv php85-fileinfo \
+        php85-curl php85-pdo_sqlite
 ```
+
+Alpine splits php far finer than Debian does, and the split is not cosmetic: `php85`
+alone has no **ctype**, and the Zend seed dies on the first line of the bootstrap with
+`Call to undefined function ctype_digit()`. Everything after `php85-mbstring` above is
+what Debian's `php8.5-cli` bundles and Alpine does not.
+
+`Dockerfile.alpine` is this list, as the same four stages as the Debian image, and
+`bash tools/docker/run_tests.sh --alpine` runs the usual gate against it (its own image
+tag and its own compiler-cache volume — a glibc binary does not run in a musl
+container). It is **prepared, not gated**: `gate.yml` carries it as an opt-in
+`workflow_dispatch` input marked `continue-on-error`, because nothing had ever checked
+the claim below until that button existed.
 
 musl exports plain `stat`/`lstat`/`fstat` and has `glob`/`globfree`, but lacks
 `GLOB_BRACE`, `GLOB_ONLYDIR` and the LFS64 aliases (`stat64`) — a few filesystem

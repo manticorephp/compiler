@@ -20,6 +20,10 @@ on:
         description: 'also run tools/selfhost_fixpoint.sh (hours)'
         type: boolean
         default: false
+      alpine:
+        description: 'also run the musl (Alpine) build — prepared, not yet green'
+        type: boolean
+        default: false
 
 concurrency:
   group: gate
@@ -95,5 +99,50 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gate-logs-${{ matrix.arch }}
+          path: ci-logs/
+          if-no-files-found: warn
+
+  # musl, opt-in. It is here so that "does Alpine still build" is a button rather
+  # than an afternoon, and `continue-on-error` because docs/install.md has claimed
+  # musl works for longer than anything has checked it — the first runs are
+  # evidence-gathering, and they must not turn the parity gate red while they are.
+  alpine:
+    name: alpine-arm64 (musl, experimental)
+    if: inputs.alpine
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the musl toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.alpine
+          target: toolchain
+          tags: manticore-toolchain:alpine
+          load: true
+          cache-from: type=gha,scope=toolchain-alpine
+          cache-to: type=gha,mode=max,scope=toolchain-alpine
+
+      - name: Seed + suite
+        run: |
+          mkdir -p ci-logs && chmod 777 ci-logs
+          docker run --rm \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -e MC_JOBS=0 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+            manticore-toolchain:alpine \
+            /bin/bash /repo/tools/docker/gate.sh
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs-alpine
           path: ci-logs/
           if-no-files-found: warn
