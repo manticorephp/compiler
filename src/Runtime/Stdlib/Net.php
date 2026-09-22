@@ -2128,6 +2128,59 @@ function __mc_sockaddr_name(\Ffi\Ptr $sa, int $alen): string
 }
 
 /**
+ * Kernel file → socket copy, at most $len bytes from $offset of $in.
+ *
+ * Answers the bytes sent (≥ 0 — it may be fewer than asked, the caller loops),
+ * -1 on a hard error, -2 on would-block (park the connection and retry), -3
+ * when the pair is not one sendfile(2) can serve: a TLS stream has to be
+ * encrypted in userspace, and a non-socket destination is not what the syscall
+ * takes.
+ *
+ * Both hosts spell the syscall `sendfile` and mean different things by it
+ * ({@see \Runtime\Libc\sys_sendfile_linux}, `sys_sendfile_bsd`), so the split
+ * lives here and every caller sees one contract.
+ */
+function __mc_sendfile(\Resource $out, \Resource $in, int $offset, int $len): int
+{
+    if ($out->kind !== \Resource::KIND_SOCKET || $len <= 0) {
+        return -3;
+    }
+    $infd = \__mc_fileno($in);
+    if ($infd < 0) {
+        return -1;
+    }
+    $eWould = \__mc_sock_const(10);
+    $eAgain = \__mc_sock_const(11);
+    if (\__mc_host_is_darwin()) {
+        $lenBox = \Runtime\Libc\calloc(8, 1);
+        \poke_i64($lenBox, 0, $len);
+        $rc = \Runtime\Libc\sys_sendfile_bsd($infd, $out->addr, $offset, $lenBox, \int_to_ptr(0), 0);
+        $done = \peek_i64($lenBox, 0);
+        \Runtime\Libc\free($lenBox);
+        if ($rc === 0) {
+            return $done;
+        }
+        $e = \__mc_errno();
+        if ($e === $eAgain || $e === $eWould || $e === 4) {
+            return $done > 0 ? $done : -2;
+        }
+        return -1;
+    }
+    $offBox = \Runtime\Libc\calloc(8, 1);
+    \poke_i64($offBox, 0, $offset);
+    $n = \Runtime\Libc\sys_sendfile_linux($out->addr, $infd, $offBox, $len);
+    \Runtime\Libc\free($offBox);
+    if ($n >= 0) {
+        return $n;
+    }
+    $e = \__mc_errno();
+    if ($e === $eAgain || $e === $eWould || $e === 4) {
+        return -2;
+    }
+    return -1;
+}
+
+/**
  * The local ("host:port") name of a socket, or the peer's when $want_peer.
  * @return string|false
  */
