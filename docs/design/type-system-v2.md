@@ -494,3 +494,10 @@ statically (TypeCheck has no class table — the read still throws);
 PHPStan reports the same offset error — the docblock is the contract; a float
 stored into an INFERRED `vec[int]` local does not widen (pre-existing on main —
 the declared-shape store rule above is the checked case).
+
+Decision, not a limit: an int stored into a declared `float` field reads back as a
+float (`$q[0] = 3; var_dump($q[0])` → `float(3)`, where php — which ignores the
+docblock — prints `int(3)`). The field's type is the contract, exactly as a typed
+property `public float $x = 3` holds `float(3)` in php itself; the raw `vec[float]`
+buffer cannot hold an int, and boxing the whole shape for one widened store would
+give up the raw path shapes exist for.
