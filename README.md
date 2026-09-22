@@ -372,7 +372,13 @@ bash tests/aot/run.sh -k hello        # filter by substring
 bash tools/difftest.sh                # parity vs `php`
 bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + rebuild stability
 bash tools/docker/run_tests.sh --gate # the same, on Linux
+bash tools/install_smoke.sh           # an installed compiler ($PATH, symlink) finds its own lib/
 ```
+
+CI runs the suite on every push to `main` and every PR — Linux arm64 and amd64 in
+the container, macOS bare — self-hosting from the compiler the previous run cached,
+with the Zend seed as the fallback rather than the loop. `gate.yml` adds difftest
+weekly, and the fixpoint only when asked for.
 
 `selfhost_fixpoint.sh` asserts gen2 IR == gen3 IR, runs the suite through the
 self-built compiler, and rebuilds repeatedly to catch build-to-build layout roulette.

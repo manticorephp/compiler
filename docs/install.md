@@ -190,7 +190,7 @@ functions degrade accordingly.
 | macOS x86_64 | **supported** |
 | Linux glibc ≥ 2.33 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
 | Linux glibc < 2.33 (e.g. Ubuntu 20.04) | **unsupported** — cannot link `stat` |
-| Linux musl / Alpine | same as glibc, minus some `glob` constants |
+| Linux musl / Alpine | **prepared, not gated** — builds, minus some `glob` constants; `Dockerfile.alpine` + `run_tests.sh --alpine`, and an opt-in `gate.yml` job |
 
 Both macOS and Linux build the compiler from the cold Zend seed, self-host
 (`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite
@@ -203,23 +203,46 @@ see [`tools/docker/README.md`](../tools/docker/README.md).
 
 ## Docker
 
-The root `Dockerfile` has two targets.
-
-**`toolchain`** — a ready host environment, nothing baked in. Mount a checkout
-and work in it:
+The published image carries the compiler **and** the toolchain it shells out to,
+which is the one form of delivery that needs nothing installed on the far side:
 
 ```bash
+docker run --rm -v "$PWD":/work -u "$(id -u):$(id -g)" \
+    ghcr.io/manticorephp/compiler manticore compile app.php -o app
+```
+
+`-u "$(id -u):$(id -g)"` is not decoration: the image runs as uid 1000, and
+without it the binary it writes into your bind mount comes back owned by someone
+else.
+
+The root `Dockerfile` builds that image, and three stages lead to it:
+
+| Target | What it is |
+|---|---|
+| `base` | clang + the `-dev` libraries the compiler links against. **No php.** |
+| `toolchain` | `base` + PHP 8.5 — the cold-seed interpreter and the difftest oracle |
+| `build` | `toolchain` + the compiler, cold-seeded from the source tree |
+| `runtime` | `base` + that compiler — what gets published |
+
+```bash
+# a ready host environment; mount a checkout and work in it
 docker build --target toolchain -t manticore-toolchain .
 docker run --rm -it -v "$PWD":/build/manticore -w /build/manticore \
     manticore-toolchain bash
+
+# the published shape, built locally
+docker build --target runtime -t manticore .
 ```
 
-**`build`** — copies the repo in and runs `bin/compile`, baking the compiler into
-the image.
+php lives in `toolchain` and not in `base` on purpose: the shipped compiler is a
+native binary and never asks for an interpreter, so `runtime` branches off
+`base` and carries none.
 
-```bash
-docker build --target build -t manticore .
-```
+The base is `ARG DEBIAN_TAG=13`. Release tarballs are built with
+`--build-arg DEBIAN_TAG=12` (glibc 2.36) — glibc is backwards compatible and not
+forwards, so shipping from the newest base would mean running only on the newest
+distributions. `Dockerfile.alpine` is the musl counterpart, with the same four
+stages.
 
 To run the libc probes and the AOT suite in a container, see
 [`tools/docker/README.md`](../tools/docker/README.md).
@@ -245,5 +268,11 @@ than 2.33. See the hard floors above.
 install the PCRE2 *development* package (`libpcre2-dev`, `pcre2-dev`, or
 `brew install pcre2`), not just the runtime library. Same shape for OpenSSL.
 
-**Seed build runs out of memory** — `bin/compile` invokes Zend with
-`-d memory_limit=2048M`. A container with a lower hard limit will be OOM-killed.
+**Seed build runs out of memory** — two different ceilings, and the second one
+is the one people hit. `bin/compile` invokes Zend with `-d memory_limit=2048M`,
+so a container with a lower hard limit is OOM-killed during the bootstrap. Past
+that, the seed builds the whole compiler as one LLVM module, and **that peaks at
+just under 7 GiB** (measured: 6.83 GiB on glibc, 6.94 GiB on musl — the libc is
+not the variable). A machine or a Docker VM with 8 GB is therefore right at the
+edge: glibc squeaks under and musl does not. Give the VM 12 GB, or use a warm
+`bin/build`, which does not pay this at all.
