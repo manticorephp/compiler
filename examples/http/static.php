@@ -10,12 +10,17 @@
 // safePath() is the whole security story: both the root and the request path go
 // through realpath, so `..` and symlinks cannot leave the root. A directory
 // answers null, which is why the index file is named here and not guessed.
+//
+// The root is derived from the EXECUTABLE, not from __DIR__: __DIR__ is
+// resolved at compile time and names the source's directory on the build
+// machine, which after a deploy need not exist. `public/` travels beside the
+// binary.
 
 use Http\Request;
 use Http\Response;
 use Http\Server;
 
-$root = __DIR__ . '/public';
+$root = dirname(realpath($argv[0])) . '/public';
 
 (new Server('tcp://127.0.0.1:8080'))
     ->compression(true, 1024, 6)
