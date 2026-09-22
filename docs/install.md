@@ -1,9 +1,11 @@
 # Installing Manticore — host dependencies and platform support
 
-Manticore compiles PHP to a native binary. The *output* binaries are fully
-static and have no runtime dependencies — they call libc and nothing else. The
-*compiler*, however, shells out to a real toolchain and links against a few
-system libraries, so the host needs those present at build time.
+Manticore compiles PHP to a native binary with no PHP runtime in it — no
+interpreter, no `php.ini`, no extension loader. It is not statically linked,
+though: an output binary links libc, PCRE2 and OpenSSL dynamically, plus whatever
+a program's FFI bindings name (libcurl, libsqlite3, …), so the machine that RUNS
+it needs those libraries too. The *compiler* additionally shells out to a real
+toolchain, so the host needs clang and `cc` present at build time.
 
 This is an end-user guide. Quick version lives in the README's `Requirements`.
 
@@ -11,23 +13,30 @@ This is an end-user guide. Quick version lives in the README's `Requirements`.
 
 ## Quick install
 
-Manticore builds **from source** — there is no prebuilt binary to download; the
-compiler compiles itself. The installer needs the [host toolchain](#what-the-host-needs-and-why)
-present (it checks and tells you what is missing), then puts everything under
-`$MANTICORE_HOME` (default `~/.manticore`).
+The installer takes a published build when one exists for your platform (linux
+and macOS, arm64 and amd64), verified against the release's `SHA256SUMS`, and
+otherwise builds **from source** — the compiler compiles itself. Either way it
+needs the [host toolchain](#what-the-host-needs-and-why) present (it checks and
+tells you what is missing), then puts everything under `$MANTICORE_HOME`
+(default `~/.manticore`).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 # then, as the script prints:
 export PATH="$HOME/.manticore/bin:$PATH"
-manticore version        # -> manticore 0.10.0
+manticore version        # -> manticore 0.11.0
 ```
 
-Re-running the installer **upgrades in place**: once a working `manticore` is
-installed it rebuilds the new version *with itself* (self-host, fast); the Zend
-seed is only the cold first boot. Knobs: `MANTICORE_HOME`, `MANTICORE_REF`
-(branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (build a local checkout instead
-of cloning).
+Re-running the installer **upgrades in place**. When it builds from source, a
+working `manticore` rebuilds the new version *with itself* (self-host, fast) and
+the Zend seed is only the cold first boot. Knobs: `MANTICORE_HOME`,
+`MANTICORE_VERSION` (a specific release), `MANTICORE_FROM_SOURCE=1` (skip the
+download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
+(build a local checkout instead of cloning).
+
+A published tarball is built on **Debian 12** (glibc 2.36) even though the
+development image tracks Debian 13: a release has to run on the distribution
+someone already has, and glibc is backwards compatible, not forwards.
 
 ### Via Composer
 
@@ -148,8 +157,24 @@ a specific toolchain; otherwise follow the Dockerfile's approach.
 ### Alpine (musl)
 
 ```bash
-apk add clang lld musl-dev pcre2-dev openssl-dev curl-dev pkgconf bash php85-cli
+apk add clang lld gcc musl-dev binutils pcre2-dev openssl-dev curl-dev sqlite-dev \
+        pkgconf bash file make \
+        php85 php85-ctype php85-mbstring php85-tokenizer php85-openssl \
+        php85-phar php85-session php85-posix php85-iconv php85-fileinfo \
+        php85-curl php85-pdo_sqlite
 ```
+
+Alpine splits php far finer than Debian does, and the split is not cosmetic: `php85`
+alone has no **ctype**, and the Zend seed dies on the first line of the bootstrap with
+`Call to undefined function ctype_digit()`. Everything after `php85-mbstring` above is
+what Debian's `php8.5-cli` bundles and Alpine does not.
+
+`Dockerfile.alpine` is this list, as the same four stages as the Debian image, and
+`bash tools/docker/run_tests.sh --alpine` runs the usual gate against it (its own image
+tag and its own compiler-cache volume — a glibc binary does not run in a musl
+container). It is **prepared, not gated**: `gate.yml` carries it as an opt-in
+`workflow_dispatch` input marked `continue-on-error`, because nothing had ever checked
+the claim below until that button existed.
 
 musl exports plain `stat`/`lstat`/`fstat` and has `glob`/`globfree`, but lacks
 `GLOB_BRACE`, `GLOB_ONLYDIR` and the LFS64 aliases (`stat64`) — a few filesystem
@@ -165,7 +190,7 @@ functions degrade accordingly.
 | macOS x86_64 | **supported** |
 | Linux glibc ≥ 2.33 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
 | Linux glibc < 2.33 (e.g. Ubuntu 20.04) | **unsupported** — cannot link `stat` |
-| Linux musl / Alpine | same as glibc, minus some `glob` constants |
+| Linux musl / Alpine | **prepared, not gated** — builds, minus some `glob` constants; `Dockerfile.alpine` + `run_tests.sh --alpine`, and an opt-in `gate.yml` job |
 
 Both macOS and Linux build the compiler from the cold Zend seed, self-host
 (`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite
@@ -178,23 +203,46 @@ see [`tools/docker/README.md`](../tools/docker/README.md).
 
 ## Docker
 
-The root `Dockerfile` has two targets.
-
-**`toolchain`** — a ready host environment, nothing baked in. Mount a checkout
-and work in it:
+The published image carries the compiler **and** the toolchain it shells out to,
+which is the one form of delivery that needs nothing installed on the far side:
 
 ```bash
+docker run --rm -v "$PWD":/work -u "$(id -u):$(id -g)" \
+    ghcr.io/manticorephp/compiler manticore compile app.php -o app
+```
+
+`-u "$(id -u):$(id -g)"` is not decoration: the image runs as uid 1000, and
+without it the binary it writes into your bind mount comes back owned by someone
+else.
+
+The root `Dockerfile` builds that image, and three stages lead to it:
+
+| Target | What it is |
+|---|---|
+| `base` | clang + the `-dev` libraries the compiler links against. **No php.** |
+| `toolchain` | `base` + PHP 8.5 — the cold-seed interpreter and the difftest oracle |
+| `build` | `toolchain` + the compiler, cold-seeded from the source tree |
+| `runtime` | `base` + that compiler — what gets published |
+
+```bash
+# a ready host environment; mount a checkout and work in it
 docker build --target toolchain -t manticore-toolchain .
 docker run --rm -it -v "$PWD":/build/manticore -w /build/manticore \
     manticore-toolchain bash
+
+# the published shape, built locally
+docker build --target runtime -t manticore .
 ```
 
-**`build`** — copies the repo in and runs `bin/compile`, baking the compiler into
-the image.
+php lives in `toolchain` and not in `base` on purpose: the shipped compiler is a
+native binary and never asks for an interpreter, so `runtime` branches off
+`base` and carries none.
 
-```bash
-docker build --target build -t manticore .
-```
+The base is `ARG DEBIAN_TAG=13`. Release tarballs are built with
+`--build-arg DEBIAN_TAG=12` (glibc 2.36) — glibc is backwards compatible and not
+forwards, so shipping from the newest base would mean running only on the newest
+distributions. `Dockerfile.alpine` is the musl counterpart, with the same four
+stages.
 
 To run the libc probes and the AOT suite in a container, see
 [`tools/docker/README.md`](../tools/docker/README.md).
@@ -220,5 +268,11 @@ than 2.33. See the hard floors above.
 install the PCRE2 *development* package (`libpcre2-dev`, `pcre2-dev`, or
 `brew install pcre2`), not just the runtime library. Same shape for OpenSSL.
 
-**Seed build runs out of memory** — `bin/compile` invokes Zend with
-`-d memory_limit=2048M`. A container with a lower hard limit will be OOM-killed.
+**Seed build runs out of memory** — two different ceilings, and the second one
+is the one people hit. `bin/compile` invokes Zend with `-d memory_limit=2048M`,
+so a container with a lower hard limit is OOM-killed during the bootstrap. Past
+that, the seed builds the whole compiler as one LLVM module, and **that peaks at
+just under 7 GiB** (measured: 6.83 GiB on glibc, 6.94 GiB on musl — the libc is
+not the variable). A machine or a Docker VM with 8 GB is therefore right at the
+edge: glibc squeaks under and musl does not. Give the VM 12 GB, or use a warm
+`bin/build`, which does not pay this at all.

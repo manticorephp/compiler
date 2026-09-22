@@ -278,6 +278,15 @@ else
         exit 1
     fi
     echo "ok: lib/manticore_stdlib.o (built by $OUT)"
+
+    # `lib/prelude/` is part of the SHIPPED layout, not of the dev tree: the
+    # compiler in a checkout reads `<exe>/../prelude` (the source), so a stale
+    # copy under lib/ is invisible here and only surfaces once something takes
+    # lib/ away with it — a CI compiler cache, tools/install_smoke.sh, a release
+    # tarball built warm. Only bin/compile used to publish it, which means every
+    # self-hosted build left it at whatever the last COLD seed wrote.
+    mkdir -p lib/prelude
+    cp prelude/*.php lib/prelude/
 fi
 
 if [[ $VERIFY -eq 1 ]]; then

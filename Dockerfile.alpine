@@ -1,0 +1,101 @@
+# Manticore on Alpine (musl). The same four stages as the Debian `Dockerfile`,
+# and deliberately a SEPARATE file: apk and apt do not parametrise into one
+# sensible build, and the interesting differences here are not package names.
+#
+#   docker build -f Dockerfile.alpine --target toolchain -t manticore-toolchain:alpine .
+#   bash tools/docker/run_tests.sh --alpine
+#
+# Status: PREPARED, NOT GATED. docs/install.md has always said musl builds and
+# loses only a few `glob` constants (`GLOB_BRACE`, `GLOB_ONLYDIR`) and the LFS64
+# aliases, but nothing in CI has ever checked that claim. This file is what makes
+# checking it a matrix row instead of an afternoon.
+#
+# Why musl is worth preparing at all: it is the shape a statically linked, truly
+# portable output binary would take. Until the compiler grows `-static` / `-rpath`
+# that is a future, not a feature — so this stays out of the required checks.
+ARG ALPINE_TAG=3.23
+FROM alpine:${ALPINE_TAG} AS base
+
+# clang assembles the IR; gcc is here for `cc`, the link driver, and it brings
+# musl-dev's crt files with it. pkgconf provides pkg-config, pcre2-dev provides
+# pcre2-config, curl-dev provides curl-config — the three probes Main.php runs.
+# /etc/services ships in alpine-baselayout, so there is no netbase to add.
+# The last line is what a first musl run costs, and none of it is guesswork —
+# each package is one cluster of suite failures:
+#   tzdata        -> /usr/share/zoneinfo, which TzInfo.php reads directly. Alpine
+#                    ships no tz database at all, so every date_* case failed.
+#   libxml2-dev   -> prelude/xml.php binds libxml2 through FFI (`#[Library('xml2')]`),
+#                    and the dev package is what provides the linkable .so.
+#   gnu-libiconv  -> musl keeps iconv INSIDE libc and ships no libiconv.so, while
+#                    src/Runtime/Iconv.php binds `#[Library('iconv')]` by name.
+RUN apk add --no-cache \
+        clang lld gcc musl-dev binutils \
+        pcre2-dev openssl-dev curl-dev sqlite-dev pkgconf \
+        bash file make curl ca-certificates \
+        tzdata libxml2-dev gnu-libiconv
+
+RUN clang --version | head -1 && cc --version | head -1 \
+    && pcre2-config --libs8 && pkg-config --libs openssl \
+    && curl-config --libs && pkg-config --libs sqlite3
+
+# uid 1000, matching the Debian image: running as root would make is_writable()
+# of a 0400 file answer true and quietly disagree with the recorded expectations.
+RUN adduser -D -u 1000 -s /bin/bash manticore \
+    && mkdir -p /build \
+    && chown -R manticore:manticore /build
+
+WORKDIR /build
+USER manticore
+CMD ["/bin/bash"]
+
+
+# ---- + PHP 8.5, the seed interpreter and the difftest oracle ----
+# Alpine 3.23 carries php85 in the main repository, so this needs no third-party
+# source — the one place musl is EASIER than Debian, where php comes from sury.
+FROM base AS toolchain
+
+# Alpine splits php far finer than Debian does, and the split is not cosmetic:
+# `php85` alone has no ctype, and the Zend seed dies on line one of the bootstrap
+# with `Call to undefined function ctype_digit()`. Everything below `mbstring` is
+# what Debian's php8.5-cli bundles and Alpine does not.
+USER root
+RUN apk add --no-cache \
+        php85 php85-mbstring php85-curl php85-pdo_sqlite \
+        php85-ctype php85-tokenizer php85-openssl php85-phar \
+        php85-session php85-posix php85-iconv php85-fileinfo \
+    && ln -sf /usr/bin/php85 /usr/local/bin/php
+
+RUN php --version \
+    && php -r 'exit(function_exists("ctype_digit") ? 0 : 1);' \
+    && php -r 'exit(function_exists("curl_init") ? 0 : 1);' \
+    && php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);'
+
+USER manticore
+
+
+# ---- build the compiler from source ----
+FROM toolchain AS build
+
+COPY --chown=manticore:manticore . /build/manticore
+WORKDIR /build/manticore
+
+RUN rm -rf bin/manticore lib tests/aot/tmp \
+    && bin/compile
+
+ENV PATH="/build/manticore/bin:${PATH}"
+CMD ["/bin/bash"]
+
+
+# ---- what a user runs ----
+FROM base AS runtime
+
+COPY --from=build /build/manticore/bin/manticore /opt/manticore/bin/manticore
+COPY --from=build /build/manticore/lib /opt/manticore/lib
+
+ENV PATH="/opt/manticore/bin:${PATH}"
+WORKDIR /work
+
+RUN manticore version
+
+USER manticore
+CMD ["manticore", "--help"]

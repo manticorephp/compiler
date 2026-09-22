@@ -1,23 +1,27 @@
-# Manticore in a container. Two targets:
+# Manticore in a container. Four stages, three of them worth building:
 #
 #   docker build --target toolchain -t manticore-toolchain .
-#   docker build --target build     -t manticore .          # see the WARNING below
+#   docker build --target runtime   -t manticore .
+#   docker build --target build     -t manticore-build .
 #
-# `toolchain` is a ready host environment (php 8.5 + clang + pcre2 + openssl);
-# mount a checkout into it and build by hand. `build` bakes the compiler in.
-# tools/docker/run_tests.sh builds `toolchain` too — one image definition, two
-# consumers.
+# `base`      — clang + the -dev libraries the compiler links against. No php.
+# `toolchain` — base + php 8.5: the seed interpreter and the difftest oracle.
+#               Mount a checkout into it and build by hand; this is what
+#               tools/docker/run_tests.sh and the workflows use.
+# `build`     — toolchain + the compiler cold-seeded from this source tree.
+# `runtime`   — base + that compiler. What gets published; no php in it.
 #
-# Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian
-# bookworm's stock php (8.2) and clang (14) are both wrong for this compiler:
+# Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian's
+# stock php and clang are both wrong for this compiler:
 #   * PHP 8.5 is manticore's target language version, so the Zend seed must be
 #     8.5 or the seed disagrees with what it is compiling.
 #   * clang 14 predates LLVM 15's opaque pointers and REJECTS the IR manticore
 #     emits ("ptr type is only supported in -opaque-pointers mode"). Verified,
-#     not assumed -- stock bookworm clang-14 fails the seed assemble step.
+#     not assumed -- bookworm's stock clang-14 failed the seed assemble step.
 # So: php from sury.org, clang from apt.llvm.org.
 
-FROM debian:12 AS toolchain
+ARG DEBIAN_TAG=13
+FROM debian:${DEBIAN_TAG} AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -36,32 +40,31 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  `curl-config` and the `libcurl.so` symlink, and Main.php's
 #                  generic_link_flags() needs one of them — `pkg-config --libs
 #                  curl` fails everywhere, since the module is called libcurl.
+# wget + gnupg + lsb-release are llvm.sh's own dependencies, and `wget` is not a
+# stand-in for the `curl` next to it: llvm.sh calls wget by name.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg lsb-release software-properties-common \
+        ca-certificates curl wget gnupg lsb-release \
         gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config \
         binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- PHP 8.5 (sury.org) ----
-# The `php8.5-*` extension packages are here for the ORACLE, not for linking:
-# difftest grades our output against this php, so a case that calls curl_* or
-# PDO can only be graded where the interpreter has that extension too. They are
-# a different axis from the `lib*-dev` packages above, which are what our own
-# FFI bindings link against — `libsqlite3-dev` without `php8.5-sqlite3` links
-# fine and leaves the oracle unable to run a single pdo_* case.
-RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ bookworm main" \
-        > /etc/apt/sources.list.d/php.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --set php /usr/bin/php8.5
+# `software-properties-common` exists on bookworm and NOT on trixie — Debian
+# dropped it — and this image is built on both: 13 for development, 12 for the
+# release tarballs, because glibc is backwards compatible and not forwards.
+# llvm.sh needs it on exactly the base where it exists: on bookworm it calls
+# add-apt-repository, and on a newer Debian it writes the deb822 source itself.
+# Hence a probe rather than a package in the list above — naming it unconditionally
+# fails trixie, and dropping it unconditionally fails bookworm. Both happened.
+RUN apt-get update \
+    && if apt-cache show software-properties-common > /dev/null 2>&1; then \
+           apt-get install -y --no-install-recommends software-properties-common; \
+       fi \
+    && rm -rf /var/lib/apt/lists/*
 
 # ---- latest stable clang/LLVM (apt.llvm.org) ----
 # NOT `llvm.sh` with no argument: that targets the development version (23 at time of
-# writing), which publishes no bookworm packages and hard-fails the build. Walk
+# writing), which publishes no packages for this suite and hard-fails the build. Walk
 # candidate versions newest-first and keep the first that actually installs, so
 # this tracks "latest that exists" without pinning to a version that will rot.
 ARG LLVM_VERSIONS="22 21 20"
@@ -83,10 +86,9 @@ RUN CLANG_BIN="$(ls -1 /usr/bin/clang-[0-9]* | grep -E 'clang-[0-9]+$' | sort -V
     && ln -sf "$CLANG_BIN" /usr/local/bin/clang \
     && ln -sf "$CLANG_BIN" /usr/local/bin/cc
 
-RUN php --version && clang --version | head -1 && cc --version | head -1 \
+RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
-    && curl-config --libs && php -r 'exit(function_exists("curl_init") ? 0 : 1);' \
-    && pkg-config --libs sqlite3 && php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);'
+    && curl-config --libs && pkg-config --libs sqlite3
 
 # Run as a normal, unprivileged user. Under root every file is writable/executable
 # regardless of mode, so a suite that checks permissions diverges from a real
@@ -100,6 +102,37 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash manticore \
 WORKDIR /build
 USER manticore
 CMD ["/bin/bash"]
+
+
+# ---- + PHP 8.5, the seed interpreter and the difftest oracle ----
+#
+# A STAGE of its own, because the shipped compiler does not need it: php is what
+# cold-seeds the build and what difftest grades against, and neither happens in
+# the image a user runs. `runtime` therefore branches off `base`, not off this.
+#
+# The `php8.5-*` extension packages are here for the ORACLE, not for linking:
+# difftest grades our output against this php, so a case that calls curl_* or
+# PDO can only be graded where the interpreter has that extension too. They are
+# a different axis from the `lib*-dev` packages in `base`, which are what our own
+# FFI bindings link against — `libsqlite3-dev` without `php8.5-sqlite3` links
+# fine and leaves the oracle unable to run a single pdo_* case.
+FROM base AS toolchain
+
+USER root
+RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $(. /etc/os-release; echo "$VERSION_CODENAME") main" \
+        > /etc/apt/sources.list.d/php.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --set php /usr/bin/php8.5
+
+RUN php --version \
+    && php -r 'exit(function_exists("curl_init") ? 0 : 1);' \
+    && php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);'
+
+USER manticore
 
 
 # ---- build the compiler from source ----
@@ -121,3 +154,33 @@ RUN rm -rf bin/manticore lib tests/aot/tmp \
 
 ENV PATH="/build/manticore/bin:${PATH}"
 CMD ["/bin/bash"]
+
+
+# ---- what a USER runs: the compiler, and the toolchain it shells out to ----
+#
+#   docker run --rm -v "$PWD":/work -u "$(id -u):$(id -g)" \
+#       manticorephp/manticore manticore compile app.php -o app
+#
+# Off `base`, so no php and no oracle extensions ride along: the compiler is a
+# native binary and never asks for an interpreter. clang, cc, pkg-config and the
+# -dev libraries DO stay — the compiler shells out to clang to assemble its IR
+# and to cc to link, so an image without them could not compile anything. That
+# is also the honest answer to "why not ship a tarball instead": the tarball is
+# these three directories, and the toolchain around them is what the image adds.
+#
+# `-u $(id -u)` above is not decoration: the image runs as uid 1000, and without
+# it a binary compiled into a bind mount comes back owned by the wrong user.
+FROM base AS runtime
+
+COPY --from=build /build/manticore/bin/manticore /opt/manticore/bin/manticore
+COPY --from=build /build/manticore/lib /opt/manticore/lib
+
+ENV PATH="/opt/manticore/bin:${PATH}"
+WORKDIR /work
+
+# Reached by the bare name through $PATH — the shape that used to lose the
+# prelude and the stdlib before self_dir() resolved the real executable.
+RUN manticore version
+
+USER manticore
+CMD ["manticore", "--help"]

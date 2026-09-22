@@ -9,6 +9,7 @@
 #   bash tools/docker/run_tests.sh                 # arm64
 #   bash tools/docker/run_tests.sh --amd64         # amd64 (emulated)
 #   bash tools/docker/run_tests.sh --both
+#   bash tools/docker/run_tests.sh --alpine        # musl (PREPARED, not gated)
 #   bash tools/docker/run_tests.sh --shell         # drop into the container
 #   bash tools/docker/run_tests.sh --cold          # ignore the self-host cache
 #   bash tools/docker/run_tests.sh -k http_workers # ONE case (or a substring)
@@ -29,6 +30,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
 PLATFORMS=(linux/arm64)
+DOCKERFILE=""
+LIBC=glibc
 SHELL_MODE=0
 GATE_MODE=0
 COLD_MODE=0
@@ -39,6 +42,11 @@ for arg in "$@"; do
     case "$arg" in
         --amd64) PLATFORMS=(linux/amd64) ;;
         --both)  PLATFORMS=(linux/arm64 linux/amd64) ;;
+        # musl instead of glibc, via Dockerfile.alpine. Its own image tag and its
+        # own compiler-cache volume: a glibc binary in a musl container does not
+        # run, and a cache that mixed them would hand the gate a compiler the
+        # loader refuses.
+        --alpine) DOCKERFILE="$ROOT/Dockerfile.alpine"; LIBC=alpine ;;
         --shell) SHELL_MODE=1 ;;
         --cold)  COLD_MODE=1 ;;
         # Narrow the SUITE step to the cases whose name contains this substring
@@ -53,7 +61,7 @@ for arg in "$@"; do
         # Linux socket/errno constants or a glibc free(), so this is the only honest
         # gate for anything touching them.
         --gate)  GATE_MODE=1 ;;
-        *) echo "usage: $0 [--amd64|--both|--shell|--gate|--cold] [-k <substr>]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--amd64|--both|--alpine|--shell|--gate|--cold] [-k <substr>]" >&2; exit 2 ;;
     esac
 done
 if [ "$want_filter" = "1" ]; then echo "usage: $0 -k <substr>" >&2; exit 2; fi
@@ -64,17 +72,18 @@ fi
 
 
 IMAGE_BASE=manticore-toolchain
+[ -n "$DOCKERFILE" ] || DOCKERFILE="$ROOT/Dockerfile"
 
 for platform in "${PLATFORMS[@]}"; do
     arch="${platform#linux/}"
-    image="$IMAGE_BASE:$arch"
-    cache_volume="manticore-compiler-cache-$arch"
+    image="$IMAGE_BASE:$arch-$LIBC"
+    cache_volume="manticore-compiler-cache-$arch-$LIBC"
     echo "############ $platform ############" >&2
     # The root Dockerfile's `toolchain` target — the same image an end user
     # builds. Its `build` target is deliberately NOT used here: this harness runs
     # bin/compile against a bind-mounted working tree, not a baked-in copy.
     docker build --platform "$platform" --target toolchain -t "$image" \
-        -f "$ROOT/Dockerfile" "$ROOT" >&2
+        -f "$DOCKERFILE" "$ROOT" >&2
 
     # Keep Linux ELF artifacts outside the host checkout. A warmed compiler can
     # self-host the current source tree, so an edit need not pay the Zend cold

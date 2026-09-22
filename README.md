@@ -53,21 +53,37 @@ Per-OS package lists, Docker images and troubleshooting:
 
 ## Install
 
-There is no prebuilt binary to download — the compiler compiles itself. The installer
-checks the toolchain above, tells you what is missing, then installs under
-`$MANTICORE_HOME` (default `~/.manticore`):
+The installer takes a published build when there is one for your platform (linux and
+macOS, arm64 and amd64), verifies it against the release checksums, and otherwise
+falls back to what it has always done: compile the compiler with itself. It checks
+the toolchain above, tells you what is missing, then installs under `$MANTICORE_HOME`
+(default `~/.manticore`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 export PATH="$HOME/.manticore/bin:$PATH"
 
-manticore version        # manticore 0.10.0
+manticore version        # manticore 0.11.0
 ```
 
-Re-running the installer **upgrades in place**: an existing `manticore` rebuilds the
-new version *with itself* (self-host, fast) — the Zend seed is only the cold first
-boot. Knobs: `MANTICORE_HOME`, `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`,
-`MANTICORE_SRC` (build a local checkout instead of cloning).
+Re-running the installer **upgrades in place**. Knobs: `MANTICORE_HOME`,
+`MANTICORE_VERSION` (a specific release), `MANTICORE_FROM_SOURCE=1` (skip the
+download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (build a
+local checkout instead of cloning). Building from source is the same self-hosting
+loop it always was: an existing `manticore` rebuilds the new version *with itself*,
+and the Zend seed is only the cold first boot.
+
+In a container, with the toolchain already in it:
+
+```bash
+docker run --rm -v "$PWD":/work -u "$(id -u):$(id -g)" \
+    ghcr.io/manticorephp/compiler manticore compile app.php -o app
+```
+
+A tarball carries the compiler and its stdlib, not a toolchain: `manticore`
+assembles its IR with `clang`, links with `cc`, and the binaries it emits link the
+host's pcre2, openssl, sqlite3 and curl. The image is the one artifact that brings
+all of that with it.
 
 Via Composer, which here is a delivery + build trigger rather than a runtime:
 
@@ -356,7 +372,13 @@ bash tests/aot/run.sh -k hello        # filter by substring
 bash tools/difftest.sh                # parity vs `php`
 bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + rebuild stability
 bash tools/docker/run_tests.sh --gate # the same, on Linux
+bash tools/install_smoke.sh           # an installed compiler ($PATH, symlink) finds its own lib/
 ```
+
+CI runs the suite on every push to `main` and every PR — Linux arm64 and amd64 in
+the container, macOS bare — self-hosting from the compiler the previous run cached,
+with the Zend seed as the fallback rather than the loop. `gate.yml` adds difftest
+weekly, and the fixpoint only when asked for.
 
 `selfhost_fixpoint.sh` asserts gen2 IR == gen3 IR, runs the suite through the
 self-built compiler, and rebuilds repeatedly to catch build-to-build layout roulette.

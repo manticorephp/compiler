@@ -33,8 +33,10 @@ re-measure, e.g. before changing one of those ABI tables.
 bash tools/docker/run_tests.sh            # arm64: cached self-host build + full suite
 bash tools/docker/run_tests.sh --amd64    # amd64 (emulated, slow)
 bash tools/docker/run_tests.sh --both
+bash tools/docker/run_tests.sh --alpine   # musl instead of glibc (prepared, not gated)
 bash tools/docker/run_tests.sh --shell    # interactive container
 bash tools/docker/run_tests.sh --gate     # the HEAVY gate, on Linux
+bash tools/docker/run_tests.sh -k http_    # one case (or a substring)
 bash tools/docker/run_tests.sh --cold     # force a Zend cold seed
 ```
 
@@ -47,10 +49,13 @@ socket/errno constants or a glibc `free()` — macOS green proves nothing about 
 in a container because each cold seed is minutes; `MC_STABILITY_N=5` for the full
 sweep.
 
-The image is the **root `Dockerfile`'s `toolchain` target** -- the same one an
-end user builds (see `docs/install.md`). It carries **PHP 8.5** (sury.org) and
+The image is the **root `Dockerfile`'s `toolchain` target** (or
+`Dockerfile.alpine`'s, with `--alpine`) -- the same one an end user builds (see
+`docs/install.md`). Each libc gets its own image tag and its own compiler-cache
+volume: a glibc binary does not run in a musl container, and a shared cache would
+hand the gate a compiler the loader refuses. It carries **PHP 8.5** (sury.org) and
 the **latest stable clang** (apt.llvm.org, currently 22) on board, deliberately
--- Debian bookworm's stock php 8.2 and clang 14 are both unusable here:
+-- Debian's stock php and clang are both unusable here:
 
 - PHP 8.5 is manticore's target language, so the Zend seed must be 8.5.
 - clang 14 predates LLVM 15's opaque pointers and **rejects the IR manticore
