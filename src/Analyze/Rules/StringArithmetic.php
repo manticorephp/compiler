@@ -133,9 +133,10 @@ final class StringArithmetic
      * optional exponent. 0 = no number at all (php raises a TypeError),
      * strlen = the whole string is a number (php just computes).
      *
-     * Written out rather than with `preg_*`: no rule under src/Analyze/ uses
-     * PCRE, and a self-hosted regex is the more expensive spelling of a
-     * character walk ({@see \Compile\Mir\Type::isIntKey}, same reasoning).
+     * Hand-written rather than `preg_*` for the reason {@see
+     * \Compile\Mir\Type::isIntKey} is: the walk is the cheaper spelling, and it
+     * is verified against php's own `is_numeric` / arithmetic. A regex would be
+     * fine here too — PCRE2 is linked into every binary (AGENTS.md, Code style).
      */
     private function numericPrefixLen(string $v): int
     {

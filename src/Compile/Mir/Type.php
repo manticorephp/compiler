@@ -390,7 +390,9 @@ final class Type
     /** True when PHP would canonicalise this STRING key to an int key at the
      *  array boundary — `'0'` and `'-1'` are int, `'01'` and `'-0'` are not
      *  (php's own rule: `0` or an optional `-` then a nonzero leading digit
-     *  and only digits after). Written without `preg_*` — self-host cost. */
+     *  and only digits after). Hand-written rather than `preg_*` because this
+     *  runs per array key in a compiled program, not because a regex is
+     *  unavailable — PCRE2 is linked into every binary (AGENTS.md, Code style). */
     public static function isIntKey(string $k): bool
     {
         if ($k === '0') { return true; }

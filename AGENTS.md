@@ -180,6 +180,14 @@ Corollaries:
 - Root cause over workaround. No reverts as a fix. If a fix needs a change in the
   compiler AND in the tree that only compiles with that fix, split it into two
   generations.
+- `preg_*` is allowed anywhere in `src/`, and already used in ~25 files: every
+  binary links PCRE2 regardless (see Design principles §2), so a regex costs no
+  dependency a program does not already carry. Two caveats, neither about
+  linkage: a character walk still beats PCRE in a HOT path compiled into every
+  program (`Type::isIntKey` runs per array key and stays hand-written for that
+  reason, not for portability), and `/u` over bytes that are not valid UTF-8
+  makes `preg_replace` return NULL and `preg_match` false — the compiler reads
+  arbitrary source bytes, so either drop `/u` or check `preg_last_error()`.
 - Match the surrounding code — naming, comment density, idiom.
 - Commit messages: imperative, one line of what changed and why; no generated
   co-author trailers.
