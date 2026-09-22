@@ -93,20 +93,38 @@ restore_compiler_cache() {
     bin/manticore version >/dev/null 2>&1
 }
 
+# SAYS whether it worked, and that is the point. The cache directory is a host
+# mount shared by two different users: on CI the files restored by actions/cache
+# belong to the runner, while this container is uid 1000 — and unlinking an entry
+# needs write permission on its DIRECTORY, not on the file — so a restored tree
+# is unremovable from in here unless the workflow chmods it recursively. When
+# that step is missing the copy fails, every message is an `rm: Permission
+# denied` nobody reads, the job still passes, and the cache silently never
+# updates: every run goes back to a cold seed for ever. A cache that cannot be
+# written is not fatal, but it must not be quiet.
 save_compiler_cache() {
     [ -n "$MC_COMPILER_CACHE" ] || return 0
     [ -x bin/manticore ] || return 0
     [ -f lib/manticore_stdlib.o ] || return 0
 
     tmp="$MC_COMPILER_CACHE/.next.$$"
-    rm -rf "$tmp"
-    mkdir -p "$tmp/bin" "$tmp/lib"
+    if ! { rm -rf "$tmp" && mkdir -p "$tmp/bin" "$tmp/lib"; } 2>/dev/null; then
+        echo "cache: $MC_COMPILER_CACHE is not writable by uid $(id -u) — NOT saved"
+        return 0
+    fi
     cp bin/manticore "$tmp/bin/manticore"
     cp -a lib/. "$tmp/lib/"
     cache_id > "$tmp/id"
-    rm -rf "$MC_COMPILER_CACHE/bin" "$MC_COMPILER_CACHE/lib" "$MC_COMPILER_CACHE/id"
-    mv "$tmp/bin" "$tmp/lib" "$tmp/id" "$MC_COMPILER_CACHE/"
-    rmdir "$tmp"
+
+    if rm -rf "$MC_COMPILER_CACHE/bin" "$MC_COMPILER_CACHE/lib" "$MC_COMPILER_CACHE/id" 2>/dev/null \
+            && mv "$tmp/bin" "$tmp/lib" "$tmp/id" "$MC_COMPILER_CACHE/" 2>/dev/null; then
+        rmdir "$tmp" 2>/dev/null
+        echo "cache: saved ($(du -sh "$MC_COMPILER_CACHE" 2>/dev/null | cut -f1))"
+    else
+        rm -rf "$tmp" 2>/dev/null
+        echo "cache: the existing entry belongs to another user and cannot be replaced" \
+             "from uid $(id -u) — NOT saved, the next run will cold-seed again"
+    fi
 }
 
 echo

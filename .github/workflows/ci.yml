@@ -72,7 +72,11 @@ jobs:
       # bind mount).
       - name: Build + suite
         run: |
-          mkdir -p ci-logs ci-cache && chmod 777 ci-logs ci-cache
+          # -R, not just the top directory: actions/cache restores the tree as the
+          # RUNNER, and the container is uid 1000 — unlinking an entry needs write
+          # permission on the directory that holds it, so a restored lib/ is
+          # unremovable from inside without this and the cache never updates.
+          mkdir -p ci-logs ci-cache && chmod -R 777 ci-logs ci-cache
           docker run --rm \
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
