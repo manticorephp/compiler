@@ -1875,23 +1875,33 @@ trait EmitLlvmModule
     {
         $r = $n;
         $v = $r->value;
-        // In __main (emitted as `i32 @main`): a NULL/bare top-level return is a
-        // whole-program INCLUDE-return — a polyfill bootstrap's `return require …`
-        // parses to `return null`, and require is a no-op — so evaluate nothing and
-        // FALL THROUGH (it must not terminate __main before the entry's own code
-        // runs).
-        //
-        // A VALUE return ENDS the script but is NOT its exit status: php CLI leaves
-        // `$?` at 0 for a top-level `return` (only exit()/die() and an uncaught throw
-        // set it). The value is the INCLUDE-return the entry hands its includer, and
-        // there is none. symfony's own entry idiom is `return $app->run();` with
+        // In __main (emitted as `i32 @main`): a top-level return ENDS THE SCRIPT,
+        // valued or not, but is NOT its exit status — php CLI leaves `$?` at 0
+        // for one (only exit()/die() and an uncaught throw set it). The value is
+        // the INCLUDE-return the entry would hand its includer, and there is no
+        // includer. symfony's own entry idiom is `return $app->run();` with
         // setAutoExit(false), which php exits 0 from — we reported the command's
-        // status instead. So evaluate the expression (it IS the program: `run()` does
-        // the work) and discard it, then `ret i32 0` like the fall-through.
+        // status instead. So evaluate the expression (it IS the program: `run()`
+        // does the work), discard it, and `ret i32 0`.
+        //
+        // The BARE form used to emit nothing and fall through, on the reasoning
+        // that a polyfill bootstrap's `return require …` parses to `return null`
+        // and must not end the program before the entry's own code runs. That
+        // reasoning belongs to a NON-ENTRY file, and those never reach here:
+        // {@see \Manticore\Main} rewrites every non-entry top-level return, at
+        // any depth, into "store the value, jump past this file" before MIR
+        // (tests/aot/cases/include_conditional_return/c_novalue.php is the bare
+        // one). What was left was the asymmetry — `return 5;` ended the entry and
+        // `return;` ran on — and it is silent.
+        //
+        // Ending here is not a bailout: `ret` from main runs the atexit chain, so
+        // the output buffers still drain and the shutdown functions still run.
         if ($this->frame->isMain) {
-            if ($v === null || $v->kind === Node::KIND_NULL_CONST) { return ''; }
-            $out = $this->emitNode($v);
-            $out .= $this->coerceToI64();
+            $out = '';
+            if ($v !== null && $v->kind !== Node::KIND_NULL_CONST) {
+                $out = $this->emitNode($v);
+                $out .= $this->coerceToI64();
+            }
             return $out . "  ret i32 0\n" . $this->emitDeadLabel();
         }
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
