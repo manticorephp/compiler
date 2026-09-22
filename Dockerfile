@@ -41,11 +41,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  `curl-config` and the `libcurl.so` symlink, and Main.php's
 #                  generic_link_flags() needs one of them — `pkg-config --libs
 #                  curl` fails everywhere, since the module is called libcurl.
+# libxml2-dev  -> ext/dom + SimpleXML (prelude/xml.php binds `xml2` by name).
+#                 It was NEVER declared here and the XML cases passed anyway,
+#                 because llvm.sh installed llvm-NN-dev, which Depends: libxml2-dev
+#                 — so the `libxml2.so` symlink `-lxml2` needs arrived as a side
+#                 effect of a THIRD-PARTY installer. Dropping that installer took
+#                 the symlink with it and turned 8 dom_/simplexml_ cases red on
+#                 both arches. `libxml2.so.2` alone is not enough: clang pulls the
+#                 runtime library, and the link wants the development one.
 # curl + gnupg fetch and verify sury's signing key for php; nothing here is for
 # clang any more — that comes from the distribution's own archive below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg \
-        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config \
+        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev libxml2-dev pkg-config \
         binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*

@@ -32,9 +32,11 @@ plus a real toolchain, because it ends in `clang` and `cc`:
 | `php` | **8.5** | cold bootstrap only — Zend runs the compiler source once to seed the first native binary |
 | libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
 | OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
+| libxml2, libsqlite3, libcurl (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, or `curl_*` — each is demand-gated and linked on mention |
 
 The `-dev` / `-devel` half matters: the headers are what the build looks for, not just
-the runtime library.
+the runtime library. It is also what carries the unversioned `lib<name>.so` symlink
+a `-l<name>` resolves against — a runtime `libxml2.so.2` on its own does not link.
 
 **Platforms:** macOS (arm64 / x86_64) and Linux (glibc ≥ 2.33, arm64 / x86_64). Each
 builds the compiler and passes the full suite including the self-host fixpoint. Alpine

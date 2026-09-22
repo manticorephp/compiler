@@ -73,6 +73,7 @@ $MANTICORE_HOME/lib/prelude/*.php
 | **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php::openssl_link_flags()`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
 | **libcurl ≥ 7.68** + `curl-config` — *only* to compile a program that calls `curl_*` | `ext/curl` | `Main.php::generic_link_flags()`, `prelude/curl.php` |
 | **libsqlite3** + `pkg-config sqlite3` — *only* to compile a program that mentions `PDO` | `pdo_sqlite` | `Main.php::generic_link_flags()`, `prelude/pdo_sqlite.php` |
+| **libxml2** (**dev** package) — *only* to compile a program that uses `DOM*` / `SimpleXML` | `ext/dom`, SimpleXML | `Main.php::generic_link_flags()`, `prelude/xml.php` |
 | `bash`, `find`, `sort`, `xargs`, `sed`, `awk`, `grep`, `mktemp` | build scripts | `bin/compile`, `tools/*.sh` |
 
 `pcre2-config --libs8` and `pkg-config --libs openssl` are how the link flags
@@ -125,20 +126,21 @@ Homebrew's `php` tracks the current release; check `php -v` reports 8.5.
 
 ### Debian / Ubuntu
 
-Stock packages are not sufficient (clang 14, php 8.2), so PHP comes from
-sury.org and clang from apt.llvm.org:
+The DEFAULT `clang` is too old on both suites (14 on bookworm), and the stock
+`php` is 8.2 — but a versioned `clang-22` is in Debian's own archive, so only
+php needs a third-party source:
 
 ```bash
 sudo apt-get install -y \
     gcc libc6-dev binutils make \
     libpcre2-dev libssl-dev pkg-config \
-    libcurl4-openssl-dev \
+    libcurl4-openssl-dev libsqlite3-dev libxml2-dev \
     netbase
 
-# clang / LLVM (pick the newest that publishes packages for your release)
-curl -sSL https://apt.llvm.org/llvm.sh | sudo bash -s 21
-sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
-sudo ln -sf /usr/bin/clang-21 /usr/local/bin/cc
+# clang / LLVM: the newest versioned package the suite carries
+sudo apt-get install -y clang-22 lld-22
+sudo ln -sf /usr/bin/clang-22 /usr/local/bin/clang
+sudo ln -sf /usr/bin/clang-22 /usr/local/bin/cc
 
 # PHP 8.5 (sury.org)
 sudo apt-get install -y php8.5-cli php8.5-mbstring
@@ -149,10 +151,17 @@ sudo update-alternatives --set php /usr/bin/php8.5
 which a bare `debian:12` ships without — omit it and the network stdlib silently
 degrades (`getservbyname("http")` returns `false`) instead of failing loudly.
 
-The root `Dockerfile` covers the same ground, with one deliberate difference: it
-does **not** pin an LLVM version. It probes a descending list and takes the first
-that installs, then symlinks the newest it found. Pin `21` above only if you want
-a specific toolchain; otherwise follow the Dockerfile's approach.
+The root `Dockerfile` covers the same ground without pinning a version: it takes
+the highest `clang-NN` the suite offers and refuses below 15. Pin `clang-22`
+above only if you want a specific toolchain.
+
+⚠ **`libxml2-dev`, not just `libxml2`.** `prelude/xml.php` binds libxml2 by name,
+so the link needs the `libxml2.so` symlink the *development* package carries —
+the runtime `libxml2.so.2` that clang drags in is not enough. This one went
+undeclared for a long time and the XML cases passed anyway, because the LLVM
+installer used to pull `llvm-NN-dev`, which depends on `libxml2-dev`. Removing
+that installer took the symlink with it and turned eight `dom_*`/`simplexml_*`
+cases red on both arches — a dependency held up by an accident.
 
 ### Alpine (musl)
 
