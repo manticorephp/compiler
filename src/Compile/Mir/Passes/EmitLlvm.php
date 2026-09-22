@@ -724,24 +724,9 @@ final class EmitLlvm implements EmitVisitor
                 if ($cd->propertyReadonly !== []) { $this->rt->needsExceptions = true; break; }
             }
         }
-        // Classify cell/`mixed` properties: a name that is EVER stored a
-        // non-scalar (array / string / object / unknown / general cell) value
-        // stays RAW (the SPL cell-array backing `$__s` etc. — rc-managed +
-        // boxToCell would rebuild it). A cell prop whose every store is a non-rc
-        // scalar (int/float/bool/null/numericCell) is self-describing: it
-        // defaults to a boxed NULL and box-stores, so a read / var_dump / `===
-        // null` dispatch by tag instead of mis-reading a raw 0. Name-global
-        // (sidesteps inheritance / class-qualification — over-conservative is
-        // safe: a name shared with a non-scalar prop just stays raw).
-        $this->cellPropNotBoxable = [];
+        // Per-module property usage facts for the OWNERSHIP decisions (a cell
+        // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
-        $this->cellPropHasArrayStore = [];
-        $this->cellPropHasInPlaceBox = [];
-        $this->cellPropHasNestedArrayStore = [];
-        $this->cellPropHasCellArrayStore = [];
-        $this->cellPropHasVecCellArrayStore = [];
-        $this->cellPropTagRead = [];
-        $this->cellPropElemAsIndex = [];
         $this->propRawBorrow = [];
         $this->globalCellVeto = [];
         $this->propElemBorrow = [];
@@ -1804,54 +1789,9 @@ final class EmitLlvm implements EmitVisitor
         return false;
     }
 
-    /** Prop names ever stored a value boxToCell can't box in place → keep RAW. */
-    private array $cellPropNotBoxable = [];
-
     /** Prop names used as a RAW array base (`$this->p[...]`, `foreach ($this->p)`)
      *  — the SPL backing-slot pattern; never box (array-access reads the raw buffer). */
     private array $cellPropArrayBase = [];
-
-    /** Prop names ever stored a concrete array value (needs a cell-array rebuild). */
-    private array $cellPropHasArrayStore = [];
-
-    /** Prop names ever stored a scalar/string/object (proof of a self-describing,
-     *  heterogeneous slot — only then does an array store ride along as a boxed cell). */
-    private array $cellPropHasInPlaceBox = [];
-
-    /** Prop names ever stored an array whose ELEMENT is itself an array/cell — a
-     *  NESTED structure. Reading a nested value back must preserve its array-ness
-     *  (`is_array($c->data['x'])`), so such a slot boxes as a cell-array even when
-     *  it only ever holds arrays. An array-of-SCALARS slot (e.g. a key buffer read
-     *  as a raw index) stays raw — boxing it would turn a raw key into a cell. */
-    private array $cellPropHasNestedArrayStore = [];
-
-    /** Prop names whole-stored an array whose ELEMENT is a CELL (a heterogeneous /
-     *  null-carrying flat array — `$c->d = ["k"=>null,"j"=>"x"]`). A whole-read of
-     *  such a slot (var_dump/return) must see a self-describing array cell, so it
-     *  boxes — UNLESS the slot is also a raw array base (element-written, e.g. an
-     *  SPL `__s`), which is caught earlier and stays raw. A cell-array key buffer
-     *  read as a raw index (SPL `__k`) declares its slot a concrete `array`, so it
-     *  is not a cell prop and never reaches here. */
-    private array $cellPropHasCellArrayStore = [];
-
-    /** Prop names whole-stored a VEC cell-array. Ambiguous: a VEC cell-array is
-     *  EITHER a value container (`$o->v = ["a",null]`, wants boxing so a whole read
-     *  var_dumps right) OR the SPL key-buffer shape (`$ks[]=$k; $this->k=$ks`, read
-     *  raw as an index — must stay raw). Box it ONLY when a positive TAG-READ signal
-     *  is present AND no element-as-index veto — a key buffer is never tag-consumed,
-     *  so it never boxes even if an indirect index-flow escapes the veto scan. */
-    private array $cellPropHasVecCellArrayStore = [];
-
-    /** Prop names whose WHOLE value is passed to a tag-consuming builtin
-     *  (var_dump / is_array / print_r / var_export / gettype / json_encode /
-     *  serialize) — a read that genuinely needs the array tag. The box signal for
-     *  {@see $cellPropHasVecCellArrayStore}. */
-    private array $cellPropTagRead = [];
-
-    /** Prop names whose ELEMENT is read in an array-INDEX position
-     *  (`$d[$this->k[$i]]`) — its elements are used as raw keys and must not be
-     *  boxed into cells. The raw veto for {@see $cellPropHasVecCellArrayStore}. */
-    private array $cellPropElemAsIndex = [];
 
     /**
      * Prop keys whose value is read somewhere that takes NO REFERENCE — the veto
@@ -2313,43 +2253,8 @@ final class EmitLlvm implements EmitVisitor
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             // Key by the DECLARING class (+ a bare-name global fallback when the
             // receiver is erased), so a same-named property in an unrelated class
-            // no longer poisons this slot's box decision. See cellPropBoxed.
-            $key = $this->cellPropKey($n->object->type->class ?? '', $n->property);
-            $this->markPropOwnElem($n, $key);
-            $vk = $n->value->type->kind;
-            if ($vk === Type::KIND_ARRAY) {
-                // A concrete array can box (boxToCell rebuilds it as a cell-array),
-                // but it only does so when the slot is already self-describing —
-                // see cellPropBoxed. Tracked separately so an array-only prop keeps
-                // its current raw behaviour (no regression for typed-array backing).
-                $this->cellPropHasArrayStore[$key] = true;
-                // NESTED = the element is itself a concrete ARRAY (a genuine
-                // array-of-arrays). NOT a CELL element: that is boxed SCALARS
-                // (e.g. the SPL iterator's `__k = vec[cell]` heterogeneous keys),
-                // which must stay raw — boxing re-wraps an already-cell key.
-                $el = $n->value->type->element;
-                if ($el !== null && $el->kind === Type::KIND_ARRAY) {
-                    $this->cellPropHasNestedArrayStore[$key] = true;
-                } elseif ($el !== null && $el->kind === Type::KIND_CELL) {
-                    // A flat heterogeneous / null-carrying array (element = cell)
-                    // whole-stored into a mixed slot: a whole-read must see a tagged
-                    // array cell, so box it (unless it is a raw array base, checked
-                    // first in cellPropBoxed). An ASSOC (string-keyed) is
-                    // unambiguously a data container → box. A VEC is ambiguous — it
-                    // is EITHER a value container OR the SPL key-buffer shape
-                    // (`$ks[]=$k; $this->k=$ks`) read raw as an index — so it boxes
-                    // only under the tag-read signal + no index veto (cellPropBoxed).
-                    if ($n->value->type->isAssoc()) {
-                        $this->cellPropHasCellArrayStore[$key] = true;
-                    } else {
-                        $this->cellPropHasVecCellArrayStore[$key] = true;
-                    }
-                }
-            } elseif (!$this->cellBoxableKind($n->value->type)) {
-                $this->cellPropNotBoxable[$key] = true;
-            } else {
-                $this->cellPropHasInPlaceBox[$key] = true;
-            }
+            // cannot poison this slot's ownership facts.
+            $this->markPropOwnElem($n, $this->cellPropKey($n->object->type->class ?? '', $n->property));
         }
         // `clone` COPIES an array property with __mir_array_copy, which co-owns
         // elements in REPR mode — i.e. nothing at all for a concrete, unstamped
@@ -2363,24 +2268,6 @@ final class EmitLlvm implements EmitVisitor
         }
         $base = $this->cellPropArrayBaseKey($n);
         if ($base !== null) { $this->cellPropArrayBase[$base] = true; }
-        // Box signal: a WHOLE prop-read passed to a tag-consuming builtin (a read
-        // that genuinely needs the array tag). A key buffer is never tag-consumed,
-        // so a VEC cell-array only ever boxes for a real value container.
-        if ($n->kind === Node::KIND_CALL && $this->isTagConsumer($n->function)) {
-            $arg = $n->args[0] ?? null;
-            if ($arg !== null && $arg->kind === Node::KIND_PROPERTY_ACCESS) {
-                $this->cellPropTagRead[$this->cellPropKey($arg->object->type->class ?? '', $arg->property)] = true;
-            }
-        }
-        // Raw veto: a prop element read in an INDEX position (`$d[$this->k[$i]]`) is
-        // a raw key — never box that prop.
-        if ($n->kind === Node::KIND_ARRAY_ACCESS || $n->kind === Node::KIND_STORE_ELEMENT) {
-            $idx = $n->index;
-            if ($idx !== null && $idx->kind === Node::KIND_ARRAY_ACCESS
-                && $idx->array->kind === Node::KIND_PROPERTY_ACCESS) {
-                $this->cellPropElemAsIndex[$this->cellPropKey($idx->array->object->type->class ?? '', $idx->array->property)] = true;
-            }
-        }
         // The elem-borrow arm needs to know its CONSUMER, and markChildBorrows
         // only ever sees a node's direct children. One field, saved and restored
         // around the descent, is enough — the walk is depth-first.
@@ -3312,16 +3199,6 @@ final class EmitLlvm implements EmitVisitor
         return $flavor === 'vecstr' || $flavor === 'assocstr'
             || $flavor === 'vecobj' || $flavor === 'assocobj'
             || $flavor === 'veccell' || $flavor === 'assoccell';
-    }
-
-    /** Builtins whose argument's array-ness must be visible at runtime (they
-     *  dispatch on the NaN tag), so a whole cell-array prop passed to one is a box
-     *  signal. count/in_array/etc. work on a raw array and are deliberately absent. */
-    private function isTagConsumer(string $fn): bool
-    {
-        return $fn === 'var_dump' || $fn === 'print_r' || $fn === 'var_export'
-            || $fn === 'is_array' || $fn === 'gettype' || $fn === 'get_debug_type'
-            || $fn === 'json_encode' || $fn === 'serialize';
     }
 
     // Generator frame layout:

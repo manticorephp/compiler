@@ -1666,15 +1666,6 @@ trait EmitLlvmExpr
      * needs instanceof narrowing (see inferPropertyAccess path-narrowing) —
      * unguarded it hits the bag path.
      */
-    private function cellBoxableKind(Type $t): bool
-    {
-        $k = $t->kind;
-        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL
-            || $k === Type::KIND_STRING || $k === Type::KIND_OBJ
-            || $k === Type::KIND_CLOSURE || $k === Type::KIND_CELL;
-    }
-
     /** The property name when $n uses `$obj->name` as a RAW array base that must
      *  keep a raw buffer — an element WRITE (`$this->p[...] = `). A read-only
      *  index (`$x = $this->p[$k]`) and a FOREACH are NOT counted: both work fine
@@ -1753,28 +1744,6 @@ trait EmitLlvmExpr
     private function cellPropBoxed(?Type $ptype, string $class, string $prop): bool
     {
         return $ptype !== null && $ptype->kind === Type::KIND_CELL;
-    }
-
-    /**
-     * Whether a cell-typed operand reads a property slot that is NOT
-     * self-describing — i.e. one {@see cellPropBoxed} keeps raw.
-     *
-     * The read side has to agree with the store side about a slot's shape. A
-     * raw slot holds a bare pointer (or a bare 0 for its `null` default), so a
-     * NaN-tag decode over it answers whatever the pointer bits happen to look
-     * like: `null` reads as tag 6 (a double), which is never tag 3, so
-     * `=== null` was permanently false and `!== null` permanently true. Only
-     * property reads can be raw this way; every other cell operand is boxed by
-     * construction.
-     */
-    private function cellOperandIsRawSlot(Node $n): bool
-    {
-        if ($n->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
-        $cls = $n->object->type->class ?? '';
-        if ($cls === '' || !isset($this->classes[$cls])) { return false; }
-        $pt = $this->classes[$cls]->propertyTypes[$n->property] ?? null;
-        if ($pt === null || $pt->kind !== Type::KIND_CELL) { return false; }
-        return !$this->cellPropBoxed($pt, $cls, $n->property);
     }
 
     private function emitStringConst(StringConst $n): string
@@ -3756,8 +3725,7 @@ trait EmitLlvmExpr
             // `$this->fn !== null` answered TRUE on a freshly-constructed
             // object. Such a slot carries either shape, so it takes the same
             // dual test as an erased operand below.
-            if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL
-                && !$this->cellOperandIsRawSlot($other)) {
+            if (!($leftNull && $rightNull) && $ok === Type::KIND_CELL) {
                 $chunks = [$this->emitNode($other)];
                 $chunks[] = $this->coerceToI64();
                 $chunks[] = $this->cellTagIr($this->lastValue);
@@ -3778,8 +3746,7 @@ trait EmitLlvmExpr
             // `while (null !== $token = array_shift($this->parsed))` therefore
             // ran forever past the end of its token list.
             if (!($leftNull && $rightNull)
-                && ($ok === Type::KIND_UNKNOWN
-                    || ($ok === Type::KIND_CELL && $this->cellOperandIsRawSlot($other)))) {
+                && $ok === Type::KIND_UNKNOWN) {
                 $chunks = [$this->emitNode($other)];
                 $chunks[] = $this->coerceToI64();
                 $cv = $this->lastValue;
