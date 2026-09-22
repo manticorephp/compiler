@@ -113,11 +113,51 @@ pair's ARRAY. `LowerTypes::lowerTypeHint` now lowers `array{…}` to
 `vec[cell]` / `assoc[string,cell]`. Witness `w4_array_shape_doc` (fails on
 main's binary). gen3 builds and both witnesses pass on it.
 
-**Verifier (step 3).** `MANTICORE_CELLGUARD=strict` fails the build on any
-`raw -> cell` edge the emitter-seam census sees (`EmitLlvmCellGuard`,
-`Main.php` refuses to write the object). The ratchet baseline
-(`tools/cellguard_baseline.txt`, `tools/cellguard_scan.sh --ratchet`, now
-parallel) is the debt list; the flag defaults on when it is empty.
+**Verifier (step 3) — landed 2026-09-22 (branch `verifier`).**
+`MANTICORE_CELLGUARD=strict` fails the build on any `raw -> cell` edge the
+emitter-seam census sees (`EmitLlvmCellGuard`, `Main.php` refuses to write the
+object), and `bin/build` now exports it by default: the compiler and the
+stdlib are built under the verifier (it emits no IR — only `CELL_ASSERT` bakes
+anything). The ratchet baseline (`tools/cellguard_baseline.txt`,
+`tools/cellguard_scan.sh --ratchet`) is the debt list.
+
+The first census after W4 said 3250 sites / 23313 raw words, and 98% of it was
+the INSTRUMENT: every violation line now names its source
+(`src=<node>(<callee>):<type>`), and bucketing by that field found the blind
+spots one class at a time — the store emitters leave the assignment's
+EXPRESSION value (the pre-box RHS word) in `lastValue` while the slot took the
+box (`noteCellSinkStored`); a return was checked against the DECLARED type
+while NarrowReturns had narrowed the ABI; a callee of any flavor whose type is
+cell was unmarked (one rule in `emitNode`: trusted by signature); ternary /
+`??` / `match` joined nothing; `own_alias`, `elem_encode`, the ref deref, the
+class-id property reader, the bag read and the dynamic-name chain passed
+nothing through. What was left was REAL:
+
+- **P8 — a `mixed` / unhinted instance property holding an ARRAY.** Its store
+  repr came from a usage census (raw when only arrays were ever stored, an
+  element-written base, a vec with no "tag-read" signal — nine tables) while
+  the read was typed by the declaration: `public $u; $o->u = [5];
+  var_dump($o->u)` printed a denormal, and an SPL key buffer (`private mixed
+  $__k = $ks`) read whole came back as `float(2.16E-314)`. Now every
+  cell-declared property boxes, an array FLAT (`box_array`, the buffer under a
+  tag with its hint intact, retained first) — the same rule the static-prop
+  and `$GLOBALS` slots follow; the cell-base element paths (P7,
+  `vecWriteBack`) already carry it. The nine tables, `cellOperandIsRawSlot`
+  and `cellBoxableKind` are gone. Witness `w4_mixed_prop_array`.
+- **`(object)` of a run-time-classified value** read every cell as the assoc
+  pointer (`settype($v, 'object')` over `mixed &$v` SIGSEGV'd); it now
+  dispatches by tag (`__mir_cell_to_bag`), and the stdlib's `stdClass` is no
+  longer `#[Struct]` — the compiled JSON parser's objects reached the program
+  under a layout its readers did not share. Witness `cast_object_cell`.
+- Two InferTypes traps on the way: `planMergeShadow` re-planted its `$x = $x`
+  box-back on every run (the survivor was then retyped to the arm's flow type
+  and stored RAW — only the freshest append kept the slot boxed; the box-back
+  now carries `declaredType = cell`), and it must never target a static /
+  global-backed slot (its repr is the decl's).
+
+Still on the baseline: a by-reference closure return (`function &(): array {
+return $this->items; }`) hands the closure's cell return a raw buffer pointer —
+the reference-return channel is the ref-cell epic's, not this one's.
 `plausiblePtrIr` → assertions is still owed.
 
 **By-ref (P5/P6).** A local handed to a `mixed &` param is one word two frames
@@ -250,9 +290,9 @@ by-ref call into an erased param.
    decided once (the declared/lowered type), every store boxes to it (flat
    `box_array` for an array), every read trusts it. P3 falls out of P2.
 2. **P5 → P6.** By-ref repr agreement, then `settype` as a stdlib body over it.
-3. **Verifier.** `MANTICORE_TYPECHECK=1` hardened into a pass that fails the
-   build on a `raw → cell` edge; cellguard's ratchet baseline (288 sites)
-   driven to 0, then the flag defaults on.
+3. **Verifier.** ✅ `MANTICORE_CELLGUARD=strict` fails the build on a `raw →
+   cell` edge; the ratchet baseline 288 → 2 (the by-ref closure return);
+   `bin/build` exports strict by default.
 4. **Unlock.** Delete the `false &&` in `arithType`; convert `plausiblePtrIr`
    sites to assertions; `MemoryAbi::VERSION` bump ⇒ one `bin/build --seed`.
 

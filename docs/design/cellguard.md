@@ -83,7 +83,22 @@ Sinks checked: `store_local`, `store_element`, `store_property`,
    arithmetic (`docs/design/unknown-cell-soundness.md` §18, the `false &&` gate at
    `InferTypes.php:1701`), not at the return.
 
-## Current numbers (full corpus, `tools/cellguard_scan.sh`, 2026-09-13)
+## Current numbers (full corpus, `tools/cellguard_scan.sh`, 2026-09-22)
+
+- Corpus: 1147 attempted, 0 compile failures, 1147 classified.
+- **Occurrences: `raw`=2. Distinct `(sink, fn, ord)` sites: 2** — both the
+  by-reference closure return of `byref_closure_bound_scope` (the ref-return
+  channel, [value-channels.md](value-channels.md)).
+- Coverage: `boxed`=14150 `opaque`=55652 `probed`=2 `unchecked`=1472.
+- `MANTICORE_CELLGUARD=strict` is the default under `bin/build`: the compiler
+  and the stdlib build with zero violations. Every violation line carries
+  `src=<node>(<callee>):<type>` — bucket by it before reading a site.
+- ⚠ The first post-W4 census (2026-09-22, before the instrument was fixed)
+  said 3250 sites / 23313 raw; 98% was the instrument's own blind spots
+  (value-channels.md, step 3). Read a jump in the numbers as a question about
+  the instrument first.
+
+## Numbers of 2026-09-13 (historical)
 
 - Corpus: 1074 attempted (main's merge added 8 cases, e.g. `stdlib_zlib`, `stdlib_openssl_x509`), 192 pre-existing rc=70 compile failures (was 187), 882 classified.
 - **Occurrences: `raw`=937. Distinct `(sink, fn, ord)` sites: 286.**

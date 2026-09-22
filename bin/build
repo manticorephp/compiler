@@ -60,10 +60,15 @@ cd "$ROOT"
 # canonical dir, as tools/selfhost.sh does for the same reason.
 export MANTICORE_PRELUDE="$ROOT/prelude"
 
-# The cellguard flags are per-compile diagnostics. Exported into a self
-# build they would bake __mir_assert_cell calls into bin/manticore and every
-# lib/*.o (a flag's default is baked into the installed binary) — never here.
-unset MANTICORE_CELLGUARD MANTICORE_CELL_ASSERT
+# MANTICORE_CELL_ASSERT is a per-compile diagnostic that BAKES __mir_assert_cell
+# calls into whatever it compiles (a flag's default is baked into the installed
+# binary) — never into a self build. The cell VERIFIER is the opposite: it emits
+# no IR, it only refuses to write an object in which a raw word reaches a cell
+# channel (docs/design/value-channels.md, step 3), so the compiler and the stdlib
+# are built under it by default. MANTICORE_CELLGUARD=1 turns it back into the
+# report-only census.
+unset MANTICORE_CELL_ASSERT
+export MANTICORE_CELLGUARD="${MANTICORE_CELLGUARD:-strict}"
 
 SEED=0
 AUTOSEED=0
