@@ -1010,6 +1010,94 @@ function mimeFor(string $path): string
 }
 
 /**
+ * Does an `If-None-Match` list match `$etag`? WEAK comparison, which is the
+ * only one RFC 9110 §13.1.2 allows for `If-None-Match`: both `W/` prefixes are
+ * dropped before comparing, and `*` matches anything.
+ *
+ * @internal
+ */
+function etagMatches(string $list, string $etag): bool
+{
+    $want = \strncmp($etag, 'W/', 2) === 0 ? \substr($etag, 2) : $etag;
+    foreach (splitStr(',', $list) as $t) {
+        $tag = \trim($t);
+        if ($tag === '*') {
+            return true;
+        }
+        if (\strncmp($tag, 'W/', 2) === 0) {
+            $tag = \substr($tag, 2);
+        }
+        if ($tag === $want) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * `bytes=a-b` → `[first, last]`, inclusive and clamped to the file.
+ *
+ * null means UNSATISFIABLE (416). `[-1, -1]` means "not a single byte range I
+ * serve" — a multi-range, another unit, or garbage — which the RFC lets a
+ * server answer with the full representation.
+ *
+ * @internal
+ * @return ?array<int, int>
+ */
+function parseRange(string $spec, int $size): ?array<int, int>
+{
+    $ignore = [];
+    $ignore[] = -1;
+    $ignore[] = -1;
+    if (\strncmp($spec, 'bytes=', 6) !== 0 || \strpos($spec, ',') !== false) {
+        return $ignore;
+    }
+    $r = \trim(\substr($spec, 6));
+    $dash = \strpos($r, '-');
+    if ($dash === false) {
+        return $ignore;
+    }
+    $a = \substr($r, 0, $dash);
+    $b = \substr($r, $dash + 1);
+    if ($a === '') {
+        // `-n`: the LAST n bytes. An empty suffix and a zero-length one are
+        // unsatisfiable, and so is any suffix of an empty file.
+        if ($b === '' || !\ctype_digit($b)) {
+            return $ignore;
+        }
+        $n = (int)$b;
+        if ($n === 0 || $size === 0) {
+            return null;
+        }
+        if ($n > $size) {
+            $n = $size;
+        }
+        $out = [];
+        $out[] = $size - $n;
+        $out[] = $size - 1;
+        return $out;
+    }
+    if (!\ctype_digit($a) || ($b !== '' && !\ctype_digit($b))) {
+        return $ignore;
+    }
+    $first = (int)$a;
+    if ($first >= $size) {
+        return null;
+    }
+    $last = $b === '' ? $size - 1 : (int)$b;
+    if ($last < $first) {
+        return $ignore;
+    }
+    if ($last >= $size) {
+        $last = $size - 1;
+    }
+    $out = [];
+    $out[] = $first;
+    $out[] = $last;
+    return $out;
+}
+
+/**
  * Byte length of the chunk size-line starting at $pos, CRLF included; -1 when
  * the buffer does not hold a complete one yet, -2 when it is too long to be one.
  *
@@ -4212,6 +4300,76 @@ final class Server
     }
 
     /**
+     * RFC 9110 §13.2 over a file response the HANDLER left at 200: the status
+     * to send, with the file window and the headers settled for it.
+     *
+     * A handler that set its own status is answering something other than "here
+     * is this file" — 201 on an upload, say — and its answer is not the
+     * server's to turn into a 304. A non-GET/HEAD is left alone too (v1: php's
+     * own `If-Match` / 412 half is not implemented).
+     */
+    private function conditional(Request $req, Response $res): int
+    {
+        // The predicate is the STATUS, not `statusWasSet()`: {@see absorb} calls
+        // `status()` on every response that did not set one, to let an ambient
+        // `http_response_code()` win, and `status()` marks the flag — so by the
+        // time a response is written the flag is true for all of them.
+        if ($res->status !== 200 || ($req->method !== 'GET' && $req->method !== 'HEAD')) {
+            return $res->status;
+        }
+        $h = $res->headers;
+        $etag = $h->get('etag');
+        $inm = $req->header('If-None-Match');
+        $notModified = false;
+        if ($inm !== '') {
+            // `If-None-Match` present WINS: a date is the weaker validator and
+            // §13.1.3 says it is only consulted when there is no entity tag.
+            $notModified = $etag !== '' && etagMatches($inm, $etag);
+        } else {
+            $ims = $req->header('If-Modified-Since');
+            if ($ims !== '') {
+                $since = \strtotime($ims);
+                $notModified = $since !== false && $res->fileMtime() <= $since;
+            }
+        }
+        if ($notModified) {
+            $h->remove('content-type');
+            $h->remove('content-length');
+            $h->remove('accept-ranges');
+            $res->setFileWindow(0, 0);
+            return Status::NOT_MODIFIED;
+        }
+        $range = $req->header('Range');
+        if ($range === '') {
+            return $res->status;
+        }
+        $ifRange = $req->header('If-Range');
+        if ($ifRange !== '') {
+            // §13.1.5: an entity tag in `If-Range` must match STRONGLY. Ours are
+            // all weak, so a tag never narrows — only the exact date does.
+            $ok = \strpos($ifRange, '"') !== false
+                ? ($etag !== '' && $ifRange === $etag && \strncmp($etag, 'W/', 2) !== 0)
+                : (\strtotime($ifRange) === $res->fileMtime());
+            if (!$ok) {
+                return $res->status;
+            }
+        }
+        $win = parseRange($range, $res->fileSize());
+        if ($win === null) {
+            $h->set('Content-Range', 'bytes */' . $res->fileSize());
+            $h->remove('content-type');
+            $res->setFileWindow(0, 0);
+            return Status::RANGE_NOT_SATISFIABLE;
+        }
+        if ($win[0] < 0) {
+            return $res->status;
+        }
+        $h->set('Content-Range', 'bytes ' . $win[0] . '-' . $win[1] . '/' . $res->fileSize());
+        $res->setFileWindow($win[0], $win[1] - $win[0] + 1);
+        return Status::PARTIAL_CONTENT;
+    }
+
+    /**
      * A file body: the head, then the bytes straight from the page cache.
      *
      * `sendfile(2)` on a plain socket — the bytes never enter the process. A
@@ -4225,6 +4383,7 @@ final class Server
         if ($in === null) {
             return $keep;
         }
+        $res->status = $this->conditional($req, $res);
         $hasBody = Status::hasBody($res->status) && $res->fileLength() > 0;
         $h = $res->headers;
         $h->remove('content-length');

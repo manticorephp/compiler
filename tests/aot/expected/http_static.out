@@ -31,5 +31,159 @@ nf: HTTP/1.1 404 Not Found
   Date: present
   Server: mc-test
   body[2] match=yes
+inm-hit: HTTP/1.1 304 Not Modified
+  Last-Modified: present
+  ETag: present
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+inm-star: HTTP/1.1 304 Not Modified
+  Last-Modified: present
+  ETag: present
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+inm-list: HTTP/1.1 304 Not Modified
+  Last-Modified: present
+  ETag: present
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+inm-miss: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 5
+  Date: present
+  Server: mc-test
+  body[5] match=yes
+ims-hit: HTTP/1.1 304 Not Modified
+  Last-Modified: present
+  ETag: present
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+ims-old: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 5
+  Date: present
+  Server: mc-test
+  body[5] match=yes
+ims-with-inm-miss: HTTP/1.1 200 OK
+  Content-Type: text/plain; charset=utf-8
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 5
+  Date: present
+  Server: mc-test
+  body[5] match=yes
+range-mid: HTTP/1.1 206 Partial Content
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Range: bytes 10-19/100000
+  Content-Length: 10
+  Date: present
+  Server: mc-test
+  body[10] match=yes
+range-suffix: HTTP/1.1 206 Partial Content
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Range: bytes 99995-99999/100000
+  Content-Length: 5
+  Date: present
+  Server: mc-test
+  body[5] match=yes
+range-open: HTTP/1.1 206 Partial Content
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Range: bytes 99990-99999/100000
+  Content-Length: 10
+  Date: present
+  Server: mc-test
+  body[10] match=yes
+range-bad: HTTP/1.1 416 Range Not Satisfiable
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Range: bytes */100000
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+range-multi: HTTP/1.1 200 OK
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 100000
+  Date: present
+  Server: mc-test
+  body[100000] match=yes
+range-garbage: HTTP/1.1 200 OK
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 100000
+  Date: present
+  Server: mc-test
+  body[100000] match=yes
+if-range-miss: HTTP/1.1 200 OK
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 100000
+  Date: present
+  Server: mc-test
+  body[100000] match=yes
+if-range-etag: HTTP/1.1 200 OK
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 100000
+  Date: present
+  Server: mc-test
+  body[100000] match=yes
+if-range-date: HTTP/1.1 206 Partial Content
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Range: bytes 0-1/100000
+  Content-Length: 2
+  Date: present
+  Server: mc-test
+  body[2] match=yes
+head-range: HTTP/1.1 206 Partial Content
+  Content-Type: application/octet-stream
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Range: bytes 0-9/100000
+  Content-Length: 10
+  Date: present
+  Server: mc-test
+  body[0] match=yes
+status201: HTTP/1.1 201 Created
+  Content-Type: text/plain; charset=utf-8
+  Last-Modified: present
+  ETag: present
+  Accept-Ranges: bytes
+  Content-Length: 5
+  Date: present
+  Server: mc-test
+  body[5] match=yes
 throws: HTTP/1.1 500 Internal Server Error
 done

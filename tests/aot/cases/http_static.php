@@ -177,10 +177,75 @@ async(function () use ($server, $port, $pub, $fixture) {
     $c->send("GET /missing.bin HTTP/1.1\r\nHost: t\r\n\r\n");
     show('nf', $c->readOne(), 'nf');
 
-    $c->send("GET /throws HTTP/1.1\r\nHost: t\r\n\r\n");
-    $t = $c->readOne();
-    echo 'throws: ', explode("\r\n", headOf($t))[0], "\n";
+    // The validators of the fixture, as the first response reported them.
+    $etag = headerOf($first, 'ETag');
+    $lm = headerOf($first, 'Last-Modified');
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nIf-None-Match: " . $etag . "\r\n\r\n");
+    show('inm-hit', $c->readOne(), '');
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nIf-None-Match: *\r\n\r\n");
+    show('inm-star', $c->readOne(), '');
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nIf-None-Match: \"x\", W/\"y\", " . $etag . "\r\n\r\n");
+    show('inm-list', $c->readOne(), '');
+
+    $c->send("GET /a.txt HTTP/1.1\r\nHost: t\r\nIf-None-Match: \"zzz\"\r\n\r\n");
+    show('inm-miss', $c->readOne(), 'hello');
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nIf-Modified-Since: " . $lm . "\r\n\r\n");
+    show('ims-hit', $c->readOne(), '');
+
+    $c->send("GET /a.txt HTTP/1.1\r\nHost: t\r\nIf-Modified-Since: Mon, 01 Jan 1990 00:00:00 GMT\r\n\r\n");
+    show('ims-old', $c->readOne(), 'hello');
+
+    // If-None-Match present and missing: the date is never consulted.
+    $c->send("GET /a.txt HTTP/1.1\r\nHost: t\r\nIf-None-Match: \"zzz\"\r\nIf-Modified-Since: " . $lm . "\r\n\r\n");
+    show('ims-with-inm-miss', $c->readOne(), 'hello');
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=10-19\r\n\r\n");
+    show('range-mid', $c->readOne(), substr($fixture, 10, 10));
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=-5\r\n\r\n");
+    show('range-suffix', $c->readOne(), substr($fixture, 99995, 5));
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=99990-\r\n\r\n");
+    show('range-open', $c->readOne(), substr($fixture, 99990, 10));
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=100000-\r\n\r\n");
+    show('range-bad', $c->readOne(), '');
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=0-1,5-6\r\n\r\n");
+    show('range-multi', $c->readOne(), $fixture);
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: pages=1\r\n\r\n");
+    show('range-garbage', $c->readOne(), $fixture);
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=0-1\r\nIf-Range: \"zzz\"\r\n\r\n");
+    show('if-range-miss', $c->readOne(), $fixture);
+
+    // Our ETags are WEAK, and a weak tag never satisfies If-Range (RFC 9110
+    // §13.1.5) — the full representation is the correct answer here.
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=0-1\r\nIf-Range: " . $etag . "\r\n\r\n");
+    show('if-range-etag', $c->readOne(), $fixture);
+
+    $c->send("GET /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=0-1\r\nIf-Range: " . $lm . "\r\n\r\n");
+    show('if-range-date', $c->readOne(), substr($fixture, 0, 2));
+
+    $c->send("HEAD /big.bin HTTP/1.1\r\nHost: t\r\nRange: bytes=0-9\r\n\r\n");
+    show('head-range', $c->readOne(false), '');
+
+    // A status the handler set itself is not the server's to turn into a 304.
+    $c->send("GET /a.txt?status=201 HTTP/1.1\r\nHost: t\r\nIf-None-Match: " . $etag . "\r\n\r\n");
+    show('status201', $c->readOne(), 'hello');
     $c->close();
+
+    // A handler whose file() throws answers 500 and drops the connection, so
+    // this one is asked LAST and on a connection of its own.
+    $c2 = new Client(fsockopen('127.0.0.1', $port));
+    $c2->send("GET /throws HTTP/1.1\r\nHost: t\r\n\r\n");
+    echo 'throws: ', explode("\r\n", headOf($c2->readOne()))[0], "\n";
+    $c2->close();
 
     $server->stop();
 });
