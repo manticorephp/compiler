@@ -928,6 +928,88 @@ function parseCookies(string $line): array<string, string>
 }
 
 /**
+ * A request path mapped under `$root`, or null when it does not name a regular
+ * file inside it.
+ *
+ * Both sides go through `realpath`, so a symlink that leaves the root is
+ * refused by construction rather than by string surgery on `..`. A DIRECTORY
+ * answers null: which index file a directory stands for is the handler's
+ * policy, not this function's (`safePath($root, $req->path . '/index.html')`).
+ *
+ * The path arrives already percent-decoded and `..`-collapsed by the server
+ * ({@see normPath}), so an encoded `%2e%2e` is a literal path segment here and
+ * simply names nothing.
+ */
+function safePath(string $root, string $reqPath): ?string
+{
+    if ($reqPath === '' || $reqPath[0] !== '/') {
+        return null;
+    }
+    // A trailing slash spells a DIRECTORY in a URL, and a directory answers
+    // null here. Without the test `realpath` decides: Darwin resolves
+    // `/pub/index.html/` to the file and Linux refuses it, which would make
+    // the same request answer differently per host.
+    if (\substr($reqPath, -1) === '/') {
+        return null;
+    }
+    $base = \realpath($root);
+    if ($base === false) {
+        return null;
+    }
+    $base = \rtrim($base, '/');
+    $full = \realpath($base . $reqPath);
+    if ($full === false || !\is_file($full)) {
+        return null;
+    }
+    if (\strncmp($full, $base . '/', \strlen($base) + 1) !== 0) {
+        return null;
+    }
+    return $full;
+}
+
+/** Content-Type from the extension; `application/octet-stream` when unknown. */
+function mimeFor(string $path): string
+{
+    $dot = \strrpos($path, '.');
+    $slash = \strrpos($path, '/');
+    if ($dot === false || ($slash !== false && $dot < $slash)) {
+        return 'application/octet-stream';
+    }
+    $ext = \strtolower(\substr($path, $dot + 1));
+    return match ($ext) {
+        'html', 'htm' => 'text/html; charset=utf-8',
+        'css' => 'text/css; charset=utf-8',
+        'js', 'mjs' => 'text/javascript; charset=utf-8',
+        'json', 'map' => 'application/json',
+        'txt', 'md', 'log' => 'text/plain; charset=utf-8',
+        'xml' => 'application/xml',
+        'svg' => 'image/svg+xml',
+        'png' => 'image/png',
+        'jpg', 'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'avif' => 'image/avif',
+        'ico' => 'image/x-icon',
+        'woff' => 'font/woff',
+        'woff2' => 'font/woff2',
+        'ttf' => 'font/ttf',
+        'otf' => 'font/otf',
+        'wasm' => 'application/wasm',
+        'pdf' => 'application/pdf',
+        'zip' => 'application/zip',
+        'gz' => 'application/gzip',
+        'mp4' => 'video/mp4',
+        'webm' => 'video/webm',
+        'mp3' => 'audio/mpeg',
+        'ogg' => 'audio/ogg',
+        'wav' => 'audio/wav',
+        'csv' => 'text/csv; charset=utf-8',
+        'webmanifest' => 'application/manifest+json',
+        default => 'application/octet-stream',
+    };
+}
+
+/**
  * Byte length of the chunk size-line starting at $pos, CRLF included; -1 when
  * the buffer does not hold a complete one yet, -2 when it is too long to be one.
  *
