@@ -469,7 +469,28 @@ shaped local survives a const-key store and a same-shape merge. The native
 __mc_http_read_response` docblock — a 2-tuple over a 3-tuple body — was caught
 by this at the first build.
 
+A RAW-hinted buffer is checked by its hint: the writer typed every word the
+same way, so the hint either is the claim, is INT under a `float` field (the
+read widens, as php does) or lies for every element at once — `range(1,2)`
+into `array{0:int,1:string}` throws at `$p[1]`, it no longer walks an int as a
+string pointer. The thrower is handed the word boxed by the hint so `given`
+names the real kind. Statically, `TypeCheck::shapeConflict` recurses into the
+element (a sub-literal against `vec[array{…}]`) and holds an unshaped concrete
+array (`vec[int]`) to a declared shape field by field; a constant-key store
+into a DECLARED shape is held to the field's exact kind, scalars included,
+except an int into a `float` field, which the store converts. A Monomorphize
+clone keeps a shaped param's declared fields over the representative arg's
+element, whatever call site came first.
+
 Known limits: class identity of an object field is not checked at run time; a
-RAW-hinted buffer is never checked (nothing to check); a `list<array{…}>`
-docblock form is not recognised; the parser drops an inline `/** @var */` on a
-promoted ctor param (separate follow-up); `Dump` prints a nested shape flat.
+`list<array{…}>` docblock form is not recognised; the parser drops an inline
+`/** @var */` on a promoted ctor param (separate follow-up); `Dump` prints a
+nested shape flat; a shape does not cross the stdlib `.sig` for functions —
+`Sig::encodeType` spells the MIR type (`array{0:string,1:int}` → `mixed[]`),
+the far side sees the same repr so the call is safe, but the precision stops
+at the module boundary; a store into a shaped PROPERTY is not checked
+statically (TypeCheck has no class table — the read still throws);
+`isset($r['k']) ? $r['k'] : d` on a sealed declared shape is a compile error, as
+PHPStan reports the same offset error — the docblock is the contract; a float
+stored into an INFERRED `vec[int]` local does not widen (pre-existing on main —
+the declared-shape store rule above is the checked case).
