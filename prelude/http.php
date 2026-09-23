@@ -3956,10 +3956,23 @@ final class Server
      * Run $fn once when {@see stop} is called — how a long-lived takeover
      * (a WebSocket session) learns the server is going down. Returns an id
      * for {@see offStop}.
+     *
+     * A takeover that upgrades DURING or AFTER `stop()` (dispatch was already
+     * in flight, or `stop()` raced it) registers into a hook list that will
+     * never run again — `stop()` is one-shot. $fn runs INLINE here instead,
+     * so a session that checks in late still hears the server is going down.
      */
     public function onStop(\Closure $fn): int
     {
         $this->stopSeq = $this->stopSeq + 1;
+        if ($this->stopped) {
+            try {
+                $fn();
+            } catch (\Throwable $e) {
+                $this->statErrors = $this->statErrors + 1;
+            }
+            return $this->stopSeq;
+        }
         $this->stopHooks[$this->stopSeq] = $fn;
         return $this->stopSeq;
     }
@@ -3988,6 +4001,7 @@ final class Server
                 $fn();
             } catch (\Throwable $e) {
                 // One hook's failure must not keep the others from running.
+                $this->statErrors = $this->statErrors + 1;
             }
         }
     }
@@ -4183,6 +4197,11 @@ final class Server
             if ($res !== null) {
                 // After requestEnd(): a takeover runs with no request context.
                 $out->flush();
+                // pump()'s idle/header read deadline (as short as 0.3s under a
+                // tight config) is a REQUEST-parsing concern; a session must
+                // not inherit it. 0 clears both directions back to the stream
+                // layer's own default (stream_set_timeout, Net.php).
+                $this->setTimeout($conn, 0.0);
                 $this->runTakeover($conn, $buf, $res);
                 return;
             }
@@ -4219,7 +4238,13 @@ final class Server
         }
         $res = $this->dispatch($req);
         if ($res->isTakeover()) {
-            if ($res->status !== Status::SWITCHING_PROTOCOLS || $req->version !== '1.1') {
+            // An unread streamed-body byte is a request byte the wire hasn't
+            // finished delivering; handing it to the new protocol as ITS
+            // first byte is a handler bug (it never read what it asked for),
+            // same tier as a takeover that is not a clean 101/1.1.
+            $rd = $req->streamed ? $req->stream() : null;
+            $bodyLeft = $rd !== null && !$rd->eof();
+            if ($res->status !== Status::SWITCHING_PROTOCOLS || $req->version !== '1.1' || $bodyLeft) {
                 $this->statErrors = $this->statErrors + 1;
                 $this->writeError($out, 500);
                 return false;

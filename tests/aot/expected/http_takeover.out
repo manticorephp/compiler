@@ -3,6 +3,13 @@ upgrade header
 no content-length
 HELLO
 AGAIN
+LATE
 HTTP/1.1 500 Internal Server Error
+HTTP/1.1 500 Internal Server Error
+HTTP/1.1 500 Internal Server Error
+HTTP/1.1 101 Switching Protocols
+ERRUP
+HTTP/1.1 101 Switching Protocols
 BYE
-upgraded=1 errors=1
+LATEBYE
+upgraded=3 errors=5
