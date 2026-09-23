@@ -265,65 +265,137 @@ function __mc_zl_fixed_lit(int $sym): array
     return [0xC0 + $sym - 280, 8];
 }
 
-function __mc_zl_deflate_raw(string $data, int $level): string
+/**
+ * An incremental DEFLATE stream (php's `deflate_init` result). The LZ77 history
+ * outlives a call — that is context takeover — so positions are ABSOLUTE: $win
+ * holds the last bytes seen and $base is the absolute offset of $win[0]. $head
+ * and $prev entries below $base are stale and ignored on read.
+ */
+final class DeflateContext
 {
-    $n = \strlen($data);
-    if ($level === 0) { return \__mc_zl_stored($data); }
+    public int $encoding = -15;
+    public int $level = -1;
+    public int $window = 15;
+    public int $strategy = 0;
+    public int $maxChain = 128;
+    public bool $headerDone = false;
+    public bool $finished = false;
+    public int $check = 0;
+    public int $total = 0;
+    public string $dict = '';
+    public int $dictId = 0;
+    public string $win = '';
+    public int $base = 0;
+    /** @var array<int,int> */
+    public array $head = [];
+    /** @var array<int,int> */
+    public array $prev = [];
+    public int $hashed = 0;
+    public string $pending = '';
+    public int $bb = 0;
+    public int $bc = 0;
+    public string $out = '';
+}
 
+function __mc_zl_put(DeflateContext $c, int $bits, int $n): void
+{
+    $c->bb = $c->bb | ($bits << $c->bc);
+    $c->bc = $c->bc + $n;
+    while ($c->bc >= 8) {
+        $c->out = $c->out . \chr($c->bb & 0xFF);
+        $c->bb = $c->bb >> 8;
+        $c->bc = $c->bc - 8;
+    }
+}
+
+function __mc_zl_align(DeflateContext $c): void
+{
+    if ($c->bc > 0) { $c->out = $c->out . \chr($c->bb & 0xFF); }
+    $c->bb = 0;
+    $c->bc = 0;
+}
+
+function __mc_zl_chain(DeflateContext $c, string $w, int $i, int $abs): void
+{
+    $h = ((\ord($w[$i]) << 10) ^ (\ord($w[$i + 1]) << 5) ^ \ord($w[$i + 2])) & 0x7FFF;
+    $c->prev[$abs] = $c->head[$h] ?? -1;
+    $c->head[$h] = $abs;
+}
+
+/**
+ * One fixed-Huffman block over $data, matched against everything still in the
+ * window. A single call over a whole input is exactly the one-shot encoder's
+ * bit sequence. The block's bits stay in the accumulator: the caller decides
+ * whether the stream ends, flushes to a byte boundary, or just continues.
+ */
+function __mc_zl_block(DeflateContext $c, string $data, bool $final): void
+{
     $lbase = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
     $lext  = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
     $dbase = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
     $dext  = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
 
-    // How far down a hash chain to look. This is the whole meaning of $level
-    // here: more candidates, better matches, more time.
-    $maxChain = 128;
-    if ($level < 0) { $maxChain = 128; }
-    elseif ($level <= 3) { $maxChain = 16; }
-    elseif ($level <= 6) { $maxChain = 128; }
-    else { $maxChain = 1024; }
+    $start = \strlen($c->win);
+    $c->win = $c->win . $data;
+    $w = $c->win;
+    $n = \strlen($w);
+    $base = $c->base;
+    $maxChain = $c->maxChain;
+    $wbits = $c->window < 9 ? 9 : $c->window;
+    $maxDist = $wbits >= 15 ? 32768 : (1 << $wbits);
+
+    // Positions the previous call could not hash (its last two bytes had no
+    // successor yet, or a dictionary was just seeded) go into the chains first,
+    // oldest first, so a match here can reach them.
+    $hp = $c->hashed;
+    if ($hp < $base) { $hp = $base; }
+    while ($hp < $base + $start && $hp + 2 < $base + $n) {
+        \__mc_zl_chain($c, $w, $hp - $base, $hp);
+        $hp = $hp + 1;
+    }
 
     $cap = 1024;
     $out = \str_repeat("\0", $cap);
     $olen = 0;
-    $bb = 0;
-    $bc = 0;
+    $bb = $c->bb;
+    $bc = $c->bc;
 
-    // BFINAL=1, BTYPE=01 (fixed Huffman): one block for the whole input.
-    $bb = $bb | (1 << $bc); $bc = $bc + 1;
+    // BFINAL, then BTYPE=01 (fixed Huffman).
+    if ($final) { $bb = $bb | (1 << $bc); }
+    $bc = $bc + 1;
     $bb = $bb | (1 << $bc); $bc = $bc + 2;
 
-    $head = [];
-    $prev = [];
-    $pos = 0;
+    $pos = $start;
     while ($pos < $n) {
         $len = 0;
         $dist = 0;
         if ($pos + 2 < $n) {
-            $h = ((\ord($data[$pos]) << 10) ^ (\ord($data[$pos + 1]) << 5) ^ \ord($data[$pos + 2])) & 0x7FFF;
-            $cand = $head[$h] ?? -1;
+            $ap = $base + $pos;
+            $h = ((\ord($w[$pos]) << 10) ^ (\ord($w[$pos + 1]) << 5) ^ \ord($w[$pos + 2])) & 0x7FFF;
+            $cand = $c->head[$h] ?? -1;
             $chain = $maxChain;
             $max = $n - $pos;
             if ($max > 258) { $max = 258; }
-            while ($cand >= 0 && $chain > 0 && $pos - $cand <= 32768) {
+            while ($cand >= $base && $chain > 0 && $ap - $cand <= $maxDist) {
                 // Only a candidate that beats the best so far is worth measuring
                 // past its first bytes, so check the deciding byte first. $len <
                 // $max is what keeps that probe inside the string: $pos + $len is
                 // one past the current best, and the best can already reach the end.
-                if ($len === 0 || ($len < $max && $data[$cand + $len] === $data[$pos + $len])) {
+                $ci = $cand - $base;
+                if ($len === 0 || ($len < $max && $w[$ci + $len] === $w[$pos + $len])) {
                     $l = 0;
-                    while ($l < $max && $data[$cand + $l] === $data[$pos + $l]) { $l = $l + 1; }
+                    while ($l < $max && $w[$ci + $l] === $w[$pos + $l]) { $l = $l + 1; }
                     if ($l >= 3 && $l > $len) {
                         $len = $l;
-                        $dist = $pos - $cand;
+                        $dist = $ap - $cand;
                         if ($l === 258) { break; }
                     }
                 }
-                $cand = $prev[$cand] ?? -1;
+                $cand = $c->prev[$cand] ?? -1;
                 $chain = $chain - 1;
             }
-            $prev[$pos] = $head[$h] ?? -1;
-            $head[$h] = $pos;
+            $c->prev[$ap] = $c->head[$h] ?? -1;
+            $c->head[$h] = $ap;
         }
 
         if ($len >= 3) {
@@ -348,15 +420,11 @@ function __mc_zl_deflate_raw(string $data, int $level): string
             // next match cannot see it.
             for ($k = 1; $k < $len; $k++) {
                 $p = $pos + $k;
-                if ($p + 2 < $n) {
-                    $h = ((\ord($data[$p]) << 10) ^ (\ord($data[$p + 1]) << 5) ^ \ord($data[$p + 2])) & 0x7FFF;
-                    $prev[$p] = $head[$h] ?? -1;
-                    $head[$h] = $p;
-                }
+                if ($p + 2 < $n) { \__mc_zl_chain($c, $w, $p, $base + $p); }
             }
             $pos = $pos + $len;
         } else {
-            $lc = \__mc_zl_fixed_lit(\ord($data[$pos]));
+            $lc = \__mc_zl_fixed_lit(\ord($w[$pos]));
             $bb = $bb | (\__mc_zl_rev($lc[0], $lc[1]) << $bc); $bc = $bc + $lc[1];
             $pos = $pos + 1;
         }
@@ -366,21 +434,172 @@ function __mc_zl_deflate_raw(string $data, int $level): string
         }
     }
 
-    // End of block, then flush the partial byte.
     $ec = \__mc_zl_fixed_lit(256);
     $bb = $bb | (\__mc_zl_rev($ec[0], $ec[1]) << $bc); $bc = $bc + $ec[1];
-    while ($bc > 0) {
+    while ($bc >= 8) {
         if ($olen >= $cap) { $out = $out . \str_repeat("\0", $cap); $cap = $cap * 2; }
         $out[$olen] = \chr($bb & 0xFF); $olen = $olen + 1; $bb = $bb >> 8; $bc = $bc - 8;
     }
+    $c->out = $c->out . \substr($out, 0, $olen);
+    $c->bb = $bb;
+    $c->bc = $bc;
 
-    $z = \substr($out, 0, $olen);
+    $e = $base + $n - 2;
+    $c->hashed = $hp > $e ? $hp : $e;
+    if (!$final) { \__mc_zl_slide($c); }
+}
+
+/** Keep the window at 32 KiB of history once it passes 64: DEFLATE cannot reach further back. */
+function __mc_zl_slide(DeflateContext $c): void
+{
+    $n = \strlen($c->win);
+    if ($n <= 65536) { return; }
+    $drop = $n - 32768;
+    $nb = $c->base + $drop;
+    for ($p = $c->base; $p < $nb; $p++) { unset($c->prev[$p]); }
+    $c->win = \substr($c->win, $drop);
+    $c->base = $nb;
+}
+
+/** $data as BTYPE=00 blocks of at most 65535 bytes; only the last may carry BFINAL. */
+function __mc_zl_stored_block(DeflateContext $c, string $data, bool $final): void
+{
+    $n = \strlen($data);
+    $pos = 0;
+    do {
+        $len = $n - $pos;
+        if ($len > 65535) { $len = 65535; }
+        \__mc_zl_put($c, ($final && $pos + $len >= $n) ? 1 : 0, 3);
+        \__mc_zl_align($c);
+        $c->out = $c->out . \chr($len & 0xFF) . \chr(($len >> 8) & 0xFF)
+            . \chr((~$len) & 0xFF) . \chr(((~$len) >> 8) & 0xFF) . \substr($data, $pos, $len);
+        $pos = $pos + $len;
+    } while ($pos < $n);
+}
+
+/**
+ * The container header, once per stream, byte for byte what zlib writes: CMF
+ * carries the window, FLG the level class and FDICT, and FCHECK is added the
+ * way deflate.c adds it (31 when the pair is already a multiple of 31). The
+ * gzip OS byte is 3 (Unix), as in __mc_zl_wrap.
+ */
+function __mc_zl_header(DeflateContext $c): void
+{
+    if ($c->headerDone) { return; }
+    $c->headerDone = true;
+    $lv = $c->level < 0 ? 6 : $c->level;
+    $plain = $c->strategy >= 2 || $lv < 2;
+    if ($c->encoding === 15) {
+        $wbits = $c->window < 9 ? 9 : $c->window;
+        $cmf = (($wbits - 8) << 4) | 8;
+        $flevel = $plain ? 0 : ($lv < 6 ? 1 : ($lv === 6 ? 2 : 3));
+        $hdr = ($cmf << 8) | ($flevel << 6);
+        if ($c->dict !== '') { $hdr = $hdr | 0x20; }
+        $hdr = $hdr + 31 - ($hdr % 31);
+        $c->out = $c->out . \chr($hdr >> 8) . \chr($hdr & 0xFF);
+        if ($c->dict !== '') { $c->out = $c->out . \__mc_zl_be32($c->dictId); }
+    } elseif ($c->encoding === 31) {
+        $xfl = $lv === 9 ? 2 : ($plain ? 4 : 0);
+        $c->out = $c->out . "\x1f\x8b\x08\x00\x00\x00\x00\x00" . \chr($xfl) . "\x03";
+    }
+}
+
+/** A fresh stream on the same settings; the dictionary (not gzip's) is the first history. */
+function __mc_zl_reset(DeflateContext $c): void
+{
+    $c->headerDone = false;
+    $c->finished = false;
+    $c->check = $c->encoding === 15 ? 1 : 0;
+    $c->total = 0;
+    $c->win = $c->encoding === 31 ? '' : $c->dict;
+    $c->base = 0;
+    $c->head = [];
+    $c->prev = [];
+    $c->hashed = 0;
+    $c->pending = '';
+    $c->bb = 0;
+    $c->bc = 0;
+}
+
+/**
+ * One deflate_add(). NO_FLUSH buffers up to 64 KiB before coding a block; a
+ * SYNC or FULL flush closes the block and appends an empty stored one, whose
+ * LEN/NLEN are the 00 00 ff ff a permessage-deflate peer strips; FULL also
+ * forgets the history; PARTIAL appends an empty fixed block; BLOCK just closes
+ * the block. FINISH ends the stream, and the next call starts a new one, as
+ * php's does.
+ */
+function __mc_zl_deflate_core(DeflateContext $c, string $data, int $flush): string
+{
+    $c->out = '';
+    if ($c->finished) { \__mc_zl_reset($c); }
+    \__mc_zl_header($c);
+    if ($data !== '') {
+        $c->total = $c->total + \strlen($data);
+        if ($c->encoding === 31) { $c->check = \__mc_zl_crc32_update($c->check, $data); }
+        elseif ($c->encoding === 15) { $c->check = \__mc_zl_adler32_update($c->check, $data); }
+        $c->pending = $c->pending . $data;
+    }
+    $final = $flush === 4;
+    if ($flush === 0 && \strlen($c->pending) < 65536) { return $c->out; }
+    if ($c->pending !== '' || $final) {
+        $take = $c->pending;
+        $c->pending = '';
+        if ($c->level === 0) { \__mc_zl_stored_block($c, $take, $final); }
+        else { \__mc_zl_block($c, $take, $final); }
+    }
+    if ($final) {
+        \__mc_zl_align($c);
+        if ($c->encoding === 15) { $c->out = $c->out . \__mc_zl_be32($c->check); }
+        elseif ($c->encoding === 31) {
+            $c->out = $c->out . \__mc_zl_le32($c->check) . \__mc_zl_le32($c->total & 0xFFFFFFFF);
+        }
+        $c->finished = true;
+    } elseif ($flush === 2 || $flush === 3) {
+        \__mc_zl_put($c, 0, 3);
+        \__mc_zl_align($c);
+        $c->out = $c->out . "\x00\x00\xff\xff";
+        if ($flush === 3) {
+            $c->win = '';
+            $c->base = 0;
+            $c->head = [];
+            $c->prev = [];
+            $c->hashed = 0;
+        }
+    } elseif ($flush === 1) {
+        \__mc_zl_put($c, 2, 3);
+        \__mc_zl_put($c, 0, 7);
+    }
+    $r = $c->out;
+    $c->out = '';
+
+    return $r;
+}
+
+function __mc_zl_deflate_raw(string $data, int $level): string
+{
+    if ($level === 0) { return \__mc_zl_stored($data); }
+
+    $c = new DeflateContext();
+    $c->level = $level;
+    $c->maxChain = \__mc_zl_max_chain($level);
+    $z = \__mc_zl_deflate_core($c, $data, 4);
     // Incompressible input: a stored block is smaller than a Huffman-coded one,
     // and zlib makes the same choice.
     $s = \__mc_zl_stored($data);
     if (\strlen($s) < \strlen($z)) { return $s; }
 
     return $z;
+}
+
+/** How far down a hash chain to look: the whole meaning of $level here — more candidates, better matches, more time. */
+function __mc_zl_max_chain(int $level): int
+{
+    if ($level < 0) { return 128; }
+    if ($level <= 3) { return 16; }
+    if ($level <= 6) { return 128; }
+
+    return 1024;
 }
 
 /** The whole input as BTYPE=00 blocks — legal DEFLATE, and the only shape for level 0. */
@@ -409,15 +628,55 @@ function __mc_zl_stored(string $data): string
 /** Adler-32 (RFC 1950 §9): the zlib container's integrity check. */
 function __mc_zl_adler32(string $data): int
 {
-    $a = 1;
-    $b = 0;
+    return \__mc_zl_adler32_update(1, $data);
+}
+
+/**
+ * A running Adler-32: feed it the previous value (1 to start). The two sums are
+ * reduced once per 5552 bytes, zlib's NMAX — the most a 32-bit sum takes
+ * without overflowing, and far inside a 64-bit one.
+ */
+function __mc_zl_adler32_update(int $adler, string $data): int
+{
+    $a = $adler & 0xFFFF;
+    $b = ($adler >> 16) & 0xFFFF;
     $n = \strlen($data);
-    for ($i = 0; $i < $n; $i = $i + 1) {
-        $a = ($a + \ord($data[$i])) % 65521;
-        $b = ($b + $a) % 65521;
+    $i = 0;
+    while ($i < $n) {
+        $end = $i + 5552;
+        if ($end > $n) { $end = $n; }
+        while ($i < $end) {
+            $a = $a + \ord($data[$i]);
+            $b = $b + $a;
+            $i = $i + 1;
+        }
+        $a = $a % 65521;
+        $b = $b % 65521;
     }
 
     return ($b << 16) | $a;
+}
+
+/** A running CRC-32 (crc32()'s polynomial): feed it the previous value (0 to start). */
+function __mc_zl_crc32_update(int $crc, string $data): int
+{
+    static $t = [];
+    if (\count($t) === 0) {
+        for ($i = 0; $i < 256; $i = $i + 1) {
+            $c = $i;
+            for ($j = 0; $j < 8; $j = $j + 1) {
+                $c = ($c & 1) !== 0 ? (($c >> 1) ^ 0xEDB88320) : ($c >> 1);
+            }
+            $t[$i] = $c;
+        }
+    }
+    $crc = ($crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+    $n = \strlen($data);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $crc = $t[($crc ^ \ord($data[$i])) & 0xFF] ^ ($crc >> 8);
+    }
+
+    return $crc ^ 0xFFFFFFFF;
 }
 
 /** A 32-bit value, most significant byte first (the zlib checksum's order). */
@@ -636,4 +895,97 @@ function zlib_decode(string $data, int $max_length = 0)
     }
 
     return \__mc_zl_unwrap($data, $max_length, -15);
+}
+
+// ── the incremental API ────────────────────────────────────────────────
+// The flush modes are numbers for the same reason as the encodings above:
+// 0 NO_FLUSH, 1 PARTIAL, 2 SYNC, 3 FULL, 4 FINISH, 5 BLOCK.
+
+/** php's name for a value's type in a TypeError: `null`, `true`, `false`, else get_debug_type(). */
+function __mc_zl_type_name(mixed $v): string
+{
+    if ($v === null) { return 'null'; }
+    if ($v === true) { return 'true'; }
+    if ($v === false) { return 'false'; }
+
+    return \get_debug_type($v);
+}
+
+/**
+ * The options php checks, in php's order — level, memory, window, strategy,
+ * dictionary, and only then the encoding. A dictionary array is its entries
+ * each followed by NUL, as php joins it; a gzip stream ignores a dictionary,
+ * as zlib does. Window 8 is coded as 9: zlib's raw and gzip deflate refuse 8,
+ * and its zlib container quietly takes 9.
+ *
+ * @param array<string,mixed> $options
+ */
+function deflate_init(int $encoding, array $options = []): DeflateContext
+{
+    $level = \array_key_exists('level', $options) ? (int) $options['level'] : -1;
+    if ($level < -1 || $level > 9) {
+        throw new \ValueError('deflate_init(): "level" option must be between -1 and 9');
+    }
+    $memory = \array_key_exists('memory', $options) ? (int) $options['memory'] : 8;
+    if ($memory < 1 || $memory > 9) {
+        throw new \ValueError('deflate_init(): "memory" option must be between 1 and 9');
+    }
+    $window = \array_key_exists('window', $options) ? (int) $options['window'] : 15;
+    if ($window < 8 || $window > 15) {
+        throw new \ValueError('deflate_init(): "window" option must be between 8 and 15');
+    }
+    $strategy = \array_key_exists('strategy', $options) ? (int) $options['strategy'] : 0;
+    if ($strategy < 0 || $strategy > 4) {
+        throw new \ValueError('deflate_init(): "strategy" option must be one of ZLIB_FILTERED, '
+            . 'ZLIB_HUFFMAN_ONLY, ZLIB_RLE, ZLIB_FIXED, or ZLIB_DEFAULT_STRATEGY');
+    }
+    $dict = '';
+    if (\array_key_exists('dictionary', $options)) {
+        $d = $options['dictionary'];
+        if (\is_string($d)) {
+            $dict = $d;
+        } elseif (\is_array($d)) {
+            foreach ($d as $entry) {
+                $s = (string) $entry;
+                if ($s === '') {
+                    throw new \ValueError('deflate_init(): Argument #2 ($options) must not contain empty strings');
+                }
+                if (\strpos($s, "\0") !== false) {
+                    throw new \ValueError('deflate_init(): Argument #2 ($options) must not contain strings with null bytes');
+                }
+                $dict = $dict . $s . "\0";
+            }
+        } else {
+            throw new \TypeError('deflate_init(): Argument #2 ($options) must be of type zero-terminated string or array, '
+                . \__mc_zl_type_name($d) . ' given');
+        }
+    }
+    if ($encoding !== -15 && $encoding !== 15 && $encoding !== 31) {
+        throw new \ValueError('deflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, '
+            . 'ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE');
+    }
+
+    $c = new DeflateContext();
+    $c->encoding = $encoding;
+    $c->level = $level;
+    $c->window = $window < 9 ? 9 : $window;
+    $c->strategy = $strategy;
+    $c->maxChain = $strategy === 2 ? 0 : \__mc_zl_max_chain($level);
+    if ($encoding !== 31) {
+        $c->dict = $dict;
+        $c->dictId = $dict === '' ? 0 : \__mc_zl_adler32_update(1, $dict);
+    }
+    \__mc_zl_reset($c);
+
+    return $c;
+}
+
+function deflate_add(DeflateContext $context, string $data, int $flush_mode = 2): string
+{
+    if ($flush_mode < 0 || $flush_mode > 5) {
+        throw new \ValueError('deflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, '
+            . 'ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH');
+    }
+
+    return \__mc_zl_deflate_core($context, $data, $flush_mode);
 }
