@@ -4598,7 +4598,7 @@ trait EmitLlvmObjects
             // must not see (or clear) this one's mode.
             $mode = $this->strOffsetCoalesce ? 'coalesce' : 'isset';
             $this->strOffsetCoalesce = false;
-            $out = $this->emitNode($aa->array);
+            $out = $this->emitStrOffsetBase($aa->array);
             $out .= $this->coerceToPtr();
             $arr = $this->lastValue;
             $out .= $this->emitNode($aa->index);

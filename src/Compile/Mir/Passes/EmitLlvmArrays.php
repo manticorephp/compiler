@@ -219,13 +219,17 @@ trait EmitLlvmArrays
         // `$s[$i]` on a string → fresh 1-char string. Negative index counts
         // from the end; out-of-range yields "" (both handled by the helper).
         if ($aa->array->type->kind === Type::KIND_STRING) {
-            $out = $this->emitNode($aa->array);
+            // A PROBE (`empty($s[$k])`, `$s[$k] ?? d`) asks whether the offset
+            // exists, as isset does: a key php cannot use is absent, not an error.
+            // A probe that is the BASE of another string fetch (`$s['1x'][0]`)
+            // is php's IS-mode fetch instead ({@see emitStrOffsetBase}).
+            $mode = $this->strOffsetSpine ? 'coalesce' : ($aa->probe ? 'isset' : 'read');
+            $this->strOffsetSpine = false;
+            $out = $this->emitStrOffsetBase($aa->array);
             $out .= $this->coerceToPtr();
             $base = $this->lastValue;
             $out .= $this->emitNode($aa->index);
-            // A PROBE (`empty($s[$k])`, `$s[$k] ?? d`) asks whether the offset
-            // exists, as isset does: a key php cannot use is absent, not an error.
-            $out .= $this->coerceStrOffset($aa->index, $aa->probe ? 'isset' : 'read');
+            $out .= $this->coerceStrOffset($aa->index, $mode);
             $idx = $this->lastValue;
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
@@ -271,6 +275,27 @@ trait EmitLlvmArrays
      *  by the isset arm ({@see coerceStrOffset} 'coalesce'). */
     private bool $strOffsetCoalesce = false;
 
+    /** Set by {@see emitStrOffsetBase} for the probe string fetch it is about to
+     *  emit; read and cleared at the top of that fetch. */
+    private bool $strOffsetSpine = false;
+
+    /**
+     * The base of a string-offset access. When it is itself a PROBE string
+     * fetch (`isset($s['1x'][0])`, `$s['x'][0] ?? d`), php makes that inner
+     * fetch in IS mode — the `??` rules, not isset's: `"1x"` warns (so throws
+     * here), a non-numeric key is absent.
+     */
+    private function emitStrOffsetBase(Node $base): string
+    {
+        if ($base instanceof ArrayAccess_ && $base->probe
+            && $base->array->type->kind === Type::KIND_STRING) {
+            $this->strOffsetSpine = true;
+        }
+        $out = $this->emitNode($base);
+        $this->strOffsetSpine = false;
+        return $out;
+    }
+
     /**
      * The just-emitted `$index` as a string byte OFFSET (a machine int), by
      * php's rules for a string offset. A CELL index — an `int|false` strpos
@@ -290,6 +315,12 @@ trait EmitLlvmArrays
         if ($k === Type::KIND_STRING) {
             $out = $this->coerceToPtr();
             $out .= $this->boxToCell(Type::string_());
+            return $out . $this->strOffsetViaPrelude($mode);
+        }
+        // A float / bool offset is read and written after php's `String offset
+        // cast occurred` warning — thrown here — while isset / empty / `??` cast.
+        if (($k === Type::KIND_FLOAT || $k === Type::KIND_BOOL) && $mode === 'read') {
+            $out = $this->boxToCell($index->type);
             return $out . $this->strOffsetViaPrelude($mode);
         }
         if ($k !== Type::KIND_CELL) {

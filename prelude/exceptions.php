@@ -131,14 +131,17 @@ function __mir_shape_type_error(mixed $v, string $where, string $expected): void
  * integer at all is php's TypeError, and so is an array or an object. An
  * integer followed by other bytes (`"1x"`) is where php WARNS `Illegal string
  * offset` and reads the leading int — here it throws that text (where Zend
- * warns, Manticore throws). null / bool / float cast (null 0, float truncates).
+ * warns, Manticore throws). null / bool / float are the same case: php warns
+ * `String offset cast occurred` and uses the cast, so they throw that text.
+ * Only a READ or a WRITE comes here; isset / empty / `??` take the keys below.
  */
 function __mir_str_offset(mixed $k): int
 {
+    if (\is_int($k)) { return $k; }
     if (\is_array($k) || \is_object($k)) {
         throw new TypeError('Cannot access offset of type ' . (\is_object($k) ? \get_class($k) : 'array') . ' on string');
     }
-    if (!\is_string($k)) { return (int)$k; }
+    if (!\is_string($k)) { throw new TypeError('String offset cast occurred'); }
     $form = __mir_str_offset_form($k);
     if ($form === 2) {
         throw new TypeError('Cannot access offset of type string on string');
@@ -164,12 +167,16 @@ function __mir_str_offset_isset_key(mixed $k): int
 }
 
 /**
- * `$s[$k] ?? d`'s presence key: php reads it like the offset itself, except
- * that a non-numeric string is simply absent (PHP_INT_MIN, no string has it).
+ * `$s[$k] ?? d`'s presence key — and the key of every INNER fetch of an
+ * isset / empty / `??` chain (`$s['1x'][0]`), which php makes in the same
+ * mode: read like the offset itself ("1x", an array or object throws), except
+ * that a non-numeric string is simply absent (PHP_INT_MIN, no string has it)
+ * and null / bool / float cast without a warning.
  */
 function __mir_str_offset_coalesce_key(mixed $k): int
 {
     if (\is_string($k) && __mir_str_offset_form($k) === 2) { return \PHP_INT_MIN; }
+    if (!\is_string($k) && !\is_array($k) && !\is_object($k)) { return (int)$k; }
     return __mir_str_offset($k);
 }
 

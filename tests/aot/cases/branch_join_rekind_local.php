@@ -4,9 +4,11 @@
 // read with ONE representation on every path — and a cell used as a STRING
 // OFFSET must leave its box before it indexes bytes.
 //
-// Expected output is php's EXCEPT the offsetRules rows for "1x", "0x1", "1e": php
-// warns `Illegal string offset` and reads the leading int; Manticore throws that text
-// as a TypeError (where Zend warns, Manticore throws), so those rows are hand-written.
+// Expected output is php's EXCEPT where php WARNS and carries on — Manticore throws that
+// text as a TypeError (where Zend warns, Manticore throws), so these are hand-written:
+// offsetRules rows "1x", "0x1", "1e" (`Illegal string offset`), the r/w columns of the
+// null, true, false, 1.7, 2.0 rows (`String offset cast occurred`), and the "1x" row of
+// nestedProbe (php warns on the inner fetch of an isset / empty / `??` chain).
 
 function tables(): array
 {
@@ -318,6 +320,21 @@ function stringOffset(string $k): string
     try { return $s[$k] . (isset($s[$k]) ? 'y' : 'n'); } catch (\TypeError $e) { return \get_class($e) . ' ' . $e->getMessage(); }
 }
 
+// the INNER fetch of an isset / empty / `??` chain follows `??`'s rules, not isset's
+function nestedProbe(array $ks): string
+{
+    $out = '';
+    foreach ($ks as $k) {
+        $s = 'abcd';
+        $line = \json_encode($k) . ':';
+        try { $line .= ' c=' . ($s[$k][0] ?? 'D'); } catch (\TypeError $e) { $line .= ' c!' . $e->getMessage(); }
+        try { $line .= ' i=' . (isset($s[$k][0]) ? 'y' : 'n'); } catch (\TypeError $e) { $line .= ' i!' . $e->getMessage(); }
+        try { $line .= ' e=' . (empty($s[$k][0]) ? 'y' : 'n'); } catch (\TypeError $e) { $line .= ' e!' . $e->getMessage(); }
+        $out .= $line . "\n";
+    }
+    return $out;
+}
+
 // `empty` on a statically STRING-typed offset probes, it does not throw
 function stringEmpty(string $k): string
 {
@@ -343,6 +360,7 @@ echo matchAssignVec($m), "\n";
 echo matchAssignInt([10]), "\n";
 echo ternaryAssignVec($m), "\n";
 echo ternaryAssignInt([10]), "\n";
-echo offsetRules(['1', ' 1', '1 ', '01', '-1', '+1', '1x', '0x1', 'x', '', ' ', '1.5', '1.', '.5', '1e2', '1e', '9223372036854775808', null, true, false, 1.7, 2, '9', [1], new K(), new \stdClass()]);
+echo offsetRules(['1', ' 1', '1 ', '01', '-1', '+1', '1x', '0x1', 'x', '', ' ', '1.5', '1.', '.5', '1e2', '1e', '9223372036854775808', null, true, false, 1.7, 2.0, 2, '9', [1], new K(), new \stdClass()]);
 echo stringOffset('2'), ' ', stringOffset('x'), "\n";
 echo stringEmpty('1'), ' ', stringEmpty('x'), ' ', stringEmpty('1x'), ' ', stringEmpty('9'), ' ', stringEmpty('0'), "\n";
+echo nestedProbe(['1x', 'x', '1', '9', null]);

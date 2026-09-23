@@ -32,10 +32,11 @@ a10,b20,c30,ZZZdef
 "1e2": r!TypeError Cannot access offset of type string on string i=n e=y c=d w!TypeError Cannot access offset of type string on string
 "1e": r!TypeError Illegal string offset "1e" i=n e=y c!Illegal string offset "1e" w!TypeError Illegal string offset "1e"
 "9223372036854775808": r!TypeError Cannot access offset of type string on string i=n e=y c=d w!TypeError Cannot access offset of type string on string
-null: r=a i=y e=n c=a w=Zbcd
-true: r=b i=y e=n c=b w=aZcd
-false: r=a i=y e=n c=a w=Zbcd
-1.7: r=b w=aZcd
+null: r!TypeError String offset cast occurred i=y e=n c=a w!TypeError String offset cast occurred
+true: r!TypeError String offset cast occurred i=y e=n c=b w!TypeError String offset cast occurred
+false: r!TypeError String offset cast occurred i=y e=n c=a w!TypeError String offset cast occurred
+1.7: r!TypeError String offset cast occurred w!TypeError String offset cast occurred
+2: r!TypeError String offset cast occurred w!TypeError String offset cast occurred
 2: r=c i=y e=n c=c w=abZd
 "9": r= i=n e=y c=d w=abcd     Z
 [1]: r!TypeError Cannot access offset of type array on string i=n e=y c!Cannot access offset of type array on string w!TypeError Cannot access offset of type array on string
@@ -43,3 +44,8 @@ K: r!TypeError Cannot access offset of type K on string i=n e=y c!Cannot access 
 stdClass: r!TypeError Cannot access offset of type stdClass on string i=n e=y c!Cannot access offset of type stdClass on string w!TypeError Cannot access offset of type stdClass on string
 cy TypeError Cannot access offset of type string on string
 ny yn yn yn ny
+"1x": c!Illegal string offset "1x" i!Illegal string offset "1x" e!Illegal string offset "1x"
+"x": c=D i=n e=y
+"1": c=b i=y e=n
+"9": c=D i=n e=y
+null: c=a i=y e=n
