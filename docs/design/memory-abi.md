@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **8** (v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **9** (v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -228,6 +228,30 @@ Returning a value transfers ownership to the caller — the returned local is dr
 owning set before the expression is emitted, so scope-exit release skips it. By-reference
 binding forwards the slot to a shared cell and bypasses rc ops at the binding site; the
 underlying buffer stays owned by whichever local holds it.
+
+### Array elements belong to the buffer
+
+A holder's count on an array is a count on the BUFFER (`Debug::$rcBufferOnly`, on by
+default; `MANTICORE_RC_BUF_ONLY=0` restores the old model for bisecting). Every retain
+variant is `rc + 1`, every release variant is `rc - 1`, and the keys and elements are
+dropped once, when rc reaches 0 — whatever variant name (`_obj`, `_str`, `_ownel_*`) a site
+picked. The element walk at 0 is keyed by the buffer's ELEMENT HINT, and by the repr bits
+only for an unstamped buffer; every walk — release, adopt, cow — uses that same key.
+
+What that asks of everything else: a buffer must OWN the elements it holds.
+
+- A value copy adopts them: `__mir_array_copy` takes a count on each (by hint), so a caller
+  never adopts after it.
+- Anything that copies element words into another buffer takes a count on each word it
+  copies — spread (`__mir_array_spread_into`), union, `array_unshift` of a pack.
+- An argument literal whose ARRAY elements are released by the call site's argument-temp
+  list is released as a bare buffer (`vecbuf`/`assocbuf`), never as element-walking.
+
+The model it replaced let every retain co-own the elements and a proven `_ownel_` release
+give one back. That is sound only when every count on a buffer follows it, and a fresh +1
+carries no element refs of its own, so on a buffer with mixed holders the element count
+depended on which holder let go last. The extra element refs also MASKED each shallow copy
+above; each one surfaced as a premature free when they were gone.
 
 ## 6. Destructor order
 

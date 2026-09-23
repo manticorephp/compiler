@@ -1239,7 +1239,14 @@ trait EmitLlvmControl
         // {@see InsertMemoryOps::foreachValueCoOwns} can only STRAND the final
         // iteration's ref — never double-free it.
         if ($this->foreachValueOwns($fe)) {
-            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
+            // The flavor of the value var's OWN scope-exit release, not one
+            // re-derived from the element type: for an element that is itself
+            // array-of-arrays the two differ — `discardReleaseFlavor` answers the
+            // repr-mode `assoc`, the release a nested `…arrbuf` that drops the
+            // inner buffers on every call — and a plain retain paired with that
+            // release freed the inner arrays under the caller's literal
+            // (`foreach ($others as $o)` over `[['a' => [3]]]`).
+            $fvFlavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
             if ($fvFlavor !== '') {
                 $out .= $this->rcRetainReg($ev, $fvFlavor);
                 $prev = $this->ssa->allocReg();

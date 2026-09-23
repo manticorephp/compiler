@@ -141,6 +141,11 @@ carries the set across a library's `.sig` for a binding that lives in a linked `
 allowance cannot drift from the bindings, and a program that pulls in no weak binding gets no
 `-U` flags at all. GNU ld auto-binds a weak-undefined to 0, so Linux needs no flag.
 
+Never mark a binding weak only to be lenient: under `--as-needed` (the link line's own, and
+the built-in default of Alpine's and Ubuntu's `gcc`) a weak reference does not make a shared
+library *needed*. A library reached through weak bindings alone is dropped from the link and
+every call through it jumps to address 0.
+
 ### `#[Ffi\Variadic($fixed)]` — a C variadic callee
 
 `$fixed` is the number of **named** parameters, the ones before the C `...`:

@@ -7,7 +7,7 @@
 #   ./install.sh                      # from a checkout
 #
 # Two paths, in this order:
-#   * a PUBLISHED build for this platform (linux/macos × arm64/amd64), verified
+#   * a PUBLISHED build for this platform (linux/linux-musl/macos × arm64/amd64), verified
 #     against the release's SHA256SUMS. Needs no php: the compiler is native and
 #     CI already paid the bootstrap. MANTICORE_FROM_SOURCE=1 skips it.
 #   * otherwise Manticore compiles ITSELF from PHP source:
@@ -56,6 +56,16 @@ log "platform $OS/$ARCH -> prefix $PREFIX"
 # an unreachable github, a checksum that does not match.
 REL_OS=""; REL_ARCH=""
 case "$OS" in Darwin) REL_OS=macos;; Linux) REL_OS=linux;; esac
+# The C library, not the kernel, decides which Linux build starts here: a glibc
+# binary under musl fails in the loader with "not found" and nothing more.
+# musl's ldd names itself on stderr; the loader file is the fallback for a host
+# without ldd.
+MUSL=0
+if [ "$OS" = Linux ]; then
+    if { ldd --version 2>&1 || true; } | grep -qi musl || ls /lib/ld-musl-* >/dev/null 2>&1; then
+        MUSL=1; REL_OS=linux-musl
+    fi
+fi
 case "$ARCH" in arm64|aarch64) REL_ARCH=arm64;; x86_64|amd64) REL_ARCH=amd64;; esac
 
 fetch() {
@@ -150,8 +160,12 @@ have pcre2-config || soft+=("libpcre2 dev (pcre2-config) — for preg_*")
 show_hints() {
     case "$OS" in
         Darwin) echo "  xcode-select --install; brew install php pcre2 openssl@3 pkg-config" >&2;;
-        Linux)  echo "  apt-get install -y gcc libc6-dev libpcre2-dev libssl-dev pkg-config netbase php8.5-cli" >&2
-                echo "  # plus clang/LLVM >= 15 from https://apt.llvm.org" >&2;;
+        Linux)  if [ "$MUSL" = 1 ]; then
+                    echo "  apk add clang lld gcc musl-dev pcre2-dev openssl-dev pkgconf tzdata libxml2-dev php85 php85-ctype" >&2
+                else
+                    echo "  apt-get install -y gcc libc6-dev libpcre2-dev libssl-dev pkg-config netbase php8.5-cli" >&2
+                    echo "  # plus clang/LLVM >= 15 (clang-NN from the distribution archive)" >&2
+                fi;;
     esac
 }
 if [ ${#hard[@]} -gt 0 ]; then

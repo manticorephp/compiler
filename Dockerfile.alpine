@@ -5,14 +5,12 @@
 #   docker build -f Dockerfile.alpine --target toolchain -t manticore-toolchain:alpine .
 #   bash tools/docker/run_tests.sh --alpine
 #
-# Status: PREPARED, NOT GATED. docs/install.md has always said musl builds and
-# loses only a few `glob` constants (`GLOB_BRACE`, `GLOB_ONLYDIR`) and the LFS64
-# aliases, but nothing in CI has ever checked that claim. This file is what makes
-# checking it a matrix row instead of an afternoon.
-#
-# Why musl is worth preparing at all: it is the shape a statically linked, truly
-# portable output binary would take. Until the compiler grows `-static` / `-rpath`
-# that is a future, not a feature — so this stays out of the required checks.
+# A supported target: ci.yml builds and runs the suite on it per push (both
+# arches), gate.yml adds difftest, and the release publishes `:<v>-alpine` and
+# the `linux-musl` tarballs — all through the same `toolchain` and `base` stages
+# below. musl loses only a few `glob` constants (`GLOB_BRACE`, `GLOB_ONLYDIR`)
+# and the LFS64 aliases. It is also the shape a statically linked, truly
+# portable output binary would take once the compiler grows `-static`.
 ARG ALPINE_TAG=3.23
 FROM alpine:${ALPINE_TAG} AS base
 
@@ -26,13 +24,14 @@ FROM alpine:${ALPINE_TAG} AS base
 #                    ships no tz database at all, so every date_* case failed.
 #   libxml2-dev   -> prelude/xml.php binds libxml2 through FFI (`#[Library('xml2')]`),
 #                    and the dev package is what provides the linkable .so.
-#   gnu-libiconv  -> musl keeps iconv INSIDE libc and ships no libiconv.so, while
-#                    src/Runtime/Iconv.php binds `#[Library('iconv')]` by name.
+# NOT gnu-libiconv: musl keeps iconv inside libc (so no `-liconv`, as on glibc),
+# and php on Alpine answers from musl's too — //TRANSLIT included, which musl
+# does not have. The oracle is the host's php, so the binary uses the host's iconv.
 RUN apk add --no-cache \
         clang lld gcc musl-dev binutils \
         pcre2-dev openssl-dev curl-dev sqlite-dev pkgconf \
         bash file make curl ca-certificates \
-        tzdata libxml2-dev gnu-libiconv
+        tzdata libxml2-dev
 
 RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \

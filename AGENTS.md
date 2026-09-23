@@ -96,7 +96,7 @@ annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 | Monomorphization / erasure | `src/Compile/Mir/Passes/Monomorphize.php` |
 | LLVM codegen | `src/Compile/Mir/Passes/EmitLlvm.php` host + `EmitLlvm*.php` traits |
 | Codegen builtins (inline primitives) | `src/Compile/Mir/Passes/EmitLlvmBuiltins.php` |
-| Memory ABI: offsets, tags, rc encoding | `src/Compile/MemoryAbi.php` (bumping `VERSION` ⇒ `bin/build --seed`) |
+| Memory ABI: offsets, tags, rc encoding | `src/Compile/MemoryAbi.php` — a layout change still ships through a plain `bin/build` (see below) |
 | Runtime helpers emitted as IR | `src/Compile/Runtime/*.php` |
 | PHP-level stdlib | `src/Runtime/Stdlib/*.php` → `lib/manticore_stdlib.o` + `.sig` |
 | Prelude (PHP injected into every program) | `prelude/*.php` |
@@ -140,6 +140,12 @@ this way. `bin/build` preflights with `bin/manticore analyze src --only
 undefined.,parse.error` and refuses to write a library `.o` containing a trap.
 
 Corollaries:
+- **A memory-ABI change needs no seed.** The previous generation compiles the new
+  source with its OWN runtime inside the compiler (which links no stdlib), and
+  pass 2 rebuilds `lib/*.o` with the NEW binary, so no program ever mixes two
+  layouts. The seed needs php; a compiler that can only move forward through
+  Zend is not self-hosted. Verified on the v8 → v9 bump: a v8 compiler's
+  `bin/build` reached the fixpoint byte-identical to the Zend-seeded binary.
 - **New syntax has no escape.** It is unusable inside `src/` until the generation
   that parses it is installed. Never ship a parser change together with tree code
   that needs it — the previous generation cannot build the tree, and only a cold

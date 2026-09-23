@@ -645,6 +645,14 @@ final class InsertMemoryOps implements Pass
         // over-releases a `Closure` this frame did not build.
         if ($value->kind === Node::KIND_CLOSURE) { return true; }
         $tk = $value->type->kind;
+        // A `Closure`-returning method types its call `closure`, not
+        // `obj<Closure>`; the same producer rule as the object arm below.
+        if ($tk === Type::KIND_CLOSURE) {
+            $ck = $value->kind;
+            if ($ck === Node::KIND_CALL) { return !isset($this->ffiFns[$value->function]); }
+            return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
+                || $ck === Node::KIND_INVOKE;
+        }
         // A CELL counts: `f(): Foo|false` boxes a FRESH object into a cell, and
         // the +1 return convention transfers it to us exactly as for a plain
         // obj. Excluding it meant a cell local was NEVER released — the object
@@ -669,10 +677,22 @@ final class InsertMemoryOps implements Pass
             // that would otherwise be tracked as a +1 owned heap object and
             // rc_release the ordinal-as-pointer (SIGSEGV).
             if ($cls !== '' && isset($this->enums[$cls])) { return false; }
-            // Closures have no rc header (struct is [fn_ptr, captures...]).
-            // Both the synthesized `__closure_N` and a `\Closure`-typed slot
-            // (class "Closure") hold such a header-less struct.
-            if ($cls === 'Closure' || \str_starts_with($cls, '__closure_')) { return false; }
+            // A closure env carries its own lifetime header
+            // ({@see EmitLlvmCalls::emitClosure}), and a call hands one back
+            // under the same +1 return convention an object rides: the callee
+            // retains a borrowed closure it returns
+            // ({@see EmitLlvmModule::isBorrowedObjReturn}), a returned owned
+            // local transfers. So a call / invoke producer is owned; any other
+            // (an alias, a property or element read) stays a borrow. Refusing
+            // them all meant a closure that left the frame that built it —
+            // returned, then dropped — was never released, nor was anything
+            // it captured.
+            if ($cls === 'Closure' || \str_starts_with($cls, '__closure_')) {
+                $ck = $value->kind;
+                if ($ck === Node::KIND_CALL) { return !isset($this->ffiFns[$value->function]); }
+                return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
+                    || $ck === Node::KIND_INVOKE;
+            }
             // Ffi\Ptr is an opaque foreign pointer (FILE*/DIR*/raw addr) with
             // no rc header — rc-releasing it frees libc memory and aborts.
             if ($cls === 'Ffi\\Ptr') { return false; }
@@ -1004,7 +1024,8 @@ final class InsertMemoryOps implements Pass
     {
         $k = $t->kind;
         return $k === Type::KIND_OBJ || $k === Type::KIND_ARRAY
-            || $k === Type::KIND_STRING || $k === Type::KIND_CELL;
+            || $k === Type::KIND_STRING || $k === Type::KIND_CELL
+            || $k === Type::KIND_CLOSURE;
     }
 
     /** A store that neither owns nor borrows: a string LITERAL (immortal, `rc <

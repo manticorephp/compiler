@@ -38,9 +38,10 @@ The `-dev` / `-devel` half matters: the headers are what the build looks for, no
 the runtime library. It is also what carries the unversioned `lib<name>.so` symlink
 a `-l<name>` resolves against — a runtime `libxml2.so.2` on its own does not link.
 
-**Platforms:** macOS (arm64 / x86_64) and Linux (glibc ≥ 2.33, arm64 / x86_64). Each
-builds the compiler and passes the full suite including the self-host fixpoint. Alpine
-(musl) builds; see [`docs/install.md`](docs/install.md) for the current caveats.
+**Platforms:** macOS (arm64 / x86_64) and Linux (glibc ≥ 2.34 or musl / Alpine, arm64 /
+x86_64). Each builds the compiler and passes the full suite including the self-host
+fixpoint; Alpine has its own image tag (`:alpine`) and `linux-musl` tarballs. See
+[`docs/install.md`](docs/install.md).
 
 ```bash
 # macOS

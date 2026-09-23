@@ -9,7 +9,7 @@
 #   bash tools/docker/run_tests.sh                 # arm64
 #   bash tools/docker/run_tests.sh --amd64         # amd64 (emulated)
 #   bash tools/docker/run_tests.sh --both
-#   bash tools/docker/run_tests.sh --alpine        # musl (PREPARED, not gated)
+#   bash tools/docker/run_tests.sh --alpine        # musl (Alpine) instead of glibc
 #   bash tools/docker/run_tests.sh --shell         # drop into the container
 #   bash tools/docker/run_tests.sh --cold          # ignore the self-host cache
 #   bash tools/docker/run_tests.sh -k http_workers # ONE case (or a substring)

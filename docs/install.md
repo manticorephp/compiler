@@ -34,9 +34,9 @@ the Zend seed is only the cold first boot. Knobs: `MANTICORE_HOME`,
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
 (build a local checkout instead of cloning).
 
-A published tarball is built on **Debian 12** (glibc 2.36) even though the
-development image tracks Debian 13: a release has to run on the distribution
-someone already has, and glibc is backwards compatible, not forwards.
+Published Linux builds are made on **Debian 12** (glibc 2.36), which is also what
+development and CI use: a release has to run on the distribution someone already
+has, and glibc is backwards compatible, not forwards.
 
 ### Via Composer
 
@@ -106,10 +106,21 @@ Nothing the compiler emits ever calls into a PHP runtime.
   bookworm's stock clang is 14, so it cannot build Manticore.
 - **PHP 8.5 for the seed.** 8.5 is Manticore's *target* language version. An
   older Zend seed disagrees with the source it is compiling.
-- **glibc ≥ 2.33.** Manticore binds plain `stat` / `lstat` / `fstat` by name.
-  glibc only began exporting those in 2.33 — before that it exported just
-  `__xstat` / `__lxstat` / `__fxstat`. Ubuntu 20.04 (glibc 2.31) therefore
-  cannot link. Ubuntu 22.04, Debian 12 and Alpine can.
+- **glibc ≥ 2.34**, measured rather than assumed: `readelf -V` on a released
+  binary reports `GLIBC_2.34` as the highest symbol version it references. The
+  floor starts with `stat` / `lstat` / `fstat`, which manticore binds by name and
+  glibc only began exporting in 2.33 (before that it was `__xstat` / `__lxstat` /
+  `__fxstat`), and 2.34 is where the rest of what it uses settles. Ubuntu 20.04
+  (2.31) and Debian 11 (2.31) therefore cannot run it; RHEL 9 (2.34) is exactly
+  at the floor; Ubuntu 22.04 (2.35) and Debian 12 (2.36) have room.
+
+  ⚠ **The floor is the symbol versions a binary REFERENCES, not the glibc of the
+  machine that built it.** This is worth stating because we got it wrong in the
+  other direction: a compiler built on trixie (glibc 2.41) was expected to be
+  unusable on bookworm (2.36), and it ran there without complaint — it asks for
+  nothing newer than 2.34. Building on the older base is still the right default,
+  because it makes the floor a property of the build rather than of whichever
+  symbols a release happened not to touch.
 
 ---
 
@@ -167,7 +178,7 @@ cases red on both arches — a dependency held up by an accident.
 
 ```bash
 apk add clang lld gcc musl-dev binutils pcre2-dev openssl-dev curl-dev sqlite-dev \
-        pkgconf bash file make \
+        pkgconf bash file make tzdata libxml2-dev \
         php85 php85-ctype php85-mbstring php85-tokenizer php85-openssl \
         php85-phar php85-session php85-posix php85-iconv php85-fileinfo \
         php85-curl php85-pdo_sqlite
@@ -178,12 +189,26 @@ alone has no **ctype**, and the Zend seed dies on the first line of the bootstra
 `Call to undefined function ctype_digit()`. Everything after `php85-mbstring` above is
 what Debian's `php8.5-cli` bundles and Alpine does not.
 
+`tzdata` because Alpine ships no zone database and the date functions read
+`/usr/share/zoneinfo` directly; `libxml2-dev` for the `libxml2.so` link symlink, as on
+Debian. The prebuilt route is shorter: `docker pull ghcr.io/manticorephp/compiler:alpine`,
+or install.sh, which notices musl and fetches the `linux-musl` tarball.
+
 `Dockerfile.alpine` is this list, as the same four stages as the Debian image, and
 `bash tools/docker/run_tests.sh --alpine` runs the usual gate against it (its own image
 tag and its own compiler-cache volume — a glibc binary does not run in a musl
-container). It is **prepared, not gated**: `gate.yml` carries it as an opt-in
-`workflow_dispatch` input marked `continue-on-error`, because nothing had ever checked
-the claim below until that button existed.
+container). CI runs it on every push, on both arches, next to the glibc rows, and the
+release publishes it.
+
+Where the C library itself answers differently, the answer is the host's php, not
+glibc's: musl's iconv has no `//TRANSLIT` or `//IGNORE`, php on Alpine returns `false`
+for both, and so does a Manticore binary there. A case whose output depends on it keeps
+a `tests/aot/expected/<name>.musl.out`.
+
+musl was also the first allocator to refuse three memory bugs glibc had been quietly
+absorbing (a nested write through a referenced element, a foreach value over arrays of
+arrays, a scalar read off a freed temp) — worth remembering the next time a case is red
+only here.
 
 musl exports plain `stat`/`lstat`/`fstat` and has `glob`/`globfree`, but lacks
 `GLOB_BRACE`, `GLOB_ONLYDIR` and the LFS64 aliases (`stat64`) — a few filesystem
@@ -197,9 +222,9 @@ functions degrade accordingly.
 |---|---|
 | macOS arm64 | **supported** — the primary development and gate platform |
 | macOS x86_64 | **supported** |
-| Linux glibc ≥ 2.33 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
-| Linux glibc < 2.33 (e.g. Ubuntu 20.04) | **unsupported** — cannot link `stat` |
-| Linux musl / Alpine | **prepared, not gated** — builds, minus some `glob` constants; `Dockerfile.alpine` + `run_tests.sh --alpine`, and an opt-in `gate.yml` job |
+| Linux glibc ≥ 2.34 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
+| Linux glibc < 2.34 (e.g. Ubuntu 20.04, Debian 11) | **unsupported** — cannot link `stat` |
+| Linux musl / Alpine (arm64 / x86_64) | **supported** — full build + suite per push; `:alpine` image and `linux-musl` tarballs; minus some `glob` constants |
 
 Both macOS and Linux build the compiler from the cold Zend seed, self-host
 (`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite
@@ -247,11 +272,11 @@ php lives in `toolchain` and not in `base` on purpose: the shipped compiler is a
 native binary and never asks for an interpreter, so `runtime` branches off
 `base` and carries none.
 
-The base is `ARG DEBIAN_TAG=13`. Release tarballs are built with
-`--build-arg DEBIAN_TAG=12` (glibc 2.36) — glibc is backwards compatible and not
-forwards, so shipping from the newest base would mean running only on the newest
-distributions. `Dockerfile.alpine` is the musl counterpart, with the same four
-stages.
+The base is `ARG DEBIAN_TAG=12` (bookworm, glibc 2.36) for development, CI and
+releases alike. One base is not tidiness: glibc is backwards compatible and not
+forwards, so a compiler published from a newer base cannot seed a build on an
+older one — split bases split the seed chain. `Dockerfile.alpine` is the musl
+counterpart, with the same four stages.
 
 To run the libc probes and the AOT suite in a container, see
 [`tools/docker/README.md`](../tools/docker/README.md).
@@ -271,7 +296,7 @@ diagnostic format; it prints the raw linker output when that happens, so file
 that output as a bug.
 
 **`undefined reference to '__xstat'` / missing `stat`** at link — glibc older
-than 2.33. See the hard floors above.
+than 2.34. See the hard floors above.
 
 **`pcre2-config: command not found`** or link errors mentioning `-lpcre2-8` —
 install the PCRE2 *development* package (`libpcre2-dev`, `pcre2-dev`, or

@@ -239,6 +239,7 @@ trait InferNodes
         // The two readers below consult this set directly.
         $this->refCellLocalsCur = [];
         $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
         // A `static $x;` whose stores are scalar rides a CELL for the same
         // reason a ref-taken slot does: its null start must stay observable
         // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.

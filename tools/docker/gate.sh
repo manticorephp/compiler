@@ -37,6 +37,9 @@
 #   MC_COMPILER_CACHE writable directory holding a compatible self-hosted
 #                    compiler (optional; unset means always cold-seed)
 #   MC_COLD=0|1      ignore a compiler cache and force the Zend cold seed
+#   MC_SUITE=0|1     0 = build and install_smoke only, no AOT suite. What the
+#                    release asks for: CI has already run the suite against that
+#                    commit, and a second run is a slower release, not new news.
 #
 # Exit 0 only if every stage it ran passed.
 set -uo pipefail
@@ -51,6 +54,7 @@ MC_WORK="${MC_WORK:-/build}"
 MC_LOGDIR="${MC_LOGDIR:-$MC_WORK}"
 MC_COMPILER_CACHE="${MC_COMPILER_CACHE:-}"
 MC_COLD="${MC_COLD:-0}"
+MC_SUITE="${MC_SUITE:-1}"
 
 mkdir -p "$MC_WORK" "$MC_LOGDIR"
 
@@ -250,19 +254,29 @@ install_rc=$?
 tail -5 "$MC_LOGDIR/install_smoke.log"
 
 echo
-if [ -n "${MC_FILTER:-}" ]; then
+suite_rc=0
+if [ "$MC_SUITE" != "1" ]; then
+    # The release asks for this: it builds a compiler from a commit CI has
+    # already run the suite against, and running it a second time buys a slower
+    # release and no new information. install_smoke above still runs, because it
+    # asks about the artifact being shipped rather than about the tree.
+    echo "=== suite skipped (MC_SUITE=0) — this build is not a verdict on the tree ==="
+    SUITE_LABEL=skipped
+elif [ -n "${MC_FILTER:-}" ]; then
     echo "=== tests/aot/run.sh (-k $MC_FILTER, -j $MC_JOBS) — NOT the gate ==="
     MC_JOBS="$MC_JOBS" bash tests/aot/run.sh -k "$MC_FILTER" > "$MC_LOGDIR/suite.log" 2>&1
+    suite_rc=$?
+    tail -15 "$MC_LOGDIR/suite.log"
 else
     echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
     MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
+    suite_rc=$?
+    tail -15 "$MC_LOGDIR/suite.log"
 fi
-suite_rc=$?
-tail -15 "$MC_LOGDIR/suite.log"
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=$suite_rc install_smoke=$install_rc ==="
+    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc ==="
     [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] || exit 1
     exit 0
 fi
@@ -288,6 +302,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=$suite_rc install_smoke=$install_rc difftest=$diff_rc fixpoint=$fix_rc ==="
+echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc difftest=$diff_rc fixpoint=$fix_rc ==="
 [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0

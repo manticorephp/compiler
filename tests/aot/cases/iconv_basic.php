@@ -21,6 +21,8 @@ echo iconv("Windows-1252", "UTF-8", $cp), "\n";
 // ITSELF the same way: glibc renders "na\u{ef}ve caf\u{e9}" as `naive cafe`,
 // macOS libiconv as `na\"ive caf'e`. Both are the host library speaking, so
 // the expectation is split — expected/iconv_basic.linux.out carries glibc's.
+// musl's iconv has neither //TRANSLIT nor //IGNORE: php on Alpine answers
+// false for both, and so do we (expected/iconv_basic.musl.out).
 echo iconv("UTF-8", "ASCII//TRANSLIT", "na\u{ef}ve caf\u{e9}"), "\n";
 echo iconv("UTF-8", "ASCII//IGNORE", "a\u{e9}b"), "\n";
 

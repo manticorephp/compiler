@@ -1,7 +1,7 @@
 # What a release IS: a container image on GitHub's registry (ghcr.io), and
 # per-platform tarballs on the GitHub release. Nothing else is published, and
-# nothing is published from a cache — every artifact here is cold-seeded from the
-# tagged source, so a release owes nothing to a compiler already lying around.
+# nothing is published from a compiler nobody tested — the seed is the previous
+# release, and the Zend bootstrap is what brings a platform up the first time.
 #
 # The image is the primary artifact and the tarball is the secondary one, for a
 # reason worth writing down: the compiler shells out to `clang` to assemble its
@@ -35,7 +35,7 @@ env:
 
 jobs:
   linux:
-    name: linux-${{ matrix.arch }}
+    name: linux-${{ matrix.tag }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -43,12 +43,32 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # Two C libraries, one row each per arch. `tag` names everything a row
+      # produces — the images (`<v>-alpine-arm64`), the seed it starts from and
+      # the artifact — and `os` is the tarball's platform, which install.sh picks
+      # by asking the host's loader: a glibc binary does not start under musl.
       matrix:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
+            tag: arm64
+            dockerfile: Dockerfile
+            os: linux
           - arch: amd64
             runner: ubuntu-latest
+            tag: amd64
+            dockerfile: Dockerfile
+            os: linux
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: alpine-arm64
+            dockerfile: Dockerfile.alpine
+            os: linux-musl
+          - arch: amd64
+            runner: ubuntu-latest
+            tag: alpine-amd64
+            dockerfile: Dockerfile.alpine
+            os: linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -66,51 +86,101 @@ jobs:
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # DEBIAN_TAG=12, while ci.yml and the development image track 13. glibc is
-      # backwards compatible and not forwards: a binary built against 2.41 (trixie)
-      # refuses to start on 2.36 (bookworm), so a release built on the newest base
-      # would run only on the newest distributions. The two axes are separate —
-      # develop on the fresh toolchain, ship against the older floor — and this is
-      # the whole of the difference, one build arg.
-      - name: Build the runtime image
+      # The toolchain, not `runtime`: `runtime` reaches it through the `build`
+      # stage, which cold-seeds from source, and a release has no business paying
+      # for a bootstrap. It self-hosts from the compiler CI published, exactly as
+      # every other build here does — the Zend seed stays as the recovery path
+      # for the case where nothing compatible has ever been published.
+      - name: Build the toolchain image
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: runtime
-          build-args: |
-            DEBIAN_TAG=12
-          tags: manticore-runtime:${{ matrix.arch }}
+          file: ${{ matrix.dockerfile }}
+          target: toolchain
+          tags: manticore-toolchain:${{ matrix.tag }}
           load: true
-          cache-from: type=gha,scope=release-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.tag }}
+
+      # The previous release first, `:main` second. Both are built on the same
+      # base as this one — there is only one base now, which is what makes a
+      # published compiler usable as a seed at all: glibc is backwards compatible
+      # and not forwards, so a trixie compiler could never have seeded a bookworm
+      # build, and while the bases differed the release had nothing to start from.
+      - name: Fetch a seed
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for tag in latest-${{ matrix.tag }} main-${{ matrix.tag }}; do
+            if docker pull -q "$IMAGE:$tag" 2>/dev/null; then
+              cid="$(docker create "$IMAGE:$tag")"
+              mkdir -p seed
+              docker cp "$cid:/opt/manticore/bin" seed/bin
+              docker cp "$cid:/opt/manticore/lib" seed/lib
+              docker rm "$cid" > /dev/null
+              chmod -R 777 seed
+              echo "seed: $IMAGE:$tag"
+              break
+            fi
+          done
+          [ -d seed ] || echo "seed: nothing published for ${{ matrix.tag }} — the Zend bootstrap it is, once"
+
+      # gate.sh, so the release builds the compiler the same way everything else
+      # does. MC_SUITE=0: CI has already run the suite against this commit, and a
+      # second run makes the release slower without making it truer. What it does
+      # keep is install_smoke, which asks about the artifact rather than the tree.
+      - name: Build the compiler
+        run: |
+          mkdir -p out logs seed && chmod -R 777 out logs seed
+          docker run --rm \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/logs":/logs \
+            -v "$PWD/out":/compiler-cache \
+            -v "$PWD/seed":/seed:ro \
+            -e MC_SUITE=0 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMPILER_CACHE=/compiler-cache \
+            -e MC_SEED_DIR=/seed \
+            -e MC_COMMIT="${GITHUB_REF_NAME} ${GITHUB_SHA::12}" \
+            manticore-toolchain:${{ matrix.tag }} \
+            /bin/bash /repo/tools/docker/gate.sh
+
+      # Same assembly as a push publishes: the base stage plus the artifacts that
+      # were just built. One definition of what the shipped image contains.
+      - name: Assemble the release image
+        run: |
+          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
+          docker build -f tools/docker/Dockerfile.publish \
+            --build-arg BASE=manticore-base:local \
+            -t manticore-runtime:${{ matrix.tag }} out
 
       # The version lives in one `puts()` in Main.php, so a tag can disagree with
       # the binary it ships. Catch that here rather than in a user's bug report.
       - name: The binary agrees with the tag
         if: github.ref_type == 'tag'
         run: |
-          got="$(docker run --rm manticore-runtime:${{ matrix.arch }} manticore version)"
+          got="$(docker run --rm manticore-runtime:${{ matrix.tag }} manticore version)"
           want="manticore ${{ steps.v.outputs.version }}"
           echo "binary: $got"
           [ "$got" = "$want" ] || { echo "tag says '$want' — see Main.php cmd_version" >&2; exit 1; }
 
       # Compile something THROUGH the image, the way a user would: bind mount,
       # bare `manticore` off $PATH, and a stdlib function that only links when
-      # the prelude and manticore_stdlib.o were both found.
+      # the prelude and manticore_stdlib.o were both found. The program runs in
+      # the image too: a musl binary does not start on the runner's glibc.
       - name: Smoke the image
         run: |
           mkdir -p smoke && printf '<?php\necho str_pad("ok", 4, "!"), "\\n";\n' > smoke/app.php
           docker run --rm -v "$PWD/smoke":/work -u "$(id -u):$(id -g)" \
-            manticore-runtime:${{ matrix.arch }} manticore compile app.php -o app
-          got="$(./smoke/app)"
+            manticore-runtime:${{ matrix.tag }} manticore compile app.php -o app
+          got="$(docker run --rm -v "$PWD/smoke":/work manticore-runtime:${{ matrix.tag }} ./app)"
           [ "$got" = "ok!!" ] || { echo "smoke printed '$got'" >&2; exit 1; }
 
       # bin/ + lib/ exactly as the image lays them out, so the tarball and the
       # image ship one layout and Main.php's <exe>/../lib lookup holds in both.
       - name: Tarball
         run: |
-          name="manticore-${{ steps.v.outputs.version }}-linux-${{ matrix.arch }}"
-          cid="$(docker create manticore-runtime:${{ matrix.arch }})"
+          name="manticore-${{ steps.v.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
+          cid="$(docker create manticore-runtime:${{ matrix.tag }})"
           mkdir -p "dist/$name"
           docker cp "$cid:/opt/manticore/bin" "dist/$name/bin"
           docker cp "$cid:/opt/manticore/lib" "dist/$name/lib"
@@ -124,13 +194,20 @@ jobs:
         if: steps.v.outputs.publish == 'true'
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag manticore-runtime:${{ matrix.arch }} \
-            "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
-          docker push "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
+          docker tag manticore-runtime:${{ matrix.tag }} \
+            "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.tag }}"
+          docker push "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.tag }}"
+          # The per-arch `latest` exists for the NEXT release to seed from: a
+          # multi-arch `:latest` cannot be extracted on one machine, and the seed
+          # has to be this architecture.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            docker tag manticore-runtime:${{ matrix.tag }} "$IMAGE:latest-${{ matrix.tag }}"
+            docker push "$IMAGE:latest-${{ matrix.tag }}"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tarball-linux-${{ matrix.arch }}
+          name: tarball-linux-${{ matrix.tag }}
           path: dist/*.tar.gz
 
   macos:
@@ -154,10 +231,39 @@ jobs:
             echo "version=0.0.0-dev.${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
           fi
 
-      # Cold, like the image: a release is built from the tagged source by the
-      # interpreter, never from a cached compiler.
-      - name: Cold seed
-        run: bin/compile
+      # Warm, like the image, and from the only macOS artifact that exists: the
+      # previous release's tarball. There is no image to seed from here, and a
+      # runner keeps nothing between runs, so the published tarball IS the chain.
+      # The Zend bootstrap remains underneath for the first release on a platform,
+      # which is the one time it is unavoidable.
+      - name: Build the compiler
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$prev" ] && gh release download "$prev" -p '*macos-arm64.tar.gz' -D seed 2>/dev/null; then
+            tar -xzf seed/*.tar.gz -C seed
+            d=""
+            for c in seed/manticore-*/; do [ -d "$c" ] && d="$c" && break; done
+            if [ -n "$d" ]; then
+              mkdir -p bin lib
+              cp "$d/bin/manticore" bin/manticore && chmod +x bin/manticore
+              cp -R "$d/lib/." lib/
+              # Downloaded and unsigned: Gatekeeper would refuse to execute it,
+              # and the refusal names nothing that would fix it.
+              xattr -d com.apple.quarantine bin/manticore 2>/dev/null || true
+              if bin/manticore version > /dev/null 2>&1 && bin/build; then
+                echo "warm: self-hosted from $prev"
+              else
+                echo "warm: $prev could not build this tree — falling back"
+                rm -rf bin/manticore bin/.manticore.prev lib
+              fi
+            fi
+          fi
+          if [ ! -x bin/manticore ]; then
+            echo "cold: nothing published for macOS yet — the Zend bootstrap, once"
+            bin/compile
+          fi
 
       - name: Installed layout holds
         run: bash tools/install_smoke.sh
@@ -201,15 +307,25 @@ jobs:
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           v="${{ steps.v.outputs.version }}"
           docker buildx imagetools create -t "$IMAGE:$v" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
+          # musl rides beside glibc as a SUFFIXED tag, the way the official
+          # images spell it: `:0.12.0-alpine`, `:alpine`.
+          docker buildx imagetools create -t "$IMAGE:$v-alpine" \
+            "$IMAGE:$v-alpine-arm64" "$IMAGE:$v-alpine-amd64"
           # `latest` follows tags only: a dispatch build must never become it.
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
+            docker buildx imagetools create -t "$IMAGE:alpine" \
+              "$IMAGE:$v-alpine-arm64" "$IMAGE:$v-alpine-amd64"
           fi
           docker buildx imagetools inspect "$IMAGE:$v"
+          docker buildx imagetools inspect "$IMAGE:$v-alpine"
 
+  # Runs on a dispatch too, and stops one step short of publishing there: the
+  # notes below are shell that had never executed anywhere, and a dry run that
+  # skipped this job would have proved the images and the tarballs while leaving
+  # the one unexercised part to fail AFTER a real tag had pushed them.
   release:
     needs: [linux, macos]
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -234,7 +350,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          # On a dispatch there is no tag, so the range ends at the commit and
+          # the version is the dev stamp the build jobs used.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+            head="$GITHUB_REF_NAME"
+          else
+            v="0.0.0-dev.${GITHUB_SHA::12}"
+            head="$GITHUB_SHA"
+          fi
 
           # NOT `gh release create --generate-notes`: that builds the list from
           # merged PRs, and this tree is pushed to directly — 144 commits since
@@ -245,10 +369,10 @@ jobs:
           # summary line and the rationale stays in the history where it belongs.
           prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "$prev" ]; then
-            range="$prev..$GITHUB_REF_NAME"
+            range="$prev..$head"
             since="since \`$prev\`"
           else
-            range="$GITHUB_REF_NAME"
+            range="$head"
             since="all of it"
           fi
           git log --no-merges --pretty='%s' "$range" \
@@ -265,23 +389,43 @@ jobs:
           docker run --rm -v "\$PWD":/work -u "\$(id -u):\$(id -g)" \\
               $IMAGE:$v manticore compile app.php -o app
 
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.sh | sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/install.sh | bash
           \`\`\`
 
           The tarballs carry the compiler and its stdlib, not a toolchain: manticore
           assembles its IR with \`clang\` and links with \`cc\`, against the host's
           pcre2, openssl, sqlite3 and curl. install.sh checks for those and says
           which are missing. The image carries the toolchain it was built with.
+          On Alpine (musl) use \`$IMAGE:$v-alpine\` or the \`linux-musl\` tarball —
+          install.sh picks it by itself.
 
-          Built cold from \`${GITHUB_REF_NAME}\` — no cached compiler took part.
+          Built cold from \`$head\` — no cached compiler took part.
 
           ## Changes ($count commits, $since)
 
           $changes
 
-          **Full log:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev:-$GITHUB_REF_NAME}...${GITHUB_REF_NAME}
+          **Full log:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev:-$head}...${head}
           EOF
           )"
+          # A dispatch stops here: everything above has run — the range, the
+          # subjects, the heredoc — and the notes go to the run summary so they
+          # can be read before a tag makes them public.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            {
+              echo "## Dry run — the notes a tag would publish"
+              echo
+              echo "$notes"
+              echo
+              echo '### Files'
+              echo '```'
+              ls -la dl/
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "dry run: nothing published"
+            exit 0
+          fi
+
           # Both ways in: pushing the tag alone (this job then creates the
           # release), and clicking "Create release" in the UI (which creates the
           # tag, fires this workflow, and leaves a release already sitting there

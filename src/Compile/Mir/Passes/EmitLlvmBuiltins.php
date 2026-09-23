@@ -816,7 +816,14 @@ trait EmitLlvmBuiltins
         if (!$t->isVec() && !$t->isAssoc()) { return ''; }
         $el = $t->element;
         if ($el === null || $el->kind === Type::KIND_CELL
-            || $el->kind === Type::KIND_UNKNOWN) { return ''; }
+            || $el->kind === Type::KIND_UNKNOWN) {
+            // Boxed flat — the same buffer under a tag. A borrow of the
+            // caller's value stays the caller's, but a FRESH one (a literal, a
+            // call's return) had no owner but this call site, exactly as the
+            // string arm above says: `f(['k', new D])` into a `mixed` param
+            // leaked the literal and everything in it.
+            if ($src === null || $this->freshRcArgFlavor($src) === '') { return ''; }
+        }
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
         return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
@@ -5993,7 +6000,16 @@ trait EmitLlvmBuiltins
             if ($cellBase) {
                 $out .= $this->retainCellPayload($c->args[$i]);
                 $out .= $this->boxToCell($c->args[$i]->type, $c->args[$i]);
-                $vals[] = $this->lastValue;
+                // …and into a buffer that IS a cell buffer: the base's buffer
+                // may still be raw-hinted (`["last"]` flat-boxed into a `mixed`
+                // slot), and a boxed word among raw ones is read by the hint —
+                // the element drop released the tagged word as a string.
+                // `__mir_elem_encode` cellifies it in place, as an element
+                // store does ({@see EmitLlvmArrays::emitElemEncode}).
+                $enc = $this->ssa->allocReg();
+                $out .= '  ' . $enc . ' = call i64 @__mir_elem_encode(ptr ' . $cur . ', i64 '
+                      . $this->lastValue . ")\n";
+                $vals[] = $enc;
                 $i = $i + 1;
                 continue;
             }
@@ -8026,18 +8042,39 @@ trait EmitLlvmBuiltins
             $keyIsString = !$keyIsCell
                 && ($arrNode->index->type->kind === Type::KIND_STRING
                     || $arrNode->index->kind === Node::KIND_STRING_CONST);
+            // The parent's slot may hold a REFERENCE (`$v = [&$b]; $v[0][] = 2`):
+            // the inner array was reached THROUGH it, so it goes back through it
+            // too, the way a plain element store does ({@see emitElemWriteThrough}).
+            // A bare set replaced the binding with the buffer — the reference was
+            // lost, and the buffer, now in two slots on one count, freed twice.
+            // Only a cell-elemented parent can hold a REF cell.
+            $throughRef = $innerCell && $this->rt->needsRefCells;
+            $outerWrote = $this->elemWroteThroughRef;
             $parent2 = $this->ssa->allocReg();
             if ($keyIsCell) {
                 $this->rt->needsCellKey = true;
                 $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToI64();
                 $key = $this->lastValue;
+                if ($throughRef) {
+                    $cur = $this->ssa->allocReg();
+                    $out .= '  ' . $cur . ' = call i64 @__mir_array_get_cell(ptr ' . $parentPtr . ', i64 ' . $key . ")\n";
+                    $out .= $this->emitElemWriteThrough($cur, $valI);
+                    $valI = $this->elemValReg;
+                }
                 $out .= '  ' . $parent2 . ' = call ptr @__mir_array_set_cell(ptr '
                       . $parentPtr . ', i64 ' . $key . ', i64 ' . $valI . ")\n";
             } elseif ($keyIsString) {
                 $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToPtr();
                 $key = $this->lastValue;
+                if ($throughRef) {
+                    $cur = $this->ssa->allocReg();
+                    $out .= '  ' . $cur . ' = call i64 @__mir_array_get_str(ptr ' . $parentPtr . ', ptr ' . $key
+                          . $this->litKeyHashArgs($arrNode->index) . ")\n";
+                    $out .= $this->emitElemWriteThrough($cur, $valI);
+                    $valI = $this->elemValReg;
+                }
                 $out .= '  ' . $parent2 . ' = call ptr @__mir_array_set_str(ptr '
                       . $parentPtr . ', ptr ' . $key . ', i64 ' . $valI
                       . $this->litKeyHashArgs($arrNode->index) . ")\n";
@@ -8045,9 +8082,16 @@ trait EmitLlvmBuiltins
                 $out .= $this->emitNode($arrNode->index);
                 $out .= $this->coerceToI64();
                 $idx = $this->lastValue;
+                if ($throughRef) {
+                    $cur = $this->ssa->allocReg();
+                    $out .= '  ' . $cur . ' = call i64 @__mir_array_get_int(ptr ' . $parentPtr . ', i64 ' . $idx . ")\n";
+                    $out .= $this->emitElemWriteThrough($cur, $valI);
+                    $valI = $this->elemValReg;
+                }
                 $out .= '  ' . $parent2 . ' = call ptr @__mir_array_set_int(ptr '
                       . $parentPtr . ', i64 ' . $idx . ', i64 ' . $valI . ")\n";
             }
+            $this->elemWroteThroughRef = $outerWrote;
             $out .= $this->vecWriteBack($arrNode->array, $parent2, $parentCell);
             return $out;
         }
