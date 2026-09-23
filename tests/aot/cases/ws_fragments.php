@@ -3,7 +3,7 @@
 // Reassembly: a control frame between two fragments is answered at once and
 // does not break the message; a 3-fragment binary message crossing the 64 KiB
 // length form; an empty fragmented text message. The server answers each
-// message with "<length>:<first 8 bytes>".
+// message with "<t|b><length>:<first 8 bytes>".
 
 use function Async\async;
 use function Async\spawn;
@@ -85,7 +85,7 @@ async(function () use ($server, $port) {
         $server->serve(function (\Http\Request $req): \Http\Response {
             return WS\upgrade($req, function (WS\Connection $ws): void {
                 foreach ($ws as $m) {
-                    $ws->send(strlen($m->data) . ':' . substr($m->data, 0, 8));
+                    $ws->send(($m->binary ? 'b' : 't') . strlen($m->data) . ':' . substr($m->data, 0, 8));
                 }
             });
         });

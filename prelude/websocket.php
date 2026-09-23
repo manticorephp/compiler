@@ -229,17 +229,26 @@ function timedOut(\Resource $s): bool
  * (one at a time); writes may come from any task and are serialized, so a
  * broadcaster never interleaves two frames. The connection is kept alive only
  * while someone reads it: the read timeout IS the ping timer.
+ *
+ * A Close started outside the reading task never reads: it sends the frame
+ * and arms a closeTimeout deadline in the connection's scope. A parked reader
+ * sees the peer's answer; if none comes in time, the deadline shuts the socket
+ * down, which wakes that reader with EOF (or, with no reader, ends it there).
  */
 final class Connection implements \IteratorAggregate
 {
     private FrameParser $parser;
     private ?\Async\Mutex $wlock = null;
+    private ?\Async\TaskGroup $scope = null;
+    private ?\Async\Task $deadline = null;
     private bool $reading = false;
     private bool $sentClose = false;
+    private bool $gotClose = false;
     private bool $closed = false;
+    private bool $fdClosed = false;
     private bool $awaitingPong = false;
-    private int $code = 1006;
-    private string $reason = '';
+    private int $peerCode = 1005;
+    private string $peerReason = '';
     private string $maskPool = '';
     private int $maskPos = 0;
 
@@ -253,7 +262,9 @@ final class Connection implements \IteratorAggregate
         private string $remoteAddr = '',
     ) {
         $this->parser = new FrameParser($buf, !$client, $o->maxFrameSize);
-        if (\Async\Context::currentScope() !== null) {
+        $scope = \Async\Context::currentScope();
+        if ($scope !== null) {
+            $this->scope = $scope;
             $this->wlock = new \Async\Mutex();
         }
     }
@@ -262,9 +273,9 @@ final class Connection implements \IteratorAggregate
     public function request(): ?\Http\Request { return $this->request; }
     public function remoteAddr(): string { return $this->remoteAddr; }
     public function isOpen(): bool { return !$this->closed && !$this->sentClose; }
-    /** 1005 when the peer's Close carried no code; 1006 when there was no Close at all. */
-    public function closeCode(): int { return $this->code; }
-    public function closeReason(): string { return $this->reason; }
+    /** The peer's Close code (1005 when it carried none); 1006 when no Close came. */
+    public function closeCode(): int { return $this->gotClose ? $this->peerCode : 1006; }
+    public function closeReason(): string { return $this->gotClose ? $this->peerReason : ''; }
 
     /** Messages until the connection closes. */
     public function getIterator(): \Generator
@@ -288,6 +299,7 @@ final class Connection implements \IteratorAggregate
             return $this->readMessage();
         } finally {
             $this->reading = false;
+            $this->releaseFd();
         }
     }
 
@@ -312,10 +324,10 @@ final class Connection implements \IteratorAggregate
     }
 
     /**
-     * Start (or finish) the closing handshake. Called while another task is
-     * reading, it only sends the Close — that reader sees the answer and
-     * returns null. Called with no reader, it waits here, up to closeTimeout,
-     * for the peer's Close, discarding data frames.
+     * Start the closing handshake. Called while another task is reading, it
+     * sends the Close and arms the closeTimeout deadline — that reader sees the
+     * answer and returns null. Called with no reader, it waits here, up to
+     * closeTimeout, for the peer's Close, discarding data frames.
      */
     public function close(int $code = 1000, string $reason = ''): void
     {
@@ -328,17 +340,14 @@ final class Connection implements \IteratorAggregate
         if ($this->closed || $this->sentClose) {
             return;
         }
-        $this->sendClose($code, $reason);
-        if ($this->reading) {
+        if (!$this->sendClose($code, $reason)) {
             return;
         }
-        $this->reading = true;
-        try {
-            while (!$this->closed && $this->readMessage() !== null) {
-            }
-        } finally {
-            $this->reading = false;
+        if ($this->reading) {
+            $this->armDeadline();
+            return;
         }
+        $this->awaitPeerClose();
     }
 
     /** @internal Server side: run the upgrade's session to its end. */
@@ -347,9 +356,11 @@ final class Connection implements \IteratorAggregate
         $stopId = 0;
         if ($server !== null) {
             $stopId = $server->onStop(function (): void {
-                try {
-                    $this->close(1001, 'server shutdown');
-                } catch (\Throwable $e) {
+                if ($this->closed || $this->sentClose) {
+                    return;
+                }
+                if ($this->sendClose(1001, 'server shutdown')) {
+                    $this->armDeadline();
                 }
             });
         }
@@ -357,6 +368,8 @@ final class Connection implements \IteratorAggregate
             $session($this);
             if ($this->isOpen()) {
                 $this->close(1000);
+            } elseif (!$this->closed && !$this->reading) {
+                $this->awaitPeerClose();
             }
         } catch (\Async\CancelledException $e) {
             if ($this->isOpen()) {
@@ -375,6 +388,9 @@ final class Connection implements \IteratorAggregate
             if ($server !== null) {
                 $server->offStop($stopId);
             }
+            // The server closes the socket once we return: nothing of ours
+            // may touch it after that.
+            $this->finish();
         }
     }
 
@@ -383,6 +399,45 @@ final class Connection implements \IteratorAggregate
         if (!$this->writeFrame($op, $data, false)) {
             throw new ConnectionClosedException('WebSocket connection is closed');
         }
+    }
+
+    /** Read (as the reader) until the peer's Close answers ours, or closeTimeout. */
+    private function awaitPeerClose(): void
+    {
+        $this->reading = true;
+        try {
+            while (!$this->closed && $this->readMessage() !== null) {
+            }
+        } finally {
+            $this->reading = false;
+            $this->releaseFd();
+        }
+    }
+
+    /**
+     * Bound a Close we sent by closeTimeout without reading here: a task in
+     * the connection's scope shuts the socket down if the connection is still
+     * not over by then. finish() cancels it.
+     */
+    private function armDeadline(): void
+    {
+        $scope = $this->scope;
+        if ($this->closed || $this->deadline !== null || $scope === null) {
+            return;
+        }
+        $wait = $this->o->closeTimeout;
+        $this->deadline = $scope->spawn(function () use ($wait): void {
+            \Async\delay($wait);
+            $this->deadline = null;
+            if ($this->closed) {
+                return;
+            }
+            if ($this->reading) {
+                \stream_socket_shutdown($this->sock, \STREAM_SHUT_RDWR);
+            } else {
+                $this->finish();
+            }
+        });
     }
 
     private function readMessage(): ?Message
@@ -444,7 +499,11 @@ final class Connection implements \IteratorAggregate
         }
     }
 
-    /** One read. False when the connection is over (EOF, error, or the ping went unanswered). */
+    /**
+     * One read. False when the connection is over (EOF, error, the ping went
+     * unanswered, or our Close went unanswered for closeTimeout). With the
+     * ping off, a read timeout only re-arms the wait.
+     */
     private function fill(): bool
     {
         $ping = $this->o->pingInterval;
@@ -458,11 +517,16 @@ final class Connection implements \IteratorAggregate
         setTimeout($this->sock, $wait);
         $chunk = \fread($this->sock, 65536);
         if ($chunk === '' || $chunk === false) {
-            if (!$this->sentClose && $ping > 0.0 && !$this->awaitingPong && timedOut($this->sock)) {
-                $this->awaitingPong = true;
-                return $this->writeFrame(Opcode::PING, '', false);
+            if (!$this->sentClose && !$this->closed && timedOut($this->sock)) {
+                if ($ping <= 0.0) {
+                    return true;
+                }
+                if (!$this->awaitingPong) {
+                    $this->awaitingPong = true;
+                    return $this->writeFrame(Opcode::PING, '', false);
+                }
             }
-            $this->abort();
+            $this->finish();
             return false;
         }
         $this->awaitingPong = false;
@@ -491,11 +555,12 @@ final class Connection implements \IteratorAggregate
                 return;
             }
         }
+        $this->gotClose = true;
+        $this->peerCode = $code;
+        $this->peerReason = $reason;
         if (!$this->sentClose) {
             $this->sendClose($code === 1005 ? 1000 : $code, '');
         }
-        $this->code = $code;
-        $this->reason = $reason;
         $this->finish();
     }
 
@@ -505,44 +570,53 @@ final class Connection implements \IteratorAggregate
         if (!$this->sentClose) {
             $this->sendClose($code, '');
         }
-        $this->code = $code;
-        $this->reason = '';
         $this->finish();
     }
 
-    /** No closing handshake happened (EOF, reset, timeout). */
-    private function abort(): void
-    {
-        if (!$this->sentClose) {
-            $this->code = 1006;
-            $this->reason = '';
-        }
-        $this->finish();
-    }
-
+    /**
+     * The connection is over. Shutdown, not fclose: another task may be parked
+     * on this fd; a shutdown wakes it with EOF where a close would leave it
+     * waiting on a descriptor number the kernel may already have reused. The
+     * server closes its end when the session returns; the client's is closed
+     * by whoever leaves the socket last ({@see releaseFd}).
+     */
     private function finish(): void
     {
+        $d = $this->deadline;
+        $this->deadline = null;
+        if ($d !== null) {
+            $d->cancel();
+        }
         if ($this->closed) {
             return;
         }
         $this->closed = true;
-        // Shutdown, not fclose: another task may be parked on this fd; a
-        // shutdown wakes it with EOF where a close would leave it waiting on a
-        // descriptor number the kernel may already have reused. The server
-        // closes its end when the session returns; the client closes it here
-        // when no one is reading.
         \stream_socket_shutdown($this->sock, \STREAM_SHUT_RDWR);
-        if ($this->client && !$this->reading) {
-            \fclose($this->sock);
-        }
+        $this->releaseFd();
     }
 
-    private function sendClose(int $code, string $reason): void
+    /** Client side: close the fd once the connection is over and no task is on it. */
+    private function releaseFd(): void
     {
-        $this->writeRaw(encodeFrame(Opcode::CLOSE, \chr($code >> 8) . \chr($code & 0xFF) . $reason, true, false, $this->nextMask()));
+        if (!$this->client || !$this->closed || $this->fdClosed || $this->reading) {
+            return;
+        }
+        $l = $this->wlock;
+        if ($l !== null && $l->isLocked()) {
+            return;
+        }
+        $this->fdClosed = true;
+        \fclose($this->sock);
+    }
+
+    /** True when the Close reached the wire; a failed write ends the connection instead. */
+    private function sendClose(int $code, string $reason): bool
+    {
+        if (!$this->writeRaw(encodeFrame(Opcode::CLOSE, \chr($code >> 8) . \chr($code & 0xFF) . $reason, true, false, $this->nextMask()))) {
+            return false;
+        }
         $this->sentClose = true;
-        $this->code = $code;
-        $this->reason = $reason;
+        return true;
     }
 
     /** A frame, unless we already sent Close (after which only the answer may be read). */
@@ -556,21 +630,28 @@ final class Connection implements \IteratorAggregate
 
     private function writeRaw(string $bytes): bool
     {
+        if ($this->closed) {
+            return false;
+        }
         $l = $this->wlock;
         if ($l !== null) {
             $l->lock();
         }
+        $ok = false;
         try {
-            $n = \fwrite($this->sock, $bytes);
+            if (!$this->closed) {
+                $ok = \fwrite($this->sock, $bytes) === \strlen($bytes);
+            }
         } finally {
             if ($l !== null) {
                 $l->unlock();
             }
         }
-        if ($n !== \strlen($bytes)) {
-            $this->abort();
+        if (!$ok) {
+            $this->finish();
             return false;
         }
+        $this->releaseFd();
         return true;
     }
 

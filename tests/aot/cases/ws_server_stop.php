@@ -91,7 +91,6 @@ async(function () {
     $server = \Http\Server::onListener(listen($port))->acceptWait(0.02);
     $t = spawn(function () use ($server) {
         $server->serve(function (\Http\Request $req): \Http\Response { return handler($req); });
-        echo "serve returned\n";
     });
     $a = Raw::open($port);
     $b = Raw::open($port);
@@ -106,6 +105,7 @@ async(function () {
         fclose($r->c);
     }
     $t->await();
+    echo "serve returned\n";
 
     $server = \Http\Server::onListener(listen($port))->acceptWait(0.02);
     $t = spawn(function () use ($server) {

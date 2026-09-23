@@ -1,7 +1,7 @@
 HTTP/1.1 101 Switching Protocols
 10:x
-1:5:Hello
-1:140001:bbbbbbbb
-1:0:
+1:t5:Hello
+1:b140001:bbbbbbbb
+1:t0:
 8:1000:
 EOF
