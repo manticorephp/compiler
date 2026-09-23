@@ -266,32 +266,74 @@ trait EmitLlvmArrays
     }
 
     /**
-     * The just-emitted `$index` as a string byte OFFSET (a machine int). A CELL
-     * index — an `int|false` strpos result carried into arithmetic, a local a
-     * loop or an if/else join promoted to a cell — has to leave its box by tag:
-     * its NaN bits read as an i64 are a vast offset, which the read helper
-     * answers "" for and the write helper pads toward. A float truncates.
+     * The just-emitted `$index` as a string byte OFFSET (a machine int), by
+     * php's rules for a string offset. A CELL index — an `int|false` strpos
+     * result carried into arithmetic, a local a loop or a join promoted to a
+     * cell — must leave its box: its NaN bits read as an i64 are a vast offset.
+     * An inline int cell unboxes in place; any other cell, and a STRING index,
+     * goes to the prelude ({@see __mir_str_offset}): a numeric string is its
+     * int, a non-numeric one php's TypeError. For `isset` ($isset) a string
+     * that is not a plain integer maps to an offset no string has, so the
+     * isset helper answers false instead of throwing. A float truncates.
      */
-    private function coerceStrOffset(Node $index): string
+    private function coerceStrOffset(Node $index, bool $isset = false): string
     {
-        if ($index->type->kind === Type::KIND_CELL) {
-            $out = $this->coerceToI64();
-            $this->rt->needsTagged = true;
-            if ($this->rt->needsRefCells) {
-                $dr = $this->ssa->allocReg();
-                $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
-                $this->lastValue = $dr;
-            }
-            $this->rt->needsTaggedToInt = true;
-            $this->rt->needsStrtol = true;
-            $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
-            $this->lastValue = $r;
-            $this->lastValueType = 'i64';
-            return $out;
+        $k = $index->type->kind;
+        if ($k === Type::KIND_STRING) {
+            $out = $this->coerceToPtr();
+            $out .= $this->boxToCell(Type::string_());
+            return $out . $this->strOffsetViaPrelude($isset);
         }
-        if ($this->lastValueType === 'double') { return $this->coerceTo('i64'); }
-        return $this->coerceToI64();
+        if ($k !== Type::KIND_CELL) {
+            if ($this->lastValueType === 'double') { return $this->coerceTo('i64'); }
+            return $this->coerceToI64();
+        }
+        $out = $this->coerceToI64();
+        $this->rt->needsTagged = true;
+        if ($this->rt->needsRefCells) {
+            $dr = $this->ssa->allocReg();
+            $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $dr;
+        }
+        $cell = $this->lastValue;
+        // 0xFFF1 in the top 16 bits = an inline int (the `__manticore_box_int` tag).
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = lshr i64 ' . $cell . ", 48\n";
+        $isInt = $this->ssa->allocReg();
+        $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ", 65521\n";
+        $intL = $this->ssa->allocLabel('soff.int');
+        $slowL = $this->ssa->allocLabel('soff.slow');
+        $endL = $this->ssa->allocLabel('soff.end');
+        $out .= '  br i1 ' . $isInt . ', label %' . $intL . ', label %' . $slowL . "\n";
+        $out .= $intL . ":\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = shl i64 ' . $cell . ", 16\n";
+        $iv = $this->ssa->allocReg();
+        $out .= '  ' . $iv . ' = ashr i64 ' . $sh . ", 16\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $this->lastValue = $cell;
+        $out .= $this->strOffsetViaPrelude($isset);
+        $sv = $this->lastValue;
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi i64 [ ' . $iv . ', %' . $intL . ' ], [ ' . $sv . ', %' . $slowL . " ]\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** `lastValue` (a cell word) through the prelude's string-offset decode. A
+     *  prelude fn takes and returns i64 words ({@see __mir_shape_type_error}). */
+    private function strOffsetViaPrelude(bool $isset): string
+    {
+        $fn = $isset ? 'manticore___mir_str_offset_isset_key' : 'manticore___mir_str_offset';
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . ' = call i64 @' . $fn . '(i64 ' . $this->lastValue . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     private function emitStoreElement(StoreElement $n): string

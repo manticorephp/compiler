@@ -83,6 +83,7 @@ trait InferNodes
     private function inferFunction(FunctionDef $fn): void
     {
         $this->cellLoopLocals = [];
+        $this->tryStoreFrames = [];
         $this->floatLoopLocals = [];
         $this->nullLoopLocals = [];
         $this->elemLoopLocals = [];
@@ -647,7 +648,11 @@ trait InferNodes
             return $node->type;
         }
         if ($kind === Node::KIND_LOAD_LOCAL)  { return $this->inferLoadLocal($node); }
-        if ($kind === Node::KIND_STORE_LOCAL) { return $this->inferStoreLocal($node); }
+        if ($kind === Node::KIND_STORE_LOCAL) {
+            $st = $this->inferStoreLocal($node);
+            if (\count($this->tryStoreFrames) > 0) { $this->noteTryStore($node->name); }
+            return $st;
+        }
         if ($kind === Node::KIND_ADD)         { return $this->inferAdd($node); }
         if ($kind === Node::KIND_SUB)         { return $this->inferSub($node); }
         if ($kind === Node::KIND_MUL)         { return $this->inferMul($node); }
@@ -1010,7 +1015,11 @@ trait InferNodes
     private function inferTryCatch(TryCatch_ $n): Type
     {
         $saved = $this->localTypes;
+        // Every store the try makes is a state a throw can leave for the catch,
+        // not only its end: {@see noteTryStore} pins a name any of them re-kinds.
+        $this->tryStoreFrames[] = $saved;
         foreach ($n->tryBody as $s) { $this->inferNode($s); }
+        \array_pop($this->tryStoreFrames);
         $tryEnd = $this->localTypes;
         // A catch is entered from ANY point of the try, so it sees the entry
         // map and the try's end at once; the paths out are the try's end and
@@ -1819,12 +1828,22 @@ trait InferNodes
         $this->inferNode($node->subject);
         $result = Type::unknown();
         $first = true;
+        // The arms are ALTERNATIVE paths: each is entered after the conditions
+        // tested so far, and the value leaves by whichever ran. A `throw` arm
+        // (and the unhandled-match error) never reaches the join.
+        $condState = $this->localTypes;
+        $exit = null;
         foreach ($node->arms as $arm) {
+            $this->localTypes = $condState;
             $conds = $arm->conds;
             if ($conds !== null) {
                 foreach ($conds as $c) { $this->inferNode($c); }
             }
+            $condState = $this->localTypes;
             $bt = $this->inferNode($arm->body);
+            if ($arm->body->kind !== Node::KIND_THROW) {
+                $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
+            }
             if ($first) { $result = $bt; $first = false; }
             elseif ($result->kind === $bt->kind) { /* keep */ }
             elseif ($result->kind === Type::KIND_CELL || $bt->kind === Type::KIND_CELL
@@ -1837,6 +1856,7 @@ trait InferNodes
             }
             else { $result = Type::unknown(); }
         }
+        $this->localTypes = $exit ?? $condState;
         $node->type = $result;
         return $result;
     }

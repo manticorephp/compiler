@@ -394,6 +394,9 @@ final class InferTypes implements Pass
      *  Discovered during inference (a call's kind isn't knowable to a pre-scan),
      *  so a promotion re-runs the function — see inferFunction. */
     private array $cellLoopLocals = [];
+    /** Open `try` bodies, innermost last: the first type each saw per name
+     *  ({@see noteTryStore}). @var array<int, array<string, Type>> */
+    private array $tryStoreFrames = [];
     /** The CURRENT function's slice of {@see $byRefCaptureCellLocals} — the same
      *  role {@see $cellLoopLocals} plays for a loop-rekinded slot: every store
      *  boxes, every read dispatches by tag. */
@@ -2220,6 +2223,29 @@ final class InferTypes implements Pass
             }
         }
         return $out;
+    }
+
+    /**
+     * A store inside a `try` body: the catch can be entered right after it, so
+     * the value it leaves meets every other state of the try (and the entry
+     * map) at the catch — including one a later store undoes before the try's
+     * end. Each open try frame keeps the first type it saw per name; a store
+     * that disagrees with it pins the name the way {@see joinLocals} does.
+     */
+    private function noteTryStore(string $name): void
+    {
+        if (!isset($this->localTypes[$name])) { return; }
+        $t = $this->localTypes[$name];
+        $n = \count($this->tryStoreFrames);
+        for ($i = 0; $i < $n; $i++) {
+            $frame = $this->tryStoreFrames[$i];
+            if (!isset($frame[$name])) {
+                $frame[$name] = $t;
+                $this->tryStoreFrames[$i] = $frame;
+                continue;
+            }
+            $this->joinLocals([$name => $frame[$name]], [$name => $t]);
+        }
     }
 
     /** Two reprs of one slot with no raw word in common — the pairs

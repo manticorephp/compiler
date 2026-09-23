@@ -216,6 +216,100 @@ function intContinue(array $st): int
     return $s;
 }
 
+function thr(int $k): void
+{
+    if ($k === 1) { throw new \RuntimeException('t'); }
+}
+
+// a re-kind in the MIDDLE of the try, undone before its end, seen by the catch
+function tryMidRekind(array $m, int $k): int
+{
+    $cur = [1, 2];
+    try {
+        $cur = $m['x'];
+        thr($k);
+        $cur = [1, 2, 3];
+    } catch (\RuntimeException $e) {
+        return 100 + \count($cur);
+    }
+    return \count($cur);
+}
+
+// an assignment inside a `match` arm: vec on one arm, cell on the other
+function matchAssignVec(array $m): int
+{
+    $cur = [1, 2];
+    $s = 0;
+    for ($i = 0; $i < 4; $i++) {
+        $s += \count($cur);
+        match ($i % 2) {
+            0 => $cur = $m['x'],
+            default => $cur = [1, 2, 3],
+        };
+    }
+    return $s;
+}
+
+// the same with an int local and a cell arm
+function matchAssignInt(array $st): int
+{
+    $x = 1;
+    $s = 0;
+    for ($i = 0; $i < 4; $i++) {
+        $s += $x;
+        match ($i % 2) {
+            0 => $x = $st[0],
+            default => $x = $i,
+        };
+    }
+    return $s;
+}
+
+// ternary arms with the same shapes
+function ternaryAssignVec(array $m): int
+{
+    $cur = [1, 2];
+    $s = 0;
+    for ($i = 0; $i < 4; $i++) {
+        $s += \count($cur);
+        $i % 2 === 0 ? ($cur = $m['x']) : ($cur = [1, 2, 3]);
+    }
+    return $s;
+}
+
+function ternaryAssignInt(array $st): int
+{
+    $x = 1;
+    $s = 0;
+    for ($i = 0; $i < 4; $i++) {
+        $s += $x;
+        $i % 2 === 0 ? ($x = $st[0]) : ($x = $i);
+    }
+    return $s;
+}
+
+// php's string-offset rules for a key that arrives as a cell
+function offsetRules(array $ks): string
+{
+    $out = '';
+    foreach ($ks as $j => $k) {
+        $s = 'abcd';
+        $line = \json_encode($k) . ':';
+        try { $line .= ' r=' . @$s[$k]; } catch (\TypeError $e) { $line .= ' r!' . \get_class($e) . ' ' . $e->getMessage(); }
+        if (!\is_float($k)) { $line .= ' i=' . (isset($s[$k]) ? 'y' : 'n'); }
+        try { @$s[$k] = 'Z'; $line .= ' w=' . $s; } catch (\TypeError $e) { $line .= ' w!' . \get_class($e) . ' ' . $e->getMessage(); }
+        $out .= $line . "\n";
+    }
+    return $out;
+}
+
+// a statically STRING-typed offset
+function stringOffset(string $k): string
+{
+    $s = 'abcd';
+    try { return $s[$k] . (isset($s[$k]) ? 'y' : 'n'); } catch (\TypeError $e) { return \get_class($e) . ' ' . $e->getMessage(); }
+}
+
 $m = ['x' => [5, 6, 7, 8, 9, 10, 11]];
 echo vecContinue(new K(), 1), "\n";
 echo intOffset('abc'), "\n";
@@ -229,3 +323,10 @@ echo matchJoin($m), "\n";
 echo tryJoin($m), "\n";
 echo breakJoin($m), "\n";
 echo intContinue([10]), "\n";
+echo tryMidRekind($m, 1), ' ', tryMidRekind($m, 0), "\n";
+echo matchAssignVec($m), "\n";
+echo matchAssignInt([10]), "\n";
+echo ternaryAssignVec($m), "\n";
+echo ternaryAssignInt([10]), "\n";
+echo offsetRules(['1', ' 1', '1 ', '01', '-1', '+1', '1x', '0x1', 'x', '', ' ', '1.5', '1.', '.5', '1e2', '1e', '9223372036854775808', null, true, false, 1.7, 2]);
+echo stringOffset('2'), ' ', stringOffset('x'), "\n";
