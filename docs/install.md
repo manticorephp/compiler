@@ -106,10 +106,21 @@ Nothing the compiler emits ever calls into a PHP runtime.
   bookworm's stock clang is 14, so it cannot build Manticore.
 - **PHP 8.5 for the seed.** 8.5 is Manticore's *target* language version. An
   older Zend seed disagrees with the source it is compiling.
-- **glibc ≥ 2.33.** Manticore binds plain `stat` / `lstat` / `fstat` by name.
-  glibc only began exporting those in 2.33 — before that it exported just
-  `__xstat` / `__lxstat` / `__fxstat`. Ubuntu 20.04 (glibc 2.31) therefore
-  cannot link. Ubuntu 22.04, Debian 12 and Alpine can.
+- **glibc ≥ 2.34**, measured rather than assumed: `readelf -V` on a released
+  binary reports `GLIBC_2.34` as the highest symbol version it references. The
+  floor starts with `stat` / `lstat` / `fstat`, which manticore binds by name and
+  glibc only began exporting in 2.33 (before that it was `__xstat` / `__lxstat` /
+  `__fxstat`), and 2.34 is where the rest of what it uses settles. Ubuntu 20.04
+  (2.31) and Debian 11 (2.31) therefore cannot run it; RHEL 9 (2.34) is exactly
+  at the floor; Ubuntu 22.04 (2.35) and Debian 12 (2.36) have room.
+
+  ⚠ **The floor is the symbol versions a binary REFERENCES, not the glibc of the
+  machine that built it.** This is worth stating because we got it wrong in the
+  other direction: a compiler built on trixie (glibc 2.41) was expected to be
+  unusable on bookworm (2.36), and it ran there without complaint — it asks for
+  nothing newer than 2.34. Building on the older base is still the right default,
+  because it makes the floor a property of the build rather than of whichever
+  symbols a release happened not to touch.
 
 ---
 
@@ -197,8 +208,8 @@ functions degrade accordingly.
 |---|---|
 | macOS arm64 | **supported** — the primary development and gate platform |
 | macOS x86_64 | **supported** |
-| Linux glibc ≥ 2.33 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
-| Linux glibc < 2.33 (e.g. Ubuntu 20.04) | **unsupported** — cannot link `stat` |
+| Linux glibc ≥ 2.34 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
+| Linux glibc < 2.34 (e.g. Ubuntu 20.04, Debian 11) | **unsupported** — cannot link `stat` |
 | Linux musl / Alpine | **prepared, not gated** — builds, minus some `glob` constants; `Dockerfile.alpine` + `run_tests.sh --alpine`, and an opt-in `gate.yml` job |
 
 Both macOS and Linux build the compiler from the cold Zend seed, self-host
@@ -271,7 +282,7 @@ diagnostic format; it prints the raw linker output when that happens, so file
 that output as a bug.
 
 **`undefined reference to '__xstat'` / missing `stat`** at link — glibc older
-than 2.33. See the hard floors above.
+than 2.34. See the hard floors above.
 
 **`pcre2-config: command not found`** or link errors mentioning `-lpcre2-8` —
 install the PCRE2 *development* package (`libpcre2-dev`, `pcre2-dev`, or
