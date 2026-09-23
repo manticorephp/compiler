@@ -63,6 +63,10 @@ function __mc_zl_construct(array $lengths, int $n): array
     return [$count, $symbol];
 }
 
+/**
+ * A symbol; -1 when the input runs out mid-code, -2 when no code matches — an
+ * incomplete table, judged as soon as no longer code is left, as zlib does.
+ */
 function __mc_zl_decode(array &$st, array $h): int
 {
     $code = 0;
@@ -70,6 +74,7 @@ function __mc_zl_decode(array &$st, array $h): int
     $index = 0;
     $count = $h[0];
     $symbol = $h[1];
+    $total = \count($symbol);
     for ($len = 1; $len <= 15; $len++) {
         $b = \__mc_zl_bits($st, 1);
         if ($b < 0) { return -1; }
@@ -77,10 +82,11 @@ function __mc_zl_decode(array &$st, array $h): int
         $c = $count[$len];
         if ($code - $first < $c) { return $symbol[$index + ($code - $first)]; }
         $index = $index + $c;
+        if ($index >= $total) { return -2; }
         $first = ($first + $c) << 1;
         $code = $code << 1;
     }
-    return -1;
+    return -2;
 }
 
 function __mc_zl_fixed_tables(): array
@@ -98,7 +104,150 @@ function __mc_zl_fixed_tables(): array
     return $cache;
 }
 
-function __mc_zl_inflate_raw(string $data, int $maxLen): string|false
+/**
+ * An incremental inflate stream (php's `inflate_init` result). Decoding resumes
+ * at the last complete unit — a symbol, a slice of a stored block, a block
+ * header, a container field — so a stream fed in any chunking answers what zlib
+ * answers: every symbol whose bits have all arrived. $in holds the bytes of the
+ * unit still incomplete (zlib has already counted them as read), $bitBuf and
+ * $bitCnt the unread bits of the byte before them, $hist the last 2^window
+ * bytes of output: as far as a back-reference may reach.
+ *
+ * $phase: 0 container header, 1 block boundary, 2 inside a stored block, 3
+ * inside a Huffman block, 4 trailer, 5 stream end (reset by the next call), 6
+ * corrupt, 7 waiting for a dictionary it will never get.
+ */
+final class InflateContext
+{
+    public int $encoding = -15;
+    public int $window = 15;
+    public string $dict = '';
+    public int $status = 0;
+    public int $readLen = 0;
+    public int $phase = 1;
+    public string $in = '';
+    public int $bitBuf = 0;
+    public int $bitCnt = 0;
+    public string $hist = '';
+    public string $out = '';
+    public int $check = 0;
+    public int $total = 0;
+    public bool $last = false;
+    public int $stored = 0;
+    /** @var array<int,int> */
+    public array $lcount = [];
+    /** @var array<int,int> */
+    public array $lsym = [];
+    /** @var array<int,int> */
+    public array $dcount = [];
+    /** @var array<int,int> */
+    public array $dsym = [];
+}
+
+/** A fresh stream on the same settings, as zlib's inflateReset leaves it: a raw dictionary served the first stream only. */
+function __mc_zl_inflate_reset(InflateContext $c): void
+{
+    $c->phase = $c->encoding === -15 ? 1 : 0;
+    $c->status = 0;
+    $c->readLen = 0;
+    $c->in = '';
+    $c->bitBuf = 0;
+    $c->bitCnt = 0;
+    $c->hist = '';
+    $c->out = '';
+    $c->check = $c->encoding === 15 ? 1 : 0;
+    $c->total = 0;
+    $c->last = false;
+    $c->stored = 0;
+    $c->lcount = [];
+    $c->lsym = [];
+    $c->dcount = [];
+    $c->dsym = [];
+}
+
+/**
+ * zlib's table check (inflate_table): an over-subscribed code is corrupt, and
+ * so is an incomplete one, except a lone one-bit code of the literal or
+ * distance alphabet. No codes at all is accepted: decoding one is the error.
+ *
+ * @param array<int,int> $count
+ */
+function __mc_zl_table_ok(array $count, bool $codeLengths): bool
+{
+    $max = 15;
+    while ($max > 0 && $count[$max] === 0) { $max = $max - 1; }
+    if ($max === 0) { return true; }
+    $left = 1;
+    for ($len = 1; $len <= 15; $len++) {
+        $left = ($left << 1) - $count[$len];
+        if ($left < 0) { return false; }
+    }
+
+    return $left === 0 || (!$codeLengths && $max === 1);
+}
+
+/**
+ * The container header at the start of $in: its length once all of it is in, 0
+ * while it is still arriving, or minus the bytes zlib had read when it judged
+ * the header bad — the magic, the method and the flags are judged as soon as
+ * their own bytes are in.
+ */
+function __mc_zl_inflate_head(InflateContext $c, string $in): int
+{
+    $n = \strlen($in);
+    if ($n < 2) { return 0; }
+    if ($c->encoding === 15) {
+        $cmf = \ord($in[0]);
+        $flg = \ord($in[1]);
+        if ((($cmf << 8) | $flg) % 31 !== 0 || ($cmf & 0x0F) !== 8 || ($cmf >> 4) + 8 > $c->window) { return -2; }
+        if (($flg & 0x20) === 0) { return 2; }
+
+        return $n < 6 ? 0 : 6;
+    }
+    if (\ord($in[0]) !== 0x1F || \ord($in[1]) !== 0x8B) { return -2; }
+    if ($n < 4) { return 0; }
+    $flg = \ord($in[3]);
+    if (\ord($in[2]) !== 8 || ($flg & 0xE0) !== 0) { return -4; }
+    $p = 10;
+    if ($n < $p) { return 0; }
+    if (($flg & 0x04) !== 0) {
+        if ($n < $p + 2) { return 0; }
+        $p = $p + 2 + (\ord($in[$p]) | (\ord($in[$p + 1]) << 8));
+        if ($n < $p) { return 0; }
+    }
+    if (($flg & 0x08) !== 0) {
+        while ($p < $n && \ord($in[$p]) !== 0) { $p = $p + 1; }
+        if ($p >= $n) { return 0; }
+        $p = $p + 1;
+    }
+    if (($flg & 0x10) !== 0) {
+        while ($p < $n && \ord($in[$p]) !== 0) { $p = $p + 1; }
+        if ($p >= $n) { return 0; }
+        $p = $p + 1;
+    }
+    if (($flg & 0x02) !== 0) {
+        if ($n < $p + 2) { return 0; }
+        $hc = \__mc_zl_crc32_update(0, \substr($in, 0, $p)) & 0xFFFF;
+        if ($hc !== (\ord($in[$p]) | (\ord($in[$p + 1]) << 8))) { return -($p + 2); }
+        $p = $p + 2;
+    }
+
+    return $p;
+}
+
+/**
+ * Decode $data after whatever the last call left incomplete. Answers 1 at the
+ * end of the stream, 0 when the input ran out (or a ZLIB_BLOCK call reached a
+ * block boundary), 2 when a zlib stream wants a dictionary it was not given or
+ * does not match, -3 on corrupt data — and a back-reference further than
+ * 2^window, or than the output so far, is corrupt data. $c->out is the output
+ * of complete units; $c->readLen follows zlib's total_in.
+ *
+ * $cap0 is php's first output buffer: ZLIB_BLOCK stops at a block boundary
+ * unless that output exactly fills a buffer, when php asks zlib again and the
+ * next block runs too. $maxLen caps a one-shot decode (0: no cap).
+ */
+function __mc_zl_inflate_run(InflateContext $c, string $data, int $flush, int $cap0, int $maxLen): int
 {
     $lbase = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
     $lext  = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
@@ -106,60 +255,116 @@ function __mc_zl_inflate_raw(string $data, int $maxLen): string|false
     $dext  = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
     $order = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
 
-    $st = [$data, 0, 0, 0];
-    // The output grows by doubling and is written through string offsets: a
-    // per-byte concatenation reallocates, and inflate is all per-byte writes.
-    $cap = 1024;
-    $out = \str_repeat("\0", $cap);
-    $olen = 0;
-    $n = \strlen($data);
+    $carry = \strlen($c->in);
+    $in = $carry === 0 ? $data : $c->in . $data;
+    $n = \strlen($in);
+    $st = [$in, 0, $c->bitBuf, $c->bitCnt];
+    $wsize = 1 << $c->window;
+    $wrap = $c->encoding !== -15;
+    // The output is written through string offsets into a buffer that grows by
+    // doubling: a per-byte concatenation reallocates, and inflate is all
+    // per-byte writes. The history sits in front, so a distance is an offset.
+    $olen0 = \strlen($c->hist);
+    $cap = $olen0 + 1024;
+    $out = $c->hist . \str_repeat("\0", 1024);
+    $olen = $olen0;
+    $ck = $c->check;
+    $ckAt = $olen0;
+    $phase = $c->phase;
+    $last = $c->last;
+    $stored = $c->stored;
+    $lh = [$c->lcount, $c->lsym];
+    $dh = [$c->dcount, $c->dsym];
+    // The last complete unit: where a call that runs out of input resumes.
+    $kPos = 0;
+    $kBuf = $st[2];
+    $kCnt = $st[3];
+    $kOut = $olen;
+    $kPhase = $phase;
+    $kLast = $last;
+    $kStored = $stored;
+    $lost = 0;
+    $dictAt = -1;
+    $ret = 0;
+    $stop = false;
 
     while (true) {
-        $last = \__mc_zl_bits($st, 1);
-        if ($last < 0) { return false; }
-        $type = \__mc_zl_bits($st, 2);
-        if ($type < 0) { return false; }
-
-        if ($type === 0) {
-            // A stored block restarts on a byte boundary; LEN and its ones
-            // complement follow, and disagreement means the stream is corrupt.
-            $st[2] = 0;
-            $st[3] = 0;
-            if ($st[1] + 4 > $n) { return false; }
-            $len = \ord($data[$st[1]]) | (\ord($data[$st[1] + 1]) << 8);
-            $nlen = \ord($data[$st[1] + 2]) | (\ord($data[$st[1] + 3]) << 8);
-            $st[1] = $st[1] + 4;
-            if ($len !== ($nlen ^ 0xFFFF)) { return false; }
-            if ($st[1] + $len > $n) { return false; }
-            while ($olen + $len > $cap) {
-                $out = $out . \str_repeat("\0", $cap);
-                $cap = $cap * 2;
+        if ($phase === 0) {
+            $h = \__mc_zl_inflate_head($c, $in);
+            if ($h === 0) { break; }
+            if ($h < 0) { $st[1] = -$h; $ret = -3; break; }
+            $st[1] = $h;
+            if ($c->encoding === 15 && $h === 6) {
+                // zlib answers Z_NEED_DICT without counting what this call read.
+                $lost = $h > $carry ? $h - $carry : 0;
+                $dictAt = $h;
+                $d = $c->dict;
+                $c->dict = '';
+                if ($d === '' || \__mc_zl_adler32_update(1, $d) !== \__mc_zl_rd_be32($in, 2)) { $ret = 2; break; }
+                if (\strlen($d) > $wsize) { $d = \substr($d, -$wsize); }
+                $olen0 = \strlen($d);
+                $cap = $olen0 + 1024;
+                $out = $d . \str_repeat("\0", 1024);
+                $olen = $olen0;
+                $ckAt = $olen0;
             }
-            for ($k = 0; $k < $len; $k++) { $out[$olen + $k] = $data[$st[1] + $k]; }
-            $olen = $olen + $len;
-            $st[1] = $st[1] + $len;
-        } elseif ($type === 1 || $type === 2) {
-            if ($type === 1) {
+            $phase = 1;
+            $kPos = $st[1]; $kBuf = 0; $kCnt = 0; $kOut = $olen; $kPhase = 1; $kLast = false; $kStored = 0;
+            if ($flush === 5) { $stop = true; break; }
+            continue;
+        }
+
+        if ($phase === 1) {
+            if ($last) {
+                $st[2] = 0;
+                $st[3] = 0;
+                $phase = 4;
+                continue;
+            }
+            $bf = \__mc_zl_bits($st, 1);
+            if ($bf < 0) { break; }
+            $type = \__mc_zl_bits($st, 2);
+            if ($type < 0) { break; }
+            $last = $bf === 1;
+            if ($type === 0) {
+                // A stored block restarts on a byte boundary; LEN and its ones
+                // complement follow, and disagreement means the stream is corrupt.
+                $st[2] = 0;
+                $st[3] = 0;
+                if ($st[1] + 4 > $n) { break; }
+                $len = \ord($in[$st[1]]) | (\ord($in[$st[1] + 1]) << 8);
+                $nlen = \ord($in[$st[1] + 2]) | (\ord($in[$st[1] + 3]) << 8);
+                $st[1] = $st[1] + 4;
+                if ($len !== ($nlen ^ 0xFFFF)) { $ret = -3; break; }
+                $stored = $len;
+                $phase = 2;
+            } elseif ($type === 1) {
                 $t = \__mc_zl_fixed_tables();
                 $lh = $t[0];
                 $dh = $t[1];
-            } else {
+                $phase = 3;
+            } elseif ($type === 2) {
                 $hlit = \__mc_zl_bits($st, 5);
+                if ($hlit < 0) { break; }
                 $hdist = \__mc_zl_bits($st, 5);
+                if ($hdist < 0) { break; }
                 $hclen = \__mc_zl_bits($st, 4);
-                if ($hclen < 0) { return false; }
+                if ($hclen < 0) { break; }
                 $hlit = $hlit + 257;
                 $hdist = $hdist + 1;
                 $hclen = $hclen + 4;
-                if ($hlit > 286 || $hdist > 30) { return false; }
+                if ($hlit > 286 || $hdist > 30) { $ret = -3; break; }
                 $cl = [];
                 for ($i = 0; $i < 19; $i++) { $cl[$i] = 0; }
+                $short = false;
                 for ($i = 0; $i < $hclen; $i++) {
                     $v = \__mc_zl_bits($st, 3);
-                    if ($v < 0) { return false; }
+                    if ($v < 0) { $short = true; break; }
                     $cl[$order[$i]] = $v;
                 }
+                if ($short) { break; }
                 $ch = \__mc_zl_construct($cl, 19);
+                if (!\__mc_zl_table_ok($ch[0], true)) { $ret = -3; break; }
                 // The literal/length and distance lengths are themselves
                 // Huffman-coded, with three repeat symbols: 16 repeats the
                 // PREVIOUS length, 17 and 18 run zeros.
@@ -168,33 +373,74 @@ function __mc_zl_inflate_raw(string $data, int $maxLen): string|false
                 $want = $hlit + $hdist;
                 while ($i < $want) {
                     $sym = \__mc_zl_decode($st, $ch);
-                    if ($sym < 0) { return false; }
+                    if ($sym === -1) { $short = true; break; }
+                    // Only an EMPTY code-length code gets here (an incomplete
+                    // one was refused above), and zlib reads each of its
+                    // missing codes as one bit of length 0.
+                    if ($sym === -2) { $sym = 0; }
                     if ($sym < 16) {
                         $lens[$i] = $sym;
                         $i = $i + 1;
-                    } elseif ($sym === 16) {
-                        if ($i === 0) { return false; }
-                        $prev = $lens[$i - 1];
-                        $r = \__mc_zl_bits($st, 2);
-                        if ($r < 0) { return false; }
-                        $r = $r + 3;
-                        while ($r > 0 && $i < $want) { $lens[$i] = $prev; $i = $i + 1; $r = $r - 1; }
-                    } else {
-                        $r = $sym === 17 ? \__mc_zl_bits($st, 3) + 3 : \__mc_zl_bits($st, 7) + 11;
-                        while ($r > 0 && $i < $want) { $lens[$i] = 0; $i = $i + 1; $r = $r - 1; }
+                        continue;
                     }
+                    $rep = 0;
+                    if ($sym === 16) {
+                        if ($i === 0) { $ret = -3; break; }
+                        $rep = $lens[$i - 1];
+                        $r = \__mc_zl_bits($st, 2);
+                        if ($r < 0) { $short = true; break; }
+                        $r = $r + 3;
+                    } elseif ($sym === 17) {
+                        $r = \__mc_zl_bits($st, 3);
+                        if ($r < 0) { $short = true; break; }
+                        $r = $r + 3;
+                    } else {
+                        $r = \__mc_zl_bits($st, 7);
+                        if ($r < 0) { $short = true; break; }
+                        $r = $r + 11;
+                    }
+                    if ($i + $r > $want) { $ret = -3; break; }
+                    while ($r > 0) { $lens[$i] = $rep; $i = $i + 1; $r = $r - 1; }
                 }
+                if ($short || $ret < 0) { break; }
+                if ($lens[256] === 0) { $ret = -3; break; }
                 $llens = [];
                 for ($k = 0; $k < $hlit; $k++) { $llens[$k] = $lens[$k]; }
                 $dlens = [];
                 for ($k = 0; $k < $hdist; $k++) { $dlens[$k] = $lens[$hlit + $k]; }
                 $lh = \__mc_zl_construct($llens, $hlit);
                 $dh = \__mc_zl_construct($dlens, $hdist);
+                if (!\__mc_zl_table_ok($lh[0], false) || !\__mc_zl_table_ok($dh[0], false)) { $ret = -3; break; }
+                $phase = 3;
+            } else {
+                $ret = -3;
+                break;
             }
+            $kPos = $st[1]; $kBuf = $st[2]; $kCnt = $st[3]; $kOut = $olen;
+            $kPhase = $phase; $kLast = $last; $kStored = $stored;
+            continue;
+        }
 
+        if ($phase === 2) {
+            $k = $n - $st[1];
+            if ($k > $stored) { $k = $stored; }
+            while ($olen + $k > $cap) {
+                $out = $out . \str_repeat("\0", $cap);
+                $cap = $cap * 2;
+            }
+            $p = $st[1];
+            for ($j = 0; $j < $k; $j++) { $out[$olen + $j] = $in[$p + $j]; }
+            $olen = $olen + $k;
+            $st[1] = $p + $k;
+            $stored = $stored - $k;
+            if ($maxLen > 0 && $olen - $olen0 > $maxLen) { $ret = -3; break; }
+            $kPos = $st[1]; $kOut = $olen; $kStored = $stored;
+            if ($stored > 0) { break; }
+        } elseif ($phase === 3) {
             while (true) {
                 $sym = \__mc_zl_decode($st, $lh);
-                if ($sym < 0) { return false; }
+                if ($sym === -1) { break 2; }
+                if ($sym < 0) { $ret = -3; break 2; }
                 if ($sym === 256) { break; }
                 if ($sym < 256) {
                     if ($olen >= $cap) {
@@ -205,16 +451,17 @@ function __mc_zl_inflate_raw(string $data, int $maxLen): string|false
                     $olen = $olen + 1;
                 } else {
                     $sym = $sym - 257;
-                    if ($sym >= 29) { return false; }
+                    if ($sym >= 29) { $ret = -3; break 2; }
                     $e = \__mc_zl_bits($st, $lext[$sym]);
-                    if ($e < 0) { return false; }
+                    if ($e < 0) { break 2; }
                     $len = $lbase[$sym] + $e;
                     $dsym = \__mc_zl_decode($st, $dh);
-                    if ($dsym < 0 || $dsym >= 30) { return false; }
+                    if ($dsym === -1) { break 2; }
+                    if ($dsym < 0 || $dsym >= 30) { $ret = -3; break 2; }
                     $e = \__mc_zl_bits($st, $dext[$dsym]);
-                    if ($e < 0) { return false; }
+                    if ($e < 0) { break 2; }
                     $dist = $dbase[$dsym] + $e;
-                    if ($dist > $olen) { return false; }
+                    if ($dist > $olen || $dist > $wsize) { $ret = -3; break 2; }
                     // An overlapping copy is legal and common (a run is coded as
                     // distance 1): read as we write, byte at a time.
                     while ($olen + $len > $cap) {
@@ -227,16 +474,100 @@ function __mc_zl_inflate_raw(string $data, int $maxLen): string|false
                     }
                     $olen = $olen + $len;
                 }
-                if ($maxLen > 0 && $olen > $maxLen) { return false; }
+                if ($maxLen > 0 && $olen - $olen0 > $maxLen) { $ret = -3; break 2; }
+                $kPos = $st[1]; $kBuf = $st[2]; $kCnt = $st[3]; $kOut = $olen;
             }
+        } elseif ($phase === 4) {
+            if (!$wrap) { $phase = 5; $ret = 1; break; }
+            if ($olen > $ckAt) {
+                $slice = \substr($out, $ckAt, $olen - $ckAt);
+                $ck = $c->encoding === 15 ? \__mc_zl_adler32_update($ck, $slice) : \__mc_zl_crc32_update($ck, $slice);
+                $ckAt = $olen;
+            }
+            $p = $st[1];
+            if ($p + 4 > $n) { break; }
+            if ($c->encoding === 15) {
+                $st[1] = $p + 4;
+                if (\__mc_zl_rd_be32($in, $p) !== $ck) { $ret = -3; break; }
+            } else {
+                if (\__mc_zl_rd_le32($in, $p) !== $ck) { $st[1] = $p + 4; $ret = -3; break; }
+                if ($p + 8 > $n) { break; }
+                $st[1] = $p + 8;
+                if (\__mc_zl_rd_le32($in, $p + 4) !== (($c->total + $olen - $olen0) & 0xFFFFFFFF)) { $ret = -3; break; }
+            }
+            $phase = 5;
+            $ret = 1;
+            break;
         } else {
-            return false;
+            $ret = -3;
+            break;
         }
-        if ($maxLen > 0 && $olen > $maxLen) { return false; }
-        if ($last === 1) { break; }
+
+        // A block ended: the next unit starts at a block boundary, where
+        // ZLIB_BLOCK hands back what it has.
+        $phase = 1;
+        $kPos = $st[1]; $kBuf = $st[2]; $kCnt = $st[3]; $kOut = $olen;
+        $kPhase = 1; $kLast = $last; $kStored = 0;
+        if ($flush === 5) {
+            $made = $olen - $olen0;
+            if ($made < $cap0 || ($made - $cap0) % 8192 !== 0) { $stop = true; break; }
+        }
     }
 
-    return \substr($out, 0, $olen);
+    if ($ret === 2) {
+        $c->phase = 7;
+        $c->in = '';
+        $c->out = '';
+        return 2;
+    }
+    $pos = $ret === 0 && !$stop ? $n : $st[1];
+    $c->readLen = $c->readLen + ($pos > $carry ? $pos - $carry : 0) - $lost;
+    if ($ret === -3) {
+        $c->phase = 6;
+        $c->in = '';
+        $c->out = '';
+        return -3;
+    }
+    if ($ret === 1) {
+        $kOut = $olen;
+        $c->phase = 5;
+        $c->in = '';
+    } else {
+        $c->phase = $kPhase;
+        $c->last = $kLast;
+        $c->stored = $kStored;
+        $c->bitBuf = $kBuf;
+        $c->bitCnt = $kCnt;
+        $c->in = $stop ? '' : \substr($in, $kPos);
+        if ($kPhase === 3) {
+            $c->lcount = $lh[0];
+            $c->lsym = $lh[1];
+            $c->dcount = $dh[0];
+            $c->dsym = $dh[1];
+        }
+        if ($wrap && $kOut > $ckAt) {
+            $slice = \substr($out, $ckAt, $kOut - $ckAt);
+            $ck = $c->encoding === 15 ? \__mc_zl_adler32_update($ck, $slice) : \__mc_zl_crc32_update($ck, $slice);
+        }
+        $h0 = $kOut > $wsize ? $kOut - $wsize : 0;
+        $c->hist = \substr($out, $h0, $kOut - $h0);
+    }
+    $c->check = $ck;
+    $c->total = $c->total + $kOut - $olen0;
+    $c->out = \substr($out, $olen0, $kOut - $olen0);
+    // php hands zlib the dictionary and calls inflate() again: when that second
+    // call reads and writes nothing, zlib answers Z_BUF_ERROR.
+    if ($ret === 0 && $dictAt >= 0 && $kOut === $olen0 && ($stop || $n === $dictAt)) { return -5; }
+
+    return $ret;
+}
+
+function __mc_zl_inflate_raw(string $data, int $maxLen): string|false
+{
+    $c = new InflateContext();
+    if (\__mc_zl_inflate_run($c, $data, 4, 0, $maxLen) !== 1) { return false; }
+
+    return $c->out;
 }
 
 // ── the encoder ─────────────────────────────────────────────────────────
@@ -912,6 +1243,36 @@ function __mc_zl_type_name(mixed $v): string
 }
 
 /**
+ * The `dictionary` option as php joins it: a string as is, an array as its
+ * entries each followed by NUL.
+ *
+ * @param array<string,mixed> $options
+ */
+function __mc_zl_dict_option(string $fn, array $options): string
+{
+    if (!\array_key_exists('dictionary', $options)) { return ''; }
+    $d = $options['dictionary'];
+    if (\is_string($d)) { return $d; }
+    if (!\is_array($d)) {
+        throw new \TypeError($fn . '(): Argument #2 ($options) must be of type zero-terminated string or array, '
+            . \__mc_zl_type_name($d) . ' given');
+    }
+    $dict = '';
+    foreach ($d as $entry) {
+        $s = (string) $entry;
+        if ($s === '') {
+            throw new \ValueError($fn . '(): Argument #2 ($options) must not contain empty strings');
+        }
+        if (\strpos($s, "\0") !== false) {
+            throw new \ValueError($fn . '(): Argument #2 ($options) must not contain strings with null bytes');
+        }
+        $dict = $dict . $s . "\0";
+    }
+
+    return $dict;
+}
+
+/**
  * The options php checks, in php's order — level, memory, window, strategy,
  * dictionary, and only then the encoding. A dictionary array is its entries
  * each followed by NUL, as php joins it; a gzip stream ignores a dictionary,
@@ -939,27 +1300,7 @@ function deflate_init(int $encoding, array $options = []): DeflateContext|false
         throw new \ValueError('deflate_init(): "strategy" option must be one of ZLIB_FILTERED, '
             . 'ZLIB_HUFFMAN_ONLY, ZLIB_RLE, ZLIB_FIXED, or ZLIB_DEFAULT_STRATEGY');
     }
-    $dict = '';
-    if (\array_key_exists('dictionary', $options)) {
-        $d = $options['dictionary'];
-        if (\is_string($d)) {
-            $dict = $d;
-        } elseif (\is_array($d)) {
-            foreach ($d as $entry) {
-                $s = (string) $entry;
-                if ($s === '') {
-                    throw new \ValueError('deflate_init(): Argument #2 ($options) must not contain empty strings');
-                }
-                if (\strpos($s, "\0") !== false) {
-                    throw new \ValueError('deflate_init(): Argument #2 ($options) must not contain strings with null bytes');
-                }
-                $dict = $dict . $s . "\0";
-            }
-        } else {
-            throw new \TypeError('deflate_init(): Argument #2 ($options) must be of type zero-terminated string or array, '
-                . \__mc_zl_type_name($d) . ' given');
-        }
-    }
+    $dict = \__mc_zl_dict_option('deflate_init', $options);
     if ($encoding !== -15 && $encoding !== 15 && $encoding !== 31) {
         throw new \ValueError('deflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, '
             . 'ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE');
@@ -991,4 +1332,97 @@ function deflate_add(DeflateContext $context, string $data, int $flush_mode = 2)
     if ($data === '' && $flush_mode !== 4) { return ''; }
 
     return \__mc_zl_deflate_core($context, $data, $flush_mode);
+}
+
+/**
+ * php's window check comes first, the encoding second, the dictionary last. A
+ * raw stream takes its dictionary as history at once; a zlib stream keeps it
+ * until its header asks for it (FDICT) and checks it against the Adler-32 the
+ * header carries; gzip has no dictionary and ignores one. Window 8 is accepted
+ * for all three; a zlib header naming a larger window than this is corrupt data.
+ *
+ * @param array<string,mixed> $options
+ */
+function inflate_init(int $encoding, array $options = []): InflateContext|false
+{
+    $window = \array_key_exists('window', $options) ? (int) $options['window'] : 15;
+    if ($window < 8 || $window > 15) {
+        throw new \ValueError('zlib window size (logarithm) (' . $window . ') must be within 8..15');
+    }
+    if ($encoding !== -15 && $encoding !== 15 && $encoding !== 31) {
+        throw new \ValueError('Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE');
+    }
+    $dict = \__mc_zl_dict_option('inflate_init', $options);
+
+    $c = new InflateContext();
+    $c->encoding = $encoding;
+    $c->window = $window;
+    \__mc_zl_inflate_reset($c);
+    if ($encoding === 15) { $c->dict = $dict; }
+    // php hands a raw stream its dictionary only at window 15: it compares the
+    // window-adjusted zlib argument against ZLIB_ENCODING_RAW, so any other
+    // window drops the dictionary on the floor.
+    if ($encoding === -15 && $window === 15 && $dict !== '') {
+        $c->hist = \strlen($dict) > 32768 ? \substr($dict, -32768) : $dict;
+    }
+
+    return $c;
+}
+
+/**
+ * One inflate_add(). A finished stream is reset lazily, on the next call, so
+ * its status and read length stay readable until then; input after the end of
+ * a stream is dropped, as is input after the block boundary where ZLIB_BLOCK
+ * stops. Corrupt data answers false, and so does a zlib stream whose
+ * dictionary is missing or wrong (status ZLIB_NEED_DICT).
+ */
+function inflate_add(InflateContext $context, string $data, int $flush_mode = 2): string|false
+{
+    if ($flush_mode < 0 || $flush_mode > 5) {
+        throw new \ValueError('inflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, '
+            . 'ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH');
+    }
+    if ($context->phase === 5) { \__mc_zl_inflate_reset($context); }
+    if ($data === '' && $flush_mode !== 4) { return ''; }
+    if ($context->phase === 6) {
+        $context->status = -3;
+        return false;
+    }
+    if ($context->phase === 7) {
+        $context->status = 2;
+        return false;
+    }
+    $len = \strlen($data);
+    $cap0 = $len > 8192 ? $len : 8192;
+    $r = \__mc_zl_inflate_run($context, $data, $flush_mode, $cap0, 0);
+    if ($r === -5) {
+        $context->status = -5;
+        return $context->out;
+    }
+    if ($r < 0 || $r === 2) {
+        $context->status = $r;
+        return false;
+    }
+    if ($r === 1) {
+        $context->status = 1;
+        return $context->out;
+    }
+    // zlib answers Z_BUF_ERROR when a call makes no progress. php meets that
+    // under FINISH, and when the output exactly filled its buffer: it grows the
+    // buffer and asks again, with nothing left to read.
+    $made = \strlen($context->out);
+    $full = $made >= $cap0 && ($made - $cap0) % 8192 === 0;
+    $context->status = $flush_mode === 4 || $full ? -5 : 0;
+
+    return $context->out;
+}
+
+function inflate_get_status(InflateContext $context): int
+{
+    return $context->status;
+}
+
+function inflate_get_read_len(InflateContext $context): int
+{
+    return $context->readLen;
 }

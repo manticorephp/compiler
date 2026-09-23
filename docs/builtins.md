@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **733 / 2135** · classes **125 / 327** · codegen builtins 224 · lowered 32 · stdlib globals 794 · prelude globals 523
+Functions **737 / 2135** · classes **126 / 327** · codegen builtins 224 · lowered 32 · stdlib globals 803 · prelude globals 529
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -87,7 +87,7 @@ Functions **733 / 2135** · classes **125 / 327** · codegen builtins 224 · low
 | [xmlwriter](#xmlwriter) | 0 / 42 | 0 / 1 | 0% |
 | [xsl](#xsl) | 0 / 0 | 0 / 1 | 0% |
 | [zip](#zip) | 0 / 10 | 0 / 1 | 0% |
-| [zlib](#zlib) | 10 / 30 | 1 / 2 | 34% |
+| [zlib](#zlib) | 14 / 30 | 2 / 2 | 50% |
 
 ## Beyond PHP — what Manticore adds
 
@@ -149,7 +149,7 @@ Functions (31): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 794 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 805 — not user API.
 
 ## Per extension
 
@@ -979,21 +979,19 @@ Classes: `ZipArchive`
 
 ### zlib
 
-Functions 10 / 30 · classes 1 / 2
+Functions 14 / 30 · classes 2 / 2
 
-<details><summary>implemented (11)</summary>
+<details><summary>implemented (16)</summary>
 
-`deflate_add`<sup>s</sup> `deflate_init`<sup>s</sup> `gzcompress`<sup>s</sup> `gzdecode`<sup>s</sup> `gzdeflate`<sup>s</sup> `gzencode`<sup>s</sup> `gzinflate`<sup>s</sup> `gzuncompress`<sup>s</sup> `zlib_decode`<sup>s</sup> `zlib_encode`<sup>s</sup>
+`deflate_add`<sup>s</sup> `deflate_init`<sup>s</sup> `gzcompress`<sup>s</sup> `gzdecode`<sup>s</sup> `gzdeflate`<sup>s</sup> `gzencode`<sup>s</sup> `gzinflate`<sup>s</sup> `gzuncompress`<sup>s</sup> `inflate_add`<sup>s</sup> `inflate_get_read_len`<sup>s</sup> `inflate_get_status`<sup>s</sup> `inflate_init`<sup>s</sup> `zlib_decode`<sup>s</sup> `zlib_encode`<sup>s</sup>
 
-Classes: `DeflateContext`
+Classes: `DeflateContext` `InflateContext`
 
 </details>
 
-<details><summary>missing (21)</summary>
+<details><summary>missing (16)</summary>
 
-`gzclose` `gzeof` `gzfile` `gzgetc` `gzgets` `gzopen` `gzpassthru` `gzputs` `gzread` `gzrewind` `gzseek` `gztell` `gzwrite` `inflate_add` `inflate_get_read_len` `inflate_get_status` `inflate_init` `ob_gzhandler` `readgzfile` `zlib_get_coding_type`
-
-Classes: `InflateContext`
+`gzclose` `gzeof` `gzfile` `gzgetc` `gzgets` `gzopen` `gzpassthru` `gzputs` `gzread` `gzrewind` `gzseek` `gztell` `gzwrite` `ob_gzhandler` `readgzfile` `zlib_get_coding_type`
 
 </details>
 
