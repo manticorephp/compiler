@@ -1,0 +1,8 @@
+HTTP/1.1 101 Switching Protocols
+upgrade header
+no content-length
+HELLO
+AGAIN
+HTTP/1.1 500 Internal Server Error
+BYE
+upgraded=1 errors=1
