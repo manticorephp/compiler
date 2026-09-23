@@ -335,7 +335,18 @@ final class NarrowReturns implements Pass
             // with an assoc one) read as "not assoc" and the declared vec's int
             // keys stood — the same distinction the shape reference above draws.
             $keyFix = $this->keyKindOf($rt) !== $this->keyKindOf($result);
-            if (!$keyFix
+            // An `unknown` element is the ABSENCE of an answer, not one: a sweep
+            // narrows every function against the bodies the LAST inference left,
+            // so a callee narrowed in the same sweep still reads unknown to its
+            // callers here. `fixed_tables(): array { static $cache …; $cache =
+            // [construct(…), construct(…)]; return $cache; }` locked
+            // `vec[unknown]` that way and never took the `vec[vec[vec[int]]]` its
+            // body settles to, so `$lh = $t[0]` merged a cell against
+            // `vec[vec[int]]` and inflate boxed its Huffman tables per call.
+            // Monotone: unknown -> concrete, after which only the cell widen moves.
+            $refine = $rt->element !== null && $rt->element->kind === Type::KIND_UNKNOWN
+                && $result->element !== null && $result->element->kind !== Type::KIND_UNKNOWN;
+            if (!$keyFix && !$refine
                 && ($result->element === null || $result->element->kind !== Type::KIND_CELL)) {
                 return false;
             }

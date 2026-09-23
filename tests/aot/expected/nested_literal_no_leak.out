@@ -1,0 +1,5 @@
+inflate_add in chunks: sum=1404650 growth ok
+property read in a literal: sum=5020009700 growth ok
+property read into an element: sum=20039800 growth ok
+property read into a property: sum=20039800 growth ok
+done

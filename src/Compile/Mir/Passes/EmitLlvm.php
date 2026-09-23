@@ -2922,10 +2922,20 @@ final class EmitLlvm implements EmitVisitor
      * so the read cannot be stranded by its slot's later release. The same
      * narrowing {@see elemReadIsOwned} makes: a struct, a closure, an enum and
      * a foreign pointer take no retain and keep the veto.
+     *
+     * An ARRAY read qualifies on the same terms: a borrowed array is never an
+     * owned producer to {@see EmitLlvmMemory::rcRetainByType}, so the raw arm
+     * retains its buffer, and the boxed arm either retains it (an erased-element
+     * array, {@see retainCellPayload}) or copies it into a fresh cell array
+     * ({@see boxToCell}). `$lh = [$c->lcount, $c->lsym]` vetoed both slots, so
+     * every `$c->lcount = $lh[0]` stranded the table it overwrote — inflate's
+     * Huffman tables, one set per `inflate_add`.
      */
     private function storeCoOwnsPropRead(Node $c): bool
     {
-        return $c->kind === Node::KIND_PROPERTY_ACCESS && $this->storeRetainsKind($c->type);
+        if ($c->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        if ($c->type->isVec() || $c->type->isAssoc()) { return true; }
+        return $this->storeRetainsKind($c->type);
     }
 
     /** The value kinds a container / property store takes a reference on:
