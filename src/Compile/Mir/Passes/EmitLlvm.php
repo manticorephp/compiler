@@ -4592,8 +4592,19 @@ final class EmitLlvm implements EmitVisitor
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
-        // An array literal is always a fresh +1 (obj/vec/assoc alike).
-        if ($k === Node::KIND_ARRAY_LIT) { return $this->discardReleaseFlavor($a->type); }
+        // An array literal is always a fresh +1 (obj/vec/assoc alike). When its
+        // ELEMENTS are arrays, each of those went through this same argument
+        // path — a fresh one is registered here and released after the call, a
+        // borrowed one retained and given back — so the literal is only the
+        // BUFFER around them. Its release must not walk them: the repr-mode
+        // `vec` release happened to drop nothing only while such a buffer
+        // carried no repr bits, and dropping by the element hint freed
+        // `array_merge($a, f())`'s `f()` twice.
+        if ($k === Node::KIND_ARRAY_LIT) {
+            $el = $a->type->element;
+            if ($el !== null && $el->isArray()) { return $a->type->isAssoc() ? 'assocbuf' : 'vecbuf'; }
+            return $this->discardReleaseFlavor($a->type);
+        }
         // An ASSOC result used to be exempted here, on the reading that
         // isBorrowedObjReturn covered only obj/vec/string. It has covered
         // assoc since — "vec AND assoc: both are one rc'd buffer" — so the
