@@ -27,7 +27,22 @@ window=12 ok
 window=13 ok
 window=14 ok
 window=15 ok
+window=8 raw false
+window=8 gzip false
 window=8 zlib 1895 ok
+''
+''
+''
+''
+0000ffff abcdef
+long >128K enc=-15 mode=2 window=15 ok
+long >128K enc=31 mode=2 window=15 ok
+long >128K enc=-15 mode=0 window=15 ok
+long >128K enc=31 mode=0 window=15 ok
+long >128K enc=-15 mode=2 window=9 ok
+long >128K enc=31 mode=2 window=9 ok
+long >128K enc=-15 mode=0 window=9 ok
+long >128K enc=31 mode=0 window=9 ok
 the quick brown fox
 stored bytes
 ValueError: deflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE

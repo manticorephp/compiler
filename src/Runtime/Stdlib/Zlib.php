@@ -915,12 +915,12 @@ function __mc_zl_type_name(mixed $v): string
  * The options php checks, in php's order — level, memory, window, strategy,
  * dictionary, and only then the encoding. A dictionary array is its entries
  * each followed by NUL, as php joins it; a gzip stream ignores a dictionary,
- * as zlib does. Window 8 is coded as 9: zlib's raw and gzip deflate refuse 8,
- * and its zlib container quietly takes 9.
+ * as zlib does. Window 8: zlib's raw and gzip deflate refuse it and php answers
+ * false; its zlib container quietly takes 9.
  *
  * @param array<string,mixed> $options
  */
-function deflate_init(int $encoding, array $options = []): DeflateContext
+function deflate_init(int $encoding, array $options = []): DeflateContext|false
 {
     $level = \array_key_exists('level', $options) ? (int) $options['level'] : -1;
     if ($level < -1 || $level > 9) {
@@ -964,6 +964,7 @@ function deflate_init(int $encoding, array $options = []): DeflateContext
         throw new \ValueError('deflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, '
             . 'ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE');
     }
+    if ($window === 8 && $encoding !== 15) { return false; }
 
     $c = new DeflateContext();
     $c->encoding = $encoding;
@@ -980,12 +981,14 @@ function deflate_init(int $encoding, array $options = []): DeflateContext
     return $c;
 }
 
+/** Empty data outside FINISH is a no-op in php: nothing buffered is flushed, no marker is written. */
 function deflate_add(DeflateContext $context, string $data, int $flush_mode = 2): string
 {
     if ($flush_mode < 0 || $flush_mode > 5) {
         throw new \ValueError('deflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, '
             . 'ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH');
     }
+    if ($data === '' && $flush_mode !== 4) { return ''; }
 
     return \__mc_zl_deflate_core($context, $data, $flush_mode);
 }
