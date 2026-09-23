@@ -577,11 +577,47 @@ final class InsertMemoryOps implements Pass
      */
     public static function foreachValueCoOwns(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): bool
     {
-        if (!\Compile\Debug::$rcForeachValueOwns) { return false; }
-        if ($fe->byRef) { return false; }
+        return self::foreachValueSlotType($fe, $enums, $classes) !== null;
+    }
+
+    /**
+     * The type a co-owning loop binds its value at — the flavor both halves
+     * retain and release by — or null when the loop does not co-own.
+     *
+     * Besides a proven vec/assoc, the two ITERATOR loops `emitForeach` routes
+     * by the subject's static type co-own too, because their step already
+     * hands out a +1 and a borrowed loop variable stranded it on every
+     * iteration:
+     *  - a GENERATOR subject: its frame owns `current`@16 and the loop takes
+     *    its own +1 of it ({@see EmitLlvmGenerator::emitYield}); bound at the
+     *    element type the loop unboxes to, a tagged cell when that is erased.
+     *  - an Iterator-protocol subject whose `current()` answers a CELL: a
+     *    Generator iterator (`getIterator(): \Generator`) and an interface one
+     *    that classifies at run time — every arm of that step is +1.
+     *    A user Iterator CLASS answers its declared raw type, which this pass
+     *    does not see; it stays borrowed.
+     *
+     * @param array<string, mixed> $enums
+     */
+    public static function foreachValueSlotType(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): ?Type
+    {
+        if (!\Compile\Debug::$rcForeachValueOwns) { return null; }
+        if ($fe->byRef) { return null; }
         $at = $fe->array->type;
-        if (!$at->isVec() && !$at->isAssoc()) { return false; }
-        return self::elemReadCoOwns($at->element, $enums, $classes);
+        if ($at->isVec() || $at->isAssoc()) {
+            return self::elemReadCoOwns($at->element, $enums, $classes) ? $at->element : null;
+        }
+        if ($at->kind !== Type::KIND_OBJ) { return null; }
+        if (($at->class ?? '') === 'Generator') {
+            $el = $at->element;
+            if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) {
+                return Type::cell();
+            }
+            return self::elemReadCoOwns($el, $enums, $classes) ? $el : null;
+        }
+        $ic = $fe->iterClass;
+        if ($ic === 'Generator' || ($ic !== '' && !isset($classes[$ic]))) { return Type::cell(); }
+        return null;
     }
 
     /**
@@ -1104,7 +1140,7 @@ final class InsertMemoryOps implements Pass
                 && self::foreachValueCoOwns($fe, $this->enums, $this->classes)
                 && !isset($this->feOwnVeto[$fe->valueVar]);
             if ($feOwns) {
-                $et = $fe->array->type->element;
+                $et = self::foreachValueSlotType($fe, $this->enums, $this->classes);
                 // ★★★ The loop variable is a STORE like any other, so it owes the
                 // same FLAVOR agreement {@see rcSlotFlavor} enforces on
                 // KIND_STORE_LOCAL. Registering `rcObjType` directly here walked

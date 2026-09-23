@@ -120,6 +120,22 @@ trait EmitLlvmGenerator
         $this->collectGenLocals($fn->body, $locals);
         $frameSize = self::GEN_HEADER + 8 * \count($locals);
 
+        // THIS function's ownership facts. The emit frame is shared across
+        // functions and a generator never ran the prologue that fills it, so
+        // the resume body read the PREVIOUS function's owned-local set: a
+        // `$m = new M(); yield $m;` loop never released the `$m` it
+        // overwrote, and a name that happened to be owned over there got a
+        // release of the wrong flavor here. The prologue's IR is not wanted —
+        // the creator zeroes the frame and retains the params below; the
+        // resume entry runs on EVERY resume.
+        $this->locals->refLocals = [];
+        $genParamNames = [];
+        foreach ($fn->params as $p) {
+            $genParamNames[$p->name] = true;
+            if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
+        }
+        $this->initRcObjSlots($fn->body, $genParamNames);
+
         // ── creator ──
         // A generator CLOSURE composes two frame mechanisms: it is invoked with
         // the closure ABI (`ptr %env` + declared args; captures unpacked from
@@ -200,6 +216,7 @@ trait EmitLlvmGenerator
                       . (string)($capIndex[$name] + 1) . "\n";
                 $cv = $this->ssa->allocReg();
                 $out .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
+                $out .= $this->genParamCoOwn($name, $cv);
                 $out .= $this->genStoreAt($fr, $off, $cv);
             } elseif (isset($paramNames[$name])) {
                 // A CLOSURE generator's caller (emitInvoke) boxed every scalar
@@ -213,8 +230,11 @@ trait EmitLlvmGenerator
                     $this->lastValueType = 'i64';
                     $out .= $this->unboxCellToType($pt);
                     $out .= $this->coerceToI64();
-                    $out .= $this->genStoreAt($fr, $off, $this->lastValue);
+                    $pv = $this->lastValue;
+                    $out .= $this->genParamCoOwn($name, $pv);
+                    $out .= $this->genStoreAt($fr, $off, $pv);
                 } else {
+                    $out .= $this->genParamCoOwn($name, '%arg.' . $name);
                     $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
                 }
             } else {
@@ -283,10 +303,71 @@ trait EmitLlvmGenerator
 
         // Fell off the end → finished. The depth goes back here too: a generator
         // that ran to completion must not leave the consumer's jmp depth raised.
+        $out .= $this->genFinishCurrent();
         $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
         $out .= $this->genRestoreEntryDepth();
         $out .= "  ret i64 0\n}\n\n";
         return $out;
+    }
+
+    /** Drop the value the frame holds in `current`@16 (a tagged cell, or 0). */
+    private function genDropCurrent(): string
+    {
+        $old = $this->ssa->allocReg();
+        return '  ' . $old . ' = load i64, ptr ' . $this->gen->currentPtr . "\n"
+             . $this->rcReleaseReg($old, 'cell');
+    }
+
+    /**
+     * A generator that finishes lets go of its last value: `current()` is null
+     * from here on, as in php, and the frame no longer holds the value
+     * the readers each took their own +1 of.
+     */
+    private function genFinishCurrent(): string
+    {
+        $this->rt->needsTagged = true;
+        $out = $this->genDropCurrent();
+        $bn = $this->ssa->allocReg();
+        $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+        return $out . '  store i64 ' . $bn . ', ptr ' . $this->gen->currentPtr . "\n";
+    }
+
+    /**
+     * Is a value yielded on the SHALLOW path an owned producer, whose +1 the
+     * frame takes over? The same producer set {@see retainCellPayload} names
+     * for a cell slot; anything else is a borrow the frame co-owns.
+     */
+    private function yieldValueFresh(Node $v): bool
+    {
+        $k = $v->type->kind;
+        if ($k === Type::KIND_STRING) { return $this->isFreshStringTemp($v); }
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_ARRAY) {
+            if ($v->kind === Node::KIND_ARRAY_LIT || $v->kind === Node::KIND_CLOSURE) { return true; }
+            return $this->freshRcArgFlavor($v) !== '';
+        }
+        if ($this->condOwnsResult($v)) { return true; }
+        $vk = $v->kind;
+        return $vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
+            || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
+            || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
+            || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT
+            || $vk === Node::KIND_CLOSURE || \Compile\Mir\BitOp::mintsFresh($v);
+    }
+
+    /**
+     * A param (or capture) the body owns — reassigned, or released at the end
+     * — holds the caller's BORROWED value, so the frame takes its own +1 as it
+     * seeds the slot: the entry retain {@see initRcObjSlots} gives an ordinary
+     * function, placed in the creator because the resume entry runs on every
+     * resume.
+     */
+    private function genParamCoOwn(string $name, string $val): string
+    {
+        if (isset($this->locals->refLocals[$name])) { return ''; }
+        $mo = $this->frame->rcObjLocals[$name] ?? null;
+        if ($mo === null) { return ''; }
+        $fl = $this->rcReleaseFlavor($mo);
+        return $fl === '' ? '' : $this->rcRetainReg($val, $fl);
     }
 
     /** `store i64 <val>, ptr (base + off)` — a frame header/local write. */
@@ -439,12 +520,26 @@ trait EmitLlvmGenerator
             // array. This is not rare — a generator closure over a bare-`array`
             // capture types its foreach value unknown, which is symfony's
             // TableRows shape exactly.
+            //
+            // ★ The frame OWNS what it holds in `current`: every reader takes
+            // its own +1 ({@see EmitLlvmControl::emitForeachGeneratorFrom},
+            // {@see EmitLlvmObjects::genCurrentRetain}) and the frame drops the
+            // previous value here and the last one when it finishes. A borrowed
+            // slot left a fresh yield (`yield new M(...)`) with no owner at all
+            // — every message of `foreach ($ws as $m)` leaked. The cell channel
+            // is a cell-slot store like any other: co-own a borrow, and a
+            // rebuilt array's fresh source is dropped by the box itself.
             if ($cellChannel && $y->value->type->kind !== Type::KIND_UNKNOWN) {
-                $out .= $this->boxToCell($y->value->type);
+                $out .= $this->retainCellPayload($y->value);
+                $out .= $this->boxToCell($y->value->type, $y->value);
+                $out .= $this->coerceToI64();
             } else {
                 $out .= $this->boxToCellShallow($y->value->type);
+                $out .= $this->coerceToI64();
+                if (!$this->yieldValueFresh($y->value)) {
+                    $out .= $this->rcRetainReg($this->lastValue, 'cell');
+                }
             }
-            $out .= $this->coerceToI64();
             $val = $this->lastValue;
         }
         // Key: explicit `$k =>`, else the auto-increment counter (then bump it).
@@ -467,6 +562,7 @@ trait EmitLlvmGenerator
             $out .= '  ' . $nk1 . ' = add i64 ' . $nk . ", 1\n";
             $out .= '  store i64 ' . $nk1 . ', ptr ' . $this->gen->nextKeyPtr . "\n";
         }
+        $out .= $this->genDropCurrent();
         $out .= '  store i64 ' . $val . ', ptr ' . $this->gen->currentPtr . "\n";
         $k = $this->gen->yieldCounter + 1;
         $this->gen->yieldCounter = $k;

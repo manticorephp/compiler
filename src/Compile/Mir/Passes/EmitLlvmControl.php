@@ -158,6 +158,7 @@ trait EmitLlvmControl
         $stepLabel = $this->ssa->allocLabel('feg.step');
         $endLabel  = $this->ssa->allocLabel('feg.end');
 
+        $out .= $this->foreachOwnedSlotReset($fe);
         // rewind: resume once if not yet started (state == 0).
         $out .= $this->genFieldLoad($g, 8);
         $st0 = $this->lastValue;
@@ -189,6 +190,18 @@ trait EmitLlvmControl
         $out .= $this->unboxCellToType($gelem);
         $out .= $this->coerceToI64();
         $cur = $this->lastValue;
+        // The frame owns `current` and drops it at the next yield, so the loop
+        // variable takes a +1 of its own — php's `$v` is a copy that outlives
+        // the step and the loop. A loop that co-owns gives back the previous
+        // iteration's; one that does not ({@see foreachValueOwns}) keeps the
+        // +1 rather than hold a word the next resume frees.
+        if ($this->foreachValueOwns($fe)) {
+            $out .= $this->foreachOwnedRebind($fe, $cur, true);
+        } else {
+            $gf = ($gelem->kind === Type::KIND_CELL || $gelem->kind === Type::KIND_UNKNOWN)
+                ? 'cell' : $this->discardReleaseFlavor($gelem);
+            if ($gf !== '') { $out .= $this->rcRetainReg($cur, $gf); }
+        }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
@@ -525,8 +538,11 @@ trait EmitLlvmControl
             $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
             $out .= '  store i64 ' . $z . ', ptr ' . $slot . "\n";
         } else {
-            // current@16 / key@24 — both already tagged cells.
+            // current@16 / key@24 — both already tagged cells. `current` is the
+            // frame's own; the object arm's method call answers a +1, and so
+            // must this one.
             $out .= $this->genFieldLoad($g, ($m === 'current') ? 16 : 24);
+            if ($m === 'current') { $out .= $this->rcRetainReg($this->lastValue, 'cell'); }
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         }
         $out .= '  br label %' . $endL . "\n";
@@ -624,7 +640,8 @@ trait EmitLlvmControl
         string $iterName, \Compile\Mir\Type $iterType, bool $dyn): string
     {
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
-        $out = $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
+        $out = $this->foreachOwnedSlotReset($fe);
+        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -642,7 +659,14 @@ trait EmitLlvmControl
         $out .= $bodyL . ":\n";
         $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current');
         $out .= $this->coerceToI64();
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        $cur = $this->lastValue;
+        // `current()` is +1 on every arm — a method's return convention, and
+        // the generator arm retains to match — so a co-owning loop variable
+        // only gives back the previous iteration's.
+        if ($this->foreachValueOwns($fe)) {
+            $out .= $this->foreachOwnedRebind($fe, $cur, false);
+        }
+        $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key');
             $out .= $this->coerceToI64();
@@ -920,6 +944,40 @@ trait EmitLlvmControl
         while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; $depth++; }
         if (!$bare && $depth === 0) { return false; }
         return $base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name;
+    }
+
+    /**
+     * Before an ITERATOR loop that co-owns its value: drop what the slot holds
+     * (an earlier loop's last value over the same name is still +1) and zero
+     * it, so the first iteration's drop is a no-op — the array loop's rule.
+     */
+    private function foreachOwnedSlotReset(Foreach_ $fe): string
+    {
+        if (!$this->foreachValueOwns($fe)) { return ''; }
+        $slot = $this->locals->slots[$fe->valueVar];
+        $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
+        $out = '';
+        if ($fl !== '') {
+            $stale = $this->ssa->allocReg();
+            $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
+            $out .= $this->rcReleaseReg($stale, $fl);
+        }
+        return $out . '  store i64 0, ptr ' . $slot . "\n";
+    }
+
+    /**
+     * A co-owning iterator loop binding `$cur`: take its +1 when the step
+     * handed out a borrow (`$retain`), then drop the previous iteration's —
+     * retain first, so a value met twice goes 1 → 2 → 1.
+     */
+    private function foreachOwnedRebind(Foreach_ $fe, string $cur, bool $retain): string
+    {
+        $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
+        if ($fl === '') { return ''; }
+        $out = $retain ? $this->rcRetainReg($cur, $fl) : '';
+        $prev = $this->ssa->allocReg();
+        $out .= '  ' . $prev . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        return $out . $this->rcReleaseReg($prev, $fl);
     }
 
     /**

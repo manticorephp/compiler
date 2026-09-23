@@ -6340,6 +6340,26 @@ trait EmitLlvmObjects
      * current. Frame: [resume_fn@0, state@8, current@16, key@24, nextkey@32,
      * sent@40, retval@48].
      */
+    /**
+     * `current()` / `send()` / `throw()` hand out the frame's `current`@16,
+     * which the frame owns and drops at the next yield
+     * ({@see EmitLlvmGenerator::emitYield}). A method call's result is the
+     * caller's +1 ({@see InsertMemoryOps::isOwnedObj}), so take one — read at
+     * the type the caller was handed; an erased one is still the tagged cell.
+     */
+    private function genCurrentRetain(Type $t, string $reg): string
+    {
+        $k = $t->kind;
+        $fl = ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) ? 'cell'
+            : ($this->isClosureValueType($t) ? 'closure' : $this->discardReleaseFlavor($t));
+        if ($fl === '') { return ''; }
+        $sv = $this->lastValue;
+        $out = $this->rcRetainReg($reg, $fl);
+        $this->lastValue = $sv;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitGeneratorMethod(\Compile\Mir\MethodCall_ $mc): string
     {
         $out = $this->emitNode($mc->object);
@@ -6359,6 +6379,7 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
             $out = $this->finishI64($out, $this->lastValue);
             if ($mc->type->kind === Type::KIND_CELL) {
                 $this->markCellOpaque($this->lastValue);
@@ -6383,6 +6404,7 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
             $out = $this->finishI64($out, $this->lastValue);
             if ($mc->type->kind === Type::KIND_CELL) {
                 $this->markCellOpaque($this->lastValue);
@@ -6404,6 +6426,7 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
             $out = $this->finishI64($out, $this->lastValue);
             if ($mc->type->kind === Type::KIND_CELL) {
                 $this->markCellOpaque($this->lastValue);

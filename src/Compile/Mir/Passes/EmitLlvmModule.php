@@ -2054,6 +2054,7 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
+            $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             // Same slot hand-back as {@see finishReturn} — this branch exits
             // before it, so a `return` inside a generator's try leaked one slot
