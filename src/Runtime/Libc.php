@@ -327,6 +327,11 @@ function sys_dup2(#[CType('int')] int $oldfd, #[CType('int')] int $newfd): int {
 #[Library('c'), Symbol('execv'), CType('int')]
 function sys_execv(string $path, Ptr $argv): int {}
 
+// `int execvp(const char *file, char *const argv[])` — execv with a PATH search
+// for a bare name: proc_open's ARRAY form runs its command directly, no shell.
+#[Library('c'), Symbol('execvp'), CType('int')]
+function sys_execvp(string $file, Ptr $argv): int {}
+
 // `FILE *fdopen(int fd, const char *mode)` — wrap an existing descriptor in a
 // stdio stream, so the f* family reads a pipe end unchanged. It ADOPTS the fd:
 // fclose on the result closes it.

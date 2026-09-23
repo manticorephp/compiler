@@ -1330,9 +1330,13 @@ trait InferNodes
 
     private function inferBlock(Block $node): Type
     {
+        $last = null;
         foreach ($node->stmts as $s) {
-            $this->inferNode($s);
+            $last = $this->inferNode($s);
         }
+        // A VALUE block built untyped (LowerFromAst::wrapCallPost) is its last
+        // node's value; every other block is constructed with its type.
+        if ($node->type->kind === Type::KIND_UNKNOWN && $last !== null) { $node->type = $last; }
         return $node->type;
     }
 
@@ -1743,12 +1747,28 @@ trait InferNodes
     {
         $this->inferNode($node->subject);
         $saved = $this->localTypes;
+        // Each arm is ENTERED from the switch head: an arm that follows one
+        // ending in break/return/throw/continue starts from the head's locals,
+        // not from what its sibling assigned — `case A: $d = explode(…); break;
+        // default: esc($d);` typed `$d` a vec in the default arm. Only a real
+        // fall-through (a non-empty arm with no terminator) carries its state on.
+        $carry = false;
         foreach ($node->arms as $arm) {
+            if (!$carry) { $this->localTypes = $saved; }
             if ($arm->value !== null) { $this->inferNode($arm->value); }
             foreach ($arm->body as $s) { $this->inferNode($s); }
+            $n = \count($arm->body);
+            $carry = $n > 0 && !$this->armTerminates($arm->body[$n - 1]);
         }
         $this->localTypes = $saved;
         return Type::void();
+    }
+
+    /** A switch arm's last statement leaves the arm: break, continue, return, throw. */
+    private function armTerminates(Node $last): bool
+    {
+        $k = $last->kind;
+        return $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE || $this->blockDiverges($last);
     }
 
     private function inferMatch(Match_ $node): Type

@@ -575,11 +575,12 @@ trait EmitLlvmObjects
                 $ri = $ri + 1;
             }
         }
-        // Capture the thrown location + call stack into a Throwable at `new`
-        // (PHP records these at construction), when the program queries a trace.
-        if ($this->rt->needsBacktrace && $cd !== null
-            && $this->classImplements($n->class, 'Throwable')) {
-            $out .= $this->emitThrowableCapture($obj, $n);
+        // Capture the `new` site into a Throwable (PHP records it at construction):
+        // line and file always — two stores, and `(string)$e` reads them through a
+        // cast no demand scan can see — the call stack only when the program
+        // queries a trace, since that costs a frame push at every call.
+        if ($cd !== null && $this->classImplements($n->class, 'Throwable')) {
+            $out .= $this->emitThrowableCapture($obj, $n, $this->rt->needsBacktrace);
         }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
@@ -591,7 +592,7 @@ trait EmitLlvmObjects
      * first) into a freshly-constructed Throwable's traceNames / traceLines, and
      * the `new` site's line/file into line/file. `$no` is the NewObj.
      */
-    private function emitThrowableCapture(string $obj, \Compile\Mir\NewObj $no): string
+    private function emitThrowableCapture(string $obj, \Compile\Mir\NewObj $no, bool $withTrace): string
     {
         $cd = $this->classes[$no->class];
         $lineOff = $cd->propertyOffset('line');
@@ -608,6 +609,7 @@ trait EmitLlvmObjects
         $fstr = $this->ssa->allocReg();
         $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
+        if (!$withTrace) { return $out; }
         // Two packed vecs of the active frames, innermost first.
         $out .= $this->emitBtVec('@__mir_bt_name');
         $namesVec = $this->lastValue;
@@ -696,6 +698,10 @@ trait EmitLlvmObjects
      */
     private function emitClone(\Compile\Mir\Clone_ $n): string
     {
+        $rk = $n->object->type->kind;
+        if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN) {
+            return $this->emitCloneErased($n);
+        }
         $cls = $n->object->type->class ?? '';
         $cd = ($cls !== '' && isset($this->classes[$cls])) ? $this->classes[$cls] : null;
         $out = $this->emitNode($n->object);
@@ -717,6 +723,66 @@ trait EmitLlvmObjects
             return $out;
         }
         return $out . $this->emitCloneOfClass($n, $cd, $cls, $src);
+    }
+
+    /**
+     * `clone $v` over a value whose class is not static — a `mixed` element, an
+     * untyped foreach value. It passed the word through: the "copy" WAS the
+     * original (a write through it hit the shared object), and a NaN-boxed
+     * receiver reached the typed consumer as a bare pointer — php-cs-fixer's
+     * `$tokensToInsert[] = clone $param` was invalid IR. Strip the tag, clone by
+     * the runtime class like an interface receiver, and box the copy back when
+     * the node is a cell.
+     */
+    private function emitCloneErased(\Compile\Mir\Clone_ $n): string
+    {
+        $out = $this->emitNode($n->object);
+        $out .= $this->coerceToI64();
+        $unb = $this->ssa->allocReg();
+        $out .= '  ' . $unb . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+        $src = $this->ssa->allocReg();
+        $out .= '  ' . $src . ' = inttoptr i64 ' . $unb . " to ptr\n";
+        $impls = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($cd->isStruct) { continue; }
+            if ($this->isEnumClass($name) || $this->isClosureClass($name)) { continue; }
+            $impls[] = $name;
+        }
+        if ($impls !== [] && $n->withProps === []) {
+            // ONE shared body per module: the chain is every class, and a copy
+            // of it at each site multiplied the module by the class count.
+            if ($this->cloneErasedSym === '') {
+                $sym = $this->mirHelperSym('__mir_clone_erased');
+                $body = $this->emitCloneDispatch($n, '%a0', $impls);
+                $ret = $this->lastValue;
+                if ($this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
+                    $this->cloneErasedSym = $sym;
+                    $this->vdExtraBodies .= 'define linkonce_odr ptr @' . $sym
+                        . "(ptr %a0) noinline {\nentry:\n" . $body . '  ret ptr ' . $ret . "\n}\n\n";
+                }
+            }
+            if ($this->cloneErasedSym !== '') {
+                $r = $this->ssa->allocReg();
+                $out .= '  ' . $r . ' = call ptr @' . $this->cloneErasedSym . '(ptr ' . $src . ")\n";
+                $this->lastValue = $r;
+                $this->lastValueType = 'ptr';
+            } else {
+                $out .= $this->emitCloneDispatch($n, $src, $impls);
+            }
+        } elseif ($impls !== []) {
+            $out .= $this->emitCloneDispatch($n, $src, $impls);
+        } else {
+            $this->lastValue = $src;
+            $this->lastValueType = 'ptr';
+        }
+        if ($n->type->kind !== Type::KIND_CELL) { return $out; }
+        $this->rt->needsTagged = true;
+        $out .= $this->coerceToPtr();
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /**

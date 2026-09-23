@@ -486,12 +486,13 @@ final class Lexer
         $underscore = \ord('_');
         $zero = \ord('0');
         $nine = \ord('9');
+        // Zend's DNUM is `{LNUM}?"."{LNUM} | {LNUM}"."{LNUM}?`: a dot after
+        // integer digits is part of the float even with no digit behind it (`0.`).
         if ($this->pos < $this->len
             && \ord($this->src[$this->pos]) === $dot
-            && $this->pos + 1 < $this->len
         ) {
-            $next = \ord($this->src[$this->pos + 1]);
-            if ($next >= $zero && $next <= $nine) {
+            $next = $this->pos + 1 < $this->len ? \ord($this->src[$this->pos + 1]) : 0;
+            if (($next >= $zero && $next <= $nine) || $this->pos > $start) {
                 $isFloat = true;
                 $this->advance();
                 while ($this->pos < $this->len) {
@@ -536,7 +537,7 @@ final class Lexer
                         }
                         while ($this->pos < $this->len) {
                             $digit = \ord($this->src[$this->pos]);
-                            if ($digit < $zero || $digit > $nine) { break; }
+                            if (($digit < $zero || $digit > $nine) && $digit !== $underscore) { break; }
                             $this->advance();
                         }
                     }

@@ -1163,6 +1163,12 @@ trait LowerTypes
                 $j = $j + 1;
             }
             $type = \substr($doc, $typeStart, $j - $typeStart);
+            // A shape or generic written over several docblock lines carries
+            // each line's ` * ` gutter inside it — `array{\n *     type: int}`
+            // otherwise names a key `*     type`.
+            if (\str_contains($type, "\n")) {
+                $type = (string)\preg_replace('/\r?\n[ \t]*\*?[ \t]*/', ' ', $type);
+            }
             if ($varName === '') { return $type; }
             while ($j < $n) {
                 $c = \substr($doc, $j, 1);

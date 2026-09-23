@@ -21,7 +21,7 @@
  * set_exception_handler) resolves through it. An empty marker made that an
  * "unknown method" error.
  */
-interface Throwable
+interface Throwable extends Stringable
 {
     public function getMessage(): string;
     public function getCode(): int;
@@ -55,6 +55,7 @@ class Exception implements Throwable
     public function getLine(): int { return $this->line; }
     public function getFile(): string { return $this->file; }
     public function getTrace(): array { return __mir_bt_frames($this->traceNames, $this->traceLines, $this->file); }
+    public function __toString(): string { return __mc_throwable_string($this); }
 
     public function getTraceAsString(): string
     {
@@ -92,6 +93,7 @@ class Error implements Throwable
     public function getLine(): int { return $this->line; }
     public function getFile(): string { return $this->file; }
     public function getTrace(): array { return __mir_bt_frames($this->traceNames, $this->traceLines, $this->file); }
+    public function __toString(): string { return __mc_throwable_string($this); }
 
     public function getTraceAsString(): string
     {
@@ -104,6 +106,19 @@ class Error implements Throwable
         }
         return $s . "#" . $n . " {main}";
     }
+}
+
+/**
+ * php's Throwable::__toString: the previous chain first, each link joined by
+ * `Next`, then this one. An empty message drops the colon, as php does.
+ */
+function __mc_throwable_string(Throwable $e): string
+{
+    $prev = $e->getPrevious();
+    $head = $prev !== null ? __mc_throwable_string($prev) . "\n\nNext " : "";
+    $msg = $e->getMessage();
+    return $head . get_class($e) . ($msg !== "" ? ": " . $msg : "") . " in " . $e->getFile() . ":" . $e->getLine()
+        . "\nStack trace:\n" . $e->getTraceAsString();
 }
 
 class RuntimeException extends Exception {}

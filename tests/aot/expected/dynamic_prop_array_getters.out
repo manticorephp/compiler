@@ -1,0 +1,23 @@
+bool(true)
+array(1) {
+  ["line"]=>
+  int(3)
+}
+array(2) {
+  [0]=>
+  string(2) "s2"
+  [1]=>
+  string(3) "s15"
+}
+bool(false)
+array(1) {
+  ["line"]=>
+  int(9)
+}
+bool(true)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}

@@ -453,14 +453,18 @@ trait LowerExprs
                 return $this->lowerFcc($expr->function);
             }
             $callee = $this->resolveCallName($expr->function);
+            $savedPost = $this->pendingCallPost;
+            $this->pendingCallPost = [];
             $args = $this->lowerCallArgs($callee, $expr->args);
+            $posts = $this->pendingCallPost;
+            $this->pendingCallPost = $savedPost;
             $sited = $this->asyncSiteCallee($callee);
             if ($sited !== '') {
                 $site = $this->callSite($expr->span);
                 if ($site !== '') {
                     $withSite = [new StringConst($site, Type::string_())];
                     foreach ($args as $a) { $withSite[] = $a; }
-                    return new Call($sited, $withSite, Type::unknown());
+                    return $this->wrapCallPost(new Call($sited, $withSite, Type::unknown()), $posts);
                 }
             }
             $call = new Call($callee, $args, Type::unknown());
@@ -469,7 +473,7 @@ trait LowerExprs
             // knows it. The overflow is read here and nowhere later: the next
             // lowering of any call overwrites it.
             $call->srcArgc = \count($expr->args);
-            return $call;
+            return $this->wrapCallPost($call, $posts);
     }
 
     private function lowerStaticAccessExpr(\Parser\Ast\StaticAccess $expr): ?Node
@@ -615,6 +619,9 @@ trait LowerExprs
         if ($expr->kind === 'DynamicStaticAccess') { return $this->lowerDynamicStaticAccessExpr($expr); }
         if ($expr->kind === 'DynamicStaticCall') {
             return $this->lowerDynStaticCall($expr);
+        }
+        if ($expr->kind === 'DynamicStaticMethodCall') {
+            return $this->lowerDynStaticMethodCall($expr);
         }
         if ($expr->kind === 'BinaryOp') {
             return $this->lowerBinary($expr);

@@ -1,0 +1,5 @@
+string(3) "str"
+int(5)
+float(1.5)
+x/string,5/integer,1.5/double
+square 0

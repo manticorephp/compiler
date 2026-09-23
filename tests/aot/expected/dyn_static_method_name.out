@@ -1,0 +1,8 @@
+int(42)
+string(3) "A:3"
+string(3) "B:4"
+int(9)
+int(101)
+int(10)
+int(12)
+Error: Call to undefined method A::nope()

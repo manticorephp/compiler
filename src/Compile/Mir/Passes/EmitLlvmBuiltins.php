@@ -3193,7 +3193,8 @@ trait EmitLlvmBuiltins
         if (\count($args) !== 2) { return null; }
         $bothInt = $args[0]->type->kind === Type::KIND_INT
             && $args[1]->type->kind === Type::KIND_INT;
-        if ($bothInt) {
+        if ($bothInt && !\Compile\Mir\IntConst::isConstInt($args[1])) { return $this->biPowIntRuntime($args); }
+        if ($bothInt && \Compile\Mir\IntConst::valueOf($args[1]) >= 0) {
             $this->rt->needsIpow = true;
             $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $b = $this->lastValue;
             $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $e = $this->lastValue;
@@ -3211,6 +3212,50 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $reg . ' = call double @llvm.pow.f64(double ' . $b . ', double ' . $e . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
+    }
+
+    /**
+     * `int ** int` with an exponent only known at run time: php's int for a
+     * non-negative exponent, its float otherwise — boxed into the numeric cell
+     * InferCalls typed the call as.
+     *
+     * @param Node[] $args
+     */
+    private function biPowIntRuntime(array $args): string
+    {
+        $this->rt->needsIpow = true;
+        $this->rt->needsTagged = true;
+        $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
+        $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $b = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $e = $this->lastValue;
+        $neg = $this->ssa->allocReg();
+        $lInt = $this->ssa->allocLabel('pow.int');
+        $lFlt = $this->ssa->allocLabel('pow.flt');
+        $lEnd = $this->ssa->allocLabel('pow.end');
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $e . ", 0\n";
+        $out .= '  br i1 ' . $neg . ', label %' . $lFlt . ', label %' . $lInt . "\n";
+        $out .= $lInt . ":\n";
+        $ri = $this->ssa->allocReg();
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $ri . ' = call i64 @__mir_ipow(i64 ' . $b . ', i64 ' . $e . ")\n";
+        $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $ri . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lFlt . ":\n";
+        $db = $this->ssa->allocReg();
+        $de = $this->ssa->allocReg();
+        $rf = $this->ssa->allocReg();
+        $bf = $this->ssa->allocReg();
+        $out .= '  ' . $db . ' = sitofp i64 ' . $b . " to double\n";
+        $out .= '  ' . $de . ' = sitofp i64 ' . $e . " to double\n";
+        $out .= '  ' . $rf . ' = call double @llvm.pow.f64(double ' . $db . ', double ' . $de . ")\n";
+        $out .= '  ' . $bf . ' = call i64 @__manticore_box_float(double ' . $rf . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi i64 [ ' . $bi . ', %' . $lInt . ' ], [ ' . $bf . ', %' . $lFlt . " ]\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /** A unary float→float math builtin via an LLVM intrinsic (floor / ceil /

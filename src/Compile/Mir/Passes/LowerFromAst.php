@@ -492,6 +492,9 @@ final class LowerFromAst implements Pass
     public bool $includeArrayClasses = false;
     /** SPL array-class prelude source, read by Main from `prelude/spl_arrays.php`. */
     public string $arrayClassesSrc = '';
+    /** SPL iterators / file-system iterators / data structures, read by Main from
+     *  `prelude/spl_iterators.php` — '' unless the program names one. */
+    public string $splIteratorsSrc = '';
     /** Inject ReflectionClass / ReflectionException (gated on the program
      *  MENTIONING one — see Main.php). Decides whether the classes exist, NOT
      *  which classes carry metadata: that is ReflectAnalysis's job, because
@@ -545,6 +548,10 @@ final class LowerFromAst implements Pass
      * @var \Parser\Ast\FunctionDecl[]
      */
     public array $externDecls = [];
+
+    /** @var array<string, bool> absolute paths of the DEMAND-LOADED source files (composer
+     *  psr-4 / classmap), set by the driver — {@see dropShadowedBuiltinTypes} */
+    public array $demandLoadedFiles = [];
 
     /** True once at least one stdlib extern was injected → driver links stdlib.o. */
     public bool $externInjected = false;
@@ -614,6 +621,14 @@ final class LowerFromAst implements Pass
      *  {@see lowerStmt} immediately before the statement whose call produced
      *  them (so an undefined out-var is defined + typed ahead of the call). */
     private array $pendingCallInits = [];
+
+    /** @var \Parser\Ast\Expr[] `$var = $__outN` copies owed right after the call being
+     *  lowered ({@see redirectAliasedOutArgs}); the call site wraps them in. */
+    private array $pendingCallPost = [];
+
+    /** @var array<string, bool> `Class::method` (lower-case method) whose body calls
+     *  `parent::method(…)` — {@see overriddenBelow} */
+    private array $forwardsToParent = [];
 
     /**
      * Bare fn name → its single namespaced FQN, for unqualified call
@@ -689,20 +704,7 @@ final class LowerFromAst implements Pass
                 $stmts[] = $us;
             }
         }
-        // Declarations hidden inside a FOLDABLE `if` are registered HERE, not
-        // only when flattenConstantIfs rewrites the statement list much later.
-        // A class that `use`s a hoisted TRAIT is built by the pass just below,
-        // and a trait it cannot see merges nothing: the trait method's return
-        // type falls back to int and a string result renders as a raw pointer
-        // (symfony/cache's Redis62ProxyTrait, declared in both arms of a
-        // version guard, printed `4372747872` for `legacy`).
-        //
-        // Registration only — the statement list is still rewritten later by
-        // the real flatten. This can only ADD registrations earlier, never
-        // remove one: a guard that needs `fnDecls` (not populated yet) simply
-        // folds to UNKNOWN here and is picked up at the later pass, exactly as
-        // before.
-        $this->preregisterFoldableDecls(\array_slice($stmts, $preludeCount));
+        $stmts = $this->dropShadowedBuiltinTypes($stmts, $preludeCount, $userStart);
         // The flattened local list is now the lowering owner; release the
         // merged Program statement-array before class bodies are lowered.
         $this->program = new Program([], "", [], $this->program->docComments);
@@ -819,6 +821,23 @@ final class LowerFromAst implements Pass
                 }
             }
         }
+        // Declarations hidden inside a FOLDABLE `if` are registered HERE, not
+        // only when flattenConstantIfs rewrites the statement list much later.
+        // A class that `use`s a hoisted TRAIT is built by the pass below, and a
+        // trait it cannot see merges nothing: the trait method's return type
+        // falls back to int and a string result renders as a raw pointer
+        // (symfony/cache's Redis62ProxyTrait, declared in both arms of a
+        // version guard, printed `4372747872` for `legacy`).
+        //
+        // AFTER the top-level registration above, never before it: the guards
+        // must already see the prelude's and the program's unconditional types.
+        // Folded ahead of them, `!class_exists('ValueError')` answered TRUE and
+        // the polyfill's ValueError was compiled beside the prelude's.
+        //
+        // Registration only — the statement list is still rewritten later by
+        // the real flatten. A guard that needs `fnDecls` (not populated yet)
+        // folds to UNKNOWN here, is not remembered, and is decided there.
+        $this->preregisterFoldableDecls(\array_slice($stmts, $preludeCount));
         // `#[TypeDef]` classes, BEFORE any ClassDef is built: a class registered
         // earlier may already name one in a property or parameter hint, and
         // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
@@ -1408,6 +1427,12 @@ final class LowerFromAst implements Pass
             }
         }
         if ($this->emitLibrary) { $this->recordExportConstants($module); }
+        // `#[Overload('f')]` — source and imported alike; ResolveOverloads
+        // retargets fitting calls to `f` once argument types are known.
+        foreach ($module->functions as $fd) {
+            $odecl = $this->fnDecls[$fd->name] ?? null;
+            if ($odecl !== null) { $fd->overloadOf = $this->overloadTarget($this->fnDeclAttrs($odecl)); }
+        }
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -1947,9 +1972,29 @@ final class LowerFromAst implements Pass
             $names[\ltrim($i, '\\')] = true;
             $this->collectInterfaceNames($i, $names, $visited);
         }
+        // php makes every class that declares `__toString` implement Stringable
+        // on its own, `implements` line or not — a `Stringable $s` parameter, an
+        // `instanceof`, class_implements() and reflection all see it.
+        if (!isset($names['Stringable']) && isset($this->classDecls['Stringable'])
+                && $this->declDeclaresToString($decl)) {
+            $names['Stringable'] = true;
+        }
         foreach ($decl->extends as $e) {
             $this->collectInterfaceNames($e, $names, $visited);
         }
+    }
+
+    /** Whether `$decl` itself, or a trait it uses, declares `__toString`. */
+    private function declDeclaresToString(\Parser\Ast\ClassDecl $decl): bool
+    {
+        foreach ($this->classDeclMethods($decl) as $m) {
+            if (\strtolower($this->methodDeclName($m)) === '__tostring') { return true; }
+        }
+        foreach ($decl->uses as $t) {
+            $td = $this->traitTable[\ltrim($t, '\\')] ?? null;
+            if ($td !== null && $this->declDeclaresToString($td)) { return true; }
+        }
+        return false;
     }
 
     /**
@@ -2126,8 +2171,12 @@ final class LowerFromAst implements Pass
         array $defaultStores,
         string $staticClass,
         string $fnName,
+        string $lexicalClass = '',
     ): FunctionDef {
-        $this->currentLowerClass = $decl->name;
+        // `self::` / `parent::` / private access resolve against the class that
+        // DECLARED the body — an inherited constructor re-lowered under a
+        // subclass still calls ITS parent, not the subclass's.
+        $this->currentLowerClass = $lexicalClass !== '' ? $lexicalClass : $decl->name;
         $this->currentStaticClass = $staticClass;
         $this->currentLowerFn = $m->name;
         // Which class a lowered method body belongs to. `$this` is untyped until
@@ -2293,9 +2342,15 @@ final class LowerFromAst implements Pass
         foreach ($this->lsbPending as $p) {
             $owner = $p->decl->name;
             foreach ($this->descendantsOf($owner) as $sub) {
+                // A descendant that overrides the method (itself, or a class
+                // between it and the owner) never reaches this body as `static`:
+                // symfony's PhpProcess redeclares fromShellCommandline, and the
+                // copy of Process's `new static([], …)` against PhpProcess's
+                // constructor was a type error in code that cannot run.
+                if ($this->overriddenBelow($owner, $sub, $p->method->name)) { continue; }
                 $spec = $this->lowerMethodFn(
                     $p->decl, $p->method, $p->cd, $p->defaultStores,
-                    $sub, $owner . '__' . $p->method->name . '__lsb' . $sub,
+                    $sub, $owner . '__' . $p->method->name . '__lsb' . $sub, $p->lexicalClass,
                 );
                 $module->addFunction($spec);
                 $lsep = $p->method->isStatic ? '::' : '->';
@@ -2323,6 +2378,32 @@ final class LowerFromAst implements Pass
             }
         }
         return $out;
+    }
+
+    /**
+     * Whether `$sub` or a class between it and `$owner` overrides `$method`
+     * WITHOUT forwarding to it: then `$owner`'s body never runs with `static`
+     * bound to `$sub`. An override that calls `parent::$method(…)` keeps the
+     * called class, so the specialization is reachable through it
+     * ({@see $forwardsToParent}, recorded while the override was lowered —
+     * its body is released by now).
+     */
+    private function overriddenBelow(string $owner, string $sub, string $method): bool
+    {
+        $low = \strtolower($method);
+        $c = $sub;
+        $guard = 0;
+        while ($c !== '' && $c !== $owner && $guard < 256) {
+            $cd = $this->classTable[$c] ?? null;
+            if ($cd === null) { return false; }
+            foreach ($cd->methodNames as $mn => $_) {
+                if (\strtolower((string)$mn) !== $low) { continue; }
+                return !isset($this->forwardsToParent[$c . '::' . $low]);
+            }
+            $c = $cd->parent;
+            $guard = $guard + 1;
+        }
+        return false;
     }
 
     /**
@@ -2357,6 +2438,23 @@ final class LowerFromAst implements Pass
             }
         }
         return $out;
+    }
+
+    /**
+     * The canonical function a `#[Overload('f')]` declaration overloads, or ''.
+     *
+     * @param \Parser\Ast\AttributeNode[] $attributes
+     */
+    private function overloadTarget(array $attributes): string
+    {
+        foreach ($attributes as $attr) {
+            if (!$this->attrIsOneOf($attr, ['Overload', 'Attr\\Overload',
+                'Manticore\\Attr\\Overload'])) { continue; }
+            foreach ($this->attrArgs($attr) as $arg) {
+                if ($arg->kind === 'StringLiteral') { return \ltrim($this->strLitValue($arg), '\\'); }
+            }
+        }
+        return '';
     }
 
     /** A param-position `#[RefOut]` (no arg — marks THIS param). Read through a
@@ -3059,7 +3157,12 @@ final class LowerFromAst implements Pass
         // #[RefOut] out-params auto-vivify — `('preg_match')($p, $s, $matches)`
         // must define $matches by ref exactly like a direct `preg_match(...)`.
         $resolved = $this->resolveCallName($name);
-        return new Call($resolved, $this->lowerCallArgs($resolved, $astArgs), Type::unknown());
+        $savedPost = $this->pendingCallPost;
+        $this->pendingCallPost = [];
+        $args = $this->lowerCallArgs($resolved, $astArgs);
+        $posts = $this->pendingCallPost;
+        $this->pendingCallPost = $savedPost;
+        return $this->wrapCallPost(new Call($resolved, $args, Type::unknown()), $posts);
     }
 
     /**
@@ -3664,6 +3767,141 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * `Class::$name(args)` / `Class::{expr}(args)`: evaluate the name ONCE, then
+     * dispatch to a literal static call per method the class can answer to. Each
+     * arm keeps the ORIGINAL class spelling, so `self::`/`static::`/`parent::`
+     * forward the late-static scope and pass `$this` exactly as the literal call
+     * would. php matches method names case-insensitively; an unknown name throws
+     * php's own Error from a statement guard, for the reason
+     * {@see lowerDynStaticPropRead} gives.
+     */
+    private function lowerDynStaticMethodCall(\Parser\Ast\DynamicStaticMethodCall $dyn): Node
+    {
+        $spelled = $dyn->class;
+        $cls = $this->resolveStaticClass($spelled);
+        $names = [];
+        foreach ($this->dynStaticMethodCandidates($cls) as $nm) {
+            if ($this->dynCallArityFits($cls, $nm, $dyn->args)) { $names[] = $nm; }
+        }
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $rawTmp = '__dynsm_n' . $id;
+        $lowTmp = '__dynsm_l' . $id;
+        $store = [
+            new StoreLocal($rawTmp, $this->lowerExpr($dyn->nameExpr), Type::string_()),
+            new StoreLocal($lowTmp, $this->lowerExpr(\Parser\Ast\Expr::call('strtolower',
+                [\Parser\Ast\Expr::variable($rawTmp, $dyn->span)], $dyn->span)), Type::string_()),
+        ];
+        $throw = new Call(
+            '__mir_throw_error',
+            [new Concat(
+                new Concat(
+                    new StringConst('Call to undefined method ' . $cls . '::', Type::string_()),
+                    new LoadLocal($rawTmp, Type::string_()),
+                ),
+                new StringConst('()', Type::string_()),
+            )],
+            Type::cell(),
+        );
+        $n = \count($names);
+        if ($n === 0) {
+            return new Block([$store[0], $store[1], $throw, new NullConst(Type::null_())], Type::null_());
+        }
+        /** @var Node[] $arms */
+        $arms = [];
+        foreach ($names as $nm) {
+            $arms[] = $this->lowerExpr(\Parser\Ast\Expr::staticCall($spelled, $nm, $dyn->args, $dyn->span));
+        }
+        $guard = new Block([$throw], Type::void());
+        for ($i = $n - 1; $i >= 0; $i = $i - 1) {
+            $guard = new Block([new If_(
+                new Cmp(new LoadLocal($lowTmp, Type::string_()), new StringConst(\strtolower($names[$i]), Type::string_()), '==='),
+                new Block([], Type::void()),
+                $guard,
+            )], Type::void());
+        }
+        $chain = $arms[$n - 1];
+        for ($i = $n - 2; $i >= 0; $i = $i - 1) {
+            $chain = new Ternary(
+                new Cmp(new LoadLocal($lowTmp, Type::string_()), new StringConst(\strtolower($names[$i]), Type::string_()), '==='),
+                $arms[$i],
+                $chain,
+                $arms[$i]->type,
+            );
+        }
+        return new Block([$store[0], $store[1], $guard, $chain], $chain->type);
+    }
+
+    /**
+     * Whether a computed-name call's arguments could bind to `$method` at all.
+     * Every candidate becomes a LITERAL call arm and is type-checked as one, so
+     * a method the call can never mean — php-cs-fixer's
+     * `self::{$this->fixingMap[$k]}($tokens, $index, $annotation)` beside the
+     * class's one-argument `configure()` — would fail the build over an arm that
+     * never runs. A spread or named argument keeps every candidate.
+     *
+     * @param \Parser\Ast\Expr[] $args
+     */
+    private function dynCallArityFits(string $class, string $method, array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a->kind === 'Spread' || $a->kind === 'NamedArg') { return true; }
+        }
+        $argc = \count($args);
+        // The class's method table first: it carries trait-mixed and inherited
+        // methods, where the decl walk below only follows `extends`.
+        $cd = $this->classTable[$class] ?? null;
+        $meta = $cd !== null ? ($cd->methodMeta[$method] ?? null) : null;
+        if ($meta !== null) {
+            if ($argc < $meta->requiredParams()) { return false; }
+            foreach ($meta->params as $pm) {
+                if ($pm->variadic) { return true; }
+            }
+            return $argc <= \count($meta->params);
+        }
+        $params = $this->resolveMethodParams($class, $method);
+        if ($params === null) { return true; }
+        $required = 0;
+        $variadic = false;
+        foreach ($params as $p) {
+            if ($this->paramIsVariadic($p)) { $variadic = true; continue; }
+            if (!$this->paramHasDefault($p)) { $required = $required + 1; }
+        }
+        if ($argc < $required) { return false; }
+        return $variadic || $argc <= \count($params);
+    }
+
+    private function paramIsVariadic(\Parser\Ast\Param $p): bool { return $p->variadic; }
+
+    private function paramHasDefault(\Parser\Ast\Param $p): bool { return $p->default !== null; }
+
+    /**
+     * Every method name `$class` can answer to, its own and inherited, minus the
+     * compiler's synthesised property-hook bodies.
+     *
+     * @return string[]
+     */
+    private function dynStaticMethodCandidates(string $class): array
+    {
+        /** @var string[] $out */
+        $out = [];
+        $seen = [];
+        $c = $class;
+        while ($c !== '' && isset($this->classTable[$c])) {
+            $cd = $this->classTable[$c];
+            foreach ($cd->methodNames as $nm => $_) {
+                $nm = (string)$nm;
+                $low = \strtolower($nm);
+                if (isset($seen[$low]) || \str_contains($nm, '__hook_')) { continue; }
+                $seen[$low] = true;
+                $out[] = $nm;
+            }
+            $c = $cd->parent;
+        }
+        return $out;
+    }
+
+    /**
      * A store through a computed static-property name: evaluate the name and the
      * value ONCE, then dispatch to the concrete slot. An unknown name throws what
      * php throws, rather than silently writing nowhere — a hand-written dispatch
@@ -3891,9 +4129,43 @@ final class LowerFromAst implements Pass
      * The live branch's statements of a compile-time `if`, or null when the guard
      * (or a preceding elseif guard) is not statically foldable.
      *
+     * A type this `if` itself declares does not exist yet while its guard runs —
+     * that is the whole polyfill idiom, `if (!class_exists('X')) { class X {} }`.
+     * The early registration pass ({@see preregisterFoldableDecls}) has already
+     * put X in the decl table by the time the real flatten folds the SAME guard,
+     * which then answered TRUE and dropped the body: X known, its methods
+     * lowered nowhere. So a name whose registered decl is one of this `if`'s own
+     * is hidden from the fold. A prelude or top-level X is a different decl and
+     * stays visible.
+     *
      * @return \Parser\Ast\Stmt[]|null
      */
     private function constIfBranch(\Parser\Ast\IfStmt $s): ?array
+    {
+        $saved = $this->foldHiddenTypes;
+        $this->hideOwnTypes($s->then->statements);
+        foreach ($s->elseifs as $arm) { $this->hideOwnTypes($arm->body->statements); }
+        if ($s->else !== null) { $this->hideOwnTypes($s->else->statements); }
+        $live = $this->constIfBranchFolded($s);
+        $this->foldHiddenTypes = $saved;
+        return $live;
+    }
+
+    /** @param \Parser\Ast\Stmt[] $stmts */
+    private function hideOwnTypes(array $stmts): void
+    {
+        foreach ($stmts as $b) {
+            if ($b->kind !== 'Class') { continue; }
+            $cdecl = $b->decl;
+            $name = ($cdecl->kind ?? 'class') === 'trait' ? $this->declName($cdecl) : $this->classDeclName($cdecl);
+            if ($name === '') { continue; }
+            $reg = $this->classDecls[$name] ?? ($this->traitTable[$name] ?? null);
+            if ($reg === null || $reg === $cdecl) { $this->foldHiddenTypes[$name] = true; }
+        }
+    }
+
+    /** @return \Parser\Ast\Stmt[]|null */
+    private function constIfBranchFolded(\Parser\Ast\IfStmt $s): ?array
     {
         $c = $this->foldGuard($s->condition);
         if ($c === self::GUARD_UNKNOWN) { return null; }
@@ -3931,6 +4203,41 @@ final class LowerFromAst implements Pass
             }
             $this->preregisterFoldableDecls($branch);
         }
+    }
+
+    /**
+     * Drop a DEMAND-LOADED file's top-level declaration of a type the runtime
+     * already provides. Composer only reads such a file when a lookup MISSES,
+     * and a built-in never misses — symfony/polyfill-php80 ships
+     * `Resources/stubs/Attribute.php` on its classmap, which php 8 never loads.
+     * Compiled anyway, it redefined the prelude's constructor and clang refused
+     * the module.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @return \Parser\Ast\Stmt[]
+     */
+    private function dropShadowedBuiltinTypes(array $stmts, int $preludeCount, int $userStart): array
+    {
+        if ($this->demandLoadedFiles === []) { return $stmts; }
+        /** @var array<string, bool> $builtin */
+        $builtin = [];
+        for ($i = 0; $i < $preludeCount; $i = $i + 1) {
+            $ps = $stmts[$i];
+            if ($ps->kind !== 'Class') { continue; }
+            $pdecl = $ps->decl;
+            $builtin[\strtolower(\ltrim($this->classDeclName($pdecl), '\\'))] = true;
+        }
+        $out = [];
+        $n = \count($stmts);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $s = $stmts[$i];
+            if ($i >= $userStart && $s->kind === 'Class' && isset($this->demandLoadedFiles[$s->span->file])) {
+                $udecl = $s->decl;
+                if (isset($builtin[\strtolower(\ltrim($this->classDeclName($udecl), '\\'))])) { continue; }
+            }
+            $out[] = $s;
+        }
+        return $out;
     }
 
     /**
@@ -4022,6 +4329,9 @@ final class LowerFromAst implements Pass
     private const GUARD_UNKNOWN = -1;
     private const GUARD_FALSE = 0;
     private const GUARD_TRUE = 1;
+
+    /** @var array<string, bool> types the `if` being folded declares itself ({@see constIfBranch}) */
+    private array $foldHiddenTypes = [];
 
     /**
      * Compile-time truth of a declaration guard as a TRI-STATE:
@@ -4172,14 +4482,19 @@ final class LowerFromAst implements Pass
             $known = isset($this->knownClassNames[$cn]) || isset($this->traitTable[$cn]);
             return $known ? self::GUARD_UNKNOWN : self::GUARD_FALSE;
         }
-        if (count($e->args) !== 1) { return self::GUARD_UNKNOWN; }
+        // An unqualified builtin call inside a namespace resolves to
+        // `Ns\class_exists` in the AST (PHP falls back to the global at
+        // runtime); match on the trailing segment so the guard folds
+        // regardless of the enclosing namespace.
+        $qual = \ltrim($e->function, '\\');
+        $fn = $this->bareName($qual);
+        // `class_exists('X', false)` — the polyfill spelling. `$autoload` cannot
+        // change the answer in a whole-program build: every class is declared
+        // up front, none arrives later through an autoloader.
+        $existsFamily = $fn === 'class_exists' || $fn === 'interface_exists'
+            || $fn === 'trait_exists' || $fn === 'enum_exists';
+        if (count($e->args) !== 1 && !($existsFamily && count($e->args) === 2)) { return self::GUARD_UNKNOWN; }
         if (true) {
-            // An unqualified builtin call inside a namespace resolves to
-            // `Ns\class_exists` in the AST (PHP falls back to the global at
-            // runtime); match on the trailing segment so the guard folds
-            // regardless of the enclosing namespace.
-            $qual = \ltrim($e->function, '\\');
-            $fn = $this->bareName($qual);
             $a0 = $e->args[0];
             if ($fn === 'function_exists') {
                 // The name is usually a string literal, but symfony writes
@@ -4208,6 +4523,7 @@ final class LowerFromAst implements Pass
                 || $fn === 'trait_exists' || $fn === 'enum_exists') {
                 $cn = $this->guardClassArgName($a0);
                 if ($cn === null) { return self::GUARD_UNKNOWN; }
+                if (isset($this->foldHiddenTypes[$cn])) { return self::GUARD_FALSE; }
                 $decl = $this->classDecls[$cn] ?? ($this->traitTable[$cn] ?? null);
                 if ($decl !== null) {
                     $kind = $decl->kind ?? 'class';
@@ -4413,6 +4729,21 @@ final class LowerFromAst implements Pass
      *
      * @param \Parser\Ast\Expr[] $astArgs
      */
+    /**
+     * Whether `$name` is read by any argument other than the one at `$skip`.
+     *
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
+    private function varReadByOtherArg(string $name, array $astArgs, int $skip): bool
+    {
+        $j = 0;
+        foreach ($astArgs as $other) {
+            if ($j !== $skip && \in_array($name, $this->collectVars($other), true)) { return true; }
+            $j = $j + 1;
+        }
+        return false;
+    }
+
     private function collectRefOutInits(\Parser\Ast\FunctionDecl $decl, array $astArgs): void
     {
         $names = $this->refOutParamNames($decl->attributes);
@@ -4428,6 +4759,10 @@ final class LowerFromAst implements Pass
             if (!isset($names[$this->paramName($p)]) && !$this->paramRefOut($p)
                 && !$this->paramHasRefOutAttr($p)) { continue; }
             if ($a->kind !== 'Variable') { continue; }
+            // The same variable READ by another argument is live at the call:
+            // `preg_match_all($re, $s, $s)` passes `$s` as the subject first, and
+            // an init stored ahead of the call replaced that subject with `[]`.
+            if ($this->varReadByOtherArg($this->variableName($a), $astArgs, $i - 1)) { continue; }
             // Only ARRAY out-params get auto-vivified: the empty-array init both
             // defines the var and types it `vec[cell]` (so captures read back as
             // tagged cells). A SCALAR out-param (`int &$count`) must NOT get an
@@ -4466,6 +4801,72 @@ final class LowerFromAst implements Pass
         }
     }
 
+    /**
+     * `preg_match_all($re, $s, $s)` — an OUT-param whose variable another
+     * argument reads. A `#[RefOut]` callee never reads what comes in, so the
+     * call is exactly `$t = []; f($re, $s, $t); $s = $t;`, and that is what it
+     * becomes: the variable keeps its incoming value for the argument that reads
+     * it, and changes type by an ordinary assignment afterwards. Written through
+     * directly, the one slot was typed for both roles at once.
+     *
+     * @param \Parser\Ast\Expr[] $astArgs
+     * @return \Parser\Ast\Expr[]
+     */
+    private function redirectAliasedOutArgs(string $fnName, array $astArgs): array
+    {
+        $bare = $this->bareName($fnName);
+        /** @var int[] $outIdx */
+        $outIdx = [];
+        if ($bare === 'preg_match' || $bare === 'preg_match_all') {
+            $outIdx[] = 2;
+        } elseif (isset($this->fnDecls[$fnName])) {
+            $decl = $this->fnDecls[$fnName];
+            $names = $this->refOutParamNames($this->fnDeclAttrs($decl));
+            $i = 0;
+            foreach ($this->fnDeclParams($decl) as $p) {
+                if (isset($names[$this->paramName($p)]) || $this->paramRefOut($p)
+                        || $this->paramHasRefOutAttr($p)) {
+                    $outIdx[] = $i;
+                }
+                $i = $i + 1;
+            }
+        }
+        foreach ($astArgs as $a) {
+            if ($a->kind === 'NamedArg' || $a->kind === 'Spread') { return $astArgs; }
+        }
+        foreach ($outIdx as $i) {
+            $a = $astArgs[$i] ?? null;
+            if ($a === null || $a->kind !== 'Variable') { continue; }
+            $name = $this->variableName($a);
+            if (!$this->varReadByOtherArg($name, $astArgs, $i)) { continue; }
+            $tmp = '__out' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $astArgs[$i] = \Parser\Ast\Expr::variable($tmp, $a->span);
+            $this->pendingCallPost[] = \Parser\Ast\Expr::assign(
+                \Parser\Ast\Expr::variable($name, $a->span),
+                \Parser\Ast\Expr::variable($tmp, $a->span), $a->span);
+        }
+        return $astArgs;
+    }
+
+    /**
+     * The call, then the out-copies {@see redirectAliasedOutArgs} owes it, as one
+     * value: the call's result is held in a temp across the copies.
+     *
+     * @param \Parser\Ast\Expr[] $posts
+     */
+    private function wrapCallPost(Node $call, array $posts): Node
+    {
+        if ($posts === []) { return $call; }
+        $r = '__outr' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $stmts = [new StoreLocal($r, $call, Type::unknown())];
+        foreach ($posts as $p) { $stmts[] = $this->lowerExpr($p); }
+        $stmts[] = new LoadLocal($r, Type::unknown());
+        // Typed from its last node by InferTypes (inferBlock).
+        return new Block($stmts, Type::unknown());
+    }
+
     /** Param->refOut via a typed param (self-host offset). */
     private function paramRefOut(\Parser\Ast\Param $p): bool { return $p->refOut; }
 
@@ -4476,10 +4877,12 @@ final class LowerFromAst implements Pass
     {
         $expanded = $this->expandBuiltinSpread($fnName, $astArgs);
         if ($expanded !== null) { $astArgs = $expanded; }
+        $astArgs = $this->redirectAliasedOutArgs($fnName, $astArgs);
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         $bare = $this->bareName($fnName);
         $isPreg = $bare === 'preg_match' || $bare === 'preg_match_all';
-        if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable') {
+        if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable'
+                && !$this->varReadByOtherArg($this->variableName($astArgs[2]), $astArgs, 2)) {
             $name = $this->variableName($astArgs[2]);
             $init = new StoreLocal($name, new ArrayLit([], Type::vec(Type::cell())), Type::vec(Type::cell()));
             $init->declaredType = Type::vec(Type::cell());
@@ -5525,6 +5928,9 @@ final class LowerFromAst implements Pass
         } elseif ($low === 'parent') {
             $cd = $this->classTable[$this->currentLowerClass] ?? null;
             $class = $cd !== null ? $cd->parent : $this->currentLowerClass;
+            if (\strtolower($expr->method) === \strtolower($this->currentLowerFn)) {
+                $this->forwardsToParent[$this->currentLowerClass . '::' . \strtolower($expr->method)] = true;
+            }
         } else {
             $scope = \ltrim($class, '\\');
         }
@@ -5960,5 +6366,7 @@ final class LsbPending
         public readonly \Parser\Ast\MethodDecl $method,
         public readonly ClassDef $cd,
         public readonly array $defaultStores,
+        /** the class that DECLARED `$method`, when it is not `$decl` */
+        public readonly string $lexicalClass = '',
     ) {}
 }

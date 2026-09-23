@@ -3732,6 +3732,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $cliSrc = prelude_src_or_empty("cli.php");
     $printRSrc = prelude_src_or_empty("print_r.php");
     $arrayClassesSrc = prelude_src_or_empty("spl_arrays.php");
+    $splIteratorsSrc = prelude_src_or_empty("spl_iterators.php");
     $reflectionSrc = prelude_src_or_empty("reflection.php");
     $attributesSrc = prelude_src_or_empty("attributes.php");
     $dateTimeSrc = prelude_src_or_empty("datetime.php");
@@ -3844,7 +3845,17 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // names either helper and the definedFunctions gate above cannot see the
     // demand. Gate on the name the program actually writes.
     if ($demand->callsAny(['array_multisort'])) { $useArrayFnsExt = true; }
-    $useArrayClasses = $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
+    // SPL iterators, file-system iterators and data structures: one file, gated
+    // on any of its names. AppendIterator::getArrayIterator() builds an
+    // ArrayIterator, so it pulls the array classes in with it.
+    $useSplIterators = $demand->mentionsAny([
+        'OuterIterator', 'RecursiveIterator', 'SeekableIterator', 'IteratorIterator', 'FilterIterator',
+        'CallbackFilterIterator', 'RecursiveFilterIterator', 'RecursiveCallbackFilterIterator', 'AppendIterator',
+        'EmptyIterator', 'RecursiveIteratorIterator', 'RecursiveTreeIterator', 'SplFileInfo', 'DirectoryIterator',
+        'FilesystemIterator', 'RecursiveDirectoryIterator', 'SplFixedArray', 'SplDoublyLinkedList', 'SplQueue',
+        'SplStack', 'SplObjectStorage',
+    ]);
+    $useArrayClasses = $useSplIterators || $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
         // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
         // file (they drain a Traversable, so they cannot live in the stdlib).
         // A program may call one without ever naming an SPL array class.
@@ -4136,6 +4147,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
 
     // The Throwable hierarchy is unconditional, and it calls __mir_bt_frames —
     // supplied either by the real frame builder or by the stub, never both.
+    $coreInterfacesSrc = prelude_src_or_empty("core_interfaces.php");
     $exceptionsSrc = prelude_src_or_empty("exceptions.php");
     // \Resource is unconditional, like the Throwable hierarchy, and for the same
     // reason: it must be REGISTERED IN EVERY MODULE. The stdlib .sig carries
@@ -4201,9 +4213,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read tokenizer.php / tokenizer_api.php");
         return null;
     }
-    if ($exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
+    if ($coreInterfacesSrc === "" || $exceptionsSrc === "" || $resourceSrc === "" || $backtraceSrc === "" || ($useVarDump && $varDumpSrc === "")) {
         dprint("compile failed: prelude not found (looked in \$MANTICORE_PRELUDE, "
             . "<compiler>/../prelude and <compiler>/../lib/prelude)");
+        return null;
+    }
+    if ($useSplIterators && $splIteratorsSrc === "") {
+        dprint("compile failed: prelude: cannot read spl_iterators.php");
         return null;
     }
     if ($useArrayClasses && $arrayClassesSrc === "") {
@@ -4249,7 +4265,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->externClassDecls = CompileArgs::$externClassDecls;
         $lower->externClassMeta = CompileArgs::$externClassMeta;
         $lower->externConstants = CompileArgs::$externConstants;
-        $lower->exceptionsSrc = $exceptionsSrc;
+        $lower->exceptionsSrc = $coreInterfacesSrc . $exceptionsSrc;
         $lower->resourceSrc = $resourceSrc;
         $lower->fiberSrc = $useFiber ? $fiberSrc : "";
         $lower->ioPollSrc = $useIoPoll ? $ioPollSrc : "";
@@ -4276,6 +4292,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
+        $lower->splIteratorsSrc = $useSplIterators ? $splIteratorsSrc : "";
         $lower->reflectionSrc = $reflectionSrc;
         $lower->attributesSrc = $attributesSrc;
         $lower->dateTimeSrc = $dateTimeSrc;
@@ -4288,6 +4305,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // linked from stdlib.o. Collected by cmd_compile on the native path;
         // empty during the Zend bootstrap build and for --emit-library.
         $lower->externDecls = CompileArgs::$externDecls;
+        /** @var array<string, bool> $dlAbs */
+        $dlAbs = [];
+        foreach (CompileArgs::$demandLoadedPaths as $dlPath => $_dl) {
+            $dlAbs[__mc_abs_source_path((string)$dlPath)] = true;
+        }
+        $lower->demandLoadedFiles = $dlAbs;
         // Reserved-attribute errors (#[Override] with no parent, a bad target, a
         // repeat) abort the build by default; analysis collects them instead.
         if ($collect !== null) { $lower->attrCollectMode = true; }
@@ -4381,6 +4404,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
         $inlineCl = null;
         \Manticore\Allocator::release('after-inline-closures');
+        // `#[Overload]`: argument types are known by now, and the InferTypes run
+        // below re-derives each retargeted call's type from its overload.
+        $module = (new \Compile\Mir\Passes\ResolveOverloads())->run($module);
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
@@ -4434,6 +4460,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $tc->reprOnly = !$tcOn;
             $module = $tc->run($module);
             \Compile\Stats::step('TypeCheck', $statT, \count($module->functions), -1);
+            foreach ($tc->warnings as $tw) {
+                if ($collect !== null) { $collect->lines[] = $tw; } else { dprint($tw); }
+            }
             if ($collect !== null) {
                 foreach ($tc->errors as $te) { $collect->lines[] = $te; }
             } elseif (\count($tc->errors) > 0) {
@@ -4663,7 +4692,7 @@ function analyze_prelude_files(): array {
     // The prelude file set (stable). Class-defining files matter most for the
     // undefined-class rule; loading all also seeds prelude functions.
     $names = [
-        "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php",
+        "core_interfaces.php", "exceptions.php", "resource.php", "reflection.php", "spl_arrays.php", "spl_iterators.php",
         "array_fns.php", "backtrace.php", "cli.php", "print_r.php", "var_dump.php",
         "datetime.php", "errors.php", "binary.php",
         "serialize.php", "unserialize.php",
@@ -4737,6 +4766,11 @@ function mir_line_to_diag(string $line, string $fileLabel): \Analyze\Diagnostic 
         if ($colon !== false) { $ln = (int)\substr($rest, 0, $colon); }
     }
     $msg = $line;
+    $wp = \strpos($line, "warning: ");
+    if ($wp !== false && $wp < 16) {
+        $wmsg = \substr($line, $wp + 9, \strlen($line) - ($wp + 9));
+        return \Analyze\Diagnostic::warning($fileLabel, $ln, 0, "repr.shape", $wmsg);
+    }
     $ep = \strpos($line, "error: ");
     if ($ep !== false) { $msg = \substr($line, $ep + 7, \strlen($line) - ($ep + 7)); }
     $code = \str_starts_with($line, "#[TypeDef]") ? "repr.typedef" : "repr.type";

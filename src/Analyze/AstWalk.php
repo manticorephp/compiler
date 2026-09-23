@@ -52,6 +52,7 @@ use Parser\Ast\Spread;
 use Parser\Ast\YieldExpr;
 use Parser\Ast\DynamicStaticAccess;
 use Parser\Ast\DynamicStaticCall;
+use Parser\Ast\DynamicStaticMethodCall;
 
 /**
  * Flattens a statement tree into every expression node it contains, descending
@@ -221,6 +222,7 @@ final class AstWalk
         if ($e instanceof YieldExpr) { $this->expr($e->key); $this->expr($e->value); return; }
         if ($e instanceof DynamicStaticAccess) { $this->expr($e->receiver); return; }
         if ($e instanceof DynamicStaticCall) { $this->expr($e->receiver); foreach ($e->args as $a) { $this->expr($a); } return; }
+        if ($e instanceof DynamicStaticMethodCall) { $this->expr($e->nameExpr); foreach ($e->args as $a) { $this->expr($a); } return; }
         // Leaf: IntLiteral / FloatLiteral / StringLiteral / BoolLiteral /
         // NullLiteral / Variable / Identifier / MagicConstant / StaticAccess /
         // Ellipsis — no child expressions.

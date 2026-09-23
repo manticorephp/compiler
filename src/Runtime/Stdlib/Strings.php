@@ -186,25 +186,56 @@ function strpos(string $haystack, string $needle, int $offset = 0): int|false
  * @param array|string $search
  * @param array|string $replace
  */
-function str_replace(array|string $search, array|string $replace, string $subject,
-                     #[\Manticore\Attr\RefOut] int &$count = 0): string
+function str_replace(array|string $search, array|string $replace, array|string $subject,
+                     #[\Manticore\Attr\RefOut] int &$count = 0): array|string
+{
+    if (!\is_array($subject)) { return \str_replace__str($search, $replace, $subject, $count); }
+    $count = 0;
+    $out = [];
+    foreach ($subject as $k => $one) {
+        $c = 0;
+        $out[$k] = \str_replace__str($search, $replace, (string)$one, $c);
+        $count = $count + $c;
+    }
+    return $out;
+}
+
+/**
+ * One string subject — the typed overload a statically-string subject reaches.
+ * An array search applies each pair in ITERATION order (keys are irrelevant);
+ * an array replace is positional in the same order, a missing one is ''.
+ *
+ * @param array|string $search
+ * @param array|string $replace
+ */
+#[\Manticore\Attr\Overload('str_replace')]
+function str_replace__str(array|string $search, array|string $replace, string $subject,
+                          #[\Manticore\Attr\RefOut] int &$count = 0): string
 {
     $count = 0;
     if (is_array($search)) {
         $out = $subject;
-        $n = \count($search);
+        /** @var string[] $needles */
+        $needles = [];
+        foreach ($search as $sv) { $needles[] = (string)$sv; }
+        $n = \count($needles);
         $repIsArr = is_array($replace);
+        /** @var string[] $reps */
+        $reps = [];
+        if ($repIsArr) { foreach ($replace as $rv) { $reps[] = (string)$rv; } }
         $i = 0;
         while ($i < $n) {
-            $rep = $repIsArr ? (string)($replace[$i] ?? '') : (string)$replace;
-            $one = (string)$search[$i];
+            $rep = $repIsArr ? ($reps[$i] ?? '') : (string)$replace;
+            $one = $needles[$i];
+            $i = $i + 1;
+            if ($one === '') { continue; }
             $count = $count + \substr_count($out, $one);
             $out = __mir_str_replace_one($one, $rep, $out);
-            $i = $i + 1;
         }
         return $out;
     }
     $needle = (string)$search;
+    if ($needle === '') { return $subject; }
     $count = \substr_count($subject, $needle);
     return __mir_str_replace_one($needle, (string)$replace, $subject);
 }

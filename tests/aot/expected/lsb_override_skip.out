@@ -1,0 +1,17 @@
+array(1) {
+  [0]=>
+  string(2) "ls"
+}
+array(2) {
+  [0]=>
+  string(3) "php"
+  [1]=>
+  string(5) "x.php"
+}
+string(8) "P\Traced"
+array(1) {
+  [0]=>
+  string(8) "trace ls"
+}
+string(4) "/tmp"
+not for PhpProcess

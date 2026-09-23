@@ -731,6 +731,25 @@ final class DynamicStaticProp extends Expr
 }
 
 /**
+ * `Class::$name(args)` / `Class::{expr}(args)` — a static call whose METHOD
+ * name is computed. The sibling of {@see DynamicStaticProp}: the class resolves
+ * the ordinary way, so the candidate methods are closed at compile time and the
+ * call lowers to a chain of literal static calls.
+ */
+final class DynamicStaticMethodCall extends Expr
+{
+    /** @param Expr[] $args */
+    public function __construct(
+        public readonly string $class,
+        public readonly Expr $nameExpr,
+        public readonly array $args,
+        Span $span,
+    ) {
+        parent::__construct('DynamicStaticMethodCall', $span);
+    }
+}
+
+/**
  * `$receiver::method(args)` — static-style dispatch through the
  * receiver's class. We compile it by reading the class id from the
  * object header at offset 0 and routing through the matching

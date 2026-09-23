@@ -23,19 +23,48 @@ function stripos(string $haystack, string $needle, int $offset = 0): int|false
  * @param array|string $search
  * @param array|string $replace
  */
-function str_ireplace(array|string $search, array|string $replace, string $subject,
-                      #[\Manticore\Attr\RefOut] int &$count = 0): string
+function str_ireplace(array|string $search, array|string $replace, array|string $subject,
+                      #[\Manticore\Attr\RefOut] int &$count = 0): array|string
+{
+    if (!\is_array($subject)) { return \str_ireplace__str($search, $replace, $subject, $count); }
+    $count = 0;
+    $out = [];
+    foreach ($subject as $k => $one) {
+        $c = 0;
+        $out[$k] = \str_ireplace__str($search, $replace, (string)$one, $c);
+        $count = $count + $c;
+    }
+    return $out;
+}
+
+/**
+ * One string subject — the typed overload a statically-string subject reaches.
+ * An array search applies each pair in ITERATION order (keys are irrelevant);
+ * an array replace is positional in the same order, a missing one is ''.
+ *
+ * @param array|string $search
+ * @param array|string $replace
+ */
+#[\Manticore\Attr\Overload('str_ireplace')]
+function str_ireplace__str(array|string $search, array|string $replace, string $subject,
+                           #[\Manticore\Attr\RefOut] int &$count = 0): string
 {
     $count = 0;
     if (is_array($search)) {
         $out = $subject;
-        $n = \count($search);
+        /** @var string[] $needles */
+        $needles = [];
+        foreach ($search as $sv) { $needles[] = (string)$sv; }
+        $n = \count($needles);
         $repIsArr = is_array($replace);
+        /** @var string[] $reps */
+        $reps = [];
+        if ($repIsArr) { foreach ($replace as $rv) { $reps[] = (string)$rv; } }
         $i = 0;
         while ($i < $n) {
-            $rep = $repIsArr ? (string)($replace[$i] ?? '') : (string)$replace;
+            $rep = $repIsArr ? ($reps[$i] ?? '') : (string)$replace;
             $hits = 0;
-            $out = __mir_str_ireplace_one((string)$search[$i], $rep, $out, $hits);
+            $out = __mir_str_ireplace_one($needles[$i], $rep, $out, $hits);
             $count = $count + $hits;
             $i = $i + 1;
         }
@@ -344,27 +373,107 @@ function stripslashes(string $string): string
 }
 
 /**
- * `strtr($string, $from, $to)` — translate each byte present in `$from` to the
- * byte at the same index in `$to` (only up to the shorter of the two). The
- * two-argument array form (`strtr($s, [$search => $replace, …])`) is not modelled
- * here — a stdlib extern would erase the pairs array's element type.
+ * `strtr($string, $from, $to)` / `strtr($string, $replace_pairs)` — php's
+ * signature: `$from` is a byte map (with `$to`) or a pairs array (without it).
+ * The typed forms are overloads ({@see \Manticore\Attr\Overload}), so a call
+ * whose arguments are statically known skips this dispatch.
  */
-function strtr(string $string, string $from, string $to): string
+function strtr(string $string, array|string $from, ?string $to = null): string
+{
+    if (\is_array($from)) {
+        if ($to !== null) {
+            throw new \TypeError('strtr(): Argument #2 ($from) must be of type string, array given');
+        }
+        return strtr__pairs($string, $from);
+    }
+    if ($to === null) {
+        throw new \TypeError('strtr(): Argument #2 ($from) must be of type array, string given');
+    }
+    return strtr__bytes($string, $from, $to);
+}
+
+/**
+ * The byte form: each byte of `$from` becomes the byte at the same index in
+ * `$to`, up to the shorter of the two. Untouched runs are copied whole.
+ */
+#[\Manticore\Attr\Overload('strtr')]
+function strtr__bytes(string $string, string $from, string $to): string
 {
     $m = \strlen($from);
     $mt = \strlen($to);
     if ($mt < $m) { $m = $mt; }
+    if ($m === 0) { return $string; }
+    /** @var int[] $map */
+    $map = [];
+    for ($c = 0; $c < 256; $c = $c + 1) { $map[] = $c; }
+    for ($j = 0; $j < $m; $j = $j + 1) { $map[\ord($from[$j])] = \ord($to[$j]); }
     $n = \strlen($string);
-    $out = "";
+    $out = '';
+    $run = 0;
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = $string[$i];
-        $rep = $c;
-        for ($j = 0; $j < $m; $j = $j + 1) {
-            if ($from[$j] === $c) { $rep = $to[$j]; break; }
-        }
-        $out = $out . $rep;
+        $b = \ord($string[$i]);
+        $r = $map[$b];
+        if ($r === $b) { continue; }
+        $out = $out . \substr($string, $run, $i - $run) . \chr($r);
+        $run = $i + 1;
     }
-    return $out;
+    if ($run === 0) { return $string; }
+    return $out . \substr($string, $run);
+}
+
+/**
+ * The pairs form: at each position the LONGEST matching key wins, and replaced
+ * text is never searched again. An empty key is skipped (php warns and skips).
+ * Keys are bucketed by first byte, each bucket longest-first; the pairs are
+ * copied into two vecs so a numeric-string key (which php stores as an int)
+ * never reaches a string-keyed map.
+ */
+#[\Manticore\Attr\Overload('strtr')]
+function strtr__pairs(string $string, array $replace_pairs): string
+{
+    /** @var string[] $keys */
+    $keys = [];
+    /** @var string[] $vals */
+    $vals = [];
+    foreach ($replace_pairs as $k => $v) {
+        $key = (string)$k;
+        if ($key === '') { continue; }
+        $keys[] = $key;
+        $vals[] = (string)$v;
+    }
+    $np = \count($keys);
+    if ($np === 0) { return $string; }
+    /** @var array<int, int[]> $buckets first byte → pair indices, longest key first */
+    $buckets = [];
+    for ($p = 0; $p < $np; $p = $p + 1) {
+        $b = \ord($keys[$p][0]);
+        $list = $buckets[$b] ?? [];
+        $len = \strlen($keys[$p]);
+        $at = \count($list);
+        while ($at > 0 && \strlen($keys[$list[$at - 1]]) < $len) { $at = $at - 1; }
+        \array_splice($list, $at, 0, [$p]);
+        $buckets[$b] = $list;
+    }
+    $n = \strlen($string);
+    $out = '';
+    $run = 0;
+    $i = 0;
+    while ($i < $n) {
+        $hit = -1;
+        $cands = $buckets[\ord($string[$i])] ?? null;
+        if ($cands !== null) {
+            foreach ($cands as $p) {
+                $key = $keys[$p];
+                if (\substr_compare($string, $key, $i, \strlen($key)) === 0) { $hit = $p; break; }
+            }
+        }
+        if ($hit < 0) { $i = $i + 1; continue; }
+        $out = $out . \substr($string, $run, $i - $run) . $vals[$hit];
+        $i = $i + \strlen($keys[$hit]);
+        $run = $i;
+    }
+    if ($run === 0) { return $string; }
+    return $out . \substr($string, $run);
 }
 
 /**

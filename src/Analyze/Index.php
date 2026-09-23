@@ -251,6 +251,15 @@ final class Index
             // An unknown ancestor — can't disprove the relationship.
             return true;
         }
+        // A class declaring `__toString` implements Stringable implicitly, as
+        // php has it; a trait may be what declares it.
+        if ($supLower === 'stringable' && $ci->kind !== 'interface') {
+            if (isset($ci->methods['__tostring'])) { return true; }
+            foreach ($ci->traits as $t) {
+                $ti = $this->classes[\strtolower(\ltrim($t, '\\'))] ?? null;
+                if ($ti === null || isset($ti->methods['__tostring'])) { return true; }
+            }
+        }
         foreach ($ci->parents as $p) {
             $pl = \strtolower(\ltrim($p, '\\'));
             if ($pl === $supLower) { return true; }
@@ -260,6 +269,18 @@ final class Index
             $il = \strtolower(\ltrim($iface, '\\'));
             if ($il === $supLower) { return true; }
             if ($this->reaches($il, $supLower, $depth + 1)) { return true; }
+        }
+        return false;
+    }
+
+    /** Whether any known class implementing `$iface` declares `$lowerMethod`. */
+    public function implementerHasMethod(string $iface, string $lowerMethod): bool
+    {
+        $il = \strtolower(\ltrim($iface, '\\'));
+        foreach ($this->classes as $lc => $ci) {
+            if ($ci->kind === 'interface' || $lc === $il) { continue; }
+            if (!$this->reaches($lc, $il, 0)) { continue; }
+            if ($this->findMethod($ci->fqn, $lowerMethod, 0) !== null) { return true; }
         }
         return false;
     }

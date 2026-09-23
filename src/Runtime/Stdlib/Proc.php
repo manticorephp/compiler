@@ -26,13 +26,17 @@ use Manticore\Attr\RefOut;
 const __MC_PROC_MAX_FD = 3;
 
 /**
+ * A string command runs through `/bin/sh -c`; an ARRAY command is the argv
+ * itself, executed directly with a PATH search and no shell, as php does.
+ *
+ * @param string|array<int, mixed> $command
  * @param array<int, mixed> $descriptor_spec
  * @param array<int, mixed> $pipes
  * @param array<string, string>|null $env
  * @param array<string, mixed>|null $options
  */
 function proc_open(
-    string $command,
+    array|string $command,
     array $descriptor_spec,
     #[RefOut] array &$pipes = [],
     ?string $cwd = null,
@@ -40,6 +44,14 @@ function proc_open(
     ?array $options = null,
 ): mixed {
     $pipes = [];
+    /** @var string[] $argvList */
+    $argvList = [];
+    if (\is_array($command)) {
+        foreach ($command as $part) { $argvList[] = (string)$part; }
+        if ($argvList === []) {
+            throw new \ValueError('proc_open(): Argument #1 ($command) must have at least one element');
+        }
+    }
 
     // Per descriptor: the fd the CHILD gets, the fd the PARENT keeps, and the
     // mode the parent's stdio wrapper opens with. -1 means "not wired".
@@ -109,12 +121,22 @@ function proc_open(
         if ($cwd !== null && $cwd !== '') {
             \Runtime\Libc\sys_chdir($cwd);
         }
-        $argv = \Runtime\Libc\calloc(4, 8);
-        \poke_i64($argv, 0, \ptr_to_int(\Runtime\Libc\strdup('sh')));
-        \poke_i64($argv, 8, \ptr_to_int(\Runtime\Libc\strdup('-c')));
-        \poke_i64($argv, 16, \ptr_to_int(\Runtime\Libc\strdup($command)));
-        \poke_i64($argv, 24, 0);
-        \Runtime\Libc\sys_execv('/bin/sh', $argv);
+        if ($argvList !== []) {
+            $na = \count($argvList);
+            $argv = \Runtime\Libc\calloc($na + 1, 8);
+            for ($k = 0; $k < $na; $k++) {
+                \poke_i64($argv, $k * 8, \ptr_to_int(\Runtime\Libc\strdup($argvList[$k])));
+            }
+            \poke_i64($argv, $na * 8, 0);
+            \Runtime\Libc\sys_execvp($argvList[0], $argv);
+        } else {
+            $argv = \Runtime\Libc\calloc(4, 8);
+            \poke_i64($argv, 0, \ptr_to_int(\Runtime\Libc\strdup('sh')));
+            \poke_i64($argv, 8, \ptr_to_int(\Runtime\Libc\strdup('-c')));
+            \poke_i64($argv, 16, \ptr_to_int(\Runtime\Libc\strdup((string)$command)));
+            \poke_i64($argv, 24, 0);
+            \Runtime\Libc\sys_execv('/bin/sh', $argv);
+        }
         // Only reached when exec failed. 127 is what a shell reports for a
         // command it could not run, and _exit skips the atexit handlers this
         // child shares with its parent.

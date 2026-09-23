@@ -89,6 +89,11 @@ trait InferScans
      */
     private function setPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): void
     {
+        // Only a DECLARED property has a slot to type. An undeclared one lives
+        // in the dynamic bag and reads back as a cell; a type invented for it
+        // from a store or a getter made the read skip the bag's boxing — a
+        // SIGSEGV on `return $this->data['visible']`.
+        if (!\in_array($prop, $cd->propertyNames, true)) { return; }
         $cd->propertyTypes[$prop] = $t;
         if ($this->ctx !== null) { $this->ctx->changes->addProp($prop); }
     }
@@ -239,6 +244,7 @@ trait InferScans
     private function scanPropElementReturns(Module $module): void
     {
         $this->propReturnsFound = [];     // "Class::prop" → element Type
+        $this->propReturnsKeyKind = [];
         foreach ($module->functions as $fn) {
             $rt = $fn->returnType;
             if ($rt === null) { continue; }
@@ -263,12 +269,20 @@ trait InferScans
             $cd = $this->classes[$cls] ?? null;
             if ($cd === null) { continue; }
             $cur = $cd->propertyTypes[$prop] ?? null;
-            if ($cur !== null && $cur->kind !== Type::KIND_UNKNOWN
+            // An UNDECLARED property has no slot to type: it lives in the
+            // dynamic bag and reads back as a cell. Typing it from a getter
+            // invented a `vec[bool]` slot that the literal stored into it never
+            // matched — a SIGSEGV at the read and an empty array at the next.
+            if ($cur === null) { continue; }
+            if ($cur->kind !== Type::KIND_UNKNOWN
                 && !($cur->isVec()
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN))) {
                 continue;
             }
-            $this->setPropType($cd, $prop, Type::vec($elem));
+            // Keyed the way the getters index it: string keys are an assoc.
+            $kk = $this->propReturnsKeyKind[$key] ?? 'i';
+            $this->setPropType($cd, $prop, $kk === 's' ? Type::assoc(Type::string_(), $elem)
+                : ($kk === 'm' ? Type::vec(Type::cell()) : Type::vec($elem)));
         }
     }
 

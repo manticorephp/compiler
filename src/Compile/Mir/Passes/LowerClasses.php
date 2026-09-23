@@ -1178,14 +1178,15 @@ trait LowerClasses
             // prepended, which is exactly php's order (defaults, then ctor body).
             $inherited = $this->inheritedCtorDecl($decl);
             if ($inherited !== null) {
+                $owner = $this->inheritedCtorOwner($decl);
                 $module->addFunction($this->lowerMethodFn(
                     $decl, $inherited, $cd, $defaultStores,
-                    $decl->name, $decl->name . '____construct',
+                    $decl->name, $decl->name . '____construct', $owner,
                 ));
                 $module->methodDisplay[$decl->name . '____construct'] =
                     $decl->name . '->__construct';
                 if ($this->sawStaticUse) {
-                    $this->lsbPending[] = new LsbPending($decl, $inherited, $cd, $defaultStores);
+                    $this->lsbPending[] = new LsbPending($decl, $inherited, $cd, $defaultStores, $owner);
                 }
                 return;
             }
@@ -1222,6 +1223,24 @@ trait LowerClasses
             $guard = $guard + 1;
         }
         return null;
+    }
+
+    /** The class that declares the constructor {@see inheritedCtorDecl} finds. */
+    private function inheritedCtorOwner(\Parser\Ast\ClassDecl $decl): string
+    {
+        $pname = $decl->extends !== [] ? \ltrim($decl->extends[0], '\\') : '';
+        $guard = 0;
+        while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
+            $pdecl = $this->classDecls[$pname];
+            foreach ($this->classDeclMethods($pdecl) as $m) {
+                if ($this->methodDeclName($m) !== '__construct') { continue; }
+                if ($this->methodDeclBody($m) === null) { continue; }
+                return $pname;
+            }
+            $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
+            $guard = $guard + 1;
+        }
+        return '';
     }
 
     /** Typed read of a method's body (T5). */

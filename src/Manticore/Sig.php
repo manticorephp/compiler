@@ -741,8 +741,9 @@ final class Sig
             $first = false;
             $out = $out . self::emitParam($p);
         }
-        $out = $out . "],\"ret\":" . self::jsonStr(self::encodeType($fn->returnType)) . "}";
-        return $out;
+        $out = $out . "],\"ret\":" . self::jsonStr(self::encodeType($fn->returnType));
+        if ($fn->overloadOf !== "") { $out = $out . ",\"overload\":" . self::jsonStr($fn->overloadOf); }
+        return $out . "}";
     }
 
     /** One parameter of a lowered signature — shared by the function and the
@@ -894,12 +895,18 @@ final class Sig
                 $ap->cellArg = $cellarg;
                 $params[] = $ap;
             }
+            // `#[Overload('f')]` crosses the boundary as the attribute itself, so
+            // an imported overload registers exactly like a source one.
+            $overload = (string)($fn["overload"] ?? "");
+            $attrs = $overload === "" ? [] : [new \Parser\Ast\AttributeNode(
+                'Manticore\\Attr\\Overload', [new StringLiteral($overload, $span)], $span)];
             $decls[] = new FunctionDecl(
                 name: $name,
                 params: $params,
                 returnType: $ret === "" ? null : $ret,
                 body: new Block([], $span),
                 span: $span,
+                attributes: $attrs,
             );
         }
         return $decls;

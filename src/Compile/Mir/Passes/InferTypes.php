@@ -284,6 +284,8 @@ final class InferTypes implements Pass
      *  {@see findPropReturns} (instance state — by-ref recursion is unsound
      *  under self-host, [[selfhost_array_ref_nesting]]). */
     private array $propReturnsFound = [];
+    /** @var array<string, string> "Class::prop" → the getters' index kind: 's' string, 'i' int, 'm' mixed */
+    private array $propReturnsKeyKind = [];
     /** @var array<string, bool> param name → used-as-string, built by
      *  {@see detectStringElemUse} (instance state, same reason). */
     private array $strParamsFound = [];
@@ -439,6 +441,13 @@ final class InferTypes implements Pass
 
     /** @var array<string, string[]> constructor function name → parameter names */
     private array $ctorParamNamesCache = [];
+
+    /** @var array<string, string[]> `Recv::method` → the classes whose body a virtual call can reach */
+    private array $virtualBodies = [];
+
+    /** @var array<string, string[]> class/interface name → every class under it, itself included */
+    private array $subtypesOf = [];
+    private bool $subtypeIndexBuilt = false;
 
     /** @var array<string, bool> functions changed by the most recent widening scan */
     private array $lastInferenceChangedFunctions = [];
@@ -1100,7 +1109,18 @@ final class InferTypes implements Pass
                     && $aa->index->kind !== Node::KIND_NULL_CONST) {
                     if ($aa->array->object->kind === Node::KIND_LOAD_LOCAL
                         && $aa->array->object->name === 'this') {
-                        $this->propReturnsFound[$cls . '::' . $aa->array->property] = $rt;
+                        // Two getters over one property that disagree (`bool
+                        // visible()` and `array command()` both reading
+                        // `$this->data[…]`) say its elements are MIXED, not
+                        // whichever getter came last.
+                        $key = $cls . '::' . $aa->array->property;
+                        $prev = $this->propReturnsFound[$key] ?? null;
+                        $this->propReturnsFound[$key] = ($prev === null || $prev->toString() === $rt->toString())
+                            ? $rt : Type::cell();
+                        $ik = $aa->index->type->kind;
+                        $kk = $ik === Type::KIND_STRING ? 's' : ($ik === Type::KIND_INT ? 'i' : 'm');
+                        $pk = $this->propReturnsKeyKind[$key] ?? $kk;
+                        $this->propReturnsKeyKind[$key] = $pk === $kk ? $kk : 'm';
                     }
                 }
             }
@@ -2466,6 +2486,10 @@ final class InferTypes implements Pass
      *  iterClass via any implementer; `$dflt` when unresolved. */
     private function iterMethodReturn(string $class, string $m, Type $dflt): Type
     {
+        // Implementers that disagree (an interface iterClass over several
+        // iterators) answer what the dispatched call answers.
+        $joined = $this->virtualReturnJoin($class, $m);
+        if ($joined !== null) { return $joined; }
         $c = $this->resolveMethodClass($class, $m);
         if ($c === '') {
             foreach ($this->classes as $cd) {

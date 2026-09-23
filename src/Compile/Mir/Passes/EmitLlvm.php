@@ -748,6 +748,7 @@ final class EmitLlvm implements EmitVisitor
             . '|' . ($this->emitLibrary ? 'lib' : 'app')));
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
+        $this->cloneErasedSym = '';
         $this->dynmSyms = [];
         $this->dynmExtraBodies = '';
         $this->dynfThunks = [];
@@ -2194,6 +2195,9 @@ final class EmitLlvm implements EmitVisitor
     }
 
     private string $vdExtraBodies = '';
+
+    /** The module's shared erased-receiver clone ({@see EmitLlvmObjects::emitCloneErased}), once emitted. */
+    private string $cloneErasedSym = '';
 
     /** shape key => the shared erased-dynamic-method chain's symbol. */
     /** @var array<string, string> */
@@ -4781,7 +4785,32 @@ final class EmitLlvm implements EmitVisitor
         if ($e->type->kind !== Type::KIND_OBJ) { return ''; }
         $cls = $e->type->class ?? '';
         if ($cls === '') { return ''; }
-        return $this->resolveMethodClass($cls, '__toString');
+        $ts = $this->resolveMethodClass($cls, '__toString');
+        if ($ts !== '' || isset($this->classes[$cls])) { return $ts; }
+        // An INTERFACE static type (`Stringable $s`, `Throwable $e`) has no
+        // ClassDef of its own: any implementer that answers __toString will do
+        // as the direct-call fallback, and toStringCandidates dispatches.
+        foreach ($this->interfaceImplementers($cls) as $impl) {
+            $t = $this->resolveMethodClass($impl, '__toString');
+            if ($t !== '') { return $t; }
+        }
+        return '';
+    }
+
+    /**
+     * Every class that implements interface `$iface`, directly or through an
+     * ancestor or a parent interface.
+     *
+     * @return string[]
+     */
+    private function interfaceImplementers(string $iface): array
+    {
+        $out = [];
+        foreach ($this->classes as $cd) {
+            $nm = $cd->name;
+            if ($this->classIsA($nm, $iface)) { $out[] = $nm; }
+        }
+        return $out;
     }
 
     /** The STATIC class of an expression, for the `__toString` dispatch. */
@@ -4804,14 +4833,19 @@ final class EmitLlvm implements EmitVisitor
         if ($staticClass === '') { return [$tsClass]; }
         $seen = [];
         $out = [];
-        foreach ($this->selfAndDescendants($staticClass) as $d) {
+        $reach = isset($this->classes[$staticClass])
+            ? $this->selfAndDescendants($staticClass) : $this->interfaceImplementers($staticClass);
+        // EVERY reaching class, not one per distinct body: the dispatch matches
+        // an exact class id (arms sharing a body merge there), so a class left
+        // out fell to the default — `Y extends X` inherited X's __toString and
+        // printed the static base's.
+        foreach ($reach as $d) {
             $t = $this->resolveMethodClass($d, '__toString');
             if ($t === '') { continue; }
-            if (isset($seen[$t])) { continue; }
             $seen[$t] = true;
             $out[] = $d;
         }
-        if ($out === []) { return [$tsClass]; }
+        if ($out === [] || \count($seen) === 1) { return [$tsClass]; }
         return $out;
     }
 
