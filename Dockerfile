@@ -21,7 +21,15 @@
 # So: php from sury.org, and clang-22 from Debian's own archive — the DEFAULT
 # clang is 14 on bookworm, but a versioned clang-22 sits in both suites.
 
-ARG DEBIAN_TAG=13
+# ONE base everywhere — development, CI and the release. It is the OLDER of the
+# two suites on purpose: glibc is backwards compatible and not forwards, so a
+# binary linked against trixie's 2.41 refuses to start on bookworm's 2.36, and
+# a compiler published from the newer base cannot seed a build on the older one.
+# Splitting the bases split the seed chain with them: CI published a trixie
+# compiler that a bookworm release could not use, which left the release with
+# nothing to warm-start from. Same base, one chain, and the floor is the older
+# glibc for free.
+ARG DEBIAN_TAG=12
 FROM debian:${DEBIAN_TAG} AS base
 
 ENV DEBIAN_FRONTEND=noninteractive

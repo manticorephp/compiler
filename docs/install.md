@@ -34,9 +34,9 @@ the Zend seed is only the cold first boot. Knobs: `MANTICORE_HOME`,
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
 (build a local checkout instead of cloning).
 
-A published tarball is built on **Debian 12** (glibc 2.36) even though the
-development image tracks Debian 13: a release has to run on the distribution
-someone already has, and glibc is backwards compatible, not forwards.
+Published Linux builds are made on **Debian 12** (glibc 2.36), which is also what
+development and CI use: a release has to run on the distribution someone already
+has, and glibc is backwards compatible, not forwards.
 
 ### Via Composer
 
@@ -247,11 +247,11 @@ php lives in `toolchain` and not in `base` on purpose: the shipped compiler is a
 native binary and never asks for an interpreter, so `runtime` branches off
 `base` and carries none.
 
-The base is `ARG DEBIAN_TAG=13`. Release tarballs are built with
-`--build-arg DEBIAN_TAG=12` (glibc 2.36) — glibc is backwards compatible and not
-forwards, so shipping from the newest base would mean running only on the newest
-distributions. `Dockerfile.alpine` is the musl counterpart, with the same four
-stages.
+The base is `ARG DEBIAN_TAG=12` (bookworm, glibc 2.36) for development, CI and
+releases alike. One base is not tidiness: glibc is backwards compatible and not
+forwards, so a compiler published from a newer base cannot seed a build on an
+older one — split bases split the seed chain. `Dockerfile.alpine` is the musl
+counterpart, with the same four stages.
 
 To run the libc probes and the AOT suite in a container, see
 [`tools/docker/README.md`](../tools/docker/README.md).
