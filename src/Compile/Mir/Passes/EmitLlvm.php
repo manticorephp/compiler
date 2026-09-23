@@ -2088,6 +2088,19 @@ final class EmitLlvm implements EmitVisitor
      */
     private array $fnKeepsNoArg = [];
 
+    /** @var array<string, bool> callees whose summary the function under
+     *  judgement read — its dependencies in the {@see computeKeepsNoArg} worklist */
+    private array $keepsReads = [];
+
+    private bool $keepsRecording = false;
+
+    /** @param array<string,bool> $keeps */
+    private function keepsRead(array $keeps, string $name): bool
+    {
+        if ($this->keepsRecording) { $this->keepsReads[$name] = true; }
+        return $keeps[$name] ?? false;
+    }
+
     /**
      * Prop keys whose SLOT owns one element ref per element — every store to
      * them hands the slot a reference that carries the element refs the drop
@@ -2490,7 +2503,8 @@ final class EmitLlvm implements EmitVisitor
             // other call is a borrow like the rest.
             $pureArg = $this->consumerKeepsNoArg($parent);
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($pureArg) { continue; }
+                // A method's verdict covers its arguments, never its receiver.
+                if ($pureArg && !($k === Node::KIND_METHOD_CALL && $c === $parent->object)) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
             }
             return;
@@ -2847,17 +2861,48 @@ final class EmitLlvm implements EmitVisitor
             // overwrite the slot the argument came from.
             $keeps[$fn->name] = !$fn->isExtern && $fn->ffiSymbol === null && !$fn->isGenerator;
         }
-        for ($round = 0; $round < 6; $round++) {
-            $changed = false;
-            foreach ($module->functions as $fn) {
-                if (!($keeps[$fn->name] ?? false)) { continue; }
-                if ($this->fnEscapesAParam($fn, $keeps)) {
-                    $keeps[$fn->name] = false;
-                    $changed = true;
+        // To the FIXPOINT, by a worklist: the summary only ever flips
+        // keep-nothing → escapes, and a function is judged again only when a
+        // callee it READ flipped. A round count cut the fixpoint short, which
+        // leaves an optimistic answer standing — a borrow judged keep-nothing —
+        // and re-walking every body per round cost more than the build could
+        // afford once methods joined the summary. A keep-nothing verdict walked
+        // the whole body, so the reads it recorded are all its dependencies;
+        // an escape is final and needs none.
+        /** @var array<string, \Compile\Mir\FunctionDef> $byName */
+        $byName = [];
+        /** @var string[] $queue */
+        $queue = [];
+        foreach ($module->functions as $fn) {
+            $byName[$fn->name] = $fn;
+            if ($keeps[$fn->name]) { $queue[] = $fn->name; }
+        }
+        /** @var array<string, bool> $queued */
+        $queued = [];
+        foreach ($queue as $qn) { $queued[$qn] = true; }
+        /** @var array<string, array<string, bool>> $dependents callee → the callers that read it */
+        $dependents = [];
+        while ($queue !== []) {
+            $name = \array_pop($queue);
+            unset($queued[$name]);
+            if (!($keeps[$name] ?? false)) { continue; }
+            $this->keepsReads = [];
+            $this->keepsRecording = true;
+            $escapes = $this->fnEscapesAParam($byName[$name], $keeps);
+            $this->keepsRecording = false;
+            if (!$escapes) {
+                foreach ($this->keepsReads as $callee => $unused) { $dependents[$callee][$name] = true; }
+                continue;
+            }
+            $keeps[$name] = false;
+            foreach ($dependents[$name] ?? [] as $caller => $unused) {
+                if (($keeps[$caller] ?? false) && !isset($queued[$caller])) {
+                    $queue[] = $caller;
+                    $queued[$caller] = true;
                 }
             }
-            if (!$changed) { break; }
         }
+        $this->keepsReads = [];
         $this->fnKeepsNoArg = $keeps;
         $want = \getenv('MANTICORE_KEEPS_TRACE');
         if ($want !== false && $want !== '') {
@@ -2878,6 +2923,12 @@ final class EmitLlvm implements EmitVisitor
             // (`$this->x = …` aliases `this`) and so did every constructor with
             // a `bool` to store.
             if ($p->name === 'this' || (!$p->variadic && $this->paramNeverPointer($p->type))) { continue; }
+            // A param the prologue COPIES holds the frame's private buffer from
+            // the first instruction on — returning or storing it hands over
+            // the copy, never the caller's argument. `$this->m = f($this->m)`
+            // with `f` adding a key vetoed the release of `m` for the program.
+            if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p,
+                isset($this->closureCaptures[$fn->name]))) { continue; }
             $taint[$p->name] = true;
         }
         if ($taint === []) { return false; }
@@ -2919,6 +2970,10 @@ final class EmitLlvm implements EmitVisitor
         // callee is park-free by the same induction, so a body of pure calls
         // and retaining stores — every promoted constructor — still qualifies.
         if ($this->isCallLike($k) && !$this->consumerKeepsNoArg($n, $keeps)) { return true; }
+        // …and a keep-nothing METHOD says so about its arguments only: the
+        // callee's own judgement never taints `this`, so a tainted receiver
+        // may be kept by it.
+        if ($k === Node::KIND_METHOD_CALL && $this->aliasesTaint($n->object, $taint)) { return true; }
         // A `foreach` over anything but a concrete array RESUMES user code — a
         // Generator, an Iterator, an erased subject that may be either — and
         // that code can park, holding the subject as the borrow it arrived as.
@@ -3017,11 +3072,36 @@ final class EmitLlvm implements EmitVisitor
         $keeps = $keeps ?? $this->fnKeepsNoArg;
         $k = $p->kind;
         if ($k === Node::KIND_CALL) {
-            return $this->callKeepsNoArg($p->function) || ($keeps[$p->function] ?? false);
+            return $this->callKeepsNoArg($p->function) || $this->keepsRead($keeps, $p->function);
         }
         if ($k === Node::KIND_NEW_OBJ) { return $this->newObjKeepsNoArg($p, $keeps); }
         if ($k === Node::KIND_STATIC_CALL) { return $this->enumFromKeepsNoArg($p); }
+        if ($k === Node::KIND_METHOD_CALL) { return $this->methodCallKeepsNoArg($p, $keeps); }
         return false;
+    }
+
+    /**
+     * Does `$recv->m(…)` keep none of its ARGUMENTS? Every body the call can
+     * dispatch to — the receiver's class and each descendant, resolved — must
+     * be one the fixpoint judged keep-nothing. An interface, a trait, an
+     * unknown class, a `__call` fallback or a body not in this module keeps
+     * the borrow. The RECEIVER is not covered: the fixpoint does not taint
+     * `this`, so a receiver operand stays a borrow ({@see scanCellPropStores}).
+     * `$this->loopMerge($saved, $this->localTypes)` alone vetoed the release
+     * of `InferTypes::localTypes` for the whole compiler.
+     * @param array<string,bool> $keeps
+     */
+    private function methodCallKeepsNoArg(\Compile\Mir\MethodCall_ $n, array $keeps): bool
+    {
+        $t = $n->object->type;
+        $cls = $t->class ?? '';
+        if ($t->kind !== Type::KIND_OBJ || $cls === '' || !isset($this->classes[$cls])) { return false; }
+        if (isset($this->interfaceNames[$cls]) || isset($this->traitNames[$cls])) { return false; }
+        foreach ($this->selfAndDescendants($cls) as $d) {
+            $owner = $this->resolveMethodClass($d, $n->method);
+            if ($owner === '' || !$this->keepsRead($keeps, $owner . '__' . $n->method)) { return false; }
+        }
+        return true;
     }
 
     /** A backed enum's `from` / `tryFrom` is {@see EmitLlvmObjects::emitEnumFrom}:
@@ -3051,7 +3131,7 @@ final class EmitLlvm implements EmitVisitor
         if ($cls === '' || !isset($this->classes[$cls])) { return false; }
         $ctorClass = $this->resolveMethodClass($cls, '__construct');
         if ($ctorClass === '') { return false; }
-        return $keeps[$ctorClass . '____construct'] ?? false;
+        return $this->keepsRead($keeps, $ctorClass . '____construct');
     }
 
     /**
@@ -3538,27 +3618,6 @@ final class EmitLlvm implements EmitVisitor
             if ($this->isEnumClass($cls)) { return false; }
         }
         return true;
-    }
-
-    /** Whether the local `$name` is the base of an in-place element store
-     *  (`$name[$k] = …` / append, or a nested `$name[0][] = …`) anywhere in `$n`
-     *  — i.e. mutated as an array, independent of its (possibly erased) type. */
-    private function localMutatedAsArray(Node $n, string $name): bool
-    {
-        if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $base = $n->array;
-            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $base->array;
-            }
-            if ($base->kind === Node::KIND_LOAD_LOCAL
-                && $base->name === $name) {
-                return true;
-            }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            if ($this->localMutatedAsArray($c, $name)) { return true; }
-        }
-        return false;
     }
 
     /** Mark the array local under an `$a[$k]` element as mutated (its element may

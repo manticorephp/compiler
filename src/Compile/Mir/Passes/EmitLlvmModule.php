@@ -930,6 +930,8 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
+        /** @var array<string, bool> $copiedParams */
+        $copiedParams = [];
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -1064,9 +1066,10 @@ trait EmitLlvmModule
                 // (a nested array under an unknown type would still leak, but that
                 // needs the concrete type). Gated on the DECLARED array hint so a
                 // string param's `$s[0]=…` char-write is never mis-copied. By-ref
-                // keeps aliasing the caller.
-                if (!$p->byRef && $p->arrayHinted
-                    && $this->localMutatedAsArray($fn->body, $p->name)) {
+                // keeps aliasing the caller. The copy is the frame's own +1,
+                // released at scope exit ({@see VecCopyOnAssign::paramCopiedOnEntry}).
+                if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, false)) {
+                    $copiedParams[$p->name] = true;
                     $ld = $this->ssa->allocReg();
                     $bodySink->write('  ' . $ld . ' = load i64, ptr ' . $slot . "\n");
                     $lp = $this->ssa->allocReg();
@@ -1095,7 +1098,7 @@ trait EmitLlvmModule
         $paramTypes = [];
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypes[$p->name] = $p->type; }
         $bodySink->write($this->preallocateLocals($fn->body));
-        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames));
+        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames, $copiedParams));
         // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
         // code is a function like any other to the language and unlike any other
         // to this file, and a prologue step added to only one of the two is

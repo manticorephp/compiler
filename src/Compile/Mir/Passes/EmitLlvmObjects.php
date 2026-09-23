@@ -6741,6 +6741,8 @@ trait EmitLlvmObjects
         /** @var string[] fresh rc arg temps, with the flavor each is released by */
         $rcArgRegs = [];
         $rcArgFlavs = [];
+        /** @var array<int,array{0:Node,1:string}> boxed cell args to drop after the call */
+        $cellBoxDrops = [];
         $cellBoxSlots = [];
         $reboxSlots = [];
         $reboxTmps = [];
@@ -6901,9 +6903,12 @@ trait EmitLlvmObjects
                 // free-function call path (else a `mixed $x` method param
                 // receives a raw array/string and mis-reads it).
                 $out .= $this->emitNode($a);
-                $out .= $this->boxToCell($a->type);
+                $out .= $this->boxToCell($a->type, $a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $argOutTypes[$ai + 1] = Type::cell();
+                // What the box left behind is the CALLER's — a rebuilt cell
+                // array or a re-tagged fresh string ({@see emitStaticCall}).
+                $cellBoxDrops[] = [$a, $this->lastValue];
             } elseif ($this->cellArrayParamNeedsBoxing($ptypes[$ai + 1] ?? null, $a->type)) {
                 // A concrete-element array (vec[int] …) passed to a cell-element
                 // array param (`mixed[]`): rebuild it with each element boxed,
@@ -6914,7 +6919,12 @@ trait EmitLlvmObjects
                 // cannot go through Monomorphize (a method param is never
                 // specialized; the indirect trampoline call is invisible anyway).
                 $out .= $this->emitNode($a);
-                $out .= $this->boxToCell($a->type);
+                $out .= $this->boxToCell($a->type, $a);
+                // The rebuild is a fresh +1 the callee only borrows:
+                // `$this->f($lines)` with `f(array $b)` leaked the copy and one
+                // ref on every element, per call — HoistAllocas alone held
+                // every line of the module's IR.
+                $cellBoxDrops[] = [$a, $this->lastValue];
                 $raw = $this->ssa->allocReg();
                 $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue
                       . ", 281474976710655\n";   // PAYLOAD_MASK: array cell → raw ptr
@@ -7147,6 +7157,9 @@ trait EmitLlvmObjects
         foreach ($rcArgRegs as $rg) {
             $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
             $rci = $rci + 1;
+        }
+        foreach ($cellBoxDrops as $cbd) {
+            $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {

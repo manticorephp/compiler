@@ -60,6 +60,45 @@ final class VecCopyOnAssign
     }
 
     /**
+     * Whether `$p` is COPIED on function entry: a by-value `array`-hinted param
+     * the body element-stores into (`$p[$k] = …`, `$p[] = …`, `$p[0][] = …`)
+     * takes a private copy so the store never reaches the caller's buffer
+     * ({@see \Compile\Mir\Passes\EmitLlvmModule}). That copy is a fresh rc=1
+     * buffer the FRAME owns, so the same answer decides OWNERSHIP too: the
+     * param is released at scope exit and takes no entry retain
+     * ({@see \Compile\Mir\Passes\InsertMemoryOps}, {@see
+     * \Compile\Mir\Passes\EmitLlvmMemory::initRcObjSlots}). Without the release
+     * every call leaked the copy — `InferTypes` alone stranded a map per
+     * mutated `array` param per call. A closure or generator prologue copies
+     * nothing, so neither does this.
+     */
+    public static function paramCopiedOnEntry(FunctionDef $fn, Param $p, bool $isClosure): bool
+    {
+        if ($isClosure || $fn->isGenerator) { return false; }
+        if ($p->byRef || !$p->arrayHinted) { return false; }
+        return self::storesInto($fn->body, $p->name);
+    }
+
+    /** Whether the local `$name` is the base of an element store anywhere in
+     *  `$n` — mutated as an array, independent of its (possibly erased) type. */
+    public static function storesInto(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $base = $n->array;
+            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
+                $base = $base->array;
+            }
+            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name) {
+                return true;
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            if (self::storesInto($c, $name)) { return true; }
+        }
+        return false;
+    }
+
+    /**
      * Whether `$slotName = $value` must copy. Both names count: the copy is
      * needed when EITHER side is mutated later.
      *
