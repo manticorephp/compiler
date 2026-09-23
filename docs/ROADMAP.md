@@ -56,6 +56,7 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
 ### Recently completed (2026-09)
 
+- ✅ array elements belong to the buffer — one ownership model and one key (hint) for every element walk; copies, spreads, unions and packs own what they hold (br `elemown`, 2026-09-23).
 - ✅ reference boxes are counted — the box and its value die with the last holder (ABI v9); a closure env is counted like an object wherever it is held; a by-value parameter and a property are promoted into a box by `&`; `$a = &$b` makes both names one reference (br `refbox`, 2026-09-23).
 - ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
   errors (br `shapes`, 2026-09-21).
@@ -132,7 +133,6 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | Integer overflow wraps | `PHP_INT_MAX + 1` | `PHP_INT_MIN` (two's complement) | promote to float, as php does. Needs value-range analysis to know which statically-int locals can overflow |
 | `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
-| Array element ownership has TWO models and TWO keys | `[$m, $m]` over a mixed `$m`; `$h->data = […]; $_SESSION = $h->data;` on a bare `array` property | elements leak (~160 B / ~125 B an iteration) | one model: a holder counts the BUFFER, elements die at rc 0 (`MANTICORE_RC_BUF_ONLY=1`, opt-in — the compiler built under it still faults on its own source), and one key: every element op by the buffer's HINT, repr only when unstamped (tried for the repr-mode walks; gen-3 then emitted invalid IR). Both expose shallow copies the extra refs were masking — `Debug::$rcBufferOnly` lists what is known |
 | A reference to a by-REF parameter dangles | `function f(&$x) { return [&$x]; }` | the REF cell points at the caller's slot | the caller has to box the argument it passes |
 | Scope-exit destructor order | two objects dying at one `}` where one sits in a reference box | box holders are released after the frame's other locals | php destroys the frame's variables in declaration order |
 

@@ -1701,7 +1701,7 @@ final class UnifiedArrayRuntime
         // that owner's release will drop.
         $repr = ($valueFlavor === 'repr');
         $reprBits = $repr ? $bump->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
-        $hasCells = $repr ? $bump->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
+        $hasCells = $repr ? $this->reprOrHintIr($bump, $flags) : null;
         // The ELEMENT HINT is what the slots ACTUALLY hold, stamped by every
         // builder; the flavor is only what the caller's static type claimed.
         // They disagree whenever a cell-element array reaches a concrete-element
@@ -1724,7 +1724,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $pbody->call('__mir_retain_by_repr', Type::void(), [$pv, $reprBits]);
+            $pbody->call('__mir_elem_retain_auto', Type::void(), [$pv, $flags]);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         } else {
@@ -1753,7 +1753,7 @@ final class UnifiedArrayRuntime
             $hvret = $fn->block('rt_hvret');
             $hval->brIf($hasCells, $hvret, $hadv);
             $vv = $hvret->load(Type::i64(), $this->entryAddr($hvret, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-            $hvret->call('__mir_retain_by_repr', Type::void(), [$vv, $reprBits]);
+            $hvret->call('__mir_elem_retain_auto', Type::void(), [$vv, $flags]);
             $hvret->br($hadv);
             $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hadv->br($hhead);
@@ -1784,6 +1784,7 @@ final class UnifiedArrayRuntime
         $this->emitCellRetain();
         $this->emitDropByRepr();
         $this->emitRetainByRepr();
+        $this->emitElemAutoOps();
         $this->emitReleaseVariant('__mir_array_release', 'repr');
         // Buffer-only: drop the buffer (+ hashed string keys) but NEVER the
         // element values, ignoring the repr bits. Used for a container passed
@@ -2122,6 +2123,43 @@ final class UnifiedArrayRuntime
         $done->retVoid();
     }
 
+    /** i1: the buffer's flags stamp an element shape — repr bits OR a hint. */
+    private function reprOrHintIr(Block $b, Value $flags): Value
+    {
+        return $b->icmp('ne', $b->and_($flags,
+            Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK)),
+            Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_elem_drop_auto(val, flags)` / `__mir_elem_retain_auto(val, flags)`
+     * — one element's count, keyed the way EVERY op on the buffer keys it: by
+     * the ELEMENT HINT (what the slots hold, stamped by every builder) and by
+     * the repr bits only for an unstamped buffer. The repr-mode walks used the
+     * repr bits alone while the flavored ones and a copy's adopt went by the
+     * hint, so an `array`-declared property of strings was co-owned by one and
+     * released by the other — its elements were never given back.
+     */
+    private function emitElemAutoOps(): void
+    {
+        foreach (['drop', 'retain'] as $op) {
+            $fn = $this->module->func('__mir_elem_' . $op . '_auto', Type::void());
+            $v = $fn->param(Type::i64(), 'val');
+            $flags = $fn->param(Type::i64(), 'flags');
+            $e = $fn->block('entry');
+            $byHint = $fn->block('byhint');
+            $byRepr = $fn->block('byrepr');
+            $hint = $e->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+            $e->brIf($e->icmp('ne', $hint, Value::int(Type::i64(), 0)), $byHint, $byRepr);
+            $after = $op === 'drop'
+                ? $this->emitDropValue($fn, $byHint, $v, 'cell', 'ea', $hint)
+                : $this->emitRetainValue($fn, $byHint, $v, 'cell', 'ea', $hint);
+            $after->retVoid();
+            $byRepr->call('__mir_' . $op . '_by_repr', Type::void(),
+                [$v, $byRepr->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK))]);
+            $byRepr->retVoid();
+        }
+    }
     /** `__mir_retain_by_repr(val, repr)` — co-own one element by its repr code,
      *  the exact mirror of {@see emitDropByRepr}. */
     private function emitRetainByRepr(): void
@@ -2352,7 +2390,7 @@ final class UnifiedArrayRuntime
         // repr, independent of which alias releases it.
         $repr = ($valueFlavor === 'repr');
         $reprBits = $repr ? $free->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
-        $hasCells = $repr ? $free->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
+        $hasCells = $repr ? $this->reprOrHintIr($free, $flags) : null;
         // The runtime element hint outranks the static flavor — the mirror of
         // the retain side, and it MUST stay the mirror.
         $elemHint = $this->ownedElemHint($free, $flags, $valueFlavor);
@@ -2372,7 +2410,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $freeb, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
-            $pbody->call('__mir_drop_by_repr', Type::void(), [$pv, $reprBits]);
+            $pbody->call('__mir_elem_drop_auto', Type::void(), [$pv, $flags]);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         } else {
@@ -2412,7 +2450,7 @@ final class UnifiedArrayRuntime
             $hvdrop = $fn->block('hvdrop');
             $hval->brIf($hasCells, $hvdrop, $hadv);
             $vv = $hvdrop->load(Type::i64(), $this->entryAddr($hvdrop, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-            $hvdrop->call('__mir_drop_by_repr', Type::void(), [$vv, $reprBits]);
+            $hvdrop->call('__mir_elem_drop_auto', Type::void(), [$vv, $flags]);
             $hvdrop->br($hadv);
         } else {
             if ($valueFlavor !== '') {
@@ -3230,7 +3268,7 @@ final class UnifiedArrayRuntime
         // flags word (incl. the repr bits) rode across in the memcpy above.
         $repr = ($valueFlavor === 'repr');
         $reprBits = $repr ? $clone->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
-        $hasCells = $repr ? $clone->icmp('ne', $reprBits, Value::int(Type::i64(), 0)) : null;
+        $hasCells = $repr ? $this->reprOrHintIr($clone, $flags) : null;
         $hhead = $fn->block('cow_hhead');
         if ($valueFlavor === '') {
             // PACKED scalars share nothing rc'd → done. HASHED: retain keys.
@@ -3244,7 +3282,7 @@ final class UnifiedArrayRuntime
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
             $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $copy, $pi));
-            $pbody->call('__mir_retain_by_repr', Type::void(), [$pv, $reprBits]);
+            $pbody->call('__mir_elem_retain_auto', Type::void(), [$pv, $flags]);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
         } else {
@@ -3274,7 +3312,7 @@ final class UnifiedArrayRuntime
             $hvret = $fn->block('cow_hvret');
             $hval->brIf($hasCells, $hvret, $hadv);
             $vv = $hvret->load(Type::i64(), $this->entryAddr($hvret, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
-            $hvret->call('__mir_retain_by_repr', Type::void(), [$vv, $reprBits]);
+            $hvret->call('__mir_elem_retain_auto', Type::void(), [$vv, $flags]);
             $hvret->br($hadv);
             $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hadv->br($hhead);
@@ -4913,8 +4951,8 @@ final class UnifiedArrayRuntime
      * rewrite was written, tried against the oracle, and printed
      * `2.1250588003432E-314` for `$this->stack`.
      *
-     * Each value gains a second owner (`__mir_retain_by_repr` under the PACK's
-     * repr bits, as `__mir_array_union` does): the pack is a temporary that is
+     * Each value gains a second owner (by the PACK's element hint, repr when
+     * unstamped, as `__mir_array_union` does): the pack is a temporary that is
      * released after the call, while its elements now live in `arr`.
      */
     private function emitUnshiftAll(): void
@@ -4939,8 +4977,6 @@ final class UnifiedArrayRuntime
         // live_len compacts tombstones out so the walk sees a clean 0..len range.
         $n = $go->call('__mir_array_live_len', Type::i64(), [$vals]);
         $go->store($go->sub($n, Value::int(Type::i64(), 1)), $iSlot);
-        $vflags = $go->load(Type::i64(), $this->hdr($go, $vals, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $vrepr = $go->and_($vflags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
         $go->br($head);
 
         $hi = $head->load(Type::i64(), $iSlot);
@@ -4948,7 +4984,7 @@ final class UnifiedArrayRuntime
 
         $bi = $body->load(Type::i64(), $iSlot);
         $v = $body->call('__mir_array_value_at', Type::i64(), [$vals, $bi]);
-        $body->call('__mir_retain_by_repr', Type::void(), [$v, $vrepr]);
+        $body = $this->emitRetainByHintOrRepr($fn, $body, $v, $vals, 'ua');
         $new = $body->call('__mir_array_unshift', Type::ptr(),
             [$body->load(Type::ptr(), $curSlot), $v]);
         $body->store($new, $curSlot);

@@ -816,7 +816,14 @@ trait EmitLlvmBuiltins
         if (!$t->isVec() && !$t->isAssoc()) { return ''; }
         $el = $t->element;
         if ($el === null || $el->kind === Type::KIND_CELL
-            || $el->kind === Type::KIND_UNKNOWN) { return ''; }
+            || $el->kind === Type::KIND_UNKNOWN) {
+            // Boxed flat — the same buffer under a tag. A borrow of the
+            // caller's value stays the caller's, but a FRESH one (a literal, a
+            // call's return) had no owner but this call site, exactly as the
+            // string arm above says: `f(['k', new D])` into a `mixed` param
+            // leaked the literal and everything in it.
+            if ($src === null || $this->freshRcArgFlavor($src) === '') { return ''; }
+        }
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
         return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
