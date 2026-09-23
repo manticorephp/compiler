@@ -886,7 +886,11 @@ trait EmitLlvmLocals
         // release ({@see InsertMemoryOps::isOwnedObj}, which owns exactly this
         // shape) would give back element refs the copy never took.
         $aliasStaticVecCopy = $copiedVecProp && $v->kind === Node::KIND_STATIC_PROP;
-        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal || $aliasStaticVecCopy) {
+        // `$r = $c->out` — a STRING property read co-owns what it reads, so the
+        // slot may drop what it overwrites ({@see \Compile\Mir\AliasOwn::
+        // propReadCoOwns}; the release half is {@see InsertMemoryOps::isOwnedObj}).
+        $aliasStrProp = \Compile\Mir\AliasOwn::propReadCoOwns($v);
+        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal || $aliasStaticVecCopy || $aliasStrProp) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;
             // An array-HINTED slot whose type erased to unknown carries no kind
@@ -965,7 +969,7 @@ trait EmitLlvmLocals
                 && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes);
             $out .= $this->globalCellOwnIr($sl, $val,
                 $copiedVecLocal || $copiedVecProp || $aliasObjStr || $aliasArrayProp
-                || $aliasArrayLocal || $elemOwned);
+                || $aliasArrayLocal || $aliasStrProp || $elemOwned);
             $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->globalBacked[$sl->name] . "\n";
         } elseif (isset($this->locals->refLocals[$sl->name])) {
             $addr = $this->ssa->allocReg();

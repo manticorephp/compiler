@@ -1,0 +1,7 @@
+handed out and reset: sum=68195198 growth ok
+handed out and reset, one sink: sum=68197722 growth ok
+offset writes into a concat-grown local: sum=60620198 growth ok
+property append in a loop: sum=60640396 growth ok
+oldoldold new
+new! x
+done

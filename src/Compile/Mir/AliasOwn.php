@@ -64,6 +64,20 @@ final class AliasOwn
         return $v;
     }
 
+    /**
+     * Does `$x = $obj->s` take a reference on a STRING it reads out of a
+     * property? The array snapshot has always retained; a string read was a
+     * bare borrow, so the slot's release-before-overwrite had to be vetoed for
+     * the whole class, and the idiom that hands a buffer out and resets it —
+     * `$r = $c->out; $c->out = ''; return $r;` — stranded one buffer per call:
+     * the return retained the borrow and the overwrite released nothing.
+     * A co-owned read lets the slot drop what it overwrites.
+     */
+    public static function propReadCoOwns(Node $v): bool
+    {
+        return $v->kind === Node::KIND_PROPERTY_ACCESS && $v->type->kind === Type::KIND_STRING;
+    }
+
     /** Does a destination slot co-own this value — i.e. is it an alias of a
      *  local holding an rc'd by-handle value? */
     public static function coOwns(Node $v): bool
