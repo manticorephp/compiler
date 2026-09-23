@@ -93,7 +93,14 @@ COMPILE_TIMEOUT="${MC_COMPILE_TIMEOUT:-300}"
 #   expected/<name>.out           shared
 #   expected/<name>.darwin.out    used on Darwin, if present
 #   expected/<name>.linux.out     used on Linux, if present
+#   expected/<name>.musl.out      used on musl Linux (Alpine), if present — wins
+#                                 over .linux.out, which is glibc's. The C library,
+#                                 not the kernel, is what answers iconv's //TRANSLIT.
 OSTAG="$(uname -s | tr '[:upper:]' '[:lower:]')"
+LIBCTAG=""
+if [[ "$OSTAG" = linux ]] && { ldd --version 2>&1 || true; } | grep -qi musl; then
+    LIBCTAG=musl
+fi
 
 # ── one case ─────────────────────────────────────────────────────────────────
 #
@@ -105,7 +112,9 @@ OSTAG="$(uname -s | tr '[:upper:]' '[:lower:]')"
 run_one() {
     local name="$1"
     local expected="$EXPECTED/$name.out"
-    if [[ -f "$EXPECTED/$name.$OSTAG.out" ]]; then
+    if [[ -n "$LIBCTAG" && -f "$EXPECTED/$name.$LIBCTAG.out" ]]; then
+        expected="$EXPECTED/$name.$LIBCTAG.out"
+    elif [[ -f "$EXPECTED/$name.$OSTAG.out" ]]; then
         expected="$EXPECTED/$name.$OSTAG.out"
     fi
     local bin="$WORK/$name.bin"

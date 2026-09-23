@@ -26,13 +26,14 @@ FROM alpine:${ALPINE_TAG} AS base
 #                    ships no tz database at all, so every date_* case failed.
 #   libxml2-dev   -> prelude/xml.php binds libxml2 through FFI (`#[Library('xml2')]`),
 #                    and the dev package is what provides the linkable .so.
-#   gnu-libiconv  -> musl keeps iconv INSIDE libc and ships no libiconv.so, while
-#                    src/Runtime/Iconv.php binds `#[Library('iconv')]` by name.
+# NOT gnu-libiconv: musl keeps iconv inside libc (so no `-liconv`, as on glibc),
+# and php on Alpine answers from musl's too — //TRANSLIT included, which musl
+# does not have. The oracle is the host's php, so the binary uses the host's iconv.
 RUN apk add --no-cache \
         clang lld gcc musl-dev binutils \
         pcre2-dev openssl-dev curl-dev sqlite-dev pkgconf \
         bash file make curl ca-certificates \
-        tzdata libxml2-dev gnu-libiconv
+        tzdata libxml2-dev
 
 RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
