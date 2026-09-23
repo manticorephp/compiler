@@ -37,6 +37,10 @@ use Compile\Mir\TryCatch_;
 use Compile\Mir\MirCatch;
 use Compile\Mir\Ternary;
 use Compile\Mir\Switch_;
+use Compile\Mir\Break_;
+use Compile\Mir\Continue_;
+use Compile\Mir\Goto_;
+use Compile\Mir\Label_;
 use Compile\Mir\SwitchArm_;
 use Compile\Mir\Match_;
 use Compile\Mir\MatchArm_;
@@ -201,6 +205,7 @@ trait InferNodes
         // Only `__main` binds a `global $x` name implicitly (no decl node) — a
         // same-named local in any other scope is an ordinary local.
         $this->inMainBody = $fn->name === '__main';
+        $this->resetJumpState();
         // The bisect handle — see Debug::$inferResetLocals.
         if (\Compile\Debug::$inferResetLocals !== []) {
             $rl = \Compile\Debug::$inferResetLocals;
@@ -688,10 +693,10 @@ trait InferNodes
         if ($kind === Node::KIND_FOREACH)     { return $this->inferForeach($node); }
         if ($kind === Node::KIND_SWITCH)      { return $this->inferSwitch($node); }
         if ($kind === Node::KIND_MATCH)       { return $this->inferMatch($node); }
-        if ($kind === Node::KIND_BREAK
-            || $kind === Node::KIND_CONTINUE
-            || $kind === Node::KIND_GOTO
-            || $kind === Node::KIND_LABEL) { return Type::void(); }
+        if ($node instanceof Break_)    { $this->noteJump($node->level, false); return Type::void(); }
+        if ($node instanceof Continue_) { $this->noteJump($node->level, true); return Type::void(); }
+        if ($node instanceof Goto_)     { $this->noteGoto($node->label); return Type::void(); }
+        if ($node instanceof Label_)    { $this->noteLabel($node->name); return Type::void(); }
         if ($kind === Node::KIND_YIELD) {
             $y = $node;
             if ($y->key !== null) {
@@ -1442,15 +1447,20 @@ trait InferNodes
         // `while ($n->kind === KIND_X) { … }` types `$n` as X inside). The merge
         // below unions back the un-narrowed pre-loop map, so it stays body-scoped.
         $this->narrowFromCond($node->cond);
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->narrowFromCond($node->cond);
             $this->inferNode($node->body);
+            $this->joinContinues();
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -1776,16 +1786,21 @@ trait InferNodes
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->localTypes[$node->valueVar] = $elem;
             if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
             $this->inferNode($node->body);
+            $this->joinContinues();
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -1800,6 +1815,7 @@ trait InferNodes
         $prev = null;
         $exit = null;
         $hasDefault = false;
+        $this->pushJumpFrame(true);
         foreach ($node->arms as $arm) {
             if ($arm->value === null) { $hasDefault = true; }
             $this->localTypes = $prev === null ? $saved : $this->joinLocals($saved, $prev);
@@ -1814,6 +1830,7 @@ trait InferNodes
             $exit = $exit === null ? $saved : $this->joinLocals($saved, $exit);
         }
         $this->localTypes = $exit;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -1867,32 +1884,42 @@ trait InferNodes
         if ($node->init !== null) { $this->inferNode($node->init); }
         if ($node->cond !== null) { $this->inferNode($node->cond); }
         $saved = $this->localTypes;
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         if ($node->step !== null) { $this->inferNode($node->step); }
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->inferNode($node->body);
+            $this->joinContinues();
             if ($node->step !== null) { $this->inferNode($node->step); }
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
     private function inferDoWhile(DoWhile_ $node): Type
     {
         $saved = $this->localTypes;
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         $this->inferNode($node->cond);
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->inferNode($node->body);
+            $this->joinContinues();
             $this->inferNode($node->cond);
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 

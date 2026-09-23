@@ -33,3 +33,58 @@ d3,4,0
 e3,3
 f3,3
 f2,2
+nb:6,6,
+gt:8
+gb:13
+b2:10
+c2:3,21,22,
+kc:3,6,3,
+sw:4
+wb:x
+sa string 'abc' "abc" 3
+ia integer 5 5 6
+oi object {"v":3} P3
+ao object {"v":3} 3
+so object {"v":3} P3
+fa array array (
+  'k' => 'v',
+) {"k":"v"} v
+bs string 'yes' "yes" 3
+sa array array (
+  0 => 1,
+  1 => 2,
+) [1,2] 2
+ia array array (
+  0 => 7,
+  1 => 8,
+  2 => 9,
+) [7,8,9] 3
+oi integer 4 8
+ao array [1] 1
+so string "q" Q
+fa double 1.5 1.5 3
+bs boolean true true T
+ls0 string "a"
+ls1 array [0]
+ls2 array [1]
+ls array (
+  0 => 2,
+) 1
+sw integer 1
+sw string "one"
+sw array [2]
+dc:3,31,3,
+sc:3,41,3,
+fb:z1
+string(3) "abc"
+object(P)#1 (1) {
+  ["v"]=>
+  int(3)
+}
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+int(5)

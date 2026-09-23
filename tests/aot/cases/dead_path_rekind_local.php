@@ -7,6 +7,10 @@
 // merged a cell with a raw int as `unknown` and `$olen + $k` added the boxed word.
 // contShadow/breakShadow: the box-back planted after a trailing continue/break was
 // dead code, so the jump carried the raw word to a slot read as a cell.
+// nestedBoth..whileBreak, doContinue, switchContinue2, foreachBreak2: a break / continue /
+// goto edge (any depth, any level) is joined at its target, not only an arm-final jump.
+// strArr..switchIntStr, dumpPairs: two kinds with no common raw word (string/array,
+// int/array, object/int, array/object, string/object, float/array, bool/string) ride a cell.
 function rd(array &$st): int
 {
     if ($st[1] >= \strlen($st[0])) { return -1; }
@@ -274,6 +278,215 @@ function deadSwitchKey(array $m, int $dead): string
     if ($k > 5) { $k = 0; }
     return 'f' . ($k + 1) . ',' . $v[$k];
 }
+/** @param array<int,mixed> $m */
+function nestedBoth(array $m): string
+{
+    $r = '';
+    $kb = $m[1];
+    for ($i = 0; $i < 3; $i++) {
+        if ($i === 0) { $kb = 5; if ($m[2] === 0) { continue; } else { continue; } }
+        $r .= ($kb + 1) . ',';
+    }
+    return 'nb:' . $r;
+}
+/** @param array<int,mixed> $m */
+function gotoDone(array $m): string
+{
+    if ($m[2] === 0) { $kb = 7; goto done; }
+    $kb = $m[1];
+    done:
+    return 'gt:' . ($kb + 1);
+}
+/** @param array<int,mixed> $m */
+function gotoBack(array $m): string
+{
+    $kb = $m[1];
+    $n = 0;
+    again:
+    $r = $kb + 1;
+    $n++;
+    if ($n < 3) { $kb = 10 + $n; goto again; }
+    return 'gb:' . $r;
+}
+/** @param array<int,mixed> $m */
+function break2(array $m): string
+{
+    $kb = $m[1];
+    for ($i = 0; $i < 3; $i++) {
+        for ($j = 0; $j < 3; $j++) {
+            if ($j === 1) { $kb = 9; break 2; }
+        }
+        $kb = $m[1];
+    }
+    return 'b2:' . ($kb + 1);
+}
+/** @param array<int,mixed> $m */
+function continue2(array $m): string
+{
+    $r = '';
+    $kb = $m[1];
+    for ($i = 0; $i < 3; $i++) {
+        $r .= ($kb + 1) . ',';
+        foreach ([1, 2] as $j) {
+            if ($j === 2) { $kb = 20 + $i; continue 2; }
+        }
+        $kb = $m[1];
+    }
+    return 'c2:' . $r;
+}
+/** @param array<int,mixed> $m */
+function killedContinue(array $m): string
+{
+    $r = '';
+    $kb = $m[1];
+    for ($i = 0; $i < 3; $i++) {
+        $r .= ($kb + 1) . ',';
+        if ($i === 0) { $kb = 5; continue; }
+        $kb = $m[1];
+    }
+    return 'kc:' . $r;
+}
+/** @param array<int,mixed> $m */
+function switchInnerBreak(array $m, int $s): string
+{
+    $kb = $m[1];
+    switch ($s) {
+        case 1:
+            if ($m[2] === 0) { $kb = 3; break; }
+            $kb = $m[1];
+            break;
+        default:
+            $kb = $m[1];
+    }
+    return 'sw:' . ($kb + 1);
+}
+/** @param array<int,mixed> $m */
+function whileBreak(array $m): string
+{
+    $kb = $m[1];
+    while (true) {
+        if ($m[2] === 0) { $kb = 'x'; break; }
+        $kb = $m[1];
+    }
+    return 'wb:' . $kb;
+}
+final class P { public int $v = 3; public function hi(): string { return 'P' . $this->v; } }
+function show(string $tag, mixed $x): void
+{
+    echo $tag, ' ', \gettype($x), ' ', \var_export($x, true), ' ', \json_encode($x), "\n";
+}
+function strArr(bool $c): void
+{
+    if ($c) { $x = 'abc'; } else { $x = [1, 2]; }
+    echo 'sa ', \gettype($x), ' ', \var_export($x, true), ' ', \json_encode($x), ' ';
+    echo $c ? \strlen($x) : \count($x), "\n";
+}
+function intArr(bool $c): void
+{
+    $x = 5;
+    if (!$c) { $x = [7, 8, 9]; }
+    echo 'ia ', \gettype($x), ' ', \var_export($x, true), ' ', \json_encode($x), ' ';
+    echo $c ? $x + 1 : \count($x), "\n";
+}
+function objInt(bool $c): void
+{
+    if ($c) { $x = new P(); } else { $x = 4; }
+    echo 'oi ', \gettype($x), ' ', \json_encode($x), ' ';
+    echo $c ? $x->hi() : $x * 2, "\n";
+}
+function arrObj(bool $c): void
+{
+    $x = [1];
+    if ($c) { $x = new P(); }
+    echo 'ao ', \gettype($x), ' ', \json_encode($x), ' ';
+    echo $c ? $x->v : \count($x), "\n";
+}
+function strObj(bool $c): void
+{
+    $x = 'q';
+    if ($c) { $x = new P(); }
+    echo 'so ', \gettype($x), ' ', \json_encode($x), ' ';
+    echo $c ? $x->hi() : \strtoupper($x), "\n";
+}
+function floatArr(bool $c): void
+{
+    $x = 1.5;
+    if ($c) { $x = ['k' => 'v']; }
+    echo 'fa ', \gettype($x), ' ', \var_export($x, true), ' ', \json_encode($x), ' ';
+    echo $c ? $x['k'] : $x * 2, "\n";
+}
+function boolStr(bool $c): void
+{
+    $x = true;
+    if ($c) { $x = 'yes'; }
+    echo 'bs ', \gettype($x), ' ', \var_export($x, true), ' ', \json_encode($x), ' ';
+    echo $c ? \strlen($x) : ($x ? 'T' : 'F'), "\n";
+}
+function loopStrArr(): void
+{
+    $x = 'a';
+    for ($i = 0; $i < 3; $i++) {
+        echo 'ls', $i, ' ', \gettype($x), ' ', \json_encode($x), "\n";
+        $x = [$i];
+    }
+    echo 'ls ', \var_export($x, true), ' ', \count($x), "\n";
+}
+function switchIntStr(int $s): void
+{
+    $x = 1;
+    switch ($s) { case 1: $x = 'one'; break; case 2: $x = [2]; break; }
+    echo 'sw ', \gettype($x), ' ', \json_encode($x), "\n";
+}
+/** @param array<int,mixed> $m */
+function doContinue(array $m): string
+{
+    $r = '';
+    $kb = $m[1];
+    $i = 0;
+    do {
+        $i++;
+        $r .= ($kb + 1) . ',';
+        if ($i === 1) { $kb = 30; continue; }
+        $kb = $m[1];
+    } while ($i < 3);
+    return 'dc:' . $r;
+}
+/** @param array<int,mixed> $m */
+function switchContinue2(array $m): string
+{
+    $r = '';
+    $kb = $m[1];
+    foreach ([0, 1, 2] as $i) {
+        $r .= ($kb + 1) . ',';
+        switch ($i) {
+            case 0: $kb = 40; continue 2;
+            default: break;
+        }
+        $kb = $m[1];
+    }
+    return 'sc:' . $r;
+}
+/** @param array<int,mixed> $m */
+function foreachBreak2(array $m): string
+{
+    $kb = $m[1];
+    foreach ([1, 2] as $a) {
+        foreach ([3, 4] as $b) {
+            if ($b === 4) { $kb = 'z' . $a; break 2; }
+        }
+        $kb = $m[1];
+    }
+    return 'fb:' . $kb;
+}
+function dumpPairs(bool $c): void
+{
+    if ($c) { $x = 'abc'; } else { $x = [1, 2]; }
+    \var_dump($x);
+    $y = 5;
+    if ($c) { $y = new P(); }
+    \var_dump($y);
+}
+
 echo run('1Hello.0'), "\n";
 $m = ['s', 4, 0, 0];
 echo keyIfNoElse($m, 0), "\n";
@@ -300,3 +513,16 @@ echo secondMergeDisagree(true, false), "\n", secondMergeDisagree(false, true), "
 echo deadForeachKeyInt(['a' => 1], 0), "\n";
 echo deadIfString($m, 0), "\n";
 echo deadSwitchKey($m, 2), "\n", deadSwitchKey($m, 3), "\n";
+
+$m = ['s', 2, 0];
+echo nestedBoth($m), "\n", gotoDone($m), "\n", gotoBack($m), "\n", break2($m), "\n", continue2($m), "\n";
+echo killedContinue($m), "\n", switchInnerBreak($m, 1), "\n", whileBreak($m), "\n";
+
+foreach ([true, false] as $c) { strArr($c); intArr($c); objInt($c); arrObj($c); strObj($c); floatArr($c); boolStr($c); }
+loopStrArr();
+switchIntStr(0); switchIntStr(1); switchIntStr(2);
+
+$m = ['s', 2, 0];
+echo doContinue($m), "\n", switchContinue2($m), "\n", foreachBreak2($m), "\n";
+dumpPairs(true);
+dumpPairs(false);

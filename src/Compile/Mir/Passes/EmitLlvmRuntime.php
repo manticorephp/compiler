@@ -1892,7 +1892,7 @@ trait EmitLlvmRuntime
     {
         $descs = '';
         $defs = '';
-        /** @var int[] class ids to register in the name→rmeta registry */
+        /** @var string[] class ids to register in the name→rmeta registry */
         $reflIds = [];
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }

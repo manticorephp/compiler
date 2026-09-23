@@ -391,6 +391,27 @@ final class InferTypes implements Pass
     /** Open `try` bodies, innermost last: the first type each saw per name
      *  ({@see noteTryStore}). @var array<int, array<string, Type>> */
     private array $tryStoreFrames = [];
+    /** Open loop / switch frames, innermost last, and the joined state each
+     *  `break` / `continue` carries to that frame. Inference walks the tree
+     *  forward, so a jump edge never meets the state it lands in unless it is
+     *  recorded here and joined ({@see joinLocals}) at its target: the loop
+     *  exit, the loop header (via the body end), the switch exit.
+     *  @var array<int, array<string, Type>> */
+    private array $jumpBreaks = [];
+    /** @var array<int, array<string, Type>> */
+    private array $jumpConts = [];
+    /** @var array<int, bool> */
+    private array $jumpBreakSet = [];
+    /** @var array<int, bool> */
+    private array $jumpContSet = [];
+    /** @var array<int, bool> a `switch` frame: `continue` leaves it like `break` */
+    private array $jumpIsSwitch = [];
+    /** States a forward `goto` carries to a label not reached yet.
+     *  @var array<string, array<string, Type>> */
+    private array $gotoPending = [];
+    /** The state at each label already passed (a backward `goto` joins it).
+     *  @var array<string, array<string, Type>> */
+    private array $labelStates = [];
     /** The CURRENT function's slice of {@see $byRefCaptureCellLocals} — the same
      *  role {@see $cellLoopLocals} plays for a loop-rekinded slot: every store
      *  boxes, every read dispatches by tag. */
@@ -1783,19 +1804,15 @@ final class InferTypes implements Pass
         foreach ($thenLocals as $name => $tT) {
             if (!isset($otherLocals[$name])) { continue; }
             $oT = $otherLocals[$name];
-            $tOk = $this->isScalarOrCell($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
-            $oOk = $this->isScalarOrCell($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
-            // An ARRAY arm merging with a CELL arm is the same problem one level
-            // up: `$t = []; if (is_array($r)) { $t = $r; }` over a `mixed $r`
-            // leaves a slot that holds a RAW buffer pointer on one path and a
-            // NaN-boxed cell on the other, and their union types UNKNOWN — so
-            // the very next `foreach ($t as …)` reads whichever the static type
-            // guessed and faults. Box the array arm so the slot is uniformly
-            // tagged. Only against a CELL sibling: two array arms already agree
-            // on the raw repr, and demoting those would cost every branchy
-            // array local a boxing round-trip.
-            $tOk = $tOk || ($tT->isArray() && $oT->kind === Type::KIND_CELL);
-            $oOk = $oOk || ($oT->isArray() && $tT->kind === Type::KIND_CELL);
+            // Any two DIFFERENT kinds a cell carries (a scalar, a string, an
+            // array, an object) share no raw word: their union types UNKNOWN,
+            // and every consumer reads whichever repr the static type guessed —
+            // `$t = []; if (is_array($r)) { $t = $r; }` over a `mixed $r` faulted
+            // in the next foreach; `'abc'` vs `[1,2]` printed a pointer. Box both
+            // arms so the slot is uniformly tagged. Two arms of one kind (two
+            // arrays, two objects) agree on the raw repr and stay raw.
+            $tOk = $this->cellCarries($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
+            $oOk = $this->cellCarries($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
@@ -2192,14 +2209,11 @@ final class InferTypes implements Pass
                 }
                 continue;
             }
-            // An ARRAY entry the body leaves a CELL (or the reverse) is the same
-            // disagreement {@see planMergeShadow} boxes at an if/else join — and
-            // that box-back is what usually produces it: the join inside the body
-            // hands the back-edge a tagged slot while the header, typed from the
-            // pre-loop raw vec, reads it as a buffer pointer.
-            $arrCell = ($st->isArray() && $bt->kind === Type::KIND_CELL)
-                || ($st->kind === Type::KIND_CELL && $bt->isArray());
-            if (!$arrCell && (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt))) { continue; }
+            // Any other pair with no raw word in common ({@see joinDisagrees}):
+            // an array entry the body leaves a cell (the if/else box-back inside
+            // the body produces exactly that), a string the body turns into an
+            // array, an object into an int.
+            if (!$this->joinDisagrees($st, $bt)) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
@@ -2238,6 +2252,95 @@ final class InferTypes implements Pass
         return $out;
     }
 
+    private function resetJumpState(): void
+    {
+        $this->jumpBreaks = [];
+        $this->jumpConts = [];
+        $this->jumpBreakSet = [];
+        $this->jumpContSet = [];
+        $this->jumpIsSwitch = [];
+        $this->gotoPending = [];
+        $this->labelStates = [];
+    }
+
+    private function pushJumpFrame(bool $isSwitch): void
+    {
+        $this->jumpBreaks[] = [];
+        $this->jumpConts[] = [];
+        $this->jumpBreakSet[] = false;
+        $this->jumpContSet[] = false;
+        $this->jumpIsSwitch[] = $isSwitch;
+    }
+
+    /** A loop body re-inferred: the edges the previous pass recorded are stale. */
+    private function resetJumpFrame(): void
+    {
+        $i = \count($this->jumpIsSwitch) - 1;
+        $this->jumpBreaks[$i] = [];
+        $this->jumpConts[$i] = [];
+        $this->jumpBreakSet[$i] = false;
+        $this->jumpContSet[$i] = false;
+    }
+
+    /** Leave a frame: the `break` edges meet the state after the construct. */
+    private function popJumpFrame(): void
+    {
+        $i = \count($this->jumpIsSwitch) - 1;
+        if ($this->jumpBreakSet[$i]) {
+            $this->localTypes = $this->joinLocals($this->localTypes, $this->jumpBreaks[$i]);
+        }
+        \array_pop($this->jumpBreaks);
+        \array_pop($this->jumpConts);
+        \array_pop($this->jumpBreakSet);
+        \array_pop($this->jumpContSet);
+        \array_pop($this->jumpIsSwitch);
+    }
+
+    /** The end of a loop body: the `continue` edges meet the back-edge state. */
+    private function joinContinues(): void
+    {
+        $i = \count($this->jumpIsSwitch) - 1;
+        if ($this->jumpContSet[$i]) {
+            $this->localTypes = $this->joinLocals($this->localTypes, $this->jumpConts[$i]);
+        }
+    }
+
+    private function noteJump(int $level, bool $isContinue): void
+    {
+        $i = \count($this->jumpIsSwitch) - ($level < 1 ? 1 : $level);
+        if ($i < 0) { return; }
+        if ($isContinue && !$this->jumpIsSwitch[$i]) {
+            $this->jumpConts[$i] = $this->jumpContSet[$i]
+                ? $this->joinLocals($this->jumpConts[$i], $this->localTypes) : $this->localTypes;
+            $this->jumpContSet[$i] = true;
+            return;
+        }
+        $this->jumpBreaks[$i] = $this->jumpBreakSet[$i]
+            ? $this->joinLocals($this->jumpBreaks[$i], $this->localTypes) : $this->localTypes;
+        $this->jumpBreakSet[$i] = true;
+    }
+
+    /** A `goto` to a label already passed can only pin (the label's reads are
+     *  typed); the re-run the pin triggers types them on the cell. */
+    private function noteGoto(string $label): void
+    {
+        if (isset($this->labelStates[$label])) {
+            $this->joinLocals($this->labelStates[$label], $this->localTypes);
+            return;
+        }
+        $this->gotoPending[$label] = isset($this->gotoPending[$label])
+            ? $this->joinLocals($this->gotoPending[$label], $this->localTypes) : $this->localTypes;
+    }
+
+    private function noteLabel(string $name): void
+    {
+        if (isset($this->gotoPending[$name])) {
+            $this->localTypes = $this->joinLocals($this->localTypes, $this->gotoPending[$name]);
+            unset($this->gotoPending[$name]);
+        }
+        $this->labelStates[$name] = $this->localTypes;
+    }
+
     /**
      * A store inside a `try` body: the catch can be entered right after it, so
      * the value it leaves meets every other state of the try (and the entry
@@ -2268,11 +2371,15 @@ final class InferTypes implements Pass
         if ($a->kind === $b->kind) { return false; }
         if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
         if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
-        if (($a->isArray() && $b->kind === Type::KIND_CELL)
-            || ($a->kind === Type::KIND_CELL && $b->isArray())) {
-            return true;
-        }
-        return $this->isScalarOrCell($a) && $this->isScalarOrCell($b);
+        return $this->cellCarries($a) && $this->cellCarries($b);
+    }
+
+    /** A kind a cell carries by its tag: a scalar, a string, an array, an
+     *  object. Two different ones in one slot share no raw word, and their
+     *  union is `unknown` — a type with no representation. */
+    private function cellCarries(Type $t): bool
+    {
+        return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ;
     }
 
     /** @param Node[] $stmts  Ends in a jump: control never falls off the end. */
