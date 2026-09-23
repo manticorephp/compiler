@@ -207,9 +207,12 @@ jobs:
           fi
           docker buildx imagetools inspect "$IMAGE:$v"
 
+  # Runs on a dispatch too, and stops one step short of publishing there: the
+  # notes below are shell that had never executed anywhere, and a dry run that
+  # skipped this job would have proved the images and the tarballs while leaving
+  # the one unexercised part to fail AFTER a real tag had pushed them.
   release:
     needs: [linux, macos]
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -234,7 +237,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          # On a dispatch there is no tag, so the range ends at the commit and
+          # the version is the dev stamp the build jobs used.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+            head="$GITHUB_REF_NAME"
+          else
+            v="0.0.0-dev.${GITHUB_SHA::12}"
+            head="$GITHUB_SHA"
+          fi
 
           # NOT `gh release create --generate-notes`: that builds the list from
           # merged PRs, and this tree is pushed to directly — 144 commits since
@@ -245,10 +256,10 @@ jobs:
           # summary line and the rationale stays in the history where it belongs.
           prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "$prev" ]; then
-            range="$prev..$GITHUB_REF_NAME"
+            range="$prev..$head"
             since="since \`$prev\`"
           else
-            range="$GITHUB_REF_NAME"
+            range="$head"
             since="all of it"
           fi
           git log --no-merges --pretty='%s' "$range" \
@@ -265,7 +276,7 @@ jobs:
           docker run --rm -v "\$PWD":/work -u "\$(id -u):\$(id -g)" \\
               $IMAGE:$v manticore compile app.php -o app
 
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.sh | sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/install.sh | sh
           \`\`\`
 
           The tarballs carry the compiler and its stdlib, not a toolchain: manticore
@@ -273,15 +284,33 @@ jobs:
           pcre2, openssl, sqlite3 and curl. install.sh checks for those and says
           which are missing. The image carries the toolchain it was built with.
 
-          Built cold from \`${GITHUB_REF_NAME}\` — no cached compiler took part.
+          Built cold from \`$head\` — no cached compiler took part.
 
           ## Changes ($count commits, $since)
 
           $changes
 
-          **Full log:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev:-$GITHUB_REF_NAME}...${GITHUB_REF_NAME}
+          **Full log:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev:-$head}...${head}
           EOF
           )"
+          # A dispatch stops here: everything above has run — the range, the
+          # subjects, the heredoc — and the notes go to the run summary so they
+          # can be read before a tag makes them public.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            {
+              echo "## Dry run — the notes a tag would publish"
+              echo
+              echo "$notes"
+              echo
+              echo '### Files'
+              echo '```'
+              ls -la dl/
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "dry run: nothing published"
+            exit 0
+          fi
+
           # Both ways in: pushing the tag alone (this job then creates the
           # release), and clicking "Create release" in the UI (which creates the
           # tag, fires this workflow, and leaves a release already sitting there
