@@ -35,7 +35,7 @@ env:
 
 jobs:
   linux:
-    name: linux-${{ matrix.arch }}
+    name: linux-${{ matrix.tag }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -43,12 +43,32 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # Two C libraries, one row each per arch. `tag` names everything a row
+      # produces — the images (`<v>-alpine-arm64`), the seed it starts from and
+      # the artifact — and `os` is the tarball's platform, which install.sh picks
+      # by asking the host's loader: a glibc binary does not start under musl.
       matrix:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
+            tag: arm64
+            dockerfile: Dockerfile
+            os: linux
           - arch: amd64
             runner: ubuntu-latest
+            tag: amd64
+            dockerfile: Dockerfile
+            os: linux
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: alpine-arm64
+            dockerfile: Dockerfile.alpine
+            os: linux-musl
+          - arch: amd64
+            runner: ubuntu-latest
+            tag: alpine-amd64
+            dockerfile: Dockerfile.alpine
+            os: linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -75,11 +95,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           target: toolchain
-          tags: manticore-toolchain:${{ matrix.arch }}
+          tags: manticore-toolchain:${{ matrix.tag }}
           load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.tag }}
 
       # The previous release first, `:main` second. Both are built on the same
       # base as this one — there is only one base now, which is what makes a
@@ -89,7 +110,7 @@ jobs:
       - name: Fetch a seed
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          for tag in latest-${{ matrix.arch }} main-${{ matrix.arch }}; do
+          for tag in latest-${{ matrix.tag }} main-${{ matrix.tag }}; do
             if docker pull -q "$IMAGE:$tag" 2>/dev/null; then
               cid="$(docker create "$IMAGE:$tag")"
               mkdir -p seed
@@ -101,7 +122,7 @@ jobs:
               break
             fi
           done
-          [ -d seed ] || echo "seed: nothing published for this arch — the Zend bootstrap it is, once"
+          [ -d seed ] || echo "seed: nothing published for ${{ matrix.tag }} — the Zend bootstrap it is, once"
 
       # gate.sh, so the release builds the compiler the same way everything else
       # does. MC_SUITE=0: CI has already run the suite against this commit, and a
@@ -120,45 +141,46 @@ jobs:
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_REF_NAME} ${GITHUB_SHA::12}" \
-            manticore-toolchain:${{ matrix.arch }} \
+            manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
       # Same assembly as a push publishes: the base stage plus the artifacts that
       # were just built. One definition of what the shipped image contains.
       - name: Assemble the release image
         run: |
-          docker build --target base -t manticore-base:local -f Dockerfile .
+          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
           docker build -f tools/docker/Dockerfile.publish \
             --build-arg BASE=manticore-base:local \
-            -t manticore-runtime:${{ matrix.arch }} out
+            -t manticore-runtime:${{ matrix.tag }} out
 
       # The version lives in one `puts()` in Main.php, so a tag can disagree with
       # the binary it ships. Catch that here rather than in a user's bug report.
       - name: The binary agrees with the tag
         if: github.ref_type == 'tag'
         run: |
-          got="$(docker run --rm manticore-runtime:${{ matrix.arch }} manticore version)"
+          got="$(docker run --rm manticore-runtime:${{ matrix.tag }} manticore version)"
           want="manticore ${{ steps.v.outputs.version }}"
           echo "binary: $got"
           [ "$got" = "$want" ] || { echo "tag says '$want' — see Main.php cmd_version" >&2; exit 1; }
 
       # Compile something THROUGH the image, the way a user would: bind mount,
       # bare `manticore` off $PATH, and a stdlib function that only links when
-      # the prelude and manticore_stdlib.o were both found.
+      # the prelude and manticore_stdlib.o were both found. The program runs in
+      # the image too: a musl binary does not start on the runner's glibc.
       - name: Smoke the image
         run: |
           mkdir -p smoke && printf '<?php\necho str_pad("ok", 4, "!"), "\\n";\n' > smoke/app.php
           docker run --rm -v "$PWD/smoke":/work -u "$(id -u):$(id -g)" \
-            manticore-runtime:${{ matrix.arch }} manticore compile app.php -o app
-          got="$(./smoke/app)"
+            manticore-runtime:${{ matrix.tag }} manticore compile app.php -o app
+          got="$(docker run --rm -v "$PWD/smoke":/work manticore-runtime:${{ matrix.tag }} ./app)"
           [ "$got" = "ok!!" ] || { echo "smoke printed '$got'" >&2; exit 1; }
 
       # bin/ + lib/ exactly as the image lays them out, so the tarball and the
       # image ship one layout and Main.php's <exe>/../lib lookup holds in both.
       - name: Tarball
         run: |
-          name="manticore-${{ steps.v.outputs.version }}-linux-${{ matrix.arch }}"
-          cid="$(docker create manticore-runtime:${{ matrix.arch }})"
+          name="manticore-${{ steps.v.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
+          cid="$(docker create manticore-runtime:${{ matrix.tag }})"
           mkdir -p "dist/$name"
           docker cp "$cid:/opt/manticore/bin" "dist/$name/bin"
           docker cp "$cid:/opt/manticore/lib" "dist/$name/lib"
@@ -172,20 +194,20 @@ jobs:
         if: steps.v.outputs.publish == 'true'
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag manticore-runtime:${{ matrix.arch }} \
-            "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
-          docker push "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.arch }}"
+          docker tag manticore-runtime:${{ matrix.tag }} \
+            "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.tag }}"
+          docker push "$IMAGE:${{ steps.v.outputs.version }}-${{ matrix.tag }}"
           # The per-arch `latest` exists for the NEXT release to seed from: a
           # multi-arch `:latest` cannot be extracted on one machine, and the seed
           # has to be this architecture.
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            docker tag manticore-runtime:${{ matrix.arch }} "$IMAGE:latest-${{ matrix.arch }}"
-            docker push "$IMAGE:latest-${{ matrix.arch }}"
+            docker tag manticore-runtime:${{ matrix.tag }} "$IMAGE:latest-${{ matrix.tag }}"
+            docker push "$IMAGE:latest-${{ matrix.tag }}"
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tarball-linux-${{ matrix.arch }}
+          name: tarball-linux-${{ matrix.tag }}
           path: dist/*.tar.gz
 
   macos:
@@ -285,11 +307,18 @@ jobs:
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           v="${{ steps.v.outputs.version }}"
           docker buildx imagetools create -t "$IMAGE:$v" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
+          # musl rides beside glibc as a SUFFIXED tag, the way the official
+          # images spell it: `:0.12.0-alpine`, `:alpine`.
+          docker buildx imagetools create -t "$IMAGE:$v-alpine" \
+            "$IMAGE:$v-alpine-arm64" "$IMAGE:$v-alpine-amd64"
           # `latest` follows tags only: a dispatch build must never become it.
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$v-arm64" "$IMAGE:$v-amd64"
+            docker buildx imagetools create -t "$IMAGE:alpine" \
+              "$IMAGE:$v-alpine-arm64" "$IMAGE:$v-alpine-amd64"
           fi
           docker buildx imagetools inspect "$IMAGE:$v"
+          docker buildx imagetools inspect "$IMAGE:$v-alpine"
 
   # Runs on a dispatch too, and stops one step short of publishing there: the
   # notes below are shell that had never executed anywhere, and a dry run that
@@ -360,13 +389,15 @@ jobs:
           docker run --rm -v "\$PWD":/work -u "\$(id -u):\$(id -g)" \\
               $IMAGE:$v manticore compile app.php -o app
 
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/install.sh | sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/install.sh | bash
           \`\`\`
 
           The tarballs carry the compiler and its stdlib, not a toolchain: manticore
           assembles its IR with \`clang\` and links with \`cc\`, against the host's
           pcre2, openssl, sqlite3 and curl. install.sh checks for those and says
           which are missing. The image carries the toolchain it was built with.
+          On Alpine (musl) use \`$IMAGE:$v-alpine\` or the \`linux-musl\` tarball —
+          install.sh picks it by itself.
 
           Built cold from \`$head\` — no cached compiler took part.
 

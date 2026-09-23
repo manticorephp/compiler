@@ -178,7 +178,7 @@ cases red on both arches — a dependency held up by an accident.
 
 ```bash
 apk add clang lld gcc musl-dev binutils pcre2-dev openssl-dev curl-dev sqlite-dev \
-        pkgconf bash file make \
+        pkgconf bash file make tzdata libxml2-dev \
         php85 php85-ctype php85-mbstring php85-tokenizer php85-openssl \
         php85-phar php85-session php85-posix php85-iconv php85-fileinfo \
         php85-curl php85-pdo_sqlite
@@ -189,12 +189,26 @@ alone has no **ctype**, and the Zend seed dies on the first line of the bootstra
 `Call to undefined function ctype_digit()`. Everything after `php85-mbstring` above is
 what Debian's `php8.5-cli` bundles and Alpine does not.
 
+`tzdata` because Alpine ships no zone database and the date functions read
+`/usr/share/zoneinfo` directly; `libxml2-dev` for the `libxml2.so` link symlink, as on
+Debian. The prebuilt route is shorter: `docker pull ghcr.io/manticorephp/compiler:alpine`,
+or install.sh, which notices musl and fetches the `linux-musl` tarball.
+
 `Dockerfile.alpine` is this list, as the same four stages as the Debian image, and
 `bash tools/docker/run_tests.sh --alpine` runs the usual gate against it (its own image
 tag and its own compiler-cache volume — a glibc binary does not run in a musl
-container). It is **prepared, not gated**: `gate.yml` carries it as an opt-in
-`workflow_dispatch` input marked `continue-on-error`, because nothing had ever checked
-the claim below until that button existed.
+container). CI runs it on every push, on both arches, next to the glibc rows, and the
+release publishes it.
+
+Where the C library itself answers differently, the answer is the host's php, not
+glibc's: musl's iconv has no `//TRANSLIT` or `//IGNORE`, php on Alpine returns `false`
+for both, and so does a Manticore binary there. A case whose output depends on it keeps
+a `tests/aot/expected/<name>.musl.out`.
+
+musl was also the first allocator to refuse three memory bugs glibc had been quietly
+absorbing (a nested write through a referenced element, a foreach value over arrays of
+arrays, a scalar read off a freed temp) — worth remembering the next time a case is red
+only here.
 
 musl exports plain `stat`/`lstat`/`fstat` and has `glob`/`globfree`, but lacks
 `GLOB_BRACE`, `GLOB_ONLYDIR` and the LFS64 aliases (`stat64`) — a few filesystem
@@ -210,7 +224,7 @@ functions degrade accordingly.
 | macOS x86_64 | **supported** |
 | Linux glibc ≥ 2.34 (arm64 / x86_64) | **supported** — full build + self-host fixpoint pass |
 | Linux glibc < 2.34 (e.g. Ubuntu 20.04, Debian 11) | **unsupported** — cannot link `stat` |
-| Linux musl / Alpine | **prepared, not gated** — builds, minus some `glob` constants; `Dockerfile.alpine` + `run_tests.sh --alpine`, and an opt-in `gate.yml` job |
+| Linux musl / Alpine (arm64 / x86_64) | **supported** — full build + suite per push; `:alpine` image and `linux-musl` tarballs; minus some `glob` constants |
 
 Both macOS and Linux build the compiler from the cold Zend seed, self-host
 (`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite

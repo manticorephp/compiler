@@ -33,7 +33,7 @@ re-measure, e.g. before changing one of those ABI tables.
 bash tools/docker/run_tests.sh            # arm64: cached self-host build + full suite
 bash tools/docker/run_tests.sh --amd64    # amd64 (emulated, slow)
 bash tools/docker/run_tests.sh --both
-bash tools/docker/run_tests.sh --alpine   # musl instead of glibc (prepared, not gated)
+bash tools/docker/run_tests.sh --alpine   # musl (Alpine) instead of glibc — a CI row too
 bash tools/docker/run_tests.sh --shell    # interactive container
 bash tools/docker/run_tests.sh --gate     # the HEAVY gate, on Linux
 bash tools/docker/run_tests.sh -k http_    # one case (or a substring)

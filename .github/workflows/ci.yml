@@ -1,5 +1,5 @@
-# Per-push: build the compiler and run the whole AOT suite, on both Linux
-# arches and on macOS.
+# Per-push: build the compiler and run the whole AOT suite — Linux on both
+# arches under both C libraries (Debian glibc, Alpine musl), and macOS.
 #
 # The steps are NOT written here. They live in tools/docker/gate.sh, which is
 # also what `bash tools/docker/run_tests.sh` runs locally — one definition, so a
@@ -54,7 +54,7 @@ concurrency:
 
 jobs:
   linux:
-    name: linux-${{ matrix.arch }}
+    name: linux-${{ matrix.tag }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -62,12 +62,28 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
+      # row reads and writes — cache key, published seed, logs — so a glibc
+      # compiler never reaches a musl container: the loader would refuse it, and
+      # a refusal is not a diagnosis.
       matrix:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
+            tag: arm64
+            dockerfile: Dockerfile
           - arch: amd64
             runner: ubuntu-latest
+            tag: amd64
+            dockerfile: Dockerfile
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: alpine-arm64
+            dockerfile: Dockerfile.alpine
+          - arch: amd64
+            runner: ubuntu-latest
+            tag: alpine-amd64
+            dockerfile: Dockerfile.alpine
     steps:
       - uses: actions/checkout@v4
 
@@ -80,11 +96,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           target: toolchain
-          tags: manticore-toolchain:${{ matrix.arch }}
+          tags: manticore-toolchain:${{ matrix.tag }}
           load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.tag }}
 
       # ~15 MB: bin/manticore + lib/*.o + lib/prelude. The key is unique per run
       # (a cache entry is immutable), so the restore-keys prefix is what actually
@@ -94,9 +111,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ci-cache
-          key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
+          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
           restore-keys: |
-            mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-
+            mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-
 
       # Second warm source, reached only when the cache missed — which it does on
       # every Dockerfile change, after a week of not being touched (GitHub evicts
@@ -108,16 +125,16 @@ jobs:
         if: steps.cache.outputs.cache-matched-key == ''
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          if docker pull -q "$IMAGE:main-${{ matrix.arch }}" 2>/dev/null; then
-            cid="$(docker create "$IMAGE:main-${{ matrix.arch }}")"
+          if docker pull -q "$IMAGE:main-${{ matrix.tag }}" 2>/dev/null; then
+            cid="$(docker create "$IMAGE:main-${{ matrix.tag }}")"
             mkdir -p ci-seed
             docker cp "$cid:/opt/manticore/bin" ci-seed/bin
             docker cp "$cid:/opt/manticore/lib" ci-seed/lib
             docker rm "$cid" > /dev/null
             chmod -R 777 ci-seed
-            echo "seed: $IMAGE:main-${{ matrix.arch }}"
+            echo "seed: $IMAGE:main-${{ matrix.tag }}"
           else
-            echo "seed: nothing published for ${{ matrix.arch }} yet — the Zend seed it is"
+            echo "seed: nothing published for ${{ matrix.tag }} yet — the Zend seed it is"
           fi || true
 
       # /logs and /compiler-cache are mounts the unprivileged container user
@@ -142,7 +159,7 @@ jobs:
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            manticore-toolchain:${{ matrix.arch }} \
+            manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
       # A red suite on top of a good build still leaves a compiler worth keeping —
@@ -152,7 +169,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ci-cache
-          key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
+          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
 
       # Publish what this run just built and tested, from the artifacts it
       # already has — NOT by building a second compiler. The runtime target in
@@ -164,21 +181,21 @@ jobs:
       - name: Publish this compiler as the seed
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker build --target base -t manticore-base:local -f Dockerfile .
+          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
           docker build -f tools/docker/Dockerfile.publish \
             --build-arg BASE=manticore-base:local \
-            -t "$IMAGE:main-${{ matrix.arch }}" \
-            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.arch }}" \
+            -t "$IMAGE:main-${{ matrix.tag }}" \
+            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}" \
             ci-cache
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:main-${{ matrix.arch }}"
-          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.arch }}"
+          docker push "$IMAGE:main-${{ matrix.tag }}"
+          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## linux-${{ matrix.arch }} — \`${GITHUB_SHA::12}\`"
+            echo "## linux-${{ matrix.tag }} — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
@@ -188,7 +205,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.arch }}
+          name: logs-${{ matrix.tag }}
           path: ci-logs/
           if-no-files-found: warn
 
@@ -273,4 +290,8 @@ jobs:
             "$IMAGE:main-arm64" "$IMAGE:main-amd64"
           docker buildx imagetools create -t "$IMAGE:${GITHUB_SHA::12}" \
             "$IMAGE:${GITHUB_SHA::12}-arm64" "$IMAGE:${GITHUB_SHA::12}-amd64"
+          docker buildx imagetools create -t "$IMAGE:main-alpine" \
+            "$IMAGE:main-alpine-arm64" "$IMAGE:main-alpine-amd64"
+          docker buildx imagetools create -t "$IMAGE:${GITHUB_SHA::12}-alpine" \
+            "$IMAGE:${GITHUB_SHA::12}-alpine-arm64" "$IMAGE:${GITHUB_SHA::12}-alpine-amd64"
           docker buildx imagetools inspect "$IMAGE:main"

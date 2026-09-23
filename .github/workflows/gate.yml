@@ -1,5 +1,6 @@
 # The heavy answer: the AOT suite PLUS difftest (byte parity against the `php`
-# interpreter), on both Linux arches. Weekly, and on demand.
+# interpreter), on both Linux arches and both C libraries (glibc on Debian,
+# musl on Alpine). Weekly, and on demand.
 #
 # Why not nightly, and why no fixpoint by default: ci.yml already answers "is
 # the suite green" on every push, and the self-host fixpoint answers a question
@@ -16,16 +17,8 @@ on:
     - cron: '0 2 * * 0'
   workflow_dispatch:
     inputs:
-      parity:
-        description: 'run the glibc parity gate (suite + difftest) — off to test musl alone'
-        type: boolean
-        default: true
       fixpoint:
         description: 'also run tools/selfhost_fixpoint.sh (hours)'
-        type: boolean
-        default: false
-      alpine:
-        description: 'also run the musl (Alpine) build — prepared, not yet green'
         type: boolean
         default: false
 
@@ -35,9 +28,7 @@ concurrency:
 
 jobs:
   linux:
-    name: gate-${{ matrix.arch }}
-    # A schedule carries no inputs, so the weekly parity run must not depend on one.
-    if: github.event_name == 'schedule' || inputs.parity
+    name: gate-${{ matrix.tag }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     strategy:
@@ -46,8 +37,20 @@ jobs:
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
+            tag: arm64
+            dockerfile: Dockerfile
           - arch: amd64
             runner: ubuntu-latest
+            tag: amd64
+            dockerfile: Dockerfile
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: alpine-arm64
+            dockerfile: Dockerfile.alpine
+          - arch: amd64
+            runner: ubuntu-latest
+            tag: alpine-amd64
+            dockerfile: Dockerfile.alpine
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -56,11 +59,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           target: toolchain
-          tags: manticore-toolchain:${{ matrix.arch }}
+          tags: manticore-toolchain:${{ matrix.tag }}
           load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.arch }}
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.tag }}
 
       # Read-only: this job is a verdict on the tree, not a producer of
       # compilers. ci.yml owns the cache, and a gate run writing it back would
@@ -69,7 +73,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ci-cache
-          key: mc-compiler-${{ matrix.arch }}-${{ hashFiles('Dockerfile') }}-
+          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-
 
       - name: Suite + difftest
         run: |
@@ -89,14 +93,14 @@ jobs:
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            manticore-toolchain:${{ matrix.arch }} \
+            manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## linux-${{ matrix.arch }} — \`${GITHUB_SHA::12}\`"
+            echo "## linux-${{ matrix.tag }} — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             tail -8  ci-logs/difftest.log 2>/dev/null || true
@@ -108,51 +112,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-logs-${{ matrix.arch }}
-          path: ci-logs/
-          if-no-files-found: warn
-
-  # musl, opt-in. It is here so that "does Alpine still build" is a button rather
-  # than an afternoon, and `continue-on-error` because docs/install.md has claimed
-  # musl works for longer than anything has checked it — the first runs are
-  # evidence-gathering, and they must not turn the parity gate red while they are.
-  alpine:
-    name: alpine-arm64 (musl, experimental)
-    if: inputs.alpine
-    runs-on: ubuntu-24.04-arm
-    continue-on-error: true
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build the musl toolchain image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.alpine
-          target: toolchain
-          tags: manticore-toolchain:alpine
-          load: true
-          cache-from: type=gha,scope=toolchain-alpine
-          cache-to: type=gha,mode=max,scope=toolchain-alpine
-
-      - name: Seed + suite
-        run: |
-          mkdir -p ci-logs && chmod 777 ci-logs
-          docker run --rm \
-            -v "$PWD":/repo:ro \
-            -v "$PWD/ci-logs":/logs \
-            -e MC_JOBS=0 \
-            -e MC_LOGDIR=/logs \
-            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            manticore-toolchain:alpine \
-            /bin/bash /repo/tools/docker/gate.sh
-
-      - name: Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gate-logs-alpine
+          name: gate-logs-${{ matrix.tag }}
           path: ci-logs/
           if-no-files-found: warn
