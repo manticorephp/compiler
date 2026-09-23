@@ -1,0 +1,7 @@
+int key     : 2 1,2
+str key     : 1 q
+dyn key     : q,z
+two deep    : 1,5
+superglobal : a,b,c
+still bound : fresh fresh
+global      : a,b,c
