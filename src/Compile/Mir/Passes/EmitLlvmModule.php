@@ -2126,6 +2126,12 @@ trait EmitLlvmModule
             // — the next `.=` on the property wrote into freed memory.
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $out .= $this->retainCellPayload($v);
+            } elseif ($v->type->kind === Type::KIND_CELL && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+                // …and a borrowed CELL (`return $this->mixed;`), by tag.
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= $this->coerceToI64();
+                $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
             }
             $out .= $this->boxToCell($v->type, $v);
             return $this->finishReturn($out, $this->lastValue, $leave);

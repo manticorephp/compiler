@@ -2604,13 +2604,18 @@ final class EmitLlvm implements EmitVisitor
         // This one leaked — one site, `Lexer.php:100`, vetoed the slot and
         // stranded every token: 9.2M of them on the Doctrine tier.
         if ($t->isVec() || $t->isAssoc()) { return true; }
+        // A closure env is counted and a borrowed one is retained on return
+        // like an object ({@see EmitLlvmModule::isBorrowedObjReturn}).
+        if ($tk === Type::KIND_CLOSURE) { return true; }
+        // A borrowed CELL handed back from a cell-returning function is
+        // retained by tag (emitReturn's cell arms, {@see
+        // EmitLlvmModule::isBorrowedCellReturn}).
+        if ($tk === Type::KIND_CELL && $v->type->kind === Type::KIND_CELL) { return true; }
         if ($tk !== Type::KIND_OBJ) { return false; }
-        // A struct has no rc header and a Closure is a header-less capture
-        // record; emitReturn refuses both, so neither is retained and the veto
-        // must stand.
+        // A struct has no rc header; emitReturn refuses it, so it is not
+        // retained and the veto must stand.
         $cls = $t->class ?? '';
         if ($cls === '') { return false; }
-        if ($this->isClosureClass($cls)) { return false; }
         if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
         if ($this->isEnumClass($cls)) { return false; }
         return true;

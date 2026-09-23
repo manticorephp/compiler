@@ -3435,20 +3435,6 @@ final class UnifiedArrayRuntime
         $this->emitRefSlotHelpers();
     }
 
-    /**
-     * A PROPERTY slot a `&` points at (`[&$o->p]`) is promoted IN PLACE, the
-     * way an element is ({@see emitRefBoxVariant}): the slot's cell moves into
-     * a box and the slot holds `cell(REF, box)`, the object owning one count.
-     *   `__mir_ref_promote_slot(slot) -> data`  the box, made on the first `&`;
-     *   `__mir_ref_slot_store(slot, v) -> i1`   write through a promoted slot
-     *                                           (dropping what the box held);
-     *                                           false = not promoted, store it;
-     *   `__mir_ref_slot_retain(v)` / `__mir_ref_slot_drop(v)`  the slot's count,
-     *                                           for `clone` and the class drop —
-     *                                           no-ops on anything but a REF cell,
-     *                                           so a cell slot never promoted
-     *                                           keeps exactly today's lifetime.
-     */
     /** i1: `$w` is a REF cell (tagged, nibble {@see MemoryAbi::CELL_TAG_REF}). */
     private function isRefCellIr(Block $b, Value $w): Value
     {
@@ -3457,6 +3443,18 @@ final class UnifiedArrayRuntime
         return $b->and_($b->icmp('ugt', $w, Value::int($i64, -4503599627370496)),
                         $b->icmp('eq', $nib, Value::int($i64, MemoryAbi::CELL_TAG_REF)));
     }
+    /**
+     * A PROPERTY slot a `&` points at (`[&$o->p]`) is promoted IN PLACE, the
+     * way an element is ({@see emitRefBoxVariant}): the slot's cell moves into
+     * a box and the slot holds `cell(REF, box)`, the object owning one count.
+     *   `__mir_ref_promote_slot(slot) -> data`  the box, made on the first `&`;
+     *   `__mir_ref_slot_store(slot, v) -> i1`   write through a promoted slot
+     *                                           (dropping what the box held);
+     *                                           false = not promoted, store it;
+     * `clone` and the class drop need nothing of their own: a cell slot's
+     * count is taken and given back by tag (`__mir_cell_retain` /
+     * `__mir_cell_drop`), and tag 9 is the box.
+     */
 
     private function emitRefSlotHelpers(): void
     {
@@ -3471,9 +3469,8 @@ final class UnifiedArrayRuntime
         $w = $e->load($i64, $slot);
         $e->brIf($this->isRefCellIr($e, $w), $have, $make);
         $have->ret($have->inttoptr($have->and_($w, $mask), Type::ptr()));
-        // The box co-owns what it takes over: the slot's own count on a cell
-        // property is not one anything gives back.
-        $make->call('__mir_cell_retain', Type::void(), [$w]);
+        // The slot's count on its value moves into the box with it, and the
+        // slot takes the box's first count instead.
         $box = $make->call('__mir_ref_new', Type::ptr(), [$w]);
         $bi = $make->ptrtoint($box, $i64);
         $make->store($make->or_($make->and_($bi, $mask), Value::int($i64, MemoryAbi::CELL_REF_TAG_BITS)), $slot);
@@ -3494,17 +3491,6 @@ final class UnifiedArrayRuntime
         $thru->ret(Value::int(Type::i1(), 1));
         $no->ret(Value::int(Type::i1(), 0));
 
-        foreach (['__mir_ref_slot_retain' => '__mir_ref_retain', '__mir_ref_slot_drop' => '__mir_ref_release'] as $sym => $op) {
-            $fn = $this->module->func($sym, Type::void());
-            $v = $fn->param($i64, 'v');
-            $e = $fn->block('entry');
-            $doit = $fn->block('doit');
-            $done = $fn->block('done');
-            $e->brIf($this->isRefCellIr($e, $v), $doit, $done);
-            $doit->call($op, Type::void(), [$doit->inttoptr($doit->and_($v, $mask), Type::ptr())]);
-            $doit->br($done);
-            $done->retVoid();
-        }
     }
 
     private function emitRefBoxVariant(string $sym, string $issetFn, string $setFn, string $slotFn, bool $strKey): void

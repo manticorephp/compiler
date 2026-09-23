@@ -1926,17 +1926,18 @@ trait EmitLlvmRuntime
                 // Release obj / string / vec / assoc props (flavor picks the
                 // right element-walking helper). Flags were pre-set in
                 // scanDropFlags so the helper is already emitted.
-                // A CELL slot a `&` promoted holds `cell(REF, box)` and the
-                // object's count on the box. Every cell slot of every module
-                // asks, because this body coalesces by name across modules and
-                // must not depend on which one saw the `&`; on anything but a
-                // REF cell the helper does nothing.
+                // A CELL slot owns what it holds — every store takes a count
+                // ({@see EmitLlvmObjects::emitStoreProperty}) — and gives it back
+                // by tag; a slot a `&` promoted holds `cell(REF, box)` and the
+                // object's count on the box, which the same tag dispatch returns.
+                // Decided by the declared type alone, because this body
+                // coalesces by name across modules.
                 if ($pt->kind === Type::KIND_CELL && $cls->propertyWidth($pn) === 8) {
                     $s = (string)$i;
                     $body .= '  %g' . $s . ' = getelementptr i8, ptr %o, i64 '
                         . (string)$cls->propertyOffset($pn) . "\n";
                     $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void @__mir_ref_slot_drop(i64 %v' . $s . ")\n";
+                    $body .= '  call void @__mir_cell_drop(i64 %v' . $s . ")\n";
                     $i = $i + 1;
                     continue;
                 }

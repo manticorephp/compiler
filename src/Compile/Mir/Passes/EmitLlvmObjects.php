@@ -782,11 +782,11 @@ trait EmitLlvmObjects
                 $out .= '  store i64 ' . $v . ', ptr ' . $dg . "\n";
                 $out .= $this->rcRetainRawByType($v, $pt);
                 // The two slots the class drop gives back that the raw retain
-                // above does not take: a promoted cell slot's count on its REF
-                // box (the clone SHARES the reference, as php does) and a
-                // closure slot's env.
+                // above does not take: a cell slot's payload by tag — a REF
+                // cell's box included, so the clone SHARES the reference as php
+                // does — and a closure slot's env.
                 if ($pt !== null && $pt->kind === Type::KIND_CELL) {
-                    $out .= '  call void @__mir_ref_slot_retain(i64 ' . $v . ")\n";
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
                 } elseif ($pt !== null && $this->isClosureValueType($pt)) {
                     $this->rt->needsClosureRc = true;
                     $cp = $this->ssa->allocReg();
@@ -1643,6 +1643,14 @@ trait EmitLlvmObjects
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         $out .= $this->rcRetainByType($n->value, $raw, $n->value->type, 4);
+        // An already-boxed cell names no rc kind for the retain above; a cell
+        // slot owns what it holds (its class drop gives it back), so a
+        // borrowed one takes its count by tag.
+        if ($n->value->type->kind === Type::KIND_CELL) {
+            $this->lastValue = $raw;
+            $this->lastValueType = 'i64';
+            $out .= $this->retainCellPayload($n->value);
+        }
         $this->lastValue = $raw;
         $this->lastValueType = 'i64';
         $out .= $this->boxToCell($n->value->type, $n->value);
@@ -2333,9 +2341,14 @@ trait EmitLlvmObjects
         if ($this->cellPropBoxed($propType, $pcls, $n->property)) {
             $vk = $n->value->type->kind;
             if ($vk === Type::KIND_CELL) {
-                // Already a boxed cell — store as-is (repr already agrees).
+                // Already a boxed cell — store as-is (repr already agrees). The
+                // slot owns it ({@see EmitLlvmRuntime}'s class drop releases a
+                // cell slot), so a borrowed one takes its count by tag.
                 $out .= $this->coerceToI64();
                 $val = $this->lastValue;
+                $out .= $this->retainCellPayload($n->value);
+                $this->lastValue = $val;
+                $this->lastValueType = 'i64';
                 $res = $val;
                 $resTy = 'i64';
             } elseif ($vk === Type::KIND_ARRAY) {
@@ -2419,17 +2432,11 @@ trait EmitLlvmObjects
         // `$this->a = $this->a` safe: the new value is at +1 before the old one
         // drops, so a self-assignment goes 1 -> 2 -> 1 instead of freeing itself.
         // A slot a `&` promoted ({@see EmitLlvm::$refCellPropNames}) holds
-        // `cell(REF, box)`: the store goes THROUGH to the box, which owns what
-        // it holds — so a cell that arrived borrowed takes its count first, as
-        // the rc kinds above already did.
+        // `cell(REF, box)`: the store goes THROUGH to the box, which takes the
+        // count the value already carries.
         $thruDone = '';
         if (isset($this->refCellPropNames[$n->property]) && $propType !== null
             && $propType->kind === Type::KIND_CELL) {
-            if ($n->value->type->kind === Type::KIND_CELL) {
-                $this->lastValue = $val;
-                $this->lastValueType = 'i64';
-                $out .= $this->retainCellPayload($n->value);
-            }
             $wt = $this->ssa->allocReg();
             $out .= '  ' . $wt . ' = call i1 @__mir_ref_slot_store(ptr ' . $gep . ', i64 ' . $val . ")\n";
             $plainL = $this->ssa->allocLabel('refprop.plain');
@@ -7405,7 +7412,18 @@ trait EmitLlvmObjects
         $holder = $this->slotHolder($n->object, $n->property);
         if ($holder === null || $holder->isExternClass) { if ($dbg) { \error_log('  no: holder'); } return ''; }
         if ($holder->propertyWidth($n->property) !== 8) { if ($dbg) { \error_log('  no: width'); } return ''; }
-        if ($this->cellPropBoxed($propType, $cls, $n->property)) { if ($dbg) { \error_log('  no: boxed'); } return ''; }
+        // A boxed CELL slot owns what it holds (every store takes a count, the
+        // class drop gives it back), so an overwrite gives the old one back by
+        // tag — under the same borrow veto every other slot answers to.
+        if ($this->cellPropBoxed($propType, $cls, $n->property)) {
+            $ckey = $this->cellPropKey($cls, $n->property);
+            if (isset($this->propRawBorrow[$ckey]) || isset($this->propRawBorrow[$n->property])) {
+                if ($dbg) { \error_log('  no: boxed, borrowed'); }
+                return '';
+            }
+            if ($dbg) { \error_log('  YES cell'); }
+            return 'cell';
+        }
         $t = $this->propStoreRetainType($n);
         if ($t === null) { if ($dbg) { \error_log('  no: type'); } return ''; }
         // A CELL slot that is NOT boxed is a raw pointer whose static type claims

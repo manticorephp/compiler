@@ -1,0 +1,30 @@
+~in-prop
+p gone
+~ow1
+ow
+~ow2
+after ow
+d gone
+~bor
+p gone
+loop
+~c1
+~c2
+after loop
+p gone aaaaa
+~shared
+q gone
+got m1
+~m1
+g gone
+~m2
+x gone
+got o1
+~o1
+g gone
+~o2
+x gone
+read cm
+~cm
+v gone
+done
