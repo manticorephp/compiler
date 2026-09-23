@@ -3775,6 +3775,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // type that crosses it and cannot name a prelude class at all; one
     // compilation unit is what lets the parser hand real objects around.
     $httpSrc = prelude_src_or_empty("http.php");
+    // Http\WebSocket — DEMAND-GATED on its own qualifier, so a program that
+    // serves plain HTTP never carries the frame codec. Parsed after Http\,
+    // whose header helpers and takeover hook it calls.
+    $wsSrc = prelude_src_or_empty("websocket.php");
     // serialize / unserialize — DEMAND-GATED, and gated SEPARATELY (two files):
     // each one generates a per-class arm set from the class table, so a program
     // that only serializes must not pay for unserialize's rebuild arms.
@@ -3915,6 +3919,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // and nobody reaches this namespace without writing `Buffer\`.
     $useBuffer = $demand->mentions('Buffer');
     $useHttp = $demand->mentions('Http');
+    // Http\WebSocket — DEMAND-GATED on its own qualifier, so a program that
+    // serves plain HTTP never carries the frame codec. Forced HERE, before
+    // $useHttp is read by anything below.
+    $useWs = $demand->mentions('WebSocket');
+    if ($useWs) {
+        $useHttp = true;
+        $useBuffer = true;
+    }
     if ($useHttp && $sapiClash) {
         // The server runs every handler with the request seam live, so it cannot
         // bow out of sapi.php the way a plain program does — and injecting on top
@@ -4177,6 +4189,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read http.php");
         return null;
     }
+    if ($useWs && $wsSrc === "") {
+        dprint("compile failed: prelude: cannot read websocket.php");
+        return null;
+    }
     if ($useXml && ($xmlSrc === "" || $xmlXpathSrc === "")) {
         dprint("compile failed: prelude: cannot read xml.php / xml_xpath.php");
         return null;
@@ -4263,6 +4279,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->pcntlSrc = $usePcntl ? $pcntlSrc : "";
         $lower->bufferSrc = $useBuffer ? $bufferSrc : "";
         $lower->httpSrc = $useHttp ? $httpSrc : "";
+        $lower->wsSrc = $useWs ? $wsSrc : "";
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
@@ -4686,7 +4703,7 @@ function analyze_prelude_files(): array {
         // The Buffer\ and Http\ class trees, same reasoning as the demand-gated
         // trees above: closed-world analysis must know every prelude class a
         // user program can name.
-        "buffer.php", "http.php",
+        "buffer.php", "http.php", "websocket.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the
         // same reason as Buffer\/Http\.

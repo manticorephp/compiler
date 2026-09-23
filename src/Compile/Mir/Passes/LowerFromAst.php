@@ -417,6 +417,10 @@ final class LowerFromAst implements Pass
      *  Async\ types and its parser names Buffer\ByteBuffer. Implies
      *  bufferSrc + asyncSrc + sapiSrc + obSrc. */
     public string $httpSrc = '';
+    /** Http\WebSocket — DEMAND-GATED on its own qualifier. Braced-namespace
+     *  tree, parsed after Http\: it calls Http\headEnd/splitHead and
+     *  Http\Response::takeover, and names Http\Request in its signatures. */
+    public string $wsSrc = '';
     /** ext/simplexml + ext/libxml — DEMAND-GATED. Global namespace, so it rides
      *  the concatenated blob rather than the braced tier. Carries the libxml2
      *  binds, the __McXmlDoc node table, SimpleXMLElement and the libxml_*

@@ -268,6 +268,12 @@ trait LowerPrelude
             $ht = \Parser\Parser::parseSource("<?php\n" . $this->httpSrc);
             foreach ($ht->statements as $s) { $stmts[] = $s; }
         }
+        // Http\WebSocket — after Http\: it calls Http\headEnd/splitHead and
+        // Http\Response::takeover, and names Http\Request in its signatures.
+        if ($this->wsSrc !== '') {
+            $ws = \Parser\Parser::parseSource("<?php\n" . $this->wsSrc);
+            foreach ($ws->statements as $s) { $stmts[] = $s; }
+        }
         return $stmts;
     }
 
