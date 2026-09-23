@@ -732,6 +732,7 @@ final class EmitLlvm implements EmitVisitor
         // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
         $this->propRawBorrow = [];
+        $this->refCellPropNames = [];
         $this->globalCellVeto = [];
         $this->propElemBorrow = [];
         $this->needsObjectVarsFn = false;
@@ -771,6 +772,7 @@ final class EmitLlvm implements EmitVisitor
             // what decides whether the return retains.
             $this->scanReturnType = $fn->returnType;
             $this->scanCellPropStores($fn->body);
+            $this->collectRefCellPropNames($fn->body);
             $decl = [];
             $alias = [];
             $this->scanGlobalCellStores($fn->body, $decl, $alias);
@@ -1817,6 +1819,34 @@ final class EmitLlvm implements EmitVisitor
     private array $propRawBorrow = [];
 
     /**
+     * Property NAMES a storable reference is taken to in this module
+     * (`[&$o->p]`). Such a slot is promoted in place on the first `&`
+     * ({@see EmitLlvmObjects::emitRefCell}): it holds `cell(REF, box)` from
+     * then on, so a store of that name tests the slot's tag and writes through
+     * the box, and the class drop gives the slot's count on the box back. By
+     * NAME, not by class: the object may be typed as a parent or a child of the
+     * class the `&` named, and the runtime tag is the real answer anyway.
+     *
+     * @var array<string, bool>
+     */
+    private array $refCellPropNames = [];
+
+    /** Fill {@see $refCellPropNames} from one function body. */
+    private function collectRefCellPropNames(Node $n): void
+    {
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $kids = \Compile\Mir\Walk::children($n);
+            if ($kids[0]->kind === Node::KIND_PROPERTY_ACCESS) {
+                $this->refCellPropNames[$this->asPropAccess($kids[0])->property] = true;
+            }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectRefCellPropNames($c); }
+    }
+
+    private function asPropAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
+
+    /**
      * Module cells (`@g__GET`, a `static` local's cell) whose stores do NOT all
      * agree with the cell's declared release flavor — {@see scanGlobalCellStores}.
      * A vetoed cell keeps the old contract (no retain, no release, no element
@@ -2304,7 +2334,13 @@ final class EmitLlvm implements EmitVisitor
     private function storeLocalRetainsProp(Node $store, Node $pa): bool
     {
         if ($store->type->kind === Type::KIND_CELL && $pa->type->kind !== Type::KIND_CELL) {
-            return false;
+            // A SUPERGLOBAL is a module cell in every scope, and its store
+            // takes its own reference — an array is copied and the copy adopts
+            // the elements ({@see EmitLlvmLocals::globalCellOwnIr}); the
+            // box-back arm this refusal is about is a plain local's.
+            // `$_SESSION = $h->data;` vetoed `H::data` and every overwrite of
+            // it leaked the whole previous array.
+            return $pa->type->isArray() && $this->isSuperglobalName($store->name);
         }
         return $pa->type->isArray()
             || $this->slotIsArrayHinted($pa->object, $pa->property, $pa->type);
@@ -2451,7 +2487,7 @@ final class EmitLlvm implements EmitVisitor
             $pureArg = $this->consumerKeepsNoArg($parent);
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($pureArg) { continue; }
-                $this->markPropBorrowsIn($c, 'call operand');
+                $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
             }
             return;
         }
@@ -2574,13 +2610,18 @@ final class EmitLlvm implements EmitVisitor
         // This one leaked — one site, `Lexer.php:100`, vetoed the slot and
         // stranded every token: 9.2M of them on the Doctrine tier.
         if ($t->isVec() || $t->isAssoc()) { return true; }
+        // A closure env is counted and a borrowed one is retained on return
+        // like an object ({@see EmitLlvmModule::isBorrowedObjReturn}).
+        if ($tk === Type::KIND_CLOSURE) { return true; }
+        // A borrowed CELL handed back from a cell-returning function is
+        // retained by tag (emitReturn's cell arms, {@see
+        // EmitLlvmModule::isBorrowedCellReturn}).
+        if ($tk === Type::KIND_CELL && $v->type->kind === Type::KIND_CELL) { return true; }
         if ($tk !== Type::KIND_OBJ) { return false; }
-        // A struct has no rc header and a Closure is a header-less capture
-        // record; emitReturn refuses both, so neither is retained and the veto
-        // must stand.
+        // A struct has no rc header; emitReturn refuses it, so it is not
+        // retained and the veto must stand.
         $cls = $t->class ?? '';
         if ($cls === '') { return false; }
-        if ($this->isClosureClass($cls)) { return false; }
         if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
         if ($this->isEnumClass($cls)) { return false; }
         return true;
@@ -3082,6 +3123,12 @@ final class EmitLlvm implements EmitVisitor
             // overwritten string slot: `Buffer\ByteBuffer::buf`, 1 KB per
             // request, 198 MB of `http_parse`.
             '__str_byte_at',
+            // The synthesized serializer's per-property step: it walks the
+            // value into the output string and keeps nothing. Every class the
+            // program serializes — and a session serializes the object graph
+            // in `$_SESSION` — handed each of its properties to it, so none of
+            // them ever released what an overwrite replaced.
+            '__mc_ser_val',
         ] as $n) {
             if ($n === $bare) { return true; }
         }
@@ -4313,6 +4360,7 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($flavor === 'str') { return '@__mir_rc_release_str'; }
         if ($flavor === 'obj') { return '@__mir_rc_release'; }
+        if ($flavor === 'closure') { return '@__mir_closure_release'; }
         if ($flavor === 'vecobj' || $flavor === 'assocobj') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_obj' : '@__mir_array_release_obj'; }
         if ($flavor === 'vecstr' || $flavor === 'assocstr') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_str' : '@__mir_array_release_str'; }
         if ($flavor === 'veccell' || $flavor === 'assoccell') { return \Compile\Debug::$rcSymElem ? '@__mir_array_release_ownel_cell' : '@__mir_array_release_cell'; }
@@ -4377,6 +4425,10 @@ final class EmitLlvm implements EmitVisitor
 
     private function classDropFlavorFor(\Compile\Mir\ClassDef $cls, string $prop, Type $pt): string
     {
+        // A closure-typed slot owns the env it holds, as an object slot owns
+        // its object: every store takes a count (a fresh literal / call return
+        // brings its own, a borrow is retained by rcRetainByType's closure arm).
+        if ($this->isClosureValueType($pt)) { return 'closure'; }
         $flavor = $this->discardReleaseFlavor($pt);
         if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
         if ($this->propBorrowUnknown || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }

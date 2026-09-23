@@ -5993,7 +5993,16 @@ trait EmitLlvmBuiltins
             if ($cellBase) {
                 $out .= $this->retainCellPayload($c->args[$i]);
                 $out .= $this->boxToCell($c->args[$i]->type, $c->args[$i]);
-                $vals[] = $this->lastValue;
+                // …and into a buffer that IS a cell buffer: the base's buffer
+                // may still be raw-hinted (`["last"]` flat-boxed into a `mixed`
+                // slot), and a boxed word among raw ones is read by the hint —
+                // the element drop released the tagged word as a string.
+                // `__mir_elem_encode` cellifies it in place, as an element
+                // store does ({@see EmitLlvmArrays::emitElemEncode}).
+                $enc = $this->ssa->allocReg();
+                $out .= '  ' . $enc . ' = call i64 @__mir_elem_encode(ptr ' . $cur . ', i64 '
+                      . $this->lastValue . ")\n";
+                $vals[] = $enc;
                 $i = $i + 1;
                 continue;
             }

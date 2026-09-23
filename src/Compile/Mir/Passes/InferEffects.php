@@ -74,6 +74,14 @@ final class InferEffects implements Pass
         if ($k === Node::KIND_NEW_OBJ) {
             return Effects::ALLOC | Effects::MAY_THROW;
         }
+        // `clone` allocates exactly as `new` does (and `__clone` may throw).
+        // Missing, it never reached InferAllocKind's RC_HEAP arm, so the local
+        // a clone was stored in was never released: `$q = clone $p;` leaked
+        // the copy and everything it co-owned — the retain side
+        // (isBorrowedObjReturn, retainCellPayload) already counted it +1.
+        if ($k === Node::KIND_CLONE) {
+            return Effects::ALLOC | Effects::MAY_THROW;
+        }
 
         if ($k === Node::KIND_DIV || $k === Node::KIND_MOD) {
             return Effects::MAY_THROW;

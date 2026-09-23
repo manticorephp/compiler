@@ -20,7 +20,7 @@ final class MemoryAbi
      * `bin/manticore version` output so vendored artefacts can
      * detect mismatches against a fresh build.
      */
-    public const VERSION = 8;
+    public const VERSION = 9;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -141,13 +141,27 @@ final class MemoryAbi
      * without the object claim, at the cost of one arm in retain/release.
      *
      * Never reached as a bare pointer — a box is only ever addressed through a
-     * REF-tagged cell, or through the slot of a promoted local, which holds
-     * `data` and is read by the existing by-ref deref.
+     * REF-tagged cell, through the slot of a promoted local, which holds
+     * `data` and is read by the existing by-ref deref, or through a closure
+     * env's by-ref capture.
+     *
+     * Every holder owns one count: the frame that made the box, each env that
+     * captured it, each REF cell stored in an array / property. The last
+     * release drops the value and frees the box (`__mir_ref_unref` /
+     * `__mir_ref_release`). The magic is also the guard: a REF cell or a by-ref
+     * capture can carry an address that is NOT a box (a property slot, a
+     * static, a caller's slot), and the rc helpers leave those alone.
      */
     public const REF_TAG_MAGIC = 0x7E66000000000008;
 
     /** The box's value word, relative to the data ptr the cell payload holds. */
     public const REF_VALUE_OFFSET = 0;
+
+    /** The box's refcount word, relative to the data ptr. */
+    public const REF_RC_OFFSET = 8;
+
+    /** Bytes one box allocates: magic, value, rc. `data = base + 8`. */
+    public const REF_BOX_BYTES = 24;
 
     /**
      * Cell tag nibble (bits 48-51) for a reference. The others are INT=1,

@@ -1,0 +1,31 @@
+5
+end scope
+~scope
+after scope
+5
+~unset
+after unset
+~discarded
+after discard
+made
+after keep
+6
+~static
+dropped
+~lit
+lit gone
+x gone
+~bor
+f gone
+x gone
+3
+~get
+g gone
+~ow1
+ow
+~ow2
+ow gone
+e! zzz
+e!! zzz
+e!!! zzz
+done

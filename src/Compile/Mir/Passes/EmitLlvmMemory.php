@@ -698,6 +698,7 @@ trait EmitLlvmMemory
         $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
+        elseif ($flavor === 'closure') { $this->rt->needsClosureRc = true; $fn = '@__mir_closure_retain'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_retain_buf'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }
@@ -754,26 +755,6 @@ trait EmitLlvmMemory
             $flavor = $this->nestedArrFlavor($at->element, $flavor);
         }
         return $flavor;
-    }
-
-    /**
-     * Co-own the KEYS and ELEMENTS of a buffer this frame already owns outright
-     * — a fresh `__mir_array_copy` result — without touching its rc.
-     * {@see UnifiedArrayRuntime::emitRetainVariant}'s `$bumpRc = false` twin of
-     * the flavor's retain, so a copy gives back exactly what its release drops.
-     */
-    private function arrayAdoptIr(string $i64reg, string $flavor): string
-    {
-        $sym = '@__mir_array_adopt';
-        if ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $sym .= '_obj'; }
-        elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $sym .= '_str'; }
-        elseif ($flavor === 'veccell' || $flavor === 'assoccell') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_cell'; }
-        elseif ($this->arrFlavorSuffix($flavor) !== '') { $this->rt->needsRc = true; $this->rt->needsStrRc = true; $sym .= '_' . $this->arrFlavorSuffix($flavor); }
-        elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $sym .= '_buf'; }
-        else { $this->rt->needsRc = true; $this->rt->needsStrRc = true; }
-        $p = $this->ssa->allocReg();
-        return '  ' . $p . ' = inttoptr i64 ' . $i64reg . " to ptr\n"
-            . '  call void ' . $sym . '(ptr ' . $p . ")\n";
     }
 
     /** Emit a release of the rc value held in `$slot` (obj / vec / vecobj / str). */

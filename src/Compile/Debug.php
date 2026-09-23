@@ -309,6 +309,34 @@ final class Debug
     public static bool $rcSymElem = true;
 
     /**
+     * `MANTICORE_RC_BUF_ONLY=1` — opt IN to BUFFER-ONLY array ownership: a
+     * holder's count is a count on the BUFFER; the keys and elements belong to
+     * the buffer and die once, at rc → 0.
+     *
+     * ⛔ OFF by default: the compiler built under it SIGSEGVs on its own source.
+     * The co-own model's extra element refs have been MASKING shallow copies
+     * that never took theirs (`copy_deep` shares leaves by design, the spread
+     * and `$b = $a + $c` shared them outright), and each one surfaces as a
+     * premature free once they are gone. The copies found so far adopt under
+     * this flag; the next one was a MIR node freed by `__mir_array_release_ownel_obj`
+     * during `LowerPrelude::injectCliSuperglobals` → `nodeReadsLocal`.
+     * `MANTICORE_FRAME_POINTERS=1` gives `malloc_history` the whole free stack.
+     *
+     * The other model — every retain co-owns the elements, every release
+     * gives one element ref back (`_ownel_`) — is sound only when EVERY count
+     * on a buffer follows it, and a fresh +1 (a literal, a call's return)
+     * carries no element refs of its own. Mixed on one buffer, the element
+     * refs depend on WHICH holder lets go last: `[$m, $m]` over a mixed-element
+     * `$m` leaked every element (160 B an iteration), a clone of a `mixed`
+     * property holding one did the same, and `$_SESSION = $h->data` leaked
+     * 354 B a store. Buffer-only cannot disagree with itself: whatever variant
+     * name a site picked, retain is `rc + 1` and release is `rc - 1` with the
+     * element walk at zero. The walk that stays is ADOPT — a fresh COPY shares
+     * the source's elements and does own a ref on each.
+     */
+    public static bool $rcBufferOnly = false;
+
+    /**
      * `MANTICORE_RC_PACK_ELEM=0` — do not release the ARRAY elements of a
      * call-argument array literal after the call ({@see Mir\Passes\
      * EmitLlvmArrays::emitArrayLitValue}). The whole of a variadic call's
@@ -660,6 +688,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcPackElem = false; }
         $env = \getenv('MANTICORE_RC_SYM_ELEM');
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
+        $env = \getenv('MANTICORE_RC_BUF_ONLY');
+        if ($env === '1' || $env === 'on') { self::$rcBufferOnly = true; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
         $env = \getenv('MANTICORE_CC_TRACE');

@@ -4,8 +4,9 @@ Status: **implemented through main `f58e5d6` (2026-09-14).** `[&$a]`, `[&$this->
 `[&$a[$k]]`, `[$v, &$v]`, `$a[$k] = &$v`, cell-alias ownership, `unset` breaking the
 binding and a mutated `mixed` by-ref param all match php; the deepclone witness is
 byte-identical. Still open: a `PropertyAccess` as the TARGET of `=&` (a copy), the
-static-property source, `&...$vars`, `R:` in `serialize`, the var_dump `&` marker, and
-`clone` sharing the VALUE where php shares the BINDING. The refusal this replaced
+static-property source, `&...$vars`, `R:` in `serialize` and the var_dump `&` marker.
+The box is counted and a property is promoted in place since br `refbox` (2026-09-23),
+so `clone` now shares the BINDING as php does. The refusal this replaced
 (`LowerFromAst::lowerArrayLit`, "an array literal cannot bind an element by
 reference") is gone. The rest of this document is the design as it was decided.
 
@@ -62,6 +63,34 @@ do.
 Encoding: a cell's tag is the nibble at bits 48-51 (`EmitLlvmExpr::cellTagIr`),
 payload the low 48 bits. The container header magics in `MemoryAbi` run
 `RC_TAG_MAGIC` 0 … `CLOSURE_TAG_MAGIC` 7, so **8 is free** for the box header.
+
+## The box's lifetime (ABI v9)
+
+The box is `[REF_TAG_MAGIC@-8, value@0, rc@+8]` (`MemoryAbi::REF_*`); every
+reader addresses `data`, so the header moved nothing. Each holder owns one count:
+
+| holder | takes it | gives it back |
+|---|---|---|
+| the frame that made it (`use (&$x)`, `[&$a]`) | `__mir_ref_new` in the prologue | every return and the fall-through, and `unset($a)` (which hands the name a fresh box) |
+| a closure env's by-ref capture | `__mir_ref_retain` at the capture | the env's `__mc_drop` |
+| a REF cell in an array / property | `__mir_cell_retain` (tag 9) at the store | `__mir_cell_drop` (tag 9) |
+| an array element promoted by `[&$v[$k]]` | `__mir_array_ref_box` makes it rc 1 | the element's drop |
+| a property slot promoted by `&$o->p` | `__mir_ref_promote_slot` makes it rc 1; `clone` retains | the class drop (`__mir_ref_slot_drop`) |
+| a by-value parameter a `[&$x]` points at | boxed in the prologue, holding the argument | as the frame's own box |
+
+The last holder drops the VALUE and frees the box. A holder that knows the
+value's representation drops it by that flavor — a ref-cell target holds a
+cell, a capture box holds the local's own type; a holder that does not (a REF
+cell, a capture of a box some other frame made) either drops it as a cell or
+frees the box shell alone, which leaks the value rather than misroute it.
+
+`retain` / `unref` check the magic first. A REF cell or a by-ref capture can
+still carry an address that is not a box — a static, a caller's by-ref slot —
+and those have no count to touch.
+
+A store through a box the frame owns releases the value it held, as a module
+cell does, but only while the slot still points at that box: `$a = &$b`
+rebinds the slot, and the storage it points at then has another owner.
 
 ## The three seams
 
@@ -165,24 +194,26 @@ A property holding a reference is shared by the clone, so the clone's writes are
 the original's writes. Copying the CELL — which is what the clone path does now,
 after the crash fix — copies the value, not the binding.
 
-⇒ The property has to hold `cell(REF, box)` rather than merely be cell-typed:
-the same box indirection the LOCAL promotion already has. Four edits, all
-located:
+⇒ The property holds `cell(REF, box)` rather than merely being cell-typed — the
+same box indirection the local promotion has. Shipped (br `refbox`, 2026-09-23)
+as an IN-PLACE promotion, the way an array element is promoted, not as the
+allocation-time box first planned here: the object may be allocated in another
+module (a prelude or library class) that never saw the `&`, so only the `&`
+itself can be relied on to make the box.
 
-1. `ClassDef` grows `propertyIsRefCell`, set by `InferScans::scanRefCellProps`
-   (appended LAST — a field added mid-struct shifts every later offset).
-2. `EmitLlvmObjects::emitObjAllocInit` gives a marked slot a fresh box holding
-   `CELL_NULL` and stores `cell(REF, box)` into the slot.
-3. `emitRefCell` over a marked property LOADS the slot — it already IS the
-   reference — instead of taking its address.
-4. `emitStoreProperty` writes THROUGH, the same branch-free two-select shape
-   `emitElemWriteThrough` uses.
+1. `EmitLlvm::$refCellPropNames` — the property NAMES a `[&$o->p]` in this
+   module points at. By name, not class: the receiver may be typed as a parent
+   or a child of the class the `&` named, and the slot's tag is the real answer.
+2. `EmitLlvmLocals::byRefAddrOf` answers such a slot's BOX
+   (`__mir_ref_promote_slot`: the slot's cell moves into a box, the slot keeps
+   `cell(REF, box)` and the object's count on it). Every `&` to the property —
+   storable reference, `$r = &$o->p`, by-ref argument — lands on the box.
+3. `emitStoreProperty` writes THROUGH a promoted slot (`__mir_ref_slot_store`,
+   dropping the value the box held).
+4. `emitPropertyAccess` dereferences, as an element read does.
+5. `clone` retains the slot's count (`__mir_ref_slot_retain`) — the clone
+   SHARES the reference, php's semantics — and the class drop gives it back
+   (`__mir_ref_slot_drop`, on every cell slot of every module: the drop body
+   coalesces by name, so it cannot depend on which module saw the `&`).
 
-The READ side needs nothing: a marked slot decodes by tag, and
-`@__manticore_deref` already sits inside `@__manticore_tag` and
-`unboxCellToType`.
-
-⚠ Until this lands, `clone` of an object with a ref-taken property DIVERGES
-silently. It no longer SIGSEGVs, which is strictly better, but it is a wrong
-answer — and no AOT case asserts the current behaviour, deliberately, because a
-test that pins a divergence makes it permanent.
+`tests/aot/cases/refbox_sources.php` asserts the clone and the outliving read.

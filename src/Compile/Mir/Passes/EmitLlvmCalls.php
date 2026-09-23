@@ -347,6 +347,11 @@ trait EmitLlvmCalls
                 } else {
                     $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->locals->slots[$name] . " to i64\n";
                 }
+                // The env is one more holder of the box (a no-op on an address
+                // that is not one); its `__mc_drop` gives the count back.
+                $cbp = $this->ssa->allocReg();
+                $out .= '  ' . $cbp . ' = inttoptr i64 ' . $capV . " to ptr\n";
+                $out .= '  call void @__mir_ref_retain(ptr ' . $cbp . ")\n";
             } else {
                 $out .= $this->emitNode($c);
                 $out .= $this->coerceToI64();
@@ -442,7 +447,15 @@ trait EmitLlvmCalls
         foreach ($cl->captures as $c) {
             $ref = ($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL;
             $i = $i + 1;
-            if ($ref) { $flavors[] = ''; continue; }
+            // A by-ref capture holds a count on the reference box. The value
+            // inside is dropped by the flavor its maker knows — only a box this
+            // frame made has one here; any other (a by-ref param's, an outer
+            // capture's) is freed without it, a leak rather than a misroute.
+            if ($ref) {
+                $bn = $c->name;
+                $flavors[] = 'ref:' . (isset($this->locals->ownedBoxes[$bn]) ? $this->ownedBoxFlavor($bn) : '');
+                continue;
+            }
             $t = $c->type;
             $k = $t->kind;
             if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { $flavors[] = 'cell'; continue; }
@@ -510,6 +523,30 @@ trait EmitLlvmCalls
                   . (string)$i . "\n";
             $v = $this->ssa->allocReg();
             $out .= '  ' . $v . ' = load i64, ptr ' . $gep . "\n";
+            if (\str_starts_with($flavor, 'ref:')) {
+                $bp = $this->ssa->allocReg();
+                $out .= '  ' . $bp . ' = inttoptr i64 ' . $v . " to ptr\n";
+                if ($retain) {
+                    $out .= '  call void @__mir_ref_retain(ptr ' . $bp . ")\n";
+                    continue;
+                }
+                $inner = \substr($flavor, 4);
+                $last = $this->ssa->allocReg();
+                $out .= '  ' . $last . ' = call i1 @__mir_ref_unref(ptr ' . $bp . ")\n";
+                $dropL = 'refcap_drop' . (string)$i;
+                $doneL = 'refcap_done' . (string)$i;
+                $out .= '  br i1 ' . $last . ', label %' . $dropL . ', label %' . $doneL . "\n";
+                $out .= $dropL . ":\n";
+                if ($inner !== '') {
+                    $iv = $this->ssa->allocReg();
+                    $out .= '  ' . $iv . ' = load i64, ptr ' . $bp . "\n";
+                    $out .= $this->rcReleaseReg($iv, $inner);
+                }
+                $out .= '  call void @__mir_ref_free(ptr ' . $bp . ")\n";
+                $out .= '  br label %' . $doneL . "\n";
+                $out .= $doneL . ":\n";
+                continue;
+            }
             if ($flavor === 'cell') {
                 $out .= '  call void @' . ($retain ? '__mir_cell_retain' : '__mir_cell_drop')
                       . '(i64 ' . $v . ")\n";
@@ -2443,7 +2480,9 @@ trait EmitLlvmCalls
         } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
             return '';
         }
-        $flavor = $this->discardReleaseFlavor($s->type);
+        // A returned closure is +1 like an object ({@see InsertMemoryOps::isOwnedObj});
+        // discardReleaseFlavor leaves closures out for its container callers.
+        $flavor = $this->isClosureValueType($s->type) ? 'closure' : $this->discardReleaseFlavor($s->type);
         if ($flavor === '') { return ''; }
         return $this->rcReleaseReg($this->lastValue, $flavor);
     }
