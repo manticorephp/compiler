@@ -1424,11 +1424,23 @@ trait InferNodes
         $this->localTypes = $saved;
         $this->inferNode($node->else);
         $elseLocals = $this->localTypes;
-        $this->planMergeShadow($node, $thenLocals, $elseLocals);
         $elseDiv = $this->blockDiverges($node->else);
+        /** @var array<string,Type> $agreed */
+        $agreed = [];
+        if (!$thenDiv && !$elseDiv) {
+            $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else);
+        }
+        $this->planMergeShadow($node, $thenLocals, $elseLocals);
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
         elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }
-        else                            { $this->localTypes = $this->mergeLocals($thenLocals, $elseLocals); }
+        else {
+            $this->localTypes = $this->mergeLocals($thenLocals, $elseLocals);
+            // The slot leaves both arms raw now, whatever another merge of the
+            // same name decided: `cellMergeLocals` is per NAME, not per merge.
+            foreach ($agreed as $name => $t) {
+                $this->localTypes[$name] = $t;
+            }
+        }
         return Type::void();
     }
 

@@ -1835,6 +1835,106 @@ final class InferTypes implements Pass
         }
     }
 
+    /**
+     * The inverse of {@see planMergeShadow}, for a promotion a LATER run no
+     * longer needs. The plant is sticky (`declaredType`), but the arm types it
+     * was planted on are not: `$t = tables(); $lh = $t[0];` beside `$lh =
+     * build();` disagreed while `tables()` still returned the `null|array`
+     * static as a cell, and agreed (`vec[vec[int]]` both) once NarrowReturns
+     * and Monomorphize made them concrete. The box-backs then stayed, so every
+     * pass through the merge rebuilt the array as a fresh cell array (a copy of
+     * every element) and boxed it into a slot whose raw predecessor nothing
+     * released — the whole Huffman table, per inflate call. Two arms of one kind
+     * agree on the raw word, which is exactly the case planMergeShadow skips, so
+     * take the pair back out and let the slot stay raw.
+     *
+     * Only a PAIR — one box-back of the name ending each arm — is taken back:
+     * that is the shape planMergeShadow plants and nothing else does. The caller
+     * leaves a diverging if/else alone, and types each name answered here with
+     * the union of its two arms: the slot leaves both raw.
+     *
+     * @return array<string,Type> name => its merged type past the if/else
+     */
+    private function unplantAgreedBoxBacks(Block $then, Block $else): array
+    {
+        $out = [];
+        $names = self::trailingBoxBackNames($then);
+        foreach ($names as $name) {
+            $ti = self::boxBackIndex($then, $name);
+            $ei = self::boxBackIndex($else, $name);
+            if ($ti < 0 || $ei < 0) { continue; }
+            $tT = self::boxBackValueType($then->stmts[$ti]);
+            $oT = self::boxBackValueType($else->stmts[$ei]);
+            if ($tT->kind !== $oT->kind) { continue; }
+            $then->stmts = self::withoutStmt($then->stmts, $ti);
+            $else->stmts = self::withoutStmt($else->stmts, $ei);
+            $out[$name] = $this->unionTypes($tT, $oT);
+        }
+        return $out;
+    }
+
+    /** The names of the box-back run ending `$block` ({@see boxBackEnd}).
+     *  @return string[] */
+    private static function trailingBoxBackNames(Block $block): array
+    {
+        $out = [];
+        for ($i = self::boxBackEnd($block) - 1; $i >= 0; $i--) {
+            $name = self::selfStoreName($block->stmts[$i]);
+            if ($name === '') { break; }
+            $out[] = $name;
+        }
+        return $out;
+    }
+
+    /** Index of `$name`'s box-back in the run ending `$block`, -1 when none —
+     *  the lookup {@see endsWithBoxBack} answers yes/no for. A box-back is a
+     *  store typed cell over a non-cell read of its own name. */
+    private static function boxBackIndex(Block $block, string $name): int
+    {
+        for ($i = self::boxBackEnd($block) - 1; $i >= 0; $i--) {
+            $st = $block->stmts[$i];
+            $sn = self::selfStoreName($st);
+            if ($sn === '') { return -1; }
+            if ($sn !== $name) { continue; }
+            if ($st->type->kind !== Type::KIND_CELL) { return -1; }
+            $vt = self::boxBackValueType($st);
+            if ($vt->kind === Type::KIND_CELL || $vt->kind === Type::KIND_UNKNOWN) { return -1; }
+            return $i;
+        }
+        return -1;
+    }
+
+    /** The name of a `$x = $x` self-store, '' for any other statement. */
+    private static function selfStoreName(Node $st): string
+    {
+        if (!($st instanceof StoreLocal)) { return ''; }
+        $v = $st->value;
+        if (!($v instanceof LoadLocal)) { return ''; }
+        return $v->name === $st->name ? $st->name : '';
+    }
+
+    /** The concrete type a box-back boxes — narrowed first: a field of a
+     *  subclass read through a base `Node` faults natively. */
+    private static function boxBackValueType(Node $st): Type
+    {
+        if (!($st instanceof StoreLocal)) { return Type::unknown(); }
+        $v = $st->value;
+        if (!($v instanceof LoadLocal)) { return Type::unknown(); }
+        return $v->type;
+    }
+
+    /** @param Node[] $stmts
+     *  @return Node[] */
+    private static function withoutStmt(array $stmts, int $at): array
+    {
+        $out = [];
+        $n = \count($stmts);
+        for ($i = 0; $i < $n; $i++) {
+            if ($i !== $at) { $out[] = $stmts[$i]; }
+        }
+        return $out;
+    }
+
     /** `$name = box($name)`: a StoreLocal typed cell whose value is the concrete
      *  read of $name — the (store cell + value concrete) combo EmitLlvm boxes.
      *  `$slot` overrides the destination type: a float slot coerces the same way
