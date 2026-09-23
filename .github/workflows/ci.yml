@@ -14,10 +14,35 @@
 # its own — so a stale cache costs one slow run, never a wrong answer.
 name: ci
 
+# The line is not "documentation versus everything else", it is "cannot change
+# what the build produces". `tools/` is NOT here: gate.sh and install_smoke.sh
+# live there and they ARE the test. Neither is `install.sh`, nor any Dockerfile,
+# nor the workflows themselves. A push that touches a listed path AND a real one
+# still runs — paths-ignore only skips when every changed file matches.
+#
+# The cost of getting this wrong is asymmetric: a skipped run over a doc edit
+# saves ~20 runner-minutes, while a skipped run over a build script means the
+# next person to touch code inherits someone else's untested change.
+# The list is spelled out twice on purpose: GitHub Actions does not expand YAML
+# anchors, and a workflow the runner cannot parse is a repository with no CI.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.claude/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.claude/**'
   workflow_dispatch:
 
 env:
