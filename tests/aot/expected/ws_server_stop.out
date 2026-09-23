@@ -1,0 +1,10 @@
+1:a 1:b
+8:1001:server shutdown
+EOF
+8:1001:server shutdown
+EOF
+serve returned
+1:c
+8:1001:server shutdown
+EOF
+serve returned after cancel

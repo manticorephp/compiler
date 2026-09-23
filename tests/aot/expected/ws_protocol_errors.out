@@ -1,0 +1,12 @@
+unmasked 8:1002: EOF
+opcode3 8:1002: EOF
+lone-cont 8:1002: EOF
+text-in-text 8:1002: EOF
+bad-utf8 8:1007: EOF
+message-too-big 8:1009: EOF
+frame-too-big 8:1009: EOF
+close-1-byte 8:1002: EOF
+close-1005 8:1002: EOF
+close-999 8:1002: EOF
+close-bad-reason 8:1007: EOF
+ping-rsv1 8:1002: EOF

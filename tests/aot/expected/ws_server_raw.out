@@ -1,0 +1,14 @@
+HTTP/1.1 101 Switching Protocols
+accept ok
+1:echo:early
+1:echo:hi
+0 -> 2:
+125 -> 2:125B
+126 -> 2:126B
+65535 -> 2:65535B
+65536 -> 2:65536B
+1048576 -> 2:1048576B
+10:png
+8:1000:
+EOF
+server saw close 1000 bye

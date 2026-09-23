@@ -1201,6 +1201,8 @@ trait LowerPrelude
             'STREAM_SERVER_BIND' => 4, 'STREAM_SERVER_LISTEN' => 8,
             'STREAM_CLIENT_CONNECT' => 4, 'STREAM_CLIENT_ASYNC_CONNECT' => 2,
             'STREAM_CLIENT_PERSISTENT' => 1,
+            // stream_socket_shutdown $how — php's values, equal to SHUT_RD/WR/RDWR on both hosts.
+            'STREAM_SHUT_RD' => 0, 'STREAM_SHUT_WR' => 1, 'STREAM_SHUT_RDWR' => 2,
             // stream_socket_enable_crypto methods — php's values; bit 0 selects
             // CLIENT (1) vs SERVER (0). TLS_* is the version-agnostic combination.
             'STREAM_CRYPTO_METHOD_ANY_CLIENT' => 127, 'STREAM_CRYPTO_METHOD_ANY_SERVER' => 126,
