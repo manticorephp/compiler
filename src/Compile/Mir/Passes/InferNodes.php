@@ -220,7 +220,6 @@ trait InferNodes
             if ($all || isset($rl['recordLocals'])) { $this->recordLocals = []; }
             if ($all || isset($rl['floatLocals'])) { $this->floatLocals = []; }
             if ($all || isset($rl['cellMergeLocals'])) { $this->cellMergeLocals = []; }
-            if ($all || isset($rl['keyUsedLocals'])) { $this->keyUsedLocals = []; }
             if ($all || isset($rl['arithUsedLocals'])) { $this->arithUsedLocals = []; }
             if ($all || isset($rl['cellCaptureLocals'])) { $this->cellCaptureLocals = []; }
             if ($all || isset($rl['localBuiltArrays'])) { $this->localBuiltArrays = []; }
@@ -471,16 +470,11 @@ trait InferNodes
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
-        $this->keyUsedLocals = [];
         $this->arithUsedLocals = [];
         $this->refPinnedLocals = [];
-        // ONE walk for the four late facts — key-used, arith-used, by-ref-pinned,
-        // and which arrays this function builds from `[]` (the soundness gate on
-        // the elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
-        //
-        // It has to stay a SECOND walk, after the float seeding above: that
-        // seeding writes `localTypes`, and `subscriptBaseIsString` reads it to
-        // decide whether a subscript index is a key or a byte offset.
+        // ONE walk for the late facts — arith-used, by-ref-pinned, and which
+        // arrays this function builds from `[]` (the soundness gate on the
+        // elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
         $this->scanLocalFacts($fn->body);
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
@@ -1410,7 +1404,7 @@ trait InferNodes
         // for the fall-through, and a later cell op reads it raw → crash.
         $thenDiv = $this->blockDiverges($node->then);
         if ($node->else === null) {
-            $this->planMergeShadow($node, $thenLocals, $saved, false);
+            $this->planMergeShadow($node, $thenLocals, $saved);
             if ($thenDiv) {
                 // `if (NEG) return/throw;` — the fall-through is the NEGATION of
                 // the guard, so narrow as if the un-negated form held below
@@ -1425,7 +1419,7 @@ trait InferNodes
         $this->localTypes = $saved;
         $this->inferNode($node->else);
         $elseLocals = $this->localTypes;
-        $this->planMergeShadow($node, $thenLocals, $elseLocals, true);
+        $this->planMergeShadow($node, $thenLocals, $elseLocals);
         $elseDiv = $this->blockDiverges($node->else);
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
         elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }

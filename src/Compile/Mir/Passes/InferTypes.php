@@ -368,12 +368,6 @@ final class InferTypes implements Pass
      *  slot is a self-describing cell AFTER the if; reads before/inside the
      *  branches stay concrete (forward inference), reads after read the cell. */
     private array $cellMergeLocals = [];
-    /** @var array<string,bool> locals used as an array INDEX/KEY anywhere in the
-     *  fn — ineligible for the if/else cell-merge shadow. NOT for the LOOP
-     *  promotion ({@see loopMerge}): a key the back-edge re-kinds has no raw repr
-     *  both sides agree on, and skipping it left the header load typed by the
-     *  pre-loop store while the body stored a cell (`$c = $prev[$c] ?? -1`). */
-    private array $keyUsedLocals = [];
     /** @var array<string,bool> locals used as an ARITHMETIC operand (`+ - * / %`,
      *  unary `-`) anywhere in the fn. Discriminates the one ambiguous loop shape:
      *  a `null`-seeded accumulator whose body types UNKNOWN. `unknown + int` is
@@ -1777,11 +1771,14 @@ final class InferTypes implements Pass
      * after the if; mark the name so mergeLocals types post-merge reads cell.
      * Reads BEFORE/INSIDE the branches stay concrete (the box is last), and a
      * later concrete re-assignment re-narrows the slot — so the original name
-     * keeps its reps everywhere else (no whole-name promotion, no array/key
-     * reuse hazard). Scalar-only: a string used raw stays raw on its own paths.
+     * keeps its reps everywhere else (no whole-name promotion). An array KEY is
+     * no exception: a cell key dispatches by tag on read, store, isset and
+     * unset, and exempting one left the merge typed `unknown` — a raw int on
+     * one path and a boxed word on the other, fed raw into `add i64`.
+     * Scalar-only: a string used raw stays raw on its own paths.
      * @param array<string,Type> $thenLocals @param array<string,Type> $otherLocals
      */
-    private function planMergeShadow(If_ $node, array $thenLocals, array $otherLocals, bool $hasElse): void
+    private function planMergeShadow(If_ $node, array $thenLocals, array $otherLocals): void
     {
         foreach ($thenLocals as $name => $tT) {
             if (!isset($otherLocals[$name])) { continue; }
@@ -1801,9 +1798,7 @@ final class InferTypes implements Pass
             $oOk = $oOk || ($oT->isArray() && $tT->kind === Type::KIND_CELL);
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
-            if (isset($this->cellMergeLocals[$name])) { continue; }
-            if (isset($this->keyUsedLocals[$name])
-                || isset($this->refPinnedLocals[$name])) { continue; }
+            if (isset($this->refPinnedLocals[$name])) { continue; }
             // A static / global-backed slot has ONE repr, its decl's (the join of
             // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
             // planted here would retype the local cell against a string slot.
@@ -1814,13 +1809,11 @@ final class InferTypes implements Pass
             // after `$f = 1.5` is still float on the next run, so without this
             // every run appended one more `$f = $f` per arm (four per arm at
             // the fixpoint, each an own_alias + drop + store in the binary).
-            if (!self::endsWithBoxBack($node->then, $name)) {
-                $node->then->stmts[] = $this->boxBackStore($name, $tT);
-            }
-            if (!$hasElse) {
+            $this->plantBoxBack($node->then, $name, $tT);
+            if ($node->else === null) {
                 $node->else = new Block([$this->boxBackStore($name, $oT)], Type::void());
-            } elseif (!self::endsWithBoxBack($node->else, $name)) {
-                $node->else->stmts[] = $this->boxBackStore($name, $oT);
+            } else {
+                $this->plantBoxBack($node->else, $name, $oT);
             }
         }
     }
@@ -1844,13 +1837,40 @@ final class InferTypes implements Pass
         return $st;
     }
 
+    /** Append the box-back to an arm — BEFORE a trailing `break`/`continue`:
+     *  behind the jump it is dead code, and the slot leaves the arm raw to the
+     *  loop header or exit that reads it as the cell this merge promised. */
+    private function plantBoxBack(Block $arm, string $name, Type $concrete): void
+    {
+        $end = self::boxBackEnd($arm);
+        if (self::endsWithBoxBack($arm, $name, $end)) { return; }
+        $st = $this->boxBackStore($name, $concrete);
+        $c = \count($arm->stmts);
+        if ($end === $c) {
+            $arm->stmts[] = $st;
+            return;
+        }
+        $jump = $arm->stmts[$c - 1];
+        $arm->stmts[$c - 1] = $st;
+        $arm->stmts[] = $jump;
+    }
+
+    /** Where an arm's box-backs end: before its trailing break/continue. */
+    private static function boxBackEnd(Block $arm): int
+    {
+        $c = \count($arm->stmts);
+        if ($c === 0) { return 0; }
+        $k = $arm->stmts[$c - 1]->kind;
+        return $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE ? $c - 1 : $c;
+    }
+
     /** Does `$block` already end in the `$name = $name` box-back store
      *  {@see boxBackStore} appends? Any trailing run of box-backs for other
      *  names is looked through, so the order they were appended in does not
-     *  matter. */
-    private static function endsWithBoxBack(Block $block, string $name): bool
+     *  matter. `$end` = one past the last box-back slot ({@see boxBackEnd}). */
+    private static function endsWithBoxBack(Block $block, string $name, int $end): bool
     {
-        for ($i = \count($block->stmts) - 1; $i >= 0; $i--) {
+        for ($i = $end - 1; $i >= 0; $i--) {
             $st = $block->stmts[$i];
             if (!($st instanceof StoreLocal) || !($st->value instanceof LoadLocal)
                 || $st->value->name !== $st->name) {
@@ -1905,13 +1925,6 @@ final class InferTypes implements Pass
         return $k === Type::KIND_OBJ || $k === Type::KIND_UNION
             || $k === Type::KIND_UNKNOWN || $k === Type::KIND_ARRAY
             || $k === Type::KIND_STRING || $k === Type::KIND_CLOSURE;
-    }
-
-    private function markKeyLocal(Node $idx): void
-    {
-        if ($idx->kind === Node::KIND_LOAD_LOCAL) {
-            $this->keyUsedLocals[$idx->name] = true;
-        }
     }
 
     private function markArithLocal(?Node $operand): void
