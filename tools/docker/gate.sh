@@ -82,25 +82,49 @@ rm -rf bin/manticore bin/.manticore.prev bin/manticore.fast lib/ tests/aot/tmp 2
 # implementation on both (glibc prints its version, musl prints its own banner
 # on stderr and exits 1, which is why the output is merged and the exit ignored).
 cache_id() {
+    local libc
+    if command -v ldd > /dev/null 2>&1; then
+        libc="$( (ldd --version 2>&1 || true) | head -1 )"
+    else
+        # macOS has no ldd, and this script runs bare on a macOS runner too.
+        libc="$(uname -s)"
+    fi
     printf 'arch=%s\nlibc=%s\nclang=%s\nphp=%s\n' \
-        "$(uname -m)" \
-        "$( (ldd --version 2>&1 || true) | head -1 )" \
+        "$(uname -m)" "$libc" \
         "$(clang --version | head -1)" \
         "$(php -r 'echo PHP_VERSION;')"
 }
 
+# The id is a NOTE, not a gate. It used to be one, and that cost a cold seed for
+# every difference it could name — including the run that ADDED `libc` to it,
+# where a cached compiler was thrown away because the id it was stored with
+# predated the field. The same reasoning that applies to a published seed applies
+# here: what matters is not whether this compiler was built by the same toolchain
+# but whether it RUNS here and can build the tree. It only ever acts as a builder
+# — bin/build compiles the new compiler from source with the CURRENT clang — so a
+# toolchain difference does not reach the output, while a libc it cannot run
+# under shows up immediately as a failed `version`.
 restore_compiler_cache() {
     [ "$MC_COLD" != "1" ] || return 1
     [ -n "$MC_COMPILER_CACHE" ] || return 1
     [ -x "$MC_COMPILER_CACHE/bin/manticore" ] || return 1
     [ -f "$MC_COMPILER_CACHE/lib/manticore_stdlib.o" ] || return 1
-    [ -f "$MC_COMPILER_CACHE/id" ] || return 1
-    cache_id | cmp -s - "$MC_COMPILER_CACHE/id" || return 1
+
+    if [ -f "$MC_COMPILER_CACHE/id" ] && ! cache_id | cmp -s - "$MC_COMPILER_CACHE/id"; then
+        echo "cache: stored under a different toolchain — trying it anyway"
+        diff <(cache_id) "$MC_COMPILER_CACHE/id" | sed 's/^/       /' | head -8
+    fi
 
     mkdir -p bin lib
     cp "$MC_COMPILER_CACHE/bin/manticore" bin/manticore
     cp -a "$MC_COMPILER_CACHE/lib/." lib/
-    bin/manticore version >/dev/null 2>&1
+    chmod u+x bin/manticore
+    if ! bin/manticore version >/dev/null 2>&1; then
+        echo "cache: holds a compiler that does not run here — ignoring it"
+        rm -rf bin/manticore lib
+        return 1
+    fi
+    return 0
 }
 
 # The PUBLISHED compiler, as a second warm source between the cache and Zend.
