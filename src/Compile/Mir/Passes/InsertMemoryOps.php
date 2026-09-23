@@ -689,6 +689,9 @@ final class InsertMemoryOps implements Pass
         // the struct / enum / closure / Ffi\Ptr guards above are this caller's
         // own rc-eligibility test, which AliasOwn deliberately does not make.
         if (AliasOwn::coOwns($value)) { return true; }
+        // A string / cell bitwise op mints its result like a concat, on the
+        // heap whatever the allocKind says ({@see \Compile\Mir\BitOp::mintsFresh}).
+        if (\Compile\Mir\BitOp::mintsFresh($value)) { return true; }
         // `(string)$int` / `(string)$float` ALLOCATE — __mir_int_to_str and
         // __mir_float_to_str hand back a fresh rc=1 buffer exactly as a string
         // builtin does. This was the one producer nobody owned: the local took

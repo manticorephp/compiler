@@ -67,6 +67,9 @@ public bool $needsClosureRc = false;
     public bool $needsRefCells = false;
     public bool $needsSubstr = false;
     public bool $needsStrRepeat = false;
+    /** Byte-wise `&` `|` `^` `~` over strings / over cells. */
+    public bool $needsStrBitop = false;
+    public bool $needsCellBitop = false;
     public bool $needsStrtolower = false;
     public bool $needsStrtoupper = false;
     public bool $needsIpow = false;

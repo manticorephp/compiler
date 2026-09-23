@@ -1233,17 +1233,53 @@ trait InferNodes
         return $node->type;
     }
 
+    /**
+     * `&` `|` `^` over two STRINGS are byte-wise and answer a string (Zend's
+     * `bitwise_*_function`); every other pair is the integer op. A pair that
+     * only MAY hold two strings — a cell on either side — decides at run time
+     * and answers a cell. Shifts are integer-only.
+     */
     private function inferBitOp(\Compile\Mir\BitOp $node): Type
     {
-        $this->inferNode($node->left);
-        $this->inferNode($node->right);
-        return $node->type; // integer bitwise → int
+        $l = $this->inferNode($node->left);
+        $r = $this->inferNode($node->right);
+        $op = $node->op;
+        if ($op === 'and' || $op === 'or' || $op === 'xor') {
+            if ($l->kind === Type::KIND_STRING && $r->kind === Type::KIND_STRING) {
+                $node->type = Type::string_();
+            } elseif ($this->bitMayBeString($l) && $this->bitMayBeString($r)) {
+                $node->type = Type::cell();
+            } else {
+                $node->type = Type::int_();
+            }
+        }
+        return $node->type;
     }
 
     private function inferBitNot(\Compile\Mir\BitNot_ $node): Type
     {
-        $this->inferNode($node->operand);
-        return $node->type; // → int
+        $t = $this->inferNode($node->operand);
+        if ($t->kind === Type::KIND_STRING) {
+            $node->type = Type::string_();
+        } elseif ($this->bitMayBeString($t)) {
+            $node->type = Type::cell();
+        } else {
+            $node->type = Type::int_();
+        }
+        return $node->type;
+    }
+
+    /** A string, or a non-numeric cell whose arms (if named) include a string.
+     *  An ERASED (`unknown`) word stays on the integer path, as it does for `+`. */
+    private function bitMayBeString(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_STRING) { return true; }
+        if ($t->kind !== Type::KIND_CELL || $t->numeric) { return false; }
+        if (\count($t->atoms) === 0) { return true; }
+        foreach ($t->atoms as $a) {
+            if ($a->kind === Type::KIND_STRING) { return true; }
+        }
+        return false;
     }
 
     private function inferConcat(Concat $node): Type

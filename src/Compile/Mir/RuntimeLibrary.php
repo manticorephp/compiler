@@ -1507,6 +1507,133 @@ final class RuntimeLibrary
         return $out;
     }
 
+    /**
+     * Runtime: byte-wise `&` `|` `^` `~` over strings, Zend's `bitwise_*_function`.
+     * `%op` 0 and, 1 or, 2 xor, 3 not (`%b` ignored). `&` and `^` answer
+     * min(len) bytes; `|` answers max(len), the longer operand's tail copied
+     * unchanged; `~` flips every byte of `%a`. Eight bytes a step over the
+     * common prefix, then the tail bytes. Returns a fresh +1 string.
+     */
+    public function strBitop(): string
+    {
+        $out  = "\ndefine ptr @__mir_str_bitop(ptr %a, ptr %b, i64 %op) {\n";
+        $out .= "entry:\n";
+        $out .= "  %isnot = icmp eq i64 %op, 3\n";
+        $out .= "  %isor = icmp eq i64 %op, 1\n";
+        $out .= "  %isxor = icmp eq i64 %op, 2\n";
+        $out .= "  %la = call i64 @__mir_strlen(ptr %a)\n";
+        $out .= "  %b2 = select i1 %isnot, ptr %a, ptr %b\n";
+        $out .= "  %lb = call i64 @__mir_strlen(ptr %b2)\n";
+        $out .= "  %alt = icmp ult i64 %la, %lb\n";
+        $out .= "  %mn = select i1 %alt, i64 %la, i64 %lb\n";
+        $out .= "  %mx = select i1 %alt, i64 %lb, i64 %la\n";
+        $out .= "  %n = select i1 %isor, i64 %mx, i64 %mn\n";
+        $out .= "  %sz = add i64 %n, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
+        $out .= "  %nw = lshr i64 %mn, 3\n";
+        $out .= "  br label %wloop\n";
+        $out .= "wloop:\n";
+        $out .= "  %w = phi i64 [0, %entry], [%w2, %wbody]\n";
+        $out .= "  %wdone = icmp uge i64 %w, %nw\n";
+        $out .= "  br i1 %wdone, label %bpre, label %wbody\n";
+        $out .= "wbody:\n";
+        $out .= "  %wo = shl i64 %w, 3\n";
+        $out .= "  %wpa = getelementptr inbounds i8, ptr %a, i64 %wo\n";
+        $out .= "  %wpb = getelementptr inbounds i8, ptr %b2, i64 %wo\n";
+        $out .= "  %wx = load i64, ptr %wpa, align 1\n";
+        $out .= "  %wy = load i64, ptr %wpb, align 1\n";
+        $out .= $this->bitopSelect('w', 'i64');
+        $out .= "  %wpd = getelementptr inbounds i8, ptr %buf, i64 %wo\n";
+        $out .= "  store i64 %wr, ptr %wpd, align 1\n";
+        $out .= "  %w2 = add i64 %w, 1\n";
+        $out .= "  br label %wloop\n";
+        $out .= "bpre:\n";
+        $out .= "  %i0 = shl i64 %nw, 3\n";
+        $out .= "  br label %bloop\n";
+        $out .= "bloop:\n";
+        $out .= "  %i = phi i64 [%i0, %bpre], [%i2, %bbody]\n";
+        $out .= "  %bdone = icmp uge i64 %i, %mn\n";
+        $out .= "  br i1 %bdone, label %tail, label %bbody\n";
+        $out .= "bbody:\n";
+        $out .= "  %bpa = getelementptr inbounds i8, ptr %a, i64 %i\n";
+        $out .= "  %bpb = getelementptr inbounds i8, ptr %b2, i64 %i\n";
+        $out .= "  %bx = load i8, ptr %bpa\n";
+        $out .= "  %by = load i8, ptr %bpb\n";
+        $out .= $this->bitopSelect('b', 'i8');
+        $out .= "  %bpd = getelementptr inbounds i8, ptr %buf, i64 %i\n";
+        $out .= "  store i8 %br, ptr %bpd\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  br label %bloop\n";
+        $out .= "tail:\n";
+        $out .= "  %rest = sub i64 %n, %mn\n";
+        $out .= "  %long = select i1 %alt, ptr %b2, ptr %a\n";
+        $out .= "  %tsrc = getelementptr inbounds i8, ptr %long, i64 %mn\n";
+        $out .= "  %tdst = getelementptr inbounds i8, ptr %buf, i64 %mn\n";
+        $out .= "  call ptr @memcpy(ptr %tdst, ptr %tsrc, i64 %rest)\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %n\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /** `%<p>x op %<p>y` → `%<p>r`, `op` chosen by the enclosing `%isor/%isxor/%isnot`. */
+    private function bitopSelect(string $p, string $ty): string
+    {
+        $x = ' %' . $p . 'x';
+        $y = ', %' . $p . 'y';
+        $v = ' %' . $p;
+        $out  = '  %' . $p . 'and = and ' . $ty . $x . $y . "\n";
+        $out .= '  %' . $p . 'or = or ' . $ty . $x . $y . "\n";
+        $out .= '  %' . $p . 'xor = xor ' . $ty . $x . $y . "\n";
+        $out .= '  %' . $p . 'not = xor ' . $ty . $x . ", -1\n";
+        $out .= '  %' . $p . 's1 = select i1 %isor, ' . $ty . $v . 'or, ' . $ty . $v . "and\n";
+        $out .= '  %' . $p . 's2 = select i1 %isxor, ' . $ty . $v . 'xor, ' . $ty . $v . "s1\n";
+        $out .= '  %' . $p . 'r = select i1 %isnot, ' . $ty . $v . 'not, ' . $ty . $v . "s2\n";
+        return $out;
+    }
+
+    /**
+     * Runtime: `&` `|` `^` `~` over CELLS (`%op` as {@see strBitop}; for `~` the
+     * caller passes `%a` twice). Two string cells → the byte-wise string, boxed;
+     * anything else → the integer op on the tagged-to-int values, boxed. Either
+     * way a fresh +1 cell.
+     */
+    public function cellBitop(): string
+    {
+        $mask = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $out  = "\ndefine i64 @__mir_cell_bitop(i64 %a, i64 %b, i64 %op) {\n";
+        $out .= "entry:\n";
+        $out .= "  %isnot = icmp eq i64 %op, 3\n";
+        $out .= "  %isor = icmp eq i64 %op, 1\n";
+        $out .= "  %isxor = icmp eq i64 %op, 2\n";
+        $out .= "  %a0 = call i64 @__manticore_deref(i64 %a)\n";
+        $out .= "  %b0 = call i64 @__manticore_deref(i64 %b)\n";
+        $out .= "  %ta = call i64 @__manticore_tag(i64 %a0)\n";
+        $out .= "  %tb = call i64 @__manticore_tag(i64 %b0)\n";
+        // Tag 4 is the string cell ({@see __manticore_box_ptr}).
+        $out .= "  %sa = icmp eq i64 %ta, 4\n";
+        $out .= "  %sb = icmp eq i64 %tb, 4\n";
+        $out .= "  %ss = and i1 %sa, %sb\n";
+        $out .= "  br i1 %ss, label %str, label %int\n";
+        $out .= "str:\n";
+        $out .= "  %ma = and i64 %a0, " . $mask . "\n";
+        $out .= "  %mb = and i64 %b0, " . $mask . "\n";
+        $out .= "  %pa = inttoptr i64 %ma to ptr\n";
+        $out .= "  %pb = inttoptr i64 %mb to ptr\n";
+        $out .= "  %rs = call ptr @__mir_str_bitop(ptr %pa, ptr %pb, i64 %op)\n";
+        $out .= "  %cs = call i64 @__manticore_box_ptr(ptr %rs)\n";
+        $out .= "  ret i64 %cs\n";
+        $out .= "int:\n";
+        $out .= "  %ix = call i64 @__manticore_tagged_to_int(i64 %a0)\n";
+        $out .= "  %iy = call i64 @__manticore_tagged_to_int(i64 %b0)\n";
+        $out .= $this->bitopSelect('i', 'i64');
+        $out .= "  %ci = call i64 @__manticore_box_int(i64 %ir)\n";
+        $out .= "  ret i64 %ci\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     /** Runtime: backslash-escape `'` `"` `\` (NUL handling is moot for a
      * strlen-scanned C string). Worst case doubles the length. */
     public function addslashes(): string
