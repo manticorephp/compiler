@@ -8,17 +8,16 @@ namespace Compile;
  * in the codegen flows through one of these constants.
  *
  * Versioning: bump {@see MemoryAbi::VERSION} whenever any layout
- * here changes. The version constant is exposed via `manticore
- * version` so out-of-tree consumers can detect mismatches.
+ * here changes. Nothing surfaces it yet (docs/design/memory-abi.md §9),
+ * and a bump needs no cold seed: the previous generation's `bin/build`
+ * carries it (AGENTS.md, bootstrap corollaries).
  *
  * Design notes: `docs/design/memory-abi.md`.
  */
 final class MemoryAbi
 {
     /**
-     * Bump on any layout / encoding change. Drives the
-     * `bin/manticore version` output so vendored artefacts can
-     * detect mismatches against a fresh build.
+     * Bump on any layout / encoding change.
      */
     public const VERSION = 9;
 
