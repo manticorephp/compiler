@@ -939,9 +939,6 @@ trait EmitLlvmArrays
         if ($keyIsCell || $keyIsString) {
             $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
         }
-        // …and it keeps no BASE either: `mkarr($i)[0]` built an array for one
-        // element. {@see EmitLlvm::baseTempRelease}.
-        $out .= $this->baseTempRelease($aa->array, $arrPtr, true, $self->type);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // A CELL result read out of a buffer that may be raw-hinted is decoded
@@ -1085,6 +1082,11 @@ trait EmitLlvmArrays
             $reg = $u;
             $this->lastValue = $reg;
         }
+        // …and a read keeps no BASE either: `mkarr($i)[0]` built an array for
+        // one element. {@see EmitLlvm::baseTempRelease}. AFTER every decode above
+        // — a shape or cellified read asks the buffer's own hint, so releasing
+        // first read the header of a freed buffer (`Async\stats()['x']`).
+        $out .= $this->baseTempRelease($aa->array, $arrPtr, true, $self->type);
         if ($self->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
