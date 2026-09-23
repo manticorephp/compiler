@@ -2050,6 +2050,11 @@ trait EmitLlvmExpr
     private function emitBitOp(\Compile\Mir\BitOp $n): string
     {
         $b = $n;
+        $tk = $b->type->kind;
+        if ($tk === Type::KIND_STRING || $tk === Type::KIND_CELL) {
+            $code = $b->op === 'and' ? 0 : ($b->op === 'or' ? 1 : 2);
+            return $this->emitStrBitop($b->left, $b->right, $code, $tk === Type::KIND_CELL);
+        }
         // Unbox a CELL operand (and numeric-coerce a string) BEFORE the bitwise
         // op, exactly as {@see emitNeg} does. coerceToI64 alone hands the raw
         // NaN-boxed carrier to `or`/`shl`, which is a silent wrong answer: an
@@ -2077,6 +2082,10 @@ trait EmitLlvmExpr
 
     private function emitBitNot(\Compile\Mir\BitNot_ $n): string
     {
+        $tk = $n->type->kind;
+        if ($tk === Type::KIND_STRING || $tk === Type::KIND_CELL) {
+            return $this->emitStrBitop($n->operand, null, 3, $tk === Type::KIND_CELL);
+        }
         $out = $this->emitNode($n->operand);
         $out .= $this->coerceArithOperand($n->operand, false);
         $val = $this->lastValue;
@@ -2085,6 +2094,90 @@ trait EmitLlvmExpr
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * Byte-wise `&` `|` `^` `~` ({@see \Compile\Mir\BitOp::mintsFresh}). A
+     * STRING result: both operands are strings, `__mir_str_bitop` mints the
+     * answer. A CELL result: an operand may hold a non-string at run time, so
+     * both go in as cells and `__mir_cell_bitop` picks the string or the integer
+     * op by tag. Either way the result is a fresh +1 and a fresh operand is
+     * released here, as {@see emitConcatPair} does. `$right` null = `~`.
+     */
+    private function emitStrBitop(Node $left, ?Node $right, int $op, bool $cell): string
+    {
+        $this->rt->needsStrBitop = true;
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        if (!$cell) {
+            $out = $this->emitNode($left);
+            $out .= $this->coerceToStr($left);
+            $l = $this->lastValue;
+            $r = $l;
+            if ($right !== null) {
+                $out .= $this->emitNode($right);
+                $out .= $this->coerceToStr($right);
+                $r = $this->lastValue;
+            }
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call ptr @__mir_str_bitop(ptr ' . $l . ', ptr ' . $r
+                  . ', i64 ' . (string)$op . ")\n";
+            $out .= $this->concatTempRelease($left, $l);
+            if ($right !== null) { $out .= $this->concatTempRelease($right, $r); }
+            $this->lastValue = $reg;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $this->rt->needsCellBitop = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsTaggedToInt = true;
+        $this->rt->needsStrtol = true;
+        $out = $this->emitBitCellOperand($left);
+        $l = $this->lastValue;
+        $lp = $this->bitCellPtr;
+        $r = $l;
+        $rp = '';
+        if ($right !== null) {
+            $out .= $this->emitBitCellOperand($right);
+            $r = $this->lastValue;
+            $rp = $this->bitCellPtr;
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_cell_bitop(i64 ' . $l . ', i64 ' . $r
+              . ', i64 ' . (string)$op . ")\n";
+        $out .= $this->bitCellOperandRelease($left, $l, $lp);
+        if ($right !== null) { $out .= $this->bitCellOperandRelease($right, $r, $rp); }
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($reg);
+        return $out;
+    }
+
+    /** The string ptr a STRING operand was boxed from, for its release; '' for a cell. */
+    private string $bitCellPtr = '';
+
+    /** Emit a `&|^~` operand as a cell: a cell as-is, a string boxed as a view. */
+    private function emitBitCellOperand(Node $op): string
+    {
+        $this->bitCellPtr = '';
+        $out = $this->emitNode($op);
+        if ($op->type->kind === Type::KIND_STRING) {
+            $out .= $this->coerceToPtr();
+            $this->bitCellPtr = $this->lastValue;
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__manticore_box_ptr(ptr ' . $this->bitCellPtr . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $out . $this->coerceToI64();
+    }
+
+    /** Release a fresh `&|^~` cell-path operand: the string temp, or the cell temp. */
+    private function bitCellOperandRelease(Node $op, string $cell, string $ptr): string
+    {
+        if ($ptr !== '') { return $this->concatTempRelease($op, $ptr); }
+        if ($this->isFreshCellTemp($op)) { return $this->rcReleaseReg($cell, 'cell'); }
+        return '';
     }
 
     /** Box the current lastValue into a tagged cell chosen by its LLVM repr

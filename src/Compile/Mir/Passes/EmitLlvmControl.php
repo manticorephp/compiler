@@ -704,7 +704,7 @@ trait EmitLlvmControl
             || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
             || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_INVOKE) {
+            || $k === Node::KIND_INVOKE || \Compile\Mir\BitOp::mintsFresh($arm)) {
             return true;
         }
         if ($k === Node::KIND_CALL) {

@@ -3731,7 +3731,7 @@ final class EmitLlvm implements EmitVisitor
         }
         return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_INVOKE;
+            || $k === Node::KIND_INVOKE || \Compile\Mir\BitOp::mintsFresh($node);
     }
 
     /**
@@ -3777,7 +3777,7 @@ final class EmitLlvm implements EmitVisitor
         $k = $index->kind;
         if ($k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
             && $k !== Node::KIND_STATIC_CALL && $k !== Node::KIND_INVOKE
-            && $k !== Node::KIND_CONCAT) { return ''; }
+            && $k !== Node::KIND_CONCAT && !\Compile\Mir\BitOp::mintsFresh($index)) { return ''; }
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
         return '  call void @__mir_cell_drop(i64 ' . $key . ")\n";
@@ -3839,6 +3839,7 @@ final class EmitLlvm implements EmitVisitor
         if (\Compile\Mir\CondOwn::isConditional($n)) { return $this->condOwnsResult($n); }
         $k = $n->kind;
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        if (\Compile\Mir\BitOp::mintsFresh($n)) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }
         $fn = $n->function;
         // `json_encode` boxes a buffer `__mir_json_enc` just allocated;
@@ -4524,7 +4525,8 @@ final class EmitLlvm implements EmitVisitor
             if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
                 || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
                 || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
-                || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT) {
+                || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT
+                || \Compile\Mir\BitOp::mintsFresh($src)) {
                 return '';
             }
             $sv = $this->lastValue;

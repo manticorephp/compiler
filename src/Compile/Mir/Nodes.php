@@ -327,7 +327,10 @@ final class Not_ extends Node
     }
 }
 
-/** Integer bitwise binary op: `op` ∈ shl | shr | and | or | xor. */
+/**
+ * Bitwise binary op: `op` ∈ shl | shr | and | or | xor. Integer, except `and`
+ * `or` `xor` over two strings, which are byte-wise and answer a string.
+ */
 final class BitOp extends Node
 {
     public function __construct(
@@ -349,9 +352,24 @@ final class BitOp extends Node
     {
         return [$this->left, $this->right];
     }
+
+    /**
+     * A string-typed `&` `|` `^` `~` MINTS its result (`__mir_str_bitop`), and a
+     * cell-typed one boxes either that fresh string or an int: a +1 its consumer
+     * owns, exactly like a Concat. The ONE predicate every half of the ownership
+     * contract asks — the pass that schedules the release and the emitter that
+     * skips the co-owner retain must agree, or the value is freed twice or never.
+     */
+    public static function mintsFresh(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k !== Node::KIND_BITOP && $k !== Node::KIND_BITNOT) { return false; }
+        $tk = $n->type->kind;
+        return $tk === Type::KIND_STRING || $tk === Type::KIND_CELL;
+    }
 }
 
-/** `~$x` — integer bitwise complement. */
+/** `~$x` — integer bitwise complement; byte-wise over a string. */
 final class BitNot_ extends Node
 {
     public function __construct(public Node $operand, Type $type)

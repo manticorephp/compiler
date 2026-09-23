@@ -921,7 +921,8 @@ trait EmitLlvmMemory
         // read) and owned locals need a retain to add a co-owner.
         $k = $valueNode->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
+            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+            || \Compile\Mir\BitOp::mintsFresh($valueNode)) {
             return '';
         }
         // A normalized conditional already carries a +1 from whichever arm ran

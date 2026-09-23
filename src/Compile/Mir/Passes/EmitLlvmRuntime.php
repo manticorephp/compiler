@@ -3450,6 +3450,8 @@ trait EmitLlvmRuntime
             $out .= "  ret ptr %buf\n";
             $out .= "}\n";
         }
+        if ($this->rt->needsStrBitop) { $out .= $this->lib->strBitop(); }
+        if ($this->rt->needsCellBitop) { $out .= $this->lib->cellBitop(); }
         if ($this->rt->needsIpow) { $out .= $this->lib->ipow(); }
         if ($this->rt->needsStrtolower) { $out .= $this->lib->caseConv('__mir_strtolower', 65, 90, 32); }
         if ($this->rt->needsStrtoupper) { $out .= $this->lib->caseConv('__mir_strtoupper', 97, 122, -32); }

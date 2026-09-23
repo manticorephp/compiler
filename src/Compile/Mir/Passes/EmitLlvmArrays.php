@@ -1774,7 +1774,7 @@ trait EmitLlvmArrays
             $ik = $se->index->kind;
             if ($ik === Node::KIND_CALL || $ik === Node::KIND_METHOD_CALL
                 || $ik === Node::KIND_STATIC_CALL || $ik === Node::KIND_INVOKE
-                || $ik === Node::KIND_CONCAT) {
+                || $ik === Node::KIND_CONCAT || \Compile\Mir\BitOp::mintsFresh($se->index)) {
                 $this->rt->needsRc = true;
                 $this->rt->needsStrRc = true;
                 $out .= '  call void @__mir_cell_drop(i64 ' . $key . ")\n";

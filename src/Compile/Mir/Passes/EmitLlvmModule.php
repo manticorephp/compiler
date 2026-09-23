@@ -2488,7 +2488,8 @@ trait EmitLlvmModule
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
             || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
             || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
-            || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST) {
+            || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST
+            || \Compile\Mir\BitOp::mintsFresh($v)) {
             return false; // owned producer (+1 already) or immortal
         }
         // `(object)$v` is owned on every path ({@see EmitLlvmExpr::emitCast}).
@@ -2524,7 +2525,8 @@ trait EmitLlvmModule
         if ($tk === Type::KIND_OBJ && $this->objTypeIsStruct($t)) { return false; }
         $k = $v->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
+            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+            || \Compile\Mir\BitOp::mintsFresh($v)) {
             return false; // owned producer — already +1
         }
         // A normalized conditional is +1 from whichever arm ran; a second retain

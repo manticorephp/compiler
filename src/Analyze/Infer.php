@@ -103,9 +103,9 @@ final class Infer
     {
         $op = $e->op;
         if ($op === '.') { return new Ty(Ty::KIND_STRING); }
-        if ($op === '%' || $op === '&' || $op === '|' || $op === '^'
-            || $op === '<<' || $op === '>>') {
-            return new Ty(Ty::KIND_INT);
+        if ($op === '%' || $op === '<<' || $op === '>>') { return new Ty(Ty::KIND_INT); }
+        if ($op === '&' || $op === '|' || $op === '^') {
+            return $this->bitTy($this->of($e->left), $this->of($e->right));
         }
         if ($op === '==' || $op === '===' || $op === '!=' || $op === '!=='
             || $op === '<' || $op === '>' || $op === '<=' || $op === '>='
@@ -127,10 +127,20 @@ final class Infer
         return Ty::unknown();
     }
 
+    /** `&` `|` `^` `~`: byte-wise over two strings, else integer; unknown while either may be a string. */
+    private function bitTy(Ty $l, Ty $r): Ty
+    {
+        if ($l->kind === Ty::KIND_STRING && $r->kind === Ty::KIND_STRING) { return new Ty(Ty::KIND_STRING); }
+        $lNum = $l->kind === Ty::KIND_INT || $l->kind === Ty::KIND_FLOAT || $l->kind === Ty::KIND_BOOL;
+        $rNum = $r->kind === Ty::KIND_INT || $r->kind === Ty::KIND_FLOAT || $r->kind === Ty::KIND_BOOL;
+        if ($lNum || $rNum) { return new Ty(Ty::KIND_INT); }
+        return Ty::unknown();
+    }
+
     private function unaryTy(UnaryOp $e): Ty
     {
         if ($e->op === '!') { return new Ty(Ty::KIND_BOOL); }
-        if ($e->op === '~') { return new Ty(Ty::KIND_INT); }
+        if ($e->op === '~') { $o = $this->of($e->operand); return $this->bitTy($o, $o); }
         if ($e->op === '-' || $e->op === '+') {
             $o = $this->of($e->operand);
             if ($o->kind === Ty::KIND_INT || $o->kind === Ty::KIND_FLOAT) { return $o; }
