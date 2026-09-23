@@ -781,6 +781,18 @@ trait EmitLlvmObjects
             } else {
                 $out .= '  store i64 ' . $v . ', ptr ' . $dg . "\n";
                 $out .= $this->rcRetainRawByType($v, $pt);
+                // The two slots the class drop gives back that the raw retain
+                // above does not take: a promoted cell slot's count on its REF
+                // box (the clone SHARES the reference, as php does) and a
+                // closure slot's env.
+                if ($pt !== null && $pt->kind === Type::KIND_CELL) {
+                    $out .= '  call void @__mir_ref_slot_retain(i64 ' . $v . ")\n";
+                } elseif ($pt !== null && $this->isClosureValueType($pt)) {
+                    $this->rt->needsClosureRc = true;
+                    $cp = $this->ssa->allocReg();
+                    $out .= '  ' . $cp . ' = inttoptr i64 ' . $v . " to ptr\n";
+                    $out .= '  call void @__mir_closure_retain(ptr ' . $cp . ")\n";
+                }
             }
         }
         // Dynamic-property bag: shallow-share the same assoc pointer.
@@ -963,6 +975,17 @@ trait EmitLlvmObjects
             $masked = $this->ssa->allocReg();
             $out .= '  ' . $masked . ' = and i64 ' . $loaded . ", 281474976710655\n";
             $this->lastValue = $masked;
+        }
+        // A slot a `&` promoted holds `cell(REF, box)`; the property IS the
+        // referenced value, as an element holding one is ({@see
+        // EmitLlvmArrays}'s element read, the same deref).
+        if ($n->type->kind === Type::KIND_CELL && isset($this->refCellPropNames[$pa->property])) {
+            $this->rt->needsTagged = true;
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
+            $this->propagateCellProvenance($this->lastValue, $d);
+            $this->lastValue = $d;
+            $this->lastValueType = 'i64';
         }
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
@@ -2395,6 +2418,25 @@ trait EmitLlvmObjects
         // AFTER the retain above and BEFORE the store, which is what makes
         // `$this->a = $this->a` safe: the new value is at +1 before the old one
         // drops, so a self-assignment goes 1 -> 2 -> 1 instead of freeing itself.
+        // A slot a `&` promoted ({@see EmitLlvm::$refCellPropNames}) holds
+        // `cell(REF, box)`: the store goes THROUGH to the box, which owns what
+        // it holds — so a cell that arrived borrowed takes its count first, as
+        // the rc kinds above already did.
+        $thruDone = '';
+        if (isset($this->refCellPropNames[$n->property]) && $propType !== null
+            && $propType->kind === Type::KIND_CELL) {
+            if ($n->value->type->kind === Type::KIND_CELL) {
+                $this->lastValue = $val;
+                $this->lastValueType = 'i64';
+                $out .= $this->retainCellPayload($n->value);
+            }
+            $wt = $this->ssa->allocReg();
+            $out .= '  ' . $wt . ' = call i1 @__mir_ref_slot_store(ptr ' . $gep . ', i64 ' . $val . ")\n";
+            $plainL = $this->ssa->allocLabel('refprop.plain');
+            $thruDone = $this->ssa->allocLabel('refprop.done');
+            $out .= '  br i1 ' . $wt . ', label %' . $thruDone . ', label %' . $plainL . "\n";
+            $out .= $plainL . ":\n";
+        }
         $drop = $this->propSlotDropsOldValue($n, $propType);
         if ($drop !== '') {
             $old = $this->ssa->allocReg();
@@ -2407,6 +2449,9 @@ trait EmitLlvmObjects
             $n->property,
             $val,
         );
+        if ($thruDone !== '') {
+            $out .= '  br label %' . $thruDone . "\n" . $thruDone . ":\n";
+        }
         $this->noteCellSinkStored($val);
         $this->lastValue = $res;
         $this->lastValueType = $resTy;
@@ -2586,9 +2631,18 @@ trait EmitLlvmObjects
             $this->locals->aliasLocals[$n->target] = $this->locals->slots[$n->target] ?? '';
             $this->locals->slots[$n->target] = $this->locals->slots[$n->source];
         }
+        // The name leaves the box it was bound to, and php drops that binding
+        // NOW: whatever else still holds the box keeps it, and if nothing does
+        // its value dies here. The frame's count goes with it; the alloca is
+        // cleared so no later exit gives it back twice.
+        $out = '';
+        if ($n->target !== $n->source && isset($this->locals->ownedBoxes[$n->target])) {
+            $out .= $this->ownedBoxReleaseIr($n->target, false);
+            $out .= '  store ptr null, ptr ' . $this->locals->ownedBoxes[$n->target] . "\n";
+        }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
-        return '';
+        return $out;
     }
 
     /** `$r = &fn(...)` — store the by-ref return address into $r's slot. */
@@ -2683,6 +2737,8 @@ trait EmitLlvmObjects
         if ($src->kind === Node::KIND_ARRAY_ACCESS) {
             $addrIr = $this->elemRefBoxAddr($src);
         } else {
+            // A PROPERTY source answers its promoted BOX here, not its slot
+            // ({@see EmitLlvmLocals::byRefAddrOf}).
             $addrIr = $this->byRefAddrOf($src);
         }
         if ($addrIr === null) {
@@ -4781,6 +4837,20 @@ trait EmitLlvmObjects
                     } else {
                         unset($this->locals->slots[$name]);
                     }
+                    // A boxed name gave its box back when it was rebound
+                    // ({@see emitRefAlias}), so the slot it returns to points at
+                    // nothing it owns: after unset it is a new variable, in a
+                    // new box.
+                    if ($prev !== '' && isset($this->locals->ownedBoxes[$name])) {
+                        $init = $this->ownedBoxFlavor($name) === 'cell'
+                            ? (string)\Compile\MemoryAbi::CELL_NULL : '0';
+                        $nb = $this->ssa->allocReg();
+                        $out .= '  ' . $nb . ' = call ptr @__mir_ref_new(i64 ' . $init . ")\n";
+                        $nbi = $this->ssa->allocReg();
+                        $out .= '  ' . $nbi . ' = ptrtoint ptr ' . $nb . " to i64\n";
+                        $out .= '  store i64 ' . $nbi . ', ptr ' . $prev . "\n";
+                        $out .= '  store ptr ' . $nb . ', ptr ' . $this->locals->ownedBoxes[$name] . "\n";
+                    }
                     continue;
                 }
                 // `unset($v)` where a STORABLE reference was taken to `$v`
@@ -4843,6 +4913,11 @@ trait EmitLlvmObjects
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($cell, $flavor); }
                     $out .= '  store i64 0, ptr ' . $cell . "\n";
                 } elseif (isset($this->locals->slots[$name])) {
+                    // An owned closure local drops its env like an object does.
+                    if ($flavor === '' && isset($this->frame->rcObjLocals[$name])
+                        && $this->isClosureValueType($t->type)) {
+                        $flavor = 'closure';
+                    }
                     if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
                         $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
                     }
@@ -7356,7 +7431,8 @@ trait EmitLlvmObjects
             if ($dbg) { \error_log('  ' . ($bufFlavor === '' ? 'no: elem-borrowed, not an array' : 'YES ' . $bufFlavor . ' (buffer only)')); }
             return $bufFlavor;
         }
-        $flavor = $this->discardReleaseFlavor($t);
+        // The slot owns the closure env it holds ({@see EmitLlvm::classDropFlavorFor}).
+        $flavor = $this->isClosureValueType($t) ? 'closure' : $this->discardReleaseFlavor($t);
         // The slot owns one element ref per element (every store hands it a
         // reference that carries them — {@see EmitLlvm::$propOwnElem}), so it
         // gives one back on EVERY release. Without this the drop runs at rc > 0

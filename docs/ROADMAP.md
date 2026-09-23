@@ -56,7 +56,7 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
 ### Recently completed (2026-09)
 
-- ✅ reference boxes are counted — the box and its value die with the last holder (ABI v9, br `refbox`, 2026-09-23).
+- ✅ reference boxes are counted — the box and its value die with the last holder (ABI v9); a closure env is counted like an object wherever it is held; a by-value parameter and a property are promoted into a box by `&`; `$a = &$b` makes both names one reference (br `refbox`, 2026-09-23).
 - ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
   errors (br `shapes`, 2026-09-21).
 
@@ -132,10 +132,10 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | Integer overflow wraps | `PHP_INT_MAX + 1` | `PHP_INT_MIN` (two's complement) | promote to float, as php does. Needs value-range analysis to know which statically-int locals can overflow |
 | `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
-| A closure that outlives its frame is never released | `function mk() { $o = new D; return fn() => $o; }` then drop the result, or a `static $keep = function () use ($o) {…}` overwritten | the env and every capture leak; `__destruct` never runs | release at scope exit and on `unset` — `discardReleaseFlavor` answers `''` for a closure |
-| A closure returning a property string hands a BORROW | `function () use ($o) { $o->n .= '!'; return $o->n; }` called twice | the caller frees `$o->n`: prints freed bytes (`zzz!`) | retain on return, as a named function's return does |
-| A REF cell onto a property or a by-ref param dangles | `[&$o->p]`, `function f(&$x) { return [&$x]; }` | the cell points INTO the object / the caller's frame, no box | promote the source into a box — `docs/design/reference-cells.md`, "The property box" |
-| `$a = &$b` on a local a ref cell was taken from | `$o = new D; $r = [&$o]; $o = &$x; $o = new D;` | SIGSEGV | rebind the owned box's name without losing the frame's count |
+| A `mixed` / cell property never releases what it holds | `class P { public mixed $o; }` … `$p->o = new D; unset($p);` | the payload leaks; `__destruct` never runs | the class drop gives the slot's count back — the stores already retain rc payloads, but a cell arriving borrowed is stored uncounted, so both halves move together |
+| Overwriting a property that is read as a borrow anywhere keeps the old value | `$x->h = $a; $x->h = $b;` in a class with `get(): Closure { return $this->h; }` | the old value leaks (object and closure slots alike) | the borrow veto in `propSlotDropsOldValue` is module-wide by name; a read that retains (the return path now does) should not count as a borrow |
+| A reference to a by-REF parameter dangles | `function f(&$x) { return [&$x]; }` | the REF cell points at the caller's slot | the caller has to box the argument it passes |
+| Scope-exit destructor order | two objects dying at one `}` where one sits in a reference box | box holders are released after the frame's other locals | php destroys the frame's variables in declaration order |
 
 An ARRAY in a `$GLOBALS['x']` slot still reads back as a float: the slot is a cell channel
 and arrays ride RAW in one by design (boxing would rebuild the array and change its identity),

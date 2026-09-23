@@ -2480,7 +2480,9 @@ trait EmitLlvmCalls
         } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
             return '';
         }
-        $flavor = $this->discardReleaseFlavor($s->type);
+        // A returned closure is +1 like an object ({@see InsertMemoryOps::isOwnedObj});
+        // discardReleaseFlavor leaves closures out for its container callers.
+        $flavor = $this->isClosureValueType($s->type) ? 'closure' : $this->discardReleaseFlavor($s->type);
         if ($flavor === '') { return ''; }
         return $this->rcReleaseReg($this->lastValue, $flavor);
     }

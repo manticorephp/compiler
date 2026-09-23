@@ -998,8 +998,8 @@ trait EmitLlvmLocals
      * A reference box OWNS its value, as a module cell does
      * ({@see globalCellOwnIr}): a store through it drops what it held. Only a
      * box this frame made ({@see LocalSlots::$ownedBoxes}) — its flavor is
-     * known — and only while the slot still points at it, since `$name = &$x`
-     * may have rebound the name to storage with another owner. `$addrI64` is
+     * known — and only while the slot points at a box that flavor describes:
+     * `$name = &$x` may have rebound the name to other storage. `$addrI64` is
      * the slot's word, the address the store is about to write through. The
      * value being stored already carries its own count, taken by the same
      * conventions as a plain local's store.
@@ -1009,18 +1009,32 @@ trait EmitLlvmLocals
         if (!isset($this->locals->ownedBoxes[$name])) { return ''; }
         $flavor = $this->ownedBoxFlavor($name);
         if ($flavor === '') { return ''; }
-        $own = $this->ssa->allocReg();
-        $out = '  ' . $own . ' = load ptr, ptr ' . $this->locals->ownedBoxes[$name] . "\n";
-        $ownI = $this->ssa->allocReg();
-        $out .= '  ' . $ownI . ' = ptrtoint ptr ' . $own . " to i64\n";
+        $bp = $this->ssa->allocReg();
+        $out = '  ' . $bp . ' = inttoptr i64 ' . $addrI64 . " to ptr\n";
         $same = $this->ssa->allocReg();
-        $out .= '  ' . $same . ' = icmp eq i64 ' . $addrI64 . ', ' . $ownI . "\n";
+        if ($flavor === 'cell') {
+            // A ref-cell name may have been aliased onto another ref-cell name's
+            // box (`$o = &$x`, both boxed — LocalSlots::closeRefCellsOverAliases);
+            // every box holds a cell it owns, so any box will do. The magic tells
+            // a box from the storage a by-ref param points at.
+            $hp = $this->ssa->allocReg();
+            $out .= '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $bp . ", i64 -8\n";
+            $hv = $this->ssa->allocReg();
+            $out .= '  ' . $hv . ' = load i64, ptr ' . $hp . "\n";
+            $out .= '  ' . $same . ' = icmp eq i64 ' . $hv . ', '
+                  . (string)\Compile\MemoryAbi::REF_TAG_MAGIC . "\n";
+        } else {
+            // A capture box holds the local's own representation; only its own.
+            $own = $this->ssa->allocReg();
+            $out .= '  ' . $own . ' = load ptr, ptr ' . $this->locals->ownedBoxes[$name] . "\n";
+            $out .= '  ' . $same . ' = icmp eq ptr ' . $bp . ', ' . $own . "\n";
+        }
         $relL = $this->ssa->allocLabel('refbox.ow');
         $contL = $this->ssa->allocLabel('refbox.ow.cont');
         $out .= '  br i1 ' . $same . ', label %' . $relL . ', label %' . $contL . "\n";
         $out .= $relL . ":\n";
         $old = $this->ssa->allocReg();
-        $out .= '  ' . $old . ' = load i64, ptr ' . $own . "\n";
+        $out .= '  ' . $old . ' = load i64, ptr ' . $bp . "\n";
         $out .= $this->rcReleaseReg($old, $flavor);
         $out .= '  br label %' . $contL . "\n";
         $out .= $contL . ":\n";
@@ -1293,6 +1307,16 @@ trait EmitLlvmLocals
             $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
                   . ', i64 ' . (string)$off . "\n";
+            // A property some `[&$o->p]` in this module stores a reference to is
+            // PROMOTED here, for every `&` to it alike (a storable reference, a
+            // `$r = &$o->p`, a by-ref argument): the slot's address dies with the
+            // object and a write through it would overwrite the REF cell the
+            // promotion left there. The box is the storage from then on.
+            if (isset($this->refCellPropNames[$pa->property]) && $pa->type->kind === Type::KIND_CELL) {
+                $bx = $this->ssa->allocReg();
+                $out .= '  ' . $bx . ' = call ptr @__mir_ref_promote_slot(ptr ' . $g . ")\n";
+                $g = $bx;
+            }
             $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
             $this->lastValue = $addr;

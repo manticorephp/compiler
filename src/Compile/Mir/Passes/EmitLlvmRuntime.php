@@ -845,7 +845,9 @@ trait EmitLlvmRuntime
             $out .= $this->dropRuntime();
             if ($this->rt->needsCc) { $out .= $this->ccRuntime(); }
         }
-        if ($this->rt->needsClosureRc) { $out .= $this->closureRcRuntime(); }
+        // Unconditional: `__mir_cell_retain` / `__mir_cell_drop` reach a
+        // closure env boxed as an object, and they are emitted in every module.
+        $out .= $this->closureRcRuntime();
         if ($this->rt->needsStrRc) {
             // String rc: the rc word (ptr-8) holds the count; cap@-16
             // precedes it. Immortal strings (literals, arena) carry -1 and
@@ -1924,6 +1926,20 @@ trait EmitLlvmRuntime
                 // Release obj / string / vec / assoc props (flavor picks the
                 // right element-walking helper). Flags were pre-set in
                 // scanDropFlags so the helper is already emitted.
+                // A CELL slot a `&` promoted holds `cell(REF, box)` and the
+                // object's count on the box. Every cell slot of every module
+                // asks, because this body coalesces by name across modules and
+                // must not depend on which one saw the `&`; on anything but a
+                // REF cell the helper does nothing.
+                if ($pt->kind === Type::KIND_CELL && $cls->propertyWidth($pn) === 8) {
+                    $s = (string)$i;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %o, i64 '
+                        . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__mir_ref_slot_drop(i64 %v' . $s . ")\n";
+                    $i = $i + 1;
+                    continue;
+                }
                 $flavor = $this->classDropFlavor($cls, $pn, $pt);
                 if ($flavor === '') { continue; }
                 $rel = $this->dropHelperFor($flavor);

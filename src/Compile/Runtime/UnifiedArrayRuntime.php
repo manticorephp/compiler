@@ -1850,7 +1850,13 @@ final class UnifiedArrayRuntime
         $doobj->brIf($doobj->icmp('ugt', $op, Value::int(Type::i64(), 65535)), $chkmagic, $done);
         $opp = $chkmagic->inttoptr($op, Type::ptr());
         $hdr = $chkmagic->load(Type::i64(), $chkmagic->gep(Type::i8(), $opp, [Value::int(Type::i64(), -8)]));
-        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $done);
+        // Not an rc object: a closure env boxed as an object (its header is
+        // CLOSURE_TAG_MAGIC@-32, rc@-8), which `__mir_closure_release` checks
+        // for itself — anything else is left alone there.
+        $doclo = $fn->block('doclo');
+        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $doclo);
+        $doclo->call('__mir_closure_release', Type::void(), [$opp]);
+        $doclo->br($done);
         $dorel->call('__mir_rc_release', Type::void(), [$opp]);
         $dorel->br($done);
 
@@ -2171,7 +2177,10 @@ final class UnifiedArrayRuntime
         $doobj->brIf($doobj->icmp('ugt', $op, Value::int(Type::i64(), 65535)), $chkmagic, $done);
         $opp = $chkmagic->inttoptr($op, Type::ptr());
         $hdr = $chkmagic->load(Type::i64(), $chkmagic->gep(Type::i8(), $opp, [Value::int(Type::i64(), -8)]));
-        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $doret, $done);
+        $doclo = $fn->block('doclo');
+        $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $doret, $doclo);
+        $doclo->call('__mir_closure_retain', Type::void(), [$opp]);
+        $doclo->br($done);
         $doret->call('__mir_rc_retain', Type::void(), [$opp]);
         $doret->br($done);
 
@@ -3422,6 +3431,80 @@ final class UnifiedArrayRuntime
         $last->call('__mir_ref_free', Type::void(), [$p]);
         $last->br($done);
         $done->retVoid();
+
+        $this->emitRefSlotHelpers();
+    }
+
+    /**
+     * A PROPERTY slot a `&` points at (`[&$o->p]`) is promoted IN PLACE, the
+     * way an element is ({@see emitRefBoxVariant}): the slot's cell moves into
+     * a box and the slot holds `cell(REF, box)`, the object owning one count.
+     *   `__mir_ref_promote_slot(slot) -> data`  the box, made on the first `&`;
+     *   `__mir_ref_slot_store(slot, v) -> i1`   write through a promoted slot
+     *                                           (dropping what the box held);
+     *                                           false = not promoted, store it;
+     *   `__mir_ref_slot_retain(v)` / `__mir_ref_slot_drop(v)`  the slot's count,
+     *                                           for `clone` and the class drop —
+     *                                           no-ops on anything but a REF cell,
+     *                                           so a cell slot never promoted
+     *                                           keeps exactly today's lifetime.
+     */
+    /** i1: `$w` is a REF cell (tagged, nibble {@see MemoryAbi::CELL_TAG_REF}). */
+    private function isRefCellIr(Block $b, Value $w): Value
+    {
+        $i64 = Type::i64();
+        $nib = $b->and_($b->lshr($w, Value::int($i64, 48)), Value::int($i64, 15));
+        return $b->and_($b->icmp('ugt', $w, Value::int($i64, -4503599627370496)),
+                        $b->icmp('eq', $nib, Value::int($i64, MemoryAbi::CELL_TAG_REF)));
+    }
+
+    private function emitRefSlotHelpers(): void
+    {
+        $i64 = Type::i64();
+        $mask = Value::int($i64, MemoryAbi::CELL_PAYLOAD_MASK);
+
+        $fn = $this->module->func('__mir_ref_promote_slot', Type::ptr());
+        $slot = $fn->param(Type::ptr(), 'slot');
+        $e = $fn->block('entry');
+        $have = $fn->block('have');
+        $make = $fn->block('make');
+        $w = $e->load($i64, $slot);
+        $e->brIf($this->isRefCellIr($e, $w), $have, $make);
+        $have->ret($have->inttoptr($have->and_($w, $mask), Type::ptr()));
+        // The box co-owns what it takes over: the slot's own count on a cell
+        // property is not one anything gives back.
+        $make->call('__mir_cell_retain', Type::void(), [$w]);
+        $box = $make->call('__mir_ref_new', Type::ptr(), [$w]);
+        $bi = $make->ptrtoint($box, $i64);
+        $make->store($make->or_($make->and_($bi, $mask), Value::int($i64, MemoryAbi::CELL_REF_TAG_BITS)), $slot);
+        $make->ret($box);
+
+        $fn = $this->module->func('__mir_ref_slot_store', Type::i1());
+        $slot = $fn->param(Type::ptr(), 'slot');
+        $v = $fn->param($i64, 'v');
+        $e = $fn->block('entry');
+        $thru = $fn->block('thru');
+        $no = $fn->block('no');
+        $w = $e->load($i64, $slot);
+        $e->brIf($this->isRefCellIr($e, $w), $thru, $no);
+        $bp = $thru->inttoptr($thru->and_($w, $mask), Type::ptr());
+        $old = $thru->load($i64, $bp);
+        $thru->store($v, $bp);
+        $thru->call('__mir_cell_drop', Type::void(), [$old]);
+        $thru->ret(Value::int(Type::i1(), 1));
+        $no->ret(Value::int(Type::i1(), 0));
+
+        foreach (['__mir_ref_slot_retain' => '__mir_ref_retain', '__mir_ref_slot_drop' => '__mir_ref_release'] as $sym => $op) {
+            $fn = $this->module->func($sym, Type::void());
+            $v = $fn->param($i64, 'v');
+            $e = $fn->block('entry');
+            $doit = $fn->block('doit');
+            $done = $fn->block('done');
+            $e->brIf($this->isRefCellIr($e, $v), $doit, $done);
+            $doit->call($op, Type::void(), [$doit->inttoptr($doit->and_($v, $mask), Type::ptr())]);
+            $doit->br($done);
+            $done->retVoid();
+        }
     }
 
     private function emitRefBoxVariant(string $sym, string $issetFn, string $setFn, string $slotFn, bool $strKey): void

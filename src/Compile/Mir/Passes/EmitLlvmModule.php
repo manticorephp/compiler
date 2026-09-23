@@ -1092,7 +1092,8 @@ trait EmitLlvmModule
             }
         }
         $paramNames = [];
-        foreach ($fn->params as $p) { $paramNames[$p->name] = true; }
+        $paramTypes = [];
+        foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypes[$p->name] = $p->type; }
         $bodySink->write($this->preallocateLocals($fn->body));
         $bodySink->write($this->initRcObjSlots($fn->body, $paramNames));
         // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
@@ -1132,7 +1133,7 @@ trait EmitLlvmModule
             $bodySink->write('  store i64 1, ptr ' . $fl . "\n");
             $this->locals->unsetBound[$uname] = $fl;
         }
-        $bodySink->write($this->emitRefCellBoxes($fn->body, $paramNames));
+        $bodySink->write($this->emitRefCellBoxes($fn->body, $paramNames, $paramTypes));
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
         // header). The caller pushed a bare method-name placeholder because a
@@ -1356,13 +1357,53 @@ trait EmitLlvmModule
         return $this->discardReleaseFlavor($t);
     }
 
-    private function emitRefCellBoxes(Node $body, array $paramNames): string
+    /**
+     * A BY-VALUE parameter a storable reference points at (`function f($x) {
+     * return [&$x]; }`) is boxed like any other local: the reference outlives
+     * the frame, and pointing it at the stack slot handed the caller a cell
+     * over dead memory. The incoming value moves into the box as a cell the
+     * box co-owns (the argument itself stays the caller's). A by-ref parameter
+     * already holds the caller's address and is left alone.
+     */
+    private function boxRefCellParamIr(string $name, ?Type $pt): string
+    {
+        if ($pt === null || isset($this->locals->refLocals[$name])) { return ''; }
+        if (!isset($this->locals->slots[$name])) { return ''; }
+        $v = $this->ssa->allocReg();
+        $out = '  ' . $v . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
+        if ($pt->kind !== Type::KIND_CELL) {
+            if ($pt->kind === Type::KIND_FLOAT) {
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = bitcast i64 ' . $v . " to double\n";
+                $this->lastValue = $d;
+                $this->lastValueType = 'double';
+            }
+            $out .= $this->boxToCellShallow($pt);
+            $out .= $this->coerceToI64();
+        }
+        $cv = $this->lastValue;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
+        $out .= $this->newOwnedBoxIr($name, $cv);
+        $this->locals->refParamTypes[$name] = Type::cell();
+        return $out;
+    }
+
+    /** @param array<string, bool> $paramNames @param array<string, Type> $paramTypes */
+    private function emitRefCellBoxes(Node $body, array $paramNames, array $paramTypes = []): string
     {
         $this->locals->refCellTargets = [];
         $this->locals->collectRefCellTargets($body);
+        $this->locals->refCellTargets = LocalSlots::closeRefCellsOverAliases($body, $this->locals->refCellTargets);
         $out = '';
         foreach ($this->locals->refCellTargets as $rname => $_) {
-            if (isset($paramNames[$rname])) { continue; }
+            if (isset($paramNames[$rname])) {
+                $out .= $this->boxRefCellParamIr($rname, $paramTypes[$rname] ?? null);
+                continue;
+            }
             if (!isset($this->locals->slots[$rname])) { continue; }
             if (isset($this->locals->refLocals[$rname])) { continue; }
             // NULL, not the slot's current word. The prologue runs before the
@@ -2079,6 +2120,13 @@ trait EmitLlvmModule
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
+            // The same +1 the `: mixed` path below takes: a BORROWED string
+            // (`return $o->n;`) boxed as-is handed the caller a cell over a
+            // buffer the object still owned, and the caller's release freed it
+            // — the next `.=` on the property wrote into freed memory.
+            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+                $out .= $this->retainCellPayload($v);
+            }
             $out .= $this->boxToCell($v->type, $v);
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
@@ -2332,9 +2380,11 @@ trait EmitLlvmModule
         // buffer the object still owned and had already freed.
         $isArr = $t->isVec() || $t->isAssoc();
         if ($tk !== Type::KIND_OBJ && !$isArr
-            && $tk !== Type::KIND_STRING) { return false; }
-        if ($tk === Type::KIND_OBJ && ($this->objTypeIsStruct($t)
-            || $this->isClosureClass($t->class ?? ''))) { return false; }
+            && $tk !== Type::KIND_STRING && $tk !== Type::KIND_CLOSURE) { return false; }
+        // A closure is NOT excluded: its env is counted, and the caller owns
+        // what a call returns ({@see InsertMemoryOps::isOwnedObj}), so a
+        // borrowed one (`return $this->handler;`) is retained like an object.
+        if ($tk === Type::KIND_OBJ && $this->objTypeIsStruct($t)) { return false; }
         $k = $v->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {

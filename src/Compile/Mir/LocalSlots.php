@@ -107,6 +107,52 @@ final class LocalSlots
     /** Narrow to the concrete class so a field read uses ITS offsets. */
     private static function asRefCell(Node $n): RefCell_ { return $n; }
 
+    /**
+     * `$a = &$b` makes the two names ONE reference, so they have to share one
+     * representation: when either is a ref-cell target (boxed, cell-typed) the
+     * other becomes one too. Aliasing a boxed name onto a plain slot left the
+     * name reading that slot's raw value as a box address — `$o = 1; $r =
+     * [&$o]; $o = &$x;` then dereferenced 2 and faulted. Both collectors
+     * ({@see collectRefCellTargets}, InferNodes::collectRefCellLocals) close
+     * over this, so the emitter and the retype agree on every name.
+     *
+     * @param array<string, true> $set
+     * @return array<string, true>
+     */
+    public static function closeRefCellsOverAliases(Node $body, array $set): array
+    {
+        if ($set === []) { return $set; }
+        /** @var array<int, array<int, string>> $pairs */
+        $pairs = [];
+        self::collectAliasPairs($body, $pairs);
+        $grew = true;
+        while ($grew) {
+            $grew = false;
+            foreach ($pairs as $p) {
+                $a = $p[0];
+                $b = $p[1];
+                if (isset($set[$a]) && !isset($set[$b])) { $set[$b] = true; $grew = true; }
+                if (isset($set[$b]) && !isset($set[$a])) { $set[$a] = true; $grew = true; }
+            }
+        }
+        return $set;
+    }
+
+    /** @param array<int, array<int, string>> $pairs */
+    private static function collectAliasPairs(Node $n, array &$pairs): void
+    {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $ra = self::asRefAlias($n);
+            $pairs[] = [$ra->target, $ra->source];
+            return;
+        }
+        foreach (Walk::children($n) as $c) {
+            self::collectAliasPairs($c, $pairs);
+        }
+    }
+
+    private static function asRefAlias(Node $n): RefAlias_ { return $n; }
+
     public function collectRefCellTargets(Node $n): void
     {
         if ($n->kind === Node::KIND_REF_CELL) {
