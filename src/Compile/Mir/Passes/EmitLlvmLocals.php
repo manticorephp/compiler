@@ -811,11 +811,9 @@ trait EmitLlvmLocals
             // nothing ever dropped an element off a live buffer; the element
             // SLOT drop ({@see \Compile\Debug::$rcElemSlotDrop}) does, so
             // `$b = $a; $a['x'] = $new;` read FREED memory out of `$b`.
-            // Adopt takes exactly the element refs the copy's own release gives
-            // back — the same pairing the copied vec PROPERTY below already has.
-            $ci = $this->ssa->allocReg();
-            $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
-            $out .= $this->arrayAdoptIr($ci, $this->arrayRetainFlavor($v, $sl->type));
+            // The adopt that takes exactly the element refs the copy's own
+            // release gives back is inside `__mir_array_copy` itself now, by the
+            // buffer's hint.
             $this->lastValue = $cp;
             $this->lastValueType = 'ptr';
             $copiedVecLocal = true;
@@ -926,9 +924,11 @@ trait EmitLlvmLocals
                 $this->propagateCellProvenance($aliasV, $owned);
                 $aliasV = $owned;
             } else {
-                $out .= $copiedVecProp
-                    ? $this->arrayAdoptIr($aliasV, $this->arrayRetainFlavor($v, $fallback))
-                    : $this->rcRetainByType($v, $aliasV, $fallback, 0);
+                // A copied vec property adopted inside `__mir_array_copy`;
+                // anything else is a second holder.
+                if (!$copiedVecProp) {
+                    $out .= $this->rcRetainByType($v, $aliasV, $fallback, 0);
+                }
             }
             $this->lastValue = $aliasV;
             $this->lastValueType = 'i64';

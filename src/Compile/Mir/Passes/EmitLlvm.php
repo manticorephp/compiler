@@ -2334,7 +2334,13 @@ final class EmitLlvm implements EmitVisitor
     private function storeLocalRetainsProp(Node $store, Node $pa): bool
     {
         if ($store->type->kind === Type::KIND_CELL && $pa->type->kind !== Type::KIND_CELL) {
-            return false;
+            // A SUPERGLOBAL is a module cell in every scope, and its store
+            // takes its own reference — an array is copied and the copy adopts
+            // the elements ({@see EmitLlvmLocals::globalCellOwnIr}); the
+            // box-back arm this refusal is about is a plain local's.
+            // `$_SESSION = $h->data;` vetoed `H::data` and every overwrite of
+            // it leaked the whole previous array.
+            return $pa->type->isArray() && $this->isSuperglobalName($store->name);
         }
         return $pa->type->isArray()
             || $this->slotIsArrayHinted($pa->object, $pa->property, $pa->type);
@@ -2481,7 +2487,7 @@ final class EmitLlvm implements EmitVisitor
             $pureArg = $this->consumerKeepsNoArg($parent);
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($pureArg) { continue; }
-                $this->markPropBorrowsIn($c, 'call operand');
+                $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
             }
             return;
         }
@@ -3117,6 +3123,12 @@ final class EmitLlvm implements EmitVisitor
             // overwritten string slot: `Buffer\ByteBuffer::buf`, 1 KB per
             // request, 198 MB of `http_parse`.
             '__str_byte_at',
+            // The synthesized serializer's per-property step: it walks the
+            // value into the output string and keeps nothing. Every class the
+            // program serializes — and a session serializes the object graph
+            // in `$_SESSION` — handed each of its properties to it, so none of
+            // them ever released what an overwrite replaced.
+            '__mc_ser_val',
         ] as $n) {
             if ($n === $bare) { return true; }
         }

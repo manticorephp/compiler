@@ -1,0 +1,18 @@
+stored 0
+~s0
+stored 1
+~s1
+stored 2
+cleared
+~s2
+after session
+a gone 3
+~sp1
+~sp2
+~sp3
+b gone
+sources gone 2
+~ua
+~ub
+union gone
+done

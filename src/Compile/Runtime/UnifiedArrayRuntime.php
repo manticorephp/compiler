@@ -1135,7 +1135,25 @@ final class UnifiedArrayRuntime
         $go->store(Value::int(Type::i64(), 1), $this->hdr($go, $copy, MemoryAbi::ARRAY_RC_OFFSET));
         $go->store(Value::int(Type::i64(), 0), $this->hdr($go, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $go->store(Value::null(), $this->hdr($go, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
-        $go->ret($copy);
+        // A VALUE copy owns its keys and elements: its release drops them
+        // whatever the source does. Adopt by the buffer's element hint — what
+        // the slots actually hold, the key every flavored release walks by —
+        // and by the repr bits for an unstamped buffer. Adopting by the
+        // caller's STATIC flavor instead took nothing on an `array`-declared
+        // property of objects (repr mode, no repr bits) while the copy's
+        // release dropped every object by its hint: `$_SESSION = $h->data;
+        // $_SESSION = [];` freed what `$h->data` still held. The copies that
+        // never adopted at all (`+`, `copy_deep`'s outer level) did the same.
+        $byHint = $fn->block('adopt_hint');
+        $byRepr = $fn->block('adopt_repr');
+        $done = $fn->block('adopt_done');
+        $hint = $this->elemHint($go, $copy);
+        $go->brIf($go->icmp('ne', $hint, Value::int(Type::i64(), 0)), $byHint, $byRepr);
+        $byHint->call('__mir_array_adopt_cell', Type::void(), [$copy]);
+        $byHint->br($done);
+        $byRepr->call('__mir_array_adopt', Type::void(), [$copy]);
+        $byRepr->br($done);
+        $done->ret($copy);
     }
 
     /**
@@ -1182,6 +1200,9 @@ final class UnifiedArrayRuntime
         $vp = $body->inttoptr($v, Type::ptr());
         $v2 = $body->call('__mir_array_copy_deep', Type::ptr(),
             [$vp, $body->sub($depth, Value::int(Type::i64(), 1))]);
+        // The outer copy's adopt took a count on the original inner buffer;
+        // its copy takes that slot.
+        $body->call('__mir_array_release_buf', Type::void(), [$vp]);
         $v2i = $body->ptrtoint($v2, Type::i64());
         $nc = $body->call('__mir_array_set_int', Type::ptr(), [$bc, $bi, $v2i]);
         $body->store($nc, $copySlot);
@@ -1245,7 +1266,6 @@ final class UnifiedArrayRuntime
         $iSlot = $go->alloca(Type::i64(), 'i');
         $go->store(Value::int(Type::i64(), 0), $iSlot);
         $bflags = $go->load(Type::i64(), $this->hdr($go, $b, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $brepr = $go->and_($bflags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK));
         $bhashed = $go->icmp('ne', $this->hashedBit($go, $bflags), Value::int(Type::i64(), 0));
         $go->brIf($go->icmp('eq', $b, Value::null()), $ret, $head);
 
@@ -1268,7 +1288,7 @@ final class UnifiedArrayRuntime
             [$sres, $skp, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $strk->brIf($strk->icmp('ne', $shas, Value::int(Type::i64(), 0)), $next, $sset);
         $sv = $sset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
-        $sset->call('__mir_retain_by_repr', Type::void(), [$sv, $brepr]);
+        $sset = $this->emitRetainByHintOrRepr($fn, $sset, $sv, $b, 'us');
         // The key string gains a second owner (the result's entry).
         $sset->call('__mir_rc_retain_str', Type::void(), [$skp]);
         $snew = $sset->call('__mir_array_set_str', Type::ptr(),
@@ -1283,7 +1303,7 @@ final class UnifiedArrayRuntime
         $ihas = $intk->call('__mir_array_isset_int', Type::i64(), [$ires, $ik]);
         $intk->brIf($intk->icmp('ne', $ihas, Value::int(Type::i64(), 0)), $next, $iset);
         $iv = $iset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
-        $iset->call('__mir_retain_by_repr', Type::void(), [$iv, $brepr]);
+        $iset = $this->emitRetainByHintOrRepr($fn, $iset, $iv, $b, 'ui');
         $inew = $iset->call('__mir_array_set_int', Type::ptr(),
             [$iset->load(Type::ptr(), $resSlot), $ik, $iv]);
         $iset->store($inew, $resSlot);
@@ -1347,6 +1367,9 @@ final class UnifiedArrayRuntime
         $isarr->brIf($isarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $cont);
         $ip = $doarr->inttoptr($doarr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
         $icp = $doarr->call('__mir_array_copy', Type::ptr(), [$ip]);
+        // The outer copy took a count on the ORIGINAL inner buffer when it
+        // adopted its elements; the copy replaces it in that slot.
+        $doarr->call('__mir_array_release_buf', Type::void(), [$ip]);
         // Re-box the fresh (non-null) copy as an ARRAY cell inline — the same
         // encoding as `__manticore_box_array`: (ptr & PAYLOAD_MASK) | ARRAY tag.
         // Inlined so `copy_cells` doesn't depend on that helper being emitted.
@@ -1658,6 +1681,13 @@ final class UnifiedArrayRuntime
             }
         }
 
+        // Buffer-only ownership ({@see Debug::$rcBufferOnly}): a retain is the
+        // count and nothing else. ADOPT still walks — a fresh copy owns a ref
+        // on each element it shares with its source.
+        if ($bumpRc && Debug::$rcBufferOnly) {
+            $bump->retVoid();
+            return;
+        }
         // ── co-own exactly what the matching release will drop ──
         $ret = $fn->block('rt_ret');
         $len = $bump->load(Type::i64(), $arr);
@@ -2003,6 +2033,27 @@ final class UnifiedArrayRuntime
      * release side has always had the same exposure and simply never
      * dereferenced first; the retain does, so it must guard.
      */
+    /**
+     * One element `$v` of `$arr` gains an owner: by the buffer's ELEMENT HINT
+     * (what the slots hold), by its repr bits for an unstamped buffer — the
+     * order every release walks them in. Returns the continuation block.
+     */
+    private function emitRetainByHintOrRepr(FunctionDef $fn, Block $b, Value $v, Value $arr, string $tag): Block
+    {
+        $flags = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $hint = $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $byHint = $fn->block('rh_hint_' . $tag);
+        $byRepr = $fn->block('rh_repr_' . $tag);
+        $join = $fn->block('rh_join_' . $tag);
+        $b->brIf($b->icmp('ne', $hint, Value::int(Type::i64(), 0)), $byHint, $byRepr);
+        $byHint = $this->emitRetainValue($fn, $byHint, $v, 'cell', 'rh' . $tag, $hint);
+        $byHint->br($join);
+        $byRepr->call('__mir_retain_by_repr', Type::void(),
+            [$v, $byRepr->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK))]);
+        $byRepr->br($join);
+        return $join;
+    }
+
     private function emitRetainValue(FunctionDef $fn, Block $b, Value $v, string $flavor, string $tag, ?Value $hint = null): Block
     {
         if ($flavor === '') { return $b; }
@@ -2201,6 +2252,9 @@ final class UnifiedArrayRuntime
 
     private function emitReleaseVariant(string $symbol, string $valueFlavor, bool $dropAlways = false): void
     {
+        // Buffer-only ownership: an `_ownel_` name is the same release — the
+        // retain it was paired with no longer takes element refs to give back.
+        if (Debug::$rcBufferOnly) { $dropAlways = false; }
         $fn = $this->module->func($symbol, Type::void());
         $arr = $fn->param(Type::ptr(), 'arr');
         $entry = $fn->block('entry');
@@ -3994,12 +4048,18 @@ final class UnifiedArrayRuntime
         $cond->brIf($cond->icmp('sge', $i, $len), $end, $body);
         $iv = $body->load(Type::i64(), $iSlot);
         $val = $body->call('__mir_array_value_at', Type::i64(), [$src, $iv]);
+        // The destination is a buffer of its own and owns what lands in it
+        // ({@see Debug::$rcBufferOnly}); the words were copied, not their
+        // counts. The spread's result released every element it never took.
+        $body = $this->emitRetainByHintOrRepr($fn, $body, $val, $src, 'sp');
         $flags = $body->load(Type::i64(), $this->hdr($body, $src, MemoryAbi::ARRAY_FLAGS_OFFSET));
         // packed (flags==0) → implicit int key → renumber; hashed → check KIND
         $body->brIf($body->icmp('eq', $this->hashedBit($body, $flags), Value::int(Type::i64(), 0)), $doInt, $isStr);
         $kind = $isStr->load(Type::i64(), $this->entryAddr($isStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $isStr->brIf($isStr->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $doStr, $doInt);
         $key = $doStr->load(Type::ptr(), $this->entryAddr($doStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        // The key string gains a second owner (the destination's entry).
+        $doStr->call('__mir_rc_retain_str', Type::void(), [$key]);
         $d1 = $doStr->load(Type::ptr(), $dSlot);
         $ns = $doStr->call('__mir_array_set_str', Type::ptr(),
             [$d1, $key, $val, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
@@ -4726,7 +4786,6 @@ final class UnifiedArrayRuntime
         // raw-hinted buffer in place (an unstamped one is empty).
         $src = $doarr->inttoptr($doarr->and_($v, $mask), Type::ptr());
         $copy = $doarr->call('__mir_array_copy', Type::ptr(), [$src]);
-        $doarr->call('__mir_array_adopt_cell', Type::void(), [$copy]);
         $hint = $this->elemHint($doarr, $copy);
         $doarr->switch_($hint, $cellify, [
             new SwitchCase(Value::int(Type::i64(), 0), $arrdone),
