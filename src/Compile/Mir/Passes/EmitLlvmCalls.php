@@ -2621,6 +2621,7 @@ trait EmitLlvmCalls
     private function emitDefaultArgPad(string $fnKey, int $firstMissingIdx, bool $haveArgs): string
     {
         $this->lastPadArgs = '';
+        $this->lastPadDrops = '';
         $ptypes = $this->sigs->paramTypes[$fnKey] ?? [];
         $pcount = \count($ptypes);
         if ($firstMissingIdx >= $pcount) { return ''; }
@@ -2651,6 +2652,7 @@ trait EmitLlvmCalls
                 $addr = $this->ssa->allocReg();
                 $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
                 $this->lastPadArgs .= $sep . 'i64 ' . $addr;
+                $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $ptypes[$pi]);
                 $pi = $pi + 1;
                 continue;
             }
@@ -2664,6 +2666,60 @@ trait EmitLlvmCalls
             $pi = $pi + 1;
         }
         return $out;
+    }
+
+    /**
+     * The post-call release of a throwaway slot backing an OMITTED by-ref
+     * default. The slot is the argument's only owner: it held the default, and
+     * the callee's write through it released that and left its own +1 there —
+     * the `$matches` of every `preg_match($re, $s)` — which php discards with
+     * the temporary. `$pt` is the callee's declared type: what it wrote.
+     */
+    private function omittedRefSlotDrop(string $slot, Type $pt): string
+    {
+        $flavor = $this->isClosureValueType($pt) ? 'closure' : $this->discardReleaseFlavor($pt);
+        if ($flavor === '') { return ''; }
+        $v = $this->ssa->allocReg();
+        return '  ' . $v . ' = load i64, ptr ' . $slot . "\n" . $this->rcReleaseReg($v, $flavor);
+    }
+
+    /**
+     * Back a by-ref param fed a non-lvalue — an OMITTED default the lowering
+     * filled in reaches the call as the default expr — with a throwaway slot
+     * seeded with that value, leaving its address in `lastValue`. The callee
+     * writes through it unconditionally; php discards what it wrote. The
+     * release of that write, when the site owns it, lands in
+     * {@see $lastRefSlotDrop} for the caller to emit after the call.
+     */
+    private function emitRefValueSlot(Node $a, ?Type $pt, int $srcArgc, int $ai): string
+    {
+        $tmp = $this->ssa->allocReg();
+        $out = '  ' . $tmp . " = alloca i64\n";
+        $out .= $this->emitNode($a);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+        $addr = $this->ssa->allocReg();
+        $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        $this->lastRefSlotDrop = ($pt !== null && $this->isOmittedDefaultArg($srcArgc, $ai, $a))
+            ? $this->omittedRefSlotDrop($tmp, $pt) : '';
+        $this->lastValue = $addr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Whether by-ref arg `$ai` is a default the lowering filled in — past what
+     * the source wrote (`$srcArgc`), or a constant a named-argument call left
+     * in a gap. Only then does the call site own what its slot ends up
+     * holding; a written non-lvalue may be a BORROW the callee never replaced.
+     */
+    private function isOmittedDefaultArg(int $srcArgc, int $ai, Node $a): bool
+    {
+        if ($srcArgc >= 0 && $ai >= $srcArgc) { return true; }
+        $k = $a->kind;
+        return $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_NULL_CONST
+            || $k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST
+            || $k === Node::KIND_BOOL_CONST || $k === Node::KIND_STRING_CONST;
     }
 
     private function emitByRefArg(Node $a): string
@@ -2757,6 +2813,7 @@ trait EmitLlvmCalls
         $ahmask = $this->sigs->arrayHintedParams[$c->function] ?? [];
         $ptypes = $this->sigs->paramTypes[$c->function] ?? [];
         $ai = 0;
+        $omitRefDrops = '';
         // Fresh string-temp arg carriers freed after the call: a borrow the
         // callee retains if it keeps it (the +1 convention), so the caller's
         // transient is dead once the call returns.
@@ -2860,14 +2917,9 @@ trait EmitLlvmCalls
                 // filled default expr. Back it with a throwaway stack slot so
                 // the callee's write lands somewhere (PHP discards it) instead
                 // of dereferencing a null address.
-                $tmp = $this->ssa->allocReg();
-                $out .= '  ' . $tmp . " = alloca i64\n";
-                $out .= $this->emitNode($a);
-                $out .= $this->coerceToI64();
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
-                $addr = $this->ssa->allocReg();
-                $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
-                $argList .= 'i64 ' . $addr;
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai);
+                $argList .= 'i64 ' . $this->lastValue;
+                $omitRefDrops .= $this->lastRefSlotDrop;
             } elseif (($camask[$ai] ?? false)
                 && $a->type->isArray() && $a->type->element !== null
                 && $a->type->element->kind !== Type::KIND_CELL
@@ -2969,6 +3021,7 @@ trait EmitLlvmCalls
         // and inherited the same by-ref hazard.
         $out .= $this->emitDefaultArgPad($c->function, $ai, !$first);
         $argList .= $this->lastPadArgs;
+        $omitRefDrops .= $this->lastPadDrops;
         // …and the mirror question: arguments the callee has NO parameter for
         // are truncated off the call ({@see EmitLlvm::faCallArgs}) but php still
         // evaluates them, so they are emitted here for their effects.
@@ -3004,6 +3057,7 @@ trait EmitLlvmCalls
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $omitRefDrops;
         // Re-box each unboxed by-ref arg. The value is READ BACK, not assumed
         // unchanged: sort()/usort() reorder in place but may hand back a
         // different buffer. Boxed as vec[cell] so boxToCell takes the flat

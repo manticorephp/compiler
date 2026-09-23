@@ -336,6 +336,12 @@ final class EmitLlvm implements EmitVisitor
     /** Arg-list suffix produced by the most recent {@see emitDefaultArgPad}. */
     private string $lastPadArgs = '';
 
+    /** Post-call IR releasing the by-ref slots that pad backed ({@see omittedRefSlotDrop}). */
+    private string $lastPadDrops = '';
+
+    /** Post-call IR releasing the slot of the latest {@see emitRefValueSlot}. */
+    private string $lastRefSlotDrop = '';
+
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
     private ?GeneratorContext $gen = null;

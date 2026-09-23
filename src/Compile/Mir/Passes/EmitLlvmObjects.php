@@ -338,6 +338,7 @@ trait EmitLlvmObjects
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
                 }
+                $padDrops = '';
                 if ($spreadArr !== '') {
                     // The pack covers every param past the fixed prefix; each
                     // defaulted one it does not reach falls back to its default.
@@ -351,6 +352,7 @@ trait EmitLlvmObjects
                     // `$this`, provided args cover [1 .. argc]).
                     $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
                     $argList .= $this->lastPadArgs;
+                    $padDrops = $this->lastPadDrops;
                 }
                 // func_get_args() channel: what the SOURCE wrote, before the pad
                 // above widened the list. Kept across the merge with the spread
@@ -366,6 +368,7 @@ trait EmitLlvmObjects
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
                       . '(' . $argList . ")\n";
+                $out .= $padDrops;
             }
             // The MIR node is typed CELL (`new_dyn %n() : cell`), so the value
             // has to BE one — this stored the bare `ptrtoint` instead, and every
@@ -445,6 +448,7 @@ trait EmitLlvmObjects
             $cellBoxTypes = [];
             $reboxSlots = [];
             $reboxTmps = [];
+            $refSlotDrops = '';
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
@@ -495,6 +499,9 @@ trait EmitLlvmObjects
                     $cellBoxTypes[] = $a->type;
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
+                } elseif (($mask[$ai + 1] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
+                    $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai);
+                    $refSlotDrops .= $this->lastRefSlotDrop;
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
                     // static type so the ctor reads the runtime tag.
@@ -559,6 +566,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
             $out .= $this->btPop();
+            $out .= $refSlotDrops;
             $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
             $ci = 0;
             foreach ($cellBoxTmps as $ctmp) {
@@ -5562,6 +5570,7 @@ trait EmitLlvmObjects
         $cellBoxTmps = [];
         $cellBoxTypes = [];
         $ai = 0;
+        $refSlotDrops = '';
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
@@ -5604,6 +5613,10 @@ trait EmitLlvmObjects
             } elseif ($this->argIsByRef($mask, $ai, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
+            } elseif (($mask[$ai] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai);
+                $argList .= 'i64 ' . $this->lastValue;
+                $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its static type.
                 $out .= $this->emitNode($a);
@@ -5661,6 +5674,7 @@ trait EmitLlvmObjects
         // arrive short — never leave a trailing optional unset.
         $out .= $this->emitDefaultArgPad($cls . '__' . $n->method, $ai, !$first);
         $argList .= $this->lastPadArgs;
+        $padDrops = $refSlotDrops . $this->lastPadDrops;
         $btName = '';
         if ($this->rt->needsBacktrace) {
             $btName = $n->class . '::' . $n->method;
@@ -5671,6 +5685,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $padDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
@@ -6689,6 +6704,7 @@ trait EmitLlvmObjects
         $reboxSlots = [];
         $reboxTmps = [];
         $cellBoxTmps = [];
+        $refSlotDrops = '';
         $static = $mc->object->type->class ?? '';
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
@@ -6839,6 +6855,10 @@ trait EmitLlvmObjects
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
+            } elseif (($mask[$ai + 1] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai);
+                $argList .= ', i64 ' . $this->lastValue;
+                $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // A tagged (mixed/union) param: NaN-box the arg by its static
                 // type so the callee reads its runtime tag — mirrors the
@@ -7084,6 +7104,7 @@ trait EmitLlvmObjects
         }
         $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }

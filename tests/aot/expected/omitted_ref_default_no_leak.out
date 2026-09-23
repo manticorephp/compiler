@@ -1,0 +1,10 @@
+preg_match hit: sum=102000 growth ok
+preg_match named: sum=102000 growth ok
+function: sum=102000 growth ok
+static method: sum=204000 growth ok
+constructor: sum=305990 growth ok
+method: sum=306000 growth ok
+a5,b5
+2 z
+c4 2 x?
+done
