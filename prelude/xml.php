@@ -30,116 +30,116 @@
 // plain C function on both hosts, and xmlTextReaderRead's -1 IS the error path.
 // It must NOT go on a bind that returns a POINTER (it would truncate to 32 bits).
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlReaderForMemory'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlReaderForMemory')]
 function __mc_xml_reader_for_memory(string $buffer, #[\Ffi\CType('int')] int $size,
                                     \Ffi\Ptr $url, \Ffi\Ptr $encoding,
                                     #[\Ffi\CType('int')] int $options): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlReaderForFile'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlReaderForFile')]
 function __mc_xml_reader_for_file(string $filename, \Ffi\Ptr $encoding,
                                   #[\Ffi\CType('int')] int $options): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlFreeTextReader'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlFreeTextReader')]
 function __mc_xml_reader_free(\Ffi\Ptr $reader): void {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderRead'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderRead'), \Ffi\CType('int')]
 function __mc_xml_read(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderNodeType'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderNodeType'), \Ffi\CType('int')]
 function __mc_xml_node_type(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderDepth'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderDepth'), \Ffi\CType('int')]
 function __mc_xml_depth(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderIsEmptyElement'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderIsEmptyElement'), \Ffi\CType('int')]
 function __mc_xml_is_empty(\Ffi\Ptr $reader): int {}
 
 // The Const* family hands back libxml2's OWN buffer — valid only until the next
 // Read. Copy it with cstr_to_str immediately (see __mc_xml_cstr) and never free.
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstLocalName'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstLocalName')]
 function __mc_xml_local_name(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstName'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstName')]
 function __mc_xml_qname(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstPrefix'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstPrefix')]
 function __mc_xml_prefix(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstNamespaceUri'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstNamespaceUri')]
 function __mc_xml_ns_uri(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstValue'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstValue')]
 function __mc_xml_value(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstXmlVersion'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstXmlVersion')]
 function __mc_xml_version(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstEncoding'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderConstEncoding')]
 function __mc_xml_encoding(\Ffi\Ptr $reader): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderStandalone'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderStandalone'), \Ffi\CType('int')]
 function __mc_xml_standalone(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderAttributeCount'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderAttributeCount'), \Ffi\CType('int')]
 function __mc_xml_attr_count(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderMoveToFirstAttribute'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderMoveToFirstAttribute'), \Ffi\CType('int')]
 function __mc_xml_first_attr(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderMoveToNextAttribute'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderMoveToNextAttribute'), \Ffi\CType('int')]
 function __mc_xml_next_attr(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderMoveToElement'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderMoveToElement'), \Ffi\CType('int')]
 function __mc_xml_to_element(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderGetParserLineNumber'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderGetParserLineNumber'), \Ffi\CType('int')]
 function __mc_xml_err_line(\Ffi\Ptr $reader): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderGetParserColumnNumber'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderGetParserColumnNumber'), \Ffi\CType('int')]
 function __mc_xml_err_col(\Ffi\Ptr $reader): int {}
 
 // ── Validation (still function-only: no struct is ever dereferenced) ────────
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaNewMemParserCtxt'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaNewMemParserCtxt')]
 function __mc_xml_schema_mem_ctxt(string $buffer, #[\Ffi\CType('int')] int $size): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaParse'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaParse')]
 function __mc_xml_schema_parse(\Ffi\Ptr $ctxt): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaFreeParserCtxt'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaFreeParserCtxt')]
 function __mc_xml_schema_free_ctxt(\Ffi\Ptr $ctxt): void {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaFree'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSchemaFree')]
 function __mc_xml_schema_free(\Ffi\Ptr $schema): void {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderSetSchema'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderSetSchema'), \Ffi\CType('int')]
 function __mc_xml_reader_set_schema(\Ffi\Ptr $reader, \Ffi\Ptr $schema): int {}
 
 // The FILE form — DOMDocument::schemaValidate($path). Takes the .xsd path
 // directly, so no parser context is built on our side.
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderSchemaValidate'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderSchemaValidate'), \Ffi\CType('int')]
 function __mc_xml_reader_schema_validate(\Ffi\Ptr $reader, string $xsd): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGNewMemParserCtxt'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGNewMemParserCtxt')]
 function __mc_xml_rng_mem_ctxt(string $buffer, #[\Ffi\CType('int')] int $size): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGParse'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGParse')]
 function __mc_xml_rng_parse(\Ffi\Ptr $ctxt): \Ffi\Ptr {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGFreeParserCtxt'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGFreeParserCtxt')]
 function __mc_xml_rng_free_ctxt(\Ffi\Ptr $ctxt): void {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGFree'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlRelaxNGFree')]
 function __mc_xml_rng_free(\Ffi\Ptr $rng): void {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderRelaxNGSetSchema'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderRelaxNGSetSchema'), \Ffi\CType('int')]
 function __mc_xml_reader_set_rng(\Ffi\Ptr $reader, \Ffi\Ptr $rng): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderSetParserProp'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderSetParserProp'), \Ffi\CType('int')]
 function __mc_xml_set_parser_prop(\Ffi\Ptr $reader, #[\Ffi\CType('int')] int $prop,
                                   #[\Ffi\CType('int')] int $value): int {}
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderIsValid'), \Ffi\CType('int'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlTextReaderIsValid'), \Ffi\CType('int')]
 function __mc_xml_is_valid(\Ffi\Ptr $reader): int {}
 
 // ── Silencing libxml2's own diagnostics ────────────────────────────────────
@@ -158,7 +158,7 @@ function __mc_xml_is_valid(\Ffi\Ptr $reader): int {}
 // — a C VARARGS callback, which a PHP function cannot be. The structured half is
 // the usable one, and it is the half that matters.
 
-#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSetStructuredErrorFunc'), \Ffi\Weak]
+#[\Ffi\Library('xml2'), \Ffi\Symbol('xmlSetStructuredErrorFunc')]
 function __mc_xml_set_structured_error(\Ffi\Ptr $ctx, \Ffi\Ptr $handler): void {}
 
 /**

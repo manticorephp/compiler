@@ -1904,10 +1904,16 @@ function cmd_compile(array $args): int {
     // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
     // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
     // undefined reference without it. `--as-needed` drops it when unreferenced.
+    //
+    // `--as-needed` is POSITIONAL: it governs the libraries after it. Placed at
+    // the tail it covered -lm alone, so on Debian every library reached the
+    // binary, while Alpine's and Ubuntu's gcc switch it on at the head — two
+    // different links from one command. It leads the line now, on every Linux.
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak)
-        : " -Wl,--gc-sections -Wl,--as-needed -lm";
-    $rc2 = system("cc " . $objList . $linkExtra . $gc . " -o " . $output);
+        : " -Wl,--gc-sections -lm";
+    $asNeeded = is_darwin() ? "" : " -Wl,--as-needed";
+    $rc2 = system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
         dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
         return 76;
