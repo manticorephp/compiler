@@ -1,0 +1,29 @@
+closure
+end closure
+~closure
+after closure
+arr
+end arr
+~arr
+after arr
+held esc
+~esc
+after esc
+5 6
+end elem elem
+~elem
+after elem
+array(2) {
+  [0]=>
+  int(5)
+  [1]=>
+  int(5)
+}
+~l0
+~l1
+end loop
+~l2
+done
+after unset o
+~unbound
+after unset r

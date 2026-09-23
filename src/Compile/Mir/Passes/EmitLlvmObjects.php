@@ -4793,19 +4793,26 @@ trait EmitLlvmObjects
                 // makes the deepclone idiom work: `$values[$k] = &$value;
                 // unset($value);` inside a foreach relies on each iteration's
                 // `&$value` being a new variable, not the one the array now
-                // holds. The old box is not released: a box is shared by every
-                // holder and none of them counts it (the same lifetime every
-                // local ref box has today).
+                // holds. The frame gives back its count on the old box — the
+                // last holder drops the value, as php's unset of the last
+                // binding does — and owns the new one from here on.
                 if (isset($this->locals->refLocals[$name])
                     && isset($this->locals->slots[$name])
                     && ($this->locals->refParamTypes[$name] ?? null) !== null
                     && $this->locals->refParamTypes[$name]->kind === Type::KIND_CELL) {
+                    $owned = isset($this->locals->ownedBoxes[$name]);
+                    if ($owned) {
+                        $out .= $this->ownedBoxReleaseIr($name, false);
+                    }
                     $nb = $this->ssa->allocReg();
-                    $out .= '  ' . $nb . " = call ptr @__mir_alloc(i64 8)\n";
-                    $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $nb . "\n";
+                    $out .= '  ' . $nb . ' = call ptr @__mir_ref_new(i64 '
+                          . (string)\Compile\MemoryAbi::CELL_NULL . ")\n";
                     $nbi = $this->ssa->allocReg();
                     $out .= '  ' . $nbi . ' = ptrtoint ptr ' . $nb . " to i64\n";
                     $out .= '  store i64 ' . $nbi . ', ptr ' . $this->locals->slots[$name] . "\n";
+                    if ($owned) {
+                        $out .= '  store ptr ' . $nb . ', ptr ' . $this->locals->ownedBoxes[$name] . "\n";
+                    }
                     continue;
                 }
                 $flavor = $this->discardReleaseFlavor($t->type);

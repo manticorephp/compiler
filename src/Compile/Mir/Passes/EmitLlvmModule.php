@@ -888,6 +888,7 @@ trait EmitLlvmModule
         // By-ref params: the slot holds the caller's variable address;
         // loads/stores deref it.
         $this->locals->refLocals = [];
+        $this->locals->ownedBoxes = [];
         $this->locals->refParamTypes = [];
         $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
@@ -1118,13 +1119,7 @@ trait EmitLlvmModule
             if (isset($paramNames[$bname])) { continue; }
             if (!isset($this->locals->slots[$bname])) { continue; }
             if (isset($this->locals->refLocals[$bname])) { continue; }
-            $box = $this->ssa->allocReg();
-            $bodySink->write('  ' . $box . " = call ptr @__mir_alloc(i64 8)\n");
-            $bodySink->write('  store i64 0, ptr ' . $box . "\n");
-            $bi = $this->ssa->allocReg();
-            $bodySink->write('  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n");
-            $bodySink->write('  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$bname] . "\n");
-            $this->locals->refLocals[$bname] = true;
+            $bodySink->write($this->newOwnedBoxIr($bname, '0'));
         }
         // One i1 per global-backed name this function unsets: `unset($static)`
         // breaks the BINDING for the rest of this call and leaves the storage
@@ -1175,6 +1170,7 @@ trait EmitLlvmModule
         // bare `return;`) must be a BOXED null, not raw 0 — a dynamic `callable`
         // caller reads the result by tag, so raw 0 decoded as float and
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
+        $bodySink->write($this->emitOwnedBoxReleases([]));
         $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n}");
         $body = $bodySink->finish() . "\n\n";
         // Do not keep the per-invocation chunk array alive through the return
@@ -1270,6 +1266,96 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /**
+     * A reference box for local `$name` holding `$init`, with this frame as its
+     * first holder: the slot gets the box (the local is a refLocal from here
+     * on) and a second alloca keeps it, so the exit release still finds the
+     * box after `$name = &$other` rebinds the slot.
+     */
+    private function newOwnedBoxIr(string $name, string $init): string
+    {
+        $box = $this->ssa->allocReg();
+        $out = '  ' . $box . ' = call ptr @__mir_ref_new(i64 ' . $init . ")\n";
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $bi . ' = ptrtoint ptr ' . $box . " to i64\n";
+        $out .= '  store i64 ' . $bi . ', ptr ' . $this->locals->slots[$name] . "\n";
+        $own = $this->ssa->allocReg();
+        $out .= '  ' . $own . " = alloca ptr\n";
+        $out .= '  store ptr ' . $box . ', ptr ' . $own . "\n";
+        $this->locals->refLocals[$name] = true;
+        $this->locals->ownedBoxes[$name] = $own;
+        return $out;
+    }
+
+    /**
+     * Give back this frame's count on every box it made
+     * ({@see newOwnedBoxIr}): the last holder drops the value by the local's
+     * own flavor and frees the box. A local the return VALUE may alias
+     * ({@see returnedLocalNames}) first hands the caller a count on the value
+     * it reads, which is the transfer a plain local makes by skipping its
+     * release. Not in a generator (its frame outlives the call) nor on a by-ref
+     * return (the caller receives the box's address).
+     *
+     * @param array<string,bool> $exempt
+     */
+    private function emitOwnedBoxReleases(array $exempt): string
+    {
+        if ($this->gen->inGenerator || $this->frame->returnsByRef) { return ''; }
+        $out = '';
+        foreach ($this->locals->ownedBoxes as $name => $_) {
+            $out .= $this->ownedBoxReleaseIr($name, isset($exempt[$name]));
+        }
+        return $out;
+    }
+
+    /** This frame's count on `$name`'s box, given back; `$handOut` first takes
+     *  a count on the value for the caller ({@see emitOwnedBoxReleases}). */
+    private function ownedBoxReleaseIr(string $name, bool $handOut): string
+    {
+        $flavor = $this->ownedBoxFlavor($name);
+        $bp = $this->ssa->allocReg();
+        $out = '  ' . $bp . ' = load ptr, ptr ' . $this->locals->ownedBoxes[$name] . "\n";
+        if ($handOut && $flavor !== '') {
+            $kv = $this->ssa->allocReg();
+            $out .= '  ' . $kv . ' = load i64, ptr ' . $bp . "\n";
+            $out .= $this->rcRetainReg($kv, $flavor);
+        }
+        $last = $this->ssa->allocReg();
+        $out .= '  ' . $last . ' = call i1 @__mir_ref_unref(ptr ' . $bp . ")\n";
+        $dropL = $this->ssa->allocLabel('refbox.drop');
+        $doneL = $this->ssa->allocLabel('refbox.done');
+        $out .= '  br i1 ' . $last . ', label %' . $dropL . ', label %' . $doneL . "\n";
+        $out .= $dropL . ":\n";
+        if ($flavor !== '') {
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = load i64, ptr ' . $bp . "\n";
+            $out .= $this->rcReleaseReg($v, $flavor);
+        }
+        $out .= '  call void @__mir_ref_free(ptr ' . $bp . ")\n";
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        return $out;
+    }
+
+    /** The flavor the value inside `$name`'s box is released with: a CELL for a
+     *  ref-cell target (its slot is retyped), the local's own otherwise. */
+    private function ownedBoxFlavor(string $name): string
+    {
+        if (isset($this->locals->refCellTargets[$name])) { return 'cell'; }
+        $t = $this->locals->byRefCaptured[$name] ?? null;
+        if ($t === null) { return ''; }
+        return $this->boxValueFlavor($t);
+    }
+
+    /** {@see discardReleaseFlavor}, plus the closure env it leaves out. */
+    private function boxValueFlavor(Type $t): string
+    {
+        if ($t->kind === Type::KIND_CLOSURE) { return 'closure'; }
+        if ($t->kind === Type::KIND_OBJ && $this->isClosureClass($t->class ?? '')) { return 'closure'; }
+        if ($t->kind === Type::KIND_UNKNOWN) { return 'cell'; }
+        return $this->discardReleaseFlavor($t);
+    }
+
     private function emitRefCellBoxes(Node $body, array $paramNames): string
     {
         $this->locals->refCellTargets = [];
@@ -1279,20 +1365,13 @@ trait EmitLlvmModule
             if (isset($paramNames[$rname])) { continue; }
             if (!isset($this->locals->slots[$rname])) { continue; }
             if (isset($this->locals->refLocals[$rname])) { continue; }
-            $rbox = $this->ssa->allocReg();
-            $out .= '  ' . $rbox . " = call ptr @__mir_alloc(i64 8)\n";
             // NULL, not the slot's current word. The prologue runs before the
             // program's first store, so that word is whatever the frame held —
             // and the box is a CELL channel now ({@see \Compile\Mir\Passes\
             // InferNodes::collectRefCellLocals} retypes the slot), so it has to
             // start self-describing. php agrees: a variable that exists only
             // because a reference was taken to it reads null.
-            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
-                  . ', ptr ' . $rbox . "\n";
-            $rbi = $this->ssa->allocReg();
-            $out .= '  ' . $rbi . ' = ptrtoint ptr ' . $rbox . " to i64\n";
-            $out .= '  store i64 ' . $rbi . ', ptr ' . $this->locals->slots[$rname] . "\n";
-            $this->locals->refLocals[$rname] = true;
+            $out .= $this->newOwnedBoxIr($rname, (string)\Compile\MemoryAbi::CELL_NULL);
             // What the slot READS is what a store through it must WRITE. This is
             // the same fact `&C::$s` needed ({@see EmitLlvmObjects::emitRefAddr})
             // and the same field that carries it: the forward-cellify plant in
@@ -1781,6 +1860,7 @@ trait EmitLlvmModule
         // Top-level code takes references too — `$refs = [&$a];` at file scope
         // is the shape the corpus actually hits first. See the note at the
         // matching line in the ordinary function emitter.
+        $this->locals->ownedBoxes = [];
         $body .= $this->emitRefCellBoxes($fn->body, []);
         // A global cell whose default is not a link-time constant (an array
         // literal on a static property) is built HERE, before any top-level
@@ -1825,10 +1905,15 @@ trait EmitLlvmModule
         foreach ($this->frame->rcObjLocals as $name => $mo) {
             if (isset($exempt[$name])) { continue; }
             if (isset($this->frame->transferredLocals[$name])) { continue; }
+            // A boxed local's slot holds the BOX, registered here before the
+            // prologue boxed it. Its value goes with the box's last holder
+            // ({@see emitOwnedBoxReleases}); releasing the slot handed the box
+            // address to the string release, which decremented malloc's header.
+            if (isset($this->locals->refLocals[$name])) { continue; }
             if (!isset($this->locals->slots[$name])) { continue; }
             $out .= $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
         }
-        return $out;
+        return $out . $this->emitOwnedBoxReleases($exempt);
     }
 
     /**

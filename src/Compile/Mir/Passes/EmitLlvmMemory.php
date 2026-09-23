@@ -698,6 +698,7 @@ trait EmitLlvmMemory
         $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
+        elseif ($flavor === 'closure') { $this->rt->needsClosureRc = true; $fn = '@__mir_closure_retain'; }
         elseif ($flavor === 'vecbuf' || $flavor === 'assocbuf') { $fn = '@__mir_array_retain_buf'; }
         elseif ($flavor === 'vecobj' || $flavor === 'assocobj') { $this->rt->needsRc = true; $fn = '@__mir_array_retain_obj'; }
         elseif ($flavor === 'vecstr' || $flavor === 'assocstr') { $this->rt->needsStrRc = true; $fn = '@__mir_array_retain_str'; }

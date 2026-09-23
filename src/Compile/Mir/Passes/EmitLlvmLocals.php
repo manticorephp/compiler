@@ -695,6 +695,7 @@ trait EmitLlvmLocals
                 $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
                 $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+                $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             } else {
                 $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
@@ -753,6 +754,7 @@ trait EmitLlvmLocals
             $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
             $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $this->lastValueType = 'i64';
@@ -771,6 +773,7 @@ trait EmitLlvmLocals
             $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
             $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $this->lastValueType = 'i64';
@@ -972,6 +975,7 @@ trait EmitLlvmLocals
             $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite: rebinding an owned RcHeap obj/vec
@@ -987,6 +991,39 @@ trait EmitLlvmLocals
         }
         $this->lastValue = $val;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * A reference box OWNS its value, as a module cell does
+     * ({@see globalCellOwnIr}): a store through it drops what it held. Only a
+     * box this frame made ({@see LocalSlots::$ownedBoxes}) — its flavor is
+     * known — and only while the slot still points at it, since `$name = &$x`
+     * may have rebound the name to storage with another owner. `$addrI64` is
+     * the slot's word, the address the store is about to write through. The
+     * value being stored already carries its own count, taken by the same
+     * conventions as a plain local's store.
+     */
+    private function ownedBoxOverwriteIr(string $name, string $addrI64): string
+    {
+        if (!isset($this->locals->ownedBoxes[$name])) { return ''; }
+        $flavor = $this->ownedBoxFlavor($name);
+        if ($flavor === '') { return ''; }
+        $own = $this->ssa->allocReg();
+        $out = '  ' . $own . ' = load ptr, ptr ' . $this->locals->ownedBoxes[$name] . "\n";
+        $ownI = $this->ssa->allocReg();
+        $out .= '  ' . $ownI . ' = ptrtoint ptr ' . $own . " to i64\n";
+        $same = $this->ssa->allocReg();
+        $out .= '  ' . $same . ' = icmp eq i64 ' . $addrI64 . ', ' . $ownI . "\n";
+        $relL = $this->ssa->allocLabel('refbox.ow');
+        $contL = $this->ssa->allocLabel('refbox.ow.cont');
+        $out .= '  br i1 ' . $same . ', label %' . $relL . ', label %' . $contL . "\n";
+        $out .= $relL . ":\n";
+        $old = $this->ssa->allocReg();
+        $out .= '  ' . $old . ' = load i64, ptr ' . $own . "\n";
+        $out .= $this->rcReleaseReg($old, $flavor);
+        $out .= '  br label %' . $contL . "\n";
+        $out .= $contL . ":\n";
         return $out;
     }
 

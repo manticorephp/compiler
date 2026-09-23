@@ -30,7 +30,10 @@ final class LocalSlots
     public array $refParamTypes = [];
     /** @var array<string, string> static-local / `global $x` name → global cell */
     public array $globalBacked = [];
-    /** @var array<string, true> locals captured by-ref by a closure (heap-boxed) */
+    /** @var array<string, Type> locals captured by-ref by a closure (heap-boxed)
+     *  → the captured value's type, which is what the box's last release drops
+     *  it by. A name captured at two different kinds reads `cell`: a raw word
+     *  there is a no-op to `__mir_cell_drop`, a leak rather than a misroute. */
     public array $byRefCaptured = [];
 
     /** @var array<string, true> locals this function `unset()`s anywhere — the
@@ -88,6 +91,13 @@ final class LocalSlots
      *  store node carries the VALUE's type, and the old value need not share it.
      *  Declared LAST — a field added mid-struct shifts every later offset. */
     public array $globalBackedType = [];
+
+    /** @var array<string, string> a local whose reference BOX this frame made
+     *  ({@see $byRefCaptured}, {@see $refCellTargets}) → the alloca holding
+     *  that box. The frame owns one count on it and gives it back on every
+     *  exit. Kept apart from the slot, which `$name = &$src` may rebind.
+     *  Declared LAST — a field added mid-struct shifts every later offset. */
+    public array $ownedBoxes = [];
 
     /**
      * Locals a reference CELL points at ({@see \Compile\Mir\RefCell_}). Only a
@@ -152,7 +162,9 @@ final class LocalSlots
             $i = 0;
             foreach ($cl->captures as $c) {
                 if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
-                    $this->byRefCaptured[$c->name] = true;
+                    $prev = $this->byRefCaptured[$c->name] ?? null;
+                    $this->byRefCaptured[$c->name] = ($prev === null || $prev->kind === $c->type->kind)
+                        ? $c->type : Type::cell();
                 }
                 $i = $i + 1;
             }

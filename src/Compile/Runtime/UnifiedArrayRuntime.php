@@ -1813,7 +1813,8 @@ final class UnifiedArrayRuntime
      * self-guards on ARRAY_TAG_MAGIC. The retain side ({@see
      * EmitLlvm::retainCellPayload}) co-owns a BORROWED cell-array so this release
      * balances (a rebuilt concrete array is a fresh +1 the cell owns outright).
-     * Scalars are no-ops.
+     * A reference (tag 9) → __mir_ref_release: the cell's count on the box
+     * ({@see emitRefBoxRc}). Scalars are no-ops.
      */
     private function emitCellDrop(): void
     {
@@ -1854,10 +1855,19 @@ final class UnifiedArrayRuntime
         $dorel->br($done);
 
         // tag 7: nested array → recursive cell release (self-guards ARRAY_MAGIC).
-        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $done);
+        $chkref = $fn->block('chkref');
+        $doref = $fn->block('doref');
+        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $chkref);
         $ap = $doarr->inttoptr($doarr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
         $doarr->call('__mir_array_release_cell', Type::void(), [$ap]);
         $doarr->br($done);
+
+        // tag 9: a reference — this holder's count on the box (self-guards
+        // REF_TAG_MAGIC, so a REF cell onto a non-box slot is left alone).
+        $chkref->brIf($chkref->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)), $doref, $done);
+        $rp = $doref->inttoptr($doref->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $doref->call('__mir_ref_release', Type::void(), [$rp]);
+        $doref->br($done);
 
         $done->retVoid();
     }
@@ -2165,10 +2175,17 @@ final class UnifiedArrayRuntime
         $doret->call('__mir_rc_retain', Type::void(), [$opp]);
         $doret->br($done);
 
-        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $done);
+        $chkref = $fn->block('chkref');
+        $doref = $fn->block('doref');
+        $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $chkref);
         $ap = $doarr->inttoptr($doarr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
         $doarr->call('__mir_array_retain', Type::void(), [$ap]);
         $doarr->br($done);
+
+        $chkref->brIf($chkref->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)), $doref, $done);
+        $rp = $doref->inttoptr($doref->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $doref->call('__mir_ref_retain', Type::void(), [$rp]);
+        $doref->br($done);
 
         $done->retVoid();
     }
@@ -3321,8 +3338,90 @@ final class UnifiedArrayRuntime
      */
     private function emitRefBox(): void
     {
+        $this->emitRefBoxRc();
         $this->emitRefBoxVariant('__mir_array_ref_box', '__mir_array_isset_int', '__mir_array_set_int', '__mir_array_ref_slot', false);
         $this->emitRefBoxVariant('__mir_array_ref_box_str', '__mir_array_isset_str', '__mir_array_set_str', '__mir_array_ref_slot_str', true);
+    }
+
+    /**
+     * The reference box's lifetime ({@see MemoryAbi::REF_TAG_MAGIC}):
+     *   `__mir_ref_new(v) -> data`  a box holding `v`, rc 1 (the maker's count);
+     *   `__mir_ref_retain(data)`    one more holder;
+     *   `__mir_ref_unref(data) -> i1`  one holder less, true when it was the
+     *                               LAST — the caller drops the value by the
+     *                               flavor it knows, then `__mir_ref_free`;
+     *   `__mir_ref_free(data)`      the box itself, value untouched;
+     *   `__mir_ref_release(data)`   unref + drop the value as a CELL + free —
+     *                               the REF-cell arm of `__mir_cell_drop`,
+     *                               where the value is always a cell.
+     * retain / unref / release answer no-op on an address whose `data-8` is
+     * not the magic: a REF cell or a by-ref capture may carry a property slot,
+     * a static or a caller's slot, and those have no count to touch.
+     */
+    private function emitRefBoxRc(): void
+    {
+        $i64 = Type::i64();
+        $magic = Value::int($i64, MemoryAbi::REF_TAG_MAGIC);
+        $rcOff = Value::int($i64, MemoryAbi::REF_RC_OFFSET);
+        $hdrOff = Value::int($i64, -8);
+
+        $fn = $this->module->func('__mir_ref_new', Type::ptr());
+        $v = $fn->param($i64, 'v');
+        $e = $fn->block('entry');
+        $base = $this->poolAlloc($e, Value::int($i64, MemoryAbi::REF_BOX_BYTES));
+        $e->store($magic, $base);
+        $data = $e->gep(Type::i8(), $base, [Value::int($i64, 8)]);
+        $e->store($v, $data);
+        $e->store(Value::int($i64, 1), $e->gep(Type::i8(), $data, [$rcOff]));
+        $e->ret($data);
+
+        $fn = $this->module->func('__mir_ref_retain', Type::void());
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $inc = $fn->block('inc');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('eq', $p, Value::null()), $done, $chk);
+        $chk->brIf($chk->icmp('eq', $chk->load($i64, $chk->gep(Type::i8(), $p, [$hdrOff])), $magic), $inc, $done);
+        $rcp = $inc->gep(Type::i8(), $p, [$rcOff]);
+        $inc->store($inc->add($inc->load($i64, $rcp), Value::int($i64, 1)), $rcp);
+        $inc->br($done);
+        $done->retVoid();
+
+        $fn = $this->module->func('__mir_ref_unref', Type::i1());
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $dec = $fn->block('dec');
+        $no = $fn->block('no');
+        $e->brIf($e->icmp('eq', $p, Value::null()), $no, $chk);
+        $chk->brIf($chk->icmp('eq', $chk->load($i64, $chk->gep(Type::i8(), $p, [$hdrOff])), $magic), $dec, $no);
+        $rcp = $dec->gep(Type::i8(), $p, [$rcOff]);
+        $n = $dec->sub($dec->load($i64, $rcp), Value::int($i64, 1));
+        $dec->store($n, $rcp);
+        $dec->ret($dec->icmp('sle', $n, Value::int($i64, 0)));
+        $no->ret(Value::int(Type::i1(), 0));
+
+        $fn = $this->module->func('__mir_ref_free', Type::void());
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        // The magic goes first: a stale holder that still reaches this block
+        // after its reuse must not read it as a live box.
+        $b = $e->gep(Type::i8(), $p, [$hdrOff]);
+        $e->store(Value::int($i64, 0), $b);
+        $this->poolFree($e, $b);
+        $e->retVoid();
+
+        $fn = $this->module->func('__mir_ref_release', Type::void());
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $last = $fn->block('last');
+        $done = $fn->block('done');
+        $e->brIf($e->call('__mir_ref_unref', Type::i1(), [$p]), $last, $done);
+        $last->call('__mir_cell_drop', Type::void(), [$last->load($i64, $p)]);
+        $last->call('__mir_ref_free', Type::void(), [$p]);
+        $last->br($done);
+        $done->retVoid();
     }
 
     private function emitRefBoxVariant(string $sym, string $issetFn, string $setFn, string $slotFn, bool $strKey): void
@@ -3383,8 +3482,9 @@ final class UnifiedArrayRuntime
         $haveBox = $have->inttoptr($have->and_($w, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
         $have->br($done);
 
-        $box = $this->poolAlloc($make, Value::int(Type::i64(), 8));
-        $make->store($w, $box);
+        // The element slot is the box's first holder: rc 1 is its count, and
+        // the array's element drop (`__mir_cell_drop`, tag 9) gives it back.
+        $box = $make->call('__mir_ref_new', Type::ptr(), [$w]);
         $bi = $make->ptrtoint($box, Type::i64());
         $cell = $make->or_($make->and_($bi, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)),
                            Value::int(Type::i64(), MemoryAbi::CELL_REF_TAG_BITS));

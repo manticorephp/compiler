@@ -63,6 +63,32 @@ Encoding: a cell's tag is the nibble at bits 48-51 (`EmitLlvmExpr::cellTagIr`),
 payload the low 48 bits. The container header magics in `MemoryAbi` run
 `RC_TAG_MAGIC` 0 … `CLOSURE_TAG_MAGIC` 7, so **8 is free** for the box header.
 
+## The box's lifetime (ABI v9)
+
+The box is `[REF_TAG_MAGIC@-8, value@0, rc@+8]` (`MemoryAbi::REF_*`); every
+reader addresses `data`, so the header moved nothing. Each holder owns one count:
+
+| holder | takes it | gives it back |
+|---|---|---|
+| the frame that made it (`use (&$x)`, `[&$a]`) | `__mir_ref_new` in the prologue | every return and the fall-through, and `unset($a)` (which hands the name a fresh box) |
+| a closure env's by-ref capture | `__mir_ref_retain` at the capture | the env's `__mc_drop` |
+| a REF cell in an array / property | `__mir_cell_retain` (tag 9) at the store | `__mir_cell_drop` (tag 9) |
+| an array element promoted by `[&$v[$k]]` | `__mir_array_ref_box` makes it rc 1 | the element's drop |
+
+The last holder drops the VALUE and frees the box. A holder that knows the
+value's representation drops it by that flavor — a ref-cell target holds a
+cell, a capture box holds the local's own type; a holder that does not (a REF
+cell, a capture of a box some other frame made) either drops it as a cell or
+frees the box shell alone, which leaks the value rather than misroute it.
+
+`retain` / `unref` check the magic first. A REF cell or a by-ref capture can
+still carry an address that is not a box — a property slot (`[&$o->p]`), a
+static, a caller's by-ref slot — and those have no count to touch.
+
+A store through a box the frame owns releases the value it held, as a module
+cell does, but only while the slot still points at that box: `$a = &$b`
+rebinds the slot, and the storage it points at then has another owner.
+
 ## The three seams
 
 1. **Create** — `boxToCell` (`EmitLlvmBuiltins:549`) gains a ref arm, and

@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **8** (v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **9** (v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
