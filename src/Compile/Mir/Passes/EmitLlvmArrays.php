@@ -223,14 +223,7 @@ trait EmitLlvmArrays
             $out .= $this->coerceToPtr();
             $base = $this->lastValue;
             $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceToI64();
-            // A byte OFFSET, so a tagged index has to come out of its box: an
-            // `int|false` strpos result carried into arithmetic reaches here as
-            // a cell, and its NaN bits read as an i64 are a vast offset — the
-            // helper's out-of-range arm then answers "" for every character.
-            if ($aa->index->type->kind === Type::KIND_CELL) {
-                $out .= $this->unboxCellInt($this->lastValue);
-            }
+            $out .= $this->coerceStrOffset($aa->index);
             $idx = $this->lastValue;
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
@@ -272,6 +265,35 @@ trait EmitLlvmArrays
         return $this->emitArrayAccessUnified($n, $aa);
     }
 
+    /**
+     * The just-emitted `$index` as a string byte OFFSET (a machine int). A CELL
+     * index — an `int|false` strpos result carried into arithmetic, a local a
+     * loop or an if/else join promoted to a cell — has to leave its box by tag:
+     * its NaN bits read as an i64 are a vast offset, which the read helper
+     * answers "" for and the write helper pads toward. A float truncates.
+     */
+    private function coerceStrOffset(Node $index): string
+    {
+        if ($index->type->kind === Type::KIND_CELL) {
+            $out = $this->coerceToI64();
+            $this->rt->needsTagged = true;
+            if ($this->rt->needsRefCells) {
+                $dr = $this->ssa->allocReg();
+                $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
+                $this->lastValue = $dr;
+            }
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsStrtol = true;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($this->lastValueType === 'double') { return $this->coerceTo('i64'); }
+        return $this->coerceToI64();
+    }
+
     private function emitStoreElement(StoreElement $n): string
     {
         $se = $n;
@@ -286,7 +308,7 @@ trait EmitLlvmArrays
             $out .= $this->coerceToPtr();
             $base = $this->lastValue;
             $out .= $this->emitNode($se->index);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceStrOffset($se->index);
             $idx = $this->lastValue;
             $out .= $this->emitNode($se->value);
             $out .= $this->coerceToPtr();

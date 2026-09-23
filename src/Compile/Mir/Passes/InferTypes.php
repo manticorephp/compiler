@@ -2176,7 +2176,14 @@ final class InferTypes implements Pass
                 }
                 continue;
             }
-            if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
+            // An ARRAY entry the body leaves a CELL (or the reverse) is the same
+            // disagreement {@see planMergeShadow} boxes at an if/else join — and
+            // that box-back is what usually produces it: the join inside the body
+            // hands the back-edge a tagged slot while the header, typed from the
+            // pre-loop raw vec, reads it as a buffer pointer.
+            $arrCell = ($st->isArray() && $bt->kind === Type::KIND_CELL)
+                || ($st->kind === Type::KIND_CELL && $bt->isArray());
+            if (!$arrCell && (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt))) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
@@ -2185,6 +2192,67 @@ final class InferTypes implements Pass
             }
         }
         return $out;
+    }
+
+    /**
+     * Where two control-flow paths meet with no if/else to plant a box-back on
+     * (a `switch` arm entered by a jump or by fall-through, the arms leaving
+     * it, a `catch` entered from anywhere in its `try`, the paths out of a
+     * `try`/`catch`): a name the paths hold in representations that share no
+     * raw word is pinned a cell for the whole function — the {@see loopMerge}
+     * discipline, so every store boxes and every read dispatches by tag.
+     *
+     * @param array<string, Type> $a
+     * @param array<string, Type> $b
+     * @return array<string, Type>
+     */
+    private function joinLocals(array $a, array $b): array
+    {
+        $out = $this->mergeLocals($a, $b);
+        foreach ($a as $name => $at) {
+            if (!isset($b[$name]) || !$this->joinDisagrees($at, $b[$name])) { continue; }
+            if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
+                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
+            $out[$name] = Type::cell();
+            if (!isset($this->cellLoopLocals[$name])) {
+                $this->cellLoopLocals[$name] = true;
+                $this->loopPromoGrew = true;
+            }
+        }
+        return $out;
+    }
+
+    /** Two reprs of one slot with no raw word in common — the pairs
+     *  {@see loopMerge} and {@see planMergeShadow} box. */
+    private function joinDisagrees(Type $a, Type $b): bool
+    {
+        if ($a->kind === $b->kind) { return false; }
+        if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
+        if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
+        if (($a->isArray() && $b->kind === Type::KIND_CELL)
+            || ($a->kind === Type::KIND_CELL && $b->isArray())) {
+            return true;
+        }
+        return $this->isScalarOrCell($a) && $this->isScalarOrCell($b);
+    }
+
+    /** @param Node[] $stmts  Ends in a jump: control never falls off the end. */
+    private static function stmtsJump(array $stmts): bool
+    {
+        $c = \count($stmts);
+        if ($c === 0) { return false; }
+        $k = $stmts[$c - 1]->kind;
+        return $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE
+            || $k === Node::KIND_RETURN || $k === Node::KIND_THROW;
+    }
+
+    /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */
+    private static function stmtsDiverge(array $stmts): bool
+    {
+        $c = \count($stmts);
+        if ($c === 0) { return false; }
+        $k = $stmts[$c - 1]->kind;
+        return $k === Node::KIND_RETURN || $k === Node::KIND_THROW;
     }
 
     private function widenNumeric(Type $a, Type $b): ?Type

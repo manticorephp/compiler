@@ -1009,14 +1009,26 @@ trait InferNodes
 
     private function inferTryCatch(TryCatch_ $n): Type
     {
+        $saved = $this->localTypes;
         foreach ($n->tryBody as $s) { $this->inferNode($s); }
+        $tryEnd = $this->localTypes;
+        // A catch is entered from ANY point of the try, so it sees the entry
+        // map and the try's end at once; the paths out are the try's end and
+        // every catch's. A name they re-kind is joined like a loop's.
+        $catchEntry = $this->joinLocals($saved, $tryEnd);
+        $exit = self::stmtsDiverge($n->tryBody) ? null : $tryEnd;
         foreach ($n->catches as $c) {
+            $this->localTypes = $catchEntry;
             // Bind `$e` to the first declared catch type (obj<T>).
             if ($c->var !== null && \count($c->types) > 0) {
                 $this->localTypes[$c->var] = Type::obj($c->types[0]);
             }
             foreach ($c->body as $s) { $this->inferNode($s); }
+            if (!self::stmtsDiverge($c->body)) {
+                $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
+            }
         }
+        $this->localTypes = $exit ?? $catchEntry;
         foreach ($n->finallyBody as $s) { $this->inferNode($s); }
         return Type::void();
     }
@@ -1778,11 +1790,27 @@ trait InferNodes
     {
         $this->inferNode($node->subject);
         $saved = $this->localTypes;
+        // An arm is entered by the jump from the subject AND, when the arm
+        // above does not end in a jump, by falling through it; control leaves
+        // by any arm that does not return/throw, or past every case when there
+        // is no `default`. A name those paths re-kind is joined like a loop's.
+        $prev = null;
+        $exit = null;
+        $hasDefault = false;
         foreach ($node->arms as $arm) {
+            if ($arm->value === null) { $hasDefault = true; }
+            $this->localTypes = $prev === null ? $saved : $this->joinLocals($saved, $prev);
             if ($arm->value !== null) { $this->inferNode($arm->value); }
             foreach ($arm->body as $s) { $this->inferNode($s); }
+            $prev = self::stmtsJump($arm->body) ? null : $this->localTypes;
+            if (!self::stmtsDiverge($arm->body)) {
+                $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
+            }
         }
-        $this->localTypes = $saved;
+        if (!$hasDefault || $exit === null) {
+            $exit = $exit === null ? $saved : $this->joinLocals($saved, $exit);
+        }
+        $this->localTypes = $exit;
         return Type::void();
     }
 

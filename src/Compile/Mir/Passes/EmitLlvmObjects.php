@@ -4598,7 +4598,7 @@ trait EmitLlvmObjects
             $out .= $this->coerceToPtr();
             $arr = $this->lastValue;
             $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceStrOffset($aa->index);
             $idx = $this->lastValue;
             $ok = $this->ssa->allocReg();
             $out .= '  ' . $ok . ' = call i1 @__mir_str_offset_isset(ptr ' . $arr
