@@ -256,6 +256,8 @@ trait LowerClasses
         $names = [];
         $types = [];
         $arrHinted = [];
+        /** @var array<string, bool> $neverObj */
+        $neverObj = [];
         $docList = [];
         $roProps = [];
         // Single inheritance: prepend the parent's properties so the
@@ -272,6 +274,7 @@ trait LowerClasses
                 $names[] = $pn;
                 $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
                 $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
+                $neverObj[$pn] = $pcd->propertyNeverObject[$pn] ?? false;
             $docList[$pn] = $pcd->propertyDocList[$pn] ?? false;
                 // readonly is NOT propagated: `readonlyDeclClass` walks the parent
                 // chain so the ORIGINAL declaring class drives the scope check
@@ -289,6 +292,7 @@ trait LowerClasses
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
                         $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
+                        $neverObj[$p->name] = $this->hintNeverObject($peff);
                         $docList[$p->name] = $this->isElemOnlyArrayDoc($peff);
                         if (($p->promotedReadonly ?? false) || $decl->isReadonly) { $roProps[$p->name] = true; }
                     }
@@ -364,6 +368,7 @@ trait LowerClasses
             if ($veff === null || $veff === '') { $pt = Type::cell(); }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
+            $neverObj[$prop->name] = $this->hintNeverObject($veff);
             $docList[$prop->name] = $this->isElemOnlyArrayDoc($veff);
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
         }
@@ -613,6 +618,7 @@ trait LowerClasses
         $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
+        $cd->propertyNeverObject = $neverObj;
         $cd->propertyDocList = $docList;
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;

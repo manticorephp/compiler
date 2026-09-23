@@ -621,6 +621,37 @@ trait LowerTypes
         return Type::obj($cls);
     }
 
+    /**
+     * Whether a declared `$hint` admits no object at all: every atom of it is an
+     * array spelling (`array`, `array<…>`, `list<…>`, `T[]`, `array{…}`), a
+     * scalar or null. `iterable`, `mixed`, `object` and any class name do not.
+     */
+    private function hintNeverObject(?string $hint): bool
+    {
+        if ($hint === null || $hint === '') { return false; }
+        $h = \strtolower(\trim($hint));
+        if ($h[0] === '?') { $h = \substr($h, 1); }
+        $atoms = [];
+        $depth = 0;
+        $cur = '';
+        $n = \strlen($h);
+        for ($i = 0; $i < $n; $i++) {
+            $c = $h[$i];
+            if ($c === '<' || $c === '{' || $c === '(') { $depth = $depth + 1; }
+            if ($c === '>' || $c === '}' || $c === ')') { $depth = $depth - 1; }
+            if ($c === '|' && $depth === 0) { $atoms[] = \trim($cur); $cur = ''; continue; }
+            $cur .= $c;
+        }
+        $atoms[] = \trim($cur);
+        foreach ($atoms as $a) {
+            if ($a === 'array' || \str_starts_with($a, 'array<') || \str_starts_with($a, 'array{')
+                || \str_starts_with($a, 'list<') || \str_ends_with($a, '[]')) { continue; }
+            if (\in_array($a, ['null', 'int', 'float', 'string', 'bool', 'false', 'true'], true)) { continue; }
+            return false;
+        }
+        return true;
+    }
+
     /** Whether `$hint` denotes a bare `array` with no element type. */
     private function isBareArrayHint(?string $hint): bool
     {
