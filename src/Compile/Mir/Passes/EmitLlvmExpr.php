@@ -2259,7 +2259,13 @@ trait EmitLlvmExpr
             $wantCell = $n->type->kind === Type::KIND_CELL;
             $res = $this->ssa->allocReg();
             $out = '  ' . $res . " = alloca i64\n";
+            // `$s[$k] ?? d` on a STRING is not isset: php throws for an array /
+            // object key and warns on `"1x"` ({@see EmitLlvmArrays::coerceStrOffset}).
+            $lft = $nc->left;
+            $this->strOffsetCoalesce = $lft instanceof \Compile\Mir\ArrayAccess_
+                && $lft->array->type->kind === Type::KIND_STRING;
             $out .= $this->emitIssetTarget($nc->left);
+            $this->strOffsetCoalesce = false;
             $present = $this->lastValue;
             $bit = $this->ssa->allocReg();
             $out .= '  ' . $bit . ' = icmp ne i64 ' . $present . ", 0\n";

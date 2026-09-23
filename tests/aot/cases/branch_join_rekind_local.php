@@ -3,6 +3,10 @@
 // boxed to a cell at an if/else join, a loop back-edge, a `continue`) must be
 // read with ONE representation on every path — and a cell used as a STRING
 // OFFSET must leave its box before it indexes bytes.
+//
+// Expected output is php's EXCEPT the offsetRules rows for "1x", "0x1", "1e": php
+// warns `Illegal string offset` and reads the leading int; Manticore throws that text
+// as a TypeError (where Zend warns, Manticore throws), so those rows are hand-written.
 
 function tables(): array
 {
@@ -294,9 +298,13 @@ function offsetRules(array $ks): string
     $out = '';
     foreach ($ks as $j => $k) {
         $s = 'abcd';
-        $line = \json_encode($k) . ':';
+        $line = (\is_object($k) ? \get_class($k) : \json_encode($k)) . ':';
         try { $line .= ' r=' . @$s[$k]; } catch (\TypeError $e) { $line .= ' r!' . \get_class($e) . ' ' . $e->getMessage(); }
-        if (!\is_float($k)) { $line .= ' i=' . (isset($s[$k]) ? 'y' : 'n'); }
+        if (!\is_float($k)) {
+            $line .= ' i=' . (isset($s[$k]) ? 'y' : 'n');
+            $line .= ' e=' . (empty($s[$k]) ? 'y' : 'n');
+            try { $line .= ' c=' . ($s[$k] ?? 'd'); } catch (\TypeError $e) { $line .= ' c!' . $e->getMessage(); }
+        }
         try { @$s[$k] = 'Z'; $line .= ' w=' . $s; } catch (\TypeError $e) { $line .= ' w!' . \get_class($e) . ' ' . $e->getMessage(); }
         $out .= $line . "\n";
     }
@@ -308,6 +316,13 @@ function stringOffset(string $k): string
 {
     $s = 'abcd';
     try { return $s[$k] . (isset($s[$k]) ? 'y' : 'n'); } catch (\TypeError $e) { return \get_class($e) . ' ' . $e->getMessage(); }
+}
+
+// `empty` on a statically STRING-typed offset probes, it does not throw
+function stringEmpty(string $k): string
+{
+    $s = 'abcd';
+    return (empty($s[$k]) ? 'y' : 'n') . (isset($s[$k]) ? 'y' : 'n');
 }
 
 $m = ['x' => [5, 6, 7, 8, 9, 10, 11]];
@@ -328,5 +343,6 @@ echo matchAssignVec($m), "\n";
 echo matchAssignInt([10]), "\n";
 echo ternaryAssignVec($m), "\n";
 echo ternaryAssignInt([10]), "\n";
-echo offsetRules(['1', ' 1', '1 ', '01', '-1', '+1', '1x', '0x1', 'x', '', ' ', '1.5', '1.', '.5', '1e2', '1e', '9223372036854775808', null, true, false, 1.7, 2]);
+echo offsetRules(['1', ' 1', '1 ', '01', '-1', '+1', '1x', '0x1', 'x', '', ' ', '1.5', '1.', '.5', '1e2', '1e', '9223372036854775808', null, true, false, 1.7, 2, '9', [1], new K(), new \stdClass()]);
 echo stringOffset('2'), ' ', stringOffset('x'), "\n";
+echo stringEmpty('1'), ' ', stringEmpty('x'), ' ', stringEmpty('1x'), ' ', stringEmpty('9'), ' ', stringEmpty('0'), "\n";

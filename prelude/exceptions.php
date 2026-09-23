@@ -127,16 +127,24 @@ function __mir_shape_type_error(mixed $v, string $where, string $expected): void
  * A string offset that arrived as a CELL or a STRING → the byte offset php
  * uses. Called from the IR ({@see \Compile\Mir\Passes\EmitLlvmArrays::
  * coerceStrOffset}), never from PHP source. An integer string (surrounding
- * whitespace allowed) is that int; an integer followed by other bytes (`"1x"`)
- * is its leading int, as php reads it; a float form, an overflow or no leading
- * integer at all is php's TypeError. A non-string casts (null 0, bool, float
- * truncates).
+ * whitespace allowed) is that int; a float form, an overflow or no leading
+ * integer at all is php's TypeError, and so is an array or an object. An
+ * integer followed by other bytes (`"1x"`) is where php WARNS `Illegal string
+ * offset` and reads the leading int — here it throws that text (where Zend
+ * warns, Manticore throws). null / bool / float cast (null 0, float truncates).
  */
 function __mir_str_offset(mixed $k): int
 {
+    if (\is_array($k) || \is_object($k)) {
+        throw new TypeError('Cannot access offset of type ' . (\is_object($k) ? \get_class($k) : 'array') . ' on string');
+    }
     if (!\is_string($k)) { return (int)$k; }
-    if (__mir_str_offset_form($k) === 2) {
+    $form = __mir_str_offset_form($k);
+    if ($form === 2) {
         throw new TypeError('Cannot access offset of type string on string');
+    }
+    if ($form === 1) {
+        throw new TypeError('Illegal string offset "' . $k . '"');
     }
     return (int)$k;
 }
@@ -144,13 +152,25 @@ function __mir_str_offset(mixed $k): int
 /**
  * `isset($s[$k])`'s key: the offset, or PHP_INT_MIN — out of range for every
  * string — when php's isset answers false whatever the length: any string
- * that is not a plain integer string.
+ * that is not a plain integer string, any array or object. `empty` and `??`
+ * probe through it too.
  */
 function __mir_str_offset_isset_key(mixed $k): int
 {
+    if (\is_array($k) || \is_object($k)) { return \PHP_INT_MIN; }
     if (!\is_string($k)) { return (int)$k; }
     if (__mir_str_offset_form($k) !== 0) { return \PHP_INT_MIN; }
     return (int)$k;
+}
+
+/**
+ * `$s[$k] ?? d`'s presence key: php reads it like the offset itself, except
+ * that a non-numeric string is simply absent (PHP_INT_MIN, no string has it).
+ */
+function __mir_str_offset_coalesce_key(mixed $k): int
+{
+    if (\is_string($k) && __mir_str_offset_form($k) === 2) { return \PHP_INT_MIN; }
+    return __mir_str_offset($k);
 }
 
 /**

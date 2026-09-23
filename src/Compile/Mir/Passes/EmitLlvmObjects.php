@@ -4594,11 +4594,15 @@ trait EmitLlvmObjects
             // String receiver: isset($s[$i]) — the binary-safe length lives in
             // the header (at ptr-16), NOT at ptr (that's the first data byte),
             // and a negative offset counts from the end — the helper does both.
+            // Taken before the operands are emitted: a nested `??` in the index
+            // must not see (or clear) this one's mode.
+            $mode = $this->strOffsetCoalesce ? 'coalesce' : 'isset';
+            $this->strOffsetCoalesce = false;
             $out = $this->emitNode($aa->array);
             $out .= $this->coerceToPtr();
             $arr = $this->lastValue;
             $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceStrOffset($aa->index, true);
+            $out .= $this->coerceStrOffset($aa->index, $mode);
             $idx = $this->lastValue;
             $ok = $this->ssa->allocReg();
             $out .= '  ' . $ok . ' = call i1 @__mir_str_offset_isset(ptr ' . $arr

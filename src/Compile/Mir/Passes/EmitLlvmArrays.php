@@ -223,7 +223,9 @@ trait EmitLlvmArrays
             $out .= $this->coerceToPtr();
             $base = $this->lastValue;
             $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceStrOffset($aa->index);
+            // A PROBE (`empty($s[$k])`, `$s[$k] ?? d`) asks whether the offset
+            // exists, as isset does: a key php cannot use is absent, not an error.
+            $out .= $this->coerceStrOffset($aa->index, $aa->probe ? 'isset' : 'read');
             $idx = $this->lastValue;
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = call ptr @__mir_str_char_at(ptr '
@@ -265,6 +267,10 @@ trait EmitLlvmArrays
         return $this->emitArrayAccessUnified($n, $aa);
     }
 
+    /** Set by `??` around its presence test on a string base; read and cleared
+     *  by the isset arm ({@see coerceStrOffset} 'coalesce'). */
+    private bool $strOffsetCoalesce = false;
+
     /**
      * The just-emitted `$index` as a string byte OFFSET (a machine int), by
      * php's rules for a string offset. A CELL index — an `int|false` strpos
@@ -272,17 +278,19 @@ trait EmitLlvmArrays
      * cell — must leave its box: its NaN bits read as an i64 are a vast offset.
      * An inline int cell unboxes in place; any other cell, and a STRING index,
      * goes to the prelude ({@see __mir_str_offset}): a numeric string is its
-     * int, a non-numeric one php's TypeError. For `isset` ($isset) a string
-     * that is not a plain integer maps to an offset no string has, so the
-     * isset helper answers false instead of throwing. A float truncates.
+     * int, a non-numeric one php's TypeError. $mode 'isset' (isset, empty, a
+     * probe read) maps a key php cannot use to an offset no string has, so the
+     * isset helper answers false instead of throwing; 'coalesce' (the presence
+     * test of `??`) does that only for a non-numeric string and throws for the
+     * rest, as php does. A float truncates.
      */
-    private function coerceStrOffset(Node $index, bool $isset = false): string
+    private function coerceStrOffset(Node $index, string $mode): string
     {
         $k = $index->type->kind;
         if ($k === Type::KIND_STRING) {
             $out = $this->coerceToPtr();
             $out .= $this->boxToCell(Type::string_());
-            return $out . $this->strOffsetViaPrelude($isset);
+            return $out . $this->strOffsetViaPrelude($mode);
         }
         if ($k !== Type::KIND_CELL) {
             if ($this->lastValueType === 'double') { return $this->coerceTo('i64'); }
@@ -313,7 +321,7 @@ trait EmitLlvmArrays
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
         $this->lastValue = $cell;
-        $out .= $this->strOffsetViaPrelude($isset);
+        $out .= $this->strOffsetViaPrelude($mode);
         $sv = $this->lastValue;
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -326,9 +334,11 @@ trait EmitLlvmArrays
 
     /** `lastValue` (a cell word) through the prelude's string-offset decode. A
      *  prelude fn takes and returns i64 words ({@see __mir_shape_type_error}). */
-    private function strOffsetViaPrelude(bool $isset): string
+    private function strOffsetViaPrelude(string $mode): string
     {
-        $fn = $isset ? 'manticore___mir_str_offset_isset_key' : 'manticore___mir_str_offset';
+        $fn = 'manticore___mir_str_offset';
+        if ($mode === 'isset') { $fn = 'manticore___mir_str_offset_isset_key'; }
+        if ($mode === 'coalesce') { $fn = 'manticore___mir_str_offset_coalesce_key'; }
         $r = $this->ssa->allocReg();
         $out = '  ' . $r . ' = call i64 @' . $fn . '(i64 ' . $this->lastValue . ")\n";
         $this->lastValue = $r;
@@ -350,7 +360,7 @@ trait EmitLlvmArrays
             $out .= $this->coerceToPtr();
             $base = $this->lastValue;
             $out .= $this->emitNode($se->index);
-            $out .= $this->coerceStrOffset($se->index);
+            $out .= $this->coerceStrOffset($se->index, 'read');
             $idx = $this->lastValue;
             $out .= $this->emitNode($se->value);
             $out .= $this->coerceToPtr();
