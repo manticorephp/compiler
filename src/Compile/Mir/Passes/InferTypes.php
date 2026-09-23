@@ -369,8 +369,10 @@ final class InferTypes implements Pass
      *  branches stay concrete (forward inference), reads after read the cell. */
     private array $cellMergeLocals = [];
     /** @var array<string,bool> locals used as an array INDEX/KEY anywhere in the
-     *  fn — ineligible for cell-merge promotion (the cell-key store/access path
-     *  does not yet render a NaN-boxed key, so a merge-cell key mis-dispatches). */
+     *  fn — ineligible for the if/else cell-merge shadow. NOT for the LOOP
+     *  promotion ({@see loopMerge}): a key the back-edge re-kinds has no raw repr
+     *  both sides agree on, and skipping it left the header load typed by the
+     *  pre-loop store while the body stored a cell (`$c = $prev[$c] ?? -1`). */
     private array $keyUsedLocals = [];
     /** @var array<string,bool> locals used as an ARITHMETIC operand (`+ - * / %`,
      *  unary `-`) anywhere in the fn. Discriminates the one ambiguous loop shape:
@@ -2166,8 +2168,7 @@ final class InferTypes implements Pass
             // `$x = null;` seed via `box_null`. A numeric body types directly, so
             // no entry/body chicken-and-egg — key on the body kind here.
             if ($st->kind === Type::KIND_NULL && ($this->nullBoxesWith($bt) || $arithUnknown)) {
-                if (isset($this->keyUsedLocals[$name])
-                    || isset($this->refPinnedLocals[$name])) { continue; }
+                if (isset($this->refPinnedLocals[$name])) { continue; }
                 $out[$name] = Type::cell();
                 if (!isset($this->cellLoopLocals[$name])) {
                     $this->cellLoopLocals[$name] = true;
@@ -2176,8 +2177,7 @@ final class InferTypes implements Pass
                 continue;
             }
             if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
-            if (isset($this->keyUsedLocals[$name])
-                || isset($this->refPinnedLocals[$name])) { continue; }
+            if (isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
                 $this->cellLoopLocals[$name] = true;
