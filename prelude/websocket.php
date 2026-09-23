@@ -241,6 +241,8 @@ final class Connection implements \IteratorAggregate
     private ?\Async\Mutex $wlock = null;
     private ?\Async\TaskGroup $scope = null;
     private ?\Async\Task $deadline = null;
+    /** The task that built this connection: the server session, or the client's connect() caller. */
+    private ?\Async\Task $owner = null;
     private bool $reading = false;
     private bool $sentClose = false;
     private bool $gotClose = false;
@@ -265,6 +267,7 @@ final class Connection implements \IteratorAggregate
         $scope = \Async\Context::currentScope();
         if ($scope !== null) {
             $this->scope = $scope;
+            $this->owner = \Async\Scheduler::instance()->current();
             $this->wlock = new \Async\Mutex();
         }
     }
@@ -324,10 +327,12 @@ final class Connection implements \IteratorAggregate
     }
 
     /**
-     * Start the closing handshake. Called while another task is reading, it
-     * sends the Close and arms the closeTimeout deadline — that reader sees the
-     * answer and returns null. Called with no reader, it waits here, up to
-     * closeTimeout, for the peer's Close, discarding data frames.
+     * Start the closing handshake. From any task but the owner (a broadcaster
+     * kicking a client), or while a read is in flight, it sends the Close and
+     * arms the closeTimeout deadline — the owner's next or current receive()
+     * sees the answer (or the deadline's EOF) and returns null. The owner with
+     * no read in flight waits here, up to closeTimeout, for the peer's Close,
+     * discarding data frames.
      */
     public function close(int $code = 1000, string $reason = ''): void
     {
@@ -343,11 +348,17 @@ final class Connection implements \IteratorAggregate
         if (!$this->sendClose($code, $reason)) {
             return;
         }
-        if ($this->reading) {
+        if ($this->reading || !$this->isOwner()) {
             $this->armDeadline();
             return;
         }
         $this->awaitPeerClose();
+    }
+
+    private function isOwner(): bool
+    {
+        $o = $this->owner;
+        return $o === null || \Async\Scheduler::instance()->current() === $o;
     }
 
     /** @internal Server side: run the upgrade's session to its end. */
@@ -359,9 +370,15 @@ final class Connection implements \IteratorAggregate
                 if ($this->closed || $this->sentClose) {
                     return;
                 }
-                if ($this->sendClose(1001, 'server shutdown')) {
-                    $this->armDeadline();
+                // Never park stop() behind a writer stuck on a full send
+                // buffer: skip the Close, the deadline still ends it (1006).
+                $l = $this->wlock;
+                if ($l === null || !$l->isLocked()) {
+                    if (!$this->sendClose(1001, 'server shutdown')) {
+                        return;
+                    }
                 }
+                $this->armDeadline();
             });
         }
         try {

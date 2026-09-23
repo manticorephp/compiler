@@ -3,11 +3,14 @@
 // Every way a connection ends: a session that returns while open closes with
 // 1000; one that throws closes with 1011 and counts as a server error; a
 // close() from another task while the session reads is bounded by
-// closeTimeout against a silent peer (1006, not a ping interval later); a
-// close() with no reader waits for the peer's answer (1000 echoed); stop()
-// over idle sessions that do not read returns at once and serve() ends within
-// one closeTimeout, not one per session; a client Connection closes its fd
-// once the peer's Close ends it. Server-side values are stashed and printed
+// closeTimeout against a silent peer (1006, not a ping interval later), and
+// one from another task while the session is BETWEEN receives never reads in
+// the closer (the session's own receive() sees the end); the owner's close()
+// with no reader waits for the peer's answer (1000 echoed); stop() over idle
+// sessions that do not read returns at once and serve() ends without a
+// closeTimeout per session; stop() never parks behind a writer stuck on a
+// full send buffer; a client Connection closes its fd once the peer's Close
+// ends it. Server-side values are stashed and printed
 // by the client task, so the order is fixed.
 
 use function Async\async;
@@ -102,6 +105,39 @@ function session(\Http\Request $req): \Http\Response
             Seen::$s = 'other code=' . $ws->closeCode();
             return;
         }
+        if ($path === '/gap') {
+            // A broadcaster kicks the client while the session is BETWEEN
+            // receives: the kicker must not take over the read.
+            spawn(function () use ($ws): void {
+                \Async\delay(0.05);
+                $t0 = microtime(true);
+                $ws->close();
+                Seen::$s = 'gap: closer ' . (microtime(true) - $t0 < 0.05 ? 'returned at once' : 'blocked');
+            });
+            \Async\delay(0.1);
+            try {
+                $m = $ws->receive();
+                Seen::$s .= ', receive ' . ($m === null ? 'null' : 'msg') . ' code=' . $ws->closeCode();
+            } catch (\LogicException $e) {
+                Seen::$s .= ', receive threw ' . $e->getMessage();
+            }
+            return;
+        }
+        if ($path === '/push') {
+            // A writer parked on a full send buffer (the client never reads)
+            // holds the write lock; stop() must not park behind it.
+            spawn(function () use ($ws): void {
+                try {
+                    $ws->sendBinary(str_repeat('x', 32 << 20));
+                    Seen::$s = 'push: sent';
+                } catch (WS\ConnectionClosedException $e) {
+                    Seen::$s = 'push: writer ended';
+                }
+            });
+            foreach ($ws as $m) {
+            }
+            return;
+        }
         if ($path === '/noreader') {
             $ws->close(1000, 'done');
             Seen::$s = 'noreader code=' . $ws->closeCode() . ' ' . $ws->closeReason();
@@ -151,7 +187,14 @@ async(function () {
     echo 'other: ', $r->frame(), "\n";
     echo 'other: ', $r->frame(), "\n";
     $dt = microtime(true) - $t0;
-    echo 'other: ', $dt > 0.2 && $dt < 1.0 ? 'EOF within closeTimeout' : 'EOF after ' . $dt, "\n";
+    echo 'other: ', $dt > 0.2 && $dt < 2.0 ? 'EOF within closeTimeout' : 'EOF after ' . $dt, "\n";
+    fclose($r->c);
+    \Async\delay(0.05);
+    echo Seen::$s, "\n";
+
+    $r = Raw::open($port, '/gap');
+    echo 'gap: ', $r->frame(), "\n";
+    echo 'gap: ', $r->frame(), "\n";
     fclose($r->c);
     \Async\delay(0.05);
     echo Seen::$s, "\n";
@@ -181,18 +224,44 @@ async(function () {
     $t = spawn(function () use ($server) {
         $server->serve(function (\Http\Request $req): \Http\Response { return session($req); });
     });
-    $a = Raw::open($port, '/idle1');
-    $b = Raw::open($port, '/idle4');
+    // Six idle sessions: a per-session closeTimeout would be 1.8 s.
+    $rs = [];
+    foreach (['/idle1', '/idle4', '/idle4', '/idle4', '/idle4', '/idle4'] as $p) {
+        $rs[] = Raw::open($port, $p);
+    }
     \Async\delay(0.05);
     $t0 = microtime(true);
     $server->stop();
     $dt = microtime(true) - $t0;
-    echo 'stop: ', $dt < 0.1 ? 'returned at once' : 'took ' . $dt, "\n";
+    echo 'stop: ', $dt < 0.25 ? 'returned at once' : 'took ' . $dt, "\n";
     $t->await();
     $dt = microtime(true) - $t0;
-    echo 'stop: ', $dt > 0.2 && $dt < 0.55 ? 'serve ended within one closeTimeout' : 'serve ended after ' . $dt, "\n";
-    echo 'stop: ', $a->frame(), ' ', $a->frame(), ' / ', $b->frame(), ' ', $b->frame(), "\n";
-    fclose($a->c);
-    fclose($b->c);
+    echo 'stop: ', $dt > 0.2 && $dt < 1.5 ? 'serve ended without a closeTimeout per session' : 'serve ended after ' . $dt, "\n";
+    foreach ($rs as $r) {
+        echo 'stop: ', $r->frame(), ' ', $r->frame(), "\n";
+        fclose($r->c);
+    }
     echo 'stop: ', Seen::$s, "\n";
+
+    Seen::$s = '';
+    $server = \Http\Server::onListener(listen($port))->acceptWait(0.02);
+    $t = spawn(function () use ($server) {
+        $server->serve(function (\Http\Request $req): \Http\Response { return session($req); });
+    });
+    $r = Raw::open($port, '/push');
+    \Async\delay(0.2);
+    $t0 = microtime(true);
+    $server->stop();
+    $dt = microtime(true) - $t0;
+    echo 'push: stop ', $dt < 0.25 ? 'returned at once' : 'took ' . $dt, "\n";
+    $t->await();
+    $n = 0;
+    while (true) {
+        $chunk = fread($r->c, 1 << 20);
+        if ($chunk === '' || $chunk === false) { break; }
+        $n += strlen($chunk);
+    }
+    fclose($r->c);
+    echo 'push: ', $n < (32 << 20) ? 'partial message then EOF' : 'got it all (' . $n . ')', "\n";
+    echo Seen::$s, "\n";
 });

@@ -7,6 +7,9 @@ other: 8:1000:
 other: EOF
 other: EOF within closeTimeout
 other code=1006
+gap: 8:1000:
+gap: EOF
+gap: closer returned at once, receive null code=1006
 noreader: 8:1000:done
 noreader: EOF
 noreader code=1000 ok
@@ -14,6 +17,14 @@ client: hi
 client: null code=1000 bye
 client: fd closed
 stop: returned at once
-stop: serve ended within one closeTimeout
-stop: 8:1001:server shutdown EOF / 8:1001:server shutdown EOF
-stop: null:1006 null:1006 
+stop: serve ended without a closeTimeout per session
+stop: 8:1001:server shutdown EOF
+stop: 8:1001:server shutdown EOF
+stop: 8:1001:server shutdown EOF
+stop: 8:1001:server shutdown EOF
+stop: 8:1001:server shutdown EOF
+stop: 8:1001:server shutdown EOF
+stop: null:1006 null:1006 null:1006 null:1006 null:1006 null:1006 
+push: stop returned at once
+push: partial message then EOF
+push: writer ended
