@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **9** (v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **10** (v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -69,7 +69,7 @@ offset 8  : i64  rc_word               -- packed rc | color | buffered
 offset 16 : ...  properties
 ```
 
-The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr }`, 40 bytes) is a static global, `linkonce_odr`
+The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr, ptr, i64 }`, 56 bytes) is a static global, `linkonce_odr`
 so each class has exactly one across every separately-linked object:
 
 ```
@@ -81,6 +81,12 @@ descriptor + 32 : ptr  props_fn     -- @__mir_props_<id>: declared props + bag a
                                        assoc; what json_encode / (array) / get_object_vars
                                        read from inside stdlib.o. Null for a class with
                                        neither properties nor a bag
+descriptor + 40 : ptr  cmp_view_fn  -- @__mir_cmpview_<id>: the COMPARE view as a FRESH assoc —
+                                       every declared prop (any visibility) then the bag, or
+                                       only the #[CompareKey] props. Null: nothing to compare
+descriptor + 48 : i64  cmp_group    -- objects compare through their views only within one
+                                       group: the class id, CMP_GROUP_KEYED (-1) for every
+                                       #[CompareKey] class, 0 (identity only) for an enum
 ```
 
 `instanceof`, method dispatch and exception catch read `class_id` at descriptor offset 0;

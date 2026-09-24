@@ -1636,7 +1636,7 @@ trait InferNodes
             // a static `B|C` union, so the method-call site dispatches on the
             // runtime class_id instead of binding to the then-branch's class. A
             // single shared class collapses back to `obj<…>` in Type::union.
-            $node->type = Type::union([$t, $e]);
+            $node->type = $this->objUnion([$t, $e]);
         }
         // `$c ? [] : [$x]` — an EMPTY array literal carries NO element type, so
         // the sibling arm's type is the whole answer. The `$t->kind === $e->kind`

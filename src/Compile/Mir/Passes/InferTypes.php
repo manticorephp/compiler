@@ -2612,8 +2612,28 @@ final class InferTypes implements Pass
         foreach ($types as $t) {
             if ($t->kind !== Type::KIND_OBJ) { $allObj = false; break; }
         }
-        if ($allObj) { return Type::union($types); }
+        if ($allObj) { return $this->objUnion($types); }
         return $first;
+    }
+
+    /**
+     * {@see Type::union} for arms this pass knows the classes of. An ENUM case
+     * is carried as its ORDINAL, not a pointer, so a union that names an enum
+     * next to another class has no representation — `E::B` and `F::Z` are both
+     * ordinal 1, and every consumer (var_dump, a boxed return, `==`) read the
+     * ordinal as an object pointer and faulted. Such a join is a `cell`: each
+     * arm boxes its own case singleton ({@see EmitLlvmBuiltins::boxToCell}).
+     *
+     * @param Type[] $arms
+     */
+    private function objUnion(array $arms): Type
+    {
+        $u = Type::union($arms);
+        if ($u->kind !== Type::KIND_UNION) { return $u; }
+        foreach ($u->atoms as $a) {
+            if (isset($this->enums[$a->class ?? ''])) { return Type::cell(); }
+        }
+        return $u;
     }
 
     private function unionPropType(Type $u, string $prop): ?Type

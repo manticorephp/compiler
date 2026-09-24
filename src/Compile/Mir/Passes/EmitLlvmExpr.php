@@ -852,6 +852,17 @@ trait EmitLlvmExpr
     private function shallowBoxToCell(Type $t): string
     {
         $this->rt->needsTagged = true;
+        if ($this->isEnumType($t)) {
+            // A case is an ORDINAL; its cell is the case SINGLETON. box_object
+            // of the ordinal handed every tagged consumer a tiny int as an
+            // object pointer.
+            $out = $this->coerceToI64();
+            $pp = '';
+            $out .= $this->emitEnumSingletonPtr((string)$t->class, $this->lastValue, $pp);
+            $this->lastValue = $pp;
+            $this->lastValueType = 'ptr';
+            return $out . $this->shallowBoxCall('ptr', '@__manticore_box_object');
+        }
         return match ($t->kind) {
             Type::KIND_CELL, Type::KIND_UNKNOWN => $this->coerceToI64(),
             Type::KIND_ARRAY  => $this->shallowBoxCall('ptr', '@__manticore_box_array'),
@@ -1375,50 +1386,85 @@ trait EmitLlvmExpr
      * `__mir_obj_compare(a, b, mode) -> i64` — php's `==` (mode 0: 1/0) and
      * `<=>` (mode 1: -1/0/1) on two RAW object pointers (either may be null).
      *
-     * The same instance is equal. Objects of different classes never are, and
-     * order as uncomparable (1). Two objects of ONE class compare their
-     * properties as php does — the declared ones in declaration order, then the
-     * dynamic ones — which is exactly an array compare of the
-     * `assoc[string, cell]` the descriptor's props_fn builds
-     * ({@see \Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET}). That is a pure
-     * function of the class, reached through the object, so this body reads no
-     * module-local table and is safe to coalesce as `linkonce_odr`.
+     * The same instance is equal. Anything that is not an rc'd class instance
+     * — an enum case singleton (ENUM_TAG_MAGIC), a closure env — compares by
+     * identity alone, and two distinct ones are UNCOMPARABLE (1), as php's
+     * enum and closure handlers answer. Two instances compare their COMPARE
+     * VIEWS ({@see \Compile\MemoryAbi::DESCRIPTOR_CMP_VIEW_FN_OFFSET}) when
+     * their compare GROUPS agree (the same class, or two `#[CompareKey]`
+     * classes), else they are uncomparable. Everything is read through the
+     * descriptor, so this body is a pure function and coalesces as
+     * `linkonce_odr`.
      *
-     * A nesting deeper than 64 (a cyclic graph php would refuse with "Nesting
-     * level too deep") answers unequal rather than recursing forever.
+     * Recursion is php's protection flag: the objects on the left of every
+     * compare in flight sit on a stack of frames (`{obj, prev}`, allocas
+     * linked from `@__mir_obj_cmp_top`), and meeting one again throws
+     * "Nesting level too deep - recursive dependency?". No depth limit — a
+     * long chain that is not a cycle compares all the way down.
      */
     private function objCompareRuntime(): string
     {
-        $pf = (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET;
-        $out  = "\n@__mir_obj_cmp_depth = linkonce_odr global i64 0\n";
+        $pf = (string)\Compile\MemoryAbi::DESCRIPTOR_CMP_VIEW_FN_OFFSET;
+        $gf = (string)\Compile\MemoryAbi::DESCRIPTOR_CMP_GROUP_OFFSET;
+        $rcMagic = (string)\Compile\MemoryAbi::RC_TAG_MAGIC;
+        $out  = "\n@__mir_obj_cmp_top = linkonce_odr global ptr null\n";
         $out .= "define i64 @__mir_obj_compare(i64 %a, i64 %b, i64 %mode) {\nentry:\n";
         $out .= "  %iseq = icmp eq i64 %mode, 0\n";
         $out .= "  %same = icmp eq i64 %a, %b\n";
         $out .= "  br i1 %same, label %equal, label %nulls\n";
         $out .= "nulls:\n";
-        $out .= "  %az = icmp eq i64 %a, 0\n  %bz = icmp eq i64 %b, 0\n  %anyz = or i1 %az, %bz\n";
-        $out .= "  br i1 %anyz, label %differ, label %descs\n";
-        $out .= "descs:\n";
+        $out .= "  %az = icmp ult i64 %a, 65536\n  %bz = icmp ult i64 %b, 65536\n  %anyz = or i1 %az, %bz\n";
+        $out .= "  br i1 %anyz, label %differ, label %magic\n";
+        $out .= "magic:\n";
         $out .= "  %pa = inttoptr i64 %a to ptr\n  %pb = inttoptr i64 %b to ptr\n";
+        $out .= "  %mpa = getelementptr inbounds i8, ptr %pa, i64 -8\n  %ma = load i64, ptr %mpa\n";
+        $out .= "  %mpb = getelementptr inbounds i8, ptr %pb, i64 -8\n  %mb = load i64, ptr %mpb\n";
+        $out .= "  %oka = icmp eq i64 %ma, $rcMagic\n  %okb = icmp eq i64 %mb, $rcMagic\n";
+        $out .= "  %okab = and i1 %oka, %okb\n";
+        $out .= "  br i1 %okab, label %descs, label %differ\n";
+        $out .= "descs:\n";
         $out .= "  %da = load ptr, ptr %pa\n  %db = load ptr, ptr %pb\n";
         $out .= "  %dan = icmp eq ptr %da, null\n  %dbn = icmp eq ptr %db, null\n  %dnn = or i1 %dan, %dbn\n";
-        $out .= "  br i1 %dnn, label %differ, label %ids\n";
-        $out .= "ids:\n";
-        $out .= "  %ia = load i64, ptr %da\n  %ib = load i64, ptr %db\n";
-        $out .= "  %sameid = icmp eq i64 %ia, %ib\n";
-        $out .= "  br i1 %sameid, label %propsfn, label %differ\n";
-        $out .= "propsfn:\n";
-        $out .= "  %fpp = getelementptr inbounds i8, ptr %da, i64 $pf\n";
-        $out .= "  %fp = load ptr, ptr %fpp\n";
-        $out .= "  %nofp = icmp eq ptr %fp, null\n";
-        $out .= "  br i1 %nofp, label %equal, label %depth\n";
-        $out .= "depth:\n";
-        $out .= "  %d0 = load i64, ptr @__mir_obj_cmp_depth\n";
-        $out .= "  %deep = icmp sge i64 %d0, 64\n";
-        $out .= "  br i1 %deep, label %differ, label %walk\n";
+        $out .= "  br i1 %dnn, label %differ, label %groups\n";
+        $out .= "groups:\n";
+        $out .= "  %gpa = getelementptr inbounds i8, ptr %da, i64 $gf\n  %ga = load i64, ptr %gpa\n";
+        $out .= "  %gpb = getelementptr inbounds i8, ptr %db, i64 $gf\n  %gb = load i64, ptr %gpb\n";
+        $out .= "  %sameg = icmp eq i64 %ga, %gb\n  %gz = icmp eq i64 %ga, 0\n";
+        $out .= "  %ngz = xor i1 %gz, true\n  %gok = and i1 %sameg, %ngz\n";
+        $out .= "  br i1 %gok, label %views, label %differ\n";
+        $out .= "views:\n";
+        $out .= "  %fpa = getelementptr inbounds i8, ptr %da, i64 $pf\n  %fa = load ptr, ptr %fpa\n";
+        $out .= "  %fpb = getelementptr inbounds i8, ptr %db, i64 $pf\n  %fb = load ptr, ptr %fpb\n";
+        $out .= "  %fan = icmp eq ptr %fa, null\n  %fbn = icmp eq ptr %fb, null\n";
+        $out .= "  %fboth = and i1 %fan, %fbn\n";
+        $out .= "  br i1 %fboth, label %equal, label %fone\n";
+        $out .= "fone:\n";
+        $out .= "  %fany = or i1 %fan, %fbn\n";
+        $out .= "  br i1 %fany, label %differ, label %scan\n";
+        // Recursion: is `a` already on the left of a compare in flight?
+        $out .= "scan:\n";
+        $out .= "  %top = load ptr, ptr @__mir_obj_cmp_top\n  br label %sloop\n";
+        $out .= "sloop:\n";
+        $out .= "  %cur = phi ptr [ %top, %scan ], [ %nxt, %snext ]\n";
+        $out .= "  %cend = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %cend, label %walk, label %sbody\n";
+        $out .= "sbody:\n";
+        $out .= "  %co = load ptr, ptr %cur\n  %hit = icmp eq ptr %co, %pa\n";
+        $out .= "  br i1 %hit, label %recur, label %snext\n";
+        $out .= "snext:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %cur, i64 8\n  %nxt = load ptr, ptr %np\n";
+        $out .= "  br label %sloop\n";
+        $out .= "recur:\n";
+        // The throw unwinds every compare in flight: none of them catches.
+        $out .= "  store ptr null, ptr @__mir_obj_cmp_top\n";
+        $out .= "  call i64 @manticore___mir_obj_cmp_recursion()\n";
+        $out .= "  br label %differ\n";
         $out .= "walk:\n";
-        $out .= "  %d1 = add i64 %d0, 1\n  store i64 %d1, ptr @__mir_obj_cmp_depth\n";
-        $out .= "  %xa = call i64 %fp(ptr %pa)\n  %xb = call i64 %fp(ptr %pb)\n";
+        $out .= "  %fr = alloca [2 x ptr]\n";
+        $out .= "  store ptr %pa, ptr %fr\n";
+        $out .= "  %frp = getelementptr inbounds i8, ptr %fr, i64 8\n  store ptr %top, ptr %frp\n";
+        $out .= "  store ptr %fr, ptr @__mir_obj_cmp_top\n";
+        $out .= "  %xa = call i64 %fa(ptr %pa)\n  %xb = call i64 %fb(ptr %pb)\n";
         $out .= "  %xap = inttoptr i64 %xa to ptr\n  %xbp = inttoptr i64 %xb to ptr\n";
         $out .= "  br i1 %iseq, label %weq, label %wcmp\n";
         $out .= "weq:\n";
@@ -1428,9 +1474,9 @@ trait EmitLlvmExpr
         $out .= "  %lc = call i64 @__mir_array_compare(ptr %xap, i64 0, ptr %xbp, i64 0)\n  br label %done\n";
         $out .= "done:\n";
         $out .= "  %r = phi i64 [ %lez, %weq ], [ %lc, %wcmp ]\n";
+        $out .= "  store ptr %top, ptr @__mir_obj_cmp_top\n";
         $out .= "  call void @__mir_array_release_cell(ptr %xap)\n";
         $out .= "  call void @__mir_array_release_cell(ptr %xbp)\n";
-        $out .= "  store i64 %d0, ptr @__mir_obj_cmp_depth\n";
         $out .= "  ret i64 %r\n";
         $out .= "equal:\n";
         $out .= "  %er = select i1 %iseq, i64 1, i64 0\n  ret i64 %er\n";
@@ -3756,6 +3802,10 @@ trait EmitLlvmExpr
                 return $out;
             }
         }
+        // Objects and enum cases: php's object compare ({@see looseObjCmpIr}).
+        if ($this->looseObjPair($n->left->type, $n->right->type, true)) {
+            return $out . $this->looseObjCmpIr($l, $lt, $n->left->type, $r, $rt, $n->right->type, false);
+        }
         // Raw numbers: an inline compare, no boxing. int/bool ride i64; anything
         // with a float side goes through doubles.
         $lRawNum = $lk === Type::KIND_INT || $lk === Type::KIND_BOOL || $lk === Type::KIND_FLOAT;
@@ -3909,7 +3959,14 @@ trait EmitLlvmExpr
      */
     private function isObjishType(Type $t): bool
     {
-        if ($t->kind === Type::KIND_UNION) { return true; }
+        if ($t->kind === Type::KIND_UNION) {
+            // An enum atom is an ORDINAL carrier; such a union has no pointer
+            // to compare (InferTypes::objUnion no longer forms one).
+            foreach ($t->atoms as $a) {
+                if (isset($this->enums[$a->class ?? ''])) { return false; }
+            }
+            return true;
+        }
         return $t->kind === Type::KIND_OBJ && !isset($this->enums[$t->class ?? '']);
     }
 
@@ -3970,12 +4027,42 @@ trait EmitLlvmExpr
     }
 
     /** Whether a loose compare of these two static types takes {@see looseObjCmpIr}. */
-    private function looseObjPair(Type $a, Type $b): bool
+    private function looseObjPair(Type $a, Type $b, bool $ordering = false): bool
     {
-        $ao = $this->isObjishType($a);
-        $bo = $this->isObjishType($b);
+        $ae = $this->isEnumType($a);
+        $be = $this->isEnumType($b);
+        // `E::A == E::B` of ONE enum is its ordinals — the cheap path stays.
+        // Ordering is not: php's enums are uncomparable.
+        if ($ae && $be && !$ordering && $a->class === $b->class) { return false; }
+        $ao = $this->isObjishType($a) || $ae;
+        $bo = $this->isObjishType($b) || $be;
         if (!$ao && !$bo) { return false; }
         return ($ao || $a->kind === Type::KIND_CELL) && ($bo || $b->kind === Type::KIND_CELL);
+    }
+
+    /**
+     * An ordering op over a `tagged_compare`-shaped result: php evaluates
+     * `a > b` as `b < a` and `a >= b` as `b <= a`, so the caller hands the
+     * operands SWAPPED for those two ({@see orderSwaps}) and this reads the
+     * result with `<` / `<=`. That is what keeps an UNCOMPARABLE pair (<=>
+     * answers 1 both ways: objects of different classes, enum cases, arrays
+     * missing a key) false under every ordering. Result: i1 zext'd to i64.
+     */
+    private function orderedFromCmpIr(string $cmp, string $op): string
+    {
+        $pred = ($op === '<' || $op === '>') ? 'slt' : 'sle';
+        $pr = $this->ssa->allocReg();
+        $out = '  ' . $pr . ' = icmp ' . $pred . ' i64 ' . $cmp . ", 0\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = zext i1 ' . $pr . " to i64\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private function orderSwaps(string $op): bool
+    {
+        return $op === '>' || $op === '>=';
     }
 
     private function emitCmp(Cmp $n): string
@@ -4569,144 +4656,31 @@ trait EmitLlvmExpr
             return \implode('', $chunks);
         }
 
-        // Two objects of the same statically-known class under LOOSE `==`: PHP
-        // compares them PROPERTY-BY-PROPERTY (loosely), not by handle, so
-        // `new P(1,"a") == new P(1,"a")` is true and `!=` is its negation (both
-        // came out backwards on the pointer path). Unrolled from the static
-        // layout — there is no runtime property table to walk (the descriptor is
-        // just {class_id, drop_fn}), which is also why an object reached through
-        // a CELL still falls back to identity in the tagged runtime.
-        // Bail to the old identity path when the unroll would be a guess: a
-        // subclassable class (the runtime class may differ from the static one,
-        // and PHP demands equal classes), or an array property whose element
-        // representation isn't one the array runtime can normalize.
-        if (($isEq || $isNe) && !$strictEq
-            && $lk === Type::KIND_OBJ && $rk === Type::KIND_OBJ) {
-            $cls = $c->left->type->class ?? '';
-            $rcls = $c->right->type->class ?? '';
-            if ($cls !== '' && $cls === $rcls
-                && isset($this->classes[$cls]) && !isset($this->enums[$cls])
-                && !$this->classHasSubclass($cls)) {
-                $cd = $this->classes[$cls];
-                $plan = [];
-                $planOk = true;
-                foreach ($cd->propertyNames as $pn) {
-                    if (!isset($cd->propertyTypes[$pn])) { $planOk = false; break; }
-                    $pt = $cd->propertyTypes[$pn];
-                    $isArr = $pt->kind === Type::KIND_ARRAY;
-                    $chain = self::EK_NONE;
-                    if ($isArr) {
-                        $chain = $this->elemChainOf($pt->element);
-                        if ($chain === self::EK_NONE) { $planOk = false; break; }
-                    }
-                    $plan[] = [$pn, $pt, $isArr, $chain];
-                }
-                if ($planOk && \count($plan) > 0) {
-                    $this->rt->needsTaggedEq = true;
-                    $lp = $l;
-                    if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $chunks[] = '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
-                    $rp = $r;
-                    if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $chunks[] = '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
-                    $yesL  = $this->ssa->allocLabel('objeq.same');
-                    $nullL = $this->ssa->allocLabel('objeq.chknull');
-                    $noL   = $this->ssa->allocLabel('objeq.no');
-                    $propL = $this->ssa->allocLabel('objeq.props');
-                    $joinL = $this->ssa->allocLabel('objeq.join');
-                    $ideq = $this->ssa->allocReg();
-                    $chunks[] = '  ' . $ideq . ' = icmp eq ptr ' . $lp . ', ' . $rp . "\n";
-                    $chunks[] = '  br i1 ' . $ideq . ', label %' . $yesL . ', label %' . $nullL . "\n";
-                    // A `?C` null carrier can't be dereferenced. Both-null already
-                    // went to the identity arm, so either-null here means unequal.
-                    $chunks[] = $nullL . ":\n";
-                    $ln = $this->ssa->allocReg();
-                    $chunks[] = '  ' . $ln . ' = icmp eq ptr ' . $lp . ", null\n";
-                    $rn = $this->ssa->allocReg();
-                    $chunks[] = '  ' . $rn . ' = icmp eq ptr ' . $rp . ", null\n";
-                    $anyn = $this->ssa->allocReg();
-                    $chunks[] = '  ' . $anyn . ' = or i1 ' . $ln . ', ' . $rn . "\n";
-                    $chunks[] = '  br i1 ' . $anyn . ', label %' . $noL . ', label %' . $propL . "\n";
-                    $chunks[] = $propL . ":\n";
-                    $acc = 'true';
-                    foreach ($plan as $p) {
-                        $pn = $p[0]; $pt = $p[1]; $isArr = $p[2]; $chain = $p[3];
-                        $off = (string)$cd->propertyOffset($pn);
-                        $lg = $this->ssa->allocReg();
-                        $chunks[] = '  ' . $lg . ' = getelementptr inbounds i8, ptr ' . $lp . ', i64 ' . $off . "\n";
-                        $lv = $this->ssa->allocReg();
-                        $chunks[] = '  ' . $lv . ' = load i64, ptr ' . $lg . "\n";
-                        $rg = $this->ssa->allocReg();
-                        $chunks[] = '  ' . $rg . ' = getelementptr inbounds i8, ptr ' . $rp . ', i64 ' . $off . "\n";
-                        $rv = $this->ssa->allocReg();
-                        $chunks[] = '  ' . $rv . ' = load i64, ptr ' . $rg . "\n";
-                        $peq = $this->ssa->allocReg();
-                        if ($isArr) {
-                            $lap = $this->ssa->allocReg();
-                            $chunks[] = '  ' . $lap . ' = inttoptr i64 ' . $lv . " to ptr\n";
-                            $rap = $this->ssa->allocReg();
-                            $chunks[] = '  ' . $rap . ' = inttoptr i64 ' . $rv . " to ptr\n";
-                            $chunks[] = '  ' . $peq . ' = call i1 @__mir_array_loose_eq(ptr ' . $lap
-                                  . ', i64 ' . $chain . ', ptr ' . $rap . ', i64 ' . $chain . ")\n";
-                        } else {
-                            $this->lastValue = $lv; $this->lastValueType = 'i64';
-                            $chunks[] = $this->shallowBoxToCell($pt);
-                            $lc2 = $this->lastValue;
-                            $this->lastValue = $rv; $this->lastValueType = 'i64';
-                            $chunks[] = $this->shallowBoxToCell($pt);
-                            $rc2 = $this->lastValue;
-                            $pe = $this->ssa->allocReg();
-                            $chunks[] = '  ' . $pe . ' = call i64 @__manticore_tagged_loose_eq(i64 '
-                                  . $lc2 . ', i64 ' . $rc2 . ")\n";
-                            $chunks[] = '  ' . $peq . ' = icmp ne i64 ' . $pe . ", 0\n";
-                        }
-                        $nacc = $this->ssa->allocReg();
-                        $chunks[] = '  ' . $nacc . ' = and i1 ' . $acc . ', ' . $peq . "\n";
-                        $acc = $nacc;
-                    }
-                    $chunks[] = '  br label %' . $joinL . "\n";
-                    $chunks[] = $yesL . ":\n  br label %" . $joinL . "\n";
-                    $chunks[] = $noL . ":\n  br label %" . $joinL . "\n";
-                    $chunks[] = $joinL . ":\n";
-                    $phi = $this->ssa->allocReg();
-                    $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $acc . ', %' . $propL . ' ], [ true, %'
-                          . $yesL . ' ], [ false, %' . $noL . " ]\n";
-                    $fin = $phi;
-                    if ($isNe) {
-                        $fin = $this->ssa->allocReg();
-                        $chunks[] = '  ' . $fin . ' = xor i1 ' . $phi . ", true\n";
-                    }
-                    $res = $this->ssa->allocReg();
-                    $chunks[] = '  ' . $res . ' = zext i1 ' . $fin . " to i64\n";
-                    $this->lastValue = $res;
-                    $this->lastValueType = 'i64';
-                    return \implode('', $chunks);
-                }
-            }
-        }
-        // Any other object-ish operand against an object-ish one or a cell, under
-        // `==`/`!=` or an ordering: php compares objects STRUCTURALLY, and a
-        // raw pointer against a boxed word never even matched the same instance.
-        if (!$strictEq && $this->looseObjPair($c->left->type, $c->right->type)) {
-            // php evaluates `a > b` as `b < a` (and `>=` as `b <= a`), which is
-            // what keeps an UNCOMPARABLE pair (<=> answers 1 both ways) false
-            // under every ordering.
-            $swap = $op === '>' || $op === '>=';
+        // An object-ish operand (or an enum case) against another or a cell,
+        // under `==`/`!=` or an ordering: php compares objects STRUCTURALLY —
+        // the whole property table, or a class's own handler — and a raw
+        // pointer against a boxed word never even matched the same instance.
+        // ONE path, the runtime's ({@see objCompareRuntime}): a static unroll
+        // of the declared layout used to stand in for the same-class case, and
+        // it disagreed with `<=>`, ignored DateTime's instant and dereferenced an
+        // uninitialized typed property.
+        if (!$strictEq && $this->looseObjPair($c->left->type, $c->right->type, !$isEq && !$isNe)) {
+            $swap = $this->orderSwaps($op);
             $chunks[] = $swap
                 ? $this->looseObjCmpIr($r, $rt, $c->right->type, $l, $lt, $c->left->type, false)
                 : $this->looseObjCmpIr($l, $lt, $c->left->type, $r, $rt, $c->right->type, $isEq || $isNe);
             $v = $this->lastValue;
-            $res = $this->ssa->allocReg();
-            if ($isEq) {
+            if ($isEq || $isNe) {
                 $res = $v;
-            } elseif ($isNe) {
-                $chunks[] = '  ' . $res . ' = xor i64 ' . $v . ", 1\n";
-            } else {
-                $pred = ($op === '<' || $op === '>') ? 'slt' : 'sle';
-                $pr = $this->ssa->allocReg();
-                $chunks[] = '  ' . $pr . ' = icmp ' . $pred . ' i64 ' . $v . ", 0\n";
-                $chunks[] = '  ' . $res . ' = zext i1 ' . $pr . " to i64\n";
+                if ($isNe) {
+                    $res = $this->ssa->allocReg();
+                    $chunks[] = '  ' . $res . ' = xor i64 ' . $v . ", 1\n";
+                }
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
             }
-            $this->lastValue = $res;
-            $this->lastValueType = 'i64';
+            $chunks[] = $this->orderedFromCmpIr($v, $op);
             return \implode('', $chunks);
         }
         // Statically-typed operand pairs the RAW carrier compare gets wrong under
@@ -4886,13 +4860,10 @@ trait EmitLlvmExpr
             $ri = $r;
             if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
             $cmp = $this->ssa->allocReg();
-            $chunks[] = '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
-            $cmpReg = $this->ssa->allocReg();
-            $chunks[] = '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
-            $extReg = $this->ssa->allocReg();
-            $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
-            $this->lastValue = $extReg;
-            $this->lastValueType = 'i64';
+            $sw = $this->orderSwaps($c->op);
+            $chunks[] = '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 '
+                  . ($sw ? $ri : $li) . ', i64 ' . ($sw ? $li : $ri) . ")\n";
+            $chunks[] = $this->orderedFromCmpIr($cmp, $c->op);
             return \implode('', $chunks);
         }
         // A NUMERIC cell (int|float) ordered against a RAW int carries either a
@@ -4927,13 +4898,10 @@ trait EmitLlvmExpr
                 $ri = $r;
                 if ($rt === 'ptr') { $ri = $this->ssa->allocReg(); $chunks[] = '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n"; }
                 $cmp = $this->ssa->allocReg();
-                $chunks[] = '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 ' . $li . ', i64 ' . $ri . ")\n";
-                $cmpReg = $this->ssa->allocReg();
-                $chunks[] = '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $cmp . ", 0\n";
-                $extReg = $this->ssa->allocReg();
-                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
-                $this->lastValue = $extReg;
-                $this->lastValueType = 'i64';
+                $sw = $this->orderSwaps($c->op);
+                $chunks[] = '  ' . $cmp . ' = call i64 @__manticore_tagged_compare(i64 '
+                      . ($sw ? $ri : $li) . ', i64 ' . ($sw ? $li : $ri) . ")\n";
+                $chunks[] = $this->orderedFromCmpIr($cmp, $c->op);
                 return \implode('', $chunks);
             }
         }

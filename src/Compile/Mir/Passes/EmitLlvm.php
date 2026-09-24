@@ -1357,7 +1357,7 @@ final class EmitLlvm implements EmitVisitor
             // Same spelling as the ordinary path — the symbol coalesces by name,
             // so a type that disagreed would be one symbol defined two ways.
             $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld);
+                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld, 'ptr null', 0);
         }
         $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
         // LLVM symbol infix must fold `\` (namespaced enums like Io\Poll\Backend

@@ -34,11 +34,18 @@ final class RuntimeLibrary
      * both MUST route through here.
      *
      * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
-     * rmeta@16, dynamic_method_table@24, props_fn@32.
+     * rmeta@16, dynamic_method_table@24, props_fn@32, cmp_view_fn@40,
+     * cmp_group@48.
      */
     public static function descriptorType(): string
     {
-        return '{ i64, ptr, ptr, ptr, ptr }';
+        return '{ i64, ptr, ptr, ptr, ptr, ptr, i64 }';
+    }
+
+    /** `@__mir_cmpview_<id>(ptr %o) -> i64` ({@see \Compile\MemoryAbi::DESCRIPTOR_CMP_VIEW_FN_OFFSET}). */
+    public static function cmpViewFnSymbol(int $id): string
+    {
+        return '@__mir_cmpview_' . (string)$id;
     }
 
     /**
@@ -54,10 +61,12 @@ final class RuntimeLibrary
         string $rmetaFld = 'ptr null',
         string $dynFld = 'ptr null',
         string $propsFld = 'ptr null',
+        string $cmpViewFld = 'ptr null',
+        ?int $cmpGroup = null,
     ): string {
         return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
             . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld
-            . ', ' . $propsFld . " }\n";
+            . ', ' . $propsFld . ', ' . $cmpViewFld . ', i64 ' . (string)($cmpGroup ?? $id) . " }\n";
     }
 
     /**

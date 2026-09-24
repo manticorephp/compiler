@@ -2032,12 +2032,43 @@ trait EmitLlvmRuntime
                     . "  ret i64 %pri\n}\n";
                 $propsFld = 'ptr ' . $sym;
             }
+            // The COMPARE view and group ({@see \Compile\MemoryAbi::
+            // DESCRIPTOR_CMP_VIEW_FN_OFFSET}). Same derivation rule as the props
+            // view above — a pure function of the class — so it coalesces too.
+            $cmpViewFld = 'ptr null';
+            $cmpGroup = (int)$id;
+            if (isset($this->enums[$cls->name])) {
+                // A case is compared by identity alone (its singleton carries
+                // ENUM_TAG_MAGIC, which the runtime checks first).
+                $cmpGroup = 0;
+            } elseif (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
+                $keyed = $this->cmpKeyProps($cls);
+                if ($keyed !== []) { $cmpGroup = \Compile\MemoryAbi::CMP_GROUP_KEYED; }
+                $cIr = $this->emitDeclaredPropsArray('%o', $cls->name, false, true);
+                $cRes = $this->lastValue;
+                if ($keyed === [] && $cls->usesBag()) {
+                    $cbg = $this->ssa->allocReg();
+                    $cbv = $this->ssa->allocReg();
+                    $cun = $this->ssa->allocReg();
+                    $cIr .= '  ' . $cbg . ' = getelementptr inbounds i8, ptr %o, i64 '
+                          . (string)$cls->bagOffset() . "\n";
+                    $cIr .= '  ' . $cbv . ' = load ptr, ptr ' . $cbg . "\n";
+                    $cIr .= '  ' . $cun . ' = call ptr @__mir_array_union(ptr '
+                          . $cRes . ', ptr ' . $cbv . ")\n";
+                    $cRes = $cun;
+                }
+                $csym = \Compile\Mir\RuntimeLibrary::cmpViewFnSymbol((int)$id);
+                $defs .= 'define i64 ' . $csym . "(ptr %o) {\nentry:\n" . $cIr
+                    . '  %cvi = ptrtoint ptr ' . $cRes . " to i64\n"
+                    . "  ret i64 %cvi\n}\n";
+                $cmpViewFld = 'ptr ' . $csym;
+            }
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
             // `ptr null` in its descriptor and emits no full reflection block.
             if (!$this->reflectWants($cls->name)) {
                 $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld);
+                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -2105,7 +2136,7 @@ trait EmitLlvmRuntime
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
-                $dynFld, $propsFld);
+                $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;

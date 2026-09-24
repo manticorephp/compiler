@@ -128,6 +128,17 @@ class OutOfRangeException extends LogicException {}
 class TypeError extends Error {}
 
 /**
+ * `==` / `<=>` reached an object that is already being compared — a cyclic
+ * graph. php refuses exactly so. Called from the IR of the generic object
+ * compare ({@see \Compile\Mir\Passes\EmitLlvmExpr::objCompareRuntime}), never
+ * from PHP source.
+ */
+function __mir_obj_cmp_recursion(): void
+{
+    throw new Error('Nesting level too deep - recursive dependency?');
+}
+
+/**
  * The shape read's throw: a docblock `array{…}` claimed field `$where` holds
  * a `$expected`, the buffer's word says otherwise. Called from the IR the
  * shape check emits ({@see \Compile\Mir\Passes\EmitLlvmArrays}), never from

@@ -19,7 +19,7 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      */
-    public const VERSION = 9;
+    public const VERSION = 10;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -342,6 +342,32 @@ final class MemoryAbi
      * `get_object_vars` inside `manticore_stdlib.o` reach an application class.
      */
     public const DESCRIPTOR_PROPS_FN_OFFSET = 32;
+
+    /**
+     * `ptr` — `@__mir_cmpview_<id>`, or null for a class with nothing to
+     * compare (no properties, no bag). Returns the object's COMPARE VIEW as a
+     * FRESH `assoc[string, cell]`: EVERY declared property (private and
+     * protected too — php compares the whole property table, which is not what
+     * the public {@see DESCRIPTOR_PROPS_FN_OFFSET} view shows) in declaration
+     * order, then the bag; or, for a class that marks properties
+     * `#[\Manticore\Attr\CompareKey]`, exactly those. What the generic
+     * `__mir_obj_compare` hands to the array compare for `==` / `<=>`.
+     */
+    public const DESCRIPTOR_CMP_VIEW_FN_OFFSET = 40;
+
+    /**
+     * `i64` — the COMPARE GROUP: two objects are compared through their views
+     * only when their groups are equal, else they never equal and order as
+     * uncomparable (php's rule for objects of different classes). A plain
+     * class's group is its own class id; every class with a
+     * {@see CMP_GROUP_KEYED} view shares one group, which is how php's custom
+     * handlers that compare ACROSS classes (a DateTime against a
+     * DateTimeImmutable, by instant) are expressed.
+     */
+    public const DESCRIPTOR_CMP_GROUP_OFFSET = 48;
+
+    /** The compare group of every class with `#[CompareKey]` properties. */
+    public const CMP_GROUP_KEYED = -1;
 
     // ─── Reflection metadata (`@__mc_rmeta_<id>`) ─────────────────
 

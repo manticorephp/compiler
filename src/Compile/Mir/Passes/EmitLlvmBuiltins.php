@@ -7468,7 +7468,31 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false): string
+    /**
+     * The properties a class marks `#[\Manticore\Attr\CompareKey]` — its
+     * compare view, when non-empty ({@see \Compile\MemoryAbi::CMP_GROUP_KEYED}).
+     *
+     * @return array<string, bool>
+     */
+    private function cmpKeyProps(\Compile\Mir\ClassDef $cd): array
+    {
+        $out = [];
+        foreach ($cd->propertyMeta as $pn => $pm) {
+            foreach ($pm->attributes as $an) {
+                if (\ltrim($an, '\\') === 'Manticore\Attr\CompareKey') { $out[$pn] = true; }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * `$forCompare`: the COMPARE view ({@see \Compile\MemoryAbi::
+     * DESCRIPTOR_CMP_VIEW_FN_OFFSET}) — every property whatever its visibility
+     * (or only the `#[CompareKey]` ones), and an enum-typed property boxed as
+     * its case SINGLETON, since two ordinals of different enums are the same
+     * word.
+     */
+    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false, bool $forCompare = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -7477,9 +7501,27 @@ trait EmitLlvmBuiltins
         $cur = $initg;
         if ($cls !== '' && isset($this->classes[$cls])) {
             $cd = $this->classes[$cls];
+            $keyed = $forCompare ? $this->cmpKeyProps($cd) : [];
             foreach ($cd->propertyNames as $pn) {
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
+                if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
+                if ($forCompare && $this->isEnumType($pt)) {
+                    $off = (string)$cd->propertyOffset($pn);
+                    $g = $this->ssa->allocReg();
+                    $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
+                    $v = $this->ssa->allocReg();
+                    $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
+                    $pp = '';
+                    $out .= $this->emitEnumSingletonPtr((string)$pt->class, $v, $pp);
+                    $boxed = $this->ssa->allocReg();
+                    $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+                    $next = $this->ssa->allocReg();
+                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
+                          . $cur . ', ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
+                    $cur = $next;
+                    continue;
+                }
                 // php serializes ONLY public properties from an object; a
                 // missing meta entry is a compiler-synthesised slot, which is
                 // public by construction. `(array)$o` and an in-scope
