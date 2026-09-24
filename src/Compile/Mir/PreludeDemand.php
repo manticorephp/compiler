@@ -29,6 +29,14 @@ final class PreludeDemand
     private array $methods = [];
     /** @var array<string,bool> lowercased identifiers appearing anywhere in code */
     private array $names = [];
+    /** `yield from` occurs: its lowering calls the prelude's `__mc_yf_gen`. */
+    private bool $yieldFrom = false;
+
+    public function usesYieldFrom(): bool
+    {
+        return $this->yieldFrom;
+    }
+
     /** @var array<string,bool> variable names, `$` included */
     private array $vars = [];
 
@@ -199,6 +207,10 @@ final class PreludeDemand
                 $this->walkInterpolation($t->lexeme);
                 $i = $i + 1;
                 continue;
+            }
+            if ($kind === TokenKind::Keyword && \strtolower($t->lexeme) === 'yield'
+                && $i + 1 < $n && \strtolower($toks[$i + 1]->lexeme) === 'from') {
+                $this->yieldFrom = true;
             }
             if ($kind !== TokenKind::Identifier) {
                 $i = $i + 1;

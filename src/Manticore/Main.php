@@ -3903,7 +3903,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         'EmptyIterator', 'RecursiveIteratorIterator', 'RecursiveTreeIterator', 'SplFileInfo', 'DirectoryIterator',
         'FilesystemIterator', 'RecursiveDirectoryIterator', 'SplFixedArray', 'SplDoublyLinkedList', 'SplQueue',
         'SplStack', 'SplObjectStorage',
-    ]);
+    ]) || $demand->usesYieldFrom();
     $useArrayClasses = $useSplIterators || $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
         // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
         // file (they drain a Traversable, so they cannot live in the stdlib).

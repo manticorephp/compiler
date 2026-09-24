@@ -668,6 +668,13 @@ trait LowerExprs
                 // (which frame-backs its iterator state across the inner
                 // yield) and works uniformly for arrays and sub-generators.
                 $src = $yv !== null ? $this->lowerExpr($yv) : new LoadLocal('this', Type::unknown());
+                // Anything but a literal array goes through the prelude's
+                // normaliser: a foreach whose body yields cannot take the erased
+                // Generator/Traversable dispatch (it would emit the yield twice),
+                // so an erased source degraded to the array-only walk.
+                if ($yv !== null && $yv->kind !== 'ArrayLit' && $this->splIteratorsSrc !== '') {
+                    $src = new \Compile\Mir\Call('__mc_yf_gen', [$src], Type::obj('Generator'));
+                }
                 $n = $this->yieldFromCounter;
                 $this->yieldFromCounter = $n + 1;
                 $kv = '__yf_k' . (string)$n;
