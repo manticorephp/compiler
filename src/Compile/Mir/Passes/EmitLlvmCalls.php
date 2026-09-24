@@ -1256,8 +1256,9 @@ trait EmitLlvmCalls
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         $out .= $this->cellTagIr($raw);
+        $tag = $this->cellTagReg;
         $isStr = $this->ssa->allocReg();
-        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -1290,7 +1291,7 @@ trait EmitLlvmCalls
         if (($ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS)
             && $this->anyClassHasMethod('__invoke')) {
             $isObjT = $this->ssa->allocReg();
-            $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $tag . ", 8\n";
             $objL = $this->ssa->allocLabel('erinv.obj');
             $chkL = $this->ssa->allocLabel('erinv.objchk');
             $cloL = $this->ssa->allocLabel('erinv.closure');
