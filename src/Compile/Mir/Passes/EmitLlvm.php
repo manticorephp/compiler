@@ -4746,9 +4746,12 @@ final class EmitLlvm implements EmitVisitor
      * is passed by reference — true only for a by-ref param fed a plain
      * local (the address-of source). Shared by call / method / static call.
      */
+    /** A by-ref PARAM always takes an address — a non-lvalue (an omitted
+     *  default) gets a throwaway slot from {@see emitByRefArg}. Routing it
+     *  down the by-VALUE path handed the callee the value as its address. */
     private function argIsByRef(array $mask, int $pi, Node $a): bool
     {
-        return ($mask[$pi] ?? false) && $this->isByRefAddressable($a);
+        return (bool)($mask[$pi] ?? false);
     }
 
     /** Push a trace frame (`display` name + call-site `line`) before a user call;

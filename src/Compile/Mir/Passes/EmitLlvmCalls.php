@@ -2668,7 +2668,23 @@ trait EmitLlvmCalls
 
     private function emitByRefArg(Node $a): string
     {
-        return $this->byRefAddrOf($a) ?? '';
+        $addr = $this->byRefAddrOf($a);
+        if ($addr !== null) { return $addr; }
+        // Not an lvalue — an OMITTED default (`?array &$m = null` called without
+        // it) arrives as the filled default expr. Back it with a throwaway slot,
+        // as {@see emitCall} does: answering '' left the previous argument's
+        // register as the "address", and the callee wrote through it
+        // (php-cs-fixer's `Preg::match($re, $s)` stored its matches at 0).
+        $tmp = $this->ssa->allocReg();
+        $out = '  ' . $tmp . " = alloca i64\n";
+        $out .= $this->emitNode($a);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**
