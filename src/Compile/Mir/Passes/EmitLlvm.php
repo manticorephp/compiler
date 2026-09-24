@@ -4757,6 +4757,21 @@ final class EmitLlvm implements EmitVisitor
      * `Command::run(\Closure $h)` retained `$h` and clobbered the commands
      * array header. Never rc-manage a closure.
      */
+    /** @var array<string, bool> */
+    private array $anyHasMethodMemo = [];
+
+    /** Does any class of the module (own or inherited) define `$method`? */
+    private function anyClassHasMethod(string $method): bool
+    {
+        if (isset($this->anyHasMethodMemo[$method])) { return $this->anyHasMethodMemo[$method]; }
+        $has = false;
+        foreach ($this->classes as $cname => $unused) {
+            if ($this->resolveMethodClass($cname, $method) !== '') { $has = true; break; }
+        }
+        $this->anyHasMethodMemo[$method] = $has;
+        return $has;
+    }
+
     private function isClosureClass(string $cls): bool
     {
         return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
