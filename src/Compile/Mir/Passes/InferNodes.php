@@ -166,7 +166,7 @@ trait InferNodes
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             $d = $n;
-            if ($d->init === null && !\str_starts_with($d->cell, '@g_')
+            if (!\str_starts_with($d->cell, '@g_')
                 && isset($this->staticLocalTypes[$d->cell])
                 && $this->staticLocalTypes[$d->cell]->kind === Type::KIND_CELL) {
                 $out[$d->name] = true;
@@ -1100,7 +1100,15 @@ trait InferNodes
     private function inferStaticLocalDecl(StaticLocalDecl_ $n): Type
     {
         $t = $n->type;
-        if ($n->init !== null) { $t = $this->inferNode($n->init); }
+        if ($n->init !== null) {
+            $t = $this->inferNode($n->init);
+            // Its stores disagree with the initialiser: the slot is a cell
+            // ({@see scanStaticLocalTypes}).
+            if (isset($this->staticLocalTypes[$n->cell])
+                && $this->staticLocalTypes[$n->cell]->kind === Type::KIND_CELL) {
+                $t = Type::cell();
+            }
+        }
         // A global-backed decl (`global $g`) is hard-lowered `int`; seed its
         // unified cross-scope type ({@see scanGlobalTypes}) so a pure-read scope
         // (`global $g; return $g;`) carries the real string/obj/array type.

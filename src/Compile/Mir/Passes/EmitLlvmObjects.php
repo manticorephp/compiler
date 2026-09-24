@@ -2673,7 +2673,13 @@ trait EmitLlvmObjects
         $out .= '  br i1 ' . $cond . ', label %' . $doLbl . ', label %' . $skipLbl . "\n";
         $out .= $doLbl . ":\n";
         $out .= $this->emitNode($n->init);
-        $out .= $this->coerceToI64();
+        // A cell slot holds the initialiser BOXED — the stores that made it a
+        // cell write cells, and every read decodes one.
+        if ($n->type->kind === Type::KIND_CELL && $n->init->type->kind !== Type::KIND_CELL) {
+            $out .= $this->boxToCell($n->init->type, $n->init);
+        } else {
+            $out .= $this->coerceToI64();
+        }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $n->cell . "\n";
         $out .= '  store i64 1, ptr ' . $n->guard . "\n";
         $out .= '  br label %' . $skipLbl . "\n";

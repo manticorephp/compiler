@@ -1160,7 +1160,9 @@ trait InferScans
             $active = [];
             /** @var array<string,string> $cells */
             $cells = [];
-            $this->collectPlainStaticLocals($fn->body, $active, $cells);
+            /** @var array<string,string> $initKinds */
+            $initKinds = [];
+            $this->collectPlainStaticLocals($fn->body, $active, $cells, $initKinds);
             if (\count($active) === 0) { continue; }
             /** @var array<string,Type> $observed */
             $observed = [];
@@ -1174,6 +1176,25 @@ trait InferScans
             $this->collectStaticStoreKinds($fn->body, $active, $kinds);
             foreach ($kinds as $name => $ks) {
                 if (isset($ks[Type::KIND_UNKNOWN])) { continue; }
+                // An INITIALISED static (`static $s = '';`) is typed by its
+                // initialiser, and that is the whole answer only while every
+                // store agrees with it. A store of another kind (`$s = $c ===
+                // false ? '' : $c`, a cell) needs the slot to be ONE
+                // representation for both: a cell, the initialiser boxed into
+                // it ({@see EmitLlvmObjects::emitStaticLocalDecl}). Left alone
+                // the slot was read as a raw string and held a NaN-boxed one.
+                if (isset($initKinds[$name])) {
+                    $ks[$initKinds[$name]] = true;
+                    if (\count($ks) < 2) { continue; }
+                    $cell = $cells[$name] ?? '';
+                    if ($cell === '') { continue; }
+                    $prev = $this->staticLocalTypes[$cell] ?? null;
+                    if ($prev !== null && $prev->kind === Type::KIND_CELL) { continue; }
+                    $this->staticLocalTypes[$cell] = Type::cell();
+                    $this->rescanTargets[$fn->name] = true;
+                    $changed = true;
+                    continue;
+                }
                 $cell = $cells[$name] ?? '';
                 if ($cell === '') { continue; }
                 $t = $observed[$name] ?? Type::unknown();
@@ -1230,16 +1251,18 @@ trait InferScans
         }
     }
 
-    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells): void
+    /** @param array<string,string> $initKinds name → its initialiser's type kind */
+    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initKinds): void
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             $d = $n;
-            if ($d->init === null && !\str_starts_with($d->cell, '@g_')) {
+            if (!\str_starts_with($d->cell, '@g_')) {
                 $active[$d->name] = true;
                 $cells[$d->name] = $d->cell;
+                if ($d->init !== null) { $initKinds[$d->name] = $d->init->type->kind; }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells); }
+        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initKinds); }
     }
 
     private function scanGlobalTypes(Module $module): bool
