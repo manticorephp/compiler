@@ -4214,9 +4214,16 @@ trait EmitLlvmExpr
         // recognised, `$isHeader` stayed true and the Table drew a header rule
         // above EVERY row. Compare payloads, and only when the cell really holds
         // an object (an erased raw pointer counts — it is what it is).
+        // A static object UNION (`$b->decl` off a base class whose subclasses
+        // declare `decl` with different classes) is a raw pointer exactly like
+        // `obj<…>`: compared verbatim against a boxed cell it never matched, and
+        // the self-built compiler's polyfill fold (`$reg === $cdecl`) dropped
+        // the class body its own guard declares.
+        $lObj = $lk === Type::KIND_OBJ || $lk === Type::KIND_UNION;
+        $rObj = $rk === Type::KIND_OBJ || $rk === Type::KIND_UNION;
         if ($strictEq
-            && (($lk === Type::KIND_OBJ && $rCellish) || ($lCellish && $rk === Type::KIND_OBJ))) {
-            $objIsLeft = $lk === Type::KIND_OBJ;
+            && (($lObj && $rCellish) || ($lCellish && $rObj))) {
+            $objIsLeft = $lObj;
             $objV = $objIsLeft ? $l : $r;
             $objT = $objIsLeft ? $lt : $rt;
             $ci   = $objIsLeft ? $r : $l;
