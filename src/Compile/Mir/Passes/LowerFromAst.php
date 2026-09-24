@@ -3200,14 +3200,37 @@ final class LowerFromAst implements Pass
         $m = $this->strLitValue($methE);
         $args = [];
         foreach ($astArgs as $a) { $args[] = $this->lowerExpr($a); }
-        if ($recvE->kind === 'StringLiteral') {
-            $cls = \ltrim($this->strLitValue($recvE), '\\');
+        $cls = $this->callableClassOf($recvE);
+        if ($cls !== null) {
             return new StaticCall_($cls, $m, $args, Type::unknown(), $cls);
         }
         return new MethodCall_($this->lowerExpr($recvE), $m, $args, Type::unknown());
     }
 
     private function elemValue(\Parser\Ast\ArrayElement $e): \Parser\Ast\Expr { return $e->value; }
+
+    /**
+     * The class a callable array's RECEIVER names at compile time, or null for
+     * an object receiver: `'C'`, `C::class`, `self::class`, `parent::class`,
+     * `__CLASS__`. Only the string literal was recognised, so `[__CLASS__, 'm']`
+     * (symfony's polyfill-mbstring title case) and `[self::class, 'm']` became
+     * METHOD closures over a class-name string, and the callback handed back
+     * garbage.
+     */
+    private function callableClassOf(\Parser\Ast\Expr $e): ?string
+    {
+        if ($e->kind === 'StringLiteral') { return \ltrim($this->strLitValue($e), '\\'); }
+        if ($e->kind === 'StaticAccess' && \strtolower($this->staticAccessName($e)) === 'class') {
+            return \ltrim($this->resolveStaticClass($this->staticAccessClass($e)), '\\');
+        }
+        if ($e->kind === 'MagicConstant' && $this->currentLowerClass !== ''
+            && \strtoupper($this->magicConstName($e)) === '__CLASS__') {
+            return $this->currentLowerClass;
+        }
+        return null;
+    }
+
+    private function magicConstName(\Parser\Ast\MagicConstant $e): string { return $e->name; }
 
     private function lowerClone(\Parser\Ast\CloneExpr $expr): Node
     {
@@ -3996,8 +4019,9 @@ final class LowerFromAst implements Pass
             $methE = $this->elemValue($els[1]);
             if ($methE->kind !== 'StringLiteral') { return null; }
             $m = $this->strLitValue($methE);
-            if ($recvE->kind === 'StringLiteral') {
-                return ['kind' => 'arr_static', 'class' => \ltrim($this->strLitValue($recvE), '\\'), 'method' => $m];
+            $rcls = $this->callableClassOf($recvE);
+            if ($rcls !== null) {
+                return ['kind' => 'arr_static', 'class' => $rcls, 'method' => $m];
             }
             if ($recvE->kind === 'Variable') {
                 // `[$o, "m"]` — the receiver is read back from the array slot at
