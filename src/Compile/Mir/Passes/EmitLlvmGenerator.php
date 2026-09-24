@@ -190,7 +190,8 @@ trait EmitLlvmGenerator
         $out .= $this->genStoreAt($fr, 48, '0');                      // retval@48 = 0
         $paramNames = [];
         $paramTypeByName = [];
-        foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypeByName[$p->name] = $p->type; }
+        $paramByRef = [];
+        foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypeByName[$p->name] = $p->type; $paramByRef[$p->name] = $p->byRef; }
         foreach ($locals as $name => $idx) {
             $off = self::GEN_HEADER + 8 * $idx;
             if (isset($capIndex[$name])) {
@@ -216,6 +217,16 @@ trait EmitLlvmGenerator
                     $out .= $this->genStoreAt($fr, $off, $this->lastValue);
                 } else {
                     $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
+                    // The frame outlives this call and reads the param later, so
+                    // it must co-own it: `(new D(5))->it()` freed the receiver
+                    // before the first resume and `$this->n` read 0 (symfony
+                    // Finder's `new LazyIterator(fn …)` yielded no files). Frame
+                    // locals are never dropped yet, so this is the same bounded
+                    // residual leak as the rest of the frame — never a UAF.
+                    $fl = $pt !== null ? $this->discardReleaseFlavor($pt) : '';
+                    if ($fl !== '' && !($paramByRef[$name] ?? false)) {
+                        $out .= $this->rcRetainReg('%arg.' . $name, $fl);
+                    }
                 }
             } else {
                 $out .= $this->genStoreAt($fr, $off, '0');
