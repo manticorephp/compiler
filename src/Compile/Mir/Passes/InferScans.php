@@ -89,6 +89,11 @@ trait InferScans
      */
     private function setPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): void
     {
+        // Only a DECLARED property has a slot to type. An undeclared one lives
+        // in the dynamic bag and reads back as a cell; a type invented for it
+        // from a store or a getter made the read skip the bag's boxing — a
+        // SIGSEGV on `return $this->data['visible']`.
+        if (!\in_array($prop, $cd->propertyNames, true)) { return; }
         $cd->propertyTypes[$prop] = $t;
         if ($this->ctx !== null) { $this->ctx->changes->addProp($prop); }
     }
@@ -239,6 +244,7 @@ trait InferScans
     private function scanPropElementReturns(Module $module): void
     {
         $this->propReturnsFound = [];     // "Class::prop" → element Type
+        $this->propReturnsKeyKind = [];
         foreach ($module->functions as $fn) {
             $rt = $fn->returnType;
             if ($rt === null) { continue; }
@@ -263,12 +269,20 @@ trait InferScans
             $cd = $this->classes[$cls] ?? null;
             if ($cd === null) { continue; }
             $cur = $cd->propertyTypes[$prop] ?? null;
-            if ($cur !== null && $cur->kind !== Type::KIND_UNKNOWN
+            // An UNDECLARED property has no slot to type: it lives in the
+            // dynamic bag and reads back as a cell. Typing it from a getter
+            // invented a `vec[bool]` slot that the literal stored into it never
+            // matched — a SIGSEGV at the read and an empty array at the next.
+            if ($cur === null) { continue; }
+            if ($cur->kind !== Type::KIND_UNKNOWN
                 && !($cur->isVec()
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN))) {
                 continue;
             }
-            $this->setPropType($cd, $prop, Type::vec($elem));
+            // Keyed the way the getters index it: string keys are an assoc.
+            $kk = $this->propReturnsKeyKind[$key] ?? 'i';
+            $this->setPropType($cd, $prop, $kk === 's' ? Type::assoc(Type::string_(), $elem)
+                : ($kk === 'm' ? Type::vec(Type::cell()) : Type::vec($elem)));
         }
     }
 
@@ -511,7 +525,8 @@ trait InferScans
         foreach ($module->functions as $fn) {
             $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
         }
-        $changed = false;
+        /** @var array<string, Type> $targets */
+        $targets = [];
         foreach ($observed as $g => $elem) {
             if (isset($unusable[$g])) { continue; }
             $ek = $elem->kind;
@@ -519,10 +534,14 @@ trait InferScans
                 || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
                 || $ek === Type::KIND_CELL
                 || ($ek === Type::KIND_OBJ && $elem->class !== null);
-            if (!$ok) { continue; }
-            foreach ($module->functions as $fn) {
-                if ($this->retypeStaticPropNodes($fn->body, $g, $elem)) { $changed = true; }
-            }
+            if ($ok) { $targets[$g] = $elem; }
+        }
+        if ($targets === []) { return false; }
+        // ONE walk for every retyped slot — a walk per slot was the module
+        // times the static properties that have stores.
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; }
         }
         return $changed;
     }
@@ -533,10 +552,12 @@ trait InferScans
      * concrete shape (`public static array $xs = [1,2]` → vec[int]) is left
      * alone, exactly as the instance-property scan only fills an erased slot.
      */
-    private function retypeStaticPropNodes(Node $n, string $g, Type $elem): bool
+    /** @param array<string, Type> $targets global cell symbol → element type */
+    private function retypeStaticPropNodes(Node $n, array $targets): bool
     {
         $changed = false;
-        if ($n->kind === Node::KIND_STATIC_PROP && $n->global === $g) {
+        if ($n->kind === Node::KIND_STATIC_PROP && isset($targets[$n->global])) {
+            $elem = $targets[$n->global];
             $cur = $n->type;
             if ($this->isErasedArrayType($cur)) {
                 $keyT = $cur->isArray() ? $cur->key : null;
@@ -545,7 +566,7 @@ trait InferScans
             }
         }
         foreach (Walk::children($n) as $c) {
-            if ($this->retypeStaticPropNodes($c, $g, $elem)) { $changed = true; }
+            if ($this->retypeStaticPropNodes($c, $targets)) { $changed = true; }
         }
         return $changed;
     }
@@ -1146,7 +1167,9 @@ trait InferScans
             $active = [];
             /** @var array<string,string> $cells */
             $cells = [];
-            $this->collectPlainStaticLocals($fn->body, $active, $cells);
+            /** @var array<string,string> $initKinds */
+            $initKinds = [];
+            $this->collectPlainStaticLocals($fn->body, $active, $cells, $initKinds);
             if (\count($active) === 0) { continue; }
             /** @var array<string,Type> $observed */
             $observed = [];
@@ -1160,6 +1183,25 @@ trait InferScans
             $this->collectStaticStoreKinds($fn->body, $active, $kinds);
             foreach ($kinds as $name => $ks) {
                 if (isset($ks[Type::KIND_UNKNOWN])) { continue; }
+                // An INITIALISED static (`static $s = '';`) is typed by its
+                // initialiser, and that is the whole answer only while every
+                // store agrees with it. A store of another kind (`$s = $c ===
+                // false ? '' : $c`, a cell) needs the slot to be ONE
+                // representation for both: a cell, the initialiser boxed into
+                // it ({@see EmitLlvmObjects::emitStaticLocalDecl}). Left alone
+                // the slot was read as a raw string and held a NaN-boxed one.
+                if (isset($initKinds[$name])) {
+                    $ks[$initKinds[$name]] = true;
+                    if (\count($ks) < 2) { continue; }
+                    $cell = $cells[$name] ?? '';
+                    if ($cell === '') { continue; }
+                    $prev = $this->staticLocalTypes[$cell] ?? null;
+                    if ($prev !== null && $prev->kind === Type::KIND_CELL) { continue; }
+                    $this->staticLocalTypes[$cell] = Type::cell();
+                    $this->rescanTargets[$fn->name] = true;
+                    $changed = true;
+                    continue;
+                }
                 $cell = $cells[$name] ?? '';
                 if ($cell === '') { continue; }
                 $t = $observed[$name] ?? Type::unknown();
@@ -1182,6 +1224,7 @@ trait InferScans
                 $prev = $this->staticLocalTypes[$cell] ?? null;
                 if ($prev !== null && $prev->kind === $t->kind) { continue; }
                 $this->staticLocalTypes[$cell] = $t;
+                $this->rescanTargets[$fn->name] = true;
                 $changed = true;
             }
         }
@@ -1215,16 +1258,18 @@ trait InferScans
         }
     }
 
-    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells): void
+    /** @param array<string,string> $initKinds name → its initialiser's type kind */
+    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initKinds): void
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             $d = $n;
-            if ($d->init === null && !\str_starts_with($d->cell, '@g_')) {
+            if (!\str_starts_with($d->cell, '@g_')) {
                 $active[$d->name] = true;
                 $cells[$d->name] = $d->cell;
+                if ($d->init !== null) { $initKinds[$d->name] = $d->init->type->kind; }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells); }
+        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initKinds); }
     }
 
     private function scanGlobalTypes(Module $module): bool
@@ -1515,10 +1560,6 @@ trait InferScans
             // retroactively make them cells. Forcing vec[cell] on one made the
             // rc walkers drop raw string elements as cells (libmalloc abort in
             // stat_functions). Only a locally-CONSTRUCTED `[]` is ours to retype.
-            $skip = [];
-            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
-            $lits = [];
-            $this->scanArrayLitLocals($fn->body, $lits);
             $found = [];
             $this->scanLocalElemNode($fn->body, $found);
             // The same erasure with two CONCRETE stores instead of a cell one:
@@ -1532,6 +1573,12 @@ trait InferScans
             foreach ($classes as $name => $seen) {
                 if (\count($seen) >= 2) { $found[$name] = true; }
             }
+            // The literal walk only answers for a candidate.
+            if ($found === []) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
             foreach ($found as $name => $unused) {
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
@@ -1712,12 +1759,15 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
             // caller's array and its elements already have a representation.
+            $found = [];
+            $this->collectByRefWidenArgs($fn->body, $foreign, $found);
+            // The literal walk only answers for a candidate — most bodies have
+            // none, and this scan runs twice per InferTypes run.
+            if ($found === []) { continue; }
             $skip = [];
             foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
             $lits = [];
             $this->scanArrayLitLocals($fn->body, $lits);
-            $found = [];
-            $this->collectByRefWidenArgs($fn->body, $foreign, $found);
             foreach ($found as $name => $unused) {
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->byRefCellElemLocals[$fn->name][$name])) { continue; }
@@ -2308,6 +2358,7 @@ trait InferScans
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
+                    $this->rescanTargets[$fn->name] = true;
                     $changed = true;
                 }
             }

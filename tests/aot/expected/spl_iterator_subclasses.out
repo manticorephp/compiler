@@ -1,0 +1,21 @@
+R/src/A.php R/src/Sub/B.php
+F:src F:src/A.php F:src/Sub F:src/Sub/B.php F:src/readme.md F:vendor F:vendor/x F:vendor/x/C.php
+TAB2
+|-root
+| |-a
+| | |-a1
+| | \-a2
+| \-b
+\-r2
+>|-root
+>| |-a
+>| | |-a1
+>| | \-a2
+>| \-b
+>\-r2
+0: a1 a2 b r2
+1: root a a1 a2 b r2
+2: a1 a2 a b root r2
+root b r2 
+bool(false)
+A.php,Sub,readme.md

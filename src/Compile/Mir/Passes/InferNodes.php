@@ -171,7 +171,7 @@ trait InferNodes
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             $d = $n;
-            if ($d->init === null && !\str_starts_with($d->cell, '@g_')
+            if (!\str_starts_with($d->cell, '@g_')
                 && isset($this->staticLocalTypes[$d->cell])
                 && $this->staticLocalTypes[$d->cell]->kind === Type::KIND_CELL) {
                 $out[$d->name] = true;
@@ -1127,7 +1127,15 @@ trait InferNodes
     private function inferStaticLocalDecl(StaticLocalDecl_ $n): Type
     {
         $t = $n->type;
-        if ($n->init !== null) { $t = $this->inferNode($n->init); }
+        if ($n->init !== null) {
+            $t = $this->inferNode($n->init);
+            // Its stores disagree with the initialiser: the slot is a cell
+            // ({@see scanStaticLocalTypes}).
+            if (isset($this->staticLocalTypes[$n->cell])
+                && $this->staticLocalTypes[$n->cell]->kind === Type::KIND_CELL) {
+                $t = Type::cell();
+            }
+        }
         // A global-backed decl (`global $g`) is hard-lowered `int`; seed its
         // unified cross-scope type ({@see scanGlobalTypes}) so a pure-read scope
         // (`global $g; return $g;`) carries the real string/obj/array type.
@@ -1393,9 +1401,13 @@ trait InferNodes
 
     private function inferBlock(Block $node): Type
     {
+        $last = null;
         foreach ($node->stmts as $s) {
-            $this->inferNode($s);
+            $last = $this->inferNode($s);
         }
+        // A VALUE block built untyped (LowerFromAst::wrapCallPost) is its last
+        // node's value; every other block is constructed with its type.
+        if ($node->type->kind === Type::KIND_UNKNOWN && $last !== null) { $node->type = $last; }
         return $node->type;
     }
 
@@ -1841,7 +1853,8 @@ trait InferNodes
             $this->localTypes = $prev === null ? $saved : $this->joinLocals($saved, $prev);
             if ($arm->value !== null) { $this->inferNode($arm->value); }
             foreach ($arm->body as $s) { $this->inferNode($s); }
-            $prev = self::stmtsJump($arm->body) ? null : $this->localTypes;
+            $n = \count($arm->body);
+            $prev = $n > 0 && $this->armTerminates($arm->body[$n - 1]) ? null : $this->localTypes;
             if (!self::stmtsDiverge($arm->body)) {
                 $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
             }
@@ -1852,6 +1865,13 @@ trait InferNodes
         $this->localTypes = $exit;
         $this->popJumpFrame();
         return Type::void();
+    }
+
+    /** A switch arm's last statement leaves the arm: break, continue, return, throw. */
+    private function armTerminates(Node $last): bool
+    {
+        $k = $last->kind;
+        return $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE || $this->blockDiverges($last);
     }
 
     private function inferMatch(Match_ $node): Type

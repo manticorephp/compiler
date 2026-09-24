@@ -174,8 +174,10 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
 5. **`unset($o->declaredProp)` is a no-op**, so the "unset it so `__get` fires again" idiom
    does not work.
 6. **`&__get` (return by reference) is unsupported** — the magic call yields an i64 cell.
-7. **`Stringable` is not auto-added** to a class declaring `__toString`, so
-   `class_implements()` / `getInterfaceNames()` do not report it as php 8 does.
+7. **A callable held in a `mixed` value.** `instanceof Closure` over such a cell answers
+   false, passing it to a `callable` parameter hands the callee the boxed word (SIGSEGV), and
+   `$c(...$args)` over it faults. A `Closure`-typed slot (`Closure::fromCallable()` at the
+   boundary) is the working form today. (`Stringable`, formerly item 7, is implicit now.)
 8. **Uninitialized typed properties serialize as their zero value.** Manticore zero-fills
    every slot, so `class P { public int $x; }` writes `1:{s:1:"x";i:0;}` where php writes
    `0:{}`. Needs an init bitmap in the object header — an object-ABI change.

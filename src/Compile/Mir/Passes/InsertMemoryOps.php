@@ -125,11 +125,15 @@ final class InsertMemoryOps implements Pass
     private array $classes = [];
     /** @var array<string, mixed> enum name → def (enum values are non-rc). */
     private array $enums = [];
+    /** @var array<string, bool> closure fn names — their prologue copies no param */
+    private array $closureFns = [];
 
     public function run(Module $module): Module
     {
         $this->classes = $module->classes;
         $this->enums = $module->enums;
+        $this->closureFns = [];
+        foreach ($module->closureCaptures as $name => $unused) { $this->closureFns[$name] = true; }
         // FFI functions return FOREIGN values (raw libc buffers/pointers
         // from calloc/malloc/fopen/...) that do NOT follow the +1 owned
         // return convention and carry no rc header — never rc-track them.
@@ -233,6 +237,21 @@ final class InsertMemoryOps implements Pass
         // Witness: symfony/polyfill-deepclone's `$values[$k] = &$value`, which
         // must rebind the CALLEE's element and leave the caller's `'p' => &$a`
         // exactly as it was.
+        // The THIRD: an `array` param the prologue COPIES because the body
+        // stores into it. The slot holds the frame's private +1, not the
+        // caller's value, so it is an owned local like any other — released at
+        // scope exit, handed on by a `return`, released before a reassignment.
+        $isClosure = isset($this->closureFns[$fn->name]);
+        foreach ($fn->params as $p) {
+            if ($p->type->kind === Type::KIND_CELL) { continue; }
+            if (!\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, $isClosure)) { continue; }
+            unset($this->rcObjBlocked[$p->name]);
+            if (!isset($this->rcObjType[$p->name])) {
+                $this->rcObjOrder[] = $p->name;
+                $this->rcObjType[$p->name] = $p->type;
+            }
+        }
+
         $mutatedAsArray = \Compile\Mir\VecCopyOnAssign::mutatedLocalsAnyType($fn->body);
         foreach ($fn->params as $p) {
             if ($p->byRef || $p->variadic) { continue; }

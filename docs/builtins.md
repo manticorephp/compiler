@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **737 / 2135** · classes **126 / 327** · codegen builtins 224 · lowered 32 · stdlib globals 803 · prelude globals 529
+Functions **731 / 2135** · classes **140 / 327** · codegen builtins 224 · lowered 32 · stdlib globals 787 · prelude globals 524
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -73,7 +73,7 @@ Functions **737 / 2135** · classes **126 / 327** · codegen builtins 224 · low
 | [soap](#soap) | 0 / 2 | 0 / 8 | 0% |
 | [sockets](#sockets) | 37 / 37 | 2 / 2 | 100% |
 | [sodium](#sodium) | 0 / 110 | 0 / 1 | 0% |
-| [SPL](#spl) | 10 / 15 | 24 / 55 | 49% |
+| [SPL](#spl) | 10 / 15 | 40 / 55 | 71% |
 | [sqlite3](#sqlite3) | 0 / 0 | 0 / 4 | 0% |
 | [standard](#standard) | 447 / 544 | 2 / 6 | 82% |
 | [sysvmsg](#sysvmsg) | 0 / 7 | 0 / 1 | 0% |
@@ -87,7 +87,7 @@ Functions **737 / 2135** · classes **126 / 327** · codegen builtins 224 · low
 | [xmlwriter](#xmlwriter) | 0 / 42 | 0 / 1 | 0% |
 | [xsl](#xsl) | 0 / 0 | 0 / 1 | 0% |
 | [zip](#zip) | 0 / 10 | 0 / 1 | 0% |
-| [zlib](#zlib) | 14 / 30 | 2 / 2 | 50% |
+| [zlib](#zlib) | 8 / 30 | 0 / 2 | 25% |
 
 ## Beyond PHP — what Manticore adds
 
@@ -134,7 +134,7 @@ Types: `Process\Supervisor`
 
 #### `Runtime\*` — internal
 
-180 functions and 2 types under `Runtime\Libc`, `Runtime\Pcre`, `Runtime\Openssl`,
+181 functions and 2 types under `Runtime\Libc`, `Runtime\Pcre`, `Runtime\Openssl`,
 `Runtime\Iconv`, `Runtime\Crypto`, `Runtime\Stdlib`: the libc / PCRE2 / OpenSSL bindings the
 stdlib is written over (`src/Runtime/*.php`). Not user API; listed only by count.
 
@@ -145,11 +145,11 @@ not. Some are deliberate (`manticore.json`-era helpers, PHP names from
 extensions this host has not loaded); anything else here is namespace
 pollution and a candidate for a `__` prefix or a namespace.
 
-Functions (31): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_delete`<sup>s</sup> `apcu_exists`<sup>s</sup> `apcu_fetch`<sup>s</sup> `apcu_store`<sup>s</sup> `cstr_to_str`<sup>b</sup> `fn_to_ptr`<sup>b</sup> `int_to_ptr`<sup>b</sup> `opcache_compile_file`<sup>s</sup> `opcache_invalidate`<sup>s</sup> `peek_i16`<sup>b</sup> `peek_i32`<sup>b</sup> `peek_i64`<sup>b</sup> `peek_i8`<sup>b</sup> `peek_u16`<sup>b</sup> `peek_u32`<sup>b</sup> `peek_u8`<sup>b</sup> `poke_i16`<sup>b</sup> `poke_i32`<sup>b</sup> `poke_i64`<sup>b</sup> `poke_i8`<sup>b</sup> `print`<sup>b</sup> `ptr_offset`<sup>b</sup> `ptr_to_int`<sup>b</sup> `sapi_windows_cp_conv`<sup>s</sup> `sapi_windows_cp_get`<sup>s</sup> `sapi_windows_cp_set`<sup>s</sup> `sapi_windows_vt100_support`<sup>s</sup> `str_bytes`<sup>b</sup> `str_from_buffer`<sup>b</sup>
+Functions (37): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_delete`<sup>s</sup> `apcu_exists`<sup>s</sup> `apcu_fetch`<sup>s</sup> `apcu_store`<sup>s</sup> `cstr_to_str`<sup>b</sup> `fn_to_ptr`<sup>b</sup> `int_to_ptr`<sup>b</sup> `opcache_compile_file`<sup>s</sup> `opcache_invalidate`<sup>s</sup> `peek_i16`<sup>b</sup> `peek_i32`<sup>b</sup> `peek_i64`<sup>b</sup> `peek_i8`<sup>b</sup> `peek_u16`<sup>b</sup> `peek_u32`<sup>b</sup> `peek_u8`<sup>b</sup> `poke_i16`<sup>b</sup> `poke_i32`<sup>b</sup> `poke_i64`<sup>b</sup> `poke_i8`<sup>b</sup> `preg_replace__str`<sup>s</sup> `preg_replace_callback__str`<sup>s</sup> `print`<sup>b</sup> `ptr_offset`<sup>b</sup> `ptr_to_int`<sup>b</sup> `sapi_windows_cp_conv`<sup>s</sup> `sapi_windows_cp_get`<sup>s</sup> `sapi_windows_cp_set`<sup>s</sup> `sapi_windows_vt100_support`<sup>s</sup> `str_bytes`<sup>b</sup> `str_from_buffer`<sup>b</sup> `str_ireplace__str`<sup>s</sup> `str_replace__str`<sup>s</sup> `strtr__bytes`<sup>s</sup> `strtr__pairs`<sup>s</sup>
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 805 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 784 — not user API.
 
 ## Per extension
 
@@ -193,7 +193,7 @@ Functions 45 / 62 · classes 31 / 40
 
 `class_alias`<sup>b</sup> `class_exists`<sup>b</sup> `debug_backtrace`<sup>b</sup> `define`<sup>l</sup> `defined`<sup>l</sup> `die`<sup>b</sup> `enum_exists`<sup>b</sup> `error_reporting`<sup>p</sup> `exit`<sup>b</sup> `extension_loaded`<sup>l</sup> `func_get_arg`<sup>l</sup> `func_get_args`<sup>l</sup> `func_num_args`<sup>l</sup> `function_exists`<sup>l</sup> `gc_collect_cycles`<sup>b</sup> `gc_disable`<sup>s</sup> `gc_enable`<sup>s</sup> `gc_enabled`<sup>s</sup> `gc_mem_caches`<sup>s</sup> `get_class`<sup>b</sup> `get_class_methods`<sup>b</sup> `get_declared_classes`<sup>p</sup> `get_declared_interfaces`<sup>p</sup> `get_declared_traits`<sup>p</sup> `get_defined_constants`<sup>p</sup> `get_object_vars`<sup>b</sup> `get_parent_class`<sup>b</sup> `get_resource_id`<sup>s</sup> `get_resource_type`<sup>s</sup> `interface_exists`<sup>b</sup> `is_a`<sup>b</sup> `is_subclass_of`<sup>b</sup> `method_exists`<sup>b</sup> `property_exists`<sup>b</sup> `restore_error_handler`<sup>p</sup> `restore_exception_handler`<sup>p</sup> `set_error_handler`<sup>p</sup> `set_exception_handler`<sup>p</sup> `strcasecmp`<sup>s</sup> `strcmp`<sup>l</sup> `strlen`<sup>b</sup> `strncasecmp`<sup>s</sup> `strncmp`<sup>l</sup> `trait_exists`<sup>b</sup> `trigger_error`<sup>l</sup>
 
-Classes: `AllowDynamicProperties` `ArgumentCountError` `ArrayAccess`<sup>i</sup> `Attribute` `BackedEnum`<sup>i</sup> `Closure`<sup>i</sup> `Countable`<sup>i</sup> `DelayedTargetValidation` `Deprecated` `Error` `Exception` `Fiber` `FiberError` `Generator`<sup>i</sup> `Iterator`<sup>i</sup> `IteratorAggregate`<sup>i</sup> `NoDiscard` `Override` `ReturnTypeWillChange` `SensitiveParameter` `SensitiveParameterValue` `Serializable`<sup>i</sup> `stdClass` `Stringable`<sup>i</sup> `Throwable` `Traversable`<sup>i</sup> `TypeError` `UnitEnum`<sup>i</sup> `ValueError` `WeakMap`<sup>i</sup> `WeakReference`<sup>i</sup>
+Classes: `AllowDynamicProperties` `ArgumentCountError` `ArrayAccess` `Attribute` `BackedEnum`<sup>i</sup> `Closure`<sup>i</sup> `Countable` `DelayedTargetValidation` `Deprecated` `Error` `Exception` `Fiber` `FiberError` `Generator`<sup>i</sup> `Iterator` `IteratorAggregate` `NoDiscard` `Override` `ReturnTypeWillChange` `SensitiveParameter` `SensitiveParameterValue` `Serializable`<sup>i</sup> `stdClass` `Stringable` `Throwable` `Traversable` `TypeError` `UnitEnum`<sup>i</sup> `ValueError` `WeakMap`<sup>i</sup> `WeakReference`<sup>i</sup>
 
 </details>
 
@@ -441,7 +441,7 @@ Functions 5 / 5 · classes 2 / 2
 
 `json_decode`<sup>b</sup> `json_encode`<sup>b</sup> `json_last_error`<sup>p</sup> `json_last_error_msg`<sup>p</sup> `json_validate`<sup>p</sup>
 
-Classes: `JsonException` `JsonSerializable`<sup>i</sup>
+Classes: `JsonException` `JsonSerializable`
 
 </details>
 
@@ -803,21 +803,21 @@ Classes: `SodiumException`
 
 ### SPL
 
-Functions 10 / 15 · classes 24 / 55
+Functions 10 / 15 · classes 40 / 55
 
-<details><summary>implemented (34)</summary>
+<details><summary>implemented (50)</summary>
 
 `class_implements`<sup>p</sup> `class_parents`<sup>p</sup> `iterator_apply`<sup>p</sup> `iterator_count`<sup>p</sup> `iterator_to_array`<sup>p</sup> `spl_autoload_functions`<sup>p</sup> `spl_autoload_register`<sup>p</sup> `spl_autoload_unregister`<sup>p</sup> `spl_object_hash`<sup>s</sup> `spl_object_id`<sup>b</sup>
 
-Classes: `ArrayIterator` `ArrayObject` `BadFunctionCallException` `BadMethodCallException` `DomainException` `InvalidArgumentException` `LengthException` `LogicException` `OutOfBoundsException` `OutOfRangeException` `OverflowException` `RangeException` `RuntimeException` `SplDoublyLinkedList`<sup>i</sup> `SplFixedArray`<sup>i</sup> `SplHeap`<sup>i</sup> `SplMaxHeap`<sup>i</sup> `SplMinHeap`<sup>i</sup> `SplObjectStorage`<sup>i</sup> `SplPriorityQueue`<sup>i</sup> `SplQueue`<sup>i</sup> `SplStack`<sup>i</sup> `UnderflowException` `UnexpectedValueException`
+Classes: `AppendIterator` `ArrayIterator` `ArrayObject` `BadFunctionCallException` `BadMethodCallException` `CallbackFilterIterator` `DirectoryIterator` `DomainException` `EmptyIterator` `FilesystemIterator` `FilterIterator` `InvalidArgumentException` `IteratorIterator` `LengthException` `LogicException` `OuterIterator` `OutOfBoundsException` `OutOfRangeException` `OverflowException` `RangeException` `RecursiveCallbackFilterIterator` `RecursiveDirectoryIterator` `RecursiveFilterIterator` `RecursiveIterator` `RecursiveIteratorIterator` `RecursiveTreeIterator` `RuntimeException` `SeekableIterator` `SplDoublyLinkedList` `SplFileInfo` `SplFixedArray` `SplHeap`<sup>i</sup> `SplMaxHeap`<sup>i</sup> `SplMinHeap`<sup>i</sup> `SplObjectStorage` `SplPriorityQueue`<sup>i</sup> `SplQueue` `SplStack` `UnderflowException` `UnexpectedValueException`
 
 </details>
 
-<details><summary>missing (36)</summary>
+<details><summary>missing (20)</summary>
 
 `class_uses` `spl_autoload` `spl_autoload_call` `spl_autoload_extensions` `spl_classes`
 
-Classes: `AppendIterator` `CachingIterator` `CallbackFilterIterator` `DirectoryIterator` `EmptyIterator` `FilesystemIterator` `FilterIterator` `GlobIterator` `InfiniteIterator` `IteratorIterator` `LimitIterator` `MultipleIterator` `NoRewindIterator` `OuterIterator` `ParentIterator` `RecursiveArrayIterator` `RecursiveCachingIterator` `RecursiveCallbackFilterIterator` `RecursiveDirectoryIterator` `RecursiveFilterIterator` `RecursiveIterator` `RecursiveIteratorIterator` `RecursiveRegexIterator` `RecursiveTreeIterator` `RegexIterator` `SeekableIterator` `SplFileInfo` `SplFileObject` `SplObserver` `SplSubject` `SplTempFileObject`
+Classes: `CachingIterator` `GlobIterator` `InfiniteIterator` `LimitIterator` `MultipleIterator` `NoRewindIterator` `ParentIterator` `RecursiveArrayIterator` `RecursiveCachingIterator` `RecursiveRegexIterator` `RegexIterator` `SplFileObject` `SplObserver` `SplSubject` `SplTempFileObject`
 
 </details>
 
@@ -979,19 +979,19 @@ Classes: `ZipArchive`
 
 ### zlib
 
-Functions 14 / 30 · classes 2 / 2
+Functions 8 / 30 · classes 0 / 2
 
-<details><summary>implemented (16)</summary>
+<details><summary>implemented (8)</summary>
 
-`deflate_add`<sup>s</sup> `deflate_init`<sup>s</sup> `gzcompress`<sup>s</sup> `gzdecode`<sup>s</sup> `gzdeflate`<sup>s</sup> `gzencode`<sup>s</sup> `gzinflate`<sup>s</sup> `gzuncompress`<sup>s</sup> `inflate_add`<sup>s</sup> `inflate_get_read_len`<sup>s</sup> `inflate_get_status`<sup>s</sup> `inflate_init`<sup>s</sup> `zlib_decode`<sup>s</sup> `zlib_encode`<sup>s</sup>
-
-Classes: `DeflateContext` `InflateContext`
+`gzcompress`<sup>s</sup> `gzdecode`<sup>s</sup> `gzdeflate`<sup>s</sup> `gzencode`<sup>s</sup> `gzinflate`<sup>s</sup> `gzuncompress`<sup>s</sup> `zlib_decode`<sup>s</sup> `zlib_encode`<sup>s</sup>
 
 </details>
 
-<details><summary>missing (16)</summary>
+<details><summary>missing (24)</summary>
 
-`gzclose` `gzeof` `gzfile` `gzgetc` `gzgets` `gzopen` `gzpassthru` `gzputs` `gzread` `gzrewind` `gzseek` `gztell` `gzwrite` `ob_gzhandler` `readgzfile` `zlib_get_coding_type`
+`deflate_add` `deflate_init` `gzclose` `gzeof` `gzfile` `gzgetc` `gzgets` `gzopen` `gzpassthru` `gzputs` `gzread` `gzrewind` `gzseek` `gztell` `gzwrite` `inflate_add` `inflate_get_read_len` `inflate_get_status` `inflate_init` `ob_gzhandler` `readgzfile` `zlib_get_coding_type`
+
+Classes: `DeflateContext` `InflateContext`
 
 </details>
 

@@ -75,31 +75,50 @@ function is_countable(mixed $value): bool
 
 /**
  * ext-filter's `filter_var` for scalar filters. Covers the *_VALIDATE_BOOL /
- * INT / FLOAT ids and the *_DEFAULT / UNSAFE_RAW passthrough — the surface
- * real apps hit (symfony reads `filter_var(env, FILTER_VALIDATE_BOOL)`). The
- * array-shaped `$options` form and the sanitise filters beyond a string
- * passthrough are not modelled. `$options` here is the int flags bitmask.
+ * INT / FLOAT / REGEXP ids and the *_DEFAULT / UNSAFE_RAW passthrough — the
+ * surface real apps hit (symfony reads `filter_var(env, FILTER_VALIDATE_BOOL)`
+ * and `filter_var($v, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]])`).
+ * `$options` is php's: the flags bitmask, or `['flags' => …, 'options' => […]]`
+ * with `default`, `min_range` / `max_range` and `regexp`. The sanitise filters
+ * beyond a string passthrough are not modelled.
  */
-function filter_var(mixed $value, int $filter = 516, int $options = 0): mixed
+function filter_var(mixed $value, int $filter = 516, array|int $options = 0): mixed
 {
-    $nullFail = ($options & 134217728) !== 0;   // FILTER_NULL_ON_FAILURE
+    $flags = \is_int($options) ? $options : (int)($options['flags'] ?? 0);
+    $opts = \is_array($options) && \is_array($options['options'] ?? null) ? $options['options'] : [];
+    $nullFail = ($flags & 134217728) !== 0;   // FILTER_NULL_ON_FAILURE
+    $fail = \array_key_exists('default', $opts) ? $opts['default'] : ($nullFail ? null : false);
     if ($filter === 258) {                       // FILTER_VALIDATE_BOOL
         $s = \strtolower(\trim((string)$value));
         if ($s === '1' || $s === 'true' || $s === 'on' || $s === 'yes') { return true; }
         if ($s === '0' || $s === 'false' || $s === 'off' || $s === 'no' || $s === '') {
             return $nullFail && $s === '' ? null : false;
         }
-        return $nullFail ? null : false;
+        return $fail;
     }
     if ($filter === 257) {                        // FILTER_VALIDATE_INT
         $s = \trim((string)$value);
-        if ($s !== '' && \preg_match('/^[+-]?\d+$/', $s) === 1) { return (int)$s; }
-        return $nullFail ? null : false;
+        if ($s === '' || \preg_match('/^[+-]?\d+$/', $s) !== 1) { return $fail; }
+        $n = (int)$s;
+        if (\array_key_exists('min_range', $opts) && $n < (int)$opts['min_range']) { return $fail; }
+        if (\array_key_exists('max_range', $opts) && $n > (int)$opts['max_range']) { return $fail; }
+        return $n;
     }
     if ($filter === 259) {                        // FILTER_VALIDATE_FLOAT
         $s = \trim((string)$value);
-        if ($s !== '' && \is_numeric($s)) { return (float)$s; }
-        return $nullFail ? null : false;
+        if ($s === '' || !\is_numeric($s)) { return $fail; }
+        $f = (float)$s;
+        if (\array_key_exists('min_range', $opts) && $f < (float)$opts['min_range']) { return $fail; }
+        if (\array_key_exists('max_range', $opts) && $f > (float)$opts['max_range']) { return $fail; }
+        return $f;
+    }
+    if ($filter === 272) {                        // FILTER_VALIDATE_REGEXP
+        $s = (string)$value;
+        $re = (string)($opts['regexp'] ?? '');
+        if ($re === '') {
+            throw new \ValueError("filter_var(): \"regexp\" option missing");
+        }
+        return \preg_match($re, $s) === 1 ? $s : $fail;
     }
     // FILTER_DEFAULT / FILTER_UNSAFE_RAW (516) and every unmodelled filter fall
     // back to the string form of the value (php's default is an unmodified

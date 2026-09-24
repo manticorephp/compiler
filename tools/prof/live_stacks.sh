@@ -69,7 +69,14 @@ while kill -0 "$PID" 2>/dev/null; do
             echo "prof: no match — the pattern is heap's DERIVED TYPE NAME," >&2
             echo "prof: e.g. 'realloc in __mir_str_append'. See $OUT/addrs.txt." >&2
         fi
-        grep -oE '^ *0x[0-9a-f]+' "$OUT/addrs.txt" | tr -d ' ' | head -"$N" >"$OUT/pick.txt"
+        # PICK=random samples the matches; the default takes them in heap's
+        # order, whose head is the allocator's own SEGMENTS for a type with
+        # hundreds of thousands of small blocks.
+        if [[ "${PICK:-}" == "random" ]]; then
+            grep -oE '^ *0x[0-9a-f]+' "$OUT/addrs.txt" | tr -d ' ' | sort -R | head -"$N" >"$OUT/pick.txt"
+        else
+            grep -oE '^ *0x[0-9a-f]+' "$OUT/addrs.txt" | tr -d ' ' | head -"$N" >"$OUT/pick.txt"
+        fi
         : >"$OUT/stacks.txt"
         while read -r a; do
             echo "===== $a =====" >>"$OUT/stacks.txt"

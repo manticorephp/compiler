@@ -1,0 +1,1 @@
+class:Foo=App\Foo,const:BAR=App\BAR

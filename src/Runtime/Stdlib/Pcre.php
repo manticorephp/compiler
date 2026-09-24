@@ -509,7 +509,57 @@ function __preg_expand(string $repl, string $subject, array $m): string
     return $out;
 }
 
-function preg_replace(string $pattern, string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+/**
+ * php's `preg_replace`: a pattern LIST is applied in order (each with the
+ * replacement at the same position, or `$replacement` itself when that is a
+ * string), and an array subject maps key by key. The typed forms are overloads
+ * ({@see \Manticore\Attr\Overload}); this body is what an erased argument reaches.
+ */
+function preg_replace(array|string $pattern, array|string $replacement, array|string $subject, int $limit = -1, #[RefOut] int &$count = 0): array|string|null
+{
+    $count = 0;
+    if (!\is_array($pattern) && \is_array($replacement)) {
+        throw new \TypeError('preg_replace(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given');
+    }
+    if (\is_array($subject)) {
+        $out = [];
+        foreach ($subject as $k => $one) {
+            $c = 0;
+            $out[$k] = \__preg_replace_list($pattern, $replacement, (string)$one, $limit, $c);
+            $count = $count + $c;
+        }
+        return $out;
+    }
+    return \__preg_replace_list($pattern, $replacement, $subject, $limit, $count);
+}
+
+/** A pattern list over one string subject — php's order: pattern by pattern. */
+#[\Manticore\Attr\Overload('preg_replace')]
+function __preg_replace_list(array|string $pattern, array|string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+{
+    $count = 0;
+    if (!\is_array($pattern)) {
+        return \preg_replace__str($pattern, (string)$replacement, $subject, $limit, $count);
+    }
+    /** @var string[] $reps */
+    $reps = [];
+    if (\is_array($replacement)) {
+        foreach ($replacement as $r) { $reps[] = (string)$r; }
+    }
+    $out = $subject;
+    $i = 0;
+    foreach ($pattern as $p) {
+        $r = \is_array($replacement) ? ($reps[$i] ?? '') : $replacement;
+        $c = 0;
+        $out = \preg_replace__str((string)$p, $r, $out, $limit, $c);
+        $count = $count + $c;
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+#[\Manticore\Attr\Overload('preg_replace')]
+function preg_replace__str(string $pattern, string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
 {
     $count = 0;
     $code = \__preg_compile($pattern);
@@ -536,7 +586,44 @@ function preg_replace(string $pattern, string $replacement, string $subject, int
     return $out;
 }
 
-function preg_replace_callback(string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+/**
+ * php's `preg_replace_callback`: a pattern list applies in order, an array
+ * subject maps key by key. The typed forms are overloads.
+ */
+function preg_replace_callback(array|string $pattern, callable $callback, array|string $subject, int $limit = -1, #[RefOut] int &$count = 0): array|string|null
+{
+    $count = 0;
+    if (\is_array($subject)) {
+        $out = [];
+        foreach ($subject as $k => $one) {
+            $c = 0;
+            $out[$k] = \__preg_replace_callback_list($pattern, $callback, (string)$one, $limit, $c);
+            $count = $count + $c;
+        }
+        return $out;
+    }
+    return \__preg_replace_callback_list($pattern, $callback, $subject, $limit, $count);
+}
+
+/** A pattern list over one string subject. */
+#[\Manticore\Attr\Overload('preg_replace_callback')]
+function __preg_replace_callback_list(array|string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+{
+    $count = 0;
+    if (!\is_array($pattern)) {
+        return \preg_replace_callback__str($pattern, $callback, $subject, $limit, $count);
+    }
+    $out = $subject;
+    foreach ($pattern as $p) {
+        $c = 0;
+        $out = \preg_replace_callback__str((string)$p, $callback, $out, $limit, $c);
+        $count = $count + $c;
+    }
+    return $out;
+}
+
+#[\Manticore\Attr\Overload('preg_replace_callback')]
+function preg_replace_callback__str(string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
 {
     $count = 0;
     $code = \__preg_compile($pattern);

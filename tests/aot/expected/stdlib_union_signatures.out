@@ -1,0 +1,35 @@
+Hello all, I said hi
+one two 3
+hexxy wyrxd
+<A|B|{c}>
+TypeError: strtr(): Argument #2 ($from) must be of type array, string given
+TypeError: strtr(): Argument #2 ($from) must be of type string, array given
+cc
+foo_Bar-baz
+a#,b##
+f0o 1
+ABc
+array(1) {
+  ["k"]=>
+  string(4) "n=42"
+}
+array(2) {
+  ["x"]=>
+  string(2) "bb"
+  ["y"]=>
+  string(2) "bb"
+}
+12 2
+abc
+array(2) {
+  [0]=>
+  string(2) "--"
+  [1]=>
+  string(2) "b-"
+}
+int(5)
+bool(false)
+int(7)
+string(3) "abc"
+a b|$HOME
+0

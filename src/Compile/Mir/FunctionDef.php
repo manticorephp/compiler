@@ -103,4 +103,11 @@ final class FunctionDef
      * pushes its as-written argument count onto that channel.
      */
     public bool $usesFuncArgs = false;
+
+    /**
+     * `#[Overload('name')]` — this function is a typed overload of `name`: a
+     * call to `name` whose arguments fit these params is retargeted here
+     * ({@see \Compile\Mir\Passes\ResolveOverloads}). Carried across the `.sig`.
+     */
+    public string $overloadOf = '';
 }

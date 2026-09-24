@@ -252,6 +252,41 @@ trait EmitLlvmModule
                 }
             }
         }
+        // The (name → is-a ids) table of a runtime-named instanceof, same
+        // interning deadline. Every class, interface and enum is a possible
+        // target; its row is the class ids that are-a it, flattened with
+        // offsets, plus its own id for the strict (is_subclass_of) form.
+        $isdNames = '';
+        $isdOff = '';
+        $isdOwn = '';
+        $isdIds = '';
+        $isdN = 0;
+        $isdM = 0;
+        if ($this->rt->needsIsaDyn) {
+            /** @var array<string, int> $targets name → own id (-1: an interface) */
+            $targets = [];
+            foreach ($this->classes as $name => $cd) { $targets[$name] = $cd->classId; }
+            foreach ($this->interfaceNames as $name => $unused) {
+                if (!isset($targets[$name])) { $targets[$name] = -1; }
+            }
+            foreach ($this->enums as $name => $ed) {
+                if (!isset($targets[$name])) { $targets[$name] = $ed->classId; }
+            }
+            foreach ($targets as $name => $own) {
+                $ids = $this->instanceofMatchIds((string)$name);
+                if ($ids === []) { continue; }
+                if ($isdN > 0) { $isdNames .= ', '; $isdOwn .= ', '; }
+                $isdNames .= 'ptr ' . $this->litStr((string)$name);
+                $isdOwn .= 'i64 ' . (string)$own;
+                $isdOff .= ($isdN > 0 ? ', ' : '') . 'i64 ' . (string)$isdM;
+                foreach ($ids as $id) {
+                    $isdIds .= ($isdM > 0 ? ', ' : '') . 'i64 ' . (string)$id;
+                    $isdM = $isdM + 1;
+                }
+                $isdN = $isdN + 1;
+            }
+            $isdOff .= ($isdN > 0 ? ', ' : '') . 'i64 ' . (string)$isdM;
+        }
         $pxClsRows = '';
         $pxPrpRows = '';
         $pxCount = 0;
@@ -418,6 +453,9 @@ trait EmitLlvmModule
             // case-insensitively — php resolves a class name that way.
             $out .= $this->memberExistsTable('isa', '__mir_class_isa',
                 $isaSubRows, $isaAncRows, $isaCount, 'strcasecmp');
+        }
+        if ($this->rt->needsIsaDyn) {
+            $out .= $this->isaDynTable($isdNames, $isdOff, $isdOwn, $isdIds, $isdN, $isdM);
         }
         if ($this->rt->needsPropExists) {
             // …and a PROPERTY name case-SENSITIVELY. Same table, different
@@ -931,6 +969,8 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
+        /** @var array<string, bool> $copiedParams */
+        $copiedParams = [];
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -1063,9 +1103,10 @@ trait EmitLlvmModule
                 // (a nested array under an unknown type would still leak, but that
                 // needs the concrete type). Gated on the DECLARED array hint so a
                 // string param's `$s[0]=…` char-write is never mis-copied. By-ref
-                // keeps aliasing the caller.
-                if (!$p->byRef && $p->arrayHinted
-                    && $this->localMutatedAsArray($fn->body, $p->name)) {
+                // keeps aliasing the caller. The copy is the frame's own +1,
+                // released at scope exit ({@see VecCopyOnAssign::paramCopiedOnEntry}).
+                if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, false)) {
+                    $copiedParams[$p->name] = true;
                     $ld = $this->ssa->allocReg();
                     $bodySink->write('  ' . $ld . ' = load i64, ptr ' . $slot . "\n");
                     $lp = $this->ssa->allocReg();
@@ -1094,7 +1135,7 @@ trait EmitLlvmModule
         $paramTypes = [];
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypes[$p->name] = $p->type; }
         $bodySink->write($this->preallocateLocals($fn->body));
-        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames));
+        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames, $copiedParams));
         // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
         // code is a function like any other to the language and unlike any other
         // to this file, and a prologue step added to only one of the two is
@@ -1219,6 +1260,81 @@ trait EmitLlvmModule
      * `$cmp` is the member comparison: php matches a METHOD name
      * case-insensitively and a PROPERTY name exactly.
      */
+    /**
+     * `__mir_isa_dyn_m<token>(cid, name, strict)`: is an object of class id `cid` an
+     * instance of the class / interface / enum NAMED `name`? One case-insensitive
+     * scan of the names (php resolves a class name that way; a leading `\` is
+     * skipped), then a scan of that name's is-a ids. `strict` refuses the
+     * target's own id — is_subclass_of is proper.
+     */
+    private function isaDynTable(string $names, string $off, string $own, string $ids, int $n, int $m): string
+    {
+        $ln = $n > 0 ? $n : 1;
+        $lm = $m > 0 ? $m : 1;
+        $out = '@__mir_isd_names = internal constant [' . (string)$ln . ' x ptr] [' . ($n > 0 ? $names : 'ptr null') . "]\n";
+        $out .= '@__mir_isd_own = internal constant [' . (string)$ln . ' x i64] [' . ($n > 0 ? $own : 'i64 -1') . "]\n";
+        $out .= '@__mir_isd_off = internal constant [' . (string)($n + 1) . ' x i64] [' . $off . "]\n";
+        $out .= '@__mir_isd_ids = internal constant [' . (string)$lm . ' x i64] [' . ($m > 0 ? $ids : 'i64 -1') . "]\n";
+        // Named per MODULE: the preamble's bodies are linkonce_odr, and this one
+        // reads this module's own tables.
+        $out .= 'define i64 @' . $this->mirHelperSym('__mir_isa_dyn') . "(i64 %cid, ptr %name0, i64 %strict) {\n";
+        $out .= "entry:\n";
+        $out .= "  %isnull = icmp eq ptr %name0, null\n";
+        $out .= "  br i1 %isnull, label %miss, label %strip\n";
+        $out .= "strip:\n";
+        $out .= "  %c0 = load i8, ptr %name0\n";
+        $out .= "  %bs = icmp eq i8 %c0, 92\n";
+        $out .= "  %name1 = getelementptr inbounds i8, ptr %name0, i64 1\n";
+        $out .= "  %name = select i1 %bs, ptr %name1, ptr %name0\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %strip], [%i1, %next]\n";
+        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  br i1 %done, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= '  %np = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %i\n";
+        $out .= "  %cand = load ptr, ptr %np\n";
+        $out .= "  %c = call i32 @strcasecmp(ptr %name, ptr %cand)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %found, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "found:\n";
+        $out .= '  %op = getelementptr inbounds [' . (string)$ln . " x i64], ptr @__mir_isd_own, i64 0, i64 %i\n";
+        $out .= "  %own = load i64, ptr %op\n";
+        $out .= "  %isown = icmp eq i64 %cid, %own\n";
+        $out .= "  %strictb = icmp ne i64 %strict, 0\n";
+        $out .= "  %refuse = and i1 %isown, %strictb\n";
+        $out .= "  br i1 %refuse, label %miss, label %range\n";
+        $out .= "range:\n";
+        $out .= '  %lop = getelementptr inbounds [' . (string)($n + 1) . " x i64], ptr @__mir_isd_off, i64 0, i64 %i\n";
+        $out .= "  %lo = load i64, ptr %lop\n";
+        $out .= "  %ip1 = add i64 %i, 1\n";
+        $out .= '  %hip = getelementptr inbounds [' . (string)($n + 1) . " x i64], ptr @__mir_isd_off, i64 0, i64 %ip1\n";
+        $out .= "  %hi = load i64, ptr %hip\n";
+        $out .= "  br label %idloop\n";
+        $out .= "idloop:\n";
+        $out .= "  %j = phi i64 [%lo, %range], [%j1, %idnext]\n";
+        $out .= "  %jdone = icmp sge i64 %j, %hi\n";
+        $out .= "  br i1 %jdone, label %miss, label %idbody\n";
+        $out .= "idbody:\n";
+        $out .= '  %ipp = getelementptr inbounds [' . (string)$lm . " x i64], ptr @__mir_isd_ids, i64 0, i64 %j\n";
+        $out .= "  %id = load i64, ptr %ipp\n";
+        $out .= "  %ideq = icmp eq i64 %id, %cid\n";
+        $out .= "  br i1 %ideq, label %hit, label %idnext\n";
+        $out .= "idnext:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %idloop\n";
+        $out .= "hit:\n";
+        $out .= "  ret i64 1\n";
+        $out .= "miss:\n";
+        $out .= "  ret i64 0\n}\n";
+        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
+        $this->rt->needsStrcmp = true;
+        return $out;
+    }
+
     private function memberExistsTable(string $prefix, string $fn, string $clsRows,
                                        string $memRows, int $n, string $cmp): string
     {

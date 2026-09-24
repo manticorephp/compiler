@@ -23,6 +23,21 @@ final class IntConst extends Node
         parent::__construct(Node::KIND_INT_CONST, $type);
     }
 
+    /** Whether `$n` is an int constant — a literal, or a negated one. Two calls,
+     *  not one `?int`: a nullable scalar's null does not read back under self-host. */
+    public static function isConstInt(Node $n): bool
+    {
+        return $n instanceof IntConst || ($n instanceof Neg && $n->operand instanceof IntConst);
+    }
+
+    /** The value of an {@see isConstInt} node (0 for any other). */
+    public static function valueOf(Node $n): int
+    {
+        if ($n instanceof IntConst) { return $n->value; }
+        if ($n instanceof Neg && $n->operand instanceof IntConst) { return -$n->operand->value; }
+        return 0;
+    }
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitIntConst($this);

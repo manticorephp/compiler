@@ -34,6 +34,12 @@ final class TypeCheck
     /** @var string[] collected, human-readable type errors */
     public array $errors = [];
 
+    /** @var string[] findings that do not stop the build */
+    public array $warnings = [];
+
+    /** A warning {@see shapeConflict} found while answering, taken by its caller. */
+    private string $shapeWarn = '';
+
     /**
      * Run ONLY the array-representation conflict check (see
      * {@see arrayReprConflict}) and skip every other rule.
@@ -89,7 +95,51 @@ final class TypeCheck
             }
         }
         $this->checkShapeNode($n, $inFn);
+        // An arm its own guard rules out never runs: `is_array($v) ? f($v) : g($v)`
+        // over a `string` $v. Checking it reported the dead arm's argument as the
+        // program's error.
+        if ($n instanceof \Compile\Mir\Ternary) {
+            $this->checkGuarded($n->cond, $n->then, $n->else_, $inFn);
+            return;
+        }
+        if ($n instanceof \Compile\Mir\If_) {
+            $this->checkGuarded($n->cond, $n->then, $n->else, $inFn);
+            return;
+        }
         foreach (Walk::children($n) as $c) { $this->checkNode($c, $inFn); }
+    }
+
+    private function checkGuarded(Node $cond, ?Node $then, ?Node $else, string $inFn): void
+    {
+        $truth = $this->staticTruth($cond);
+        $this->checkNode($cond, $inFn);
+        if ($then !== null && $truth !== 0) { $this->checkNode($then, $inFn); }
+        if ($else !== null && $truth !== 1) { $this->checkNode($else, $inFn); }
+    }
+
+    /**
+     * 1 / 0 when a type guard's answer follows from its operand's CONCRETE static
+     * type (`is_array` of a string is 0), -1 when it does not.
+     */
+    private function staticTruth(Node $cond): int
+    {
+        if ($cond->kind === Node::KIND_NOT) {
+            $inner = $cond instanceof \Compile\Mir\Not_ ? $this->staticTruth($cond->operand) : -1;
+            return $inner < 0 ? -1 : 1 - $inner;
+        }
+        if (!($cond instanceof Call) || \count($cond->args) !== 1) { return -1; }
+        $fn = \strtolower(\ltrim($cond->function, '\\'));
+        $bs = \strrpos($fn, '\\');
+        if ($bs !== false) { $fn = \substr($fn, $bs + 1); }
+        $t = $cond->args[0]->type;
+        if (!$this->concrete($t) || $t->kind === Type::KIND_NULL) { return -1; }
+        $k = $t->kind;
+        if ($fn === 'is_array')  { return $k === Type::KIND_ARRAY ? 1 : 0; }
+        if ($fn === 'is_string') { return $k === Type::KIND_STRING ? 1 : 0; }
+        if ($fn === 'is_int')    { return $k === Type::KIND_INT ? 1 : 0; }
+        if ($fn === 'is_float')  { return $k === Type::KIND_FLOAT ? 1 : 0; }
+        if ($fn === 'is_bool')   { return $k === Type::KIND_BOOL ? 1 : 0; }
+        return -1;
     }
 
     /**
@@ -136,11 +186,13 @@ final class TypeCheck
                     . $label . '() — ' . $why . ' (' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected)';
             }
+            $this->shapeWarn = '';
             $sw = $this->shapeConflict($this->givenShape($arg), $p->type);
             if ($sw !== null) {
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $sw;
             }
+            $this->takeShapeWarn($arg, $inFn . '(): argument ' . (string)($ai + 1) . ' to ' . $label . '() — ');
         }
     }
 
@@ -200,6 +252,14 @@ final class TypeCheck
     }
 
     /** `line N: error: ` prefix from a node's stamped source line (0 → ''). */
+    private function takeShapeWarn(Node $n, string $what): void
+    {
+        if ($this->shapeWarn === '') { return; }
+        $this->warnings[] = ($n->line > 0 ? 'line ' . (string)$n->line . ': warning: ' : 'warning: ')
+            . $what . $this->shapeWarn;
+        $this->shapeWarn = '';
+    }
+
     private function at(Node $n): string
     {
         return $n->line > 0 ? 'line ' . (string)$n->line . ': error: ' : 'error: ';
@@ -260,8 +320,10 @@ final class TypeCheck
         if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
             $rt = $this->returnTypes[$inFn] ?? null;
             if ($rt !== null && $rt->hasShape()) {
+                $this->shapeWarn = '';
                 $sw = $this->shapeConflict($this->givenShape($n->value), $rt);
                 if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): return — ' . $sw; }
+                $this->takeShapeWarn($n, $inFn . '(): return — ');
             }
         } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
             $at = $n->array->type;
@@ -281,8 +343,10 @@ final class TypeCheck
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL && $n->declaredType !== null
             && $n->declaredType->hasShape()) {
+            $this->shapeWarn = '';
             $sw = $this->shapeConflict($this->givenShape($n->value), $n->declaredType);
             if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): $' . $n->name . ' — ' . $sw; }
+            $this->takeShapeWarn($n, $inFn . '(): $' . $n->name . ' — ');
         }
     }
 
@@ -360,7 +424,21 @@ final class TypeCheck
                 }
                 if ($why === null) {
                     foreach ($given->fields as $ek => $gt) {
-                        if ($want->shapeFieldAt($ek) === null) { $why = 'key ' . Type::shapeKeyLabel($ek) . ' is not in the shape'; break; }
+                        if ($want->shapeFieldAt($ek) !== null) { continue; }
+                        // An OPTIONAL key the target does not name is a docblock
+                        // disagreement, not a wrong read: nothing on the other side
+                        // looks for it. php-cs-fixer declares `constant?:` where the
+                        // method it passes to declares `const?:`. A warning, not a
+                        // refusal to build.
+                        if (isset($given->nullableFields[$ek])) {
+                            if ($this->shapeWarn === '') {
+                                $this->shapeWarn = 'optional key ' . Type::shapeKeyLabel($ek) . ' of '
+                                    . $given->shapeString() . ' is not in ' . $want->shapeString();
+                            }
+                            continue;
+                        }
+                        $why = 'key ' . Type::shapeKeyLabel($ek) . ' is not in the shape';
+                        break;
                     }
                 }
             } elseif ($given->element !== null && $this->concrete($given->element)) {

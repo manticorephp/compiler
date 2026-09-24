@@ -3193,7 +3193,8 @@ trait EmitLlvmBuiltins
         if (\count($args) !== 2) { return null; }
         $bothInt = $args[0]->type->kind === Type::KIND_INT
             && $args[1]->type->kind === Type::KIND_INT;
-        if ($bothInt) {
+        if ($bothInt && !\Compile\Mir\IntConst::isConstInt($args[1])) { return $this->biPowIntRuntime($args); }
+        if ($bothInt && \Compile\Mir\IntConst::valueOf($args[1]) >= 0) {
             $this->rt->needsIpow = true;
             $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $b = $this->lastValue;
             $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $e = $this->lastValue;
@@ -3211,6 +3212,50 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $reg . ' = call double @llvm.pow.f64(double ' . $b . ', double ' . $e . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
+    }
+
+    /**
+     * `int ** int` with an exponent only known at run time: php's int for a
+     * non-negative exponent, its float otherwise — boxed into the numeric cell
+     * InferCalls typed the call as.
+     *
+     * @param Node[] $args
+     */
+    private function biPowIntRuntime(array $args): string
+    {
+        $this->rt->needsIpow = true;
+        $this->rt->needsTagged = true;
+        $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
+        $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $b = $this->lastValue;
+        $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $e = $this->lastValue;
+        $neg = $this->ssa->allocReg();
+        $lInt = $this->ssa->allocLabel('pow.int');
+        $lFlt = $this->ssa->allocLabel('pow.flt');
+        $lEnd = $this->ssa->allocLabel('pow.end');
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $e . ", 0\n";
+        $out .= '  br i1 ' . $neg . ', label %' . $lFlt . ', label %' . $lInt . "\n";
+        $out .= $lInt . ":\n";
+        $ri = $this->ssa->allocReg();
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $ri . ' = call i64 @__mir_ipow(i64 ' . $b . ', i64 ' . $e . ")\n";
+        $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $ri . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lFlt . ":\n";
+        $db = $this->ssa->allocReg();
+        $de = $this->ssa->allocReg();
+        $rf = $this->ssa->allocReg();
+        $bf = $this->ssa->allocReg();
+        $out .= '  ' . $db . ' = sitofp i64 ' . $b . " to double\n";
+        $out .= '  ' . $de . ' = sitofp i64 ' . $e . " to double\n";
+        $out .= '  ' . $rf . ' = call double @llvm.pow.f64(double ' . $db . ', double ' . $de . ")\n";
+        $out .= '  ' . $bf . ' = call i64 @__manticore_box_float(double ' . $rf . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = phi i64 [ ' . $bi . ', %' . $lInt . ' ], [ ' . $bf . ', %' . $lFlt . " ]\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /** A unary float→float math builtin via an LLVM intrinsic (floor / ceil /
@@ -6776,7 +6821,7 @@ trait EmitLlvmBuiltins
             $ids = $this->instanceofMatchIds($target);
             if ($strict) {
                 // is_subclass_of is PROPER: drop the target's own id, exactly
-                // the way the dynamic-target arms do ({@see emitInstanceofArm}).
+                // the way the runtime-name table does ({@see EmitLlvmModule::isaDynTable}).
                 $ownId = isset($this->classes[$target]) ? $this->classes[$target]->classId : -1;
                 $keep = [];
                 foreach ($ids as $id) { if ($id !== $ownId) { $keep[] = $id; } }
@@ -6797,9 +6842,9 @@ trait EmitLlvmBuiltins
      * the test is `strcmp(subject, "C") == 0` OR-ed over that set; no class-id
      * read, because a string has no descriptor to read one from.
      *
-     * php matches class names case-insensitively; this compares exactly, the
-     * same simplification {@see emitInstanceofArm} already makes for a runtime
-     * TARGET name.
+     * php matches class names case-insensitively; this compares exactly
+     * (the runtime-TARGET form goes through {@see EmitLlvmModule::isaDynTable},
+     * which does not).
      * @param Node[] $args
      */
     private function biIsAStringSubject(array $args, bool $strict, string $target): string
@@ -6937,31 +6982,17 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;
-        // Candidate target names: every class AND interface — a target may be an
-        // interface or ancestor the operand only is-a transitively (Dog is-a the
-        // Animal interface). Interfaces live outside $this->classes.
-        //
-        // Iterate each assoc's KEYS DIRECTLY — deliberately not `$t =
-        // array_keys($this->classes); foreach($ifaces) $t[] = $i;`. That
-        // array_keys-plus-append combined list monomorphizes to a repr the
-        // foreach then mis-reads (a garbage `$name` → a wild string-header read
-        // in classIsA), the array-union miscompile family. See the arm helper.
-        $acc = '';
-        foreach ($this->classes as $name => $cd) {
-            $arm = $this->emitInstanceofArm($name, $strP, $cid, $strict, $acc);
-            $out .= $arm[0];
-            $acc = $arm[1];
-        }
-        foreach ($this->interfaceNames as $name => $ignore) {
-            $arm = $this->emitInstanceofArm($name, $strP, $cid, $strict, $acc);
-            $out .= $arm[0];
-            $acc = $arm[1];
-        }
-        if ($acc !== '') {
-            $ext = $this->ssa->allocReg();
-            $out .= '  ' . $ext . ' = zext i1 ' . $acc . " to i64\n";
-            $out .= '  store i64 ' . $ext . ', ptr ' . $slot . "\n";
-        }
+        // The target NAME is a runtime string, so the class relation is looked
+        // up, not unrolled: one module table over every class, interface and
+        // enum ({@see EmitLlvmModule::isaDynTable}). An arm per candidate was a
+        // strcmp chain the size of the class table at EVERY site — 1 264 of
+        // them in one symfony resolver, and clang's SLP vectorizer spent seconds
+        // on each.
+        $this->rt->needsIsaDyn = true;
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = call i64 @' . $this->mirHelperSym('__mir_isa_dyn') . '(i64 ' . $cid . ', ptr ' . $strP
+              . ', i64 ' . ($strict ? '1' : '0') . ")\n";
+        $out .= '  store i64 ' . $hit . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $doneL . "\n";
         $out .= $doneL . ":\n";
         $reg = $this->ssa->allocReg();
@@ -6969,41 +7000,6 @@ trait EmitLlvmBuiltins
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
-    }
-
-    /**
-     * One dynamic-instanceof arm for target class/interface `$name`: the whole
-     * is-a is true when the operand's runtime name equals `$name` AND its class
-     * id is one of `$name`'s subtype ids. Returns `[ir, newAcc]` (both strings)
-     * — `$acc` threads the running OR chain. Extracted so
-     * {@see biIsADynamic} can iterate `$this->classes` and `$this->interfaceNames`
-     * KEYS directly instead of building an `array_keys()+append` list that
-     * miscompiles (see the call site).
-     *
-     * @return string[] [irToAppend, newAcc]
-     */
-    private function emitInstanceofArm(string $name, string $strP, string $cid, bool $strict, string $acc): array
-    {
-        $ids = $this->instanceofMatchIds($name);
-        if ($strict) {
-            $ownId = isset($this->classes[$name]) ? $this->classes[$name]->classId : -1;
-            $keep = [];
-            foreach ($ids as $id) { if ($id !== $ownId) { $keep[] = $id; } }
-            $ids = $keep;
-        }
-        if ($ids === []) { return ['', $acc]; }
-        $lit = $this->strLitId($this->pool->intern($name));
-        $cmp = $this->ssa->allocReg();
-        $out = '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $strP . ', ptr ' . $lit . ")\n";
-        $nameEq = $this->ssa->allocReg();
-        $out .= '  ' . $nameEq . ' = icmp eq i32 ' . $cmp . ", 0\n";
-        $out .= $this->emitClassIdMatch($cid, $ids);
-        $both = $this->ssa->allocReg();
-        $out .= '  ' . $both . ' = and i1 ' . $nameEq . ', ' . $this->classIdMatchReg . "\n";
-        if ($acc === '') { return [$out, $both]; }
-        $or = $this->ssa->allocReg();
-        $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $both . "\n";
-        return [$out, $or];
     }
 
     /** get_parent_class($obj|'C') — parent name string, or boxed false. */

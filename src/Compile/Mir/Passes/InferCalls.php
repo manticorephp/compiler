@@ -385,13 +385,16 @@ trait InferCalls
             }
             return Type::int_();
         }
-        // pow / `**`: int when both operands are int (PHP returns int for a
-        // non-negative int exponent), else float.
+        // pow / `**`: php answers an int for int operands only when the exponent
+        // is non-negative (`2 ** -1` is 0.5). A constant exponent decides it
+        // here; any other int exponent is decided at run time, so int|float.
         if ($n === 'pow') {
             $bothInt = \count($args) === 2
                 && $args[0]->type->kind === Type::KIND_INT
                 && $args[1]->type->kind === Type::KIND_INT;
-            return $bothInt ? Type::int_() : Type::float_();
+            if (!$bothInt) { return Type::float_(); }
+            if (!\Compile\Mir\IntConst::isConstInt($args[1])) { return Type::numericCell(); }
+            return \Compile\Mir\IntConst::valueOf($args[1]) >= 0 ? Type::int_() : Type::float_();
         }
         // is_* type predicates return bool — echo prints "1"/"" (not "0"),
         // var_dump renders bool(...). Without this they type unknown → render
@@ -871,7 +874,10 @@ trait InferCalls
             }
             if ($cls !== '') {
                 $mangled = $cls . '__' . $node->method;
-                if (isset($this->sigs[$mangled])) {
+                $joined = $this->virtualReturnJoin($objType->class, $node->method);
+                if ($joined !== null) {
+                    $node->type = $joined;
+                } elseif (isset($this->sigs[$mangled])) {
                     $node->type = $this->sigs[$mangled];
                 } else {
                     // Abstract method (declared, no body → no sig of its own):
@@ -964,6 +970,76 @@ trait InferCalls
 
     /** Whether `$class` (or an ancestor) implements `$iface`, transitively
      *  through the parent chain and interface inheritance. */
+    /**
+     * The result type of a VIRTUAL call when the bodies it can reach disagree.
+     * Each body's return is narrowed on its own (NarrowReturns), so an
+     * interface's `k(): mixed` came back `int` from one implementer and a
+     * boxed string from another — and the call adopted whichever was found
+     * first: `(string)$iface->k()` printed a string's tag bits as a number.
+     * The dispatch boxes each arm into the answer this returns. Null when every
+     * reachable body agrees (or there is only one).
+     */
+    private function virtualReturnJoin(string $recv, string $method): ?Type
+    {
+        $key = $recv . '::' . $method;
+        $bodies = $this->virtualBodies[$key] ?? null;
+        if ($bodies === null) {
+            if (!$this->subtypeIndexBuilt) { $this->buildSubtypeIndex(); }
+            $bodies = [];
+            $seen = [];
+            foreach ($this->subtypesOf[$recv] ?? [] as $sub) {
+                $b = $this->resolveMethodClass($sub, $method);
+                if ($b === '' || isset($seen[$b])) { continue; }
+                $seen[$b] = true;
+                $bodies[] = $b;
+            }
+            $this->virtualBodies[$key] = $bodies;
+        }
+        if (\count($bodies) < 2) { return null; }
+        $first = null;
+        $numeric = true;
+        $differ = false;
+        foreach ($bodies as $b) {
+            $t = $this->sigs[$b . '__' . $method] ?? null;
+            if ($t === null) { continue; }
+            if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) { $numeric = false; }
+            if ($first === null) { $first = $t; continue; }
+            // Only a different KIND changes how the word is read. Bodies that agree
+            // on it (arrays of different elements, objects of different classes)
+            // share the representation; boxing them into a cell cost every call a
+            // box and leaked it — the compiler compiling itself grew 1.3 GB → 8 GB.
+            if ($t->kind !== $first->kind) { $differ = true; }
+        }
+        if (!$differ) { return null; }
+        return $numeric ? Type::numericCell() : Type::cell();
+    }
+
+    /**
+     * Every class under each class/interface name, itself included — built in
+     * ONE pass per InferTypes run. Asking classImplementsT per candidate instead
+     * walked every class for every (receiver, method) pair: on php-cs-fixer's
+     * 7000 classes that was the whole compile's memory, gigabytes a run.
+     */
+    private function buildSubtypeIndex(): void
+    {
+        $this->subtypeIndexBuilt = true;
+        foreach ($this->classes as $cd) {
+            $name = $cd->name;
+            $seen = [];
+            $stack = [$name];
+            while ($stack !== []) {
+                $c = \array_pop($stack);
+                if ($c === '' || isset($seen[$c])) { continue; }
+                $seen[$c] = true;
+                $this->subtypesOf[$c][] = $name;
+                $pcd = $this->classes[$c] ?? null;
+                if ($pcd === null) { continue; }
+                if ($pcd->parent !== '') { $stack[] = $pcd->parent; }
+                foreach ($pcd->interfaces as $i) { $stack[] = $i; }
+            }
+        }
+    }
+
     private function classImplementsT(string $class, string $iface): bool
     {
         $seen = [];

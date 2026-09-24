@@ -107,8 +107,10 @@ trait EmitLlvmMemory
      * read of garbage.
      *
      * @param array<string, bool> $paramNames param name => is-a-param (a SET)
+     * @param array<string, bool> $copiedParams params the prologue already COPIED
+     *        into a private +1 ({@see \Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry})
      */
-    private function initRcObjSlots(Node $body, array $paramNames = []): string
+    private function initRcObjSlots(Node $body, array $paramNames = [], array $copiedParams = []): string
     {
         $this->frame->rcObjLocals = [];
         $this->collectRcObjLocals($body);
@@ -140,6 +142,9 @@ trait EmitLlvmMemory
                 // happened to be harmless. The caller owns the value; the
                 // callee co-owns nothing.
                 if (isset($this->locals->refLocals[$name])) { continue; }
+                // The entry copy is already the frame's own reference; a retain
+                // on top of it is the one the scope-exit release never balances.
+                if (isset($copiedParams[$name])) { continue; }
                 if (isset($this->locals->slots[$name])) {
                     $out .= $this->rcRetainSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
                 }

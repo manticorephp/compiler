@@ -220,6 +220,7 @@ final class Parser
                 $this->advance();
                 continue;
             }
+            if ($this->match(TokenKind::Semicolon)) { continue; }   // empty statement
             $stmts[] = $this->parseStatement();
         }
         // Append hoisted anonymous classes as top-level declarations (order is
@@ -1280,6 +1281,7 @@ final class Parser
         $this->expect(TokenKind::OpenBrace, "expected '{'");
         $stmts = [];
         while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
+            if ($this->match(TokenKind::Semicolon)) { continue; }   // empty statement
             $stmts[] = $this->parseStatement();
         }
         $this->expect(TokenKind::CloseBrace, "expected '}'");
@@ -1295,6 +1297,7 @@ final class Parser
         if ($this->check(TokenKind::OpenBrace)) {
             return $this->parseBlock();
         }
+        if ($this->match(TokenKind::Semicolon)) { return new Block([]); }   // `for (…);`
         return new Block([$this->parseStatement()]);
     }
 
@@ -1318,6 +1321,7 @@ final class Parser
                 if ($this->checkKeyword($kw)) { $stop = true; break; }
             }
             if ($stop) { break; }
+            if ($this->match(TokenKind::Semicolon)) { continue; }   // empty statement
             $stmts[] = $this->parseStatement();
         }
         return new Block($stmts);
@@ -1709,6 +1713,7 @@ final class Parser
                 && !$this->checkKeyword('default')
                 && !$this->isAtEnd()
             ) {
+                if ($this->match(TokenKind::Semicolon)) { continue; }   // empty statement
                 $body[] = $this->parseStatement();
             }
             $cases[] = new SwitchArm($value, $body);
@@ -2207,9 +2212,20 @@ final class Parser
         return $left;
     }
 
+    /**
+     * php's precedence, high to low: `**`, then the prefix operators
+     * (`- + ~ ++ -- @` and casts), then `instanceof`, then `!`, then `* / %`.
+     * So `!$o instanceof A` is `!($o instanceof A)` — it parsed as
+     * `(!$o) instanceof A` and answered the opposite — and `-2 ** 2` is -4.
+     */
     private function parseInstanceof(): Expr
     {
-        $left = $this->parsePower();
+        if ($this->check(TokenKind::Bang)) {
+            $span = $this->span();
+            $this->advance();
+            return Expr::unary('!', $this->parseInstanceof(), $span);
+        }
+        $left = $this->parseUnary();
         if ($this->checkKeyword('instanceof')) {
             $span = $this->span();
             $this->advance();
@@ -2231,11 +2247,12 @@ final class Parser
 
     private function parsePower(): Expr
     {
-        $left = $this->parseUnary();
+        $left = $this->parsePostfix($this->parsePrimary());
         if ($this->check(TokenKind::StarStar)) {
             $span = $this->span();
             $this->advance();
-            $right = $this->parsePower(); // right-associative
+            // Right-associative, and the exponent may itself be signed: `2 ** -1`.
+            $right = $this->parseUnary();
             return Expr::binary('**', $left, $right, $span);
         }
         return $left;
@@ -2257,7 +2274,7 @@ final class Parser
         if ($tok->kind === TokenKind::Bang) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('!', $this->parseUnary(), $span);
+            return Expr::unary('!', $this->parseInstanceof(), $span);
         }
         if ($tok->kind === TokenKind::Tilde) {
             $span = $this->span();
@@ -2293,7 +2310,7 @@ final class Parser
             $this->expect(TokenKind::CloseParen, "expected ')' after cast");
             return Expr::cast(strtolower($castTok->lexeme), $this->parseUnary(), $span);
         }
-        return $this->parsePostfix($this->parsePrimary());
+        return $this->parsePower();
     }
 
     private function looksLikeCast(): bool
@@ -2572,7 +2589,7 @@ final class Parser
         }
         if ($tok->kind === TokenKind::FloatLiteral) {
             $this->advance();
-            return Expr::float((float)$tok->lexeme, $span);
+            return Expr::float((float)str_replace('_', '', $tok->lexeme), $span);
         }
         if ($tok->kind === TokenKind::StringLiteral) {
             $this->advance();
@@ -2998,6 +3015,20 @@ final class Parser
                     $nameExpr = Expr::variable(\substr($inner->lexeme, 1), $span);
                     return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
                 }
+            }
+            // `Class::{expr}(...)` / `Class::$name(...)` — the METHOD name is
+            // computed (php-cs-fixer: `self::{$this->fixingMap[$k]}(...)`).
+            if ($member->kind === TokenKind::OpenBrace) {
+                $nameExpr = $this->parseExpression();
+                $this->expect(TokenKind::CloseBrace, "expected '}' after a dynamic static method name");
+                if (!$this->check(TokenKind::OpenParen)) {
+                    throw $this->error("expected '(' after a dynamic static method name");
+                }
+                return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $span);
+            }
+            if ($member->kind === TokenKind::Variable && $this->check(TokenKind::OpenParen)) {
+                $nameExpr = Expr::variable(\substr($member->lexeme, 1), $span);
+                return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $span);
             }
             // `Class::method(...)`
             if ($this->check(TokenKind::OpenParen)) {

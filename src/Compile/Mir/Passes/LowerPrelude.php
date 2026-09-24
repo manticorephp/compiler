@@ -117,6 +117,10 @@ trait LowerPrelude
         if ($this->includeArrayClasses) {
             $src .= $this->arrayClassesSrc;
         }
+        if ($this->splIteratorsSrc !== '') {
+            // After spl_arrays.php: AppendIterator hands out an ArrayIterator.
+            $src .= $this->splIteratorsSrc;
+        }
         if ($this->includeArrayFns) {
             $src .= $this->arrayFnsSrc;
         }

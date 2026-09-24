@@ -63,6 +63,9 @@ final class UndefinedMethod
         if (!$idx->hierarchyKnown($recv->className, 0)) { return; }
         if ($idx->hasMagicCall($recv->className)) { return; }
         if ($idx->findMethod($recv->className, \strtolower($method), 0) !== null) { return; }
+        // Through an INTERFACE the object is some implementer; a method one of
+        // them declares is a legal call (`$rii->getSubIterator()->getSubPathname()`).
+        if ($ci->kind === 'interface' && $idx->implementerHasMethod($recv->className, \strtolower($method))) { return; }
         $this->diags[] = Diagnostic::error(
             $pf->path, $line, $col, 'undefined.method',
             'unknown method ' . $recv->className . $sep . $method . '()'

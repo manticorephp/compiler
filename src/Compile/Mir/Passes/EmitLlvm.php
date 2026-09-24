@@ -130,6 +130,7 @@ final class EmitLlvm implements EmitVisitor
     use EmitLlvmObjects;
     use EmitLlvmFiber;
     use EmitLlvmCellGuard;
+    use EmitLlvmEscape;
 
     public function name(): string { return 'emit-llvm'; }
 
@@ -757,6 +758,7 @@ final class EmitLlvm implements EmitVisitor
             . '|' . ($this->emitLibrary ? 'lib' : 'app')));
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
+        $this->cloneErasedSym = '';
         $this->dynmSyms = [];
         $this->dynmExtraBodies = '';
         $this->dynfThunks = [];
@@ -773,8 +775,11 @@ final class EmitLlvm implements EmitVisitor
         // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
         $this->propBorrowUnknown = $module->isLibraryModule;
         $this->moduleIsLibrary = $module->isLibraryModule;
+        $statT = \Compile\Stats::now();
         $this->computeKeepsNoArg($module);
+        \Compile\Stats::step('  escape summaries', $statT, \count($this->escJudged), -1);
         $this->grantBagsForDynamicStores($module);
+        $statT = \Compile\Stats::now();
         foreach ($module->functions as $fn) {
             // The RETURN exemption below needs the DECLARED return type: it is
             // what emitReturn falls back to for an unknown/cell value, and so
@@ -786,6 +791,7 @@ final class EmitLlvm implements EmitVisitor
             $alias = [];
             $this->scanGlobalCellStores($fn->body, $decl, $alias);
         }
+        \Compile\Stats::step('  borrow scan', $statT, -1, -1);
         $this->scanReturnType = null;
         $streaming = $this->streamIrPath !== '';
         $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';
@@ -2082,21 +2088,6 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
-     * User functions PROVEN to keep none of their arguments — the
-     * interprocedural half of {@see $propRawBorrow}.
-     *
-     * `foreach (splitStr("\r\n", $this->block) as $line)` vetoed
-     * `Http\\Headers::block` for the whole program, because a callee CAN keep
-     * what it is handed and the veto had no way to ask. So the block string
-     * was retained by every store and released by none — the header half of
-     * the http bench, 735 B per response.
-     *
-     * {@see computeKeepsNoArg} answers it for the module's OWN functions;
-     * {@see callKeepsNoArg} stays the php-contract name list for builtins.
-     */
-    private array $fnKeepsNoArg = [];
-
-    /**
      * Prop keys whose SLOT owns one element ref per element — every store to
      * them hands the slot a reference that carries the element refs the drop
      * flavor names, so the slot's release-before-overwrite can give them back on
@@ -2203,6 +2194,9 @@ final class EmitLlvm implements EmitVisitor
     }
 
     private string $vdExtraBodies = '';
+
+    /** The module's shared erased-receiver clone ({@see EmitLlvmObjects::emitCloneErased}), once emitted. */
+    private string $cloneErasedSym = '';
 
     /** shape key => the shared erased-dynamic-method chain's symbol. */
     /** @var array<string, string> */
@@ -2495,10 +2489,22 @@ final class EmitLlvm implements EmitVisitor
             // bound when the callee cannot suspend, which is what the
             // keep-nothing judgement now certifies; an array operand of any
             // other call is a borrow like the rest.
-            $pureArg = $this->consumerKeepsNoArg($parent);
+            // Judged per ARGUMENT, and never for the receiver
+            // ({@see EmitLlvmEscape::operandHeldSafely}).
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($pureArg) { continue; }
+                if ($c->kind === Node::KIND_PROPERTY_ACCESS && $this->operandHeldSafely($parent, $c)) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
+            }
+            return;
+        }
+        // A `foreach` walks its subject as the borrow it was read as; the
+        // loop body is what could release it ({@see EmitLlvmEscape::foreachSubjectHeldSafely}).
+        if ($k === Node::KIND_FOREACH) {
+            $subj = $parent->array;
+            $held = $subj->kind === Node::KIND_PROPERTY_ACCESS && $this->foreachSubjectHeldSafely($parent);
+            foreach (\Compile\Mir\Walk::children($parent) as $c) {
+                if ($held && $c === $subj) { continue; }
+                $this->markPropBorrowsIn($c, 'node kind foreach');
             }
             return;
         }
@@ -2662,7 +2668,7 @@ final class EmitLlvm implements EmitVisitor
         // opt-in below. `\\fwrite($this->conn, $this->parts[0])` in the
         // response outbox is the shape: its buffer-only drop stranded every
         // part string, three per response.
-        if ($this->consumerKeepsNoArg($p)) { return true; }
+        if ($this->operandHeldSafely($p, $aa)) { return true; }
         if (!\Compile\Debug::$rcElemOwns) { return false; }
         $k = $aa->type->kind;
         if ($k !== Type::KIND_OBJ && $k !== Type::KIND_STRING) { return false; }
@@ -2824,139 +2830,6 @@ final class EmitLlvm implements EmitVisitor
         }
     }
 
-    /**
-     * Which of the module's OWN functions keep none of their arguments.
-     *
-     * A may-escape fixpoint, started optimistic (everything keeps nothing) and
-     * only ever ADDING escapes, so recursion terminates and the answer is the
-     * least fixpoint. A parameter ESCAPES when the body can make it outlive the
-     * call: returned, stored into a property / static / element / array literal,
-     * captured by a closure, reached by a by-ref parameter, or handed to a
-     * callee that itself keeps it. Everything unproven escapes — the
-     * conservative direction here is a leak, never a free.
-     *
-     * `splitStr($sep, $s) { return \explode($sep, $s); }` is the shape this
-     * exists for: `explode` allocates its result, so nothing of `$s` survives
-     * the call, and the caller's property slot may drop what it overwrites.
-     */
-    private function computeKeepsNoArg(\Compile\Mir\Module $module): void
-    {
-        if (!\Compile\Debug::$propBorrowEscape) { $this->fnKeepsNoArg = []; return; }
-        $keeps = [];
-        foreach ($module->functions as $fn) {
-            // A body that is not HERE cannot be judged: a signature-only stdlib
-            // import (`fwrite` — whose real body parks on back-pressure) and an
-            // FFI binding both carry an empty block, and "keeps nothing" is
-            // exactly what an empty block answers. Both stay escapes.
-            // A GENERATOR is a body that parks by construction: its frame is
-            // seeded with the raw `%arg` words ({@see EmitLlvmGenerator}), no
-            // retain, and every `yield` hands control to a caller that may
-            // overwrite the slot the argument came from.
-            $keeps[$fn->name] = !$fn->isExtern && $fn->ffiSymbol === null && !$fn->isGenerator;
-        }
-        for ($round = 0; $round < 6; $round++) {
-            $changed = false;
-            foreach ($module->functions as $fn) {
-                if (!($keeps[$fn->name] ?? false)) { continue; }
-                if ($this->fnEscapesAParam($fn, $keeps)) {
-                    $keeps[$fn->name] = false;
-                    $changed = true;
-                }
-            }
-            if (!$changed) { break; }
-        }
-        $this->fnKeepsNoArg = $keeps;
-        $want = \getenv('MANTICORE_KEEPS_TRACE');
-        if ($want !== false && $want !== '') {
-            foreach ($keeps as $kn => $kv) {
-                if (\str_contains($kn, $want)) { \error_log('KEEPS ' . $kn . ' = ' . ($kv ? 'no-keep' : 'ESCAPES')); }
-            }
-        }
-    }
-
-    /** @param array<string,bool> $keeps the round's summary, read for callees */
-    private function fnEscapesAParam(\Compile\Mir\FunctionDef $fn, array $keeps): bool
-    {
-        $taint = [];
-        foreach ($fn->params as $p) {
-            if ($p->byRef) { return true; }
-            // The receiver is not an argument, and a scalar slot never holds a
-            // pointer to keep — without both exemptions every method escaped
-            // (`$this->x = …` aliases `this`) and so did every constructor with
-            // a `bool` to store.
-            if ($p->name === 'this' || (!$p->variadic && $this->paramNeverPointer($p->type))) { continue; }
-            $taint[$p->name] = true;
-        }
-        if ($taint === []) { return false; }
-        return $this->nodeEscapes($fn->body, $taint, $keeps);
-    }
-
-    /**
-     * @param array<string,bool> $taint locals that may alias a parameter
-     * @param array<string,bool> $keeps
-     */
-    private function nodeEscapes(Node $n, array &$taint, array $keeps): bool
-    {
-        $k = $n->kind;
-        // An alias store SPREADS the taint; it does not itself escape.
-        if ($k === Node::KIND_STORE_LOCAL) {
-            if ($this->aliasesTaint($n->value, $taint)) { $taint[$n->name] = true; }
-        }
-        if ($k === Node::KIND_RETURN) {
-            if ($n->value !== null && $this->aliasesTaint($n->value, $taint)) { return true; }
-        }
-        // Anything that can OUTLIVE the frame.
-        if ($k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_STORE_STATIC_PROP
-            || $k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_LIT
-            || $k === Node::KIND_CLOSURE || $k === Node::KIND_REF_ADDR) {
-            foreach (\Compile\Mir\Walk::children($n) as $c) {
-                // A property store that RETAINS keeps a reference of its own,
-                // not the caller's — the promoted `$this->parent = $parent` of
-                // every constructor. The slot it fills gives that reference
-                // back on its own overwrite / drop.
-                if ($k === Node::KIND_STORE_PROPERTY && $c === $n->value
-                    && $this->propStoreCoOwns($n)) { continue; }
-                if ($this->aliasesTaint($c, $taint)) { return true; }
-            }
-        }
-        // Any call that is not itself keep-nothing disqualifies the body,
-        // tainted argument or not: it may PARK (a stream, a timer, `Async\\`,
-        // user code), and a parameter still held only as the borrow it
-        // arrived as is then freed by the slot it came from. A keep-nothing
-        // callee is park-free by the same induction, so a body of pure calls
-        // and retaining stores — every promoted constructor — still qualifies.
-        if ($this->isCallLike($k) && !$this->consumerKeepsNoArg($n, $keeps)) { return true; }
-        // A `foreach` over anything but a concrete array RESUMES user code — a
-        // Generator, an Iterator, an erased subject that may be either — and
-        // that code can park, holding the subject as the borrow it arrived as.
-        if ($k === Node::KIND_FOREACH) {
-            $bt = $n->array->type;
-            if (!$bt->isVec() && !$bt->isAssoc()) { return true; }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            if ($this->nodeEscapes($c, $taint, $keeps)) { return true; }
-        }
-        return false;
-    }
-
-    /** Does `$n` hand over a REFERENCE to a tainted value (rather than a fresh
-     *  one derived from it)? A concat, a cast and every builtin result are
-     *  fresh buffers; only a direct read, or a conditional over such reads,
-     *  aliases the parameter. */
-    private function aliasesTaint(Node $n, array $taint): bool
-    {
-        $k = $n->kind;
-        if ($k === Node::KIND_LOAD_LOCAL) { return isset($taint[$n->name]); }
-        // Every conditional the emitter normalizes hands an arm back as-is;
-        // the shape list is {@see \Compile\Mir\CondOwn}'s so the two cannot drift.
-        if (\Compile\Mir\CondOwn::isConditional($n)) {
-            foreach (\Compile\Mir\CondOwn::arms($n) as $arm) {
-                if ($this->aliasesTaint($arm, $taint)) { return true; }
-            }
-        }
-        return false;
-    }
-
     /** A slot of this static type holds a scalar, never a pointer anyone
      *  could keep. Everything else — erased, cell, array, object, string —
      *  is tainted. */
@@ -3021,26 +2894,6 @@ final class EmitLlvm implements EmitVisitor
         return $cd->propertyOffset($n->property) !== -1;
     }
 
-    /**
-     * Does this consumer — a call, a `new`, an enum `from` — keep nothing of
-     * what it is handed, so a borrowed operand cannot outlive it? The one
-     * owner of that question for a whole-property read, an element read and
-     * the escape fixpoint alike; $keeps is the fixpoint's in-progress summary
-     * (the finished {@see $fnKeepsNoArg} when null).
-     * @param array<string,bool>|null $keeps
-     */
-    private function consumerKeepsNoArg(Node $p, ?array $keeps = null): bool
-    {
-        $keeps = $keeps ?? $this->fnKeepsNoArg;
-        $k = $p->kind;
-        if ($k === Node::KIND_CALL) {
-            return $this->callKeepsNoArg($p->function) || ($keeps[$p->function] ?? false);
-        }
-        if ($k === Node::KIND_NEW_OBJ) { return $this->newObjKeepsNoArg($p, $keeps); }
-        if ($k === Node::KIND_STATIC_CALL) { return $this->enumFromKeepsNoArg($p); }
-        return false;
-    }
-
     /** A backed enum's `from` / `tryFrom` is {@see EmitLlvmObjects::emitEnumFrom}:
      *  an unrolled compare against the case values that yields a singleton and
      *  keeps nothing of its argument. `Method::tryFrom($this->method)` alone
@@ -3050,25 +2903,6 @@ final class EmitLlvm implements EmitVisitor
     {
         return isset($this->enums[$n->class]) && \count($n->args) === 1
             && ($n->method === 'from' || $n->method === 'tryFrom');
-    }
-
-    /**
-     * Does `new C(…)` keep none of its arguments as a BORROW? The class's
-     * constructor is one of the module's own functions and the fixpoint has
-     * judged it — with `this` out of the taint and a retaining property store
-     * not counted as an escape ({@see propStoreCoOwns}). A class the module
-     * does not declare, or one without a constructor of its own to judge,
-     * stays a borrow.
-     * @param array<string,bool> $keeps
-     */
-    private function newObjKeepsNoArg(\Compile\Mir\NewObj $n, array $keeps): bool
-    {
-        if ($n->bare) { return false; }
-        $cls = $n->class;
-        if ($cls === '' || !isset($this->classes[$cls])) { return false; }
-        $ctorClass = $this->resolveMethodClass($cls, '__construct');
-        if ($ctorClass === '') { return false; }
-        return $keeps[$ctorClass . '____construct'] ?? false;
     }
 
     /**
@@ -3150,6 +2984,11 @@ final class EmitLlvm implements EmitVisitor
             // in `$_SESSION` — handed each of its properties to it, so none of
             // them ever released what an overwrite replaced.
             '__mc_ser_val',
+            // The same for `var_export`: the synthesized per-class exporter
+            // renders `$v->p` into a fresh string. It is emitted for EVERY
+            // class once anything exports an erased value, so the compiler's
+            // own `InferTypes::localTypes` was vetoed by it.
+            '__mir_var_export',
         ] as $n) {
             if ($n === $bare) { return true; }
         }
@@ -3555,27 +3394,6 @@ final class EmitLlvm implements EmitVisitor
             if ($this->isEnumClass($cls)) { return false; }
         }
         return true;
-    }
-
-    /** Whether the local `$name` is the base of an in-place element store
-     *  (`$name[$k] = …` / append, or a nested `$name[0][] = …`) anywhere in `$n`
-     *  — i.e. mutated as an array, independent of its (possibly erased) type. */
-    private function localMutatedAsArray(Node $n, string $name): bool
-    {
-        if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $base = $n->array;
-            while ($base->kind === Node::KIND_ARRAY_ACCESS) {
-                $base = $base->array;
-            }
-            if ($base->kind === Node::KIND_LOAD_LOCAL
-                && $base->name === $name) {
-                return true;
-            }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) {
-            if ($this->localMutatedAsArray($c, $name)) { return true; }
-        }
-        return false;
     }
 
     /** Mark the array local under an `$a[$k]` element as mutated (its element may
@@ -4804,7 +4622,32 @@ final class EmitLlvm implements EmitVisitor
         if ($e->type->kind !== Type::KIND_OBJ) { return ''; }
         $cls = $e->type->class ?? '';
         if ($cls === '') { return ''; }
-        return $this->resolveMethodClass($cls, '__toString');
+        $ts = $this->resolveMethodClass($cls, '__toString');
+        if ($ts !== '' || isset($this->classes[$cls])) { return $ts; }
+        // An INTERFACE static type (`Stringable $s`, `Throwable $e`) has no
+        // ClassDef of its own: any implementer that answers __toString will do
+        // as the direct-call fallback, and toStringCandidates dispatches.
+        foreach ($this->interfaceImplementers($cls) as $impl) {
+            $t = $this->resolveMethodClass($impl, '__toString');
+            if ($t !== '') { return $t; }
+        }
+        return '';
+    }
+
+    /**
+     * Every class that implements interface `$iface`, directly or through an
+     * ancestor or a parent interface.
+     *
+     * @return string[]
+     */
+    private function interfaceImplementers(string $iface): array
+    {
+        $out = [];
+        foreach ($this->classes as $cd) {
+            $nm = $cd->name;
+            if ($this->classIsA($nm, $iface)) { $out[] = $nm; }
+        }
+        return $out;
     }
 
     /** The STATIC class of an expression, for the `__toString` dispatch. */
@@ -4827,14 +4670,19 @@ final class EmitLlvm implements EmitVisitor
         if ($staticClass === '') { return [$tsClass]; }
         $seen = [];
         $out = [];
-        foreach ($this->selfAndDescendants($staticClass) as $d) {
+        $reach = isset($this->classes[$staticClass])
+            ? $this->selfAndDescendants($staticClass) : $this->interfaceImplementers($staticClass);
+        // EVERY reaching class, not one per distinct body: the dispatch matches
+        // an exact class id (arms sharing a body merge there), so a class left
+        // out fell to the default — `Y extends X` inherited X's __toString and
+        // printed the static base's.
+        foreach ($reach as $d) {
             $t = $this->resolveMethodClass($d, '__toString');
             if ($t === '') { continue; }
-            if (isset($seen[$t])) { continue; }
             $seen[$t] = true;
             $out[] = $d;
         }
-        if ($out === []) { return [$tsClass]; }
+        if ($out === [] || \count($seen) === 1) { return [$tsClass]; }
         return $out;
     }
 

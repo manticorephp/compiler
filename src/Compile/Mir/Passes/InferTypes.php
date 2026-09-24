@@ -284,6 +284,8 @@ final class InferTypes implements Pass
      *  {@see findPropReturns} (instance state — by-ref recursion is unsound
      *  under self-host, [[selfhost_array_ref_nesting]]). */
     private array $propReturnsFound = [];
+    /** @var array<string, string> "Class::prop" → the getters' index kind: 's' string, 'i' int, 'm' mixed */
+    private array $propReturnsKeyKind = [];
     /** @var array<string, bool> param name → used-as-string, built by
      *  {@see detectStringElemUse} (instance state, same reason). */
     private array $strParamsFound = [];
@@ -460,6 +462,13 @@ final class InferTypes implements Pass
     /** @var array<string, string[]> constructor function name → parameter names */
     private array $ctorParamNamesCache = [];
 
+    /** @var array<string, string[]> `Recv::method` → the classes whose body a virtual call can reach */
+    private array $virtualBodies = [];
+
+    /** @var array<string, string[]> class/interface name → every class under it, itself included */
+    private array $subtypesOf = [];
+    private bool $subtypeIndexBuilt = false;
+
     /** @var array<string, bool> functions changed by the most recent widening scan */
     private array $lastInferenceChangedFunctions = [];
 
@@ -479,6 +488,18 @@ final class InferTypes implements Pass
      *  way to type it. Keyed by cell, which is already unique per function+var.
      *  {@see scanStaticLocalTypes}. */
     private array $staticLocalTypes = [];
+
+    /**
+     * The functions the last scan that reported a change actually changed a
+     * fact OF — a static local's type, a by-ref-arg local's cell promotion. Both
+     * facts are private to the function that holds the local, so only that
+     * function has anything to re-infer. The rescans used to re-infer the whole
+     * module instead, and because each InferTypes run starts from fresh instance
+     * state they re-discovered the same facts every run: three full module walks
+     * per run, twelve runs a compile.
+     * @var array<string, bool>
+     */
+    private array $rescanTargets = [];
 
     /** @var array<string,bool> the global-backed names (`static $x`, `global $x`) of
      *  the function being inferred — one slot whose repr its decl decides for the
@@ -693,14 +714,15 @@ final class InferTypes implements Pass
         // outlives the call, so the read that OPENS the next call is not
         // reachable from the store that filled it and keeps the int. Join every
         // store and re-infer, exactly as the global unification below does.
+        $this->rescanTargets = [];
         if ($this->scanStaticLocalTypes($module)) {
             foreach ($this->functionsForScope($module) as $fn) {
-                if (isset($this->undeclaredReturnFns[$fn->name])) {
+                if (isset($this->undeclaredReturnFns[$fn->name]) && isset($this->rescanTargets[$fn->name])) {
                     $fn->returnType = Type::unknown();
                     $this->sigs[$fn->name] = Type::unknown();
                 }
             }
-            $this->inferFunctionsForScope($module, 'static_local');
+            $this->inferFunctionsForScope($module, 'static_local', $this->rescanTargets);
         }
         // Global var type unification: a `global $g` read in a scope that never
         // stores to it keeps the hard-lowered `int` type and mis-renders/leaks a
@@ -786,8 +808,9 @@ final class InferTypes implements Pass
         }
         // A local handed to a `mixed &` parameter is likewise one word two
         // frames share, and the callee may make it any kind.
+        $this->rescanTargets = [];
         if ($this->scanRefCellArgWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_cell_arg');
+            $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
@@ -817,6 +840,9 @@ final class InferTypes implements Pass
         // needs N passes). Early-break keeps the common shallow case at ~2 passes;
         // the cap bounds a pathological chain (and self-build compile time).
         if ($this->sawClosures) {
+            /** @var array<string, bool> $closureFns */
+            $closureFns = [];
+            foreach ($this->closureNodeByName as $cname => $unused) { $closureFns[$cname] = true; }
             for ($iter = 0; $iter < 8; $iter = $iter + 1) {
                 // Convergence is driven by CAPTURE-node types, not return kinds:
                 // an inner curried capture flips unknown→cell one level per pass
@@ -827,7 +853,10 @@ final class InferTypes implements Pass
                 foreach ($this->closureNodeByName as $cn) {
                     foreach ($cn->captures as $c) { $before .= $c->type->kind . ','; }
                 }
-                $this->inferFunctionsForScope($module, 'closure_capture');
+                // Only closure BODIES read a capture's type as their seed; every
+                // capture node sits in some function's body and was typed when
+                // that function was, so the bodies are the whole of what moves.
+                $this->inferFunctionsForScope($module, 'closure_capture', $closureFns);
                 $after = '';
                 foreach ($this->closureNodeByName as $cn) {
                     foreach ($cn->captures as $c) { $after .= $c->type->kind . ','; }
@@ -1120,7 +1149,18 @@ final class InferTypes implements Pass
                     && $aa->index->kind !== Node::KIND_NULL_CONST) {
                     if ($aa->array->object->kind === Node::KIND_LOAD_LOCAL
                         && $aa->array->object->name === 'this') {
-                        $this->propReturnsFound[$cls . '::' . $aa->array->property] = $rt;
+                        // Two getters over one property that disagree (`bool
+                        // visible()` and `array command()` both reading
+                        // `$this->data[…]`) say its elements are MIXED, not
+                        // whichever getter came last.
+                        $key = $cls . '::' . $aa->array->property;
+                        $prev = $this->propReturnsFound[$key] ?? null;
+                        $this->propReturnsFound[$key] = ($prev === null || $prev->toString() === $rt->toString())
+                            ? $rt : Type::cell();
+                        $ik = $aa->index->type->kind;
+                        $kk = $ik === Type::KIND_STRING ? 's' : ($ik === Type::KIND_INT ? 'i' : 'm');
+                        $pk = $this->propReturnsKeyKind[$key] ?? $kk;
+                        $this->propReturnsKeyKind[$key] = $pk === $kk ? $kk : 'm';
                     }
                 }
             }
@@ -2780,6 +2820,10 @@ final class InferTypes implements Pass
      *  iterClass via any implementer; `$dflt` when unresolved. */
     private function iterMethodReturn(string $class, string $m, Type $dflt): Type
     {
+        // Implementers that disagree (an interface iterClass over several
+        // iterators) answer what the dispatched call answers.
+        $joined = $this->virtualReturnJoin($class, $m);
+        if ($joined !== null) { return $joined; }
         $c = $this->resolveMethodClass($class, $m);
         if ($c === '') {
             foreach ($this->classes as $cd) {

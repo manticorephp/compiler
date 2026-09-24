@@ -1,0 +1,33 @@
+R/x.txt,R,x.txt,x.txt,txt,f-,R/x.txt
+R/a,R,a,a,,-d,R/a
+rel/file.tar.gz,rel,file.tar.gz,file.tar,gz,--,rel/file.tar.gz
+/,,/,,,-d,/
+noext,,noext,noext,,--,noext
+.hidden,,.hidden,.hidden,hidden,--,.hidden
+R/missing,R,missing,missing,,--,R/missing
+5 file R/x.txt pi
+SplFileInfo::getSize(): stat failed for R/missing
+.*:R/. | ..*:R/.. | a:R/a | c:R/c | link:R/link | x.txt:R/x.txt
+DirectoryIterator::__construct(R/nope): Failed to open directory: No such file or directory
+R/a=>SplFileInfo | R/c=>SplFileInfo | R/link=>SplFileInfo | R/x.txt=>SplFileInfo
+..=>R/.. | .=>R/. | a=>R/a | c=>R/c | link=>R/link | x.txt=>R/x.txt
+0: R/a/b/z.md | R/a/y.php | R/link | R/x.txt
+1: R/a | R/a/b | R/a/b/z.md | R/a/y.php | R/c | R/link | R/x.txt
+2: R/a | R/a/b | R/a/b/z.md | R/a/y.php | R/c | R/link | R/x.txt
+0:a 0:c 0:link 0:x.txt 1:a/b 1:a/y.php 2:a/b/z.md
+R/a R/c R/link R/x.txt
+b=2 d=4 
+bool(false)
+0:5 1:6 
+0=1 1=2 x=3 
+3 3 ["a",null,"c"] nyn
+0='a' 1=NULL 2='c' 
+Index invalid or out of range
+TypeError: Cannot access offset of type string on SplFixedArray
+5["a",null,"c",null,null]
+["a"]
+["y",null,"x"][1,2]
+12n 0:2 1:3
+b 1:b 0:a b
+3 uno y 2n 0:o1/'uno' 1:o3/NULL
+Object not found

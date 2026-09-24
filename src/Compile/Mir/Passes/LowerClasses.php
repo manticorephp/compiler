@@ -256,6 +256,8 @@ trait LowerClasses
         $names = [];
         $types = [];
         $arrHinted = [];
+        /** @var array<string, bool> $neverObj */
+        $neverObj = [];
         $docList = [];
         $roProps = [];
         // Single inheritance: prepend the parent's properties so the
@@ -272,6 +274,7 @@ trait LowerClasses
                 $names[] = $pn;
                 $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
                 $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
+                $neverObj[$pn] = $pcd->propertyNeverObject[$pn] ?? false;
             $docList[$pn] = $pcd->propertyDocList[$pn] ?? false;
                 // readonly is NOT propagated: `readonlyDeclClass` walks the parent
                 // chain so the ORIGINAL declaring class drives the scope check
@@ -289,6 +292,7 @@ trait LowerClasses
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
                         $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
+                        $neverObj[$p->name] = $this->hintNeverObject($peff);
                         $docList[$p->name] = $this->isElemOnlyArrayDoc($peff);
                         if (($p->promotedReadonly ?? false) || $decl->isReadonly) { $roProps[$p->name] = true; }
                     }
@@ -364,6 +368,7 @@ trait LowerClasses
             if ($veff === null || $veff === '') { $pt = Type::cell(); }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
+            $neverObj[$prop->name] = $this->hintNeverObject($veff);
             $docList[$prop->name] = $this->isElemOnlyArrayDoc($veff);
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
         }
@@ -613,6 +618,7 @@ trait LowerClasses
         $propMeta = $this->buildPropertyMeta($decl, $parent);
         $cd = new ClassDef($decl->name, $classId, $names, $types, $methodNames, $parent, $ifaces, $spNames, $spTypes, $isStruct, $hasBag, $propHooks);
         $cd->propertyArrayHinted = $arrHinted;
+        $cd->propertyNeverObject = $neverObj;
         $cd->propertyDocList = $docList;
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;
@@ -1178,14 +1184,15 @@ trait LowerClasses
             // prepended, which is exactly php's order (defaults, then ctor body).
             $inherited = $this->inheritedCtorDecl($decl);
             if ($inherited !== null) {
+                $owner = $this->inheritedCtorOwner($decl);
                 $module->addFunction($this->lowerMethodFn(
                     $decl, $inherited, $cd, $defaultStores,
-                    $decl->name, $decl->name . '____construct',
+                    $decl->name, $decl->name . '____construct', $owner,
                 ));
                 $module->methodDisplay[$decl->name . '____construct'] =
                     $decl->name . '->__construct';
                 if ($this->sawStaticUse) {
-                    $this->lsbPending[] = new LsbPending($decl, $inherited, $cd, $defaultStores);
+                    $this->lsbPending[] = new LsbPending($decl, $inherited, $cd, $defaultStores, $owner);
                 }
                 return;
             }
@@ -1222,6 +1229,24 @@ trait LowerClasses
             $guard = $guard + 1;
         }
         return null;
+    }
+
+    /** The class that declares the constructor {@see inheritedCtorDecl} finds. */
+    private function inheritedCtorOwner(\Parser\Ast\ClassDecl $decl): string
+    {
+        $pname = $decl->extends !== [] ? \ltrim($decl->extends[0], '\\') : '';
+        $guard = 0;
+        while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
+            $pdecl = $this->classDecls[$pname];
+            foreach ($this->classDeclMethods($pdecl) as $m) {
+                if ($this->methodDeclName($m) !== '__construct') { continue; }
+                if ($this->methodDeclBody($m) === null) { continue; }
+                return $pname;
+            }
+            $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
+            $guard = $guard + 1;
+        }
+        return '';
     }
 
     /** Typed read of a method's body (T5). */

@@ -141,6 +141,12 @@ final class ClassDef
      *  for an ordinary class, which is its own display name. */
     public string $displayName = '';
 
+    /** Names of properties whose DECLARED type can never hold an object —
+     *  `array`, `?array`, `array<K,V>|null`, a scalar. Its slot may still be a
+     *  cell; php's type check is what keeps an object (and so a `foreach` that
+     *  runs user code) out. @var array<string, bool> */
+    public array $propertyNeverObject = [];
+
     /** The name this class reports to PHP (`get_class`, `::class`, var_dump). */
     public function display(): string
     {

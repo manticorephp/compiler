@@ -583,11 +583,12 @@ trait EmitLlvmObjects
                 $ri = $ri + 1;
             }
         }
-        // Capture the thrown location + call stack into a Throwable at `new`
-        // (PHP records these at construction), when the program queries a trace.
-        if ($this->rt->needsBacktrace && $cd !== null
-            && $this->classImplements($n->class, 'Throwable')) {
-            $out .= $this->emitThrowableCapture($obj, $n);
+        // Capture the `new` site into a Throwable (PHP records it at construction):
+        // line and file always — two stores, and `(string)$e` reads them through a
+        // cast no demand scan can see — the call stack only when the program
+        // queries a trace, since that costs a frame push at every call.
+        if ($cd !== null && $this->classImplements($n->class, 'Throwable')) {
+            $out .= $this->emitThrowableCapture($obj, $n, $this->rt->needsBacktrace);
         }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
@@ -599,7 +600,7 @@ trait EmitLlvmObjects
      * first) into a freshly-constructed Throwable's traceNames / traceLines, and
      * the `new` site's line/file into line/file. `$no` is the NewObj.
      */
-    private function emitThrowableCapture(string $obj, \Compile\Mir\NewObj $no): string
+    private function emitThrowableCapture(string $obj, \Compile\Mir\NewObj $no, bool $withTrace): string
     {
         $cd = $this->classes[$no->class];
         $lineOff = $cd->propertyOffset('line');
@@ -616,6 +617,7 @@ trait EmitLlvmObjects
         $fstr = $this->ssa->allocReg();
         $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
+        if (!$withTrace) { return $out; }
         // Two packed vecs of the active frames, innermost first.
         $out .= $this->emitBtVec('@__mir_bt_name');
         $namesVec = $this->lastValue;
@@ -704,6 +706,10 @@ trait EmitLlvmObjects
      */
     private function emitClone(\Compile\Mir\Clone_ $n): string
     {
+        $rk = $n->object->type->kind;
+        if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN) {
+            return $this->emitCloneErased($n);
+        }
         $cls = $n->object->type->class ?? '';
         $cd = ($cls !== '' && isset($this->classes[$cls])) ? $this->classes[$cls] : null;
         $out = $this->emitNode($n->object);
@@ -725,6 +731,66 @@ trait EmitLlvmObjects
             return $out;
         }
         return $out . $this->emitCloneOfClass($n, $cd, $cls, $src);
+    }
+
+    /**
+     * `clone $v` over a value whose class is not static — a `mixed` element, an
+     * untyped foreach value. It passed the word through: the "copy" WAS the
+     * original (a write through it hit the shared object), and a NaN-boxed
+     * receiver reached the typed consumer as a bare pointer — php-cs-fixer's
+     * `$tokensToInsert[] = clone $param` was invalid IR. Strip the tag, clone by
+     * the runtime class like an interface receiver, and box the copy back when
+     * the node is a cell.
+     */
+    private function emitCloneErased(\Compile\Mir\Clone_ $n): string
+    {
+        $out = $this->emitNode($n->object);
+        $out .= $this->coerceToI64();
+        $unb = $this->ssa->allocReg();
+        $out .= '  ' . $unb . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+        $src = $this->ssa->allocReg();
+        $out .= '  ' . $src . ' = inttoptr i64 ' . $unb . " to ptr\n";
+        $impls = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($cd->isStruct) { continue; }
+            if ($this->isEnumClass($name) || $this->isClosureClass($name)) { continue; }
+            $impls[] = $name;
+        }
+        if ($impls !== [] && $n->withProps === []) {
+            // ONE shared body per module: the chain is every class, and a copy
+            // of it at each site multiplied the module by the class count.
+            if ($this->cloneErasedSym === '') {
+                $sym = $this->mirHelperSym('__mir_clone_erased');
+                $body = $this->emitCloneDispatch($n, '%a0', $impls);
+                $ret = $this->lastValue;
+                if ($this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
+                    $this->cloneErasedSym = $sym;
+                    $this->vdExtraBodies .= 'define linkonce_odr ptr @' . $sym
+                        . "(ptr %a0) noinline {\nentry:\n" . $body . '  ret ptr ' . $ret . "\n}\n\n";
+                }
+            }
+            if ($this->cloneErasedSym !== '') {
+                $r = $this->ssa->allocReg();
+                $out .= '  ' . $r . ' = call ptr @' . $this->cloneErasedSym . '(ptr ' . $src . ")\n";
+                $this->lastValue = $r;
+                $this->lastValueType = 'ptr';
+            } else {
+                $out .= $this->emitCloneDispatch($n, $src, $impls);
+            }
+        } elseif ($impls !== []) {
+            $out .= $this->emitCloneDispatch($n, $src, $impls);
+        } else {
+            $this->lastValue = $src;
+            $this->lastValueType = 'ptr';
+        }
+        if ($n->type->kind !== Type::KIND_CELL) { return $out; }
+        $this->rt->needsTagged = true;
+        $out .= $this->coerceToPtr();
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $this->lastValue . ")\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /**
@@ -2615,7 +2681,13 @@ trait EmitLlvmObjects
         $out .= '  br i1 ' . $cond . ', label %' . $doLbl . ', label %' . $skipLbl . "\n";
         $out .= $doLbl . ":\n";
         $out .= $this->emitNode($n->init);
-        $out .= $this->coerceToI64();
+        // A cell slot holds the initialiser BOXED — the stores that made it a
+        // cell write cells, and every read decodes one.
+        if ($n->type->kind === Type::KIND_CELL && $n->init->type->kind !== Type::KIND_CELL) {
+            $out .= $this->boxToCell($n->init->type, $n->init);
+        } else {
+            $out .= $this->coerceToI64();
+        }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $n->cell . "\n";
         $out .= '  store i64 1, ptr ' . $n->guard . "\n";
         $out .= '  br label %' . $skipLbl . "\n";
@@ -2948,6 +3020,21 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynp.end');
+        // Every arm calls a per-name reader of ONE signature, so the names are a
+        // table: a probe and an indirect call instead of a strcmp chain over the
+        // program's whole property surface at every site.
+        if (\count($propTypes) >= self::DYNF_TABLE_MIN) {
+            $rows = [];
+            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropReadHelperFor((string)$p); }
+            $out .= $this->dynPropTableProbe($keyP, $rows, 'dynp');
+            $fp = $this->lastValue;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $fp . '(ptr ' . $objPtr . ")\n";
+            $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $this->dynPropMissLabel . ":\n";
+            $propTypes = [];
+        }
         foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynp.hit');
             $nextL = $this->ssa->allocLabel('dynp.next');
@@ -2979,6 +3066,36 @@ trait EmitLlvmObjects
         // Every arm of the name chain stored a boxed cell (a reader helper, the
         // bag lookup or a boxed null).
         $this->markCellOpaque($rv);
+        return $out;
+    }
+
+    /** The label a {@see dynPropTableProbe} miss branches to. */
+    private string $dynPropMissLabel = '';
+
+    /**
+     * Probe the module's `{ name, helper }` table for a runtime member name and
+     * branch: a hit continues in the current block with the helper pointer in
+     * lastValue, a miss jumps to {@see $dynPropMissLabel}, which the caller
+     * opens for its bag / default arm.
+     *
+     * @param array<string, string> $rows name => helper symbol
+     */
+    private function dynPropTableProbe(string $keyP, array $rows, string $tag): string
+    {
+        $this->dynfExtraBodies .= $this->dynfLookupFn();
+        $pair = $this->dynfTable($rows);
+        $fp = $this->ssa->allocReg();
+        $out = '  ' . $fp . ' = call ptr @__mc_dynf_lookup(ptr ' . $keyP . ', ptr '
+              . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = icmp ne ptr ' . $fp . ", null\n";
+        $hitL = $this->ssa->allocLabel($tag . '.tab');
+        $missL = $this->ssa->allocLabel($tag . '.miss');
+        $out .= '  br i1 ' . $hit . ', label %' . $hitL . ', label %' . $missL . "\n";
+        $out .= $hitL . ":\n";
+        $this->dynPropMissLabel = $missL;
+        $this->lastValue = $fp;
+        $this->lastValueType = 'ptr';
         return $out;
     }
 
@@ -3737,8 +3854,91 @@ trait EmitLlvmObjects
         return $sym;
     }
 
+    /** Some operand of the dynamic call is not a local yet, and every such one
+     *  is a read {@see dynHoistableRead} can take once. */
+    private function dynOperandsNeedHoist(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): bool
+    {
+        /** @var Node[] $ops */
+        $ops = [$dp->object, $dp->name];
+        foreach ($iv->args as $a) {
+            $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+        }
+        $need = false;
+        foreach ($ops as $o) {
+            if ($o->kind === Node::KIND_LOAD_LOCAL || $o->kind === Node::KIND_STRING_CONST) { continue; }
+            if (!$this->dynHoistableRead($o)) { return false; }
+            $need = true;
+        }
+        return $need;
+    }
+
+    /** A value that can be computed once and held in a slot without owning
+     *  anything: an int literal, or a plain property / subscript chain rooted
+     *  at a local. */
+    private function dynHoistableRead(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_INT_CONST
+            || $n->kind === Node::KIND_STRING_CONST) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
+        return false;
+    }
+
+    private function dynHoistableProp(PropertyAccess_ $pa): bool
+    {
+        return $this->escPlainPropRead($pa) && $this->dynHoistableRead($pa->object);
+    }
+
+    private function dynHoistableElem(\Compile\Mir\ArrayAccess_ $aa): bool
+    {
+        if (!$this->dynHoistableRead($aa->array)) { return false; }
+        return $aa->index === null || $this->dynHoistableRead($aa->index);
+    }
+
+    /** Evaluate `$n` once into a fresh slot and answer a LoadLocal of it —
+     *  a local or a string literal is already that. */
+    private function dynHoistOperand(Node $n, string &$out): Node
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
+        $out .= $this->emitNode($n);
+        $out .= $this->coerceToI64();
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $name = '__mc_dynh_' . \substr($slot, 1);
+        $this->locals->slots[$name] = $slot;
+        return new \Compile\Mir\LoadLocal($name, $n->type);
+    }
+
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
+        // Every shared path below wants its operands as LOCALS, because the
+        // inline fallback re-emits them per arm. A plain READ — a property or
+        // subscript chain off a local — is evaluated ONCE into a slot here, so
+        // `$this->dispatcher->{$m}(...$args)` takes the table instead of a
+        // 3 069-arm chain spliced into the site. Fresh values (a call's result)
+        // are left alone: a slot would own a +1 nobody releases.
+        if ($this->dynOperandsNeedHoist($dp, $iv)) {
+            $out = '';
+            $recvL = $this->dynHoistOperand($dp->object, $out);
+            $nameL = $this->dynHoistOperand($dp->name, $out);
+            $args = [];
+            foreach ($iv->args as $a) {
+                if ($a->kind === Node::KIND_SPREAD) {
+                    $sp = $this->asSpreadNode($a);
+                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out), $a->type);
+                } else {
+                    $args[] = $this->dynHoistOperand($a, $out);
+                }
+            }
+            $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
+            $dp2->line = $dp->line;
+            $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
+            $iv2->line = $iv->line;
+            return $out . $this->emitDynMethodCall($dp2, $iv2);
+        }
         $recv = $dp->object;
         $nameNode = $dp->name;
         $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
@@ -4279,6 +4479,17 @@ trait EmitLlvmObjects
         $out .= $this->emitBagStoreValue($n->value);
         $cellVal = $this->lastValue;
         $endL = $this->ssa->allocLabel('dynsp.end');
+        // The write twin of the reader table in {@see emitErasedDynPropDispatch}.
+        if (\count($propTypes) >= self::DYNF_TABLE_MIN) {
+            $rows = [];
+            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropertyWriteHelper((string)$p); }
+            $out .= $this->dynPropTableProbe($keyP, $rows, 'dynsp');
+            $fp = $this->lastValue;
+            $out .= '  call void ' . $fp . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $this->dynPropMissLabel . ":\n";
+            $propTypes = [];
+        }
         foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynsp.hit');
             $nextL = $this->ssa->allocLabel('dynsp.next');
@@ -6725,6 +6936,8 @@ trait EmitLlvmObjects
         /** @var string[] fresh rc arg temps, with the flavor each is released by */
         $rcArgRegs = [];
         $rcArgFlavs = [];
+        /** @var array<int,array{0:Node,1:string}> boxed cell args to drop after the call */
+        $cellBoxDrops = [];
         $cellBoxSlots = [];
         $reboxSlots = [];
         $reboxTmps = [];
@@ -6890,9 +7103,12 @@ trait EmitLlvmObjects
                 // free-function call path (else a `mixed $x` method param
                 // receives a raw array/string and mis-reads it).
                 $out .= $this->emitNode($a);
-                $out .= $this->boxToCell($a->type);
+                $out .= $this->boxToCell($a->type, $a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $argOutTypes[$ai + 1] = Type::cell();
+                // What the box left behind is the CALLER's — a rebuilt cell
+                // array or a re-tagged fresh string ({@see emitStaticCall}).
+                $cellBoxDrops[] = [$a, $this->lastValue];
             } elseif ($this->cellArrayParamNeedsBoxing($ptypes[$ai + 1] ?? null, $a->type)) {
                 // A concrete-element array (vec[int] …) passed to a cell-element
                 // array param (`mixed[]`): rebuild it with each element boxed,
@@ -6903,7 +7119,12 @@ trait EmitLlvmObjects
                 // cannot go through Monomorphize (a method param is never
                 // specialized; the indirect trampoline call is invisible anyway).
                 $out .= $this->emitNode($a);
-                $out .= $this->boxToCell($a->type);
+                $out .= $this->boxToCell($a->type, $a);
+                // The rebuild is a fresh +1 the callee only borrows:
+                // `$this->f($lines)` with `f(array $b)` leaked the copy and one
+                // ref on every element, per call — HoistAllocas alone held
+                // every line of the module's IR.
+                $cellBoxDrops[] = [$a, $this->lastValue];
                 $raw = $this->ssa->allocReg();
                 $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue
                       . ", 281474976710655\n";   // PAYLOAD_MASK: array cell → raw ptr
@@ -7141,6 +7362,9 @@ trait EmitLlvmObjects
         foreach ($rcArgRegs as $rg) {
             $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
             $rci = $rci + 1;
+        }
+        foreach ($cellBoxDrops as $cbd) {
+            $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
