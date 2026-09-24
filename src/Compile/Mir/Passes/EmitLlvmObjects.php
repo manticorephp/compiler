@@ -6718,6 +6718,70 @@ trait EmitLlvmObjects
             || $m === 'throw' || $m === 'valid';
     }
 
+    private bool $inGenArmEmit = false;
+
+    /**
+     * An iterator-protocol call on a receiver that may hold a GENERATOR FRAME
+     * where the static type cannot say so — an `Iterator`/`Traversable` slot
+     * (SPL's IteratorIterator keeps `getIterator()`'s generator in one) or an
+     * erased value. A frame is no class instance, so interface dispatch found no
+     * arm and the loop saw nothing (symfony Finder's LazyIterator, wrapped in an
+     * IteratorIterator, iterated zero files). Probe the word and, for a frame,
+     * re-issue the call against the same receiver typed `Generator`. Only a pure
+     * receiver (a local, a property) qualifies: it is read once per arm.
+     * '' when the call does not qualify.
+     */
+    private function emitIteratorCallMaybeGenerator(\Compile\Mir\MethodCall_ $mc): string
+    {
+        if ($this->inGenArmEmit) { return ''; }
+        $m = $mc->method;
+        if ($m !== 'rewind' && $m !== 'valid' && $m !== 'current' && $m !== 'key' && $m !== 'next') { return ''; }
+        $obj = $mc->object;
+        if ($obj->kind !== Node::KIND_LOAD_LOCAL && $obj->kind !== Node::KIND_PROPERTY_ACCESS) { return ''; }
+        $ok = $obj->type->kind;
+        $ocls = \strtolower(\ltrim($ok === Type::KIND_OBJ ? ($obj->type->class ?? '') : '', '\\'));
+        $may = $ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN
+            || ($ok === Type::KIND_OBJ && ($ocls === 'iterator' || $ocls === 'traversable'));
+        if (!$may) { return ''; }
+        $this->inGenArmEmit = true;
+        $out = $this->emitNode($obj);
+        $out .= $this->coerceToI64();
+        $out .= $this->untagCarrierIr($this->lastValue);
+        $out .= $this->genFrameProbeIr($this->lastValue);
+        $isGen = $this->genFrameReg;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $genL = $this->ssa->allocLabel('itg.gen');
+        $normL = $this->ssa->allocLabel('itg.obj');
+        $endL = $this->ssa->allocLabel('itg.end');
+        $void = $mc->type->kind === Type::KIND_VOID;
+        $out .= '  br i1 ' . $isGen . ', label %' . $genL . ', label %' . $normL . "\n";
+        $out .= $genL . ":\n";
+        $g = \Compile\Mir\NodeClone::node($obj);
+        $g->type = Type::obj('Generator');
+        $out .= $this->emitGeneratorMethod(new \Compile\Mir\MethodCall_($g, $m, $mc->args, $mc->type));
+        if (!$void) {
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $normL . ":\n";
+        $out .= $this->emitMethodCallInner($mc);
+        if (!$void) {
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->inGenArmEmit = false;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** Resume a generator once iff it is not yet started (state == 0). */
     private function genPrimeIfFresh(string $g): string
     {
@@ -6867,6 +6931,8 @@ trait EmitLlvmObjects
             && $this->isGeneratorProtocolMethod($mc->method)) {
             return $this->emitGeneratorMethod($mc);
         }
+        $genArm = $this->emitIteratorCallMaybeGenerator($mc);
+        if ($genArm !== '') { return $genArm; }
         // Closure methods. `$fn->bindTo($obj, $scope?)` rebinds `$this`;
         // `$fn->call($obj, ...args)` rebinds then invokes in one step. Gated on
         // a closure receiver so a user class's own `call`/`bindTo` is untouched.

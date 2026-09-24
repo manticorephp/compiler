@@ -2512,10 +2512,31 @@ trait EmitLlvmExpr
 
     private function emitInstanceof(Instanceof_ $n): string
     {
-        if (\strtolower($n->class) === 'closure') {
+        $low = \strtolower($n->class);
+        if ($low === 'closure') {
             return $this->emitClosureTest($n->operand);
         }
-        return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class));
+        // A Generator is a frame, not a class instance: no class id to match.
+        // Statically one → non-null; erased → the frame probe. Iterator and
+        // Traversable, which every generator is, add the probe to the class test
+        // (an erased generator in `yield from`'s normaliser answered false).
+        if ($low === 'generator') {
+            $gt = $n->operand->type;
+            if ($this->isGeneratorType($gt)) {
+                $out = $this->emitNode($n->operand);
+                $out .= $this->coerceToI64();
+                $nz = $this->ssa->allocReg();
+                $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+                $z = $this->ssa->allocReg();
+                $out .= '  ' . $z . ' = zext i1 ' . $nz . " to i64\n";
+                $this->lastValue = $z;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            return $this->emitClassIdTest($n->operand, [], true);
+        }
+        $genToo = $low === 'iterator' || $low === 'traversable';
+        return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class), $genToo);
     }
 
     /**
@@ -2641,11 +2662,43 @@ trait EmitLlvmExpr
      * @param int[] $ids the target's is-a id set ({@see instanceofMatchIds}),
      *                   already narrowed for `is_subclass_of`'s strictness
      */
-    private function emitClassIdTest(Node $operand, array $ids): string
+    private function emitClassIdTest(Node $operand, array $ids, bool $genToo = false): string
     {
         $out = $this->emitNode($operand);
         $out .= $this->coerceToI64();
         $obj = $this->lastValue;
+        $opk0 = $operand->type->kind;
+        if ($genToo && ($opk0 === Type::KIND_CELL || $opk0 === Type::KIND_UNKNOWN)) {
+            $out .= $this->untagCarrierIr($obj);
+            $out .= $this->genFrameProbeIr($this->lastValue);
+            $gen = $this->genFrameReg;
+            if ($ids === []) {
+                $gz = $this->ssa->allocReg();
+                $out .= '  ' . $gz . ' = zext i1 ' . $gen . " to i64\n";
+                $this->lastValue = $gz;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            $out .= $this->classIdTestTail($operand, $ids, $obj);
+            $cr = $this->lastValue;
+            $ci = $this->ssa->allocReg();
+            $out .= '  ' . $ci . ' = icmp ne i64 ' . $cr . ", 0\n";
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $ci . ', ' . $gen . "\n";
+            $oz = $this->ssa->allocReg();
+            $out .= '  ' . $oz . ' = zext i1 ' . $or . " to i64\n";
+            $this->lastValue = $oz;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $out . $this->classIdTestTail($operand, $ids, $obj);
+    }
+
+    /** {@see emitClassIdTest} past the operand's evaluation: `$obj` is its i64 word.
+     *  @param int[] $ids */
+    private function classIdTestTail(Node $operand, array $ids, string $obj): string
+    {
+        $out = '';
         if ($ids === []) {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
