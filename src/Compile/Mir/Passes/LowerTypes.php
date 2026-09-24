@@ -875,6 +875,12 @@ trait LowerTypes
         $lt = \strpos($docType, '<');
         if ($lt === false || $lt <= 0) { return false; }
         $base = \ltrim(\substr($docType, 0, $lt), '?\\');
+        // A pseudo-type's arguments bind no class: `iterable $o` + `@param
+        // iterable<Opt> $o` lowered the doc form, which is `unknown`, in place
+        // of the hint's `cell` — and the `$o = iterator_to_array($o)` arm then
+        // stored a cell into a slot read raw (php-cs-fixer FixerOptionSorter).
+        $low = \strtolower($base);
+        if ($low === 'iterable' || $low === 'callable' || $low === 'object' || $low === 'mixed') { return false; }
         return $base !== '' && $base === \ltrim($hint, '?\\');
     }
 
