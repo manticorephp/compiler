@@ -5575,11 +5575,15 @@ trait EmitLlvmObjects
         $out = $this->emitNode($fnNode);
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
-        // Env size from the static closure type; a dynamic (unknown) closure
-        // falls back to a `$this`-only env (fn ptr + one slot) — the common
-        // bind target `function () { … $this … }`.
+        // Env size from the static closure type. A receiver with no literal
+        // behind its type reads its layout at run time instead: assuming the
+        // `[fn, $this]` shape overwrote a `static fn () use ($x)` capture with
+        // the new `$this` (php-cs-fixer unbinding a capturing validator).
         $fnName = $fnNode->type->class ?? '';
-        $cnt = $this->closureCaptures[$fnName] ?? 1;
+        if (!isset($this->closureCaptures[$fnName])) {
+            return $out . $this->emitClosureRebindErased($src, $objNode);
+        }
+        $cnt = $this->closureCaptures[$fnName];
         $slots = 1 + $cnt;
         // The copy gets its own lifetime header, taken FROM THE SOURCE AT
         // RUNTIME: the source's magic says whether it owns anything, and its
@@ -5649,6 +5653,101 @@ trait EmitLlvmObjects
         $this->lastValue = $buf;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * {@see emitClosureRebind} for a receiver whose literal is not known here:
+     * the env's slot count and whether slot 1 is `$this` come from the module's
+     * shape table, keyed by the code pointer in slot 0. An env no literal of
+     * this module made keeps the old `[fn, $this]` assumption.
+     */
+    private function emitClosureRebindErased(string $src, Node $objNode): string
+    {
+        $this->rt->needsClosureRc = true;
+        $this->needsClosureShapeFn = true;
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $out = $this->emitNode($objNode);
+        $out .= $this->coerceToI64();
+        $objV = $this->lastValue;
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = load i64, ptr ' . $src . "\n";
+        $shape = $this->ssa->allocReg();
+        $out .= '  ' . $shape . ' = call i64 @' . $this->mirHelperSym('__mir_closure_shape')
+              . '(i64 ' . $fp . ")\n";
+        $slots = $this->ssa->allocReg();
+        $out .= '  ' . $slots . ' = lshr i64 ' . $shape . ", 1\n";
+        $bytes = $this->ssa->allocReg();
+        $out .= '  ' . $bytes . ' = shl i64 ' . $slots . ", 3\n";
+        $tot = $this->ssa->allocReg();
+        $out .= '  ' . $tot . ' = add i64 ' . $bytes . ', ' . (string)$hdr . "\n";
+        $base = $this->ssa->allocReg();
+        $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . $tot . ")\n";
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . ' = getelementptr inbounds i8, ptr ' . $base . ', i64 ' . (string)$hdr . "\n";
+        $srcMagic = $this->closureHdrLoad($src, \Compile\MemoryAbi::STRING_HASH_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $srcRet = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $srcDrop = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $isOurs = $this->ssa->allocReg();
+        $out .= '  ' . $isOurs . ' = icmp eq i64 ' . $srcMagic . ', '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $magicV = $this->ssa->allocReg();
+        $out .= '  ' . $magicV . ' = select i1 ' . $isOurs . ', i64 '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . ", i64 0\n";
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_HASH_OFFSET, $magicV);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET, $srcRet);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET, $srcDrop);
+        $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_RC_OFFSET, '1');
+        $out .= '  call ptr @memcpy(ptr ' . $buf . ', ptr ' . $src . ', i64 ' . $bytes . ")\n";
+        $ht = $this->ssa->allocReg();
+        $out .= '  ' . $ht . ' = and i64 ' . $shape . ", 1\n";
+        $htB = $this->ssa->allocReg();
+        $out .= '  ' . $htB . ' = icmp ne i64 ' . $ht . ", 0\n";
+        $thisL = $this->ssa->allocLabel('cbind.this');
+        $retL = $this->ssa->allocLabel('cbind.ret');
+        $endL = $this->ssa->allocLabel('cbind.end');
+        $chkL = $this->ssa->allocLabel('cbind.chk');
+        $out .= '  br i1 ' . $htB . ', label %' . $thisL . ', label %' . $chkL . "\n";
+        $out .= $thisL . ":\n";
+        $tg = $this->ssa->allocReg();
+        $out .= '  ' . $tg . ' = getelementptr inbounds i64, ptr ' . $buf . ", i64 1\n";
+        $out .= '  store i64 ' . $objV . ', ptr ' . $tg . "\n";
+        $out .= '  br label %' . $chkL . "\n";
+        $out .= $chkL . ":\n";
+        $hasRet = $this->ssa->allocReg();
+        $out .= '  ' . $hasRet . ' = icmp ne i64 ' . $srcRet . ", 0\n";
+        $out .= '  br i1 ' . $hasRet . ', label %' . $retL . ', label %' . $endL . "\n";
+        $out .= $retL . ":\n";
+        $rf = $this->ssa->allocReg();
+        $out .= '  ' . $rf . ' = inttoptr i64 ' . $srcRet . " to ptr\n";
+        $out .= '  call void ' . $rf . '(ptr ' . $buf . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->lastValue = $buf;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** The module's closure-shape lookup: code pointer → `(slots << 1) | has-$this`. */
+    private function emitClosureShapeFn(): string
+    {
+        $out = 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_closure_shape')
+             . "(i64 %fp) noinline {\nentry:\n";
+        $i = 0;
+        foreach ($this->closureShapes as $fnName => $shape) {
+            $hit = 'cs.hit.' . (string)$i;
+            $next = 'cs.next.' . (string)$i;
+            $out .= '  %cs.eq.' . (string)$i . ' = icmp eq i64 %fp, ptrtoint (ptr @manticore_'
+                  . $this->mangle($fnName) . " to i64)\n";
+            $out .= '  br i1 %cs.eq.' . (string)$i . ', label %' . $hit . ', label %' . $next . "\n";
+            $out .= $hit . ":\n  ret i64 " . (string)$shape . "\n";
+            $out .= $next . ":\n";
+            $i = $i + 1;
+        }
+        return $out . "  ret i64 5\n}\n\n";
     }
 
     /** A receiver's static class name, or '' when it has none. `Type::$class` is
