@@ -1148,7 +1148,33 @@ trait LowerTypes
         return Type::closureOf($ret, $params);
     }
 
+    /**
+     * A FUNCTION's own `@template T` (`@param T $new` / `@return T`) is not a
+     * class type parameter: nothing binds it per call, so it names the value's
+     * type only as "whatever came in". Spelled literally, `T` resolved as a
+     * class nobody declares — an erased RAW word, and a string default that
+     * crossed into a `mixed` slot was boxed as an INT (php-cs-fixer's
+     * `Future::getV4OrV3('always_last', 'always_first')`). It lowers to its
+     * bound (`of X`), else `mixed`. Class templates live in the class
+     * docblock, which never reaches here through these tags.
+     */
     private function docTagType(?string $doc, string $tag, string $varName): ?string
+    {
+        $t = $this->docTagTypeRaw($doc, $tag, $varName);
+        if ($t === null || $doc === null) { return $t; }
+        if ($tag !== '@param' && $tag !== '@param-out' && $tag !== '@return') { return $t; }
+        if (!\str_contains($doc, '@template')) { return $t; }
+        $m = [];
+        if (\preg_match_all('/@template\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+of\s+([^\s*]+))?/', $doc, $m) < 1) { return $t; }
+        foreach ($m[1] as $i => $name) {
+            $bound = $m[2][$i] ?? '';
+            $sub = $bound !== '' ? $bound : 'mixed';
+            $t = \preg_replace('/(?<![A-Za-z0-9_\\\\$])' . $name . '(?![A-Za-z0-9_\\\\])/', $sub, $t) ?? $t;
+        }
+        return $t;
+    }
+
+    private function docTagTypeRaw(?string $doc, string $tag, string $varName): ?string
     {
         if ($doc === null) { return null; }
         $n = \strlen($doc);
