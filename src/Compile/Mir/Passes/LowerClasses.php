@@ -506,6 +506,7 @@ trait LowerClasses
         // A class with defaulted properties but no user ctor gets a
         // synthesised one (see lowerClassMethods) — flag it so NewObj
         // calls it.
+        $userCtor = isset($methodNames['__construct']);
         foreach ($decl->properties as $prop) {
             if ($prop->isStatic) { continue; }
             if ($prop->default !== null) { $methodNames['__construct'] = true; break; }
@@ -519,6 +520,15 @@ trait LowerClasses
                     if ($this->traitPropHasDefault($tprop)) { $methodNames['__construct'] = true; break; }
                 }
             }
+        }
+        // The synthesised ctor IS the inherited one's body run as this class,
+        // so for late static binding it forwards like `parent::__construct()`:
+        // counted as an override, it withheld the ancestor's `__lsb<this>` copy
+        // and `static::class` in AbstractFixer's ctor named AbstractFixer
+        // (php-cs-fixer's configurable proxy fixers, whose trait defaults a
+        // property, all registered as "abstract").
+        if (!$userCtor && isset($methodNames['__construct'])) {
+            $this->forwardsToParent[$decl->name . '::__construct'] = true;
         }
         // The TRANSITIVE closure, not just the `implements` line: an interface
         // may extend others (`WrappableOutputFormatterInterface extends
