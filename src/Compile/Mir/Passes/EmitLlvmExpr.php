@@ -912,6 +912,11 @@ trait EmitLlvmExpr
      *  elements (a `vec[vec[int]]` is 5 | (EK_INT << 4)). A raw inner array
      *  can't be recovered from a tag, so the chain carries every level. */
     private const EK_ARRAY  = 5;
+    /** The static kind is unknown — the array came through a CELL — so each
+     *  element is decoded by its BUFFER's hint (`__mir_elem_decode`). Reading
+     *  those words as cells (EK_CELL) compared a raw-hinted `['k' => true]`
+     *  unequal to itself. */
+    private const EK_HINT   = 6;
     /** Not a representation the array compare runtime can normalize. */
     private const EK_NONE   = -1;
 
@@ -976,6 +981,22 @@ trait EmitLlvmExpr
      * double's bits are re-boxed through box_float so a signaling NaN can't
      * collide with the tagged range (0xFFF1..0xFFF8).
      */
+    /** `%<out> = <raw> as a cell`: by the chain, or by `%<arr>`'s buffer hint
+     *  when the chain is {@see EK_HINT}. */
+    private static function elemToCellByChain(string $arr, string $raw, string $ek, string $out): string
+    {
+        return '  %' . $out . 'h = icmp eq i64 %' . $ek . ', ' . (string)self::EK_HINT . "\n"
+            . '  br i1 %' . $out . 'h, label %' . $out . 'dec, label %' . $out . "chn\n"
+            . $out . "dec:\n"
+            . '  %' . $out . 'd = call i64 @__mir_elem_decode(ptr %' . $arr . ', i64 %' . $raw . ")\n"
+            . '  br label %' . $out . "j\n"
+            . $out . "chn:\n"
+            . '  %' . $out . 'c = call i64 @__mir_elem_to_cell(i64 %' . $raw . ', i64 %' . $ek . ")\n"
+            . '  br label %' . $out . "j\n"
+            . $out . "j:\n"
+            . '  %' . $out . ' = phi i64 [ %' . $out . 'd, %' . $out . 'dec ], [ %' . $out . 'c, %' . $out . "chn ]\n";
+    }
+
     private function elemToCellRuntime(): string
     {
         $out  = "\ndefine i64 @__mir_elem_to_cell(i64 %v, i64 %ek) {\nentry:\n";
@@ -1119,8 +1140,7 @@ trait EmitLlvmExpr
                 $out .= "recdiff:\n  ret i64 %rc\n";
             }
             $out .= "viacell:\n";
-            $out .= "  %va = call i64 @__mir_elem_to_cell(i64 %rawa, i64 %eka)\n";
-            $out .= "  %vb = call i64 @__mir_elem_to_cell(i64 %rawb, i64 %ekb)\n";
+            $out .= self::elemToCellByChain('a', 'rawa', 'eka', 'va') . self::elemToCellByChain('b', 'rawb', 'ekb', 'vb');
             if ($eq) {
                 $out .= "  %e = call i64 @__manticore_tagged_loose_eq(i64 %va, i64 %vb)\n";
                 $out .= "  %eb = icmp ne i64 %e, 0\n";
@@ -1182,8 +1202,7 @@ trait EmitLlvmExpr
         $out .= "  %re = call i1 @__mir_array_strict_eq(ptr %reca, i64 %eka1, ptr %recb, i64 %ekb1)\n";
         $out .= "  br i1 %re, label %cont, label %no\n";
         $out .= "viacell:\n";
-        $out .= "  %va = call i64 @__mir_elem_to_cell(i64 %rawa, i64 %eka)\n";
-        $out .= "  %vb = call i64 @__mir_elem_to_cell(i64 %rawb, i64 %ekb)\n";
+        $out .= self::elemToCellByChain('a', 'rawa', 'eka', 'va') . self::elemToCellByChain('b', 'rawb', 'ekb', 'vb');
         $out .= "  %veq = call i64 @__manticore_tagged_strict_eq(i64 %va, i64 %vb)\n";
         $out .= "  %veqb = icmp ne i64 %veq, 0\n";
         $out .= "  br i1 %veqb, label %cont, label %no\n";
@@ -1300,10 +1319,10 @@ trait EmitLlvmExpr
         $out .= "  %bap = and i64 %b, $mask\n";
         $out .= "  %bapp = inttoptr i64 %bap to ptr\n";
         if ($eq) {
-            $out .= "  %are = call i1 @__mir_array_loose_eq(ptr %aapp, i64 0, ptr %bapp, i64 0)\n";
+            $out .= "  %are = call i1 @__mir_array_loose_eq(ptr %aapp, i64 6, ptr %bapp, i64 6)\n";
             $out .= "  %arez = zext i1 %are to i64\n  ret i64 %arez\n";
         } else {
-            $out .= "  %arc = call i64 @__mir_array_compare(ptr %aapp, i64 0, ptr %bapp, i64 0)\n";
+            $out .= "  %arc = call i64 @__mir_array_compare(ptr %aapp, i64 6, ptr %bapp, i64 6)\n";
             $out .= "  ret i64 %arc\n";
         }
         $out .= "arrmix:\n";
@@ -1482,7 +1501,7 @@ trait EmitLlvmExpr
         $out .= "  %apap = inttoptr i64 %apa to ptr\n";
         $out .= "  %apb = and i64 %b, 281474976710655\n";
         $out .= "  %apbp = inttoptr i64 %apb to ptr\n";
-        $out .= "  %ase = call i1 @__mir_array_strict_eq(ptr %apap, i64 0, ptr %apbp, i64 0)\n";
+        $out .= "  %ase = call i1 @__mir_array_strict_eq(ptr %apap, i64 6, ptr %apbp, i64 6)\n";
         $out .= "  %asez = zext i1 %ase to i64\n  ret i64 %asez\n";
         $out .= "chkstr2:\n";
         $out .= "  %isstr = icmp eq i64 %ta, 4\n";
@@ -4686,6 +4705,20 @@ trait EmitLlvmExpr
             || ($ordJug && ($rk === Type::KIND_STRING || $rk === Type::KIND_BOOL));
         $lNum = $lk === Type::KIND_INT || $lk === Type::KIND_FLOAT
             || ($ordJug && ($lk === Type::KIND_STRING || $lk === Type::KIND_BOOL));
+        // An ARRAY against a cell, eq/ne: the same road, with the array tagged
+        // SHALLOWLY (never rebuilt) so the runtime compares by value through its
+        // hint. The carriers were compared as pointers — php-cs-fixer's
+        // `$this->configuration['include'] !== $defaults` was true for equal
+        // arrays and every fixer refused its own default configuration.
+        if (($isEq || $isNe) && $lk === Type::KIND_CELL && $rk === Type::KIND_ARRAY) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $chunks[] = $this->shallowBoxToCell($c->right->type);
+            $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
+        } elseif (($isEq || $isNe) && $rk === Type::KIND_CELL && $lk === Type::KIND_ARRAY) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $chunks[] = $this->shallowBoxToCell($c->left->type);
+            $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
+        }
         if ($lk === Type::KIND_CELL && $rNum) {
             $this->lastValue = $r; $this->lastValueType = $rt;
             $chunks[] = $this->boxToCell($c->right->type);
