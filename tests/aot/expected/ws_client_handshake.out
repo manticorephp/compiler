@@ -1,0 +1,10 @@
+Http\WebSocket\HandshakeException: WebSocket handshake failed: HTTP 200
+Http\WebSocket\HandshakeException: WebSocket handshake failed: bad Sec-WebSocket-Accept
+Http\WebSocket\HandshakeException: WebSocket handshake failed: server chose an unoffered subprotocol "other"
+Http\WebSocket\HandshakeException: WebSocket handshake failed: server chose an unoffered extension "x-foo"
+null code=1006
+ok hello
+closed code=1000
+Http\WebSocket\HandshakeException: WebSocket handshake failed: unsupported scheme "http"
+Http\WebSocket\HandshakeException: WebSocket connect to ws://127.0.
+ValueError: Http\WebSocket\connect(): Argument #3 ($headers) must not set Sec-WebSocket-Key

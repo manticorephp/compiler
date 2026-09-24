@@ -241,8 +241,10 @@ final class Connection implements \IteratorAggregate
     private ?\Async\Mutex $wlock = null;
     private ?\Async\TaskGroup $scope = null;
     private ?\Async\Task $deadline = null;
-    /** The task that built this connection: the server session, or the client's connect() caller. */
-    private ?\Async\Task $owner = null;
+    /** spl_object_id of the task that built this connection (the server session, the client's connect() caller); 0 outside async. */
+    private int $owner = 0;
+    /** spl_object_id of the task that last ran receive(); 0 until one has. */
+    private int $lastReader = 0;
     private bool $reading = false;
     private bool $sentClose = false;
     private bool $gotClose = false;
@@ -267,7 +269,7 @@ final class Connection implements \IteratorAggregate
         $scope = \Async\Context::currentScope();
         if ($scope !== null) {
             $this->scope = $scope;
-            $this->owner = \Async\Scheduler::instance()->current();
+            $this->owner = \spl_object_id(\Async\Scheduler::instance()->current());
             $this->wlock = new \Async\Mutex();
         }
     }
@@ -298,6 +300,9 @@ final class Connection implements \IteratorAggregate
             return null;
         }
         $this->reading = true;
+        if ($this->scope !== null) {
+            $this->lastReader = \spl_object_id(\Async\Scheduler::instance()->current());
+        }
         try {
             return $this->readMessage();
         } finally {
@@ -327,12 +332,14 @@ final class Connection implements \IteratorAggregate
     }
 
     /**
-     * Start the closing handshake. From any task but the owner (a broadcaster
+     * Start the closing handshake. From any task but the reader (a broadcaster
      * kicking a client), or while a read is in flight, it sends the Close and
-     * arms the closeTimeout deadline — the owner's next or current receive()
-     * sees the answer (or the deadline's EOF) and returns null. The owner with
+     * arms the closeTimeout deadline — the reader's next or current receive()
+     * sees the answer (or the deadline's EOF) and returns null. The reader with
      * no read in flight waits here, up to closeTimeout, for the peer's Close,
-     * discarding data frames.
+     * discarding data frames. The reader is the task that last ran receive(),
+     * or the owner until one has — so a reader parked between two receive()
+     * calls never finds its read taken.
      */
     public function close(int $code = 1000, string $reason = ''): void
     {
@@ -348,17 +355,20 @@ final class Connection implements \IteratorAggregate
         if (!$this->sendClose($code, $reason)) {
             return;
         }
-        if ($this->reading || !$this->isOwner()) {
+        if ($this->reading || !$this->isReader()) {
             $this->armDeadline();
             return;
         }
         $this->awaitPeerClose();
     }
 
-    private function isOwner(): bool
+    private function isReader(): bool
     {
-        $o = $this->owner;
-        return $o === null || \Async\Scheduler::instance()->current() === $o;
+        if ($this->scope === null) {
+            return true;
+        }
+        $me = \spl_object_id(\Async\Scheduler::instance()->current());
+        return $me === ($this->lastReader !== 0 ? $this->lastReader : $this->owner);
     }
 
     /** @internal Server side: run the upgrade's session to its end. */
@@ -744,6 +754,105 @@ function upgrade(\Http\Request $req, callable $session, ?Options $o = null): \Ht
         $c = new Connection($sock, $buf, false, $o, $proto, $req, $req->remoteAddr);
         $c->runSession($fn, $server);
     });
+}
+
+/**
+ * Open a WebSocket to ws:// or wss://. Throws HandshakeException when the
+ * server does not complete the upgrade. Redirects are not followed.
+ *
+ * @param array<string,string> $headers extra request headers (Origin, Authorization, …)
+ */
+function connect(string $url, ?Options $o = null, array<string, string> $headers = []): Connection
+{
+    $o = $o ?? new Options();
+    $u = \parse_url($url);
+    $scheme = \is_array($u) && isset($u['scheme']) ? \strtolower((string)$u['scheme']) : '';
+    if ($scheme !== 'ws' && $scheme !== 'wss') {
+        throw new HandshakeException('WebSocket handshake failed: unsupported scheme "' . $scheme . '"');
+    }
+    $host = isset($u['host']) ? (string)$u['host'] : '';
+    $tls = $scheme === 'wss';
+    $port = isset($u['port']) ? (int)$u['port'] : ($tls ? 443 : 80);
+    $path = (isset($u['path']) && $u['path'] !== '' ? (string)$u['path'] : '/')
+        . (isset($u['query']) ? '?' . (string)$u['query'] : '');
+    foreach ($headers as $name => $v) {
+        $ln = \strtolower($name);
+        if ($ln === 'host' || $ln === 'upgrade' || $ln === 'connection' || \strncmp($ln, 'sec-websocket-', 14) === 0) {
+            throw new \ValueError('Http\\WebSocket\\connect(): Argument #3 ($headers) must not set ' . $name);
+        }
+    }
+    $ctx = null;
+    if ($tls) {
+        $ctx = \stream_context_create(['ssl' => $o->sslContext + ['peer_name' => $host, 'SNI_enabled' => true]]);
+    }
+    $errno = 0;
+    $errstr = '';
+    $sock = \stream_socket_client(($tls ? 'tls://' : 'tcp://') . $host . ':' . $port,
+        $errno, $errstr, $o->connectTimeout, \STREAM_CLIENT_CONNECT, $ctx);
+    if ($sock === false) {
+        throw new HandshakeException('WebSocket connect to ' . $url . ' failed: ' . $errstr);
+    }
+    if (\Async\Context::currentScope() !== null) {
+        \stream_set_blocking($sock, false);
+    }
+    $key = \base64_encode(\random_bytes(16));
+    $hostHdr = $host . (($tls && $port === 443) || (!$tls && $port === 80) ? '' : ':' . $port);
+    $req = 'GET ' . $path . " HTTP/1.1\r\nHost: " . $hostHdr
+        . "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " . $key
+        . "\r\nSec-WebSocket-Version: 13\r\n";
+    if (\count($o->protocols) > 0) {
+        $req .= 'Sec-WebSocket-Protocol: ' . \implode(', ', $o->protocols) . "\r\n";
+    }
+    foreach ($headers as $name => $v) {
+        $req .= $name . ': ' . $v . "\r\n";
+    }
+    if (\fwrite($sock, $req . "\r\n") !== \strlen($req) + 2) {
+        \fclose($sock);
+        throw new HandshakeException('WebSocket handshake failed: could not send the request');
+    }
+
+    $buf = new \Buffer\ByteBuffer();
+    setTimeout($sock, $o->connectTimeout);
+    while (($end = $buf->indexOf("\r\n\r\n")) < 0) {
+        if ($buf->length() > 16384) {
+            \fclose($sock);
+            throw new HandshakeException('WebSocket handshake failed: response head too large');
+        }
+        $chunk = \fread($sock, 8192);
+        if ($chunk === '' || $chunk === false) {
+            $why = timedOut($sock) ? 'timed out waiting for the response' : 'connection closed before the response';
+            \fclose($sock);
+            throw new HandshakeException('WebSocket handshake failed: ' . $why);
+        }
+        $buf->append($chunk);
+    }
+    $lines = \Http\splitHead($buf->read($end));
+    $buf->skip(4);
+    $status = \count($lines) > 0 ? \explode(' ', $lines[0], 3) : [];
+    $code = \count($status) >= 2 ? (int)$status[1] : 0;
+    $rest = [];
+    for ($i = 1; $i < \count($lines); $i++) {
+        $rest[] = $lines[$i];
+    }
+    $h = \Http\Headers::fromLines($rest);
+    $proto = $h->get('Sec-WebSocket-Protocol');
+    $fail = '';
+    if ($code !== 101) {
+        $fail = 'HTTP ' . $code;
+    } elseif (!hasToken($h->get('Upgrade'), 'websocket') || !hasToken($h->get('Connection'), 'upgrade')) {
+        $fail = 'missing Upgrade/Connection';
+    } elseif ($h->get('Sec-WebSocket-Accept') !== acceptKey($key)) {
+        $fail = 'bad Sec-WebSocket-Accept';
+    } elseif ($proto !== '' && !\in_array($proto, $o->protocols, true)) {
+        $fail = 'server chose an unoffered subprotocol "' . $proto . '"';
+    } elseif ($h->get('Sec-WebSocket-Extensions') !== '') {
+        $fail = 'server chose an unoffered extension "' . $h->get('Sec-WebSocket-Extensions') . '"';
+    }
+    if ($fail !== '') {
+        \fclose($sock);
+        throw new HandshakeException('WebSocket handshake failed: ' . $fail);
+    }
+    return new Connection($sock, $buf, true, $o, $proto, null, $host . ':' . $port);
 }
 
 }
