@@ -1163,7 +1163,24 @@ final class LowerFromAst implements Pass
             // signature has no way to reconstruct.
             if (isset($this->externMethodSyms[$name])) { continue; }
             if (isset($this->fnDecls[$name])) { continue; }
-            if ($this->isCodegenBuiltin($name)) { continue; }
+            // A codegen builtin's stdlib twin is still DECLARED — not
+            // registered for direct calls (those stay inline, emitBuiltin is
+            // asked first), but present so a call by RUNTIME NAME finds a
+            // symbol: `self::VALIDATION_FUNCTIONS[$type]($value)` reached no
+            // `is_string` and symfony OptionsResolver rejected every option.
+            if ($this->isCodegenBuiltin($name)) {
+                $req = 0;
+                foreach ($extDecl->params as $bp) {
+                    if (!($bp->default instanceof \Parser\Ast\Expr) && !$bp->variadic) { $req = $req + 1; }
+                }
+                $module->builtinTwinReq[$name] = $req;
+                $module->builtinTwinTot[$name] = \count($extDecl->params);
+                // The HINT, not a lowered Type: lowering a type hint registers
+                // what it names, and this runs for every builtin twin in the
+                // stdlib whether or not the program ever calls one by name.
+                $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
+                continue;
+            }
             $this->fnDecls[$name] = $extDecl;
             // Register the bare-name alias for a namespaced import, exactly as
             // the in-source pre-pass does, so an unqualified `strncmp()` in the

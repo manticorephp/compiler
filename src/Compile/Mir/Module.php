@@ -247,6 +247,19 @@ final class Module
     /** @var array<string, array<string, bool>> the ELEMENT half of a by-ref capture disagreement: locals whose buffer rides cell elements on both frames ({@see Passes\InferScans::scanByRefCaptureWiden}) */
     public array $inferByRefCaptureElemLocals = [];
 
+    /**
+     * Codegen builtins that ship a stdlib twin, by name: required and total
+     * parameter counts and the return type. Not functions of this module —
+     * a direct call stays inline — but a call by RUNTIME NAME
+     * ({@see Passes\EmitLlvmCalls::emitDynFnCall}) needs to know they exist.
+     * @var array<string, int>
+     */
+    public array $builtinTwinReq = [];
+    /** @var array<string, int> */
+    public array $builtinTwinTot = [];
+    /** @var array<string, string> the declared return HINT */
+    public array $builtinTwinRet = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
     public function addGlobalCell(string $name, Node $default,

@@ -366,6 +366,27 @@ final class EmitLlvm implements EmitVisitor
      *  `return` value ({@see Module::$includeSlots}). Read by the
      *  `require`/`include` builtin. @var array<string, string> */
     private array $includeSlots = [];
+    /**
+     * String literals of `$n` that name a builtin twin.
+     * @param array<string, int> $twins
+     * @param array<string, bool> $out
+     */
+    private function collectTwinNames(Node $n, array $twins, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STRING_CONST && $n instanceof \Compile\Mir\StringConst) {
+            $v = \strtolower(\ltrim($n->value, '\\'));
+            if (isset($twins[$v])) { $out[$v] = true; }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectTwinNames($c, $twins, $out); }
+    }
+
+    /** @var array<string, int> {@see Module::$builtinTwinReq} */
+    private array $builtinTwinReq = [];
+    /** @var array<string, int> */
+    private array $builtinTwinTot = [];
+    /** @var array<string, string> */
+    private array $builtinTwinRet = [];
 
     /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
      *  @var string[] */
@@ -644,6 +665,25 @@ final class EmitLlvm implements EmitVisitor
         $this->globalVarNames = $module->globalVarNames;
         $this->globalsViewNames = $module->globalsViewNames;
         $this->includeSlots = $module->includeSlots;
+        $this->builtinTwinReq = $module->builtinTwinReq;
+        $this->builtinTwinRet = $module->builtinTwinRet;
+        // Only a twin the program NAMES in a string literal can be the target of
+        // a call by name. Arming every one at every dynamic site inlined builtins
+        // the program never uses — `gc_collect_cycles` pulled the cycle
+        // collector into the module, and its possible-root buffering delayed
+        // destructors that php runs at once.
+        $this->builtinTwinTot = [];
+        if ($module->builtinTwinTot !== []) {
+            /** @var array<string, bool> $named */
+            $named = [];
+            foreach ($module->functions as $tf) {
+                if ($tf->isExtern) { continue; }
+                $this->collectTwinNames($tf->body, $module->builtinTwinTot, $named);
+            }
+            foreach ($named as $tn => $unused) {
+                $this->builtinTwinTot[$tn] = $module->builtinTwinTot[$tn];
+            }
+        }
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;

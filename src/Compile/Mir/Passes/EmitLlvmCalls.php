@@ -786,6 +786,34 @@ trait EmitLlvmCalls
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
+        // Codegen builtins with a stdlib twin, called by NAME: the arm is an
+        // ordinary call, which the builtin emitter answers inline. Fixed arity
+        // only (a spread would need the pack filled against their params).
+        if (!$hasSpread) {
+            foreach ($this->builtinTwinTot as $bname => $btot) {
+                if (isset($this->sigs->returnType[$bname])) { continue; }
+                $breq = $this->builtinTwinReq[$bname] ?? $btot;
+                if ($argc < $breq || $argc > $btot) { continue; }
+                $bh = \strtolower($this->builtinTwinRet[$bname] ?? '');
+                $brt = match ($bh) {
+                    'bool' => Type::bool_(), 'int' => Type::int_(), 'float' => Type::float_(),
+                    'string' => Type::string_(), default => Type::cell(),
+                };
+                $hitL = $this->ssa->allocLabel('dynf.bhit');
+                $nextL = $this->ssa->allocLabel('dynf.bnext');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($bname) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitNode(new \Compile\Mir\Call($bname, $iv->args, $brt));
+                $out .= $this->boxToCell($brt);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+        }
         if ($dynfSyms !== []) {
             $out .= $hasSpread
                 ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr)
