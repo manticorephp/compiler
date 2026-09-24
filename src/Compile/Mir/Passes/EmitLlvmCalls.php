@@ -6,6 +6,7 @@ use Compile\Mir\Add;
 use Compile\Mir\Block;
 use Compile\Mir\ArrayAccess_;
 use Compile\Mir\ArrayLit;
+use Compile\Mir\ArrayElement_;
 use Compile\Mir\Spread_;
 use Compile\Mir\BoolConst;
 use Compile\Mir\MethodCall_;
@@ -1352,7 +1353,9 @@ trait EmitLlvmCalls
         // expanded into multiple positional slots.
         $pi = 0;
         $padDrops = '';
-        foreach ($iv->args as $a) {
+        $callArgs = ($known && $dynSpread === -1)
+            ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
+        foreach ($callArgs as $a) {
             // Argument unpacking `$fn(...$arr)`: expand the array across the
             // closure's remaining declared params (fixed-arity), boxing each
             // scalar element per the uniform closure ABI. A DYNAMIC callee has
@@ -1428,21 +1431,13 @@ trait EmitLlvmCalls
             $out .= $this->emitNode($a);
             $pt = $calleeParams[$capCnt + $pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
-            // (cell/unknown). A dynamic callee (`callable`) can't be gated — its
+            // (a cell; {@see closureArgRepr}). A dynamic callee (`callable`) can't be gated — its
             // param might be a TYPED array (an array_map-style callback) that
             // needs the raw array, and cellifying it blindly corrupts the
             // element reads (it crashes self-host). So the dynamic-callback case
             // — a `usort($x, fn($a,$b)=>$cmp($a["k"],$b["k"]))` with an int-arith
             // `$cmp` — is still open, pending a representation discriminator.
-            $paramErased = $known && $pt !== null
-                && ($pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN);
-            if ($this->isCellBoxableArg($a->type)) {
-                $out .= $this->boxToCell($a->type);
-            } elseif ($paramErased && $a->type->isArray() && $this->hasConcreteScalarElem($a->type)) {
-                $out .= $this->boxToCell($a->type);
-            } else {
-                $out .= $this->coerceToI64();
-            }
+            $out .= $this->closureArgRepr($a->type, $known ? $pt : null);
             $argList .= ', i64 ' . $this->lastValue;
             $argTypes .= ', i64';
             $pi = $pi + 1;
@@ -1468,7 +1463,8 @@ trait EmitLlvmCalls
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList
                   . $this->lastPadArgs . ")\n";
             $out .= $padDrops . $this->lastPadDrops;
-        } elseif ($dynSpread === -1 && $this->closurePadCandidates($pi) !== []) {
+        } elseif ($dynSpread === -1 && !$this->frame->isPrelude
+            && $this->closurePadCandidates($pi) !== []) {
             $fpi = $dynFp;
             if ($fpi === '') {
                 $fpi = $this->ssa->allocReg();
@@ -1632,9 +1628,17 @@ trait EmitLlvmCalls
         $i = $capCnt + $argc;
         $n = \count($ptypes);
         while ($i < $n) {
-            $def = $pdefs[$i] ?? null;
-            if (($vars[$i] ?? false) || $def === null) { break; }
             $pt = $ptypes[$i];
+            if ($vars[$i] ?? false) {
+                // An omitted variadic is an EMPTY pack, never a missing slot:
+                // the entry reads its one vec param unconditionally.
+                $out .= $this->emitNode(new ArrayLit([], $pt));
+                $out .= $this->coerceToI64();
+                $this->lastPadArgs .= ', i64 ' . $this->lastValue;
+                break;
+            }
+            $def = $pdefs[$i] ?? null;
+            if ($def === null) { break; }
             if ($refs[$i] ?? false) {
                 $tmp = $this->ssa->allocReg();
                 $out .= '  ' . $tmp . " = alloca i64\n";
@@ -1647,18 +1651,67 @@ trait EmitLlvmCalls
                 $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $pt);
             } else {
                 $out .= $this->emitNode($def);
-                $erased = $pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN;
-                if ($this->isCellBoxableArg($def->type)
-                    || ($erased && $def->type->isArray() && $this->hasConcreteScalarElem($def->type))) {
-                    $out .= $this->boxToCell($def->type);
-                } else {
-                    $out .= $this->coerceToI64();
-                }
+                $out .= $this->closureArgRepr($def->type, $pt);
                 $this->lastPadArgs .= ', i64 ' . $this->lastValue;
             }
             $i = $i + 1;
         }
         return $out;
+    }
+
+    /**
+     * A known closure's variadic takes ONE vec param, and nothing else packs
+     * it: the trailing arguments from its position on become a single array
+     * literal of the param's type (the literal emitter boxes each element for
+     * a `mixed` pack), exactly as {@see LowerFns::defaultFillArgs} packs a
+     * named call. Fewer arguments than that are left to
+     * {@see emitClosureDefaultPad}, which hands the variadic an empty pack.
+     *
+     * @param Node[] $args
+     * @return Node[]
+     */
+    private function closureVariadicPack(array $args, string $cname, int $capCnt): array
+    {
+        $vars = $this->sigs->variadicParams[$cname] ?? [];
+        $ptypes = $this->sigs->paramTypes[$cname] ?? [];
+        $vi = -1;
+        foreach ($vars as $i => $isVar) {
+            if ($isVar) { $vi = $i; break; }
+        }
+        $vpos = $vi - $capCnt;
+        if ($vi < 0 || $vpos < 0 || \count($args) <= $vpos) { return $args; }
+        $out = [];
+        $elems = [];
+        foreach ($args as $k => $a) {
+            if ($k < $vpos) { $out[] = $a; } else { $elems[] = new ArrayElement_(null, $a); }
+        }
+        // An untyped pack (`...$r`, element `unknown`) is read back as cells by
+        // the body, so its literal boxes every element; a typed one stays raw.
+        $pt = $ptypes[$vi];
+        $el = $pt->element;
+        if ($el === null || $el->kind === Type::KIND_UNKNOWN) { $pt = Type::vec(Type::cell()); }
+        $out[] = new ArrayLit($elems, $pt);
+        return $out;
+    }
+
+    /**
+     * The uniform closure ABI's representation of one by-value argument of
+     * type `$at` already in `lastValue`: a scalar crosses as a tagged cell, a
+     * typed array is cellified only into a param `$pt` KNOWN to be a cell, and
+     * anything else crosses raw. One rule for a written argument and a padded
+     * default alike. `$pt` is null for a dynamic callee.
+     */
+    private function closureArgRepr(Type $at, ?Type $pt): string
+    {
+        // CELL only: the closure entry unboxes a cell param, but an `unknown`
+        // one (a bare `array` / `?array` hint) stores its word RAW and COWs it
+        // as an array pointer, so a boxed array there SIGSEGVed.
+        $paramErased = $pt !== null && $pt->kind === Type::KIND_CELL;
+        if ($this->isCellBoxableArg($at)
+            || ($paramErased && $at->isArray() && $this->hasConcreteScalarElem($at))) {
+            return $this->boxToCell($at);
+        }
+        return $this->coerceToI64();
     }
 
     /**
@@ -1675,8 +1728,8 @@ trait EmitLlvmCalls
             $i = $capCnt + $argc;
             $pdefs = $this->sigs->paramDefaults[$cname] ?? [];
             if ($i >= \count($this->sigs->paramTypes[$cname] ?? [])) { continue; }
-            if ($this->sigs->variadicParams[$cname][$i] ?? false) { continue; }
-            if (($pdefs[$i] ?? null) === null) { continue; }
+            if (($pdefs[$i] ?? null) === null
+                && !($this->sigs->variadicParams[$cname][$i] ?? false)) { continue; }
             $out[$cname] = $capCnt;
         }
         return $out;

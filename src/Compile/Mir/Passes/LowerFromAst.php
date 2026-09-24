@@ -2994,7 +2994,9 @@ final class LowerFromAst implements Pass
             /** @var \Parser\Ast\Param[] $dp */
             $dp = $declParams;
             foreach ($dp as $p) {
-                $t = $this->lowerParamType($p->typeHint);
+                $t = ($p->variadic ?? false)
+                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    : $this->lowerParamType($p->typeHint);
                 $mir[] = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
                     default: $this->lowerParamDefault($p, $defaultScope));
                 $loads[] = new LoadLocal($p->name, $t);

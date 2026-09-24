@@ -75,4 +75,9 @@ final class FunctionEmitFrame
      *  same site with the same static type. {@see EmitLlvmMemory::
      *  collectOwnElemLocals}. Appended at the END — no mid-struct insertion. */
     public array $ownElemLocals = [];
+    /** The body is a prelude function, emitted `linkonce_odr`: every module's
+     *  copy must be identical, so nothing module-local (the closure pad chain,
+     *  {@see Passes\EmitLlvmCalls::emitDynClosurePaddedCall}) may shape it.
+     *  Appended at the END — no mid-struct insertion. */
+    public bool $isPrelude = false;
 }

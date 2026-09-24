@@ -515,6 +515,13 @@ trait InferNodes
             if ($this->isParamName($fn, $eln)) { continue; }
             $this->localTypes[$eln] = $ety;
         }
+        // A param default is emitted at a call site that omits the argument
+        // (a closure pad, a method-call pad) and boxed by its type there, so
+        // it has to carry one: untyped, `[1, 2]` crossed into an erased param
+        // as a raw array its elements were never cellified for.
+        foreach ($fn->params as $p) {
+            if ($p->default !== null) { $this->inferNode($p->default); }
+        }
         $this->inferNode($fn->body);
         // A function returning a CLOSURE loses the concrete `obj<__closure_N>`
         // class otherwise — an undeclared return is `unknown`, a declared

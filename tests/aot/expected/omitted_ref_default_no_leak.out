@@ -21,4 +21,13 @@ callable param: sum=510000 growth ok
 5 6 7 2 4 3 9 10
 8 9 4
 c2 n3
+1,2,9 1,2,9 1,2,9 | 1,2,9 1,2,9 | 1,2,9
+1,2,9 1,2,9 1,2,9 | 1,2,9 1,2,9 | 1,2,9
+k,z=v,w k,z=v,w k,z=v,w | k,z=v,w k,z=v,w | k,z=v,w
+seq1 seq2 seq3 | seq4 seq5 | seq6
+dflt/1.5 dflt/1.5 dflt/1.5 | dflt/1.5 dflt/1.5 | dflt/1.5
+5,9 6,9 x/1.5 y/2.25
+1:7:0: 1:2:0: 1:2:2:3+4 5:0:0 5:13:2
+q0 n0
+variadic default: sum=1005780 growth ok
 done

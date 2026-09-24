@@ -182,5 +182,77 @@ $cl(2, 0, $gs);
 echo $gs, ' ';
 $nul(3, $arr);
 echo $arr[0], "\n";
-echo "done
-";
+
+// A by-value default crosses the same boundary a written argument does, under
+// the same rule ({@see closureArgRepr}): `[1, 2]` into a bare `array` param was
+// boxed as a cell the entry then COWed as an array pointer (SIGSEGV), and
+// padded into an untyped one it carried raw ints the reader took for cells.
+// Each call builds its default afresh: a mutation inside never reaches the
+// next call. An omitted variadic is an empty pack, never a missing slot.
+final class Seq
+{
+    public static int $n = 0;
+    public int $id;
+
+    public function __construct()
+    {
+        self::$n = self::$n + 1;
+        $this->id = self::$n;
+    }
+}
+
+final class Runner
+{
+    public \Closure $c;
+
+    public function __construct(\Closure $c)
+    {
+        $this->c = $c;
+    }
+
+    public function run(): string
+    {
+        return (string)($this->c)();
+    }
+}
+
+/** @param callable(): mixed $cb */
+function viaCallable(callable $cb): string
+{
+    return (string)$cb();
+}
+
+$defArr = function (array $a = [1, 2]): string {
+    $a[] = 9;
+    return implode(',', $a);
+};
+$defUntyped = function ($a = [1, 2]): string {
+    $a[] = 9;
+    return implode(',', $a);
+};
+$defAssoc = function (array $a = ['k' => 'v']): string {
+    $a['z'] = 'w';
+    return implode(',', array_keys($a)) . '=' . implode(',', $a);
+};
+$defObj = function (Seq $s = new Seq()): string {
+    return 'seq' . $s->id;
+};
+$defScalar = function (string $s = 'dflt', float $f = 1.5): string {
+    return $s . '/' . $f;
+};
+$defVar = function ($a, $b = 7, ...$r): string {
+    return $a . ':' . $b . ':' . count($r) . ':' . implode('+', $r);
+};
+$defVarTyped = function (int $a, int ...$r): string {
+    return $a . ':' . array_sum($r) . ':' . count($r);
+};
+foreach ([$defArr, $defUntyped, $defAssoc, $defObj, $defScalar] as $cl) {
+    $r = new Runner($cl);
+    echo $cl(), ' ', $cl(), ' ', $cl(), ' | ', $r->run(), ' ', $r->run(), ' | ', viaCallable($cl), "\n";
+}
+echo $defArr([5]), ' ', $defUntyped([6]), ' ', $defScalar('x'), ' ', $defScalar('y', 2.25), "\n";
+echo $defVar(1), ' ', $defVar(1, 2), ' ', $defVar(1, 2, 3, 4), ' ', $defVarTyped(5), ' ', $defVarTyped(5, 6, 7), "\n";
+$rv = new Runner(function ($a = 'q', ...$r): string { return $a . count($r); });
+echo $rv->run(), ' ', viaCallable(function (...$r): string { return 'n' . count($r); }), "\n";
+measure('variadic default', function (int $i) use ($defVar): int { return strlen($defVar($i)); });
+echo "done\n";

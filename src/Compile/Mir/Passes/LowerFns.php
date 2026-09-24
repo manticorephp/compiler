@@ -520,8 +520,11 @@ trait LowerFns
                 // untyped param. The uniform closure ABI passes every arg as a
                 // tagged cell (so a dynamic `callable` dispatch works), so an
                 // untyped param must carry the tag; an unknown-typed param would
-                // read the raw bits and a string arg renders as its pointer.
-                type: $this->lowerParamType($p->typeHint),
+                // read the raw bits and a string arg renders as its pointer. A
+                // variadic is ONE vec param, as for a named function.
+                type: ($p->variadic ?? false)
+                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    : $this->lowerParamType($p->typeHint),
                 byRef: (bool)($p->byRef ?? false),
                 variadic: (bool)($p->variadic ?? false),
                 // The call site pads an omitted trailing param from this: the

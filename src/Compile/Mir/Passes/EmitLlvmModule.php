@@ -861,6 +861,7 @@ trait EmitLlvmModule
         $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
+        $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;
         $this->arena->vecAllocated = false;
