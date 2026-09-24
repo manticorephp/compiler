@@ -37,6 +37,32 @@ foreach ([1, 2] as $i) {
 echo "|\n";
 $o = my();
 echo $o->m(g(), rows()), "\n";
+// A plain READ can run user code too: offsetGet on an ArrayAccess object,
+// __get on an undeclared property. Either one ahead of the fresh base keeps it
+// in place.
+final class AO implements ArrayAccess
+{
+    public function offsetGet(mixed $k): mixed { echo "og "; return 1; }
+    public function offsetExists(mixed $k): bool { echo "oe "; return true; }
+    public function offsetSet(mixed $k, mixed $v): void {}
+    public function offsetUnset(mixed $k): void {}
+}
+final class MG
+{
+    public function __get(string $p): int { echo "get "; return 1; }
+    public function __isset(string $p): bool { echo "isset "; return true; }
+}
+$ao = new AO();
+byref($ao[0], mk('a')->arr);
+echo "|\n";
+$mg = new MG();
+byref($mg->v, mk('g')->arr);
+echo "|\n";
+byref(isset($ao[0]) ? 1 : 0, mk('i')->arr);
+echo "|\n";
+$plain = [7];
+byref($plain[0], mk('p')->arr);
+echo "|\n";
 mk('first')->arr[] = g();
 echo "|\n";
 

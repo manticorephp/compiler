@@ -414,18 +414,54 @@ final class SpillFreshBases
         if ($this->hasEffect($n)) { $this->orderEffect = true; }
     }
 
-    /** A node whose evaluation can be observed: a call, an allocation, a store, output. */
+    /**
+     * Can evaluating this node be observed? Conservative: only a node proven
+     * never to reach user code or throw is pure. A read that can dispatch
+     * (`$o[$k]` on an ArrayAccess object → offsetGet, `$o->p` undeclared →
+     * __get, a string conversion → __toString, `/` by zero, a shift by a
+     * negative count) is invisible at this stage, so it counts as an effect.
+     * The node's operands are scanned on their own.
+     */
     private function hasEffect(Node $n): bool
     {
         $k = $n->kind;
-        return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ
-            || $k === Node::KIND_CLONE || $k === Node::KIND_YIELD || $k === Node::KIND_INCDEC
-            || $k === Node::KIND_STORE_LOCAL || $k === Node::KIND_STORE_ELEMENT
-            || $k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_STORE_DYN_PROP
-            || $k === Node::KIND_STORE_STATIC_PROP || $k === Node::KIND_ECHO
-            || $k === Node::KIND_UNSET || $k === Node::KIND_THROW || $k === Node::KIND_CAST
-            || $k === Node::KIND_CONCAT;
+        if ($k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_STRING_CONST
+            || $k === Node::KIND_BOOL_CONST || $k === Node::KIND_NULL_CONST || $k === Node::KIND_LOAD_LOCAL
+            || $k === Node::KIND_NOT || $k === Node::KIND_TERNARY || $k === Node::KIND_NULLCOALESCE
+            || $k === Node::KIND_INSTANCEOF || $k === Node::KIND_CLASS_NAME || $k === Node::KIND_CLOSURE
+            || $k === Node::KIND_ISSET) {
+            return false;
+        }
+        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
+            || $k === Node::KIND_NEG || $k === Node::KIND_BITNOT) {
+            return !$this->operandsAre($n, false);
+        }
+        if ($k === Node::KIND_BITOP) {
+            $op = $this->asBitOp($n)->op;
+            return ($op !== 'and' && $op !== 'or' && $op !== 'xor') || !$this->operandsAre($n, false);
+        }
+        if ($k === Node::KIND_CMP || $k === Node::KIND_SPACESHIP) {
+            return !$this->operandsAre($n, true);
+        }
+        if ($k === Node::KIND_ARRAY_ACCESS) {
+            $aa = $this->asArrayAccess($n);
+            $ik = $aa->index->type->kind;
+            return $aa->array->type->kind !== Type::KIND_ARRAY || $aa->shapeCheck !== 0
+                || ($ik !== Type::KIND_INT && $ik !== Type::KIND_STRING);
+        }
+        return true;
+    }
+
+    /** Every operand a plain int/float/bool/null (and string when `$str`): no conversion reaches user code. */
+    private function operandsAre(Node $n, bool $str): bool
+    {
+        foreach (Walk::children($n) as $c) {
+            $ck = $c->type->kind;
+            if ($ck === Type::KIND_INT || $ck === Type::KIND_FLOAT || $ck === Type::KIND_BOOL || $ck === Type::KIND_NULL) { continue; }
+            if ($str && $ck === Type::KIND_STRING) { continue; }
+            return false;
+        }
+        return true;
     }
 
     // ── Rewrite, statement by statement ─────────────────────────────────────
@@ -620,6 +656,7 @@ final class SpillFreshBases
     private function asInvoke(Node $n): \Compile\Mir\Invoke_ { return $n; }
     private function asPropertyAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
     private function asArrayAccess(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
+    private function asBitOp(Node $n): \Compile\Mir\BitOp { return $n; }
     private function asDynProp(Node $n): \Compile\Mir\DynProp_ { return $n; }
     private function asIf(Node $n): \Compile\Mir\If_ { return $n; }
     private function asWhile(Node $n): \Compile\Mir\While_ { return $n; }
