@@ -1196,6 +1196,7 @@ trait InferScans
                 $prev = $this->staticLocalTypes[$cell] ?? null;
                 if ($prev !== null && $prev->kind === $t->kind) { continue; }
                 $this->staticLocalTypes[$cell] = $t;
+                $this->rescanTargets[$fn->name] = true;
                 $changed = true;
             }
         }
@@ -2361,6 +2362,7 @@ trait InferScans
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
+                    $this->rescanTargets[$fn->name] = true;
                     $changed = true;
                 }
             }
