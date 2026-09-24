@@ -4675,11 +4675,22 @@ trait EmitLlvmExpr
         // slipped through. Routing through the tagged runtime is correct for any
         // payload (int/float, and a string cell keeps php's juggling). Restrict
         // to a numeric raw side so a cell-vs-array/object identity is untouched.
-        if ($lk === Type::KIND_CELL && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT)) {
+        //
+        // An ORDERING against a STRING or BOOL takes the same road: eq/ne already
+        // returned through the tagged branch above, but `$c < "\x80"` fell to
+        // the raw-carrier compare and answered false for every byte — polyfill-
+        // mbstring's `$s[$i] < "\x80" ? 1 : $ulenMask[…]` then stepped by 0
+        // and spun forever growing the string.
+        $ordJug = !$isEq && !$isNe;
+        $rNum = $rk === Type::KIND_INT || $rk === Type::KIND_FLOAT
+            || ($ordJug && ($rk === Type::KIND_STRING || $rk === Type::KIND_BOOL));
+        $lNum = $lk === Type::KIND_INT || $lk === Type::KIND_FLOAT
+            || ($ordJug && ($lk === Type::KIND_STRING || $lk === Type::KIND_BOOL));
+        if ($lk === Type::KIND_CELL && $rNum) {
             $this->lastValue = $r; $this->lastValueType = $rt;
             $chunks[] = $this->boxToCell($c->right->type);
             $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
-        } elseif ($rk === Type::KIND_CELL && ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT)) {
+        } elseif ($rk === Type::KIND_CELL && $lNum) {
             $this->lastValue = $l; $this->lastValueType = $lt;
             $chunks[] = $this->boxToCell($c->left->type);
             $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
