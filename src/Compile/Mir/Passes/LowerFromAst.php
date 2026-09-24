@@ -1694,28 +1694,54 @@ final class LowerFromAst implements Pass
      */
     private function collectReflFnNames(Module $module): void
     {
+        $this->reflFnDynamic = false;
         foreach ($module->functions as $fn) {
             if ($fn->body === null) { continue; }
-            $this->scanReflFn($fn->body, $module);
+            $this->scanReflFn($fn->body, $module, false);
+        }
+        // A `new ReflectionFunction($name)` whose name is computed can still
+        // only name a function the program SPELLS somewhere — php-cs-fixer
+        // reflects each entry of a literal map (`'alternativeName' =>
+        // 'mb_str_split'`) to learn whether it is internal. Register every user
+        // function named in a string literal, the rule the by-name call arms
+        // already follow.
+        if ($this->reflFnDynamic) {
+            foreach ($module->functions as $fn) {
+                if ($fn->body === null) { continue; }
+                $this->scanReflFn($fn->body, $module, true);
+            }
         }
     }
 
-    private function scanReflFn(\Compile\Mir\Node $n, Module $module): void
+    private bool $reflFnDynamic = false;
+
+    private function scanReflFn(\Compile\Mir\Node $n, Module $module, bool $literals): void
     {
-        if ($n instanceof \Compile\Mir\NewObj
+        if ($literals) {
+            if ($n->kind === \Compile\Mir\Node::KIND_STRING_CONST && $n instanceof \Compile\Mir\StringConst) {
+                $this->registerReflFn(\ltrim($n->value, '\\'), $module);
+                return;
+            }
+        } elseif ($n instanceof \Compile\Mir\NewObj
             && \ltrim($n->class, '\\') === 'ReflectionFunction'
-            && \count($n->args) >= 1
-            && $n->args[0] instanceof \Compile\Mir\StringConst) {
-            $fn = \ltrim($n->args[0]->value, '\\');
-            if (!isset($module->reflFnMeta[$fn])) {
-                $decl = $this->fnDecls[$fn] ?? null;
-                if ($decl !== null) {
-                    $module->reflFnMeta[$fn] = $this->fnMethodMeta($fn, $decl);
-                }
+            && \count($n->args) >= 1) {
+            if ($n->args[0] instanceof \Compile\Mir\StringConst) {
+                $this->registerReflFn(\ltrim($n->args[0]->value, '\\'), $module);
+            } else {
+                $this->reflFnDynamic = true;
             }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
-            $this->scanReflFn($c, $module);
+            $this->scanReflFn($c, $module, $literals);
+        }
+    }
+
+    private function registerReflFn(string $fn, Module $module): void
+    {
+        if ($fn === '' || isset($module->reflFnMeta[$fn])) { return; }
+        $decl = $this->fnDecls[$fn] ?? null;
+        if ($decl !== null) {
+            $module->reflFnMeta[$fn] = $this->fnMethodMeta($fn, $decl);
         }
     }
 

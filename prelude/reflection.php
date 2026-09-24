@@ -1458,16 +1458,36 @@ class ReflectionFunction
     private int $row = 0;
     private int $tramp = 0;
 
+    private bool $internal = false;
+
     public function __construct(string $name)
     {
         $n = __mc_refl_unqualify($name);
         $h = __mc_refl_fn_find($n);
         if ($h === 0) {
-            throw new ReflectionException("Function " . $n . "() does not exist");
+            // No row: not a user function this program reflects. A name the
+            // runtime still resolves is one of php's own (a builtin or the
+            // stdlib standing in for one) — that is what isInternal() reports.
+            if (!\function_exists($n)) {
+                throw new ReflectionException("Function " . $n . "() does not exist");
+            }
+            $this->internal = true;
+            $this->name = $n;
+            return;
         }
         $this->row = $h;
         $this->name = $n;
         $this->tramp = __mc_refl_row_tramp($h);
+    }
+
+    public function isInternal(): bool
+    {
+        return $this->internal;
+    }
+
+    public function isUserDefined(): bool
+    {
+        return !$this->internal;
     }
 
     public function getName(): string
