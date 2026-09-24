@@ -119,9 +119,9 @@ final class MemoryAbi
      *
      * The two spare words carry what a string has no use for and a closure
      * cannot do without: the per-closure RETAIN and DROP functions, which
-     * co-own / release exactly the captures this env holds. A closure with NO
-     * captures owns nothing and keeps the old bare allocation — it has no
-     * magic here, and every helper below then leaves it alone.
+     * co-own / release exactly the captures this env holds; both are null when
+     * the env owns nothing. Every closure literal carries the header, so the
+     * magic is also what `instanceof Closure` tests at run time.
      *
      * `rc = -1` marks an immortal env, the same convention string literals use.
      */

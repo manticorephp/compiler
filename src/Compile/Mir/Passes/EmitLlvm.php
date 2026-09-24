@@ -385,6 +385,8 @@ final class EmitLlvm implements EmitVisitor
     private array $builtinTwinReq = [];
     /** @var array<string, int> */
     private array $builtinTwinTot = [];
+    /** @var array<string, bool> */
+    private array $callableShims = [];
     /** @var array<string, string> */
     private array $builtinTwinRet = [];
 
@@ -684,6 +686,7 @@ final class EmitLlvm implements EmitVisitor
                 $this->builtinTwinTot[$tn] = $module->builtinTwinTot[$tn];
             }
         }
+        $this->callableShims = $module->callableShims;
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;

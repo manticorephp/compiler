@@ -625,6 +625,14 @@ trait LowerFns
         return null;
     }
 
+    /** {@see coerceCallableArg} for an ARGUMENT: the closure stands in for the literal. */
+    private function coerceCallableShim(?Type $pt, \Parser\Ast\Expr $arg): ?Node
+    {
+        $conv = $this->coerceCallableArg($pt, $arg);
+        if ($conv instanceof Closure_) { $this->module->callableShims[$conv->type->class ?? ''] = true; }
+        return $conv;
+    }
+
     private function lowerInvoke(\Parser\Ast\Invoke $expr): Node
     {
         // Literal string / array callable invoked directly: `"fn"(x)`,
@@ -865,7 +873,7 @@ trait LowerFns
     private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
     {
         if ($p !== null) {
-            $conv = $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($p)), $a);
+            $conv = $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($p)), $a);
             if ($conv !== null) { return $conv; }
         }
         return $this->lowerExpr($a);

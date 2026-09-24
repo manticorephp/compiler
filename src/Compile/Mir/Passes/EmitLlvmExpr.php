@@ -2512,7 +2512,121 @@ trait EmitLlvmExpr
 
     private function emitInstanceof(Instanceof_ $n): string
     {
+        if (\strtolower($n->class) === 'closure') {
+            return $this->emitClosureTest($n->operand);
+        }
         return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class));
+    }
+
+    /**
+     * `$x instanceof Closure` → i64 0/1. A closure is no class instance: its
+     * env's slot 0 is the code pointer, so the class-id test read a descriptor
+     * out of machine code and answered false for every closure (symfony
+     * OptionsResolver took each allowed-value callback for a literal). Every
+     * closure env carries CLOSURE_TAG_MAGIC at `hash@-32` behind a plain rc at
+     * -8; an object/array/struct/enum/ref instead has a 0x7E66 magic at -8, so
+     * -32 is read only when -8 is not one, and a string's -32 is its hash.
+     */
+    private function emitClosureTest(Node $operand): string
+    {
+        $out = $this->emitNode($operand);
+        $out .= $this->coerceToI64();
+        $v = $this->lastValue;
+        $k = $operand->type->kind;
+        $cls = $operand->type->class ?? '';
+        $this->lastValueType = 'i64';
+        // A literal closure's own type: an instance unless null. A call-site
+        // shim of a callable LITERAL (`cb('strlen')`) is a string/array in php.
+        if ($k === Type::KIND_OBJ && \str_starts_with($cls, '__closure_')) {
+            if (isset($this->callableShims[$cls])) {
+                $this->lastValue = '0';
+                return $out;
+            }
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp ne i64 ' . $v . ", 0\n";
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = zext i1 ' . $nz . " to i64\n";
+            $this->lastValue = $z;
+            return $out;
+        }
+        // `closure` is also what a `callable` hint lowers to, and that slot
+        // holds an invokable object raw — so it is tested like an erased one.
+        $erased = $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN || $k === Type::KIND_CLOSURE
+            || ($k === Type::KIND_OBJ && \strtolower($cls) === 'closure');
+        if (!$erased) {
+            $this->lastValue = '0';
+            return $out;
+        }
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $slot . "\n";
+        $pay = $this->ssa->allocReg();
+        $out .= '  ' . $pay . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $pay . "\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $boxL = $this->ssa->allocLabel('ic.box');
+        $rawL = $this->ssa->allocLabel('ic.raw');
+        $rawOkL = $this->ssa->allocLabel('ic.rawok');
+        $chkL = $this->ssa->allocLabel('ic.chk');
+        $envL = $this->ssa->allocLabel('ic.env');
+        $doneL = $this->ssa->allocLabel('ic.done');
+        $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+        $out .= $boxL . ":\n";
+        $out .= $this->cellTagIr($v);
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        $bp = $this->ssa->allocReg();
+        $out .= '  ' . $bp . ' = and i64 ' . $v . ", 281474976710655\n";
+        $bs = $this->ssa->allocReg();
+        $out .= '  ' . $bs . ' = select i1 ' . $isObj . ', i64 ' . $bp . ", i64 0\n";
+        $out .= '  store i64 ' . $bs . ', ptr ' . $pay . "\n";
+        $out .= '  br label %' . $chkL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($v);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $rawOkL . ', label %' . $chkL . "\n";
+        $out .= $rawOkL . ":\n";
+        $out .= '  store i64 ' . $v . ', ptr ' . $pay . "\n";
+        $out .= '  br label %' . $chkL . "\n";
+        $out .= $chkL . ":\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = load i64, ptr ' . $pay . "\n";
+        $pz = $this->ssa->allocReg();
+        $out .= '  ' . $pz . ' = icmp eq i64 ' . $p . ", 0\n";
+        $hdrL = $this->ssa->allocLabel('ic.hdr');
+        $out .= '  br i1 ' . $pz . ', label %' . $doneL . ', label %' . $hdrL . "\n";
+        $out .= $hdrL . ":\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $p . " to ptr\n";
+        $m8p = $this->ssa->allocReg();
+        $out .= '  ' . $m8p . ' = getelementptr inbounds i8, ptr ' . $pp . ", i64 -8\n";
+        $m8 = $this->ssa->allocReg();
+        $out .= '  ' . $m8 . ' = load i64, ptr ' . $m8p . "\n";
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = lshr i64 ' . $m8 . ", 48\n";
+        $isMagic = $this->ssa->allocReg();
+        $out .= '  ' . $isMagic . ' = icmp eq i64 ' . $hi . ', '
+              . (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC >> 48) . "\n";
+        $out .= '  br i1 ' . $isMagic . ', label %' . $doneL . ', label %' . $envL . "\n";
+        $out .= $envL . ":\n";
+        $m32p = $this->ssa->allocReg();
+        $out .= '  ' . $m32p . ' = getelementptr inbounds i8, ptr ' . $pp . ', i64 '
+              . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $m32 = $this->ssa->allocReg();
+        $out .= '  ' . $m32 . ' = load i64, ptr ' . $m32p . "\n";
+        $isCl = $this->ssa->allocReg();
+        $out .= '  ' . $isCl . ' = icmp eq i64 ' . $m32 . ', '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $ce = $this->ssa->allocReg();
+        $out .= '  ' . $ce . ' = zext i1 ' . $isCl . " to i64\n";
+        $out .= '  store i64 ' . $ce . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**

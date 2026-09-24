@@ -51,6 +51,11 @@ final class Module
      *  @var string[] */
     public array $knownFnNames = [];
 
+    /** @var array<string, bool> closure fn name → a callable LITERAL (`'strlen'`,
+     *  `[$o, 'm']`) wrapped for a `callable` param: php holds a string/array
+     *  there, so `instanceof Closure` must answer false for it */
+    public array $callableShims = [];
+
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 
