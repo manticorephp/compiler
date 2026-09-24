@@ -2610,6 +2610,11 @@ final class Parser
             $mn = \strtoupper($tok->lexeme);
             if ($mn === '__FILE__') { return Expr::string($this->sourceFile, $span); }
             if ($mn === '__DIR__')  { return Expr::string($this->sourceDir(), $span); }
+            // …and __NAMESPACE__, whose value is the PARSE context: lowering has
+            // no namespace left, so it answered '' — symfony-style discovery
+            // (`sprintf('%s\%s', __NAMESPACE__, $base)` then `new $class()`)
+            // built a global name and instantiated nothing.
+            if ($mn === '__NAMESPACE__') { return Expr::string($this->currentNamespace, $span); }
             return Expr::magicConstant($tok->lexeme, $span);
         }
         if ($tok->kind === TokenKind::Keyword) {
