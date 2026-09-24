@@ -4535,8 +4535,11 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValueType = $st;
             return $o;
         }
+        // A CLOSURE is counted like an object: a borrowed one (a `\Closure`
+        // param appended to a cell element) stored with no co-owner was freed
+        // by the caller's release of its temporary while the array still held it.
         if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
-            && !$borrowedCellArray) {
+            && $k !== Type::KIND_CLOSURE && !$borrowedCellArray) {
             return '';
         }
         $saveV = $this->lastValue;

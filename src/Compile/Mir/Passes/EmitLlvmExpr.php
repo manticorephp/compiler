@@ -4917,7 +4917,7 @@ trait EmitLlvmExpr
     /**
      * Unbox the cell currently in lastValue (i64) to the representation a
      * concrete target type `$pt` expects: bool → `& 1`, int → unbox_int,
-     * array/string/object → strip the NaN tag to the payload pointer. Any other
+     * array/string/object/closure → strip the NaN tag to the payload pointer. Any other
      * kind (cell/float/unknown/…) is left as-is. Used at every cell→concrete
      * boundary (call arg, `return`): a cell carries tag bits a typed consumer
      * would mis-read (a boxed `false` is non-zero → truthy; a boxed array
@@ -5012,7 +5012,10 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
-        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ) {
+        // A CLOSURE is boxed like an object ({@see boxToCell}): left out, a
+        // `\Closure` return or argument read out of a cell element handed the
+        // tagged word on as the closure pointer.
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
