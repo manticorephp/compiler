@@ -147,6 +147,14 @@ public bool $needsClosureRc = false;
      */
     public bool $needsClassIsa = false;
 
+    /**
+     * `$obj instanceof $name` / `is_a($obj, $name)` with a runtime NAME — the
+     * module's (name → is-a class ids) table and the one scan over it
+     * (`__mir_isa_dyn`), instead of a strcmp arm per class and interface at
+     * every site.
+     */
+    public bool $needsIsaDyn = false;
+
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union
     // once here keeps the subtle "why" with the flags instead of re-deriving

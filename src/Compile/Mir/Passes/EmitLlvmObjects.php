@@ -3006,6 +3006,21 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynp.end');
+        // Every arm calls a per-name reader of ONE signature, so the names are a
+        // table: a probe and an indirect call instead of a strcmp chain over the
+        // program's whole property surface at every site.
+        if (\count($propTypes) >= self::DYNF_TABLE_MIN) {
+            $rows = [];
+            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropReadHelperFor((string)$p); }
+            $out .= $this->dynPropTableProbe($keyP, $rows, 'dynp');
+            $fp = $this->lastValue;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $fp . '(ptr ' . $objPtr . ")\n";
+            $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $this->dynPropMissLabel . ":\n";
+            $propTypes = [];
+        }
         foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynp.hit');
             $nextL = $this->ssa->allocLabel('dynp.next');
@@ -3037,6 +3052,36 @@ trait EmitLlvmObjects
         // Every arm of the name chain stored a boxed cell (a reader helper, the
         // bag lookup or a boxed null).
         $this->markCellOpaque($rv);
+        return $out;
+    }
+
+    /** The label a {@see dynPropTableProbe} miss branches to. */
+    private string $dynPropMissLabel = '';
+
+    /**
+     * Probe the module's `{ name, helper }` table for a runtime member name and
+     * branch: a hit continues in the current block with the helper pointer in
+     * lastValue, a miss jumps to {@see $dynPropMissLabel}, which the caller
+     * opens for its bag / default arm.
+     *
+     * @param array<string, string> $rows name => helper symbol
+     */
+    private function dynPropTableProbe(string $keyP, array $rows, string $tag): string
+    {
+        $this->dynfExtraBodies .= $this->dynfLookupFn();
+        $pair = $this->dynfTable($rows);
+        $fp = $this->ssa->allocReg();
+        $out = '  ' . $fp . ' = call ptr @__mc_dynf_lookup(ptr ' . $keyP . ', ptr '
+              . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = icmp ne ptr ' . $fp . ", null\n";
+        $hitL = $this->ssa->allocLabel($tag . '.tab');
+        $missL = $this->ssa->allocLabel($tag . '.miss');
+        $out .= '  br i1 ' . $hit . ', label %' . $hitL . ', label %' . $missL . "\n";
+        $out .= $hitL . ":\n";
+        $this->dynPropMissLabel = $missL;
+        $this->lastValue = $fp;
+        $this->lastValueType = 'ptr';
         return $out;
     }
 
@@ -4337,6 +4382,17 @@ trait EmitLlvmObjects
         $out .= $this->emitBagStoreValue($n->value);
         $cellVal = $this->lastValue;
         $endL = $this->ssa->allocLabel('dynsp.end');
+        // The write twin of the reader table in {@see emitErasedDynPropDispatch}.
+        if (\count($propTypes) >= self::DYNF_TABLE_MIN) {
+            $rows = [];
+            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropertyWriteHelper((string)$p); }
+            $out .= $this->dynPropTableProbe($keyP, $rows, 'dynsp');
+            $fp = $this->lastValue;
+            $out .= '  call void ' . $fp . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $this->dynPropMissLabel . ":\n";
+            $propTypes = [];
+        }
         foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynsp.hit');
             $nextL = $this->ssa->allocLabel('dynsp.next');
