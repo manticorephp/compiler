@@ -240,6 +240,12 @@ final class Module
      * @var array<string, array<string, bool>>
      */
     public array $inferByRefCellElemLocals = [];
+    /** @var array<string, array<string, bool>> by-ref CAPTURE locals that ride a cell, kept for the same reason ({@see Passes\InferScans::scanByRefCaptureWiden}) */
+    public array $inferByRefCaptureCellLocals = [];
+    /** @var array<string, Type> the unified type of each `global $x`, kept for the same reason ({@see Passes\InferScans::scanGlobalTypes}) */
+    public array $inferGlobalVarTypes = [];
+    /** @var array<string, array<string, bool>> the ELEMENT half of a by-ref capture disagreement: locals whose buffer rides cell elements on both frames ({@see Passes\InferScans::scanByRefCaptureWiden}) */
+    public array $inferByRefCaptureElemLocals = [];
 
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */

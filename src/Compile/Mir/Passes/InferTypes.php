@@ -361,7 +361,9 @@ final class InferTypes implements Pass
 
     /**
      * Every node type of every function in `$names`, as one string: equal
-     * digests mean a re-inference moved nothing there.
+     * digests mean a re-inference moved nothing there. By Type INSTANCE: one id
+     * is one type, and two equal types that are separate objects only cost
+     * the caller one more round.
      * @param array<string, bool> $names
      */
     private function bodyTypeDigest(Module $module, array $names): string
@@ -369,17 +371,20 @@ final class InferTypes implements Pass
         $acc = '';
         foreach ($module->functions as $fn) {
             if (!isset($names[$fn->name])) { continue; }
-            $h = 0;
-            $this->digestNode($fn->body, $h);
-            $acc .= $fn->name . '=' . (string)$h . ';';
+            $this->digestIds = [];
+            $this->digestNode($fn->body);
+            $acc .= $fn->name . '=' . \implode(',', $this->digestIds) . ';';
         }
         return $acc;
     }
 
-    private function digestNode(Node $n, int &$h): void
+    /** @var int[] */
+    private array $digestIds = [];
+
+    private function digestNode(Node $n): void
     {
-        $h = $this->fpMix($h, $this->typeCode($n->type));
-        foreach (Walk::children($n) as $c) { $this->digestNode($c, $h); }
+        $this->digestIds[] = $n->type->id;
+        foreach (Walk::children($n) as $c) { $this->digestNode($c); }
     }
 
     private function collectClosureNodes(Node $n): void
@@ -486,6 +491,8 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
+    /** @var array<string, array<string, bool>> the {@see $forcedCellElemLocals} entries a by-ref CAPTURE proved; kept on the module across runs */
+    private array $byRefCaptureElemLocals = [];
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
      *  frames disagreed about the kind in that shared word. Both the outer local
      *  and the closure's capture param are recorded, and both become a CELL — the
@@ -748,6 +755,12 @@ final class InferTypes implements Pass
         }
         $this->declaredReturns = $module->declaredReturnTypes;
         $this->byRefCellElemLocals = $module->inferByRefCellElemLocals;
+        $this->byRefCaptureCellLocals = $module->inferByRefCaptureCellLocals;
+        $this->globalVarTypes = $module->inferGlobalVarTypes;
+        $this->byRefCaptureElemLocals = $module->inferByRefCaptureElemLocals;
+        foreach ($this->byRefCaptureElemLocals as $fnName => $locals) {
+            foreach ($locals as $local => $unused) { $this->forcedCellElemLocals[$fnName][$local] = true; }
+        }
         // A scoped run infers only part of the module, and a closure literal is
         // recorded when its DEFINER is inferred — a definer outside the scope
         // would leave its closure body with no capture seeds at all. Its nodes
@@ -1051,6 +1064,9 @@ final class InferTypes implements Pass
         }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
         $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
+        $module->inferByRefCaptureCellLocals = $this->byRefCaptureCellLocals;
+        $module->inferGlobalVarTypes = $this->globalVarTypes;
+        $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
         $module->markPassApplied(self::NAME);
         return $module;
     }

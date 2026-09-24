@@ -86,16 +86,22 @@ trait InferScans
      * properties as well as calls, and nothing modelled that. `Sig::libsFromJson`,
      * `Exception::getTrace`, `array_reverse` and `array_pad` narrowed only after a
      * full re-inference for exactly this reason.
+     *
+     * Answers whether the slot's type actually CHANGED — what a scan's
+     * "changed" must mean, or its driver re-infers the module for nothing.
      */
-    private function setPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): void
+    private function setPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): bool
     {
         // Only a DECLARED property has a slot to type. An undeclared one lives
         // in the dynamic bag and reads back as a cell; a type invented for it
         // from a store or a getter made the read skip the bag's boxing — a
         // SIGSEGV on `return $this->data['visible']`.
-        if (!\in_array($prop, $cd->propertyNames, true)) { return; }
+        if (!\in_array($prop, $cd->propertyNames, true)) { return false; }
+        $cur = $cd->propertyTypes[$prop] ?? null;
+        if ($cur !== null && $cur->exactString() === $t->exactString()) { return false; }
         $cd->propertyTypes[$prop] = $t;
         if ($this->ctx !== null) { $this->ctx->changes->addProp($prop); }
+        return true;
     }
 
     private function scanAssocProps(Module $module): bool
@@ -131,8 +137,7 @@ trait InferScans
             }
             $v = $valType ?? ($cur !== null && $cur->isVec()
                 ? ($cur->element ?? Type::unknown()) : Type::unknown());
-            $this->setPropType($cd, $prop, Type::assoc(Type::string_(), $v));
-            $changed = true;
+            if ($this->setPropType($cd, $prop, Type::assoc(Type::string_(), $v))) { $changed = true; }
         }
         return $changed;
     }
@@ -223,8 +228,7 @@ trait InferScans
                                 $take = $curUnk && $argKnown;
                             }
                             if ($take) {
-                                $this->setPropType($cd, $pname, $arg->type);
-                                $this->ctorPropChanged = true;
+                                if ($this->setPropType($cd, $pname, $arg->type)) { $this->ctorPropChanged = true; }
                             }
                         }
                     }
@@ -445,8 +449,7 @@ trait InferScans
                 || ($cur->isArray()
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
             if (!$isErased) { continue; }
-            $this->setPropType($cd, $prop, $at);
-            $changed = true;
+            if ($this->setPropType($cd, $prop, $at)) { $changed = true; }
         }
         return $changed;
     }
@@ -499,8 +502,7 @@ trait InferScans
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
             if (!$isErased) { continue; }
             $keyT = ($cur !== null && $cur->isArray()) ? $cur->key : null;
-            $this->setPropType($cd, $prop, $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem));
-            $changed = true;
+            if ($this->setPropType($cd, $prop, $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem))) { $changed = true; }
         }
         return $changed;
     }
@@ -867,7 +869,7 @@ trait InferScans
                 // A parameter already refined to exactly this in an earlier run is
                 // not a change: marking it one re-inferred it and every caller,
                 // transitively, in every InferTypes run for nothing.
-                if ($param->type->toString() === $newT->toString()) { continue; }
+                if ($param->type->exactString() === $newT->exactString()) { continue; }
                 $param->type = $newT;
                 $this->rescanTouched[$fn->name] = true;
                 $changed = true;
@@ -941,6 +943,11 @@ trait InferScans
                 if ($pt === null || !$pt->isArray()) { continue; }
                 $pk = $pt->key;
                 if ($pk !== null && $pk->kind === Type::KIND_CELL) { continue; }
+                // Already off the packed channel: {@see scanAssocProps} keyed it
+                // by string from its own stores. Re-keying it by cell here while
+                // that scan (which reads a cell-keyed array as a vec) keys it back at
+                // the end of every run was a two-rescan ping-pong per run.
+                if ($pt->isAssoc()) { continue; }
                 $propCand[$cname . '::' . $prop] = true;
             }
         }
@@ -960,7 +967,9 @@ trait InferScans
                 if (!isset($promote[$key])) { continue; }
                 $param = $fn->params[$idx - 1];
                 $elem = $param->type->element;
-                $param->type = Type::assoc(Type::cell(), $elem === null ? Type::unknown() : $elem);
+                $newT = Type::assoc(Type::cell(), $elem === null ? Type::unknown() : $elem);
+                if ($param->type->exactString() === $newT->exactString()) { continue; }
+                $param->type = $newT;
                 $changed = true;
             }
         }
@@ -970,11 +979,10 @@ trait InferScans
                 $pt = $cd->propertyTypes[$prop] ?? null;
                 if ($pt === null) { continue; }
                 $elem = $pt->element;
-                $this->setPropType($cd, $prop, Type::assoc(
+                if ($this->setPropType($cd, $prop, Type::assoc(
                     Type::cell(),
                     $elem === null ? Type::unknown() : $elem,
-                ));
-                $changed = true;
+                ))) { $changed = true; }
             }
         }
         return $changed;
@@ -1321,10 +1329,14 @@ trait InferScans
                 $keyT = isset($strKey[$name])
                     ? Type::string_()
                     : (($t !== null && $t->isArray()) ? $t->key : null);
-                $this->globalVarTypes[$name] = $keyT !== null
+                $newT = $keyT !== null
                     ? Type::assoc($keyT, $elems[$name])
                     : Type::vec($elems[$name]);
-                $changed = true;
+                $prevT = $this->globalVarTypes[$name] ?? null;
+                if ($prevT === null || $prevT->exactString() !== $newT->exactString()) {
+                    $this->globalVarTypes[$name] = $newT;
+                    $changed = true;
+                }
                 continue;
             }
             if ($t === null) { continue; }
@@ -1429,10 +1441,12 @@ trait InferScans
                 if (!$this->byRefCaptureElemDisagrees($cl, $pn, $siteKind, $siteElem)) { continue; }
                 if (!isset($this->forcedCellElemLocals[$fn->name][$local])) {
                     $this->forcedCellElemLocals[$fn->name][$local] = true;
+                    $this->byRefCaptureElemLocals[$fn->name][$local] = true;
                     $changed = true;
                 }
                 if (!isset($this->forcedCellElemLocals[$clName][$pn])) {
                     $this->forcedCellElemLocals[$clName][$pn] = true;
+                    $this->byRefCaptureElemLocals[$clName][$pn] = true;
                     $changed = true;
                 }
             }
