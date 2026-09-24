@@ -137,6 +137,52 @@ function loopAlias(string $p): int
     return strlen((string)$x) + strlen($y);
 }
 
+
+// A local a reference can reach is never a MIXED slot: a write through the
+// alias would not keep its representation flag. `$r = &$d`, `use (&$d)` and a
+// by-ref argument, each merged with a null-ternary like the repro.
+function app(string &$s): void { $s .= '!'; }
+
+function refa(string $p, bool $c, bool $n): string
+{
+    $d = '';
+    $d .= $p;
+    $r = &$d;
+    if ($c) {
+        $x = $n ? null : dec($d);
+        if ($x === null) { return ''; }
+        $d = $x;
+    }
+    $r = $p . 'r';
+    return $d;
+}
+
+function useref(string $p, bool $c, bool $n): string
+{
+    $d = '';
+    $d .= $p;
+    $f = function () use (&$d, $p): void { $d = $p . 'u'; };
+    if ($c) {
+        $x = $n ? null : dec($d);
+        if ($x === null) { return ''; }
+        $d = $x;
+    }
+    $f();
+    return $d;
+}
+
+function byrefarg(string $p, bool $c, bool $n): string
+{
+    $d = '';
+    $d .= $p;
+    if ($c) {
+        $x = $n ? null : dec($d);
+        if ($x === null) { return ''; }
+        $d = $x;
+    }
+    app($d);
+    return $d;
+}
 $base = str_repeat('x', 4400);
 measure('append', fn (int $i): int => strlen(readAppend($base . $i, false, false)));
 measure('append taken', fn (int $i): int => strlen(readAppend($base . $i, true, false)));
@@ -150,3 +196,5 @@ measure('loop', fn (int $i): int => loopRekind($base . $i));
 measure('loop alias', fn (int $i): int => loopAlias($base . $i));
 echo readAppend('abc', true, false), ' ', readAppend('abc', false, false), ' [', readAppend('abc', true, true), "]\n";
 echo lenFall('ab', true), ' ', lenFall('ab', false), ' ', intOrString('abc', true), ' ', intOrString('abc', false), "\n";
+echo byrefarg('abc', false, false), ' ', byrefarg('abc', true, false), ' [', byrefarg('abc', true, true), "]\n";
+echo refa('abc', true, true), ' ', useref('abc', false, false), ' ', useref('abc', true, true), "\n";

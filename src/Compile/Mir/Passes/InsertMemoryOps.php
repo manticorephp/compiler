@@ -111,6 +111,21 @@ final class InsertMemoryOps implements Pass
     /** @var array<string, bool> names a foreach binds (its own ownership path). */
     private array $rcObjForeachVar = [];
 
+    /** @var array<string, bool> names bound to other storage or aliased by a
+     *  reference ({@see collectRefNames}) — a write through the alias lands in
+     *  the slot without the store that keeps a MIXED slot's flag. */
+    private array $rcObjRefName = [];
+
+    /** @var array<string, bool[]> fn name → per-param by-ref mask */
+    private array $refMasks = [];
+
+    /** @var array<string, bool> fn name → its variadic tail is by-ref */
+    private array $refVariadic = [];
+
+    /** @var array<string, int> closure fn name → capture count (the call's
+     *  leading params) */
+    private array $closureCaptureCount = [];
+
     /** @var array<string, bool> names that took a raw SCALAR store. */
     private array $rcObjRawScalar = [];
 
@@ -163,6 +178,19 @@ final class InsertMemoryOps implements Pass
         foreach ($module->functions as $fn) {
             if ($fn->ffiSymbol !== null) { $this->ffiFns[$fn->name] = true; }
         }
+        $this->refMasks = [];
+        $this->refVariadic = [];
+        foreach ($module->functions as $fn) {
+            $mask = [];
+            $tail = false;
+            foreach ($fn->params as $p) {
+                $mask[] = $p->byRef;
+                $tail = $p->variadic && $p->byRef;
+            }
+            $this->refMasks[$fn->name] = $mask;
+            $this->refVariadic[$fn->name] = $tail;
+        }
+        $this->closureCaptureCount = $module->closureCaptures;
         foreach ($module->functions as $fn) {
             $this->lowerFunction($fn);
         }
@@ -189,6 +217,8 @@ final class InsertMemoryOps implements Pass
         $this->rcObjMixed = [];
         $this->rcObjForeachVar = [];
         $this->rcObjRawScalar = [];
+        $this->rcObjRefName = [];
+        $this->collectRefNames($fn->body);
         $this->rcObjErasedProp = [];
         $this->rcObjCopyOnly = [];
         $this->blockReason = [];
@@ -1192,7 +1222,8 @@ final class InsertMemoryOps implements Pass
             if (!isset($this->rcObjCellSeen[$name])) { continue; }
             if (isset($this->rcObjBlocked[$name])) { continue; }
             if (!$fn->isGenerator && !isset($params[$name])
-                && !isset($this->rcObjForeachVar[$name]) && $this->mixableRaw($rawT)) {
+                && !isset($this->rcObjForeachVar[$name]) && !isset($this->rcObjRefName[$name])
+                && $this->mixableRaw($rawT)) {
                 $this->rcObjMixed[$name] = true;
                 $this->rcObjType[$name] = $rawT;
                 continue;
@@ -1215,6 +1246,158 @@ final class InsertMemoryOps implements Pass
             $this->noteBlock($name, "repr", $t);
         }
     }
+
+    /**
+     * Every local a reference can reach, or that lives outside the frame: a
+     * `static` / `global` binding, either side of `$r = &$d`, a `$r = &f()`
+     * target, a by-ref closure capture, a by-ref foreach (its variable and the
+     * array it walks), the root of a `&` address or reference cell, and the
+     * root of every argument a by-ref parameter receives. A write through any
+     * of those reaches the slot without its StoreLocal, so a MIXED slot's flag
+     * would not see it ({@see settleMixedSlots}). An unresolved callee pins
+     * every local argument (a false pin is a leak, a miss a double free).
+     */
+    private function collectRefNames(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STATIC_LOCAL_DECL) {
+            $this->rcObjRefName[$this->asStaticLocalDecl($n)->name] = true;
+        } elseif ($k === Node::KIND_REF_ALIAS) {
+            $ra = $this->asRefAlias($n);
+            $this->rcObjRefName[$ra->target] = true;
+            $this->rcObjRefName[$ra->source] = true;
+        } elseif ($k === Node::KIND_REF_BIND) {
+            $this->rcObjRefName[$this->asRefBind($n)->target] = true;
+        } elseif ($k === Node::KIND_REF_ADDR) {
+            $rd = $this->asRefAddr($n);
+            $this->rcObjRefName[$rd->target] = true;
+            $this->refRoot($rd->lvalue);
+        } elseif ($k === Node::KIND_REF_CELL) {
+            $this->refRoot($this->asRefCell($n)->refSource);
+        } elseif ($k === Node::KIND_CLOSURE) {
+            $cl = $this->asClosure($n);
+            $i = 0;
+            foreach ($cl->captures as $cap) {
+                if ($cl->captureByRef[$i] ?? false) { $this->refRoot($cap); }
+                $i = $i + 1;
+            }
+        } elseif ($k === Node::KIND_FOREACH) {
+            $fe = $this->asForeachNode($n);
+            if ($fe->byRef) {
+                $this->rcObjRefName[$fe->valueVar] = true;
+                $this->refRoot($fe->array);
+            }
+        } else {
+            $this->refArgRoots($n);
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefNames($c); }
+    }
+
+    /** Mark the local at the bottom of an lvalue chain. */
+    private function refRoot(Node $n): void
+    {
+        $cur = $n;
+        while (true) {
+            $k = $cur->kind;
+            if ($k === Node::KIND_LOAD_LOCAL) {
+                $this->rcObjRefName[$this->asLoadLocal($cur)->name] = true;
+                return;
+            }
+            if ($k === Node::KIND_PROPERTY_ACCESS) { $cur = $this->asPropertyAccessNode($cur)->object; }
+            elseif ($k === Node::KIND_ARRAY_ACCESS) { $cur = $this->asArrayAccessNode($cur)->array; }
+            else { return; }
+        }
+    }
+
+    /** The by-ref argument roots of a call-shaped node. */
+    private function refArgRoots(Node $n): void
+    {
+        $k = $n->kind;
+        $fn = '';
+        $offset = 0;
+        $args = [];
+        $builtin = false;
+        if ($k === Node::KIND_CALL) {
+            $c = $this->asCallNode($n);
+            $fn = \ltrim($c->function, '\\');
+            $args = $c->args;
+            $builtin = true;
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            $sc = $this->asStaticCallNode($n);
+            $fn = $this->resolveMethodFn($sc->class, $sc->method);
+            $args = $sc->args;
+        } elseif ($k === Node::KIND_NEW_OBJ) {
+            $no = $this->asNewObjNode($n);
+            $fn = $this->resolveMethodFn($no->class, '__construct');
+            $args = $no->args;
+            $offset = 1;
+        } elseif ($k === Node::KIND_METHOD_CALL) {
+            $mc = $this->asMethodCallNode($n);
+            $recv = $mc->object->type->class ?? '';
+            $fn = $recv === '' ? '' : $this->resolveMethodFn($recv, $mc->method);
+            $args = $mc->args;
+            $offset = 1;
+        } elseif ($k === Node::KIND_INVOKE) {
+            $iv = $this->asInvokeNode($n);
+            $fn = $iv->callee->type->class ?? '';
+            $args = $iv->args;
+            $offset = $this->closureCaptureCount[$fn] ?? 0;
+        } else {
+            return;
+        }
+        if (!isset($this->refMasks[$fn])) {
+            if ($builtin) {
+                if (\count($args) > 0 && ($fn === 'current' || $fn === 'pos' || $fn === 'key'
+                    || $fn === 'next' || $fn === 'prev' || $fn === 'reset' || $fn === 'end'
+                    || $fn === 'array_pop' || $fn === 'array_shift' || $fn === 'array_unshift')) {
+                    $this->refRoot($args[0]);
+                }
+                return;
+            }
+            foreach ($args as $a) { $this->refRoot($a); }
+            return;
+        }
+        $mask = $this->refMasks[$fn];
+        $cnt = \count($mask);
+        $tail = $this->refVariadic[$fn] ?? false;
+        $i = 0;
+        foreach ($args as $a) {
+            $p = $i + $offset;
+            $byRef = $p < $cnt ? $mask[$p] : false;
+            if (!$byRef && $tail && $p >= $cnt - 1) { $byRef = true; }
+            if ($byRef) { $this->refRoot($a); }
+            $i = $i + 1;
+        }
+    }
+
+    private function resolveMethodFn(string $class, string $method): string
+    {
+        $cur = $class;
+        $guard = 0;
+        while ($cur !== '' && $guard < 64) {
+            $cand = $cur . '__' . $method;
+            if (isset($this->refMasks[$cand])) { return $cand; }
+            $cur = isset($this->classes[$cur]) ? $this->classes[$cur]->parent : '';
+            $guard = $guard + 1;
+        }
+        return '';
+    }
+
+    private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
+    private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
+    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
+    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
+    private function asRefCell(Node $n): \Compile\Mir\RefCell_ { return $n; }
+    private function asClosure(Node $n): \Compile\Mir\Closure_ { return $n; }
+    private function asForeachNode(Node $n): \Compile\Mir\Foreach_ { return $n; }
+    private function asLoadLocal(Node $n): LoadLocal { return $n; }
+    private function asPropertyAccessNode(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
+    private function asArrayAccessNode(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
+    private function asCallNode(Node $n): \Compile\Mir\Call { return $n; }
+    private function asStaticCallNode(Node $n): \Compile\Mir\StaticCall_ { return $n; }
+    private function asNewObjNode(Node $n): \Compile\Mir\NewObj { return $n; }
+    private function asMethodCallNode(Node $n): \Compile\Mir\MethodCall_ { return $n; }
+    private function asInvokeNode(Node $n): \Compile\Mir\Invoke_ { return $n; }
 
     /** A raw slot type a cell can hold and a tagged drop can release. An array
      *  box-back may REBUILD the buffer; the emitter then releases the raw

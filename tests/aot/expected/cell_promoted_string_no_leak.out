@@ -10,3 +10,5 @@ loop: sum=90310780 growth ok
 loop alias: sum=180621560 growth ok
 cba abc []
 3 4 3 4
+abc! cba! []
+ abcu 
