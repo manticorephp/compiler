@@ -2058,7 +2058,14 @@ final class InferTypes implements Pass
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }
-            if (isset($this->keyUsedLocals[$name])
+            // A key-used local is held back only while no arm is a cell yet: one
+            // that already is (a foreach key off an erased array, re-bound to
+            // `strtolower($from)` on one path) reaches every key site tagged
+            // anyway, and leaving the string arm raw typed the merge UNKNOWN —
+            // `isset($default[$from])` then looked up a pointer (php-cs-fixer
+            // phpdoc_return_self_reference's normalizer).
+            $anyCell = $tT->kind === Type::KIND_CELL || $oT->kind === Type::KIND_CELL;
+            if ((isset($this->keyUsedLocals[$name]) && !$anyCell)
                 || isset($this->refPinnedLocals[$name])) { continue; }
             // A static / global-backed slot has ONE repr, its decl's (the join of
             // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
@@ -2133,7 +2140,7 @@ final class InferTypes implements Pass
             }
             if (!$ok) { continue; }
             if (isset($this->cellMergeLocals[$name])) { continue; }
-            if (isset($this->keyUsedLocals[$name])
+            if ((isset($this->keyUsedLocals[$name]) && !$hasCell)
                 || isset($this->refPinnedLocals[$name])) { continue; }
             if (isset($this->globalBackedNames[$name])
                 || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
