@@ -525,7 +525,8 @@ trait InferScans
         foreach ($module->functions as $fn) {
             $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
         }
-        $changed = false;
+        /** @var array<string, Type> $targets */
+        $targets = [];
         foreach ($observed as $g => $elem) {
             if (isset($unusable[$g])) { continue; }
             $ek = $elem->kind;
@@ -533,10 +534,14 @@ trait InferScans
                 || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL
                 || $ek === Type::KIND_CELL
                 || ($ek === Type::KIND_OBJ && $elem->class !== null);
-            if (!$ok) { continue; }
-            foreach ($module->functions as $fn) {
-                if ($this->retypeStaticPropNodes($fn->body, $g, $elem)) { $changed = true; }
-            }
+            if ($ok) { $targets[$g] = $elem; }
+        }
+        if ($targets === []) { return false; }
+        // ONE walk for every retyped slot — a walk per slot was the module
+        // times the static properties that have stores.
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; }
         }
         return $changed;
     }
@@ -547,10 +552,12 @@ trait InferScans
      * concrete shape (`public static array $xs = [1,2]` → vec[int]) is left
      * alone, exactly as the instance-property scan only fills an erased slot.
      */
-    private function retypeStaticPropNodes(Node $n, string $g, Type $elem): bool
+    /** @param array<string, Type> $targets global cell symbol → element type */
+    private function retypeStaticPropNodes(Node $n, array $targets): bool
     {
         $changed = false;
-        if ($n->kind === Node::KIND_STATIC_PROP && $n->global === $g) {
+        if ($n->kind === Node::KIND_STATIC_PROP && isset($targets[$n->global])) {
+            $elem = $targets[$n->global];
             $cur = $n->type;
             if ($this->isErasedArrayType($cur)) {
                 $keyT = $cur->isArray() ? $cur->key : null;
@@ -559,7 +566,7 @@ trait InferScans
             }
         }
         foreach (Walk::children($n) as $c) {
-            if ($this->retypeStaticPropNodes($c, $g, $elem)) { $changed = true; }
+            if ($this->retypeStaticPropNodes($c, $targets)) { $changed = true; }
         }
         return $changed;
     }
@@ -1553,10 +1560,6 @@ trait InferScans
             // retroactively make them cells. Forcing vec[cell] on one made the
             // rc walkers drop raw string elements as cells (libmalloc abort in
             // stat_functions). Only a locally-CONSTRUCTED `[]` is ours to retype.
-            $skip = [];
-            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
-            $lits = [];
-            $this->scanArrayLitLocals($fn->body, $lits);
             $found = [];
             $this->scanLocalElemNode($fn->body, $found);
             // The same erasure with two CONCRETE stores instead of a cell one:
@@ -1570,6 +1573,12 @@ trait InferScans
             foreach ($classes as $name => $seen) {
                 if (\count($seen) >= 2) { $found[$name] = true; }
             }
+            // The literal walk only answers for a candidate.
+            if ($found === []) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
             foreach ($found as $name => $unused) {
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
@@ -1750,12 +1759,15 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
             // caller's array and its elements already have a representation.
+            $found = [];
+            $this->collectByRefWidenArgs($fn->body, $foreign, $found);
+            // The literal walk only answers for a candidate — most bodies have
+            // none, and this scan runs twice per InferTypes run.
+            if ($found === []) { continue; }
             $skip = [];
             foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
             $lits = [];
             $this->scanArrayLitLocals($fn->body, $lits);
-            $found = [];
-            $this->collectByRefWidenArgs($fn->body, $foreign, $found);
             foreach ($found as $name => $unused) {
                 if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->byRefCellElemLocals[$fn->name][$name])) { continue; }
