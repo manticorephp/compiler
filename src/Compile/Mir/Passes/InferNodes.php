@@ -1760,15 +1760,66 @@ trait InferNodes
         // not from what its sibling assigned — `case A: $d = explode(…); break;
         // default: esc($d);` typed `$d` a vec in the default arm. Only a real
         // fall-through (a non-empty arm with no terminator) carries its state on.
+        //
+        // What LEAVES the switch is merged, the way an if/else merges its two
+        // arms: every arm that exits by break/continue or by falling off the
+        // last arm, plus the head itself when no default arm catches it. It
+        // used to be discarded — `$x = 0; switch (…) { default: $x = $t; }` read
+        // `$x` as the head's int afterwards and handed the string's ADDRESS on
+        // (symfony Finder's `$minDepth = $maxDepth = $cmp->getTarget()`).
+        //
+        // The exits are kept FLAT ("exit#name" → Type), never as a list of
+        // maps: a nested array is the known self-host miscompile shape — under
+        // Zend a list of maps planted the box-backs, natively it read nothing.
         $carry = false;
-        foreach ($node->arms as $arm) {
+        $last = \count($node->arms) - 1;
+        $hasDefault = false;
+        /** @var int[] $exitArms */
+        $exitArms = [];
+        /** @var array<string, Type> $exitTypes */
+        $exitTypes = [];
+        foreach ($node->arms as $ai => $arm) {
             if (!$carry) { $this->localTypes = $saved; }
+            if ($arm->value === null) { $hasDefault = true; }
             if ($arm->value !== null) { $this->inferNode($arm->value); }
             foreach ($arm->body as $s) { $this->inferNode($s); }
             $n = \count($arm->body);
+            $end = $n > 0 ? $arm->body[$n - 1] : null;
             $carry = $n > 0 && !$this->armTerminates($arm->body[$n - 1]);
+            if ($end !== null && $this->blockDiverges($end)) { continue; }
+            $leaves = $ai === $last
+                || ($end !== null && ($end->kind === Node::KIND_BREAK || $end->kind === Node::KIND_CONTINUE));
+            if (!$leaves) { continue; }
+            $ei = (string)\count($exitArms) . '#';
+            $exitArms[] = $ai;
+            foreach ($this->localTypes as $name => $t) { $exitTypes[$ei . $name] = $t; }
         }
-        $this->localTypes = $saved;
+        if (!$hasDefault) {
+            $ei = (string)\count($exitArms) . '#';
+            $exitArms[] = -1;
+            foreach ($saved as $name => $t) { $exitTypes[$ei . $name] = $t; }
+        }
+        $k = \count($exitArms);
+        if ($k === 0) {
+            $this->localTypes = $saved;
+            return Type::void();
+        }
+        $this->planSwitchMergeShadow($node, $exitArms, $exitTypes);
+        // Merged AFTER planting: the box-backs mark their names in
+        // cellMergeLocals, which is what types those reads cell past the merge.
+        /** @var array<string, Type> $merged */
+        $merged = [];
+        for ($i = 0; $i < $k; $i = $i + 1) {
+            /** @var array<string, Type> $st */
+            $st = [];
+            $pre = (string)$i . '#';
+            $pl = \strlen($pre);
+            foreach ($exitTypes as $key => $t) {
+                if (\strncmp($key, $pre, $pl) === 0) { $st[\substr($key, $pl)] = $t; }
+            }
+            $merged = $i === 0 ? $st : $this->mergeLocals($merged, $st);
+        }
+        $this->localTypes = $merged;
         return Type::void();
     }
 

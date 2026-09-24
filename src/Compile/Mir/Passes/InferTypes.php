@@ -2060,6 +2060,111 @@ final class InferTypes implements Pass
         }
     }
 
+    /**
+     * {@see planMergeShadow} for a `switch`: N exits instead of two, on the
+     * same terms per name. The box-back goes before an exit's break/continue
+     * (or at the end of the arm that falls off the switch); the HEAD exit —
+     * no default arm, no case taken — gets a synthesized default arm holding
+     * its box-backs, after a `break` that keeps the last arm from falling into
+     * it. Idempotent: the next run finds the box-backs, and the synthesized
+     * default makes the head an ordinary arm.
+     *
+     * @param int[] $exitArms arm index of each exit, -1 for the head
+     * @param array<string, Type> $exitTypes "exit#name" → that exit's type
+     */
+    private function planSwitchMergeShadow(Switch_ $node, array $exitArms, array $exitTypes): void
+    {
+        $k = \count($exitArms);
+        if ($k < 2) { return; }
+        /** @var array<string, Type> $headBoxes */
+        $headBoxes = [];
+        foreach ($exitTypes as $key0 => $t0) {
+            if (\strncmp($key0, '0#', 2) !== 0) { continue; }
+            $name = \substr($key0, 2);
+            /** @var Type[] $ts */
+            $ts = [];
+            $inAll = true;
+            for ($i = 0; $i < $k; $i = $i + 1) {
+                $ek = (string)$i . '#' . $name;
+                if (!isset($exitTypes[$ek])) { $inAll = false; break; }
+                $ts[] = $exitTypes[$ek];
+            }
+            if (!$inAll) { continue; }
+            $sameKind = true;
+            $hasCell = false;
+            foreach ($ts as $t) {
+                if ($t->kind !== $t0->kind) { $sameKind = false; }
+                if ($t->kind === Type::KIND_CELL) { $hasCell = true; }
+            }
+            if ($sameKind) { continue; }
+            $ok = true;
+            foreach ($ts as $t) {
+                if ($this->isScalarOrCell($t)) { continue; }
+                if ($t->isArray() && $hasCell) { continue; }
+                if ($t->kind === Type::KIND_NULL) {
+                    $boxes = true;
+                    foreach ($ts as $u) {
+                        if ($u->kind !== Type::KIND_NULL && !$this->nullBoxesWith($u)) { $boxes = false; }
+                    }
+                    if ($boxes) { continue; }
+                }
+                $ok = false;
+            }
+            if (!$ok) { continue; }
+            if (isset($this->cellMergeLocals[$name])) { continue; }
+            if (isset($this->keyUsedLocals[$name])
+                || isset($this->refPinnedLocals[$name])) { continue; }
+            if (isset($this->globalBackedNames[$name])
+                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
+            $this->cellMergeLocals[$name] = true;
+            for ($i = 0; $i < $k; $i = $i + 1) {
+                $ai = $exitArms[$i];
+                if ($ai < 0) { $headBoxes[$name] = $ts[$i]; continue; }
+                $arm = $node->arms[$ai];
+                $arm->body = self::withBoxBack($arm->body, $this->boxBackStore($name, $ts[$i]));
+            }
+        }
+        if (\count($headBoxes) === 0) { return; }
+        $lastIdx = \count($node->arms) - 1;
+        if ($lastIdx >= 0) {
+            $lastArm = $node->arms[$lastIdx];
+            $n = \count($lastArm->body);
+            $end = $n > 0 ? $lastArm->body[$n - 1] : null;
+            if ($end === null || !$this->armTerminates($end)) { $lastArm->body[] = new \Compile\Mir\Break_(1); }
+        }
+        /** @var Node[] $stmts */
+        $stmts = [];
+        foreach ($headBoxes as $name => $t) { $stmts[] = $this->boxBackStore($name, $t); }
+        $node->arms[] = new \Compile\Mir\SwitchArm_(null, $stmts);
+    }
+
+    /**
+     * `$body` with `$box` placed before its trailing break/continue (or at its
+     * end), unless the run of box-backs there already stores that name.
+     * @param Node[] $body
+     * @return Node[]
+     */
+    private static function withBoxBack(array $body, StoreLocal $box): array
+    {
+        $n = \count($body);
+        $cut = $n;
+        if ($n > 0 && ($body[$n - 1]->kind === Node::KIND_BREAK || $body[$n - 1]->kind === Node::KIND_CONTINUE)) {
+            $cut = $n - 1;
+        }
+        for ($i = $cut - 1; $i >= 0; $i--) {
+            $st = $body[$i];
+            if (!($st instanceof StoreLocal) || !($st->value instanceof LoadLocal)
+                || $st->value->name !== $st->name) { break; }
+            if ($st->name === $box->name) { return $body; }
+        }
+        /** @var Node[] $out */
+        $out = [];
+        for ($i = 0; $i < $cut; $i = $i + 1) { $out[] = $body[$i]; }
+        $out[] = $box;
+        for ($i = $cut; $i < $n; $i = $i + 1) { $out[] = $body[$i]; }
+        return $out;
+    }
+
     /** `$name = box($name)`: a StoreLocal typed cell whose value is the concrete
      *  read of $name — the (store cell + value concrete) combo EmitLlvm boxes.
      *  `$slot` overrides the destination type: a float slot coerces the same way
