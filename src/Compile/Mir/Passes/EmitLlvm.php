@@ -761,6 +761,8 @@ final class EmitLlvm implements EmitVisitor
         $this->cloneErasedSym = '';
         $this->dynmSyms = [];
         $this->dynmExtraBodies = '';
+        $this->scmpSyms = [];
+        $this->scmpExtraBodies = '';
         $this->dynfThunks = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
@@ -1082,6 +1084,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
         $extraBodies .= $this->dynmExtraBodies;
+        $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
@@ -2204,6 +2207,13 @@ final class EmitLlvm implements EmitVisitor
 
     /** Bodies for {@see EmitLlvmObjects::dynmChainFn}, flushed with the others. */
     private string $dynmExtraBodies = '';
+
+    /** struct class|mode => its compare helper ({@see EmitLlvmExpr::structCmpSym}). */
+    /** @var array<string, string> */
+    private array $scmpSyms = [];
+
+    /** Bodies of those helpers, flushed with the other lazy helpers. */
+    private string $scmpExtraBodies = '';
 
     /** callee|arg-kind key => the uniform `i64 (i64…)` thunk's symbol.
      *  {@see EmitLlvmCalls::dynfThunk} */

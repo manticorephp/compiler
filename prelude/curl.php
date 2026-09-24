@@ -433,6 +433,7 @@ function __mc_curl_xferinfo_tramp(\Ffi\Ptr $ud, int $dlt, int $dln, int $ult, in
 
 // ── Handles ─────────────────────────────────────────────────────────────────
 
+#[\Manticore\Attr\Uncomparable]
 final class CurlHandle
 {
     /**

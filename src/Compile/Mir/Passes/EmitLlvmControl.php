@@ -1561,7 +1561,11 @@ trait EmitLlvmControl
                         Type::KIND_BOOL => true, Type::KIND_ARRAY => true, Type::KIND_OBJ => true,
                     ];
                     $bothStr = $subjK === Type::KIND_STRING && $vk === Type::KIND_STRING;
-                    if ($this->looseObjPair($sw->subject->type, $arm->value->type)) {
+                    $sPair = $this->structPair($sw->subject->type, $arm->value->type);
+                    if ($sPair !== '') {
+                        $out .= $this->structCmpIr($sPair, $subj, 'i64', $v, 'i64', true);
+                        $out .= '  ' . $eq . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+                    } elseif ($this->looseObjPair($sw->subject->type, $arm->value->type)) {
                         // An object subject or arm: php's `==` on objects is
                         // structural, and a raw pointer never matched a boxed one.
                         $out .= $this->looseObjCmpIr($subj, 'i64', $sw->subject->type, $v, 'i64', $arm->value->type, true);

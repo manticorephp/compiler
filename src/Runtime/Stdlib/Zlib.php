@@ -117,6 +117,7 @@ function __mc_zl_fixed_tables(): array
  * inside a Huffman block, 4 trailer, 5 stream end (reset by the next call), 6
  * corrupt, 7 waiting for a dictionary it will never get.
  */
+#[\Manticore\Attr\Uncomparable]
 final class InflateContext
 {
     public int $encoding = -15;
@@ -602,6 +603,7 @@ function __mc_zl_fixed_lit(int $sym): array
  * holds the last bytes seen and $base is the absolute offset of $win[0]. $head
  * and $prev entries below $base are stale and ignored on read.
  */
+#[\Manticore\Attr\Uncomparable]
 final class DeflateContext
 {
     public int $encoding = -15;

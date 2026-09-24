@@ -204,6 +204,7 @@ class DateTimeZone
  * two private scalars plus a __get so the public value can be int|false without
  * a `mixed` property.
  */
+#[\Manticore\Attr\Uncomparable]
 class DateInterval
 {
     public int $y = 0;

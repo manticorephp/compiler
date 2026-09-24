@@ -25,6 +25,7 @@ class FiberExit extends \Exception
 {
 }
 
+#[\Manticore\Attr\CompareNone]
 class Fiber
 {
     private $callable;

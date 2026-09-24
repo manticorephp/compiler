@@ -3802,6 +3802,10 @@ trait EmitLlvmExpr
                 return $out;
             }
         }
+        $sPair = $this->structPair($n->left->type, $n->right->type);
+        if ($sPair !== '') {
+            return $out . $this->structCmpIr($sPair, $l, $lt, $r, $rt, false);
+        }
         // Objects and enum cases: php's object compare ({@see looseObjCmpIr}).
         if ($this->looseObjPair($n->left->type, $n->right->type, true)) {
             return $out . $this->looseObjCmpIr($l, $lt, $n->left->type, $r, $rt, $n->right->type, false);
@@ -4024,6 +4028,108 @@ trait EmitLlvmExpr
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** The `#[Struct]` class a static type names, or '' — a headerless value. */
+    private function structClassOf(Type $t): string
+    {
+        if ($t->kind !== Type::KIND_OBJ) { return ''; }
+        $cn = $t->class ?? '';
+        return ($cn !== '' && isset($this->classes[$cn]) && $this->classes[$cn]->isStruct) ? $cn : '';
+    }
+
+    /**
+     * The module's compare helper for `#[Struct]` class `$cls`:
+     * `i64 (ptr a, ptr b)` answering `==` (1/0) when `$eq`, else `<=>`
+     * (-1/0/1). A struct has NO header — no descriptor for the runtime compare
+     * to read ({@see objCompareRuntime} sees only STRUCT_TAG_MAGIC) — but its
+     * layout is fixed and known here, so php's property-wise compare is
+     * unrolled over it: each field in declaration order, loaded at its width
+     * and boxed ({@see EmitLlvmObjects::emitFixedPropLoad}), the first
+     * difference deciding; a nested struct field recurses into its own
+     * helper. Emitted once per module per (class, mode).
+     */
+    private function structCmpSym(string $cls, bool $eq): string
+    {
+        $key = $cls . '|' . ($eq ? 'e' : 'c');
+        if (isset($this->scmpSyms[$key])) { return $this->scmpSyms[$key]; }
+        $sym = '@' . $this->mirHelperSym('__mir_scmp_' . ($eq ? 'e_' : 'c_') . $this->mangle($cls));
+        $this->scmpSyms[$key] = $sym;
+        $savedV = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $this->rt->needsTaggedEq = true;
+        $this->rt->needsTaggedCompare = true;
+        $cd = $this->classes[$cls];
+        $same = $eq ? '1' : '0';
+        $body = "entry:\n  %same = icmp eq ptr %a, %b\n  br i1 %same, label %yes, label %nn\n";
+        $body .= "nn:\n  %an = icmp eq ptr %a, null\n  %bn = icmp eq ptr %b, null\n  %anyn = or i1 %an, %bn\n";
+        $body .= "  br i1 %anyn, label %nul, label %f0\n";
+        // One side null (both null is the same pointer): php's null against an
+        // object — unequal, and null orders first.
+        $body .= "nul:\n" . ($eq ? "  ret i64 0\n" : "  %nr = select i1 %an, i64 -1, i64 1\n  ret i64 %nr\n");
+        $i = 0;
+        foreach ($cd->propertyNames as $pn) {
+            $pt = $cd->propertyTypes[$pn] ?? null;
+            if ($pt === null) { continue; }
+            $body .= 'f' . (string)$i . ":\n";
+            $sub = $this->structClassOf($pt);
+            if ($sub !== '') {
+                $off = (string)$cd->propertyOffset($pn);
+                $ga = $this->ssa->allocReg(); $gb = $this->ssa->allocReg();
+                $body .= '  ' . $ga . ' = getelementptr inbounds i8, ptr %a, i64 ' . $off . "\n";
+                $body .= '  ' . $gb . ' = getelementptr inbounds i8, ptr %b, i64 ' . $off . "\n";
+                $va = $this->ssa->allocReg(); $vb = $this->ssa->allocReg();
+                $body .= '  ' . $va . ' = load ptr, ptr ' . $ga . "\n";
+                $body .= '  ' . $vb . ' = load ptr, ptr ' . $gb . "\n";
+                $r = $this->ssa->allocReg();
+                $body .= '  ' . $r . ' = call i64 ' . $this->structCmpSym($sub, $eq) . '(ptr ' . $va . ', ptr ' . $vb . ")\n";
+            } else {
+                $body .= $this->emitFixedPropLoad('%a', $cd, $pn);
+                $ca = $this->lastValue;
+                $body .= $this->emitFixedPropLoad('%b', $cd, $pn);
+                $cb = $this->lastValue;
+                $r = $this->ssa->allocReg();
+                $body .= '  ' . $r . ' = call i64 @' . ($eq ? '__manticore_tagged_loose_eq' : '__manticore_tagged_compare')
+                       . '(i64 ' . $ca . ', i64 ' . $cb . ")\n";
+            }
+            $stop = $this->ssa->allocReg();
+            $body .= '  ' . $stop . ' = icmp ' . ($eq ? 'eq' : 'ne') . ' i64 ' . $r . ", 0\n";
+            $out = $this->ssa->allocLabel('scmp.out');
+            $body .= '  br i1 ' . $stop . ', label %' . $out . ', label %f' . (string)($i + 1) . "\n";
+            $body .= $out . ":\n  ret i64 " . ($eq ? '0' : $r) . "\n";
+            $i = $i + 1;
+        }
+        $body .= 'f' . (string)$i . ":\n  br label %yes\n";
+        $body .= "yes:\n  ret i64 " . $same . "\n";
+        $this->scmpExtraBodies .= 'define internal i64 ' . $sym . "(ptr %a, ptr %b) {\n" . $body . "}\n\n";
+        $this->lastValue = $savedV;
+        $this->lastValueType = $savedT;
+        return $sym;
+    }
+
+    /**
+     * Two operands of ONE `#[Struct]` class under a loose compare: the struct's
+     * compare helper. lastValue ← i64 (`==`: 1/0; else `<=>`: -1/0/1).
+     */
+    private function structCmpIr(string $cls, string $l, string $lt, string $r, string $rt, bool $eq): string
+    {
+        $out = '';
+        $lp = $l;
+        if ($lt !== 'ptr') { $lp = $this->ssa->allocReg(); $out .= '  ' . $lp . ' = inttoptr i64 ' . $l . " to ptr\n"; }
+        $rp = $r;
+        if ($rt !== 'ptr') { $rp = $this->ssa->allocReg(); $out .= '  ' . $rp . ' = inttoptr i64 ' . $r . " to ptr\n"; }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = call i64 ' . $this->structCmpSym($cls, $eq) . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** The one struct class both static types name, or ''. */
+    private function structPair(Type $a, Type $b): string
+    {
+        $sa = $this->structClassOf($a);
+        return ($sa !== '' && $sa === $this->structClassOf($b)) ? $sa : '';
     }
 
     /** Whether a loose compare of these two static types takes {@see looseObjCmpIr}. */
@@ -4664,6 +4770,24 @@ trait EmitLlvmExpr
         // of the declared layout used to stand in for the same-class case, and
         // it disagreed with `<=>`, ignored DateTime's instant and dereferenced an
         // uninitialized typed property.
+        $sPair = $strictEq ? '' : $this->structPair($c->left->type, $c->right->type);
+        if ($sPair !== '') {
+            $swapS = $this->orderSwaps($op);
+            $chunks[] = $swapS
+                ? $this->structCmpIr($sPair, $r, $rt, $l, $lt, false)
+                : $this->structCmpIr($sPair, $l, $lt, $r, $rt, $isEq || $isNe);
+            $v = $this->lastValue;
+            if ($isEq) { return \implode('', $chunks); }
+            if ($isNe) {
+                $res = $this->ssa->allocReg();
+                $chunks[] = '  ' . $res . ' = xor i64 ' . $v . ", 1\n";
+                $this->lastValue = $res;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
+            }
+            $chunks[] = $this->orderedFromCmpIr($v, $op);
+            return \implode('', $chunks);
+        }
         if (!$strictEq && $this->looseObjPair($c->left->type, $c->right->type, !$isEq && !$isNe)) {
             $swap = $this->orderSwaps($op);
             $chunks[] = $swap

@@ -260,6 +260,7 @@ function hash_equals(string $known_string, string $user_string): bool
  * state here — a streaming EVP context is the follow-up, and it changes only the
  * memory profile, never a digest.
  */
+#[\Manticore\Attr\CompareNone]
 final class HashContext
 {
     public string $algo = '';

@@ -2037,10 +2037,15 @@ trait EmitLlvmRuntime
             // view above — a pure function of the class — so it coalesces too.
             $cmpViewFld = 'ptr null';
             $cmpGroup = (int)$id;
-            if (isset($this->enums[$cls->name])) {
+            $cmpMark = $this->classCmpMark($cls);
+            if (isset($this->enums[$cls->name]) || $cmpMark === 'Uncomparable') {
                 // A case is compared by identity alone (its singleton carries
-                // ENUM_TAG_MAGIC, which the runtime checks first).
+                // ENUM_TAG_MAGIC, which the runtime checks first), and so is a
+                // class php declares uncomparable (a CurlHandle, a DeflateContext).
                 $cmpGroup = 0;
+            } elseif ($cmpMark === 'CompareNone') {
+                // php's class has no properties: two instances are equal
+                // whatever hidden state this one keeps (a HashContext).
             } elseif (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
                 $keyed = $this->cmpKeyProps($cls);
                 if ($keyed !== []) { $cmpGroup = \Compile\MemoryAbi::CMP_GROUP_KEYED; }

@@ -7474,6 +7474,27 @@ trait EmitLlvmBuiltins
      *
      * @return array<string, bool>
      */
+    /**
+     * `Uncomparable` / `CompareNone` when the class or an ancestor carries
+     * `#[\Manticore\Attr\Uncomparable]` / `#[\Manticore\Attr\CompareNone]`,
+     * else ''. php's compare handler is inherited, so the mark is too.
+     */
+    private function classCmpMark(\Compile\Mir\ClassDef $cd): string
+    {
+        $c = $cd;
+        $guard = 0;
+        while ($c !== null && $guard < 64) {
+            foreach ($c->attributes as $an) {
+                $bare = \ltrim($an, '\\');
+                if ($bare === 'Manticore\Attr\Uncomparable') { return 'Uncomparable'; }
+                if ($bare === 'Manticore\Attr\CompareNone') { return 'CompareNone'; }
+            }
+            $c = ($c->parent !== '' && isset($this->classes[$c->parent])) ? $this->classes[$c->parent] : null;
+            $guard = $guard + 1;
+        }
+        return '';
+    }
+
     private function cmpKeyProps(\Compile\Mir\ClassDef $cd): array
     {
         $out = [];
