@@ -211,6 +211,196 @@ final class Options
     public function compressionMinBytes(int $n): Options { $this->compressionMinBytes = $n; return $this; }
 }
 
+/**
+ * permessage-deflate (RFC 7692) for one connection. Our deflater is limited to
+ * the window the peer allowed; our inflater always keeps 32 KiB, which is
+ * correct for any window the peer uses (8..15). An agreement that would bind
+ * OUR deflater to window 8 is declined, never answered with 9 (RFC 7692 lets a
+ * peer only lower a value; zlib, and php/zlib with it, refuses a raw 256-byte
+ * window): the server skips such an offer, the client fails the handshake.
+ */
+final class Pmd
+{
+    public bool $serverNoCtx = false;
+    public bool $clientNoCtx = false;
+    public int $serverBits = 15;
+    public int $clientBits = 15;
+    private bool $ourNoCtx = false;
+    private int $ourBits = 15;
+    private ?\DeflateContext $def = null;
+    private ?\InflateContext $inf = null;
+
+    /** @return array<int, array<string,string>> one parameter map per well-formed permessage-deflate offer; a malformed one is dropped */
+    public static function parseOffers(string $header): array
+    {
+        $out = [];
+        foreach (\explode(',', $header) as $ext) {
+            $parts = \explode(';', $ext);
+            if (\strtolower(\trim($parts[0])) !== 'permessage-deflate') {
+                continue;
+            }
+            $params = [];
+            $ok = true;
+            $n = \count($parts);
+            for ($i = 1; $i < $n; $i++) {
+                $kv = \explode('=', $parts[$i], 2);
+                $k = \strtolower(\trim($kv[0]));
+                $hasV = \count($kv) === 2;
+                $v = $hasV ? \trim(\trim($kv[1]), '"') : '';
+                if (isset($params[$k])) {
+                    $ok = false;
+                } elseif ($k === 'server_no_context_takeover' || $k === 'client_no_context_takeover') {
+                    $ok = !$hasV;
+                } elseif ($k === 'server_max_window_bits') {
+                    $ok = self::bitsOk($v);
+                } elseif ($k === 'client_max_window_bits') {
+                    $ok = !$hasV || self::bitsOk($v);
+                } else {
+                    $ok = false;
+                }
+                if (!$ok) {
+                    break;
+                }
+                $params[$k] = $v;
+            }
+            if ($ok) {
+                $out[] = $params;
+            }
+        }
+        return $out;
+    }
+
+    private static function bitsOk(string $v): bool
+    {
+        return \ctype_digit($v) && \strlen($v) <= 2 && (int)$v >= 8 && (int)$v <= 15;
+    }
+
+    /** Server: the first offer we can satisfy (every well-formed one but server_max_window_bits=8), or null. */
+    public static function accept(string $header): ?Pmd
+    {
+        foreach (self::parseOffers($header) as $p) {
+            if (isset($p['server_max_window_bits']) && (int)$p['server_max_window_bits'] === 8) {
+                continue;
+            }
+            $m = new Pmd();
+            $m->serverNoCtx = isset($p['server_no_context_takeover']);
+            $m->clientNoCtx = isset($p['client_no_context_takeover']);
+            $m->serverBits = isset($p['server_max_window_bits']) ? (int)$p['server_max_window_bits'] : 15;
+            $m->clientBits = isset($p['client_max_window_bits']) && $p['client_max_window_bits'] !== ''
+                ? (int)$p['client_max_window_bits'] : 15;
+            $m->forRole(false);
+            return $m;
+        }
+        return null;
+    }
+
+    public function responseHeader(): string
+    {
+        $h = 'permessage-deflate';
+        if ($this->serverNoCtx) {
+            $h .= '; server_no_context_takeover';
+        }
+        if ($this->clientNoCtx) {
+            $h .= '; client_no_context_takeover';
+        }
+        if ($this->serverBits !== 15) {
+            $h .= '; server_max_window_bits=' . $this->serverBits;
+        }
+        if ($this->clientBits !== 15) {
+            $h .= '; client_max_window_bits=' . $this->clientBits;
+        }
+        return $h;
+    }
+
+    public static function offerHeader(): string
+    {
+        return 'permessage-deflate; client_max_window_bits';
+    }
+
+    /** Client: the server's answer to {@see offerHeader}; anything we did not allow throws. */
+    public static function fromResponse(string $header): Pmd
+    {
+        $offers = self::parseOffers($header);
+        if (\count($offers) !== 1 || \count(\explode(',', $header)) !== 1) {
+            throw new HandshakeException('WebSocket handshake failed: server chose an unoffered extension "' . $header . '"');
+        }
+        $p = $offers[0];
+        if (isset($p['client_max_window_bits']) && $p['client_max_window_bits'] === '') {
+            throw new HandshakeException('WebSocket handshake failed: client_max_window_bits without a value');
+        }
+        if (isset($p['client_max_window_bits']) && (int)$p['client_max_window_bits'] === 8) {
+            throw new HandshakeException('WebSocket handshake failed: server requires client_max_window_bits=8, which our deflater cannot honour');
+        }
+        $m = new Pmd();
+        $m->serverNoCtx = isset($p['server_no_context_takeover']);
+        $m->clientNoCtx = isset($p['client_no_context_takeover']);
+        $m->serverBits = isset($p['server_max_window_bits']) ? (int)$p['server_max_window_bits'] : 15;
+        $m->clientBits = isset($p['client_max_window_bits']) ? (int)$p['client_max_window_bits'] : 15;
+        $m->forRole(true);
+        return $m;
+    }
+
+    /** Which half of the agreement limits OUR deflater. */
+    public function forRole(bool $client): void
+    {
+        $this->ourNoCtx = $client ? $this->clientNoCtx : $this->serverNoCtx;
+        $this->ourBits = $client ? $this->clientBits : $this->serverBits;
+    }
+
+    /** One message: SYNC_FLUSH, the 00 00 ff ff tail stripped. */
+    public function compress(string $msg): string
+    {
+        $d = $this->def;
+        if ($d === null || $this->ourNoCtx) {
+            $nd = \deflate_init(\ZLIB_ENCODING_RAW, ['window' => $this->ourBits]);
+            if ($nd === false) {
+                throw new \LogicException('permessage-deflate: deflate_init refused window ' . $this->ourBits);
+            }
+            $d = $nd;
+            $this->def = $d;
+        }
+        $z = \deflate_add($d, $msg, \ZLIB_SYNC_FLUSH);
+        $n = \strlen($z);
+        if ($n >= 4 && \substr($z, $n - 4) === "\x00\x00\xff\xff") {
+            return \substr($z, 0, $n - 4);
+        }
+        return $z;
+    }
+
+    /**
+     * One message; null once it grows past $max (1009). Fed in 4 KiB slices so
+     * a bomb stops early: the peak is $max plus what one slice inflates to (up
+     * to ~4 MiB of zeros), never the whole bomb. Corrupt data throws
+     * \UnexpectedValueException (1007).
+     */
+    public function decompress(string $payload, int $max): ?string
+    {
+        $f = $this->inf;
+        if ($f === null) {
+            $ni = \inflate_init(\ZLIB_ENCODING_RAW);
+            if ($ni === false) {
+                throw new \LogicException('permessage-deflate: inflate_init failed');
+            }
+            $f = $ni;
+            $this->inf = $f;
+        }
+        $in = $payload . "\x00\x00\xff\xff";
+        $out = '';
+        $n = \strlen($in);
+        for ($p = 0; $p < $n; $p += 4096) {
+            $r = \inflate_add($f, \substr($in, $p, 4096), \ZLIB_SYNC_FLUSH);
+            if ($r === false) {
+                throw new \UnexpectedValueException('permessage-deflate: corrupt payload');
+            }
+            $out .= $r;
+            if (\strlen($out) > $max) {
+                return null;
+            }
+        }
+        return $out;
+    }
+}
+
 /** Seconds as stream_set_timeout's (int, µs) pair. */
 function setTimeout(\Resource $s, float $seconds): void
 {
@@ -264,8 +454,9 @@ final class Connection implements \IteratorAggregate
         private string $protocol = '',
         private ?\Http\Request $request = null,
         private string $remoteAddr = '',
+        private ?Pmd $pmd = null,
     ) {
-        $this->parser = new FrameParser($buf, !$client, $o->maxFrameSize);
+        $this->parser = new FrameParser($buf, !$client, $o->maxFrameSize, $pmd !== null);
         $scope = \Async\Context::currentScope();
         if ($scope !== null) {
             $this->scope = $scope;
@@ -423,7 +614,12 @@ final class Connection implements \IteratorAggregate
 
     private function sendData(int $op, string $data): void
     {
-        if (!$this->writeFrame($op, $data, false)) {
+        if ($this->pmd !== null && \strlen($data) >= $this->o->compressionMinBytes) {
+            $ok = !$this->closed && !$this->sentClose && $this->writeRaw($data, $op);
+        } else {
+            $ok = $this->writeFrame($op, $data, false);
+        }
+        if (!$ok) {
             throw new ConnectionClosedException('WebSocket connection is closed');
         }
     }
@@ -517,6 +713,20 @@ final class Connection implements \IteratorAggregate
             $data .= $p;
             if (!$this->parser->fin) {
                 continue;
+            }
+            if ($compressed) {
+                $pmd = $this->pmd;
+                try {
+                    $plain = $pmd === null ? null : $pmd->decompress($data, $this->o->maxMessageSize);
+                } catch (\UnexpectedValueException $e) {
+                    $this->fail(1007);
+                    return null;
+                }
+                if ($plain === null) {
+                    $this->fail(1009);
+                    return null;
+                }
+                $data = $plain;
             }
             if ($op === Opcode::TEXT && !utf8Ok($data)) {
                 $this->fail(1007);
@@ -655,7 +865,12 @@ final class Connection implements \IteratorAggregate
         return $this->writeRaw(encodeFrame($op, $payload, true, $rsv1, $this->nextMask()));
     }
 
-    private function writeRaw(string $bytes): bool
+    /**
+     * Bytes to the wire under the write lock. With $zop >= 0, $bytes is a
+     * message to compress and frame here, inside the lock: the deflater's
+     * stream is shared, so its order must be the frames' order on the wire.
+     */
+    private function writeRaw(string $bytes, int $zop = -1): bool
     {
         if ($this->closed) {
             return false;
@@ -667,7 +882,12 @@ final class Connection implements \IteratorAggregate
         $ok = false;
         try {
             if (!$this->closed) {
-                $ok = \fwrite($this->sock, $bytes) === \strlen($bytes);
+                $out = $bytes;
+                $pmd = $this->pmd;
+                if ($zop >= 0 && $pmd !== null) {
+                    $out = encodeFrame($zop, $pmd->compress($bytes), true, true, $this->nextMask());
+                }
+                $ok = \fwrite($this->sock, $out) === \strlen($out);
             }
         } finally {
             if ($l !== null) {
@@ -749,9 +969,16 @@ function upgrade(\Http\Request $req, callable $session, ?Options $o = null): \Ht
     if ($proto !== '') {
         $res->header('Sec-WebSocket-Protocol', $proto);
     }
+    $pmd = null;
+    if ($o->compression && $h->get('Sec-WebSocket-Extensions') !== '') {
+        $pmd = Pmd::accept($h->get('Sec-WebSocket-Extensions'));
+        if ($pmd !== null) {
+            $res->header('Sec-WebSocket-Extensions', $pmd->responseHeader());
+        }
+    }
     $fn = \Closure::fromCallable($session);
-    return $res->takeover(function (\Resource $sock, \Buffer\ByteBuffer $buf, \Http\Server $server) use ($fn, $o, $proto, $req): void {
-        $c = new Connection($sock, $buf, false, $o, $proto, $req, $req->remoteAddr);
+    return $res->takeover(function (\Resource $sock, \Buffer\ByteBuffer $buf, \Http\Server $server) use ($fn, $o, $proto, $req, $pmd): void {
+        $c = new Connection($sock, $buf, false, $o, $proto, $req, $req->remoteAddr, $pmd);
         $c->runSession($fn, $server);
     });
 }
@@ -841,6 +1068,9 @@ function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, a
     if (\count($o->protocols) > 0) {
         $req .= 'Sec-WebSocket-Protocol: ' . \implode(', ', $o->protocols) . "\r\n";
     }
+    if ($o->compression) {
+        $req .= 'Sec-WebSocket-Extensions: ' . Pmd::offerHeader() . "\r\n";
+    }
     foreach ($headers as $name => $v) {
         $req .= $name . ': ' . $v . "\r\n";
     }
@@ -886,6 +1116,7 @@ function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, a
     }
     $h = \Http\Headers::fromLines($rest);
     $proto = $h->get('Sec-WebSocket-Protocol');
+    $ext = $h->get('Sec-WebSocket-Extensions');
     $fail = '';
     if ($code !== 101) {
         $fail = 'HTTP ' . $code . (\count($status) >= 3 && $status[2] !== '' ? ' ' . $status[2] : '');
@@ -895,13 +1126,14 @@ function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, a
         $fail = 'bad Sec-WebSocket-Accept';
     } elseif ($proto !== '' && !\in_array($proto, $o->protocols, true)) {
         $fail = 'server chose an unoffered subprotocol "' . $proto . '"';
-    } elseif ($h->get('Sec-WebSocket-Extensions') !== '') {
-        $fail = 'server chose an unoffered extension "' . $h->get('Sec-WebSocket-Extensions') . '"';
+    } elseif ($ext !== '' && !$o->compression) {
+        $fail = 'server chose an unoffered extension "' . $ext . '"';
     }
     if ($fail !== '') {
         throw new HandshakeException('WebSocket handshake failed: ' . $fail);
     }
-    return new Connection($sock, $buf, true, $o, $proto, null, $remote);
+    $pmd = $ext === '' ? null : Pmd::fromResponse($ext);
+    return new Connection($sock, $buf, true, $o, $proto, null, $remote, $pmd);
 }
 
 }

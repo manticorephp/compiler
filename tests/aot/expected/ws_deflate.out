@@ -1,0 +1,25 @@
+ext: permessage-deflate
+rsv1 echo:Hello
+rsv1 echo:Hello
+server takeover
+rsv1 echo:tiny
+short reply plain 105
+long reply compressed 305
+50 ok, echo:tiny
+ext: permessage-deflate; server_no_context_takeover; client_no_context_takeover
+no takeover
+ext: permessage-deflate; server_max_window_bits=10
+window ok
+ext: permessage-deflate; client_max_window_bits=8
+w8 echo:Hello
+ext: []
+client w8: WebSocket handshake failed: server requires client_max_window_bits=8, which our deflater cannot honour
+client server-w8: connected
+ext: permessage-deflate; client_max_window_bits=12
+ext: []
+bomb 8:1009: EOF
+corrupt 8:1007: EOF
+rsv1-cont 8:1002: EOF
+plain ext: []
+rsv1-unnegotiated 8:1002: EOF
+plain ok
