@@ -189,15 +189,44 @@ final class InsertMemoryOps implements Pass
         // The conservative direction is a leak, not a free: a param reassigned
         // to a fresh array on every path keeps that array alive to the end of
         // the process instead of being freed at scope exit.
+        // The walk runs FIRST so the blocks it records can be told apart from
+        // the blanket param block below ({@see $storeBlocked}); it never reads
+        // either map.
+        $this->scanStores($fn->body);
+        $storeBlocked = $this->rcObjBlocked;
         foreach ($fn->params as $p) {
             $this->blocked[$p->name] = true;
             $this->rcObjBlocked[$p->name] = true;
             $this->noteBlock($p->name, 'param', $p->type);
         }
 
-        $this->scanStores($fn->body);
+        // The FIRST exception: a BY-VALUE object or string param the body
+        // REASSIGNS from an owned producer (`$o = $o ?? new Options()`,
+        // `if ($o === null) { $o = new O(); }`, `$s = trim($s)`). The blanket
+        // block took both the release-before-overwrite and the scope-exit
+        // release away, so whatever the frame stored there was never freed —
+        // and a conditional's borrowed arm (`$o` itself) is retained to +1 by
+        // the ownership contract, so even the CALLER's object leaked one count
+        // per call. Registering the param gives it the entry retain + scope-exit
+        // release {@see EmitLlvmMemory::initRcObjSlots} pairs for exactly this
+        // shape: the entry +1 makes the caller's value the frame's to release,
+        // on overwrite or at exit, and a param never reassigned on the path
+        // taken is retained and released once. Only when every store to the
+        // name is owned and agrees with the param's own slot flavor — any
+        // borrowed or mismatched store keeps the block (a leak, never a free).
+        foreach ($fn->params as $p) {
+            if ($p->byRef || $p->variadic) { continue; }
+            $pk = $p->type->kind;
+            if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING) { continue; }
+            if ($pk === Type::KIND_OBJ && $this->isClosureType($p->type)) { continue; }
+            $st = $this->rcObjType[$p->name] ?? null;
+            if ($st === null || isset($storeBlocked[$p->name])) { continue; }
+            if ($this->rcSlotFlavor($st) !== $this->rcSlotFlavor($p->type)) { continue; }
+            if ($this->rcObjSlotBoxed[$p->name] ?? false) { continue; }
+            unset($this->rcObjBlocked[$p->name]);
+        }
 
-        // ONE exception to the blanket param block above: a BY-VALUE string
+        // The SECOND exception to the blanket param block: a BY-VALUE string
         // param the body self-appends to (`$out .= …`). The append takes
         // __mir_str_append's in-place fast path whenever rc == 1 — and rc IS 1
         // there, because that single reference is the CALLER'S. The callee then
@@ -224,7 +253,7 @@ final class InsertMemoryOps implements Pass
             }
         }
 
-        // The SECOND exception, and the same discipline: a BY-VALUE `mixed`
+        // The THIRD exception, and the same discipline: a BY-VALUE `mixed`
         // param the body MUTATES AS AN ARRAY (`$v[$k] = …`, `$v[] = …`,
         // `unset($v[$k])`, `$v[$k] = &$x`). An `array`-hinted param is copied on
         // entry for this ({@see EmitLlvmModule}'s copy_deep); a `mixed` one was
@@ -237,7 +266,7 @@ final class InsertMemoryOps implements Pass
         // Witness: symfony/polyfill-deepclone's `$values[$k] = &$value`, which
         // must rebind the CALLEE's element and leave the caller's `'p' => &$a`
         // exactly as it was.
-        // The THIRD: an `array` param the prologue COPIES because the body
+        // The FOURTH: an `array` param the prologue COPIES because the body
         // stores into it. The slot holds the frame's private +1, not the
         // caller's value, so it is an owned local like any other — released at
         // scope exit, handed on by a `return`, released before a reassignment.
