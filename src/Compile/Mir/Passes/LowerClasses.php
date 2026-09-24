@@ -421,6 +421,16 @@ trait LowerClasses
                 // places because the layouts are built by two separate walks.
                 $types[$tprop->name] = ($tveff === null || $tveff === '')
                     ? Type::cell() : $this->lowerTypeHint($tveff);
+                // The per-slot facts every array-property scan keys on. Without
+                // them a trait's `?array $configuration` looked un-hinted, so a
+                // whole store of a cell-valued array never widened the slot off
+                // its doc shape (`array{strategy: 'a'|'b'}` → assoc[string,
+                // string]) and the element write released a tagged cell as a
+                // raw string (php-cs-fixer ConfigurableFixerTrait).
+                $arrHinted[$tprop->name] = $this->isBareArrayHint($tveff) || $types[$tprop->name]->isArray();
+                $neverObj[$tprop->name] = $this->hintNeverObject($tveff);
+                $docList[$tprop->name] = $this->isElemOnlyArrayDoc($tveff);
+                if ($tprop->isReadonly) { $roProps[$tprop->name] = true; }
             }
         }
         // PHP 8.4 property hooks: inherit the parent's map, then record each
