@@ -1572,6 +1572,9 @@ final class InferTypes implements Pass
                 // elements nobody can see: skipping it let a sibling site's
                 // concrete element stand for it.
                 if ($this->isUnknownArrayElem($a->type)) {
+                    // An empty `[]` has no element to disagree with.
+                    if ($a->kind === Node::KIND_ARRAY_LIT && $a instanceof \Compile\Mir\ArrayLit
+                        && \count($a->elements) === 0) { continue; }
                     $srcIdx = $a->kind === Node::KIND_LOAD_LOCAL ? ($this->callArgScanParams[$a->name] ?? -1) : -1;
                     $srcKey = $srcIdx >= 0 ? $this->callArgScanFn . '#' . (string)$srcIdx : '';
                     if ($srcKey !== '' && isset($cand[$srcKey])) {
