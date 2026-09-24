@@ -1,0 +1,1 @@
+{"applications":[{"name":"dataapp","src":"src","entry":"src/main.php","output":".work/dataapp","composer":true}]}

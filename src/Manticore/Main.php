@@ -2874,6 +2874,13 @@ function cmd_build(array $args): int
                     $sfContents = __mc_source_contents($sf);
                     $sfMayDeclare = __mc_source_may_declare($sfContents);
                     $sfPath = __mc_source_path($sf);
+                    // A pure data file is kept as an ordinary (non-demand) unit:
+                    // its only statement is the `return` a `require` reads.
+                    if (!$isBoot && !$sfMayDeclare && __mc_source_is_data_file($sfContents)) {
+                        $sources[] = $sfContents;
+                        $paths[] = $sfPath;
+                        continue;
+                    }
                     if (!$isBoot && !$sfMayDeclare) {
                         $skippedScripts = $skippedScripts + 1;
                         dprint("build:   - script (declares nothing, never autoloaded): " . $sfPath);
@@ -3093,7 +3100,8 @@ function build_manifest_libraries(array $libs, bool $appsOnly): int
                     // library declaration unit. The application-side
                     // `bootstrap:true` path adds them later.
                     if (isset($bootFiles[$sfNorm])) { continue; }
-                    if (!__mc_library_source_may_declare(__mc_source_contents($sf))) { continue; }
+                    if (!__mc_library_source_may_declare(__mc_source_contents($sf))
+                        && !__mc_source_is_data_file(__mc_source_contents($sf))) { continue; }
                     $sources[] = __mc_source_contents($sf);
                     $paths[] = __mc_source_path($sf);
                 }
@@ -3354,6 +3362,47 @@ function __mc_as_trycatch(\Parser\Ast\TryCatchStmt $s): \Parser\Ast\TryCatchStmt
 function __mc_as_switch(\Parser\Ast\SwitchStmt $s): \Parser\Ast\SwitchStmt { return $s; }
 function __mc_as_namespace(\Parser\Ast\NamespaceStmt $s): \Parser\Ast\NamespaceStmt { return $s; }
 function __mc_as_return(\Parser\Ast\ReturnStmt $s): \Parser\Ast\ReturnStmt { return $s; }
+function __mc_as_arraylit(\Parser\Ast\ArrayLit $e): \Parser\Ast\ArrayLit { return $e; }
+
+/**
+ * A pure DATA file: its whole top level is `return <literal>` — an array of
+ * scalars, at any depth. Such a file declares nothing, so the demand-loaded
+ * filter took it for a script and dropped it, yet code reaches it by `require`
+ * for its value: symfony/polyfill-mbstring's `Resources/unidata/*.php` case
+ * tables, where every `require` then answered false and mb_strtolower changed
+ * nothing. Evaluating a literal has no side effect, so running it at startup
+ * (the include-slot store) is indistinguishable from php's lazy require.
+ */
+function __mc_source_is_data_file(string $src): bool
+{
+    if (!\str_contains($src, 'return')) { return false; }
+    try {
+        $program = \Parser\Parser::parseSource($src);
+    } catch (Throwable $e) {
+        return false;
+    }
+    $stmts = $program->statements;
+    if (\count($stmts) !== 1) { return false; }
+    $s = $stmts[0];
+    if ($s->kind !== 'Return' || !($s instanceof \Parser\Ast\ReturnStmt)) { return false; }
+    $v = __mc_as_return($s)->value;
+    return $v instanceof \Parser\Ast\Expr && __mc_expr_is_literal($v);
+}
+
+function __mc_expr_is_literal(\Parser\Ast\Expr $e): bool
+{
+    $k = $e->kind;
+    if ($k === 'StringLiteral' || $k === 'IntLiteral' || $k === 'FloatLiteral'
+        || $k === 'BoolLiteral' || $k === 'NullLiteral') { return true; }
+    if ($k !== 'ArrayLit' || !($e instanceof \Parser\Ast\ArrayLit)) { return false; }
+    foreach (__mc_as_arraylit($e)->elements as $el) {
+        if ($el->byRef) { return false; }
+        $key = $el->key;
+        if ($key instanceof \Parser\Ast\Expr && !__mc_expr_is_literal($key)) { return false; }
+        if (!__mc_expr_is_literal($el->value)) { return false; }
+    }
+    return true;
+}
 
 /**
  * Rewrite every top-level `return` of a NON-ENTRY file into "store the value,
