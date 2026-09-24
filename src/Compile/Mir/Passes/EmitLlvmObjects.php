@@ -3840,8 +3840,91 @@ trait EmitLlvmObjects
         return $sym;
     }
 
+    /** Some operand of the dynamic call is not a local yet, and every such one
+     *  is a read {@see dynHoistableRead} can take once. */
+    private function dynOperandsNeedHoist(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): bool
+    {
+        /** @var Node[] $ops */
+        $ops = [$dp->object, $dp->name];
+        foreach ($iv->args as $a) {
+            $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+        }
+        $need = false;
+        foreach ($ops as $o) {
+            if ($o->kind === Node::KIND_LOAD_LOCAL || $o->kind === Node::KIND_STRING_CONST) { continue; }
+            if (!$this->dynHoistableRead($o)) { return false; }
+            $need = true;
+        }
+        return $need;
+    }
+
+    /** A value that can be computed once and held in a slot without owning
+     *  anything: an int literal, or a plain property / subscript chain rooted
+     *  at a local. */
+    private function dynHoistableRead(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_INT_CONST
+            || $n->kind === Node::KIND_STRING_CONST) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
+        return false;
+    }
+
+    private function dynHoistableProp(PropertyAccess_ $pa): bool
+    {
+        return $this->escPlainPropRead($pa) && $this->dynHoistableRead($pa->object);
+    }
+
+    private function dynHoistableElem(\Compile\Mir\ArrayAccess_ $aa): bool
+    {
+        if (!$this->dynHoistableRead($aa->array)) { return false; }
+        return $aa->index === null || $this->dynHoistableRead($aa->index);
+    }
+
+    /** Evaluate `$n` once into a fresh slot and answer a LoadLocal of it —
+     *  a local or a string literal is already that. */
+    private function dynHoistOperand(Node $n, string &$out): Node
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
+        $out .= $this->emitNode($n);
+        $out .= $this->coerceToI64();
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $name = '__mc_dynh_' . \substr($slot, 1);
+        $this->locals->slots[$name] = $slot;
+        return new \Compile\Mir\LoadLocal($name, $n->type);
+    }
+
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
+        // Every shared path below wants its operands as LOCALS, because the
+        // inline fallback re-emits them per arm. A plain READ — a property or
+        // subscript chain off a local — is evaluated ONCE into a slot here, so
+        // `$this->dispatcher->{$m}(...$args)` takes the table instead of a
+        // 3 069-arm chain spliced into the site. Fresh values (a call's result)
+        // are left alone: a slot would own a +1 nobody releases.
+        if ($this->dynOperandsNeedHoist($dp, $iv)) {
+            $out = '';
+            $recvL = $this->dynHoistOperand($dp->object, $out);
+            $nameL = $this->dynHoistOperand($dp->name, $out);
+            $args = [];
+            foreach ($iv->args as $a) {
+                if ($a->kind === Node::KIND_SPREAD) {
+                    $sp = $this->asSpreadNode($a);
+                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out), $a->type);
+                } else {
+                    $args[] = $this->dynHoistOperand($a, $out);
+                }
+            }
+            $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
+            $dp2->line = $dp->line;
+            $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
+            $iv2->line = $iv->line;
+            return $out . $this->emitDynMethodCall($dp2, $iv2);
+        }
         $recv = $dp->object;
         $nameNode = $dp->name;
         $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
