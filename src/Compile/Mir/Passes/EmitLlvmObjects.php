@@ -154,6 +154,15 @@ trait EmitLlvmObjects
     private function emitNewDynObj(\Compile\Mir\NewDynObj $n): string
     {
         $out = $this->emitNode($n->classExpr);
+        // A name read off an erased channel (`foreach ($static_list as $class)
+        // { new $class(); }` — php-cs-fixer's registerBuiltInFixers) is a
+        // string CELL, and strcmp dereferenced its tag bits. The string unbox
+        // is the identity on a raw pointer ({@see unboxCellArg}).
+        $ck = $n->classExpr->type->kind;
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType(Type::string_());
+        }
         $out .= $this->coerceToI64();
         $nameI = $this->lastValue;
         $namePtr = $this->ssa->allocReg();
