@@ -1353,8 +1353,11 @@ trait EmitLlvmCalls
         // expanded into multiple positional slots.
         $pi = 0;
         $padDrops = '';
+        $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
+        $packNode = $this->closurePackNode;
+        $packTarget = $this->closurePackTarget;
         foreach ($callArgs as $a) {
             // Argument unpacking `$fn(...$arr)`: expand the array across the
             // closure's remaining declared params (fixed-arity), boxing each
@@ -1429,6 +1432,9 @@ trait EmitLlvmCalls
                 continue;
             }
             $out .= $this->emitNode($a);
+            if ($packNode !== null && $a === $packNode && $packTarget !== null) {
+                $out .= $this->emitCellArrayToTyped($packTarget);
+            }
             $pt = $calleeParams[$capCnt + $pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
             // (a cell; {@see closureArgRepr}). A dynamic callee (`callable`) can't be gated — its
@@ -1689,10 +1695,33 @@ trait EmitLlvmCalls
         // the body, so its literal boxes every element; a typed one stays raw.
         $pt = $ptypes[$vi];
         $el = $pt->element;
+        $this->closurePackNode = null;
+        $this->closurePackTarget = null;
         if ($el === null || $el->kind === Type::KIND_UNKNOWN) { $pt = Type::vec(Type::cell()); }
-        $out[] = new ArrayLit($elems, $pt);
+        // A TYPED pack whose elements do not all carry the element's own kind
+        // (a `mixed` call result into `string ...$r`) is built as cells and
+        // rebuilt into the typed vec at the de-cellify boundary
+        // ({@see emitCellArrayToTyped}), the one a cell array bound to a typed
+        // slot takes. Stored raw, a cell word became a string pointer.
+        $lit = null;
+        if ($el !== null && $this->needsDeCellify($pt, Type::vec(Type::cell()))) {
+            foreach ($elems as $e) {
+                if ($e->value->type->kind !== $el->kind) {
+                    $lit = new ArrayLit($elems, Type::vec(Type::cell()));
+                    $this->closurePackNode = $lit;
+                    $this->closurePackTarget = $pt;
+                    break;
+                }
+            }
+        }
+        $out[] = $lit ?? new ArrayLit($elems, $pt);
         return $out;
     }
+
+    /** The cell-built pack of the latest {@see closureVariadicPack}, and the
+     *  typed vec it is rebuilt into; null when the pack was built typed. */
+    private ?ArrayLit $closurePackNode = null;
+    private ?Type $closurePackTarget = null;
 
     /**
      * The uniform closure ABI's representation of one by-value argument of

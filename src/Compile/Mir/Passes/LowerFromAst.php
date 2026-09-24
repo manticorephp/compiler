@@ -2997,8 +2997,10 @@ final class LowerFromAst implements Pass
                 $t = ($p->variadic ?? false)
                     ? Type::vec($this->lowerTypeHint($p->typeHint))
                     : $this->lowerParamType($p->typeHint);
-                $mir[] = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
+                $fp = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
                     default: $this->lowerParamDefault($p, $defaultScope));
+                $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $t->isArray();
+                $mir[] = $fp;
                 $loads[] = new LoadLocal($p->name, $t);
             }
         } else {

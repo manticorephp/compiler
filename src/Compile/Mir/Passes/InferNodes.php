@@ -2186,7 +2186,12 @@ trait InferNodes
                     : ($at->isAssoc() ? ($at->key ?? Type::string_()) : Type::string_());
                 $this->localTypes[$name] = Type::assoc($key, $elem);
             } elseif ($at->isVec()
-                || ($at->kind === Type::KIND_UNKNOWN && $it->kind !== Type::KIND_STRING)) {
+                || ($at->kind === Type::KIND_UNKNOWN && $it->kind !== Type::KIND_STRING
+                    // An ERASED PARAM holds the caller's elements, which this
+                    // store says nothing about: `$a[] = 9` on a closure's bare
+                    // `array $a` fed `mk(): mixed` retyped it vec[int] and the
+                    // boxed `1, 2` rendered as raw words.
+                    && !isset($this->currentParamTypes[$name]))) {
                 // A STRING-keyed store into an ERASED local says nothing about the
                 // container, and this arm would claim two things at once: that it is
                 // a VEC (it is not — the key is a string) and that its element type

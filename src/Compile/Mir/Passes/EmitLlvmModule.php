@@ -1008,6 +1008,10 @@ trait EmitLlvmModule
                     $bodySink->write('  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n");
                 } else {
                     $bodySink->write('  store i64 %arg.' . $cn . ', ptr ' . $slot . "\n");
+                    // The same payload mask a named function's prologue takes:
+                    // `$f(mk())` with `mk(): mixed` hands a bare-`array` param a
+                    // tagged word, and the body's COW dereferenced the tag bits.
+                    $bodySink->write($this->arrayHintedEntryMask($pp, $slot));
                 }
             }
         } else {
@@ -1048,13 +1052,7 @@ trait EmitLlvmModule
                 // call site BOXES the argument (see
                 // tests/aot/cases/array_param_mixed_field.php) — there the tag is
                 // the point, and stripping it hands `var_dump` a raw buffer.
-                if (!$p->byRef && $p->arrayHinted && $p->type->kind !== Type::KIND_CELL) {
-                    $rw = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $rw . ' = load i64, ptr ' . $slot . "\n");
-                    $mk = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n");
-                    $bodySink->write('  store i64 ' . $mk . ', ptr ' . $slot . "\n");
-                }
+                $bodySink->write($this->arrayHintedEntryMask($p, $slot));
                 // PHP arrays are values: a by-VALUE array param the body mutates
                 // in place (`$x[] = …` / `$x[$k] = …` / nested `$x[0][] = …`) must
                 // not alias the caller's buffer. Copy it on entry so the mutation
@@ -2431,5 +2429,21 @@ trait EmitLlvmModule
             return false; // transfer of an owned local
         }
         return true; // param / alias / property / array read — borrow
+    }
+
+    /**
+     * Strip a NaN tag off a by-value bare-`array` param on entry: its slot is
+     * read as a RAW buffer pointer throughout the body. The identity on a raw
+     * pointer (every userspace address fits the 48 payload bits). Not for a
+     * param PROMOTED to a cell, whose tag is the point.
+     */
+    private function arrayHintedEntryMask(\Compile\Mir\Param $p, string $slot): string
+    {
+        if ($p->byRef || !$p->arrayHinted || $p->type->kind === Type::KIND_CELL) { return ''; }
+        $rw = $this->ssa->allocReg();
+        $mk = $this->ssa->allocReg();
+        return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
+            . '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n"
+            . '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
     }
 }

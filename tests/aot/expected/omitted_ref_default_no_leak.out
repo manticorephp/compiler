@@ -30,4 +30,7 @@ dflt/1.5 dflt/1.5 dflt/1.5 | dflt/1.5 dflt/1.5 | dflt/1.5
 1:7:0: 1:2:0: 1:2:2:3+4 5:0:0 5:13:2
 q0 n0
 variadic default: sum=1005780 growth ok
+1str 2strlit 5 7 3:stringarray
+1,x,9 3:1,x,9 1,x,9 3:1,x,9
+1,x,9 7,9
 done

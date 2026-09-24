@@ -255,4 +255,50 @@ echo $defVar(1), ' ', $defVar(1, 2), ' ', $defVar(1, 2, 3, 4), ' ', $defVarTyped
 $rv = new Runner(function ($a = 'q', ...$r): string { return $a . count($r); });
 echo $rv->run(), ' ', viaCallable(function (...$r): string { return 'n' . count($r); }), "\n";
 measure('variadic default', function (int $i) use ($defVar): int { return strlen($defVar($i)); });
+
+// A `mixed` value into a TYPED variadic is rebuilt into the typed pack at the
+// de-cellify boundary (stored raw, the cell word became a string pointer), and
+// a `mixed` array into a bare `array` param is masked to its payload on entry
+// and keeps its erased element: `$a[] = 9` no longer claims vec[int] over the
+// caller's boxed elements (COWing the tagged word SIGSEGVed).
+function mixedStr(): mixed
+{
+    return 'str';
+}
+
+function mixedInt(): mixed
+{
+    return 5;
+}
+
+function mixedArr(): mixed
+{
+    return [1, 'x'];
+}
+
+$packStr = function (string ...$r): string {
+    return count($r) . implode('', $r);
+};
+$packInt = function (int ...$r): int {
+    return array_sum($r);
+};
+$packMixed = function (mixed ...$r): string {
+    return count($r) . ':' . gettype($r[0]) . gettype($r[2] ?? null);
+};
+echo $packStr(mixedStr()), ' ', $packStr(mixedStr(), 'lit'), ' ', $packInt(mixedInt()), ' ',
+    $packInt(mixedInt(), 2), ' ', $packMixed(mixedStr(), mixedInt(), mixedArr()), "\n";
+$mutArr = function (array $a): string {
+    $a[] = 9;
+    return implode(',', $a);
+};
+$mutNullable = function (?array $a): string {
+    $a[] = 9;
+    return count($a) . ':' . implode(',', $a);
+};
+$callArr = new Runner(fn (): string => $mutArr(mixedArr()));
+echo $mutArr(mixedArr()), ' ', $mutNullable(mixedArr()), ' ', $callArr->run(), ' ',
+    viaCallable(fn () => $mutNullable(mixedArr())), "\n";
+$arrRunner = new Holder();
+$arrRunner->cb = $mutArr;
+echo ($arrRunner->cb)(mixedArr()), ' ', ($arrRunner->cb)([7]), "\n";
 echo "done\n";
