@@ -346,8 +346,11 @@ function __mc_iov_advance(\Ffi\Ptr $iov, int $n, int $bytes): void
 /**
  * Vectored send for a plain socket: `writev(2)` on the built iov, with the same
  * suspend-on-EWOULDBLOCK loop as `fwrite`'s single-buffer path under AsyncHook.
- * TLS has no vector primitive in OpenSSL's stream API — we fall back to a
- * per-chunk `__mc_transport_send` loop there. Callers keep the $chunks array
+ * SOCKET ONLY — `fwrite`'s array path is the one caller, and it gates on
+ * `KIND_SOCKET` before reaching here (a TLS `\Resource` never does; OpenSSL's
+ * stream API has no writev primitive, so a TLS array write goes through
+ * `fwrite`'s concat+recurse arm instead and lands on the retrying single-buffer
+ * path below via {@see __mc_stream_send_retry}). Callers keep the $chunks array
  * alive for the duration of the call; the iov's `iov_base` fields point INTO
  * those strings' byte data via `str_bytes()`.
  *
@@ -362,20 +365,6 @@ function __mc_stream_sendv(\Resource $s, array $chunks): int
     $total = 0;
     foreach ($chunks as $c) { $total = $total + \strlen($c); }
     if ($total === 0) { return 0; }
-    // TLS: no writev — degrade to a per-chunk transport_send loop. Still avoids
-    // the userspace concat (SSL_write of $n small records vs one big buffer).
-    if ($s->kind === \Resource::KIND_TLS) {
-        $sent = 0;
-        foreach ($chunks as $c) {
-            $len = \strlen($c);
-            if ($len === 0) { continue; }
-            $w = __mc_transport_send($s, $c, $len);
-            if ($w <= 0) { return $sent; }
-            $sent = $sent + $w;
-            if ($w < $len) { return $sent; }
-        }
-        return $sent;
-    }
     // Build iovec[$n] as [base:i64, len:i64] × n = 16 bytes/entry. iov_base is a
     // raw address into a live PHP string's data (str_bytes); the caller's $chunks
     // array keeps those strings pinned for the duration.
@@ -488,28 +477,80 @@ function __mc_wait_write(\Resource $s): int
 }
 
 /**
- * Pull ONE chunk from the socket into the buffer. Returns bytes added; 0 means
- * the peer closed OR the read timed out (both stop the reader; feof vs timed_out
- * distinguishes them).
+ * Send $data (exactly $n bytes of it) once, retrying across every would-block
+ * shape until *some* bytes go out, the write deadline expires, or a real error
+ * stops it. Returns bytes sent, 0 on stop. The send-side twin of
+ * {@see __mc_stream_recv_into}; {@see fwrite}'s AsyncHook loop calls this once
+ * per outer iteration and accumulates.
  *
- * ⚠ THE ONLY BLOCKING CALL in the stream path. See the note above.
+ * TLS is NOT the socket path's "retry once on writable" — `SSL_write` (no
+ * `SSL_MODE_ENABLE_PARTIAL_WRITE`) is all-or-`-1` per call, and a `WANT_READ`
+ * (a renegotiation, or a TLS 1.3 `KeyUpdate`) must park on READABLE, not
+ * writable; parking on the wrong side and giving up after one retry read a
+ * live connection as a short write. This loops on `SSL_get_error` exactly like
+ * the read side, direction-correct, bounded by the SAME per-park deadline
+ * (`$s->wtimeoutMs`).
  */
-function __mc_stream_fill(\Resource $s, int $want): int
+function __mc_stream_send_retry(\Resource $s, string $data, int $n): int
 {
-    if ($want < 4096) {
-        $want = 4096;   // a syscall costs the same for 1 byte or 4 KiB
+    if ($s->kind === \Resource::KIND_SOCKET) {
+        while (true) {
+            $sent = \__mc_transport_send($s, $data, $n);
+            if ($sent > 0) {
+                return $sent;
+            }
+            if ($sent === 0) {
+                return 0;
+            }
+            $we = \__mc_errno();
+            if ($we !== 0 && $we !== \__mc_sock_const(10) && $we !== \__mc_sock_const(11) && $we !== 4) {
+                return 0;   // EPIPE / ECONNRESET — a real error, not back-pressure
+            }
+            if (\__mc_wait_write($s) === 0) {
+                return 0;   // deadline: short write
+            }
+        }
     }
-    // malloc, NOT calloc: recv/SSL_read overwrite the whole buffer before we
-    // read from it, so the zero-init is pure waste. Under wrk profiling
-    // `_platform_memset` on this calloc took ~4% of the request-hot time.
-    // A persistent scratch buffer (reused across fills) was also tried, but
-    // regressed: macOS's zone allocator has a thread-local cache so malloc(4K)
-    // is effectively free, and the static-property access ended up costlier
-    // than the malloc it was meant to skip.
-    $buf = \Runtime\Libc\malloc($want + 1);
-    if ($buf === null) {
-        return 0;
+    $sent = \__mc_transport_send($s, $data, $n);
+    if ($sent <= 0) {
+        $deadline = \__mc_microtime_f()
+            + ($s->wtimeoutMs > 0 ? (float)$s->wtimeoutMs : 60000.0) / 1000.0;
+        $rf = \Runtime\AsyncHook::readableFor();
+        $wf = \Runtime\AsyncHook::writableFor();
+        while ($sent <= 0) {
+            $err = \Runtime\Openssl\getError($s->ssl, $sent);
+            if ($err !== 2 && $err !== 3) {
+                return 0;   // a real error, not WANT_READ/WANT_WRITE
+            }
+            $left = $deadline - \__mc_microtime_f();
+            if ($left <= 0.0) {
+                $s->timedOut = true;
+                return 0;
+            }
+            $ready = $err === 2 ? $rf($s, $left) : $wf($s, $left);
+            if ($ready !== true) {
+                $s->timedOut = true;
+                return 0;
+            }
+            $sent = \__mc_transport_send($s, $data, $n);
+        }
     }
+    return $sent > 0 ? $sent : 0;
+}
+
+/**
+ * Fill $buf with up to $want bytes from the transport, retrying across every
+ * would-block shape until something arrives, the read deadline expires, or a
+ * real error stops it. Returns bytes read; 0 means the peer closed OR the read
+ * timed out (both stop the reader; $s->eof vs $s->timedOut distinguishes them).
+ * The one recv-retry loop shared by {@see __mc_stream_fill} (buffered path) and
+ * the bulk-bypass branch of {@see __mc_stream_read} — they differ only in what
+ * they do with the bytes afterward, not in how they wait for them.
+ *
+ * ⚠ THE ONLY BLOCKING CALL in the stream path. See the notes below.
+ */
+function __mc_stream_recv_into(\Resource $s, \Ffi\Ptr $buf, int $want): int
+{
     // OPTIMISTIC RECV under AsyncHook. Transparent-I/O fds are non-blocking
     // (stream_set_blocking(false)), so a recv with the next request already
     // buffered in the kernel returns immediately — no reactor round-trip, no
@@ -523,19 +564,20 @@ function __mc_stream_fill(\Resource $s, int $want): int
     // sibling that drained the fd first), so the recv is retried in a loop and
     // each would-block parks again. Reporting 0 on the first EWOULDBLOCK — what
     // this did — read as end-of-stream and truncated the response. Any OTHER
-    // errno is a real error (ECONNRESET/EPIPE) and stops the reader.
+    // errno is a real error (ECONNRESET/EPIPE) and stops the reader. This is
+    // the ONLY path a bare KIND_SOCKET under AsyncHook takes: skipping it (what
+    // the bulk-bypass callsite used to do) fell through to the single
+    // wait-then-one-recv shape below, so a spurious wake's EWOULDBLOCK read as
+    // EOF with $eof left false — the caller could not tell a truncated read
+    // from a closed one.
     if ($s->kind === \Resource::KIND_SOCKET && \Runtime\AsyncHook::active()) {
         while (true) {
             $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
             if ($got > 0) {
-                __mc_buf_compact($s);
-                $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
-                \Runtime\Libc\free($buf);
                 return $got;
             }
             if ($got === 0) {
                 $s->eof = true;
-                \Runtime\Libc\free($buf);
                 return 0;
             }
             // Park on would-block. The errno test is deliberately NEGATIVE: only a
@@ -544,17 +586,14 @@ function __mc_stream_fill(\Resource $s, int $want): int
             // ended a read at zero bytes with the data still in flight.
             $e = \__mc_errno();
             if ($e !== 0 && $e !== \__mc_sock_const(10) && $e !== \__mc_sock_const(11) && $e !== 4) {
-                \Runtime\Libc\free($buf);
                 return 0;
             }
             if (\__mc_wait_read($s) === 0) {
-                \Runtime\Libc\free($buf);
                 return 0;   // timed out ($timedOut recorded) — do not block on recv
             }
         }
     }
     if (\__mc_wait_read($s) === 0) {
-        \Runtime\Libc\free($buf);
         return 0;   // timed out — do not block on recv
     }
     $got = __mc_transport_recv($s, $buf, $want);
@@ -592,14 +631,40 @@ function __mc_stream_fill(\Resource $s, int $want): int
             $got = __mc_transport_recv($s, $buf, $want);
         }
     }
+    if ($got === 0) {
+        $s->eof = true;
+    }
+    return $got > 0 ? $got : 0;
+}
+
+/**
+ * Pull ONE chunk from the socket into the buffer. Returns bytes added; 0 means
+ * the peer closed OR the read timed out (both stop the reader; feof vs timed_out
+ * distinguishes them).
+ */
+function __mc_stream_fill(\Resource $s, int $want): int
+{
+    if ($want < 4096) {
+        $want = 4096;   // a syscall costs the same for 1 byte or 4 KiB
+    }
+    // malloc, NOT calloc: recv/SSL_read overwrite the whole buffer before we
+    // read from it, so the zero-init is pure waste. Under wrk profiling
+    // `_platform_memset` on this calloc took ~4% of the request-hot time.
+    // A persistent scratch buffer (reused across fills) was also tried, but
+    // regressed: macOS's zone allocator has a thread-local cache so malloc(4K)
+    // is effectively free, and the static-property access ended up costlier
+    // than the malloc it was meant to skip.
+    $buf = \Runtime\Libc\malloc($want + 1);
+    if ($buf === null) {
+        return 0;
+    }
+    $got = \__mc_stream_recv_into($s, $buf, $want);
     if ($got > 0) {
         __mc_buf_compact($s);
         $s->rbuf = $s->rbuf . \str_from_buffer($buf, $got);
-    } elseif ($got === 0) {
-        $s->eof = true;
     }
     \Runtime\Libc\free($buf);
-    return $got > 0 ? $got : 0;
+    return $got;
 }
 
 /** Read up to $n buffered bytes, filling from the socket only when empty. */
@@ -621,48 +686,17 @@ function __mc_stream_read(\Resource $s, int $n): string
         //   before: 0.42s vs php's 0.07s — 6x SLOWER
         // The threshold is the fill size: below it the buffered path is already
         // reading a whole chunk anyway, so there is nothing to win and the
-        // read-ahead is worth keeping.
+        // read-ahead is worth keeping. Same recv-retry as the buffered path
+        // ({@see __mc_stream_recv_into}) — a bulk fread() is not exempt from the
+        // EWOULDBLOCK-under-AsyncHook or the TLS WANT_READ/WANT_WRITE park.
         if ($n >= 4096) {
-            if (\__mc_wait_read($s) === 0) {
-                return '';   // timed out
-            }
             // malloc: recv overwrites the whole buffer, zero-init is waste.
             $buf = \Runtime\Libc\malloc($n + 1);
             if ($buf === null) {
                 return '';
             }
-            $got = __mc_transport_recv($s, $buf, $n);
-            // Same TLS WANT_READ/WANT_WRITE park as __mc_stream_fill: a non-blocking
-            // SSL_read returns <=0 whenever a record is only partly on the wire, and
-            // that is NOT end-of-stream. The bulk bypass skips the buffered path on
-            // purpose (see above), so it must carry this retry itself rather than
-            // falling through to __mc_stream_fill — reporting 0 here truncated a
-            // large fread() at a TLS record boundary instead of returning the rest.
-            if ($got <= 0 && $s->kind === \Resource::KIND_TLS && \Runtime\AsyncHook::active()) {
-                $deadline = \__mc_microtime_f()
-                    + ($s->rtimeoutMs > 0 ? (float)$s->rtimeoutMs : 60000.0) / 1000.0;
-                $rf = \Runtime\AsyncHook::readableFor();
-                $wf = \Runtime\AsyncHook::writableFor();
-                while ($got <= 0) {
-                    $err = \Runtime\Openssl\getError($s->ssl, $got);
-                    if ($err !== 2 && $err !== 3) {
-                        break;   // clean shutdown (SSL_ERROR_ZERO_RETURN) or a hard error
-                    }
-                    $left = $deadline - \__mc_microtime_f();
-                    if ($left <= 0.0) {
-                        $s->timedOut = true;
-                        break;
-                    }
-                    $ready = $err === 2 ? $rf($s, $left) : $wf($s, $left);
-                    if ($ready !== true) {
-                        $s->timedOut = true;
-                        break;
-                    }
-                    $got = __mc_transport_recv($s, $buf, $n);
-                }
-            }
+            $got = \__mc_stream_recv_into($s, $buf, $n);
             if ($got <= 0) {
-                if ($got === 0) { $s->eof = true; }
                 \Runtime\Libc\free($buf);
                 return '';
             }
@@ -955,8 +989,11 @@ function stream_copy_to_stream(\Resource $from, \Resource $to, int $maxlen = -1,
         if ($chunk === '') {
             break;
         }
-        \fwrite($to, $chunk);
-        $copied = $copied + \strlen($chunk);
+        $w = \fwrite($to, $chunk);
+        $copied = $copied + $w;
+        if ($w < \strlen($chunk)) {
+            break;   // short write (deadline/closed peer) — stop, do not skip bytes
+        }
     }
     return $copied;
 }
@@ -1515,8 +1552,9 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         // process never blocks. A writability wake is a HINT: the retry may report
         // back-pressure again (another writer drained the window first), so a
         // would-block parks again instead of ending the write short. Only a real
-        // errno (EPIPE/ECONNRESET) — or the stream's WRITE DEADLINE — stops us. TLS
-        // keeps the retry-once shape: errno says nothing about SSL_write's WANT_WRITE.
+        // error, or the stream's WRITE DEADLINE, stops us — see
+        // {@see __mc_stream_send_retry} for the per-chunk retry (direction-correct
+        // for TLS, not "retry once on writable").
         //
         // The deadline is PER PARK, exactly as on the read side (each fill gets a
         // whole rtimeoutMs). A peer draining slowly but steadily is alive and php
@@ -1526,21 +1564,9 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
             $total = 0;
             while ($total < $len) {
                 $chunk = $total === 0 ? $data : \substr($data, $total);
-                $n = \__mc_transport_send($stream, $chunk, $len - $total);
-                if ($n > 0) { $total = $total + $n; continue; }
-                if ($n === 0) { break; }
-                if ($stream->kind === \Resource::KIND_SOCKET) {
-                    $we = \__mc_errno();
-                    if ($we !== 0 && $we !== \__mc_sock_const(10)
-                        && $we !== \__mc_sock_const(11) && $we !== 4) {
-                        break;   // EPIPE / ECONNRESET — a real error, not back-pressure
-                    }
-                }
-                if (\__mc_wait_write($stream) === 0) { break; }   // deadline: short write
-                if ($stream->kind !== \Resource::KIND_SOCKET) {
-                    $n = \__mc_transport_send($stream, $chunk, $len - $total);
-                    if ($n > 0) { $total = $total + $n; } else { break; }
-                }
+                $n = \__mc_stream_send_retry($stream, $chunk, $len - $total);
+                if ($n <= 0) { break; }
+                $total = $total + $n;
             }
             return $total;
         }
