@@ -855,7 +855,10 @@ trait EmitLlvmExpr
         return match ($t->kind) {
             Type::KIND_CELL, Type::KIND_UNKNOWN => $this->coerceToI64(),
             Type::KIND_ARRAY  => $this->shallowBoxCall('ptr', '@__manticore_box_array'),
-            Type::KIND_OBJ    => $this->shallowBoxCall('ptr', '@__manticore_box_object'),
+            // An object UNION is the same bare object pointer as `obj<C>`; the
+            // int arm below boxed its ADDRESS as a number.
+            Type::KIND_OBJ, Type::KIND_UNION
+                              => $this->shallowBoxCall('ptr', '@__manticore_box_object'),
             Type::KIND_STRING => $this->shallowBoxCall('ptr', '@__manticore_box_ptr'),
             Type::KIND_FLOAT  => $this->shallowBoxCall('double', '@__manticore_box_float'),
             Type::KIND_BOOL   => $this->shallowBoxCall('i64', '@__manticore_box_bool'),
@@ -1249,15 +1252,14 @@ trait EmitLlvmExpr
         $out .= "  %bobj = icmp eq i64 %tb, 8\n";
         $out .= "  %bothobj = and i1 %aobj, %bobj\n";
         $out .= "  br i1 %bothobj, label %objboth, label %objmix\n";
-        // No runtime property table exists (the descriptor is {class_id,
-        // drop_fn}), so structural == on two objects reached through a CELL is
-        // still a hole — identity is the sound subset. The statically-typed
-        // path unrolls the real property compare in emitCmp.
+        // Two objects: php's structural compare ({@see objCompareRuntime}) —
+        // the same class compares its properties, a different class never
+        // equals and orders as uncomparable.
         $out .= "objboth:\n";
-        $out .= "  %oeq = icmp eq i64 %a, %b\n";
-        $out .= $eq
-            ? "  %oez = zext i1 %oeq to i64\n  ret i64 %oez\n"
-            : "  %oez = select i1 %oeq, i64 0, i64 1\n  ret i64 %oez\n";
+        $out .= "  %oa = and i64 %a, $mask\n";
+        $out .= "  %ob = and i64 %b, $mask\n";
+        $out .= '  %oez = call i64 @__mir_obj_compare(i64 %oa, i64 %ob, i64 ' . ($eq ? '0' : '1') . ")\n";
+        $out .= "  ret i64 %oez\n";
         $out .= "objmix:\n";
         $out .= "  %anyobj = or i1 %aobj, %bobj\n";
         $out .= "  br i1 %anyobj, label %objgreater, label %rowarr\n";
@@ -1369,12 +1371,81 @@ trait EmitLlvmExpr
      * is the PHP-numeric-string test (strtod consumed the whole string modulo
      * trailing ASCII whitespace). Used by the cell==cell / cell===cell path.
      */
+    /**
+     * `__mir_obj_compare(a, b, mode) -> i64` — php's `==` (mode 0: 1/0) and
+     * `<=>` (mode 1: -1/0/1) on two RAW object pointers (either may be null).
+     *
+     * The same instance is equal. Objects of different classes never are, and
+     * order as uncomparable (1). Two objects of ONE class compare their
+     * properties as php does — the declared ones in declaration order, then the
+     * dynamic ones — which is exactly an array compare of the
+     * `assoc[string, cell]` the descriptor's props_fn builds
+     * ({@see \Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET}). That is a pure
+     * function of the class, reached through the object, so this body reads no
+     * module-local table and is safe to coalesce as `linkonce_odr`.
+     *
+     * A nesting deeper than 64 (a cyclic graph php would refuse with "Nesting
+     * level too deep") answers unequal rather than recursing forever.
+     */
+    private function objCompareRuntime(): string
+    {
+        $pf = (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET;
+        $out  = "\n@__mir_obj_cmp_depth = linkonce_odr global i64 0\n";
+        $out .= "define i64 @__mir_obj_compare(i64 %a, i64 %b, i64 %mode) {\nentry:\n";
+        $out .= "  %iseq = icmp eq i64 %mode, 0\n";
+        $out .= "  %same = icmp eq i64 %a, %b\n";
+        $out .= "  br i1 %same, label %equal, label %nulls\n";
+        $out .= "nulls:\n";
+        $out .= "  %az = icmp eq i64 %a, 0\n  %bz = icmp eq i64 %b, 0\n  %anyz = or i1 %az, %bz\n";
+        $out .= "  br i1 %anyz, label %differ, label %descs\n";
+        $out .= "descs:\n";
+        $out .= "  %pa = inttoptr i64 %a to ptr\n  %pb = inttoptr i64 %b to ptr\n";
+        $out .= "  %da = load ptr, ptr %pa\n  %db = load ptr, ptr %pb\n";
+        $out .= "  %dan = icmp eq ptr %da, null\n  %dbn = icmp eq ptr %db, null\n  %dnn = or i1 %dan, %dbn\n";
+        $out .= "  br i1 %dnn, label %differ, label %ids\n";
+        $out .= "ids:\n";
+        $out .= "  %ia = load i64, ptr %da\n  %ib = load i64, ptr %db\n";
+        $out .= "  %sameid = icmp eq i64 %ia, %ib\n";
+        $out .= "  br i1 %sameid, label %propsfn, label %differ\n";
+        $out .= "propsfn:\n";
+        $out .= "  %fpp = getelementptr inbounds i8, ptr %da, i64 $pf\n";
+        $out .= "  %fp = load ptr, ptr %fpp\n";
+        $out .= "  %nofp = icmp eq ptr %fp, null\n";
+        $out .= "  br i1 %nofp, label %equal, label %depth\n";
+        $out .= "depth:\n";
+        $out .= "  %d0 = load i64, ptr @__mir_obj_cmp_depth\n";
+        $out .= "  %deep = icmp sge i64 %d0, 64\n";
+        $out .= "  br i1 %deep, label %differ, label %walk\n";
+        $out .= "walk:\n";
+        $out .= "  %d1 = add i64 %d0, 1\n  store i64 %d1, ptr @__mir_obj_cmp_depth\n";
+        $out .= "  %xa = call i64 %fp(ptr %pa)\n  %xb = call i64 %fp(ptr %pb)\n";
+        $out .= "  %xap = inttoptr i64 %xa to ptr\n  %xbp = inttoptr i64 %xb to ptr\n";
+        $out .= "  br i1 %iseq, label %weq, label %wcmp\n";
+        $out .= "weq:\n";
+        $out .= "  %le = call i1 @__mir_array_loose_eq(ptr %xap, i64 0, ptr %xbp, i64 0)\n";
+        $out .= "  %lez = zext i1 %le to i64\n  br label %done\n";
+        $out .= "wcmp:\n";
+        $out .= "  %lc = call i64 @__mir_array_compare(ptr %xap, i64 0, ptr %xbp, i64 0)\n  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  %r = phi i64 [ %lez, %weq ], [ %lc, %wcmp ]\n";
+        $out .= "  call void @__mir_array_release_cell(ptr %xap)\n";
+        $out .= "  call void @__mir_array_release_cell(ptr %xbp)\n";
+        $out .= "  store i64 %d0, ptr @__mir_obj_cmp_depth\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "equal:\n";
+        $out .= "  %er = select i1 %iseq, i64 1, i64 0\n  ret i64 %er\n";
+        $out .= "differ:\n";
+        $out .= "  %dr = select i1 %iseq, i64 0, i64 1\n  ret i64 %dr\n}\n";
+        return $out;
+    }
+
     private function taggedEqRuntime(): string
     {
         $this->rt->needsStrcmp = true;
         $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+        $out0 = $this->objCompareRuntime();
         // __mir_is_numeric_str(s) -> i1
-        $out  = "\ndefine i1 @__mir_is_numeric_str(ptr %s) {\nentry:\n";
+        $out  = $out0 . "\ndefine i1 @__mir_is_numeric_str(ptr %s) {\nentry:\n";
         // A null carrier is `is_numeric(null)` — false, not a fault.
         $out .= "  %nul = icmp eq ptr %s, null\n";
         $out .= "  br i1 %nul, label %no, label %read\n";
@@ -3831,6 +3902,82 @@ trait EmitLlvmExpr
     }
 
 
+    /**
+     * An object-ish static type: a raw object pointer that php compares as an
+     * object — `obj<C>` (not an enum, whose carrier is an ordinal) or an
+     * object UNION. The one predicate every compare site routes by.
+     */
+    private function isObjishType(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_UNION) { return true; }
+        return $t->kind === Type::KIND_OBJ && !isset($this->enums[$t->class ?? '']);
+    }
+
+    /**
+     * `$obj === $cell` identity: i1 in lastValue. `$oi` is the raw object word,
+     * `$ci` a cell word that may be boxed or (erased) raw. The same instance iff
+     * the cell holds an object whose payload is that pointer — a boxed
+     * non-object never is.
+     */
+    private function objCellSameIr(string $oi, string $ci): string
+    {
+        $out = '';
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
+        $pm = $this->ssa->allocReg();
+        $out .= '  ' . $pm . ' = and i64 ' . $ci . ", 281474976710655\n";
+        $pay = $this->ssa->allocReg();
+        $out .= '  ' . $pay . ' = select i1 ' . $isBox . ', i64 ' . $pm . ', i64 ' . $ci . "\n";
+        $out .= $this->cellTagIr($ci);
+        $tag = $this->cellTagReg;
+        $isObjTag = $this->ssa->allocReg();
+        $out .= '  ' . $isObjTag . ' = icmp eq i64 ' . $tag . ", 8\n";
+        $okKind = $this->ssa->allocReg();
+        $out .= '  ' . $okKind . ' = select i1 ' . $isBox . ', i1 ' . $isObjTag . ", i1 true\n";
+        $same = $this->ssa->allocReg();
+        $out .= '  ' . $same . ' = icmp eq i64 ' . $pay . ', ' . $oi . "\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = and i1 ' . $okKind . ', ' . $same . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i1';
+        return $out;
+    }
+
+    /**
+     * php's LOOSE compare of two operands at least one of which is object-ish
+     * and the other object-ish or a cell ({@see isObjishType}): both are boxed
+     * (a cell passes through) and the tagged runtime decides — identity, then
+     * {@see objCompareRuntime}'s structural compare. `$eq` true → `==` (i64
+     * 1/0), false → `<=>` (i64 -1/0/1). The one normalisation `==`, `<=>`,
+     * ordering and `switch` share.
+     */
+    private function looseObjCmpIr(string $l, string $lt, Type $lT, string $r, string $rt, Type $rT, bool $eq): string
+    {
+        $this->rt->needsTaggedEq = true;
+        $this->rt->needsTaggedCompare = true;
+        $this->lastValue = $l; $this->lastValueType = $lt;
+        $out = $this->shallowBoxToCell($lT);
+        $li = $this->lastValue;
+        $this->lastValue = $r; $this->lastValueType = $rt;
+        $out .= $this->shallowBoxToCell($rT);
+        $ri = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = call i64 @' . ($eq ? '__manticore_tagged_loose_eq' : '__manticore_tagged_compare')
+              . '(i64 ' . $li . ', i64 ' . $ri . ")\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Whether a loose compare of these two static types takes {@see looseObjCmpIr}. */
+    private function looseObjPair(Type $a, Type $b): bool
+    {
+        $ao = $this->isObjishType($a);
+        $bo = $this->isObjishType($b);
+        if (!$ao && !$bo) { return false; }
+        return ($ao || $a->kind === Type::KIND_CELL) && ($bo || $b->kind === Type::KIND_CELL);
+    }
+
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
@@ -3852,6 +3999,7 @@ trait EmitLlvmExpr
         // soundly) answered false for every one of them.
         $looseNullKinds = [
             Type::KIND_STRING => true, Type::KIND_NULL  => true, Type::KIND_OBJ   => true,
+            Type::KIND_UNION  => true,
             Type::KIND_CLOSURE => true, Type::KIND_CELL => true, Type::KIND_UNKNOWN => true,
             Type::KIND_ARRAY  => true, Type::KIND_FLOAT => true, Type::KIND_INT   => true,
             Type::KIND_BOOL   => true,
@@ -3873,8 +4021,16 @@ trait EmitLlvmExpr
                 $chunks[] = '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
             } elseif ($ok === Type::KIND_NULL) {
                 $res = $isEq ? '1' : '0';
+            } elseif ($this->isObjishType($other->type)) {
+                // An object is always truthy, so it is never loosely null — but
+                // a `?C` / nullable-union carrier may BE null (a 0 pointer).
+                $chunks[] = $this->coerceToI64();
+                $b = $this->ssa->allocReg();
+                $chunks[] = '  ' . $b . ' = icmp ' . ($isEq ? 'eq' : 'ne') . ' i64 ' . $this->lastValue . ", 0\n";
+                $res = $this->ssa->allocReg();
+                $chunks[] = '  ' . $res . ' = zext i1 ' . $b . " to i64\n";
             } elseif ($ok === Type::KIND_OBJ || $ok === Type::KIND_CLOSURE) {
-                // An object is always truthy, so it is never loosely null.
+                // An enum case / a closure is always truthy, so never loosely null.
                 $res = $isEq ? '0' : '1';
             } elseif ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN) {
                 $this->rt->needsTaggedEq = true;
@@ -3988,7 +4144,7 @@ trait EmitLlvmExpr
                 return \implode('', $chunks);
             }
             $ptrCarried = $ok === Type::KIND_STRING || $ok === Type::KIND_OBJ
-                || $ok === Type::KIND_ARRAY
+                || $ok === Type::KIND_ARRAY || $ok === Type::KIND_UNION
                 || $ok === Type::KIND_CLOSURE;
             if (!($leftNull && $rightNull) && $ptrCarried) {
                 $chunks = [$this->emitNode($other)];
@@ -4228,27 +4384,13 @@ trait EmitLlvmExpr
             $objT = $objIsLeft ? $lt : $rt;
             $ci   = $objIsLeft ? $r : $l;
             $cellT = $objIsLeft ? $rt : $lt;
-            if ($cellT === 'ptr') { $cp = $this->ssa->allocReg(); $chunks[] = '  ' . $cp . ' = ptrtoint ptr ' . $ci . " to i64\n"; $ci = $cp; }
-            $oi = $objV;
-            if ($objT === 'ptr') { $oi = $this->ssa->allocReg(); $chunks[] = '  ' . $oi . ' = ptrtoint ptr ' . $objV . " to i64\n"; }
-            // Payload of a boxed carrier, the word itself when it was never boxed.
-            $isBox = $this->ssa->allocReg();
-            $chunks[] = '  ' . $isBox . ' = icmp ugt i64 ' . $ci . ", -4503599627370496\n";
-            $pm = $this->ssa->allocReg();
-            $chunks[] = '  ' . $pm . ' = and i64 ' . $ci . ", 281474976710655\n";
-            $pay = $this->ssa->allocReg();
-            $chunks[] = '  ' . $pay . ' = select i1 ' . $isBox . ', i64 ' . $pm . ', i64 ' . $ci . "\n";
-            // A boxed NON-object cell (a string, an array, a scalar) can never be
-            // the same instance, so its payload must not be compared.
-            $chunks[] = $this->cellTagIr($ci); $tag = $this->cellTagReg;
-            $isObjTag = $this->ssa->allocReg();
-            $chunks[] = '  ' . $isObjTag . ' = icmp eq i64 ' . $tag . ", 8\n";
-            $okKind = $this->ssa->allocReg();
-            $chunks[] = '  ' . $okKind . ' = select i1 ' . $isBox . ', i1 ' . $isObjTag . ", i1 true\n";
-            $same = $this->ssa->allocReg();
-            $chunks[] = '  ' . $same . ' = icmp eq i64 ' . $pay . ', ' . $oi . "\n";
-            $res = $this->ssa->allocReg();
-            $chunks[] = '  ' . $res . ' = and i1 ' . $okKind . ', ' . $same . "\n";
+            $this->lastValue = $ci; $this->lastValueType = $cellT;
+            $chunks[] = $this->coerceToI64();
+            $ci = $this->lastValue;
+            $this->lastValue = $objV; $this->lastValueType = $objT;
+            $chunks[] = $this->coerceToI64();
+            $chunks[] = $this->objCellSameIr($this->lastValue, $ci);
+            $res = $this->lastValue;
             if ($op === '!==') { $nn = $this->ssa->allocReg(); $chunks[] = '  ' . $nn . ' = xor i1 ' . $res . ", true\n"; $res = $nn; }
             $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
             $this->lastValue = $z; $this->lastValueType = 'i64';
@@ -4539,6 +4681,33 @@ trait EmitLlvmExpr
                     return \implode('', $chunks);
                 }
             }
+        }
+        // Any other object-ish operand against an object-ish one or a cell, under
+        // `==`/`!=` or an ordering: php compares objects STRUCTURALLY, and a
+        // raw pointer against a boxed word never even matched the same instance.
+        if (!$strictEq && $this->looseObjPair($c->left->type, $c->right->type)) {
+            // php evaluates `a > b` as `b < a` (and `>=` as `b <= a`), which is
+            // what keeps an UNCOMPARABLE pair (<=> answers 1 both ways) false
+            // under every ordering.
+            $swap = $op === '>' || $op === '>=';
+            $chunks[] = $swap
+                ? $this->looseObjCmpIr($r, $rt, $c->right->type, $l, $lt, $c->left->type, false)
+                : $this->looseObjCmpIr($l, $lt, $c->left->type, $r, $rt, $c->right->type, $isEq || $isNe);
+            $v = $this->lastValue;
+            $res = $this->ssa->allocReg();
+            if ($isEq) {
+                $res = $v;
+            } elseif ($isNe) {
+                $chunks[] = '  ' . $res . ' = xor i64 ' . $v . ", 1\n";
+            } else {
+                $pred = ($op === '<' || $op === '>') ? 'slt' : 'sle';
+                $pr = $this->ssa->allocReg();
+                $chunks[] = '  ' . $pr . ' = icmp ' . $pred . ' i64 ' . $v . ", 0\n";
+                $chunks[] = '  ' . $res . ' = zext i1 ' . $pr . " to i64\n";
+            }
+            $this->lastValue = $res;
+            $this->lastValueType = 'i64';
+            return \implode('', $chunks);
         }
         // Statically-typed operand pairs the RAW carrier compare gets wrong under
         // PHP's LOOSE `==`, routed through the tagged table instead:

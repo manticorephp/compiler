@@ -2522,16 +2522,6 @@ final class InferTypes implements Pass
         return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ;
     }
 
-    /** @param Node[] $stmts  Ends in a jump: control never falls off the end. */
-    private static function stmtsJump(array $stmts): bool
-    {
-        $c = \count($stmts);
-        if ($c === 0) { return false; }
-        $k = $stmts[$c - 1]->kind;
-        return $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE
-            || $k === Node::KIND_RETURN || $k === Node::KIND_THROW;
-    }
-
     /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */
     private static function stmtsDiverge(array $stmts): bool
     {

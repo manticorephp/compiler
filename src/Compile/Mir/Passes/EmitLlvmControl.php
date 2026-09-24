@@ -1561,7 +1561,12 @@ trait EmitLlvmControl
                         Type::KIND_BOOL => true, Type::KIND_ARRAY => true, Type::KIND_OBJ => true,
                     ];
                     $bothStr = $subjK === Type::KIND_STRING && $vk === Type::KIND_STRING;
-                    if ($useStr) {
+                    if ($this->looseObjPair($sw->subject->type, $arm->value->type)) {
+                        // An object subject or arm: php's `==` on objects is
+                        // structural, and a raw pointer never matched a boxed one.
+                        $out .= $this->looseObjCmpIr($subj, 'i64', $sw->subject->type, $v, 'i64', $arm->value->type, true);
+                        $out .= '  ' . $eq . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+                    } elseif ($useStr) {
                         $this->rt->needsStrcmp = true;
                         $eqFn = '@__mir_str_eq';
                         if ($bothStr) {
@@ -1662,6 +1667,13 @@ trait EmitLlvmControl
                             $out .= $this->boxToCell($c->type);
                             $out .= $this->coerceToI64();
                             $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $this->lastValue . "\n";
+                        } elseif ($this->isObjishType($c->type)) {
+                            // An object cond against a cell subject: the same
+                            // instance ({@see objCellSameIr}), never an unboxed int.
+                            $out .= $this->emitNode($c);
+                            $out .= $this->coerceToI64();
+                            $out .= $this->objCellSameIr($this->lastValue, $subj);
+                            $out .= '  ' . $eq . ' = or i1 ' . $this->lastValue . ", false\n";
                         } else {
                             // int/bool/null cond: unbox the subject's payload
                             // once, then `icmp eq` against the raw cond value.
@@ -1687,6 +1699,10 @@ trait EmitLlvmControl
                             $cp = $this->ssa->allocReg();
                             $out .= '  ' . $cp . ' = inttoptr i64 ' . $cv . " to ptr\n";
                             $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                        } elseif ($vk === Type::KIND_CELL && $this->isObjishType($m->subject->type)) {
+                            // An object subject against a cell cond: identity by payload.
+                            $out .= $this->objCellSameIr($subj, $cv);
+                            $out .= '  ' . $eq . ' = or i1 ' . $this->lastValue . ", false\n";
                         } else {
                             $out .= '  ' . $eq . ' = icmp eq i64 ' . $subj . ', ' . $cv . "\n";
                         }

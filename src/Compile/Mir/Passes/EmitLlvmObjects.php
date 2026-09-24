@@ -2441,9 +2441,13 @@ trait EmitLlvmObjects
                 $val = $this->lastValue;
                 $res = $raw;
                 $resTy = 'i64';
-            } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_CLOSURE) {
-                // rc-managed payload (string/object/closure) — retain the RAW ptr
+            } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_CLOSURE
+                || $vk === Type::KIND_UNION) {
+                // rc-managed payload (string/object/closure, and an object UNION,
+                // which is the same bare object pointer) — retain the RAW ptr
                 // before boxing (a tagged cell would mis-locate the rc header).
+                // A union fell to the scalar arm: boxed, never retained, and the
+                // holder's drop freed an object its source still owned.
                 $out .= $this->coerceToI64();
                 $raw = $this->lastValue;
                 $out .= $this->rcRetainByType($n->value, $raw, $propType, 4);
