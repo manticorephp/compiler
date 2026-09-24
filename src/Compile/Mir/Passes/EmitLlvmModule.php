@@ -2262,9 +2262,15 @@ trait EmitLlvmModule
         // a 0 header is misread as a double — so box it by its runtime repr.
         // A passthrough `return $x` of a cell param is typed CELL (handled
         // above), never reaches here; arrays/objects travel raw (below).
+        // An i64 carrier is probed rather than int-boxed: a bare-`array` param
+        // is UNKNOWN too, and the uniform ABI handed it in already TAGGED —
+        // `static fn ($o, array $v): array => $v` returned an int-boxed array
+        // cell (php-cs-fixer's option normalizers). The probe still int-boxes a
+        // raw int and leaves a tagged word alone.
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
-            $out .= $this->boxLastByRepr();
+            $out .= ($this->lastValueType === 'double' || $this->lastValueType === 'ptr')
+                ? $this->boxLastByRepr() : $this->boxUnknownShallowIr();
             return $this->finishReturn($out, $this->lastValue, $leave);
         }
         // The declared return is a CELL-element array but this arm still holds a
