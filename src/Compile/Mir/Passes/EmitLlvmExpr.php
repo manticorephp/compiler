@@ -744,6 +744,42 @@ trait EmitLlvmExpr
     }
 
     /**
+     * A cell reaching an `int` parameter or return: php's coercive typing, not
+     * a bare unbox. A STRING cell parses (`int $min` handed Finder's `'1'` depth
+     * target read the string's ADDRESS), a BOOL is 0/1, and every other word
+     * takes the plain unbox it always did — deliberately not {@see
+     * taggedToIntRuntime}, which reads an untagged word as a double, and a raw
+     * int still reaches cell slots ({@see \Compile\Mir\Passes\EmitLlvm::plausiblePtrIr}).
+     */
+    private function cellToIntArgRuntime(): string
+    {
+        $out  = "\ndefine i64 @__manticore_cell_to_int_arg(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  br i1 %istag, label %tagged, label %plain\n";
+        $out .= "tagged:\n";
+        $out .= "  %ts = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %ts, 15\n";
+        $out .= "  switch i64 %nib, label %plain [\n";
+        $out .= "    i64 2, label %asbool\n";
+        $out .= "    i64 4, label %asstr\n";
+        $out .= "  ]\n";
+        $out .= "asbool:\n";
+        $out .= "  %bb = and i64 %v, 1\n";
+        $out .= "  ret i64 %bb\n";
+        $out .= "asstr:\n";
+        $out .= "  %sp = and i64 %v, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= "  %sptr = inttoptr i64 %sp to ptr\n";
+        $out .= "  %sv = call i64 @__mir_str_to_int(ptr %sptr)\n";
+        $out .= "  ret i64 %sv\n";
+        $out .= "plain:\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
+        $out .= "  ret i64 %i\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
      * NaN-boxed cell → double (numeric context for float arithmetic / `/`).
      * int → sitofp, bool → 0/1, null → 0.0, string → strtod, float → its bits,
      * array → non-empty?1:0. Mirrors {@see taggedToIntRuntime} but yields a
@@ -4957,8 +4993,10 @@ trait EmitLlvmExpr
             return $out;
         }
         if ($pk === Type::KIND_INT) {
+            $this->rt->needsCellToIntArg = true;
+            $this->rt->needsStrtol = true;
             $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
+            $out = '  ' . $r . ' = call i64 @__manticore_cell_to_int_arg(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;

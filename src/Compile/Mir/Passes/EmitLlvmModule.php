@@ -715,6 +715,9 @@ trait EmitLlvmModule
         if ($this->rt->needsTaggedToInt) {
             $out .= $this->taggedToIntRuntime();
         }
+        if ($this->rt->needsCellToIntArg) {
+            $out .= $this->cellToIntArgRuntime();
+        }
         if ($this->rt->needsStrtol) {
             $out .= $this->strToIntRuntime();
         }
