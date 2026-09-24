@@ -710,6 +710,29 @@ trait EmitLlvmBuiltins
         $sel = $this->ssa->allocReg();
         $out .= '  ' . $sel . ' = select i1 ' . $isObj . ', i64 ' . $ob . ', i64 ' . $intB . "\n";
         $out .= '  store i64 ' . $sel . ', ptr ' . $slot . "\n";
+        // A closure env has a plain rc at -8 and CLOSURE_TAG_MAGIC at -32; it is
+        // boxed the way a closure literal is (tag 8). Left to the int arm, a raw
+        // env from `$a->bindTo(null)` became an INT cell and lost `instanceof
+        // Closure`. -32 is read only when -8 carried no allocator magic.
+        $cloChk = $this->ssa->allocLabel('bx.clochk');
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = lshr i64 ' . $tw . ", 48\n";
+        $anyMagic = $this->ssa->allocReg();
+        $out .= '  ' . $anyMagic . ' = icmp eq i64 ' . $hi . ', '
+              . (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC >> 48) . "\n";
+        $out .= '  br i1 ' . $anyMagic . ', label %' . $endL . ', label %' . $cloChk . "\n";
+        $out .= $cloChk . ":\n";
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $rp . ', i64 '
+              . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $cw = $this->ssa->allocReg();
+        $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+        $isClo = $this->ssa->allocReg();
+        $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cw . ', '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $cb = $this->ssa->allocReg();
+        $out .= '  ' . $cb . ' = select i1 ' . $isClo . ', i64 ' . $ob . ', i64 ' . $intB . "\n";
+        $out .= '  store i64 ' . $cb . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();

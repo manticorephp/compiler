@@ -625,6 +625,10 @@ trait InferCalls
         // callee type obj<__closure_N> → that fn's return type.
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];
+        } elseif ($ct->kind === Type::KIND_OBJ && $ct->class === 'Closure') {
+            // Narrowed by `instanceof Closure`: which closure is unknown, and the
+            // uniform ABI hands back a tagged cell.
+            $node->type = Type::cell();
         } elseif ($ct->kind === Type::KIND_CLOSURE) {
             // A `callable(int): string` states its return type, so the invoke can
             // be typed concretely — the value still ARRIVES as a tagged cell under
@@ -804,7 +808,7 @@ trait InferCalls
         // Closure methods on a closure receiver: `->bindTo()` yields a (rebound)
         // closure; `->call()` invokes it and returns a tagged cell (uniform ABI).
         $recvCls = $objType->class ?? '';
-        if ($objType->kind === Type::KIND_CLOSURE || \str_starts_with($recvCls, '__closure_')) {
+        if ($objType->kind === Type::KIND_CLOSURE || $recvCls === 'Closure' || \str_starts_with($recvCls, '__closure_')) {
             if ($node->method === 'bindTo') { $node->type = Type::closure(); return $node->type; }
             if ($node->method === 'call')   { $node->type = Type::cell();    return $node->type; }
         }
