@@ -497,7 +497,7 @@ trait LowerFns
             $params[] = new Param(name: $cn, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
         }
         foreach ($declParams as $p) {
-            $params[] = new Param(
+            $cp = new Param(
                 name: $p->name,
                 // Untyped closure param → cell (NOT unknown), matching a regular
                 // untyped param. The uniform closure ABI passes every arg as a
@@ -508,6 +508,11 @@ trait LowerFns
                 byRef: (bool)($p->byRef ?? false),
                 variadic: (bool)($p->variadic ?? false),
             );
+            // As for a named function: the entry masks a bare-`array` param's
+            // tag, which the uniform ABI always hands in — `array_reduce`'s
+            // `static function (array $carry, …)` ran COW on the tagged word.
+            $cp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $cp->type->isArray();
+            $params[] = $cp;
         }
         $retType = $this->lowerTypeHint($retHint);
         if ($isGenerator) {

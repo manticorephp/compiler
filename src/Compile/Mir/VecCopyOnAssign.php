@@ -74,7 +74,10 @@ final class VecCopyOnAssign
      */
     public static function paramCopiedOnEntry(FunctionDef $fn, Param $p, bool $isClosure): bool
     {
-        if ($isClosure || $fn->isGenerator) { return false; }
+        // A closure copies too: its array params are array-hinted like a named
+        // function's, and array_reduce's `$carry[$k] = …` otherwise promoted
+        // (and freed) the buffer the caller's slot still held.
+        if ($fn->isGenerator) { return false; }
         if ($p->byRef || !$p->arrayHinted) { return false; }
         return self::storesInto($fn->body, $p->name);
     }

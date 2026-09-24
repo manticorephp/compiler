@@ -666,6 +666,9 @@ trait InferScans
     private function scanParamElements(FunctionDef $fn): void
     {
         // Candidate params: array-ish with no known element type.
+        // Never a closure's: it is invoked through the erased closure ABI, so no
+        // call site can ever refute a body-usage guess about its elements.
+        if (\str_starts_with($fn->name, '__closure_')) { return; }
         $cand = [];                       // param name → index
         foreach ($fn->params as $idx => $p) {
             if ($p->variadic) { continue; }
@@ -719,6 +722,9 @@ trait InferScans
         $refined = [];                   // "fn#idx" → true (heuristic vec[scalar])
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
+            // A closure is reached through the erased invoke, never a Call this
+            // scan can read — its param has no observable call sites.
+            if (\str_starts_with($fn->name, '__closure_')) { continue; }
             $idx = 0;
             foreach ($fn->params as $p) {
                 // A prelude BY-REF array param must not be refined here — the
