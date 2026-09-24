@@ -2337,6 +2337,18 @@ trait EmitLlvmModule
             if ($v->type->kind === Type::KIND_CELL && $this->frame->returnType !== null) {
                 $out .= $this->unboxCellToType($this->frame->returnType);
             }
+            // …and an ERASED value into a STRING / ARRAY return, on the terms
+            // {@see unboxCellArg} gives the call-argument sink: those unboxes are
+            // the identity on a raw pointer, so the boxed and raw shapes share
+            // one path. `return $this->progress` off an unhinted property
+            // (`@var null|T::*` erases) handed the tagged word back as a string
+            // pointer, and the +1 below retained through the tag bits.
+            if ($v->type->kind === Type::KIND_UNKNOWN && $this->frame->returnType !== null
+                && ($this->frame->returnType->kind === Type::KIND_STRING
+                    || $this->frame->returnType->isArray())) {
+                $out .= $this->coerceToI64();
+                $out .= $this->unboxCellToType($this->frame->returnType);
+            }
             // A FLOAT value returned from an `: int` function is CONVERTED, not
             // reinterpreted. The i64 carrier below is a BITCAST (a float rides
             // its raw bits and the caller bitcasts back), so without an explicit
