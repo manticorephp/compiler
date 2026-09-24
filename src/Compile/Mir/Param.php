@@ -70,4 +70,19 @@ final class Param
      * it makes has to be MONOTONE or it is not a retraction at all.
      */
     public bool $elemGuessWithdrawn = false;
+
+    /**
+     * The ERASED type this param had before {@see Passes\InferScans::scanCallSiteArrayElems}
+     * refined its element from the call sites it could observe. A site whose
+     * argument was still erased counts as no evidence, so the refinement is a
+     * claim about the sites SEEN — and when that site later types to a different
+     * element the claim is refuted, and the param goes back to this type (for
+     * Monomorphize to clone per caller) instead of standing for TypeCheck to
+     * refuse: `array_reverse(rules())` next to `array_reverse(dirs())`.
+     */
+    public ?Type $siteRefinedFrom = null;
+
+    /** The call-site refinement above was withdrawn; never made again (the
+     *  same monotone rule as {@see $elemGuessWithdrawn}). */
+    public bool $siteRefineWithdrawn = false;
 }

@@ -848,6 +848,15 @@ trait InferScans
                         $p->elemGuessWithdrawn = true;
                         $this->rescanTouched[$fn->name] = true;
                         $changed = true;
+                    } elseif ($p->siteRefinedFrom !== null && !$p->siteRefineWithdrawn) {
+                        // Refuted by a site that was erased when the refinement
+                        // was made. Back to the declared erased type — which is
+                        // also what a prelude body started from, so no module's
+                        // copy of it is specialized from this one's sites.
+                        $p->type = $p->siteRefinedFrom;
+                        $p->siteRefineWithdrawn = true;
+                        $this->rescanTouched[$fn->name] = true;
+                        $changed = true;
                     }
                     continue;
                 }
@@ -863,6 +872,7 @@ trait InferScans
                 if (isset($refined[$key]) && !$observed[$key]->isArray()
                     && $observed[$key]->kind !== Type::KIND_CELL) { continue; }
                 $param = $fn->params[$idx - 1];
+                if ($param->siteRefineWithdrawn) { continue; }
                 $newT = isset($assocKey[$key])
                     ? Type::assoc($assocKey[$key], $observed[$key])
                     : Type::vec($observed[$key]);
@@ -870,6 +880,9 @@ trait InferScans
                 // not a change: marking it one re-inferred it and every caller,
                 // transitively, in every InferTypes run for nothing.
                 if ($param->type->exactString() === $newT->exactString()) { continue; }
+                if (!isset($refined[$key]) && $param->siteRefinedFrom === null) {
+                    $param->siteRefinedFrom = $param->type;
+                }
                 $param->type = $newT;
                 $this->rescanTouched[$fn->name] = true;
                 $changed = true;
