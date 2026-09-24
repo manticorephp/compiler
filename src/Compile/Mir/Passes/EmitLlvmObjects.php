@@ -5152,6 +5152,10 @@ trait EmitLlvmObjects
                         && $this->isClosureValueType($t->type)) {
                         $flavor = 'closure';
                     }
+                    // A MIXED slot releases by its representation flag.
+                    if (isset($this->frame->mixedFlagSlots[$name])) {
+                        $flavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]);
+                    }
                     if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
                         $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
                     }

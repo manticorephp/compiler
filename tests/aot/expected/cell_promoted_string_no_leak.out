@@ -1,0 +1,12 @@
+append: sum=90290280 growth ok
+append taken: sum=90290280 growth ok
+append null: sum=0 growth ok
+assign: sum=90310780 growth ok
+fall-through: sum=135445670 growth ok
+int|string: sum=90303946 growth ok
+?obj: sum=90300530 growth ok
+?array: sum=90341530 growth ok
+loop: sum=90310780 growth ok
+loop alias: sum=180621560 growth ok
+cba abc []
+3 4 3 4

@@ -92,6 +92,28 @@ final class InsertMemoryOps implements Pass
      *  about this has no single correct release flavor and is blocked. */
     private array $rcObjSlotBoxed = [];
 
+    /** @var array<string, Type> owned rc local → the slot type of its first
+     *  owned RAW store (the raw half of a {@see $rcObjMixed} name). */
+    private array $rcObjRawType = [];
+
+    /** @var array<string, bool> owned rc local → it took an owned store into a
+     *  CELL slot. */
+    private array $rcObjCellSeen = [];
+
+    /** @var array<string, bool> owned rc locals whose slot is a raw string /
+     *  object on some paths and a cell on others — the flow-sensitive cell
+     *  promotion at an if/else merge ({@see InferTypes::planMergeShadow}). No
+     *  one static flavor releases both, so the release reads a per-slot
+     *  "holds a cell" flag the emitter keeps beside the slot
+     *  ({@see EmitLlvmMemory::mixedReleaseIr}). */
+    private array $rcObjMixed = [];
+
+    /** @var array<string, bool> names a foreach binds (its own ownership path). */
+    private array $rcObjForeachVar = [];
+
+    /** @var array<string, bool> names that took a raw SCALAR store. */
+    private array $rcObjRawScalar = [];
+
     /** @var array<string, bool> owned array names EVERY owned store of which is
      *  a `__mir_array_copy` — so the name's buffer is this frame's own and
      *  releasing it cannot free anything another owner still holds. */
@@ -162,6 +184,11 @@ final class InsertMemoryOps implements Pass
         $this->rcObjNeutral = [];
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
+        $this->rcObjRawType = [];
+        $this->rcObjCellSeen = [];
+        $this->rcObjMixed = [];
+        $this->rcObjForeachVar = [];
+        $this->rcObjRawScalar = [];
         $this->rcObjErasedProp = [];
         $this->rcObjCopyOnly = [];
         $this->blockReason = [];
@@ -193,6 +220,7 @@ final class InsertMemoryOps implements Pass
         // the blanket param block below ({@see $storeBlocked}); it never reads
         // either map.
         $this->scanStores($fn->body);
+        $this->settleMixedSlots($fn);
         $storeBlocked = $this->rcObjBlocked;
         foreach ($fn->params as $p) {
             $this->blocked[$p->name] = true;
@@ -347,6 +375,10 @@ final class InsertMemoryOps implements Pass
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
             if ($t !== null && $t->kind === Type::KIND_OBJ) { continue; }
+            // …and a CELL: its drop dispatches on the tag the slot carries, so a
+            // neutral store (a boxed scalar, null, an immortal literal) leaves
+            // it nothing to over-release.
+            if ($t !== null && $t->kind === Type::KIND_CELL) { continue; }
             // …and an ARRAY every owned store of which is a COPY. The SIGBUS this
             // block was written for is a SHARED buffer (`$conds = null; … $conds
             // = [];`, whose buffer a live MatchArm_ still held); a copy is the
@@ -393,6 +425,7 @@ final class InsertMemoryOps implements Pass
                 : ($type->isVec() ? 'vec'
                 : ($type->isAssoc() ? 'assoc'
                 : ($this->isClosureType($type) ? 'closure' : 'obj'))));
+            if (isset($this->rcObjMixed[$name])) { $flavor = 'mix' . $flavor; }
             $target = new LoadLocal($name, $type);
             $rcReleases[] = new MemoryOp_('rc_release', $flavor, $target, Type::void());
         }
@@ -429,6 +462,7 @@ final class InsertMemoryOps implements Pass
             $this->ownTrace('RCOBJ ' . $onm
                 . ' type=' . ($ot === null ? '?' : $ot->toString())
                 . ' flavor=' . ($ot === null ? '?' : $this->rcSlotFlavor($ot))
+                . (isset($this->rcObjMixed[$onm]) ? ' MIXED' : '')
                 . (isset($this->rcObjBlocked[$onm]) ? ' BLOCKED' : ' released'));
         }
         foreach ($this->ownedFlavor as $onm => $ofl) {
@@ -965,7 +999,7 @@ final class InsertMemoryOps implements Pass
      * SIGSEGV'd at scope exit on `0xfff7…`, i.e. the tag, not a heap pointer.
      * One owner for the slot's representation, or the release frees a tag.
      */
-    private function slotStoredType(StoreLocal $sl): Type
+    public static function slotStoredType(StoreLocal $sl): Type
     {
         $st = $sl->type->kind;
         $vt = $sl->value->type->kind;
@@ -1122,6 +1156,79 @@ final class InsertMemoryOps implements Pass
             || $value->type->kind === Type::KIND_NULL;
     }
 
+    private function isNonRcScalar(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
+    /**
+     * Decide every name that took owned stores into BOTH a raw slot and a cell
+     * slot. That is InferTypes' flow-sensitive promotion: the slot is raw up to
+     * an if/else merge and a cell after it, where a self-boxing `$x = box($x)`
+     * converts it in place. It used to be blocked outright — a leak of the whole
+     * value on every call (`$d = ''; $d .= $p; if ($z) { $q = $n ? null : f($d);
+     * …; $d = $q; } return $d;`, ~2.5x the string per call).
+     *
+     * A raw STRING or OBJECT is boxed by tagging the same pointer, so the box-back
+     * moves the one reference and the slot owns exactly one value throughout; an
+     * ARRAY box-back may rebuild the buffer as a cell array that co-owns every
+     * element, and the emitter then gives the raw predecessor back on the spot.
+     * The release only has to know which representation the slot holds when it
+     * runs: the emitter keeps a flag beside the slot, written by every store
+     * ({@see slotStoredType}) — "a raw rc pointer" or not (a cell, a raw scalar)
+     * — so the answer is exact at every return, overwrite and scope exit. A
+     * closure / struct / enum / Generator has no tag a cell drop can trust, a
+     * param arrives holding the caller's value, a foreach binding has its own
+     * ownership path and a generator's locals live in its frame: all of those
+     * stay blocked (a leak, never a free of a tag).
+     */
+    private function settleMixedSlots(FunctionDef $fn): void
+    {
+        $params = [];
+        foreach ($fn->params as $p) { $params[$p->name] = true; }
+        foreach ($this->rcObjRawType as $name => $rawT) {
+            if (!isset($this->rcObjCellSeen[$name])) { continue; }
+            if (isset($this->rcObjBlocked[$name])) { continue; }
+            if (!$fn->isGenerator && !isset($params[$name])
+                && !isset($this->rcObjForeachVar[$name]) && $this->mixableRaw($rawT)) {
+                $this->rcObjMixed[$name] = true;
+                $this->rcObjType[$name] = $rawT;
+                continue;
+            }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "repr", $rawT);
+        }
+        foreach ($this->rcObjRawScalar as $name => $ignored) {
+            if (isset($this->rcObjMixed[$name])) { continue; }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "notowned", $this->rcObjType[$name] ?? null);
+        }
+        // Any other name whose slot type disagrees with a cell store it took
+        // (registered by a path that recorded no raw type) keeps the block.
+        foreach ($this->rcObjCellSeen as $name => $ignored) {
+            if (isset($this->rcObjMixed[$name])) { continue; }
+            $t = $this->rcObjType[$name] ?? null;
+            if ($t === null || $t->kind === Type::KIND_CELL) { continue; }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "repr", $t);
+        }
+    }
+
+    /** A raw slot type a cell can hold and a tagged drop can release. An array
+     *  box-back may REBUILD the buffer; the emitter then releases the raw
+     *  predecessor itself ({@see EmitLlvmLocals::emitStoreLocal}). */
+    private function mixableRaw(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_STRING) { return true; }
+        if ($t->kind === Type::KIND_ARRAY) { return true; }
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        if ($cls === '' || $cls === 'Generator') { return false; }
+        return $this->objClassIsRc($cls);
+    }
+
     /** {@see CondOwn} — the shared half of the contract, plus this pass's own
      *  rc-eligibility guard on the result type. */
     private function isOwnedCond(Node $value): bool
@@ -1213,10 +1320,18 @@ final class InsertMemoryOps implements Pass
                     $this->rcObjSlotBoxed[$fe->valueVar] = $et->kind === Type::KIND_CELL;
                     $this->rcObjPlainOwner[$fe->valueVar] = true;
                 }
+                // The binding is a store of the element's repr: it takes part in
+                // the raw-vs-cell decision {@see settleMixedSlots} makes.
+                if ($et !== null && $et->kind === Type::KIND_CELL) {
+                    $this->rcObjCellSeen[$fe->valueVar] = true;
+                } elseif ($et !== null && !isset($this->rcObjRawType[$fe->valueVar])) {
+                    $this->rcObjRawType[$fe->valueVar] = $et;
+                }
             } else {
                 $this->rcObjBlocked[$fe->valueVar] = true;
                 $this->noteBlock($fe->valueVar, "foreach", null);
             }
+            $this->rcObjForeachVar[$fe->valueVar] = true;
             // `blocked` is the ARENA/alloc-flavor set, not the rc one: the loop
             // var is never an allocation of this frame either way.
             $this->blocked[$fe->valueVar] = true;
@@ -1235,7 +1350,7 @@ final class InsertMemoryOps implements Pass
             // double-free / over-release a borrow); an owned-obj store
             // (a `new` or an obj-returning call — both yield rc=1)
             // registers it.
-            $slotType = $this->slotStoredType($sl);
+            $slotType = self::slotStoredType($sl);
             $boxedSlot = $slotType->kind === Type::KIND_CELL;
             // An ERASED array-property read carries KIND_UNKNOWN, which has no rc
             // flavor at all — so even once it is owned (below) the release ladder
@@ -1268,6 +1383,17 @@ final class InsertMemoryOps implements Pass
             // …and a STATIC vec read, owned by the COPY the general path makes
             // ({@see isOwnedObj}): the box-back arm returns before that copy
             // too, boxing the static's own buffer by pointer.
+            // The merge box-back `$x = box($x)` converts the slot IN PLACE: the
+            // one reference it held moves into the cell (the emitter gives back
+            // a rebuilt array's raw predecessor itself). It neither owns nor
+            // borrows — only the slot's representation changes, which is what
+            // {@see settleMixedSlots} decides on.
+            if ($boxedSlot && $value->kind === Node::KIND_LOAD_LOCAL
+                && $value->name === $name && $value->type->kind !== Type::KIND_CELL) {
+                $this->rcObjCellSeen[$name] = true;
+                $this->blocked[$name] = true;
+                return;
+            }
             $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
                 || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS)
                 || ($value->kind === Node::KIND_STATIC_PROP && $value->type->isVec());
@@ -1292,10 +1418,15 @@ final class InsertMemoryOps implements Pass
                 // no single release flavor that is right for both — the scope-exit
                 // release reads the slot, not the producer. Block: a leak, never a
                 // free of a tag.
-                if (isset($this->rcObjSlotBoxed[$name])
-                    && $this->rcObjSlotBoxed[$name] !== $boxedSlot) {
+                // …unless the raw side is one string / object flavor: that pair
+                // is decided after the walk ({@see settleMixedSlots}).
+                if ($boxedSlot) {
+                    $this->rcObjCellSeen[$name] = true;
+                } elseif (!isset($this->rcObjRawType[$name])) {
+                    $this->rcObjRawType[$name] = $slotType;
+                } elseif ($this->rcSlotFlavor($this->rcObjRawType[$name]) !== $this->rcSlotFlavor($slotType)) {
                     $this->rcObjBlocked[$name] = true;
-                    $this->noteBlock($name, "repr", $slotType);
+                    $this->noteBlock($name, "flavor", $slotType);
                 }
                 $this->rcObjSlotBoxed[$name] = $boxedSlot;
                 // …and two stores that disagree about the slot's rc FLAVOR are
@@ -1319,7 +1450,8 @@ final class InsertMemoryOps implements Pass
                 $prevFlavor = isset($this->rcObjType[$name])
                     ? $this->rcSlotFlavor($this->rcObjType[$name]) : '';
                 $nowFlavor = $this->rcSlotFlavor($slotType);
-                if ($prevFlavor !== '' && $nowFlavor !== '' && $prevFlavor !== $nowFlavor) {
+                if ($prevFlavor !== '' && $nowFlavor !== '' && $prevFlavor !== $nowFlavor
+                    && $prevFlavor !== 'cell' && $nowFlavor !== 'cell') {
                     $this->rcObjBlocked[$name] = true;
                     $this->noteBlock($name, "flavor", $slotType);
                 }
@@ -1348,10 +1480,19 @@ final class InsertMemoryOps implements Pass
                 $isCopy = $ownedCopy || $this->storeMakesArrayCopy($sl);
                 if (!isset($this->rcObjCopyOnly[$name])) { $this->rcObjCopyOnly[$name] = $isCopy; }
                 elseif (!$isCopy) { $this->rcObjCopyOnly[$name] = false; }
-            } elseif ($this->isRcNeutralStore($value)) {
+            } elseif ($this->isRcNeutralStore($value)
+                || ($boxedSlot && $this->isNonRcScalar($value->type))) {
+                // A scalar boxed into a CELL slot is a value, not a reference:
+                // `$x = 0;` ahead of a loop that re-kinds `$x` to a string
+                // blocked the name, and every string the loop stored leaked.
                 // Decided after the walk — a neutral store only survives when
                 // EVERY owned store to the name is a conditional.
                 $this->rcObjNeutral[$name] = true;
+            } elseif ($this->isNonRcScalar($value->type) && $this->isNonRcScalar($slotType)) {
+                // A RAW scalar owns nothing either, but only a MIXED slot can
+                // tell it from a raw pointer at release time (its flag says "not
+                // a raw rc value"); anywhere else it keeps the block.
+                $this->rcObjRawScalar[$name] = true;
             } else {
                 $this->rcObjBlocked[$name] = true;
                 $this->noteBlock($name, "notowned", $value->type);

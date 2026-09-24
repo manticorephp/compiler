@@ -81,6 +81,11 @@ final class MemoryAbi
      */
     public const CELL_NULL = -3659174697238528;
 
+    /** `0xFFF0000000000000`: an i64 word unsigned-GREATER than this carries a
+     *  cell tag; anything at or below it is a raw double (or, in a raw slot, a
+     *  pointer — every userspace address fits the 48 payload bits). */
+    public const CELL_TAGGED_MIN = -4503599627370496;
+
     /**
      * Sentinel at a `#[Struct]` instance's `ptr-8`. A struct is a value type
      * with NO header at all — no descriptor at +0, no rc at +8 — yet it is

@@ -856,7 +856,7 @@ trait EmitLlvmControl
             $out .= $this->emitNode($t->then);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $thenArm);
-                $out .= $this->boxToCell($t->then->type);
+                $out .= $this->boxToCell($t->then->type, $t->then);
             } else {
                 $out .= $this->coerceToI64();
             }
@@ -877,7 +877,7 @@ trait EmitLlvmControl
         $out .= $this->emitNode($t->else_);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($n, $t->else_);
-            $out .= $this->boxToCell($t->else_->type);
+            $out .= $this->boxToCell($t->else_->type, $t->else_);
         } else {
             $out .= $this->coerceToI64();
         }
@@ -1729,7 +1729,7 @@ trait EmitLlvmControl
             $out .= $this->emitNode($arm->body);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $arm->body);
-                $out .= $this->boxToCell($arm->body->type);
+                $out .= $this->boxToCell($arm->body->type, $arm->body);
             } else {
                 $out .= $this->coerceToI64();
             }

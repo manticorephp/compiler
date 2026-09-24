@@ -2486,7 +2486,7 @@ trait EmitLlvmExpr
         $out .= $this->emitNode($nc->right);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($n, $nc->right);
-            $out .= $this->boxToCell($nc->right->type);
+            $out .= $this->boxToCell($nc->right->type, $nc->right);
         } else {
             $out .= $this->coerceToI64();
         }

@@ -80,4 +80,11 @@ final class FunctionEmitFrame
      *  {@see Passes\EmitLlvmCalls::emitDynClosurePaddedCall}) may shape it.
      *  Appended at the END — no mid-struct insertion. */
     public bool $isPrelude = false;
+    /** @var array<string, string> a MIXED rc local (raw on some paths, a cell on
+     *  others — {@see Passes\InsertMemoryOps::settleMixedSlots}) → the alloca of
+     *  its "slot holds a cell" flag. Appended at the END. */
+    public array $mixedFlagSlots = [];
+    /** @var array<string, string> the same flags keyed by the local's SLOT, for
+     *  the release helpers that only see the slot. Appended at the END. */
+    public array $mixedFlagBySlot = [];
 }

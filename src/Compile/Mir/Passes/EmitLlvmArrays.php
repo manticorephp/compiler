@@ -1295,6 +1295,9 @@ trait EmitLlvmArrays
         if ($base->kind !== Node::KIND_LOAD_LOCAL) { return $base->type; }
         $mo = $this->frame->rcObjLocals[$base->name] ?? null;
         if ($mo === null) { return $base->type; }
+        // A MIXED slot's recorded type is only its RAW half; the load's flow
+        // type says which half this store sees.
+        if (isset($this->frame->mixedFlagSlots[$base->name])) { return $base->type; }
         $t = $mo->target;
         if ($t === null) { return $base->type; }
         return $t->type;
