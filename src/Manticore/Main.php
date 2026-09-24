@@ -4566,6 +4566,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $memMode = null;
         \Manticore\Allocator::release('after-memory-mode');
         $statT = \Compile\Stats::now();
+        $module = (new \Compile\Mir\Passes\SpillFreshBases())->run($module);
+        \Compile\Stats::step('SpillFreshBases', $statT, -1, -1);
+        $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
         $module = $memOps->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
