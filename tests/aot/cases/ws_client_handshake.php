@@ -4,7 +4,9 @@
 // unoffered subprotocol or extension are HandshakeExceptions; a masked server
 // frame is a protocol error (1002 sent, closeCode 1006 — no Close came back);
 // a frame in the same segment as the 101 is kept; bad schemes, a closed port
-// and a user header that overrides the handshake are refused.
+// a user header that overrides the handshake or smuggles CR/LF/NUL are
+// refused; a non-HTTP status line, an oversized head and a head that trickles
+// in past connectTimeout (a TOTAL deadline, not per read) fail the handshake.
 
 use function Async\async;
 use function Async\spawn;
@@ -51,9 +53,19 @@ function peer(\Resource $l, int $i): void
         fwrite($c, $ok . "Sec-WebSocket-Protocol: other\r\n\r\n");
     } elseif ($i === 4) {
         fwrite($c, $ok . "Sec-WebSocket-Extensions: x-foo\r\n\r\n");
+    } elseif ($i === 7) {
+        fwrite($c, "SSH-2.0-OpenSSH\r\n\r\n");
+    } elseif ($i === 8) {
+        fwrite($c, "HTTP/1.1 101 Switching Protocols\r\nX-Pad: " . str_repeat('p', 20000) . "\r\n\r\n");
+    } elseif ($i === 9) {
+        fwrite($c, 'HTTP/1.1 101');
+        for ($k = 0; $k < 6; $k++) {
+            \Async\delay(0.1);
+            if (fwrite($c, ' ') !== 1) { break; }
+        }
     } elseif ($i === 5) {
         fwrite($c, $ok . "\r\n" . WS\encodeFrame(1, 'masked', true, false, "\x01\x02\x03\x04"));
-    } else {
+    } elseif ($i === 6) {
         fwrite($c, $ok . "\r\n" . WS\encodeFrame(1, 'hello', true, false, ''));
         fread($c, 4096);
         fwrite($c, "\x88\x02\x03\xe8");
@@ -85,7 +97,7 @@ function attempt(string $url, ?WS\Options $o = null, array<string, string> $head
 
 async(function () use ($l, $port) {
     $peer = spawn(function () use ($l) {
-        for ($i = 1; $i <= 6; $i++) {
+        for ($i = 1; $i <= 9; $i++) {
             peer($l, $i);
         }
     });
@@ -96,6 +108,12 @@ async(function () use ($l, $port) {
     attempt($url);
     attempt($url);
     attempt($url);
+    attempt($url);
+    attempt($url);
+    $t0 = microtime(true);
+    attempt($url, (new WS\Options())->connectTimeout(0.3));
+    $dt = microtime(true) - $t0;
+    echo 'total deadline: ', $dt > 0.25 && $dt < 0.5 ? 'ok' : 'took ' . round($dt, 2), "\n";
     $peer->await();
     fclose($l);
 
@@ -105,4 +123,11 @@ async(function () use ($l, $port) {
     fclose($dead);
     attempt('ws://' . $dn . '/');
     attempt($url, null, ['Sec-WebSocket-Key' => 'x']);
+    attempt($url, null, ['X-A' => "x\r\nSec-WebSocket-Protocol: evil"]);
+    attempt($url, null, ['X-A' => "x\r\n\r\nGET /other HTTP/1.1"]);
+    attempt($url, null, ["X-A\r\nX-B" => 'x']);
+    attempt($url, null, ['X-A' => "a\0b"]);
+    attempt($url, null, ['X-A: b' => 'x']);
+    attempt($url, null, ['' => 'x']);
+    attempt('ws:/x');
 });

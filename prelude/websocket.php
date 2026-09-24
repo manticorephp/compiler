@@ -241,9 +241,9 @@ final class Connection implements \IteratorAggregate
     private ?\Async\Mutex $wlock = null;
     private ?\Async\TaskGroup $scope = null;
     private ?\Async\Task $deadline = null;
-    /** spl_object_id of the task that built this connection (the server session, the client's connect() caller); 0 outside async. */
+    /** Task::$id of the task that built this connection (the server session, the client's connect() caller); 0 outside async. */
     private int $owner = 0;
-    /** spl_object_id of the task that last ran receive(); 0 until one has. */
+    /** Task::$id of the task that last ran receive(); 0 until one has. */
     private int $lastReader = 0;
     private bool $reading = false;
     private bool $sentClose = false;
@@ -269,7 +269,7 @@ final class Connection implements \IteratorAggregate
         $scope = \Async\Context::currentScope();
         if ($scope !== null) {
             $this->scope = $scope;
-            $this->owner = \spl_object_id(\Async\Scheduler::instance()->current());
+            $this->owner = \Async\Scheduler::instance()->current()->id;
             $this->wlock = new \Async\Mutex();
         }
     }
@@ -301,7 +301,7 @@ final class Connection implements \IteratorAggregate
         }
         $this->reading = true;
         if ($this->scope !== null) {
-            $this->lastReader = \spl_object_id(\Async\Scheduler::instance()->current());
+            $this->lastReader = \Async\Scheduler::instance()->current()->id;
         }
         try {
             return $this->readMessage();
@@ -367,7 +367,7 @@ final class Connection implements \IteratorAggregate
         if ($this->scope === null) {
             return true;
         }
-        $me = \spl_object_id(\Async\Scheduler::instance()->current());
+        $me = \Async\Scheduler::instance()->current()->id;
         return $me === ($this->lastReader !== 0 ? $this->lastReader : $this->owner);
     }
 
@@ -759,6 +759,7 @@ function upgrade(\Http\Request $req, callable $session, ?Options $o = null): \Ht
 /**
  * Open a WebSocket to ws:// or wss://. Throws HandshakeException when the
  * server does not complete the upgrade. Redirects are not followed.
+ * connectTimeout bounds the connect and the handshake together.
  *
  * @param array<string,string> $headers extra request headers (Origin, Authorization, …)
  */
@@ -771,19 +772,21 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
         throw new HandshakeException('WebSocket handshake failed: unsupported scheme "' . $scheme . '"');
     }
     $host = isset($u['host']) ? (string)$u['host'] : '';
+    if ($host === '') {
+        throw new HandshakeException('WebSocket handshake failed: no host in "' . $url . '"');
+    }
     $tls = $scheme === 'wss';
     $port = isset($u['port']) ? (int)$u['port'] : ($tls ? 443 : 80);
     $path = (isset($u['path']) && $u['path'] !== '' ? (string)$u['path'] : '/')
         . (isset($u['query']) ? '?' . (string)$u['query'] : '');
     foreach ($headers as $name => $v) {
-        $ln = \strtolower($name);
-        if ($ln === 'host' || $ln === 'upgrade' || $ln === 'connection' || \strncmp($ln, 'sec-websocket-', 14) === 0) {
-            throw new \ValueError('Http\\WebSocket\\connect(): Argument #3 ($headers) must not set ' . $name);
-        }
+        checkHeader((string)$name, $v);
     }
+    $deadline = \microtime(true) + $o->connectTimeout;
     $ctx = null;
     if ($tls) {
-        $ctx = \stream_context_create(['ssl' => $o->sslContext + ['peer_name' => $host, 'SNI_enabled' => true]]);
+        $peer = \strlen($host) > 1 && $host[0] === '[' ? \substr($host, 1, \strlen($host) - 2) : $host;
+        $ctx = \stream_context_create(['ssl' => $o->sslContext + ['peer_name' => $peer, 'SNI_enabled' => true]]);
     }
     $errno = 0;
     $errstr = '';
@@ -792,11 +795,46 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
     if ($sock === false) {
         throw new HandshakeException('WebSocket connect to ' . $url . ' failed: ' . $errstr);
     }
+    try {
+        $hostHdr = $host . (($tls && $port === 443) || (!$tls && $port === 80) ? '' : ':' . $port);
+        return handshake($sock, $o, $path, $hostHdr, $headers, $deadline, $host . ':' . $port);
+    } catch (\Throwable $e) {
+        \fclose($sock);
+        throw $e;
+    }
+}
+
+/** A user header for connect(): no CR/LF/NUL, a non-empty name without ':', never a handshake header. */
+function checkHeader(string $name, string $v): void
+{
+    $arg = 'Http\\WebSocket\\connect(): Argument #3 ($headers) ';
+    if ($name === '') {
+        throw new \ValueError($arg . 'must not contain an empty header name');
+    }
+    if (\strpbrk($name . $v, "\r\n\0") !== false) {
+        throw new \ValueError($arg . 'must not contain CR, LF or NUL');
+    }
+    if (\strpos($name, ':') !== false) {
+        throw new \ValueError($arg . 'must not contain ":" in a header name');
+    }
+    $ln = \strtolower($name);
+    if ($ln === 'host' || $ln === 'upgrade' || $ln === 'connection' || \strncmp($ln, 'sec-websocket-', 14) === 0) {
+        throw new \ValueError($arg . 'must not set ' . $name);
+    }
+}
+
+/**
+ * The client half of the upgrade over an open socket. Throws on any failure;
+ * the caller owns (and closes) the socket until a Connection is returned.
+ *
+ * @param array<string,string> $headers
+ */
+function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, array<string, string> $headers, float $deadline, string $remote): Connection
+{
     if (\Async\Context::currentScope() !== null) {
         \stream_set_blocking($sock, false);
     }
     $key = \base64_encode(\random_bytes(16));
-    $hostHdr = $host . (($tls && $port === 443) || (!$tls && $port === 80) ? '' : ':' . $port);
     $req = 'GET ' . $path . " HTTP/1.1\r\nHost: " . $hostHdr
         . "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " . $key
         . "\r\nSec-WebSocket-Version: 13\r\n";
@@ -806,29 +844,41 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
     foreach ($headers as $name => $v) {
         $req .= $name . ': ' . $v . "\r\n";
     }
-    if (\fwrite($sock, $req . "\r\n") !== \strlen($req) + 2) {
-        \fclose($sock);
+    $req .= "\r\n";
+    if (\fwrite($sock, $req) !== \strlen($req)) {
         throw new HandshakeException('WebSocket handshake failed: could not send the request');
     }
 
     $buf = new \Buffer\ByteBuffer();
-    setTimeout($sock, $o->connectTimeout);
-    while (($end = $buf->indexOf("\r\n\r\n")) < 0) {
-        if ($buf->length() > 16384) {
-            \fclose($sock);
+    while (true) {
+        $end = $buf->indexOf("\r\n\r\n");
+        if ($end > 16384 || ($end < 0 && $buf->length() > 16388)) {
             throw new HandshakeException('WebSocket handshake failed: response head too large');
         }
+        if ($end >= 0) {
+            break;
+        }
+        $left = $deadline - \microtime(true);
+        if ($left <= 0.0) {
+            throw new HandshakeException('WebSocket handshake failed: timed out waiting for the response');
+        }
+        setTimeout($sock, $left);
         $chunk = \fread($sock, 8192);
         if ($chunk === '' || $chunk === false) {
-            $why = timedOut($sock) ? 'timed out waiting for the response' : 'connection closed before the response';
-            \fclose($sock);
-            throw new HandshakeException('WebSocket handshake failed: ' . $why);
+            if (timedOut($sock)) {
+                throw new HandshakeException('WebSocket handshake failed: timed out waiting for the response');
+            }
+            throw new HandshakeException('WebSocket handshake failed: connection closed before the response');
         }
         $buf->append($chunk);
     }
     $lines = \Http\splitHead($buf->read($end));
     $buf->skip(4);
-    $status = \count($lines) > 0 ? \explode(' ', $lines[0], 3) : [];
+    $first = \count($lines) > 0 ? $lines[0] : '';
+    if (\strncmp($first, 'HTTP/1.', 7) !== 0) {
+        throw new HandshakeException('WebSocket handshake failed: not an HTTP/1.x response');
+    }
+    $status = \explode(' ', $first, 3);
     $code = \count($status) >= 2 ? (int)$status[1] : 0;
     $rest = [];
     for ($i = 1; $i < \count($lines); $i++) {
@@ -838,7 +888,7 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
     $proto = $h->get('Sec-WebSocket-Protocol');
     $fail = '';
     if ($code !== 101) {
-        $fail = 'HTTP ' . $code;
+        $fail = 'HTTP ' . $code . (\count($status) >= 3 && $status[2] !== '' ? ' ' . $status[2] : '');
     } elseif (!hasToken($h->get('Upgrade'), 'websocket') || !hasToken($h->get('Connection'), 'upgrade')) {
         $fail = 'missing Upgrade/Connection';
     } elseif ($h->get('Sec-WebSocket-Accept') !== acceptKey($key)) {
@@ -849,10 +899,9 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
         $fail = 'server chose an unoffered extension "' . $h->get('Sec-WebSocket-Extensions') . '"';
     }
     if ($fail !== '') {
-        \fclose($sock);
         throw new HandshakeException('WebSocket handshake failed: ' . $fail);
     }
-    return new Connection($sock, $buf, true, $o, $proto, null, $host . ':' . $port);
+    return new Connection($sock, $buf, true, $o, $proto, null, $remote);
 }
 
 }

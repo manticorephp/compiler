@@ -480,11 +480,18 @@ namespace Async {
          * not on a scheduler-global stack is what makes nesting sound under
          * interleaving: a fiber can only ever read its OWN open scope.
          */
+        /** Unique for the life of the process — never reused, unlike an object id. */
+        public int $id = 0;
+        private static int $lastId = 0;
+
         public function __construct(
             public \Fiber $fiber,
             public TaskGroup $owner,
             public TaskGroup $scope,
-        ) {}
+        ) {
+            self::$lastId = self::$lastId + 1;
+            $this->id = self::$lastId;
+        }
 
         public function isDone(): bool { return $this->state !== self::PENDING; }
 
