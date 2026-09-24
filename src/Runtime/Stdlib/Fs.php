@@ -186,9 +186,34 @@ function readlink(string $path): string|false
     return $s;
 }
 
+/**
+ * The working directory, fetched once and kept until {@see chdir} moves it —
+ * php's own "virtual cwd". libc answers a RELATIVE realpath(3) by calling
+ * getcwd(3), and Darwin's getcwd walks up the tree READING every parent
+ * directory to recover the names: from a working directory under a busy
+ * /private/tmp that was ~3.5 ms a call, 14 s of the compiler's parse over
+ * 4 108 files. Pass `$reset` to drop the cached value.
+ */
+function __mc_cwd(bool $reset = false): string
+{
+    static $cwd = '';
+    if ($reset) { $cwd = ''; return ''; }
+    if ($cwd === '') {
+        $c = \getcwd();
+        $cwd = $c === false ? '' : $c;
+    }
+    return $cwd;
+}
+
 /** Canonical absolute path with symlinks resolved, or false when it does not exist. */
 function realpath(string $path): string|false
 {
+    // Absolute before libc sees it, so realpath(3) never asks getcwd(3)
+    // ({@see __mc_cwd}). php resolves '' to the working directory.
+    if ($path === '' || $path[0] !== '/') {
+        $cwd = \__mc_cwd();
+        if ($cwd !== '') { $path = $path === '' ? $cwd : $cwd . '/' . $path; }
+    }
     // POSIX requires the buffer to hold PATH_MAX bytes when it is not NULL.
     $buf = \Runtime\Libc\calloc(4097, 1);
     if ($buf === null) {
@@ -458,7 +483,9 @@ function fnmatch(string $pattern, string $filename, int $flags = 0): bool
 /** Change the current working directory. Returns true on success. */
 function chdir(string $directory): bool
 {
-    return \Runtime\Libc\sys_chdir($directory) === 0;
+    if (\Runtime\Libc\sys_chdir($directory) !== 0) { return false; }
+    \__mc_cwd(true);
+    return true;
 }
 
 // glob() is implemented HERE rather than over libc glob(3), for the same reason
