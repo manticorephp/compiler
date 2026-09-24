@@ -5389,7 +5389,16 @@ final class LowerFromAst implements Pass
      */
     private function lowerInstanceof(\Parser\Ast\InstanceofExpr $e): Node
     {
-        return new Instanceof_($this->lowerExpr($e->operand), \ltrim($e->class, '\\'));
+        // `instanceof self|static|parent` names a class the way `new self` does.
+        // Left literal, the test compared against a class called "self", and the
+        // narrowing it drives typed the operand `obj<self>` — so symfony Finder's
+        // `if ($children instanceof self) { $children->rootPath = …; }` wrote
+        // into no slot, and every nested path doubled its directory.
+        $low = \strtolower($e->class);
+        $cls = ($low === 'self' || $low === 'static' || $low === 'parent')
+            ? $this->resolveStaticClass($e->class)
+            : \ltrim($e->class, '\\');
+        return new Instanceof_($this->lowerExpr($e->operand), $cls);
     }
 
     /**
