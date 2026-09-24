@@ -1139,10 +1139,16 @@ trait EmitLlvmBuiltins
             $ep = '';
             $out .= $this->emitEnumSingletonPtr((string)$elem->class, $ev, $ep);
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
-        } elseif ($ek === Type::KIND_OBJ) {
+        } elseif ($ek === Type::KIND_OBJ || $ek === Type::KIND_CLOSURE) {
             // discardReleaseFlavor answers '' for the header-less classes (a
-            // #[Struct] / closure / enum ordinal / Ffi\Ptr) — never rc-touch those.
-            $elemRetain = $this->discardReleaseFlavor($elem);
+            // #[Struct] / enum ordinal / Ffi\Ptr) — never rc-touch those. A
+            // closure env is counted, and the rebuilt array's __mir_cell_drop
+            // releases it (tag 8, closure header): without this +1 each cellify
+            // of `[static function …]` handed away one count it never took, and
+            // the literal's own release double-freed the env (php-cs-fixer
+            // FinalInternalClassFixer).
+            $elemRetain = ($ek === Type::KIND_CLOSURE || $this->isClosureClass($elem->class ?? ''))
+                ? 'closure' : $this->discardReleaseFlavor($elem);
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
@@ -1181,7 +1187,8 @@ trait EmitLlvmBuiltins
         // kind takes its +1 through the tag (`__mir_cell_retain` is the mirror of
         // the `__mir_cell_drop` the rebuilt array's release runs per element);
         // a scalar kind owns nothing on either arm.
-        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || $ek === Type::KIND_ARRAY) {
+        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || $ek === Type::KIND_ARRAY
+            || $ek === Type::KIND_CLOSURE) {
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             $out .= '  call void @__mir_cell_retain(i64 ' . $dynBoxed . ")\n";
