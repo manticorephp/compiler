@@ -1981,6 +1981,14 @@ trait EmitLlvmBuiltins
     private function biRequireValue(array $args): string
     {
         $out = $this->emitNode($args[0]);
+        // A path built on an erased channel is a string CELL (symfony's
+        // polyfill-mbstring `require $file` in getData), and realpath read its
+        // tag bits — the same unbox {@see emitNewDynObj} takes for a class name.
+        $ak = $args[0]->type->kind;
+        if ($ak === Type::KIND_CELL || $ak === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType(Type::string_());
+        }
         $out .= $this->coerceToPtr();
         $pathP = $this->lastValue;
         $slots = $this->includeSlots;
