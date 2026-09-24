@@ -968,7 +968,12 @@ function thinlto_link_flags(): string {
          . ' -Wl,--thinlto-cache-policy=prune_after=24h:cache_size=5%';
 }
 
-function collect_stdlib_extern_decls(): array
+/**
+ * `$withTypes`: also import the classes the stdlib exports into
+ * {@see CompileArgs::$externClassDecls} / `$externClassMeta` — for a PROGRAM
+ * only, never for a build of the stdlib itself, which declares them.
+ */
+function collect_stdlib_extern_decls(bool $withTypes = false): array
 {
     /** @var \Parser\Ast\FunctionDecl[] $decls */
     $decls = [];
@@ -982,6 +987,7 @@ function collect_stdlib_extern_decls(): array
         if ($sigJson !== null) {
             $bad = Sig::validateImport($sigJson, $sigPath);
             if ($bad !== "") { CompileArgs::$sigError = $bad; return $decls; }
+            if ($withTypes) { import_stdlib_types($sigJson); }
             return Sig::declsFromJson($sigJson);
         }
     }
@@ -1011,6 +1017,23 @@ function collect_stdlib_extern_decls(): array
     return $decls;
 }
 
+/**
+ * Append the stdlib `.sig`'s exported classes to the program's class imports,
+ * next to whatever user libraries the manifest already imported.
+ */
+function import_stdlib_types(string $sigJson): void
+{
+    /** @var array<string, bool> $taken */
+    $taken = [];
+    foreach (Sig::classMetaFromJson($sigJson) as $mname => $meta) {
+        if (isset(CompileArgs::$externClassMeta[$mname])) { continue; }
+        CompileArgs::$externClassMeta[$mname] = $meta;
+        $taken[$meta->name] = true;
+    }
+    foreach (Sig::classDeclsFromJson($sigJson) as $cdecl) {
+        if (isset($taken[$cdecl->name])) { CompileArgs::$externClassDecls[] = $cdecl; }
+    }
+}
 /**
  * Directory of the RUNNING compiler, symlinks resolved — the anchor every
  * bundled asset (stdlib.o, its .sig, the prelude) is found relative to.
@@ -1491,15 +1514,16 @@ final class CompileArgs
     public static array $externConstants = [];
 
     /**
-     * Whether the library being built exports its TYPES, not just its
-     * functions. False for a `runtime: true` library — the bundled stdlib.
+     * Whether the library being built exports ALL its types, the way a user
+     * library does. False for a `runtime: true` library — the bundled stdlib.
      *
-     * The stdlib's classes are internal (`Runtime\Json\Parser`,
+     * Most of the stdlib's classes are internal (`Runtime\Json\Parser`,
      * `Runtime\AsyncHook`) or compiler-owned (`stdClass`, which every module
-     * registers for itself), and its `.o` is linked into every program rather
-     * than selected as a dependency. Exporting them would hand each program a
-     * second definition of a class it already holds. The class-shaped stdlib
-     * surface stays where it is — in the prelude.
+     * registers for itself); exporting those would hand each program a second
+     * definition of a class it already holds. The php classes it defines
+     * (`HashContext`, `DeflateContext`, `InflateContext`) are exported alone
+     * ({@see \Compile\Mir\Passes\LowerFromAst::$exportRuntimeTypes}) and every
+     * program imports them ({@see collect_stdlib_extern_decls}).
      */
     public static bool $exportTypes = true;
 }
@@ -1777,7 +1801,7 @@ function cmd_compile(array $args): int {
     // the static. Skipped when building stdlib.o itself.
     if (!CompileArgs::$emitLibrary) {
         $sigT = \Compile\Stats::now();
-        CompileArgs::$externDecls = collect_stdlib_extern_decls();
+        CompileArgs::$externDecls = collect_stdlib_extern_decls(true);
         \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
             \count(CompileArgs::$externDecls), -1);
         if (CompileArgs::$sigError !== '') {
@@ -2510,7 +2534,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // because its `.o` is deliberately unresolved and linked by the app.
     $splitLibrary = $emitLibrary && (int)(\getenv("MANTICORE_SPLIT_JOBS") ?: "0") >= 2;
     if (($withStdlib && !$emitLibrary) || $splitLibrary) {
-        foreach (collect_stdlib_extern_decls() as $d) { CompileArgs::$externDecls[] = $d; }
+        foreach (collect_stdlib_extern_decls(!$emitLibrary) as $d) { CompileArgs::$externDecls[] = $d; }
         if (CompileArgs::$sigError !== '') {
             dprint(CompileArgs::$sigError);
             return 65;
@@ -4278,6 +4302,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->includeCli = $useCli;
         // Library targets carry the extra bookkeeping their `.sig` exports.
         $lower->emitLibrary = CompileArgs::$emitLibrary && CompileArgs::$exportTypes;
+        $lower->exportRuntimeTypes = CompileArgs::$emitLibrary && !CompileArgs::$exportTypes;
         $lower->externClassDecls = CompileArgs::$externClassDecls;
         $lower->externClassMeta = CompileArgs::$externClassMeta;
         $lower->externConstants = CompileArgs::$externConstants;

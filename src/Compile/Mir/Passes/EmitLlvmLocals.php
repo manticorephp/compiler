@@ -932,7 +932,7 @@ trait EmitLlvmLocals
         // release ({@see InsertMemoryOps::isOwnedObj}, which owns exactly this
         // shape) would give back element refs the copy never took.
         $aliasStaticVecCopy = $copiedVecProp && $v->kind === Node::KIND_STATIC_PROP;
-        // `$r = $c->out` — a STRING property read co-owns what it reads, so the
+        // `$r = $c->out` — a STRING / OBJECT property read co-owns what it reads, so the
         // slot may drop what it overwrites ({@see \Compile\Mir\AliasOwn::
         // propReadCoOwns}; the release half is {@see InsertMemoryOps::isOwnedObj}).
         $aliasStrProp = \Compile\Mir\AliasOwn::propReadCoOwns($v);

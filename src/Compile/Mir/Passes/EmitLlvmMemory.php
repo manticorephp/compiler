@@ -375,7 +375,7 @@ trait EmitLlvmMemory
         $fallback = null;
         if ($value->kind === Node::KIND_PROPERTY_ACCESS) {
             if (!$this->storeLocalRetainsProp($store, $value)) { return null; }
-            // A co-owned STRING read has no elements to pair.
+            // A co-owned STRING / OBJECT read has no elements to pair.
             if (\Compile\Mir\AliasOwn::propReadCoOwns($value)) { return null; }
             // ⚠ Character-for-character {@see EmitLlvmLocals::emitStoreLocal}'s
             // `$fallback`: an array-HINTED slot whose type erased to unknown

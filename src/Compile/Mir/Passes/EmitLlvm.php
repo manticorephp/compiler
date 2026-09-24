@@ -2338,12 +2338,12 @@ final class EmitLlvm implements EmitVisitor
      * the retain; if the two ever disagree this scan either leaks (harmless) or
      * blesses a borrow as owned (a free of a live value).
      *
-     * An ARRAY and a STRING ({@see \Compile\Mir\AliasOwn::propReadCoOwns}). An
-     * object property read emits NO retain at all, so `$o = $this->child;` leaves
-     * the local pointing at a value the slot still owns — which is exactly why an
-     * object slot may only drop when the property is read NOWHERE. And a read
-     * through the cell box-back arm does not retain either: that arm returns
-     * before ever reaching the retain.
+     * An ARRAY, a STRING and an OBJECT ({@see \Compile\Mir\AliasOwn::propReadCoOwns}).
+     * A closure env read emits NO retain the local's release would balance, so
+     * `$c = $this->cb;` leaves the local pointing at a value the slot still owns
+     * — which is exactly why such a slot may only drop when the property is read
+     * NOWHERE. And a read through the cell box-back arm does not retain either:
+     * that arm returns before ever reaching the retain.
      */
     private function storeLocalRetainsProp(Node $store, Node $pa): bool
     {

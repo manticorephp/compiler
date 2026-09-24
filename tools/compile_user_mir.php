@@ -86,6 +86,7 @@ if (\is_string($sig) && $sig !== '' && \is_file($sig)) {
     $json = \file_get_contents($sig);
     if ($json !== false) {
         \Manticore\CompileArgs::$externDecls = \Manticore\Sig::declsFromJson($json);
+        \Manticore\import_stdlib_types($json);
     }
 }
 

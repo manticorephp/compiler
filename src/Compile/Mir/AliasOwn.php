@@ -72,10 +72,21 @@ final class AliasOwn
      * `$r = $c->out; $c->out = ''; return $r;` — stranded one buffer per call:
      * the return retained the borrow and the overwrite released nothing.
      * A co-owned read lets the slot drop what it overwrites.
+     *
+     * An OBJECT read the same way: `$d = $this->def; if (…) { $d = new…;
+     * $this->def = $d; }` is how a lazily (re)built member is written, and the
+     * borrow vetoed `$def` for the whole class — permessage-deflate's per-message
+     * context under `server_no_context_takeover` was never released. A closure
+     * env is not an object here: its reads keep their own borrowed rule.
      */
     public static function propReadCoOwns(Node $v): bool
     {
-        return $v->kind === Node::KIND_PROPERTY_ACCESS && $v->type->kind === Type::KIND_STRING;
+        if ($v->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        $k = $v->type->kind;
+        if ($k === Type::KIND_STRING) { return true; }
+        if ($k !== Type::KIND_OBJ) { return false; }
+        $cls = $v->type->class ?? '';
+        return $cls !== 'Closure' && !\str_starts_with($cls, '__closure_');
     }
 
     /** Does a destination slot co-own this value — i.e. is it an alias of a

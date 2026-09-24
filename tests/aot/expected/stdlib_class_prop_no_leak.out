@@ -1,0 +1,15 @@
+deflate property overwrite: sum=992000 growth ok
+inflate property overwrite: sum=992000 growth ok
+hash property overwrite: sum=2563200 growth ok
+stdClass property overwrite: sum=80200000 growth ok
+deflate holder dies: sum=992000 growth ok
+inflate holder dies: sum=992000 growth ok
+hash holder dies: sum=2563200 growth ok
+stdClass holder dies: sum=80200000 growth ok
+deflate array property element: sum=4647 growth ok
+deflate array parameter element: sum=159 growth ok
+deflate static property: sum=350
+stdClass static property: sum=1400000
+deflate returned into property: sum=1550 growth ok
+deflate local only: sum=992000 growth ok
+deflate inflate hash 19999 DeflateContext stdClass

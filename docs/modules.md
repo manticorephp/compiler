@@ -146,10 +146,11 @@ one across the boundary does not), generic (`@template`) classes and
 `#[TypeDef]`s. A generic or TypeDef is recorded in the `.sig` as
 `"unsupported"` so the diagnostic can name the reason.
 
-⚠ The bundled stdlib (`runtime: true`) exports functions only, by design: its
-classes are internal or compiler-owned, and its `.o` is linked into every
-program rather than selected as a dependency. The class-shaped stdlib surface
-stays in `prelude/`.
+⚠ The bundled stdlib (`runtime: true`) exports its functions and only the php
+classes it defines (`HashContext`, `DeflateContext`, `InflateContext`), which
+every program imports. Its `Runtime\…` classes are internal and `stdClass` is
+compiler-owned (every module registers it), so those stay unexported. The rest
+of the class-shaped stdlib surface stays in `prelude/`.
 
 ---
 
