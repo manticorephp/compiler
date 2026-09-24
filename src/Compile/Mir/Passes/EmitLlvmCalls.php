@@ -1351,6 +1351,7 @@ trait EmitLlvmCalls
         // Running param index — diverges from the loop key once a spread has
         // expanded into multiple positional slots.
         $pi = 0;
+        $padDrops = '';
         foreach ($iv->args as $a) {
             // Argument unpacking `$fn(...$arr)`: expand the array across the
             // closure's remaining declared params (fixed-arity), boxing each
@@ -1399,14 +1400,8 @@ trait EmitLlvmCalls
                 } else {
                     // Not an lvalue — back it with a throwaway slot so the
                     // callee's write lands somewhere (PHP discards it).
-                    $tmp = $this->ssa->allocReg();
-                    $out .= '  ' . $tmp . " = alloca i64\n";
-                    $out .= $this->emitNode($a);
-                    $out .= $this->coerceToI64();
-                    $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
-                    $addr = $this->ssa->allocReg();
-                    $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
-                    $this->lastValue = $addr;
+                    $out .= $this->emitRefValueSlot($a, $calleeParams[$capCnt + $pi] ?? null, -1, $pi);
+                    $padDrops .= $this->lastRefSlotDrop;
                 }
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
@@ -1464,7 +1459,25 @@ trait EmitLlvmCalls
         $reg = $this->ssa->allocReg();
         $fpReg = '';
         if ($known) {
-            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList . ")\n";
+            // The closure ABI carries no arity, so a trailing param the call
+            // omits must be supplied here, exactly as a named call pads it:
+            // the entry reads every declared slot, and an omitted one was
+            // whatever the register held (`$f(3)` on `int $k = 5` saw 0; a
+            // by-ref `&$m = null` wrote through garbage and SIGSEGVed).
+            $out .= $this->emitClosureDefaultPad($fn, $capCnt, $pi);
+            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($fn) . '(' . $argList
+                  . $this->lastPadArgs . ")\n";
+            $out .= $padDrops . $this->lastPadDrops;
+        } elseif ($dynSpread === -1 && $this->closurePadCandidates($pi) !== []) {
+            $fpi = $dynFp;
+            if ($fpi === '') {
+                $fpi = $this->ssa->allocReg();
+                $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
+            }
+            $fpReg = $fpi;
+            $out .= $this->emitDynClosurePaddedCall($fpi, $argList, $argTypes, $pi);
+            $out .= $padDrops;
+            $reg = $this->lastValue;
         } else {
             // Dynamic dispatch: load the fn ptr from struct slot 0 and call
             // indirectly (the callee is a `Closure`-typed value whose
@@ -1478,6 +1491,7 @@ trait EmitLlvmCalls
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
+            $out .= $padDrops;
         }
         $out .= $this->faPop();
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
@@ -1595,6 +1609,119 @@ trait EmitLlvmCalls
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
         }
+        return $out;
+    }
+
+    /**
+     * Pad the trailing params of closure `$cname` a call of `$argc` arguments
+     * omits, under the uniform closure ABI: a by-value default is boxed the way
+     * a written argument is, a by-ref one is backed by a throwaway slot seeded
+     * with the default whose post-call release ({@see omittedRefSlotDrop})
+     * lands in `lastPadDrops`. The suffix lands in `lastPadArgs`, one `, i64`
+     * default (php refuses that call; nothing is invented for it).
+     */
+    private function emitClosureDefaultPad(string $cname, int $capCnt, int $argc): string
+    {
+        $this->lastPadArgs = '';
+        $this->lastPadDrops = '';
+        $ptypes = $this->sigs->paramTypes[$cname] ?? [];
+        $pdefs = $this->sigs->paramDefaults[$cname] ?? [];
+        $refs = $this->sigs->refParams[$cname] ?? [];
+        $vars = $this->sigs->variadicParams[$cname] ?? [];
+        $out = '';
+        $i = $capCnt + $argc;
+        $n = \count($ptypes);
+        while ($i < $n) {
+            $def = $pdefs[$i] ?? null;
+            if (($vars[$i] ?? false) || $def === null) { break; }
+            $pt = $ptypes[$i];
+            if ($refs[$i] ?? false) {
+                $tmp = $this->ssa->allocReg();
+                $out .= '  ' . $tmp . " = alloca i64\n";
+                $out .= $this->emitNode($def);
+                $out .= $this->coerceToI64();
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                $this->lastPadArgs .= ', i64 ' . $addr;
+                $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $pt);
+            } else {
+                $out .= $this->emitNode($def);
+                $erased = $pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN;
+                if ($this->isCellBoxableArg($def->type)
+                    || ($erased && $def->type->isArray() && $this->hasConcreteScalarElem($def->type))) {
+                    $out .= $this->boxToCell($def->type);
+                } else {
+                    $out .= $this->coerceToI64();
+                }
+                $this->lastPadArgs .= ', i64 ' . $this->lastValue;
+            }
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * The module's closures a DYNAMIC invoke of `$argc` arguments may reach
+     * with a default left to pad — name => capture count. Empty for a module
+     * without such a closure, and then the invoke is emitted as it always was.
+     *
+     * @return array<string, int>
+     */
+    private function closurePadCandidates(int $argc): array
+    {
+        $out = [];
+        foreach ($this->closureCaptures as $cname => $capCnt) {
+            $i = $capCnt + $argc;
+            $pdefs = $this->sigs->paramDefaults[$cname] ?? [];
+            if ($i >= \count($this->sigs->paramTypes[$cname] ?? [])) { continue; }
+            if ($this->sigs->variadicParams[$cname][$i] ?? false) { continue; }
+            if (($pdefs[$i] ?? null) === null) { continue; }
+            $out[$cname] = $capCnt;
+        }
+        return $out;
+    }
+
+    /**
+     * A dynamic closure call that may omit a defaulted param: the fn ptr is
+     * compared against every {@see closurePadCandidates} closure, a match is
+     * called DIRECTLY with its defaults padded (and its by-ref pad slots
+     * released after), anything else takes the plain indirect call. The result
+     * joins through a slot and is left in `lastValue`.
+     */
+    private function emitDynClosurePaddedCall(string $fpi, string $argList, string $argTypes, int $argc): string
+    {
+        $out = '';
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $endL = $this->ssa->allocLabel('cpad.end');
+        foreach ($this->closurePadCandidates($argc) as $cname => $capCnt) {
+            $sym = '@manticore_' . $this->mangle($cname);
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpi . ', ptrtoint (ptr ' . $sym . " to i64)\n";
+            $hitL = $this->ssa->allocLabel('cpad.hit');
+            $nextL = $this->ssa->allocLabel('cpad.next');
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= $this->emitClosureDefaultPad($cname, $capCnt, $argc);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $sym . '(' . $argList . $this->lastPadArgs . ")\n";
+            $out .= $this->lastPadDrops;
+            $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
+        $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
         return $out;
     }
 

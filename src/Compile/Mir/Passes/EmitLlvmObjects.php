@@ -5850,6 +5850,7 @@ trait EmitLlvmObjects
      */
     private function vdArmArity(array $parts, array $cTypes, string $sym): string
     {
+        $this->vdArmDrops = '';
         if ($sym === '' || $this->spreadTail !== null) { return ''; }
         $want = \count($this->sigs->paramTypes[$sym] ?? $cTypes);
         if ($want === 0) { return ''; }
@@ -5881,6 +5882,7 @@ trait EmitLlvmObjects
         }
         $out = $this->emitDefaultArgPad($sym, $have, true);
         $this->vdArmList = \implode(', ', $parts) . $this->lastPadArgs;
+        $this->vdArmDrops = $this->lastPadDrops;
         return $out;
     }
 
@@ -6134,7 +6136,7 @@ trait EmitLlvmObjects
             $bodyChunks[] = $this->vdArmArgs($argList, $argOutTypes,
                                               $this->sigs->paramTypes[$targets[$c]] ?? [], $targets[$c]);
             $bodyChunks[] = '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
-                           . '(' . $this->vdArmList . ")\n";
+                           . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
             // Cell-typed result over candidates whose declared returns DISAGREE:
             // box each arm's raw return by its OWN return type so the merged value
             // is a uniform, self-describing cell (a mixed-repr raw merge would read
@@ -6158,7 +6160,7 @@ trait EmitLlvmObjects
         $out .= $this->vdArmArgs($argList, $argOutTypes,
                                  $this->sigs->paramTypes[$fallback] ?? [], $fallback);
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
-              . '(' . $this->vdArmList . ")\n";
+              . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
         if ($boxCell) {
             $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
             $rd = $this->lastValue;
@@ -6962,6 +6964,10 @@ trait EmitLlvmObjects
         // `$this`, so provided params cover indices [0 .. $ai].
         $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true);
         $argList .= $this->lastPadArgs;
+        // The fallback's by-ref pad slots are the site's: an arm that re-pads
+        // leaves them holding the default, one that keeps them sees the
+        // callee's write — either way this site releases them once.
+        $refSlotDrops .= $this->lastPadDrops;
         // The pad above is the FALLBACK's. Record what the site really wrote so
         // a dispatch arm can cut back to it ({@see vdArmArity}).
         $this->vdSiteArgc = $ai + 1;
@@ -7115,7 +7121,7 @@ trait EmitLlvmObjects
             $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? [], $sym);
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
-                  . '(' . $this->vdArmList . ")\n";
+                  . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
             // An erased thunk already returns a cell; boxing it again double-boxes.
             if ($boxCell && !isset($erasedSyms[$sym])) {
                 $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);

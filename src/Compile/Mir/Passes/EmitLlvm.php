@@ -516,6 +516,9 @@ final class EmitLlvm implements EmitVisitor
      *  back to this and re-pads from its OWN declaration
      *  ({@see Passes\EmitLlvmObjects::vdArmArity}). */
     private int $vdSiteArgc = 0;
+    /** Post-call release of the by-ref pad slots the latest {@see Passes\EmitLlvmObjects::vdArmArity}
+     *  created for its arm ({@see omittedRefSlotDrop}); emitted right after that arm's call. */
+    private string $vdArmDrops = '';
     /** Scratch: caller slot address / scratch cell slot of the by-ref argument
      *  {@see EmitLlvmCalls::emitByRefCellBox} just boxed. */
     private string $refBoxSlot = '';

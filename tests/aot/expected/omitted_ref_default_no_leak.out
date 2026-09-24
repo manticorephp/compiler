@@ -7,4 +7,18 @@ method: sum=306000 growth ok
 a5,b5
 2 z
 c4 2 x?
+closure: sum=510000 growth ok
+closure ?array: sum=14000
+arrow fn: sum=612000 growth ok
+call_user_func: sum=510000 growth ok
+call_user_func_array: sum=510000 growth ok
+__invoke: sum=204000 growth ok
+closure property: sum=408000 growth ok
+first-class fn: sum=306000 growth ok
+first-class static: sum=918000 growth ok
+first-class method: sum=1020000 growth ok
+callable param: sum=510000 growth ok
+5 6 7 2 4 3 9 10
+8 9 4
+c2 n3
 done

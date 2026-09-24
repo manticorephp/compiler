@@ -2982,7 +2982,7 @@ final class LowerFromAst implements Pass
      * wrapper. `null` declParams (unknown arity, e.g. a builtin) falls back to
      * a single cell param. Returns `[Param[], Node[]]`.
      */
-    private function fccParamsAndArgs(?array $declParams): array
+    private function fccParamsAndArgs(?array $declParams, ?string $defaultScope = null): array
     {
         $mir = [];
         $loads = [];
@@ -2995,7 +2995,8 @@ final class LowerFromAst implements Pass
             $dp = $declParams;
             foreach ($dp as $p) {
                 $t = $this->lowerParamType($p->typeHint);
-                $mir[] = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false));
+                $mir[] = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
+                    default: $this->lowerParamDefault($p, $defaultScope));
                 $loads[] = new LoadLocal($p->name, $t);
             }
         } else {
@@ -3027,7 +3028,7 @@ final class LowerFromAst implements Pass
         }
         $call = new StaticCall_($class, $method, $loads, Type::unknown(), $scope);
         $body = new Block([new Return_($call, Type::void())], Type::void());
-        return $this->finishClosure([], $declParams, $body, null);
+        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class);
     }
 
     /** Closure capturing `$recv` and forwarding to `$recv->$method(...)`.
@@ -3044,7 +3045,7 @@ final class LowerFromAst implements Pass
         // arm concrete, which is what triggers the ternary's cell-lift.)
         $declParams = null;
         if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
-        [$mir, $loads] = $this->fccParamsAndArgs($declParams);
+        [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
     }
