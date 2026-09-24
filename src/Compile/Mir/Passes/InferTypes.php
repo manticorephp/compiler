@@ -2580,9 +2580,23 @@ final class InferTypes implements Pass
         // which is what made a caller rebuild the boxed array as if its values
         // were raw (SIGSEGV) or read them raw (garbage floats).
         if ($cur->kind === Type::KIND_CELL) { return $cur; }
+        // Two closure literals are one representation — a raw env pointer — so
+        // the element is `closure`, not a cell: `$copy = $asserts; $copy[] = fn…`
+        // re-typed the buffer's element to cell AFTER the first closure rode in
+        // raw, and the invoke read that raw word as a cell (called through 0).
+        if ($this->isClosureElem($cur) && $this->isClosureElem($vt)) {
+            return $cur->kind === Type::KIND_OBJ && $vt->kind === Type::KIND_OBJ && $cur->class === $vt->class
+                ? $cur : Type::closure();
+        }
         $u = $this->unionTypes($cur, $vt);
         if ($u->kind === Type::KIND_UNKNOWN || $u->kind === Type::KIND_NULL) { return Type::cell(); }
         return $u;
+    }
+
+    private function isClosureElem(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
+        return $t->kind === Type::KIND_OBJ && \str_starts_with($t->class ?? '', '__closure_');
     }
 
     /** Backing kind via a typed param (self-host slot offset). */
