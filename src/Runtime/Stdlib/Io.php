@@ -632,6 +632,35 @@ function __mc_stream_read(\Resource $s, int $n): string
                 return '';
             }
             $got = __mc_transport_recv($s, $buf, $n);
+            // Same TLS WANT_READ/WANT_WRITE park as __mc_stream_fill: a non-blocking
+            // SSL_read returns <=0 whenever a record is only partly on the wire, and
+            // that is NOT end-of-stream. The bulk bypass skips the buffered path on
+            // purpose (see above), so it must carry this retry itself rather than
+            // falling through to __mc_stream_fill — reporting 0 here truncated a
+            // large fread() at a TLS record boundary instead of returning the rest.
+            if ($got <= 0 && $s->kind === \Resource::KIND_TLS && \Runtime\AsyncHook::active()) {
+                $deadline = \__mc_microtime_f()
+                    + ($s->rtimeoutMs > 0 ? (float)$s->rtimeoutMs : 60000.0) / 1000.0;
+                $rf = \Runtime\AsyncHook::readableFor();
+                $wf = \Runtime\AsyncHook::writableFor();
+                while ($got <= 0) {
+                    $err = \Runtime\Openssl\getError($s->ssl, $got);
+                    if ($err !== 2 && $err !== 3) {
+                        break;   // clean shutdown (SSL_ERROR_ZERO_RETURN) or a hard error
+                    }
+                    $left = $deadline - \__mc_microtime_f();
+                    if ($left <= 0.0) {
+                        $s->timedOut = true;
+                        break;
+                    }
+                    $ready = $err === 2 ? $rf($s, $left) : $wf($s, $left);
+                    if ($ready !== true) {
+                        $s->timedOut = true;
+                        break;
+                    }
+                    $got = __mc_transport_recv($s, $buf, $n);
+                }
+            }
             if ($got <= 0) {
                 if ($got === 0) { $s->eof = true; }
                 \Runtime\Libc\free($buf);
