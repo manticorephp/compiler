@@ -241,6 +241,11 @@ final class InferTypes implements Pass
      * @var array<string, bool>
      */
     private array $rescanTouched = [];
+    /** @var array<string, string[]> "fn#idx" → caller candidate params its erased sites forward */
+    private array $callArgForward = [];
+    private string $callArgScanFn = '';
+    /** @var array<string, int> */
+    private array $callArgScanParams = [];
 
     private ?\Compile\Mir\DependencyIndex $callGraph = null;
 
@@ -1561,7 +1566,23 @@ final class InferTypes implements Pass
                 // poison a concrete observation from another call site. (Recursive
                 // quicksort's `&$a` erased to int → `<` compiled as an integer
                 // compare on string pointers; see preserve_known_type_principle.)
-                if ($this->isUnknownArrayElem($a->type)) { continue; }
+                // Only a forwarded CANDIDATE param is deferred — resolved after
+                // collection by what that param resolves to. Any other erased
+                // arg (a bare-`array` property, a call result) is a site whose
+                // elements nobody can see: skipping it let a sibling site's
+                // concrete element stand for it.
+                if ($this->isUnknownArrayElem($a->type)) {
+                    $srcIdx = $a->kind === Node::KIND_LOAD_LOCAL ? ($this->callArgScanParams[$a->name] ?? -1) : -1;
+                    $srcKey = $srcIdx >= 0 ? $this->callArgScanFn . '#' . (string)$srcIdx : '';
+                    if ($srcKey !== '' && isset($cand[$srcKey])) {
+                        $this->callArgForward[$key][] = $srcKey;
+                        continue;
+                    }
+                    $conflict[$key] = true;
+                    $erasedArg[$key] = true;
+                    unset($observed[$key]);
+                    continue;
+                }
                 $isAssoc = $a->type->isAssoc();
                 // A CELL-KEYED array (a mixed int+string key literal, or a
                 // buffer rebuilt through a cell-keyed `$o[$k]=…`) reports
