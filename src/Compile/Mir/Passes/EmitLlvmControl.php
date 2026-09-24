@@ -740,6 +740,14 @@ trait EmitLlvmControl
         // `$s[$i]` mints a buffer — the same read {@see EmitLlvm::isFreshStringTemp}
         // has always released. Missing it here retained an already-owned +1.
         if ($this->isStrCharRead($arm)) { return true; }
+        // `(string)$x` answers exactly as its consumers read it ({@see
+        // EmitLlvm::isFreshStringTemp}'s cast arm): every operand but a string
+        // mints or retains a +1, a string passes its own ownership through.
+        // Missing it here retained the +1 again — `isset($u['host']) ?
+        // (string)$u['host'] : ''` leaked the host once per call.
+        if ($k === Node::KIND_CAST && $arm->type->kind === Type::KIND_STRING) {
+            return $this->isFreshStringTemp($arm);
+        }
         return $this->condOwnsResult($arm);
     }
 
