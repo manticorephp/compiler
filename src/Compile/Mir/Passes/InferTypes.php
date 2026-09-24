@@ -359,6 +359,29 @@ final class InferTypes implements Pass
         }
     }
 
+    /**
+     * Every node type of every function in `$names`, as one string: equal
+     * digests mean a re-inference moved nothing there.
+     * @param array<string, bool> $names
+     */
+    private function bodyTypeDigest(Module $module, array $names): string
+    {
+        $acc = '';
+        foreach ($module->functions as $fn) {
+            if (!isset($names[$fn->name])) { continue; }
+            $h = 0;
+            $this->digestNode($fn->body, $h);
+            $acc .= $fn->name . '=' . (string)$h . ';';
+        }
+        return $acc;
+    }
+
+    private function digestNode(Node $n, int &$h): void
+    {
+        $h = $this->fpMix($h, $this->typeCode($n->type));
+        foreach (Walk::children($n) as $c) { $this->digestNode($c, $h); }
+    }
+
     private function collectClosureNodes(Node $n): void
     {
         if ($n->kind === Node::KIND_CLOSURE) {
@@ -724,6 +747,7 @@ final class InferTypes implements Pass
             }
         }
         $this->declaredReturns = $module->declaredReturnTypes;
+        $this->byRefCellElemLocals = $module->inferByRefCellElemLocals;
         // A scoped run infers only part of the module, and a closure literal is
         // recorded when its DEFINER is inferred — a definer outside the scope
         // would leave its closure body with no capture seeds at all. Its nodes
@@ -882,12 +906,18 @@ final class InferTypes implements Pass
         // on the index node (prior passes), re-infer: scanLocalShapes reads the
         // node ->type and flips `$o`'s `[]` literal to assoc. Bounded loop —
         // each flip removes the vec base, so it converges in one iteration.
+        // A pass that moved no type in its targets leaves the next one the very
+        // same input, so it is the fixpoint: a `$v[$cellKey] = …` on a genuine
+        // vec stays a match forever, and the loop re-inferred it to the guard
+        // in every InferTypes run.
         $guard = 0;
         while ($guard < 4) {
             $targets = $this->untypedAssocKeyStoreFunctions($module);
             if (\count($targets) === 0) { break; }
+            $before = $this->bodyTypeDigest($module, $targets);
             $this->inferFunctionsForScope($module, 'assoc_key', $targets);
             $guard = $guard + 1;
+            if ($this->bodyTypeDigest($module, $targets) === $before) { break; }
         }
         // Element erasure on a LOCAL: `$out = []` whose only clue is a store of an
         // already-CELL value (`$out[$k] = $v`). The pre-inference scan can't type a
@@ -1020,6 +1050,7 @@ final class InferTypes implements Pass
             $guard = $guard + 1;
         }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
+        $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
         $module->markPassApplied(self::NAME);
         return $module;
     }

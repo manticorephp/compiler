@@ -224,6 +224,23 @@ final class Module
      */
     public array $declaredReturnTypes = [];
 
+    /**
+     * A fact InferTypes LEARNS about a function's locals: a local array holds
+     * cells because a by-ref callee appends a foreign element to it
+     * ({@see Passes\InferScans::scanByRefElemWiden}). It is read off the
+     * CALLEE's stores, never off the local's own types, so a later run cannot
+     * un-learn it. Kept on the module so the NEXT run starts from it: re-learned
+     * from scratch, every one of the dozen runs typed the local wrong first and
+     * then re-inferred the function and all its callers to correct it.
+     *
+     * NOT its sibling `forcedCellElemLocals` ({@see
+     * Passes\InferScans::scanLocalElemFromStores}): that one is derived from the
+     * local's stored values, which an early run sees less precisely — kept, it
+     * pinned a cell element a later run would not have. fn => local => true.
+     * @var array<string, array<string, bool>>
+     */
+    public array $inferByRefCellElemLocals = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
     public function addGlobalCell(string $name, Node $default,

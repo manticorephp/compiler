@@ -861,9 +861,14 @@ trait InferScans
                 if (isset($refined[$key]) && !$observed[$key]->isArray()
                     && $observed[$key]->kind !== Type::KIND_CELL) { continue; }
                 $param = $fn->params[$idx - 1];
-                $param->type = isset($assocKey[$key])
+                $newT = isset($assocKey[$key])
                     ? Type::assoc($assocKey[$key], $observed[$key])
                     : Type::vec($observed[$key]);
+                // A parameter already refined to exactly this in an earlier run is
+                // not a change: marking it one re-inferred it and every caller,
+                // transitively, in every InferTypes run for nothing.
+                if ($param->type->toString() === $newT->toString()) { continue; }
+                $param->type = $newT;
                 $this->rescanTouched[$fn->name] = true;
                 $changed = true;
             }
