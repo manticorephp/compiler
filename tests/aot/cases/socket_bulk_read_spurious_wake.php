@@ -14,6 +14,12 @@
 // Before the fix that loser's fread() reported '' (0 bytes) instead of parking
 // again for the second chunk, silently losing it. With the fix it retries and
 // gets its share once the second chunk arrives.
+//
+// ASSUMES the first 5000 B server write arrives as ONE recv() on the client
+// side (loopback, well under the MTU/socket-buffer size, so this has been
+// reliable in practice) — split=uneven would also fire on a kernel that
+// hands it back in two pieces, a false positive this case does not try to
+// tell apart from the real regression it pins.
 
 use function Async\async;
 use function Async\spawn;

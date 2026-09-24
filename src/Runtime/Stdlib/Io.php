@@ -488,8 +488,18 @@ function __mc_wait_write(\Resource $s): int
  * (a renegotiation, or a TLS 1.3 `KeyUpdate`) must park on READABLE, not
  * writable; parking on the wrong side and giving up after one retry read a
  * live connection as a short write. This loops on `SSL_get_error` exactly like
- * the read side, direction-correct, bounded by the SAME per-park deadline
- * (`$s->wtimeoutMs`).
+ * the read side, direction-correct — BUT unlike the read side's one absolute
+ * deadline for the whole retry sequence (deliberate there: see
+ * __mc_stream_recv_into's note on an alternating WANT_READ/WANT_WRITE peer),
+ * each park here gets its OWN fresh `$s->wtimeoutMs` budget, exactly like
+ * `__mc_wait_write` already does for a plain socket and exactly what this
+ * function's caller ({@see fwrite}) says the design is ("an absolute
+ * per-call budget would fail a big fwrite over a slow link where php
+ * succeeds"). A one-shot deadline here failed a large frame to a
+ * slow-but-steady peer after `wtimeoutMs` TOTAL even though every individual
+ * park kept succeeding — and on the WS path `wtimeoutMs` is small (the same
+ * value as the read timeout, which doubles as the ping interval), so a big
+ * `sendBinary()` outliving one ping interval failed outright.
  */
 function __mc_stream_send_retry(\Resource $s, string $data, int $n): int
 {
@@ -513,21 +523,15 @@ function __mc_stream_send_retry(\Resource $s, string $data, int $n): int
     }
     $sent = \__mc_transport_send($s, $data, $n);
     if ($sent <= 0) {
-        $deadline = \__mc_microtime_f()
-            + ($s->wtimeoutMs > 0 ? (float)$s->wtimeoutMs : 60000.0) / 1000.0;
         $rf = \Runtime\AsyncHook::readableFor();
         $wf = \Runtime\AsyncHook::writableFor();
+        $secs = ($s->wtimeoutMs > 0 ? (float)$s->wtimeoutMs : 60000.0) / 1000.0;
         while ($sent <= 0) {
             $err = \Runtime\Openssl\getError($s->ssl, $sent);
             if ($err !== 2 && $err !== 3) {
                 return 0;   // a real error, not WANT_READ/WANT_WRITE
             }
-            $left = $deadline - \__mc_microtime_f();
-            if ($left <= 0.0) {
-                $s->timedOut = true;
-                return 0;
-            }
-            $ready = $err === 2 ? $rf($s, $left) : $wf($s, $left);
+            $ready = $err === 2 ? $rf($s, $secs) : $wf($s, $secs);
             if ($ready !== true) {
                 $s->timedOut = true;
                 return 0;
@@ -1484,6 +1488,12 @@ function fclose(\Resource $stream): bool
  */
 function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
 {
+    // Per-operation, same reasoning as fread()'s reset: timed_out is one shared
+    // flag for both directions, and php resets it before every stream op, read
+    // or write, not just once. Covers __mc_stream_sendv too (the vectored-socket
+    // path) — that helper has no reset of its own, but its one caller is the
+    // array branch right below, which is already past this line.
+    $stream->timedOut = false;
     if (\is_array($data)) {
         // Vectored path is worthwhile only on a plain socket (writev(2)) and
         // only when the request is "send it all", i.e. no $length cap; a $length
@@ -1598,6 +1608,14 @@ function fread(\Resource $stream, int $length): string
     if ($length <= 0) {
         return "";
     }
+    // php's timed_out is PER OPERATION (php_stream_read resets it before every
+    // read), not sticky across calls. Leaving a prior true here meant one real
+    // timeout (a WS ping) poisoned every LATER read on the stream: a genuine
+    // EOF right after also reports '' and stream_get_meta_data()['timed_out']
+    // stayed true from the earlier call, so Connection::fill() (websocket.php)
+    // read a closed peer as "still just a ping timeout" and pinged into a dead
+    // socket instead of ending the connection.
+    $stream->timedOut = false;
     if ($stream->kind === \Resource::KIND_MEMFILE) {
         // Read from the seek cursor WITHOUT compacting — a seek-back must still
         // find the earlier bytes.
@@ -1636,6 +1654,9 @@ function fread(\Resource $stream, int $length): string
  */
 function fgets(\Resource $stream, ?int $length = null)
 {
+    // Per-operation, same as fread() above — see that reset for why a sticky
+    // timed_out from an earlier call is wrong.
+    $stream->timedOut = false;
     $cap = ($length !== null && $length > 1) ? $length : 8192;
     if ($stream->kind === \Resource::KIND_MEMFILE) {
         // A line from the cursor, terminator included, capped at $cap-1 like php.
