@@ -932,6 +932,12 @@ final class LowerFromAst implements Pass
             }
         }
 
+        foreach ($module->interfaceNames as $ifn => $_) {
+            $ian = [];
+            $iav = [];
+            $this->collectInterfaceNames($ifn, $ian, $iav);
+            $module->interfaceAncestors[$ifn] = \array_keys($ian);
+        }
         // Reify every `Box<float>` the program's docblocks bind. Runs HERE: the
         // origin classes (and their parents) now exist, and no body has been
         // lowered yet — so a spec class is already in the class table when a body

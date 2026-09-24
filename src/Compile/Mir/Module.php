@@ -33,6 +33,11 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, string[]> interface → every interface it extends,
+     *  transitively: `foreach` over an `Aware extends \Iterator` slot must know
+     *  it is Traversable (it walked the object as an array) */
+    public array $interfaceAncestors = [];
+
     /** @var array<string, true> declared trait names (compile-time
      *  `trait_exists` fold). */
     public array $traitNames = [];

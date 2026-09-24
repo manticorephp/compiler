@@ -651,6 +651,7 @@ final class EmitLlvm implements EmitVisitor
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
+        $this->interfaceAncestors = $module->interfaceAncestors;
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
         $this->deprecatedFns = $module->deprecatedFns;
@@ -3162,6 +3163,9 @@ final class EmitLlvm implements EmitVisitor
      * Built-in interfaces (Iterator, ArrayAccess, …) aren't in `$classes`;
      * they're matched by name as declared on `implements`.
      */
+    /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
+    private array $interfaceAncestors = [];
+
     private function classImplements(string $class, string $iface): bool
     {
         $key = $class . '|' . $iface;
@@ -3179,7 +3183,10 @@ final class EmitLlvm implements EmitVisitor
                 return true;
             }
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
+            if ($cd === null) {
+                foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
+                continue;
+            }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }
