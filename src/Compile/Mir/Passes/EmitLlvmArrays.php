@@ -299,6 +299,60 @@ trait EmitLlvmArrays
             $this->lastValueType = 'ptr';
             return $out;
         }
+        // The same write through a CELL local (an untyped parameter): the base
+        // holds a string or an array only at run time, and the array store path
+        // it always took treated a string as a buffer header — SIGBUS in
+        // polyfill-mbstring's `$s[--$nlen] = $uchr[--$ulen]`. Classify by tag;
+        // a string takes the byte write and is boxed back into the slot.
+        if ($se->array->type->kind === Type::KIND_CELL
+            && $se->index->kind !== Node::KIND_NULL_CONST
+            && $se->array->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->locals->slots[$se->array->name])
+            && !isset($this->locals->refLocals[$se->array->name])
+            && !isset($this->locals->globalBacked[$se->array->name])
+            && ($se->value->type->kind === Type::KIND_STRING || $se->value->type->kind === Type::KIND_CELL)) {
+            $slot = $this->locals->slots[$se->array->name];
+            $cur = $this->ssa->allocReg();
+            $out = '  ' . $cur . ' = load i64, ptr ' . $slot . "\n";
+            $out .= $this->cellTagIr($cur);
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+            $strL = $this->ssa->allocLabel('cellstr.set');
+            $arrL = $this->ssa->allocLabel('cellstr.arr');
+            $endL = $this->ssa->allocLabel('cellstr.end');
+            $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $arrL . "\n";
+            $out .= $strL . ":\n";
+            $bp = $this->ssa->allocReg();
+            $out .= '  ' . $bp . ' = and i64 ' . $cur . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $base = $this->ssa->allocReg();
+            $out .= '  ' . $base . ' = inttoptr i64 ' . $bp . " to ptr\n";
+            $out .= $this->emitNode($se->index);
+            $out .= $this->coerceToI64();
+            $idx = $this->lastValue;
+            $out .= $this->emitNode($se->value);
+            if ($se->value->type->kind === Type::KIND_CELL) {
+                $out .= $this->coerceToI64();
+                $out .= $this->unboxCellToType(Type::string_());
+            }
+            $out .= $this->coerceToPtr();
+            $chs = $this->lastValue;
+            $nw = $this->ssa->allocReg();
+            $out .= '  ' . $nw . ' = call ptr @__mir_str_set_char(ptr ' . $base
+                  . ', i64 ' . $idx . ', ptr ' . $chs . ")\n";
+            $this->lastValue = $nw;
+            $this->lastValueType = 'ptr';
+            $out .= $this->boxToCell(Type::string_());
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $arrL . ":\n";
+            $out .= $this->emitStoreElementUnified($se);
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $endL . ":\n";
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // `$obj[$k] = $v` / `$obj[] = $v` on an ArrayAccess object →
         // `$obj->offsetSet($k, $v)`. The append form `$obj[]=` already lowered
         // its index to a NullConst, so `$se->index` is the right key as-is.
