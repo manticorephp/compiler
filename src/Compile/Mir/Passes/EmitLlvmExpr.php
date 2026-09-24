@@ -4826,6 +4826,20 @@ trait EmitLlvmExpr
         // hint. The carriers were compared as pointers — php-cs-fixer's
         // `$this->configuration['include'] !== $defaults` was true for equal
         // arrays and every fixer refused its own default configuration.
+        // An ERASED side against an array (a bare `array` param is KIND_UNKNOWN)
+        // is tagged by probing its word — an array carrier becomes an array cell
+        // — and then compares by value like a cell does. The pointers were
+        // compared: `$value !== array_unique($value)` was true for every list
+        // (php-cs-fixer ordered_attributes refused its own `order` default).
+        if (($isEq || $isNe) && $lk === Type::KIND_UNKNOWN && $rk === Type::KIND_ARRAY) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $chunks[] = $this->boxUnknownShallowIr();
+            $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
+        } elseif (($isEq || $isNe) && $rk === Type::KIND_UNKNOWN && $lk === Type::KIND_ARRAY) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $chunks[] = $this->boxUnknownShallowIr();
+            $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
+        }
         if (($isEq || $isNe) && $lk === Type::KIND_CELL && $rk === Type::KIND_ARRAY) {
             $this->lastValue = $r; $this->lastValueType = $rt;
             $chunks[] = $this->shallowBoxToCell($c->right->type);
