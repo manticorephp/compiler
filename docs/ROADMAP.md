@@ -56,6 +56,7 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
 ### Recently completed (2026-09)
 
+- ✅ a closure in an array element is owned by the buffer (repr `CLO`, ABI v11): released on overwrite, `unset` and container death, co-owned by element reads, `foreach` and a direct `($a[$k])()` call; a `callable` that is not a closure env is never released as one; `unset` on a shared buffer separates first (br `websocket`, 2026-09-24).
 - ✅ array elements belong to the buffer — one ownership model and one key (hint) for every element walk; copies, spreads, unions and packs own what they hold (br `elemown`, 2026-09-23).
 - ✅ reference boxes are counted — the box and its value die with the last holder (ABI v9); a closure env is counted like an object wherever it is held; a by-value parameter and a property are promoted into a box by `&`; `$a = &$b` makes both names one reference (br `refbox`, 2026-09-23).
 - ✅ docblock array shapes — per-field typing, early unbox, `TypeError` on a lie, static shape
@@ -198,6 +199,13 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
 
 ### Other semantic gaps
 
+- **Container leaks that remain (any value kind)**: a static property never releases what an
+  overwrite replaces; a `mixed`/cell array element is not released on overwrite / `unset`; a
+  fresh object or closure passed to a `mixed` parameter is never released by the caller; a
+  CAPTURELESS closure literal has no lifetime header and is never freed.
+- **Calling a `callable` string / `[obj, 'm']` array held in a `Closure`/`callable` slot**
+  (`$handlers['x']('a')`) crashes: the slot is called as a closure env. Only a literal passed
+  straight to a `callable` parameter is converted. `$f instanceof \Closure` on a cell is false.
 - **`goto` into a loop body** is unsupported. Plain forward and backward `goto` work.
 - **`ReflectionEnum` does not exist** — it was built and reverted. Every other Reflection
   class ships (`prelude/reflection.php`).

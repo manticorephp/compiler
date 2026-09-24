@@ -575,7 +575,7 @@ trait EmitLlvmMemory
             if ($t === null || $shared) { return 'vecbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A NESTED array element — the member the flavor family was
             // missing, so this fell through to the plain repr walk and
@@ -594,7 +594,7 @@ trait EmitLlvmMemory
             if ($t === null || $shared) { return 'assocbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'assoc'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }

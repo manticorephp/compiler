@@ -5185,6 +5185,19 @@ trait EmitLlvmObjects
                     // overwrite leak ({@see \Compile\Debug::$rcElemSlotDrop}).
                     // Read the word BEFORE the helper removes the entry; drop it
                     // after, so the array never observes a freed element.
+                    // Separate a SHARED buffer first, exactly as an element
+                    // store does: the HASHED unset deleted in place, so
+                    // `$copy = $this->map; unset($this->map[$k]);` took the
+                    // entry out of `$copy` too (and, now that a closure slot
+                    // gives its count back, dropped the env `$copy` still
+                    // listed). The clone co-owns what it shares.
+                    if ($this->unsetBaseIsWritable($aa->array)) {
+                        $cow = $this->ssa->allocReg();
+                        $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($aa->array->type, $aa->array)
+                              . '(ptr ' . $arrPtr . ")\n";
+                        $out .= $this->vecWriteBack($aa->array, $cow, $baseCell);
+                        $arrPtr = $cow;
+                    }
                     $sgBase = $this->superglobalCellBase($aa->array);
                     $dropFlavor = $this->elemSlotDropFlavor($aa->array->type, $sgBase);
                     $curE = '';
@@ -5196,9 +5209,11 @@ trait EmitLlvmObjects
                               . ($keyIsString ? 'ptr ' : 'i64 ') . $key
                               . ($keyIsString ? $this->litKeyHashArgs($aa->index) : '') . ")\n";
                     }
+                    $dropArr = $arrPtr;
                     if ($keyIsCell && $this->unsetBaseIsWritable($aa->array)) {
                         $this->rt->needsCellKey = true;
                         $r = $this->ssa->allocReg();
+                        $dropArr = $r;
                         $out .= '  ' . $r . ' = call ptr @__mir_array_unset_cell_at(ptr '
                               . $arrPtr . ', i64 ' . $key . ")\n";
                         $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
@@ -5216,6 +5231,7 @@ trait EmitLlvmObjects
                         // base (`$a[0][1]`) keeps the old in-place call, where a
                         // packed unset is still the historical no-op.
                         $r = $this->ssa->allocReg();
+                        $dropArr = $r;
                         $out .= '  ' . $r . ' = call ptr @__mir_array_unset_at(ptr '
                               . $arrPtr . ', i64 ' . $key . ")\n";
                         $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
@@ -5228,7 +5244,7 @@ trait EmitLlvmObjects
                     if ($keyIsCell || $keyIsString) {
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
-                    if ($dropFlavor !== '') { $out .= $this->rcReleaseReg($curE, $dropFlavor); }
+                    if ($dropFlavor !== '') { $out .= $this->elemSlotReleaseIr($curE, $dropFlavor, $dropArr); }
                 }
             }
             // Property overloading: `unset($obj->undeclaredProp)` on a class

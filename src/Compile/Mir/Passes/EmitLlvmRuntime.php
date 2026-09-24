@@ -1305,10 +1305,17 @@ trait EmitLlvmRuntime
         $hdr   = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
         $mOff  = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
         $dOff  = (string)\Compile\MemoryAbi::CLOSURE_DROP_OFFSET;
+        // Only a plain heap address can carry the header: null, a small
+        // sentinel or a NaN-tagged word (a cell that reached a closure-typed
+        // slot unboxed) is left alone before `p-32` is read.
+        $guard  = "  %pi = ptrtoint ptr %p to i64\n";
+        $guard .= "  %lo = icmp ult i64 %pi, 65536\n";
+        $guard .= "  %hi = icmp ugt i64 %pi, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $guard .= "  %bad = or i1 %lo, %hi\n";
+        $guard .= "  br i1 %bad, label %done, label %hdr\n";
         $out  = "define void @__mir_closure_retain(ptr %p) {\n";
         $out .= "entry:\n";
-        $out .= "  %z = icmp eq ptr %p, null\n";
-        $out .= "  br i1 %z, label %done, label %hdr\n";
+        $out .= $guard;
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
@@ -1328,8 +1335,7 @@ trait EmitLlvmRuntime
         $out .= "}\n";
         $out .= "define void @__mir_closure_release(ptr %p) {\n";
         $out .= "entry:\n";
-        $out .= "  %z = icmp eq ptr %p, null\n";
-        $out .= "  br i1 %z, label %done, label %hdr\n";
+        $out .= $guard;
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";

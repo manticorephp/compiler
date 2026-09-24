@@ -643,13 +643,20 @@ final class InsertMemoryOps implements Pass
         // null and on an IMMORTAL literal (negative rc) — so a slot holding a
         // constant costs nothing and a heap string is counted like any other.
         if ($t->kind === Type::KIND_STRING) { return true; }
+        // A CLOSURE element is co-owned too, now that its slot gives its count
+        // back on overwrite / unset / container death ({@see \Compile\MemoryAbi::
+        // ARRAY_REPR_CLO}): `$f = $a[$k]; unset($a[$k]); $f();` would otherwise
+        // call a freed env. rcRetainByType's closure arm takes the +1 and the
+        // local's `closure` release gives it back — both through the helpers
+        // that act only on a word carrying the env magic.
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
         if ($t->kind === Type::KIND_OBJ) {
             $c = $t->class ?? '';
             if ($c === '') { return true; }
             // ★★★ REFUSE EXACTLY WHAT THE RETAIN MACHINERY REFUSES. This used to
             // exclude enums ALONE, while the emitter's half takes its +1 through
             // {@see EmitLlvmMemory::rcRetainByType}, which SILENTLY returns ''
-            // for a closure, a `#[Struct]`, an `Ffi\Ptr` and a `Generator` too.
+            // for a `#[Struct]`, an `Ffi\Ptr` and a `Generator` (a closure has its own arm).
             // Agreeing with itself is not enough — a predicate that says "owned"
             // where the retain emits nothing leaves the pass's scope-exit
             // release with NOTHING to balance it, and these are precisely the
@@ -660,7 +667,7 @@ final class InsertMemoryOps implements Pass
             // not a refcount at all.
             if (isset($enums[$c])) { return false; }
             if ($c === 'Ffi\\Ptr') { return false; }
-            if ($c === 'Closure' || \str_starts_with($c, '__closure_')) { return false; }
+            if ($c === 'Closure' || \str_starts_with($c, '__closure_')) { return true; }
             // A Generator retains through the STRING rc path and would be
             // released through the object one — a flavor disagreement of the
             // same family [[rc-flavor-disagreement]]. Left out entirely.
@@ -798,6 +805,9 @@ final class InsertMemoryOps implements Pass
         if ($tk === Type::KIND_CLOSURE) {
             $ck = $value->kind;
             if ($ck === Node::KIND_CALL) { return !isset($this->ffiFns[$value->function]); }
+            // An ELEMENT read co-owns ({@see elemReadCoOwns}; the emitter half
+            // is EmitLlvmLocals::elemReadCoOwn).
+            if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
             return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                 || $ck === Node::KIND_INVOKE;
         }
@@ -831,13 +841,14 @@ final class InsertMemoryOps implements Pass
             // retains a borrowed closure it returns
             // ({@see EmitLlvmModule::isBorrowedObjReturn}), a returned owned
             // local transfers. So a call / invoke producer is owned; any other
-            // (an alias, a property or element read) stays a borrow. Refusing
+            // (an alias, a property read) stays a borrow; an element read co-owns. Refusing
             // them all meant a closure that left the frame that built it —
             // returned, then dropped — was never released, nor was anything
             // it captured.
             if ($cls === 'Closure' || \str_starts_with($cls, '__closure_')) {
                 $ck = $value->kind;
                 if ($ck === Node::KIND_CALL) { return !isset($this->ffiFns[$value->function]); }
+                if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
                 return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                     || $ck === Node::KIND_INVOKE;
             }

@@ -587,9 +587,28 @@ trait EmitLlvmArrays
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
         $litHint = $this->elementHintCodeForType($al->type->element);
         if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($res, $litHint); }
+        if (!$cellVals && $this->closureLiteral($al)) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CLO); }
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * A raw literal of closures, every element counted by
+     * {@see emitArrayLitValue} (a borrow retained, a fresh one transferred): it
+     * owns its closure words ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}). A
+     * spread copies words the literal never counted, so it disqualifies.
+     */
+    private function closureLiteral(ArrayLit $al): bool
+    {
+        if (\count($al->elements) === 0) { return false; }
+        $el = $al->type->element;
+        if ($el === null || !$this->isClosureValueType($el)) { return false; }
+        foreach ($al->elements as $e) {
+            if ($e->value->kind === Node::KIND_SPREAD) { return false; }
+            if (!$this->isClosureValueType($e->value->type)) { return false; }
+        }
+        return true;
     }
 
     /**
@@ -691,6 +710,7 @@ trait EmitLlvmArrays
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
         $litHint = $this->elementHintCodeForType($al->type->element);
         if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($arr, $litHint); }
+        if (!$cellVals && $this->closureLiteral($al)) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CLO); }
         $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
@@ -1482,7 +1502,7 @@ trait EmitLlvmArrays
         if ($ek === Type::KIND_CELL) { return '@__mir_array_cow_cell'; }
         if ($ek === Type::KIND_UNKNOWN) { return '@__mir_array_cow'; }
         if ($ek === Type::KIND_STRING) { return '@__mir_array_cow_str'; }
-        if ($ek === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) {
+        if ($ek === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) {
             return '@__mir_array_cow_obj';
         }
         return '@__mir_array_cow';
@@ -1765,7 +1785,7 @@ trait EmitLlvmArrays
      * still there. Select the word to 0 in that case rather than branching: the
      * whole write-through path is deliberately branch-free.
      */
-    private function emitElemSlotDrop(string $cur, string $flavor): string
+    private function emitElemSlotDrop(string $cur, string $flavor, string $arr): string
     {
         $word = $cur;
         if ($this->elemWroteThroughRef !== '') {
@@ -1773,7 +1793,39 @@ trait EmitLlvmArrays
             $word = $sel;
             return '  ' . $sel . ' = select i1 ' . $this->elemWroteThroughRef
                  . ', i64 0, i64 ' . $cur . "\n"
-                 . $this->rcReleaseReg($word, $flavor);
+                 . $this->elemSlotReleaseIr($word, $flavor, $arr);
+        }
+        return $this->elemSlotReleaseIr($word, $flavor, $arr);
+    }
+
+    /**
+     * A raw store of a closure value into a closure-element slot — the store
+     * whose count ({@see EmitLlvmMemory::rcRetainByType}'s closure arm: a
+     * borrow is retained, a fresh literal / call result transfers) lets the
+     * buffer claim {@see \Compile\MemoryAbi::ARRAY_REPR_CLO}.
+     */
+    private function closureElemStore(StoreElement $se): bool
+    {
+        $el = $se->array->type->element ?? null;
+        // An ERASED container (`$a = []` before its first store has typed it)
+        // counts a closure the same way; the stamp itself refuses a buffer
+        // that holds anything it cannot vouch for.
+        if ($el === null || (!$this->isClosureValueType($el) && $el->kind !== Type::KIND_UNKNOWN)) { return false; }
+        if (!$se->array->type->isVec() && !$se->array->type->isAssoc()) { return false; }
+        return $this->isClosureValueType($se->value->type);
+    }
+
+    /**
+     * Release the word an element slot of `$arr` just gave up, by the slot's
+     * drop flavor ({@see EmitLlvm::elemSlotDropFlavor}). A closure slot asks
+     * the buffer whether it counted its closure words
+     * ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}) instead of trusting the type.
+     */
+    private function elemSlotReleaseIr(string $word, string $flavor, string $arr): string
+    {
+        if ($flavor === 'clogated') {
+            $this->rt->needsClosureRc = true;
+            return '  call void @__mir_array_clo_drop(ptr ' . $arr . ', i64 ' . $word . ")\n";
         }
         return $this->rcReleaseReg($word, $flavor);
     }
@@ -1872,7 +1924,7 @@ trait EmitLlvmArrays
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
-            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor); }
+            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor, $next); }
             // set_cell's string arm RETAINS the stored key exactly like set_str
             // below — release our own +1 on a FRESH key cell (a mixed-returning
             // call / concat used directly as `$o[f()] = v`), or every dynamic
@@ -1904,7 +1956,7 @@ trait EmitLlvmArrays
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
-            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor); }
+            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor, $next); }
             // set_str RETAINS the stored key (append) — release our own +1 on a
             // fresh key temp (`$m["k".$i]`), or it leaks (borrowed locals/literals
             // stay untouched, balanced by their own later release). Without this the
@@ -1927,7 +1979,7 @@ trait EmitLlvmArrays
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
-            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor); }
+            if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor, $next); }
         }
         // Stamp the element repr on the persisted buffer ($next may be a
         // realloced / promoted / deimmortalised buffer) so the plain repr
@@ -1963,6 +2015,12 @@ trait EmitLlvmArrays
         if ($hint !== null) {
             $out .= '  call void @__mir_elem_stamp_raw(ptr ' . $next . ', i64 ' . (string)$hint
                   . ', i64 ' . (string)($reprCode ?? 0) . ")\n";
+        }
+        // A raw closure slot took its own count on the value just stored (a
+        // borrow retained, a fresh one transferred); the buffer records that
+        // it owns its closure words when that is true of all of them.
+        if (!$boxVal && !$rebinds && $this->closureElemStore($se)) {
+            $out .= '  call void @__mir_array_clo_stamp(ptr ' . $next . ")\n";
         }
         $out .= $this->vecWriteBack($se->array, $next, $baseCell);
         $this->noteCellSinkStored($val);

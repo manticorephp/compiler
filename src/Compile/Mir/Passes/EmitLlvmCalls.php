@@ -1213,7 +1213,18 @@ trait EmitLlvmCalls
             $this->lastValueType = 'i64';
         }
         $out .= $this->coerceToPtr();
-        return $out . $this->emitClosureStructInvoke($n, $this->lastValue);
+        // `($this->hooks[$k])()` calls an env the ELEMENT owns, and the body
+        // may take it off its slot (a hook that unregisters itself), which now
+        // gives the count back. Hold one for the call, as php does.
+        if (!$this->invokePinsCallee($iv, $iv->callee)) {
+            return $out . $this->emitClosureStructInvoke($n, $this->lastValue);
+        }
+        $this->rt->needsClosureRc = true;
+        $env = $this->lastValue;
+        $out .= '  call void @__mir_closure_retain(ptr ' . $env . ")\n";
+        $out .= $this->emitClosureStructInvoke($n, $env);
+        $out .= '  call void @__mir_closure_release(ptr ' . $env . ")\n";
+        return $out;
     }
 
     /**
@@ -1281,6 +1292,20 @@ trait EmitLlvmCalls
      * payload masked out of a NaN-boxed cell. `$unboxResult` is false when the
      * caller merges arms and unboxes once at the join.
      */
+    /**
+     * Does this invoke hold its own count on the closure it calls? Yes for a
+     * closure read straight out of a SLOT that gives its count back on
+     * overwrite / `unset` — an element or a property: the body may clear its
+     * own slot (a hook that unregisters itself), and php keeps the closure
+     * alive for the call. Also why such a callee is no borrow of its property.
+     */
+    private function invokePinsCallee(Invoke_ $iv, Node $c): bool
+    {
+        if ($iv->callee !== $c) { return false; }
+        if ($c->kind !== Node::KIND_ARRAY_ACCESS && $c->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        return $this->isClosureValueType($c->type);
+    }
+
     private function emitClosureStructInvoke(Invoke_ $n, string $struct, bool $unboxResult = true): string
     {
         $iv = $n;

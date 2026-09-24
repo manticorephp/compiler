@@ -1,0 +1,28 @@
+local only: sum=102305990 growth ok
+array<int,Closure> element unset: sum=102305990 growth ok
+array<int,Closure> element overwrite: sum=102305990 growth ok
+array<string,callable> element unset: sum=102509990 growth ok
+array<int,mixed> element unset: sum=7000 growth ok
+?Closure property overwrite: sum=102305990 growth ok
+callable property overwrite: sum=102305990 growth ok
+static property overwrite: sum=7020990 growth ok
+holder dies: sum=204000 growth ok
+local array dies: sum=204611980 growth ok
+untyped local array: sum=102000 growth ok
+copy then unset: sum=102305990 growth ok
+read then unset: sum=102305990 growth ok
+hook unregisters itself: sum=102305990 growth ok
+foreach over hooks: sum=204611980 growth ok
+sorted hooks: sum=103194854 growth ok
+left: 4
+self: 64
+static => Tool::rev
+sarr => 2 parts
+mfcc => t:AB
+arrow => ab!!
+str => strtoupper
+arr => 2 parts
+fcc => ba
+clo => ab!
+strrev [q] 4
+done

@@ -140,6 +140,8 @@ final class UnifiedArrayRuntime
         $this->emitElemKindIs();
         $this->emitElemEncodeRaw();
         $this->emitElemStampRaw();
+        $this->emitCloStamp();
+        $this->emitCloDrop();
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
         $this->emitTakeCell('__mir_array_shift_cell', '__mir_array_shift');
         $this->emitUnshift();
@@ -1744,7 +1746,15 @@ final class UnifiedArrayRuntime
         $hi = $hhead->load(Type::i64(), $iSlot);
         $hhead->brIf($hhead->icmp('sge', $hi, $len), $ret, $hbody);
         $kind = $hbody->load(Type::i64(), $this->entryAddr($hbody, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
-        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
+        // A TOMBSTONE's value word is stale — the free walk skips it, so
+        // co-owning it here is a count no release gives back (and, for an
+        // element the unset already dropped, a count on freed memory).
+        $hlive = $fn->block('rt_hlive');
+        $hskip = $fn->block('rt_hskip');
+        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED)), $hskip, $hlive);
+        $hskip->store($hskip->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hskip->br($hhead);
+        $hlive->brIf($hlive->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
         $kp = $hkey->load(Type::ptr(), $this->entryAddr($hkey, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $hkey->call('__mir_rc_retain_str', Type::void(), [$kp]);
         $hkey->br($hval);
@@ -2117,9 +2127,15 @@ final class UnifiedArrayRuntime
         // __mir_array_release self-guards ARRAY_TAG_MAGIC (safe on a non-array).
         $doarr->call('__mir_array_release', Type::void(), [$doarr->inttoptr($val, Type::ptr())]);
         $doarr->br($done);
-        $chkcell->brIf($chkcell->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CELL)), $docell, $done);
+        $chkclo = $fn->block('chkclo');
+        $doclo = $fn->block('doclo');
+        $chkcell->brIf($chkcell->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CELL)), $docell, $chkclo);
         $docell->call('__mir_cell_drop', Type::void(), [$val]);
         $docell->br($done);
+        // CLO: a counted closure env; the helper leaves every other word alone.
+        $chkclo->brIf($chkclo->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO)), $doclo, $done);
+        $doclo->call('__mir_closure_release', Type::void(), [$doclo->inttoptr($val, Type::ptr())]);
+        $doclo->br($done);
         $done->retVoid();
     }
 
@@ -2187,9 +2203,15 @@ final class UnifiedArrayRuntime
         $chkarr->brIf($chkarr->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_ARR)), $doarr, $chkcell);
         $doarr->call('__mir_array_retain', Type::void(), [$doarr->inttoptr($val, Type::ptr())]);
         $doarr->br($done);
-        $chkcell->brIf($chkcell->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CELL)), $docell, $done);
+        $chkclo = $fn->block('chkclo');
+        $doclo = $fn->block('doclo');
+        $chkcell->brIf($chkcell->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CELL)), $docell, $chkclo);
         $docell->call('__mir_cell_retain', Type::void(), [$val]);
         $docell->br($done);
+        // CLO: a counted closure env; the helper leaves every other word alone.
+        $chkclo->brIf($chkclo->icmp('eq', $repr, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO)), $doclo, $done);
+        $doclo->call('__mir_closure_retain', Type::void(), [$doclo->inttoptr($val, Type::ptr())]);
+        $doclo->br($done);
         $done->retVoid();
     }
 
@@ -3303,7 +3325,15 @@ final class UnifiedArrayRuntime
         $hi = $hhead->load(Type::i64(), $iSlot);
         $hhead->brIf($hhead->icmp('sge', $hi, $len), $ret, $hbody);
         $kind = $hbody->load(Type::i64(), $this->entryAddr($hbody, $copy, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
-        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
+        // A TOMBSTONE's value word is stale — the free walk skips it, so
+        // co-owning it here is a count no release gives back (and, for an
+        // element the unset already dropped, a count on freed memory).
+        $hlive = $fn->block('cow_hlive');
+        $hskip = $fn->block('cow_hskip');
+        $hbody->brIf($hbody->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED)), $hskip, $hlive);
+        $hskip->store($hskip->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hskip->br($hhead);
+        $hlive->brIf($hlive->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
         $kp = $hkey->load(Type::ptr(), $this->entryAddr($hkey, $copy, $hi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $hkey->call('__mir_rc_retain_str', Type::void(), [$kp]);
         $hkey->br($hval);
@@ -4430,6 +4460,14 @@ final class UnifiedArrayRuntime
         $len = $e->load(Type::i64(), $arr);
         $fp = $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
         $flags = $e->load(Type::i64(), $fp);
+        // A buffer that OWNS raw closure envs (repr CLO, no hint) boxes each as
+        // an OBJECT cell: its count moves into the cell, and `__mir_cell_drop`
+        // gives it back through `__mir_closure_release`, which leaves a
+        // non-env word alone. Unboxed, the env would sit under repr CELL as an
+        // untagged word that no drop ever reaches.
+        $isClo = $e->icmp('eq', $e->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO));
+        $hint = $e->select($isClo, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ), $hint);
         $iSlot = $e->alloca(Type::i64(), 'ci');
         $e->store(Value::int(Type::i64(), 0), $iSlot);
         $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hhead, $phead);
@@ -4784,8 +4822,18 @@ final class UnifiedArrayRuntime
             new SwitchCase(Value::int(Type::i64(), 0), $h0),
             new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $asis),
         ]);
-        $h0->store($h0->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
-        $h0->ret($cell);
+        // Hint 0 is an empty or never-described buffer — except one that owns
+        // raw closure envs (repr CLO): those are rewritten as the object cells
+        // they are, or they would sit untagged under a CELL hint.
+        $h0clo = $fn->block('h0clo');
+        $h0plain = $fn->block('h0plain');
+        $isClo = $h0->icmp('eq', $h0->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO));
+        $h0->brIf($isClo, $h0clo, $h0plain);
+        $h0clo->call('__mir_array_cellify_inplace', Type::void(), [$arr, Value::int(Type::i64(), 0)]);
+        $h0clo->ret($cell);
+        $h0plain->store($h0plain->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
+        $h0plain->ret($cell);
         $mism->call('__mir_array_cellify_inplace', Type::void(), [$arr, $hint]);
         $mism->ret($cell);
     }
@@ -4901,6 +4949,60 @@ final class UnifiedArrayRuntime
         $withRepr = $st->or_($st->and_($hinted, Value::int(Type::i64(), ~MemoryAbi::ARRAY_REPR_MASK)), $repr);
         $st->store($st->select($st->icmp('ne', $repr, Value::int(Type::i64(), 0)), $withRepr, $hinted), $fp);
         $st->retVoid();
+    }
+
+    /**
+     * `__mir_array_clo_stamp(arr)` — after a closure-element store that took
+     * its own count, claim {@see MemoryAbi::ARRAY_REPR_CLO} for the buffer,
+     * but only when that claim is TRUE of every closure word in it: the buffer
+     * already says CLO, or the value just stored is its only entry. A buffer
+     * built by anything else (a builder copying closure words without counting
+     * them, a described buffer) keeps its bits — its closures then leak, as
+     * they always did, rather than being given back a count nobody took.
+     */
+    private function emitCloStamp(): void
+    {
+        $fn = $this->module->func('__mir_array_clo_stamp', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $st = $fn->block('st');
+        $done = $fn->block('done');
+        $fp = $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $flags = $e->load(Type::i64(), $fp);
+        $desc = $e->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $e->brIf($e->icmp('eq', $desc, Value::int(Type::i64(), 0)), $chk, $done);
+        $len = $chk->load(Type::i64(), $arr);
+        $chk->brIf($chk->icmp('eq', $len, Value::int(Type::i64(), 1)), $st, $done);
+        $st->store($st->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO)), $fp);
+        $st->br($done);
+        $done->retVoid();
+    }
+
+    /**
+     * `__mir_array_clo_drop(arr, old)` — the overwrite / `unset` drop of one
+     * closure slot, taken only when the buffer OWNS its closure words (repr
+     * CLO, no hint). `old` is the word the slot held; the release self-guards
+     * on the closure magic, so a function-name string or an `[obj, 'm']`
+     * array in a `callable` slot is left alone.
+     */
+    private function emitCloDrop(): void
+    {
+        $fn = $this->module->func('__mir_array_clo_drop', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $old = $fn->param(Type::i64(), 'old');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $drop = $fn->block('drop');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $desc = $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $owns = $chk->icmp('eq', $desc, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO));
+        $chk->brIf($owns, $drop, $done);
+        $drop->call('__mir_closure_release', Type::void(), [$drop->inttoptr($old, Type::ptr())]);
+        $drop->br($done);
+        $done->retVoid();
     }
 
     /**

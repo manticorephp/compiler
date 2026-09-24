@@ -2503,6 +2503,9 @@ final class EmitLlvm implements EmitVisitor
             // ({@see EmitLlvmEscape::operandHeldSafely}).
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c->kind === Node::KIND_PROPERTY_ACCESS && $this->operandHeldSafely($parent, $c)) { continue; }
+                // The closure an invoke CALLS is pinned for the call ({@see
+                // EmitLlvmCalls::invokePinsCallee}); it is not handed to anyone.
+                if ($parent instanceof \Compile\Mir\Invoke_ && $this->invokePinsCallee($parent, $c)) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
             }
             return;
@@ -3388,6 +3391,11 @@ final class EmitLlvm implements EmitVisitor
         $tk = $valueNode->type->kind;
         $cls = $valueNode->type->class ?? '';
         if ($boxed && $tk === Type::KIND_CELL) { return true; }
+        // rcRetainByType's closure arm co-owns every borrowed closure (the
+        // helper self-guards on the env magic). Answering "borrowed" here
+        // marked the local transferred as well, so a stored closure local
+        // kept one count nobody gave back.
+        if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && $this->isClosureClass($cls))) { return true; }
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY
@@ -4048,7 +4056,10 @@ final class EmitLlvm implements EmitVisitor
         $f = $this->discardReleaseFlavor($el);
         if ($f === 'obj') { return 'obj'; }
         if ($f === 'str') { return 'str'; }
-        return 'buf';   // closure / #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
+        // A closure element is owned by the buffer's CLO repr, which only the
+        // repr walk reads ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}).
+        if ($this->isClosureValueType($el)) { return ''; }
+        return 'buf';   // #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
     }
 
     /**
@@ -4152,6 +4163,11 @@ final class EmitLlvm implements EmitVisitor
         $k = $el->kind;
         if ($k === Type::KIND_UNKNOWN) { return ''; }
         if ($k === Type::KIND_CELL) { return $cellElemOwned ? 'cell' : ''; }
+        // A closure slot drops through the buffer's own ownership record
+        // (`__mir_array_clo_drop`, {@see \Compile\MemoryAbi::ARRAY_REPR_CLO}):
+        // the static type cannot say whether this buffer counted its closure
+        // words, and a `callable` slot may hold a word that is no env at all.
+        if ($this->isClosureValueType($el)) { return 'clogated'; }
         // Which element KINDS may drop — `obj,arr` by default, because a
         // compiler built with STRING-element drops miscompiles itself
         // ({@see \Compile\Debug::$elemDropKinds} carries the repro). Also the
@@ -4439,6 +4455,19 @@ final class EmitLlvm implements EmitVisitor
         // freed none. Only the LITERAL: a closure read out of a local or a
         // property is a borrow.
         if ($a->kind === Node::KIND_CLOSURE) { return 'closure'; }
+        // …and so is a closure a CALL hands back, under the +1 return
+        // convention rcRetainByType's closure arm already reads as a transfer:
+        // `$reg->on($obj->makeHook())` retained it into the registry and the
+        // call's own count was never given back.
+        if ($this->isClosureValueType($a->type)) {
+            $ck = $a->kind;
+            if ($ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL || $ck === Node::KIND_INVOKE) { return 'closure'; }
+            if ($ck === Node::KIND_CALL) {
+                $cfn = $a->function;
+                if (isset($this->sigs->paramTypes[$cfn]) && !($this->sigs->returnsByRef[$cfn] ?? false)) { return 'closure'; }
+            }
+            return '';
+        }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
@@ -4568,8 +4597,11 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValueType = $st;
             return $o;
         }
+        // A closure boxes as an OBJECT cell whose drop reaches the env
+        // (`__mir_cell_drop` → `__mir_closure_release`), so the box co-owns it
+        // like any object: rcRetainByType's closure arm, fresh ones transfer.
         if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
-            && !$borrowedCellArray) {
+            && $k !== Type::KIND_CLOSURE && !$borrowedCellArray) {
             return '';
         }
         $saveV = $this->lastValue;
