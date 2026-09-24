@@ -1377,10 +1377,20 @@ final class UnifiedArrayRuntime
             $doarr->and_($doarr->ptrtoint($icp, Type::i64()), Value::int(Type::i64(), 281474976710655)),
             Value::int(Type::i64(), -2533274790395904),
         );
+        // Written back at its POSITION, into the fresh copy's own slot. `set_int`
+        // took the position for an INT KEY: on a string-keyed (hashed) array it
+        // APPENDED a new entry holding another array, which this same walk then
+        // visited — `clone` of an object whose `array` property held an array
+        // under a string key (symfony OptionsResolver::$defaults) never returned.
         $bc2 = $doarr->load(Type::ptr(), $copySlot);
-        $nc = $doarr->call('__mir_array_set_int', Type::ptr(), [$bc2, $bi, $iv]);
-        $doarr->store($nc, $copySlot);
-        $doarr->br($cont);
+        $pk = $fn->block('cc_packed');
+        $hs = $fn->block('cc_hashed');
+        $cflags = $doarr->load(Type::i64(), $this->hdr($doarr, $bc2, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $doarr->brIf($doarr->icmp('ne', $this->hashedBit($doarr, $cflags), Value::int(Type::i64(), 0)), $hs, $pk);
+        $pk->store($iv, $this->packedSlot($pk, $bc2, $bi));
+        $pk->br($cont);
+        $hs->store($iv, $this->entryAddr($hs, $bc2, $bi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $hs->br($cont);
 
         $cont->store($cont->add($cont->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
         $cont->br($head);
