@@ -1,0 +1,5 @@
+g mkc byref |
+g mkf1 byref g mkf2 byref |
+my g rows m 3
+mkfirst g |
+hoisted first: sum=20200 growth ok

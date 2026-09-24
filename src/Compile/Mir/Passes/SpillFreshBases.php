@@ -34,9 +34,11 @@ use Compile\Mir\Walk;
  * second released the object the first write was still going through
  * (`mk()->arr[] = 3` aborted). Their chains are pinned structurally first
  * ({@see pinWrites}). When the chain is evaluated unconditionally by a
- * statement, its fresh base is HOISTED instead — `$__fb_N = f();` before the
+ * statement AND nothing the statement evaluates before that base has a side
+ * effect, its fresh base is HOISTED instead — `$__fb_N = f();` before the
  * statement, `$__fb_N` in the chain — so any number of evaluations reads the
- * same object, and it is evaluated once, as php does. A chain under a
+ * same object, and it is evaluated once, as php does. A base behind an
+ * earlier effect, an erased callee's argument, a chain under a
  * conditional, or on a CELL-typed base, keeps the old behaviour (a leak, never
  * a double free).
  *
@@ -82,6 +84,12 @@ final class SpillFreshBases
 
     /** @var array<int, StoreLocal> hoisted bases of the statement being visited */
     private array $hoisted = [];
+
+    /** The statement {@see hoistIn} is working on — the order {@see effectBefore} walks. */
+    private ?Node $stmtRoot = null;
+
+    private bool $orderReached = false;
+    private bool $orderEffect = false;
 
     /** @var array<string, bool> hoisted names a reference keeps alive past the statement */
     private array $keepAlive = [];
@@ -184,7 +192,7 @@ final class SpillFreshBases
      *
      * @return int[]
      */
-    private function refArgIndexes(Node $n): array
+    private function refArgIndexes(Node $n, bool $forHoist = false): array
     {
         $k = $n->kind;
         $fn = '';
@@ -226,6 +234,10 @@ final class SpillFreshBases
                 if ($this->writesBackFirstArg($fn) && \count($args) > 0) { $out[] = 0; }
                 return $out;
             }
+            // An erased callee: pinned conservatively, but its arguments are
+            // never HOISTED — most are plain by-value reads, and lifting one
+            // ahead of its siblings reorders their evaluation.
+            if ($forHoist) { return $out; }
             $i = 0;
             foreach ($args as $a) {
                 $ak = $a->type->kind;
@@ -333,7 +345,7 @@ final class SpillFreshBases
             $ra = $this->asRefAddr($n);
             $ra->lvalue = $this->hoistBottom($ra->lvalue, true);
         } else {
-            $idx = $this->refArgIndexes($n);
+            $idx = $this->refArgIndexes($n, true);
             if (\count($idx) > 0) {
                 $args = $this->callArgs($n);
                 foreach ($idx as $i) { $args[$i] = $this->hoistBottom($args[$i], false); }
@@ -367,10 +379,53 @@ final class SpillFreshBases
         // `$o = mo(); $o->arr[] = 1;` SIGSEGVs with no temporary involved), so
         // such a chain keeps evaluating its base in place, as before.
         if ($n->type->kind === Type::KIND_CELL || !$this->isFreshContainer($n, 2)) { return $n; }
+        // Only when nothing the statement evaluates BEFORE it can have a side
+        // effect: hoisting lifts it ahead of all of them.
+        if ($this->effectBefore($this->stmtRoot, $n)) { return $n; }
         $name = $this->nextName();
         $this->hoisted[] = new StoreLocal($name, $n, $n->type);
         if ($keep) { $this->keepAlive[$name] = true; }
         return new LoadLocal($name, $n->type);
+    }
+
+    /**
+     * Does anything the statement evaluates before `$target` have a side
+     * effect? Evaluation order is the lowering's: operands left to right
+     * ({@see Node::children}), each node after its own operands. `$target`'s own
+     * operands move with it, so they do not count.
+     */
+    private function effectBefore(?Node $root, Node $target): bool
+    {
+        if ($root === null) { return true; }
+        $this->orderReached = false;
+        $this->orderEffect = false;
+        $this->scanOrder($root, \spl_object_id($target));
+        return $this->orderEffect || !$this->orderReached;
+    }
+
+    private function scanOrder(Node $n, int $target): void
+    {
+        if ($this->orderReached || $this->orderEffect) { return; }
+        if (\spl_object_id($n) === $target) { $this->orderReached = true; return; }
+        foreach (Walk::children($n) as $c) {
+            $this->scanOrder($c, $target);
+            if ($this->orderReached || $this->orderEffect) { return; }
+        }
+        if ($this->hasEffect($n)) { $this->orderEffect = true; }
+    }
+
+    /** A node whose evaluation can be observed: a call, an allocation, a store, output. */
+    private function hasEffect(Node $n): bool
+    {
+        $k = $n->kind;
+        return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ
+            || $k === Node::KIND_CLONE || $k === Node::KIND_YIELD || $k === Node::KIND_INCDEC
+            || $k === Node::KIND_STORE_LOCAL || $k === Node::KIND_STORE_ELEMENT
+            || $k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_STORE_DYN_PROP
+            || $k === Node::KIND_STORE_STATIC_PROP || $k === Node::KIND_ECHO
+            || $k === Node::KIND_UNSET || $k === Node::KIND_THROW || $k === Node::KIND_CAST
+            || $k === Node::KIND_CONCAT;
     }
 
     // ── Rewrite, statement by statement ─────────────────────────────────────
@@ -395,6 +450,7 @@ final class SpillFreshBases
             $savedHoisted = $this->hoisted;
             $this->pending = [];
             $this->hoisted = [];
+            $this->stmtRoot = $s;
             $this->hoistIn($s);
             $pre = $this->hoisted;
             $this->hoisted = $savedHoisted;
