@@ -543,6 +543,9 @@ trait InferScans
         foreach ($module->functions as $fn) {
             if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; }
         }
+        if ($changed && $this->ctx !== null) {
+            foreach ($targets as $g => $unused) { $this->ctx->changes->addProp($g); }
+        }
         return $changed;
     }
 

@@ -159,6 +159,9 @@ final class NarrowReturns implements Pass
                 foreach ($scope->functions as $sn) { $inScope[$sn] = true; }
                 \Compile\Stats::line("  infer-diff: scope holds " . (string)\count($inScope) . " fn(s)");
                 $before = $infer->fingerprintAll($module);
+                /** @var array<string, string[]> $dumps */
+                $dumps = [];
+                foreach ($module->functions as $df) { $dumps[$df->name] = $infer->typeDump($df); }
                 $retBefore = [];
                 foreach ($module->functions as $bf) {
                     $rt = $bf->returnType;
@@ -185,6 +188,16 @@ final class NarrowReturns implements Pass
                             . '  ret ' . $rt1 . ' -> ' . $rt2
                             . ($rt1 === $rt2 ? '  (BODY only)' : '')
                             . '  in-scope=' . (isset($inScope[$name]) ? 'y' : 'n'));
+                        foreach ($module->functions as $af2) {
+                            if ($af2->name !== $name) { continue; }
+                            $now = $check->typeDump($af2);
+                            $was = $dumps[$name] ?? [];
+                            $di = 0;
+                            while ($di < \count($now) && $di < \count($was) && $now[$di] === $was[$di]) { $di = $di + 1; }
+                            \Compile\Stats::line('  infer-diff:   first diff @' . (string)$di . ': scoped `'
+                                . ($was[$di] ?? '-') . '` full `' . ($now[$di] ?? '-') . '`');
+                            break;
+                        }
                     }
                 }
                 \Compile\Stats::line('  infer-diff: round ' . (string)$iters . ' — '

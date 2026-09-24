@@ -24,8 +24,11 @@ final class InferenceScope
         // the edges DependencyIndex does not model, so re-inferring their holders
         // unconditionally is what makes the narrowed scope SOUND rather than
         // optimistic.
-        $names = [];
-        foreach ($context->invalidated() as $n) { $names[$n] = true; }
+        // The first wave only; {@see \Compile\Mir\Passes\InferTypes::run}
+        // follows a change further exactly as far as types keep moving.
+        $seed = $context->dependencies->seedChanges($context->changes);
+        if ($seed === null) { return new self(self::FULL, [], 'barrier-or-unknown'); }
+        $names = $seed;
         foreach ($context->barriers->escapers() as $n => $_) { $names[$n] = true; }
         return new self(self::TARGETED, \array_keys($names), 'dependency-closure+escapers');
     }

@@ -13,6 +13,8 @@ final class DependencyIndex
     private array $methodCallers = [];
     /** Functions containing a `new $cls(...)`, i.e. callers of every constructor. */
     private array $dynNewCallers = [];
+    /** Functions containing a closure INVOKE — the callers of every closure body. */
+    private array $invokers = [];
     /**
      * Bare property name => the functions that read or write it.
      *
@@ -36,6 +38,10 @@ final class DependencyIndex
      * is ambiguous while composing it is exact.
      */
     private array $methodOf = [];
+    /** Bare method name => every module symbol implementing it. @var array<string, array<string, bool>> */
+    private array $methodSyms = [];
+    /** Caller => the bare method names it dispatches on (static or dynamic). @var array<string, array<string, bool>> */
+    private array $methodCallsOf = [];
     private array $unknownReasons = [];
     private bool $unknownEscape = false;
 
@@ -51,7 +57,10 @@ final class DependencyIndex
         foreach ($module->classes as $cd) {
             foreach ($cd->methodNames as $m => $_) {
                 $sym = $cd->name . '__' . $m;
-                if (isset($functions[$sym])) { $index->methodOf[$sym] = $m; }
+                if (isset($functions[$sym])) {
+                    $index->methodOf[$sym] = $m;
+                    $index->methodSyms[$m][$sym] = true;
+                }
             }
         }
         foreach ($module->functions as $fn) {
@@ -91,6 +100,14 @@ final class DependencyIndex
                 $seen[$caller] = true;
                 $queue[] = $caller;
             }
+            // A changed closure body is reachable through every indirect call.
+            if (\str_starts_with($name, '__closure_')) {
+                foreach ($this->invokers as $caller => $_) {
+                    if (isset($seen[$caller])) { continue; }
+                    $seen[$caller] = true;
+                    $queue[] = $caller;
+                }
+            }
             // A changed method is reachable through every site dispatching on its
             // name, and a changed constructor through every dynamic `new`.
             $bare = $this->methodOf[$name] ?? '';
@@ -125,8 +142,83 @@ final class DependencyIndex
                 $seen[$callee] = true;
                 $queue[] = $callee;
             }
+            // …and the same hop through a dispatch: a method's parameter is
+            // refined from its call sites exactly like a function's.
+            foreach (($this->methodCallsOf[$src] ?? []) as $m => $_) {
+                foreach (($this->methodSyms[$m] ?? []) as $sym => $__) {
+                    if (isset($seen[$sym])) { continue; }
+                    $seen[$sym] = true;
+                    $queue[] = $sym;
+                }
+            }
         }
         return $queue;
+    }
+
+    /**
+     * The functions that can observe `$name` DIRECTLY: its callers (they read its
+     * return), its callees (their parameters are refined from its arguments),
+     * the same two through a dispatch on its bare name, a closure body's
+     * invokers, a constructor's dynamic `new`s. One hop — the scoped pass walks
+     * further only when a re-inferred neighbour's own types actually move
+     * ({@see \Compile\Mir\Passes\InferTypes::run}).
+     * @return array<string, bool>
+     */
+    public function neighbors(string $name): array
+    {
+        $out = [];
+        foreach (($this->callers[$name] ?? []) as $n => $_) { $out[$n] = true; }
+        foreach (($this->callees[$name] ?? []) as $n => $_) { $out[$n] = true; }
+        foreach (($this->methodCallsOf[$name] ?? []) as $m => $_) {
+            foreach (($this->methodSyms[$m] ?? []) as $sym => $__) { $out[$sym] = true; }
+        }
+        $bare = $this->methodOf[$name] ?? '';
+        if ($bare !== '') {
+            foreach (($this->methodCallers[$bare] ?? []) as $n => $_) { $out[$n] = true; }
+            if ($bare === '__construct') {
+                foreach ($this->dynNewCallers as $n => $_) { $out[$n] = true; }
+            }
+        }
+        if (\str_starts_with($name, '__closure_')) {
+            foreach ($this->invokers as $n => $_) { $out[$n] = true; }
+        }
+        unset($out[$name]);
+        return $out;
+    }
+
+    /**
+     * The first wave of a scoped pass: what moved, what can see it directly, and
+     * whoever names a retyped property. The rest is propagated by the pass itself.
+     * @return array<string, bool>|null  null when only a full pass is sound
+     */
+    public function seedChanges(ChangeSet $changes): ?array
+    {
+        if ($this->unknownEscape || $changes->unknownEscape
+            || \count($changes->classes) > 0 || \count($changes->globals) > 0) {
+            return null;
+        }
+        $out = [];
+        foreach ($changes->functions as $fn => $_) {
+            if (!isset($this->functions[$fn])) { continue; }
+            $out[$fn] = true;
+            foreach ($this->neighbors($fn) as $n => $__) { $out[$n] = true; }
+        }
+        if (\count($changes->props) > 0) {
+            foreach ($changes->props as $prop => $_) {
+                foreach (($this->propUsers[$prop] ?? []) as $fn => $__) { $out[$fn] = true; }
+            }
+            foreach ($this->dynPropUsers as $fn => $_) { $out[$fn] = true; }
+        }
+        return $out;
+    }
+
+    /** Everyone who can read property `$prop`: the functions naming it, and
+     *  those addressing properties by a runtime name. @return array<string, bool> */
+    public function usersOfProp(string $prop): array
+    {
+        $out = $this->propUsers[$prop] ?? [];
+        foreach ($this->dynPropUsers as $fn => $_) { $out[$fn] = true; }
+        return $out;
     }
 
     public function invalidateChanges(ChangeSet $changes): array
@@ -170,6 +262,10 @@ final class DependencyIndex
 
     private function asStaticProp(Node $node): StaticProp_ { return $node; }
 
+    private function asStaticCall(Node $node): StaticCall_ { return $node; }
+
+    private function asClosure(Node $node): Closure_ { return $node; }
+
     private function asStoreStaticProp(Node $node): StoreStaticProp_ { return $node; }
 
     private function collect(Node $node, string $caller): void
@@ -198,6 +294,7 @@ final class DependencyIndex
         if ($node->kind === Node::KIND_METHOD_CALL) {
             $m = $this->asMethodCall($node)->method;
             $this->methodCallers[$m][$caller] = true;
+            $this->methodCallsOf[$caller][$m] = true;
             $this->dynamicCallers[$caller] = true;
         }
         if ($node->kind === Node::KIND_PROPERTY_ACCESS) {
@@ -219,6 +316,27 @@ final class DependencyIndex
         }
         // `new $cls(...)` reaches an unknown constructor, so it is a caller of
         // every `__construct` for invalidation purposes — and of nothing else.
+        // A static call reaches `C::m` — keyed by the method NAME like a
+        // dispatch, which also covers a `parent::` / late-static-bound target.
+        if ($node->kind === Node::KIND_STATIC_CALL) {
+            $sm = $this->asStaticCall($node)->method;
+            $this->methodCallers[$sm][$caller] = true;
+            $this->methodCallsOf[$caller][$sm] = true;
+        }
+        // A closure body is typed from its captures, which its DEFINER types:
+        // the definer changing re-infers the body (a callee edge), and the body's
+        // return reaches the definer's own uses of the literal (a caller edge).
+        if ($node->kind === Node::KIND_CLOSURE) {
+            $body = '__closure_' . (string)$this->asClosure($node)->id;
+            if (isset($this->functions[$body])) {
+                $this->callees[$caller][$body] = true;
+                $this->callers[$body][$caller] = true;
+            }
+        }
+        // An indirect call can reach any closure body.
+        if ($node->kind === Node::KIND_INVOKE) {
+            $this->invokers[$caller] = true;
+        }
         if ($node->kind === Node::KIND_NEW_DYN_OBJ) {
             $this->dynNewCallers[$caller] = true;
             $this->dynamicCallers[$caller] = true;

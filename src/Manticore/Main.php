@@ -4414,7 +4414,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
         $statT = \Compile\Stats::now();
-        $mono = new \Compile\Mir\Passes\Monomorphize();
+        $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext);
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
         $mono = null;
