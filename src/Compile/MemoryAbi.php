@@ -19,7 +19,7 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      */
-    public const VERSION = 9;
+    public const VERSION = 10;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -126,6 +126,19 @@ final class MemoryAbi
      * `rc = -1` marks an immortal env, the same convention string literals use.
      */
     public const CLOSURE_TAG_MAGIC = 0x7E66000000000007;
+
+    /**
+     * Bits 8..23 of a closure env's magic word carry its SHAPE,
+     * `(env slots << 1) | slot-1-is-$this`, so a rebind of a closure whose
+     * literal the call site cannot name copies the right number of slots and
+     * only replaces a real `$this`. The shape rides in the env because the
+     * code pointer cannot key it: SplitModule gives every part its own copy of
+     * an `internal` closure body. Every test of the magic masks these bits.
+     */
+    public const CLOSURE_SHAPE_SHIFT = 8;
+
+    /** `~0xFFFF00`: the magic word with its shape bits cleared. */
+    public const CLOSURE_MAGIC_MASK = -16776961;
 
     /**
      * Sentinel at a REFERENCE BOX's `data-8`. A PHP reference is two or more

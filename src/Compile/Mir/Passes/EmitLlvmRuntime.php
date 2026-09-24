@@ -1312,7 +1312,8 @@ trait EmitLlvmRuntime
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
-        $out .= "  %ism = icmp eq i64 %m, " . $magic . "\n";
+        $out .= "  %mm = and i64 %m, " . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+        $out .= "  %ism = icmp eq i64 %mm, " . $magic . "\n";
         $out .= "  br i1 %ism, label %rcb, label %done\n";
         $out .= "rcb:\n";
         $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n";
@@ -1333,7 +1334,8 @@ trait EmitLlvmRuntime
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
-        $out .= "  %ism = icmp eq i64 %m, " . $magic . "\n";
+        $out .= "  %mm = and i64 %m, " . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+        $out .= "  %ism = icmp eq i64 %mm, " . $magic . "\n";
         $out .= "  br i1 %ism, label %rcb, label %done\n";
         $out .= "rcb:\n";
         $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n";

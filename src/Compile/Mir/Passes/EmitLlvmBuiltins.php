@@ -727,8 +727,10 @@ trait EmitLlvmBuiltins
               . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
         $cw = $this->ssa->allocReg();
         $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+        $cwm = $this->ssa->allocReg();
+        $out .= '  ' . $cwm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
         $isClo = $this->ssa->allocReg();
-        $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cw . ', '
+        $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cwm . ', '
               . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
         $cb = $this->ssa->allocReg();
         $out .= '  ' . $cb . ' = select i1 ' . $isClo . ', i64 ' . $ob . ', i64 ' . $intB . "\n";
@@ -3754,6 +3756,31 @@ trait EmitLlvmBuiltins
                 $rz = $this->ssa->allocReg();
                 $out .= '  ' . $rz . ' = zext i1 ' . $prev . " to i64\n";
                 $out .= '  store i64 ' . $rz . ', ptr ' . $slot . "\n";
+                if ($kind === Type::KIND_OBJ) {
+                    // A raw closure env is an object too: a plain rc at -8,
+                    // CLOSURE_TAG_MAGIC at -32 (read only when -8 is no magic).
+                    $cloL = $this->ssa->allocLabel('ia.clo');
+                    $hi = $this->ssa->allocReg();
+                    $out .= '  ' . $hi . ' = lshr i64 ' . $tw . ", 48\n";
+                    $anyM = $this->ssa->allocReg();
+                    $out .= '  ' . $anyM . ' = icmp eq i64 ' . $hi . ', '
+                          . (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC >> 48) . "\n";
+                    $out .= '  br i1 ' . $anyM . ', label %' . $endL . ', label %' . $cloL . "\n";
+                    $out .= $cloL . ":\n";
+                    $cp = $this->ssa->allocReg();
+                    $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $rp . ', i64 '
+                          . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+                    $cw = $this->ssa->allocReg();
+                    $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+                    $cwm = $this->ssa->allocReg();
+                    $out .= '  ' . $cwm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+                    $isClo = $this->ssa->allocReg();
+                    $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cwm . ', '
+                          . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+                    $cz = $this->ssa->allocReg();
+                    $out .= '  ' . $cz . ' = zext i1 ' . $isClo . " to i64\n";
+                    $out .= '  store i64 ' . $cz . ', ptr ' . $slot . "\n";
+                }
                 $out .= '  br label %' . $endL . "\n";
             }
             $out .= $endL . ":\n";

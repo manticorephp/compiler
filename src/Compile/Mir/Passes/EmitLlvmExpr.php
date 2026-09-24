@@ -2614,8 +2614,10 @@ trait EmitLlvmExpr
               . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
         $m32 = $this->ssa->allocReg();
         $out .= '  ' . $m32 . ' = load i64, ptr ' . $m32p . "\n";
+        $m32m = $this->ssa->allocReg();
+        $out .= '  ' . $m32m . ' = and i64 ' . $m32 . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
         $isCl = $this->ssa->allocReg();
-        $out .= '  ' . $isCl . ' = icmp eq i64 ' . $m32 . ', '
+        $out .= '  ' . $isCl . ' = icmp eq i64 ' . $m32m . ', '
               . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
         $ce = $this->ssa->allocReg();
         $out .= '  ' . $ce . ' = zext i1 ' . $isCl . " to i64\n";

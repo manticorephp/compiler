@@ -5607,12 +5607,10 @@ trait EmitLlvmObjects
         $out .= $this->closureHdrLoadOut;
         $srcDrop = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET);
         $out .= $this->closureHdrLoadOut;
-        $isOurs = $this->ssa->allocReg();
-        $out .= '  ' . $isOurs . ' = icmp eq i64 ' . $srcMagic . ', '
-              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $out .= $this->closureMagicTestIr($srcMagic);
+        $isOurs = $this->closureIsOursReg;
         $magicV = $this->ssa->allocReg();
-        $out .= '  ' . $magicV . ' = select i1 ' . $isOurs . ', i64 '
-              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . ", i64 0\n";
+        $out .= '  ' . $magicV . ' = select i1 ' . $isOurs . ', i64 ' . $srcMagic . ", i64 0\n";
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_HASH_OFFSET, $magicV);
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET, $srcRet);
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET, $srcDrop);
@@ -5657,24 +5655,28 @@ trait EmitLlvmObjects
 
     /**
      * {@see emitClosureRebind} for a receiver whose literal is not known here:
-     * the env's slot count and whether slot 1 is `$this` come from the module's
-     * shape table, keyed by the code pointer in slot 0. An env no literal of
-     * this module made keeps the old `[fn, $this]` assumption.
+     * the env's slot count and whether slot 1 is `$this` come from the shape
+     * bits of its magic word ({@see \Compile\MemoryAbi::CLOSURE_SHAPE_SHIFT}).
+     * An env without our header keeps the old `[fn, $this]` assumption.
      */
     private function emitClosureRebindErased(string $src, Node $objNode): string
     {
         $this->rt->needsClosureRc = true;
-        $this->needsClosureShapeFn = true;
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
         $out = $this->emitNode($objNode);
         $out .= $this->coerceToI64();
         $objV = $this->lastValue;
-        $fp = $this->ssa->allocReg();
-        $out .= '  ' . $fp . ' = load i64, ptr ' . $src . "\n";
+        $srcMagic = $this->closureHdrLoad($src, \Compile\MemoryAbi::STRING_HASH_OFFSET);
+        $out .= $this->closureHdrLoadOut;
+        $out .= $this->closureMagicTestIr($srcMagic);
+        $isOurs = $this->closureIsOursReg;
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $srcMagic . ', ' . (string)\Compile\MemoryAbi::CLOSURE_SHAPE_SHIFT . "\n";
+        $shm = $this->ssa->allocReg();
+        $out .= '  ' . $shm . ' = and i64 ' . $sh . ", 65535\n";
         $shape = $this->ssa->allocReg();
-        $out .= '  ' . $shape . ' = call i64 @' . $this->mirHelperSym('__mir_closure_shape')
-              . '(i64 ' . $fp . ")\n";
+        $out .= '  ' . $shape . ' = select i1 ' . $isOurs . ', i64 ' . $shm . ", i64 5\n";
         $slots = $this->ssa->allocReg();
         $out .= '  ' . $slots . ' = lshr i64 ' . $shape . ", 1\n";
         $bytes = $this->ssa->allocReg();
@@ -5685,18 +5687,12 @@ trait EmitLlvmObjects
         $out .= '  ' . $base . ' = call ptr @__mir_alloc(i64 ' . $tot . ")\n";
         $buf = $this->ssa->allocReg();
         $out .= '  ' . $buf . ' = getelementptr inbounds i8, ptr ' . $base . ', i64 ' . (string)$hdr . "\n";
-        $srcMagic = $this->closureHdrLoad($src, \Compile\MemoryAbi::STRING_HASH_OFFSET);
-        $out .= $this->closureHdrLoadOut;
         $srcRet = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET);
         $out .= $this->closureHdrLoadOut;
         $srcDrop = $this->closureHdrLoad($src, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET);
         $out .= $this->closureHdrLoadOut;
-        $isOurs = $this->ssa->allocReg();
-        $out .= '  ' . $isOurs . ' = icmp eq i64 ' . $srcMagic . ', '
-              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
         $magicV = $this->ssa->allocReg();
-        $out .= '  ' . $magicV . ' = select i1 ' . $isOurs . ', i64 '
-              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . ", i64 0\n";
+        $out .= '  ' . $magicV . ' = select i1 ' . $isOurs . ', i64 ' . $srcMagic . ", i64 0\n";
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_HASH_OFFSET, $magicV);
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_RETAIN_OFFSET, $srcRet);
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::CLOSURE_DROP_OFFSET, $srcDrop);
@@ -5731,23 +5727,17 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** The module's closure-shape lookup: code pointer → `(slots << 1) | has-$this`. */
-    private function emitClosureShapeFn(): string
+    private string $closureIsOursReg = '';
+
+    /** `($magic & CLOSURE_MAGIC_MASK) == CLOSURE_TAG_MAGIC` → {@see $closureIsOursReg}. */
+    private function closureMagicTestIr(string $magic): string
     {
-        $out = 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_closure_shape')
-             . "(i64 %fp) noinline {\nentry:\n";
-        $i = 0;
-        foreach ($this->closureShapes as $fnName => $shape) {
-            $hit = 'cs.hit.' . (string)$i;
-            $next = 'cs.next.' . (string)$i;
-            $out .= '  %cs.eq.' . (string)$i . ' = icmp eq i64 %fp, ptrtoint (ptr @manticore_'
-                  . $this->mangle($fnName) . " to i64)\n";
-            $out .= '  br i1 %cs.eq.' . (string)$i . ', label %' . $hit . ', label %' . $next . "\n";
-            $out .= $hit . ":\n  ret i64 " . (string)$shape . "\n";
-            $out .= $next . ":\n";
-            $i = $i + 1;
-        }
-        return $out . "  ret i64 5\n}\n\n";
+        $mm = $this->ssa->allocReg();
+        $out = '  ' . $mm . ' = and i64 ' . $magic . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+        $is = $this->ssa->allocReg();
+        $out .= '  ' . $is . ' = icmp eq i64 ' . $mm . ', ' . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $this->closureIsOursReg = $is;
+        return $out;
     }
 
     /** A receiver's static class name, or '' when it has none. `Type::$class` is

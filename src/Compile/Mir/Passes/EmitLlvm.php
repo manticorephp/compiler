@@ -398,9 +398,6 @@ final class EmitLlvm implements EmitVisitor
      *  registered by the LITERAL and drained into the generated
      *  `__mc_drop` / `__mc_retain` pair after the function loop. */
     private array $closureDrops = [];
-    /** @var array<string, int> closure fn → `(env slots << 1) | has-$this`, one per
-     *  literal emitted; the table an ERASED rebind reads its layout from */
-    private array $closureShapes = [];
     /** @var array<string,bool> closure fn name → has a `$this` slot (slot 1). */
     private array $closureHasThis = [];
 
@@ -786,8 +783,6 @@ final class EmitLlvm implements EmitVisitor
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
-        $this->closureShapes = [];
-        $this->needsClosureShapeFn = false;
         $this->eidxNeeded = [];
         $this->newDynNeeded = [];
         $this->erasedIfaceIface = [];
@@ -1118,7 +1113,6 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
-        if ($this->needsClosureShapeFn) { $extraBodies .= $this->emitClosureShapeFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
         $extraBodies .= $this->dynmExtraBodies;
@@ -2169,9 +2163,6 @@ final class EmitLlvm implements EmitVisitor
 
     /** A site asked for the erased shallow-boxing body. */
     private bool $needsBoxUnknownFn = false;
-
-    /** An erased `->bindTo` asked for the closure-shape lookup. */
-    private bool $needsClosureShapeFn = false;
 
     /** Key channels (`cell` / `int` / `str`) an erased `$x[$k]` site used;
      *  one shared body each ({@see EmitLlvmArrays::emitErasedIndexFns}). */

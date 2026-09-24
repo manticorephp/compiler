@@ -301,7 +301,7 @@ trait EmitLlvmCalls
         // captured value, at every evaluation of the literal (measured: 80 B an
         // iteration for a captured string, 112 for an array).
         $fnName = '__closure_' . (string)$cl->id;
-        $this->closureShapes[$fnName] = ((1 + $cnt) << 1) | (($this->closureHasThis[$fnName] ?? false) ? 1 : 0);
+        $shape = ((1 + $cnt) << 1) | (($this->closureHasThis[$fnName] ?? false) ? 1 : 0);
         $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
         $sz = $hdr + 8 * (1 + $cnt);
         $base = $this->ssa->allocReg();
@@ -311,7 +311,7 @@ trait EmitLlvmCalls
               . ', i64 ' . (string)$hdr . "\n";
         $this->rt->needsClosureRc = true;
         $out .= $this->closureHdrStore($buf, \Compile\MemoryAbi::STRING_HASH_OFFSET,
-            (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC);
+            (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC | ($shape << \Compile\MemoryAbi::CLOSURE_SHAPE_SHIFT)));
         // The per-closure retain/drop pair; both null when the closure owns
         // nothing through its env, which keeps release a plain free.
         $dropV = '0';
