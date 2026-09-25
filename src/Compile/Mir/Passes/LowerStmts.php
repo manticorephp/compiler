@@ -174,9 +174,146 @@ trait LowerStmts
         return $node;
     }
 
+    /**
+     * A WRITE statement whose target chain carries an index (or a receiver)
+     * with a side effect — `$rows[$i++]['n'] = 7`, `unset($m[k()]['n'])`,
+     * `$a[f()]['x'] .= 'y'`, `$a[f()]['c']++`, `mk()->n++` — evaluates that
+     * part ONCE, into a `__lv_N` temp, before the statement, and the statement
+     * then names the temp. php evaluates each dim once, left to right, before
+     * the right-hand side. Without this the part ran once per use: a compound
+     * assign lowers the target twice (read + store), and the emitter re-emits
+     * every level of a nested base for its read, its copy-on-write separation
+     * and its write-back ({@see EmitLlvmArrays::emitSeparatedArray},
+     * {@see EmitLlvmBuiltins::vecWriteBack}) — `$i++` advanced three times.
+     * The temps are unset after the statement, where php has destroyed them.
+     * Statement context only; null when nothing needed hoisting.
+     */
+    private function hoistLvalueStmt(\Parser\Ast\Expr $e): ?Node
+    {
+        $this->lvHoist = [];
+        $this->lvTemps = [];
+        $k = $e->kind;
+        $rewritten = null;
+        if ($k === 'Assign') {
+            $rewritten = $this->hoistAssign($e);
+        } elseif ($k === 'CompoundAssign') {
+            $rewritten = $this->hoistCompound($e);
+        } elseif ($k === 'IncDec') {
+            $rewritten = $this->hoistIncDec($e);
+        } elseif ($k === 'Call') {
+            $rewritten = $this->hoistUnset($e);
+        }
+        if ($rewritten === null || $this->lvTemps === []) {
+            $this->lvHoist = [];
+            $this->lvTemps = [];
+            return null;
+        }
+        $stmts = $this->lvHoist;
+        $temps = $this->lvTemps;
+        $this->lvHoist = [];
+        $this->lvTemps = [];
+        $stmts[] = $this->lowerExpr($rewritten);
+        $loads = [];
+        foreach ($temps as $t) { $loads[] = new LoadLocal($t, Type::unknown()); }
+        $stmts[] = new Unset_($loads, Type::void());
+        return new Block($stmts, Type::void());
+    }
+
+    private function hoistAssign(\Parser\Ast\Assign $e): ?\Parser\Ast\Expr
+    {
+        $t = $this->hoistLvChain($e->target);
+        if ($t === $e->target) { return null; }
+        return new \Parser\Ast\Assign($t, $e->value, $e->span);
+    }
+
+    private function hoistCompound(\Parser\Ast\CompoundAssign $e): ?\Parser\Ast\Expr
+    {
+        $t = $this->hoistLvChain($e->target);
+        if ($t === $e->target) { return null; }
+        return new \Parser\Ast\CompoundAssign($e->op, $t, $e->value, $e->span);
+    }
+
+    private function hoistIncDec(\Parser\Ast\IncDec $e): ?\Parser\Ast\Expr
+    {
+        $t = $this->hoistLvChain($e->operand);
+        if ($t === $e->operand) { return null; }
+        return new \Parser\Ast\IncDec($e->op, $e->prefix, $t, $e->span);
+    }
+
+    private function hoistUnset(\Parser\Ast\CallExpr $e): ?\Parser\Ast\Expr
+    {
+        if (\strtolower(\ltrim($e->function, '\\')) !== 'unset') { return null; }
+        $args = [];
+        $changed = false;
+        foreach ($e->args as $a) {
+            $h = $this->hoistLvChain($a);
+            if ($h !== $a) { $changed = true; }
+            $args[] = $h;
+        }
+        if (!$changed) { return null; }
+        return new \Parser\Ast\CallExpr($e->function, $args, $e->span);
+    }
+
+    /** The target chain with every effectful dim / receiver replaced by a temp. */
+    private function hoistLvChain(\Parser\Ast\Expr $e): \Parser\Ast\Expr
+    {
+        if ($e->kind === 'ArrayAccess') { return $this->hoistLvDim($e); }
+        if ($e->kind === 'PropertyAccess') { return $this->hoistLvProp($e); }
+        return $e;
+    }
+
+    private function hoistLvDim(\Parser\Ast\ArrayAccess $e): \Parser\Ast\Expr
+    {
+        // `$GLOBALS[...]` has its own lowering, which reads the literal chain.
+        if ($this->isGlobalsAccess($e)) { return $e; }
+        $base = $this->hoistLvChain($e->array);
+        $idx = $e->index;
+        if ($idx !== null && !$this->lvPure($idx)) { $idx = $this->lvTemp($idx); }
+        if ($base === $e->array && $idx === $e->index) { return $e; }
+        return new \Parser\Ast\ArrayAccess($base, $idx, $e->span);
+    }
+
+    private function hoistLvProp(\Parser\Ast\PropertyAccess $e): \Parser\Ast\Expr
+    {
+        if ($e->nullsafe) { return $e; }
+        $obj = $e->object;
+        $ok = $obj->kind;
+        if ($ok === 'ArrayAccess' || $ok === 'PropertyAccess') {
+            $obj = $this->hoistLvChain($obj);
+        } elseif (!$this->lvPure($obj)) {
+            // An object is a handle: evaluating the receiver into a temp is
+            // exactly what php's one evaluation does.
+            $obj = $this->lvTemp($obj);
+        }
+        if ($obj === $e->object) { return $e; }
+        return new \Parser\Ast\PropertyAccess($obj, $e->property, false, $e->span);
+    }
+
+    /** Evaluate `$e` now, into a fresh temp; the chain names the temp. */
+    private function lvTemp(\Parser\Ast\Expr $e): \Parser\Ast\Expr
+    {
+        $name = '__lv_' . (string)$this->lvCounter;
+        $this->lvCounter = $this->lvCounter + 1;
+        $v = $this->lowerExpr($e);
+        $this->lvHoist[] = new StoreLocal($name, $v, $v->type);
+        $this->lvTemps[] = $name;
+        return new \Parser\Ast\Variable($name, $e->span);
+    }
+
+    /** A dim / receiver whose evaluation has no effect and whose value cannot
+     *  change inside the statement's own chain. */
+    private function lvPure(\Parser\Ast\Expr $e): bool
+    {
+        $k = $e->kind;
+        return $k === 'Variable' || $k === 'IntLiteral' || $k === 'FloatLiteral'
+            || $k === 'StringLiteral' || $k === 'BoolLiteral' || $k === 'NullLiteral'
+            || $k === 'MagicConstant' || $k === 'Identifier' || $k === 'StaticAccess';
+    }
     private function lowerStmtInner(\Parser\Ast\Stmt $stmt): Node
     {
         if ($stmt->kind === 'Expression') {
+            $hoisted = $this->hoistLvalueStmt($stmt->expr);
+            if ($hoisted !== null) { return $hoisted; }
             $lowered = $this->lowerExpr($stmt->expr);
             // `(void) f();` — the cast lowered away, so mark the call itself so
             // the #[\NoDiscard] check stays quiet for it.

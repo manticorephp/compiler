@@ -640,6 +640,15 @@ final class LowerFromAst implements Pass
     private int $closureCounter = 0;
     private int $destrCounter = 0;
 
+    /** Counter for the `__lv_N` temps {@see LowerStmts::hoistLvalueStmt} makes. */
+    private int $lvCounter = 0;
+
+    /** @var Node[] the temp stores of the lvalue being hoisted, in evaluation order */
+    private array $lvHoist = [];
+
+    /** @var string[] the temp names of the lvalue being hoisted */
+    private array $lvTemps = [];
+
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
 
