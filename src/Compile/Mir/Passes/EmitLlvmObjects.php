@@ -2724,6 +2724,13 @@ trait EmitLlvmObjects
         // its value dies here. The frame's count goes with it; the alloca is
         // cleared so no later exit gives it back twice.
         $out = '';
+        if ($n->target !== $n->source && isset($this->locals->elemRefBoxes[$n->target])) {
+            $eo = $this->locals->elemRefBoxes[$n->target];
+            $eb = $this->ssa->allocReg();
+            $out .= '  ' . $eb . ' = load ptr, ptr ' . $eo . "\n";
+            $out .= '  call void @__mir_ref_release(ptr ' . $eb . ")\n";
+            $out .= '  store ptr null, ptr ' . $eo . "\n";
+        }
         if ($n->target !== $n->source && isset($this->locals->ownedBoxes[$n->target])) {
             $out .= $this->ownedBoxReleaseIr($n->target, false);
             $out .= '  store ptr null, ptr ' . $this->locals->ownedBoxes[$n->target] . "\n";
@@ -2767,6 +2774,38 @@ trait EmitLlvmObjects
             $out = '  ' . $slot . " = alloca i64\n";
         } else {
             $out = '';
+        }
+        // An element of a cell-channel array is PROMOTED into a reference box,
+        // not aliased by address: the address points into the buffer and the
+        // next insert relocates it, so `$r = &$a[0]; $a[] = …; $r = 5;` wrote
+        // into the freed old buffer. The frame co-owns the box while `$r` is
+        // bound to it ({@see EmitLlvmModule::emitElemRefBoxSlots}). A raw-channel
+        // element keeps the address alias.
+        $lv = $n->lvalue;
+        if ($lv->kind === Node::KIND_ARRAY_ACCESS && $lv instanceof \Compile\Mir\ArrayAccess_
+            && isset($this->locals->elemRefBoxes[$n->target])) {
+            $lel = $lv->array->type->element ?? null;
+            $lek = $lel === null ? Type::KIND_UNKNOWN : $lel->kind;
+            $bir = ($lek === Type::KIND_CELL || $lek === Type::KIND_UNKNOWN) ? $this->elemRefBoxAddr($lv) : null;
+            if ($bir !== null) {
+                $out .= $bir;
+                $bxi = $this->lastValue;
+                $bxp = $this->ssa->allocReg();
+                $out .= '  ' . $bxp . ' = inttoptr i64 ' . $bxi . " to ptr\n";
+                $out .= '  call void @__mir_ref_retain(ptr ' . $bxp . ")\n";
+                $own = $this->locals->elemRefBoxes[$n->target];
+                $old = $this->ssa->allocReg();
+                $out .= '  ' . $old . ' = load ptr, ptr ' . $own . "\n";
+                $out .= '  call void @__mir_ref_release(ptr ' . $old . ")\n";
+                $out .= '  store ptr ' . $bxp . ', ptr ' . $own . "\n";
+                $out .= '  store i64 ' . $bxi . ', ptr ' . $this->locals->slots[$n->target] . "\n";
+                $this->rt->needsRefCells = true;
+                $this->locals->refLocals[$n->target] = true;
+                $this->locals->refParamTypes[$n->target] = Type::cell();
+                $this->lastValue = '0';
+                $this->lastValueType = 'i64';
+                return $out;
+            }
         }
         $addrIr = $this->byRefAddrOf($n->lvalue);
         if ($addrIr === null) {
@@ -2881,18 +2920,23 @@ trait EmitLlvmObjects
         // A CELL key (int-or-string at runtime, e.g. `$k` off a foreach over a
         // `mixed` array) dispatches in the runtime, like every other cell-key
         // access; only a float / null-append key has no channel at all.
-        $keyKind = $this->arrayElemKeyKind($aa->index);
+        $keyKind = $aa->index->kind === Node::KIND_NULL_CONST ? 'append' : $this->arrayElemKeyKind($aa->index);
         if ($keyKind === null && $this->keyRidesCellChannel($aa->index)) { $keyKind = 'cell'; }
         if ($keyKind === null || !$this->containerAddressable($aa->array)) { return null; }
         $bk = $aa->array->type->kind;
         if (!$aa->array->type->isArray() && $bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN) {
             return null;
         }
+        $this->containerCloseIr = '';
         $out = $this->containerCellPtr($aa->array);
+        $close = $this->containerCloseIr;
+        $this->containerCloseIr = '';
         if ($out === null) { return null; }
         $slotPtr = $this->lastValue;
         $bx = $this->ssa->allocReg();
-        if ($keyKind === 'cell') {
+        if ($keyKind === 'append') {
+            $out .= '  ' . $bx . ' = call ptr @__mir_array_ref_box_append(ptr ' . $slotPtr . ")\n";
+        } elseif ($keyKind === 'cell') {
             $this->rt->needsCellKey = true;
             $out .= $this->emitNode($aa->index);
             $out .= $this->coerceToI64();
@@ -2909,6 +2953,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $bx . ' = call ptr @__mir_array_ref_box(ptr ' . $slotPtr
                   . ', i64 ' . $this->lastValue . ")\n";
         }
+        $out .= $close;
         $addr = $this->ssa->allocReg();
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $bx . " to i64\n";
         $this->lastValue = $addr;

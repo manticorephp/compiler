@@ -235,6 +235,10 @@ trait InferNodes
         $this->refCellLocalsCur = [];
         $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
         $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
+        // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
+        // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
+        // box — a cell — whatever it is later assigned.
+        $this->collectElemRefTargetsInfer($fn->body);
         // A `static $x;` whose stores are scalar rides a CELL for the same
         // reason a ref-taken slot does: its null start must stay observable
         // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
@@ -388,6 +392,24 @@ trait InferNodes
         // write `$b['note'] = 'hi'` through the by-ref param, and the record's
         // per-field int slot has no room for the string. A record is a shape
         // claim about the WHOLE local, and a by-ref callee is part of that whole.
+        // The root local of an element reference (`$r = &$c[$k]`, `&$c[]`,
+        // `&$l['k'][$j]`): the element is promoted into a reference BOX, and the
+        // slot then holds cell(REF, box) — a cell channel whatever the other
+        // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
+        // a raw string pointer.
+        $this->refElemBases = [];
+        $this->collectRefElemBases($fn->body);
+        foreach ($this->refElemBases as $name => $unused) {
+            unset($this->recordLocals[$name]);
+            if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
+            $this->cellElemLocals[$name] = true;
+            if (isset($this->assocLocals[$name])) {
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+                $this->localTypes[$name] = Type::assoc($key, Type::cell());
+            } else {
+                $this->localTypes[$name] = Type::vec(Type::cell());
+            }
+        }
         foreach ($this->byRefCellElemLocals[$fn->name] ?? [] as $name => $unused) {
             unset($this->recordLocals[$name]);
             // A record literal is string-keyed by definition; once it stops being
@@ -2364,5 +2386,36 @@ trait InferNodes
         }
         $node->type = $vt;
         return $vt;
+    }
+    /** @var array<string, bool> {@see collectRefElemBases} */
+    private array $refElemBases = [];
+
+    private function collectRefElemBases(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
+            $b = $n->lvalue;
+            $guard = 0;
+            while ($b instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) {
+                $b = $b->array;
+                $guard = $guard + 1;
+            }
+            if ($b instanceof \Compile\Mir\LoadLocal) { $this->refElemBases[$b->name] = true; }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefElemBases($c); }
+    }
+    private function collectElemRefTargetsInfer(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue instanceof \Compile\Mir\ArrayAccess_) {
+            $lv = $n->lvalue;
+            $el = $lv->array->type->element ?? null;
+            $ek = $el === null ? Type::KIND_UNKNOWN : $el->kind;
+            $root = $lv->array;
+            $guard = 0;
+            while ($root instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) { $root = $root->array; $guard = $guard + 1; }
+            if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN || $root instanceof \Compile\Mir\LoadLocal) {
+                $this->refCellLocalsCur[$n->target] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectElemRefTargetsInfer($c); }
     }
 }

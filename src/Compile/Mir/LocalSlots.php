@@ -277,4 +277,21 @@ final class LocalSlots
         if ($n->kind === Node::KIND_TRY_CATCH) { $this->sjljPinAll = true; return; }
         foreach (Walk::children($n) as $c) { $this->collectSjljPins($c); }
     }
+
+    /** @var array<string, bool> locals some `$name = &$a[$k]` binds (collected
+     *  per body by {@see collectElemRefTargets}). Declared LAST. */
+    public array $elemRefTargets = [];
+
+    /** @var array<string, string> name → `alloca ptr` holding the element's
+     *  reference BOX this frame co-owns while `$name` is bound to it (null
+     *  when unbound). Declared LAST. */
+    public array $elemRefBoxes = [];
+
+    public function collectElemRefTargets(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
+            $this->elemRefTargets[$n->target] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->collectElemRefTargets($c); }
+    }
 }

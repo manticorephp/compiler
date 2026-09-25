@@ -114,9 +114,11 @@ final class UnifiedArrayRuntime
         $this->emitCowVariant('__mir_array_cow_ownel_str', 'str', true);
         $this->emitCowVariant('__mir_array_cow_ownel_cell', 'cell', true);
         $this->emitRefSlot();
+        $this->emitRefSlotAppend();
         $this->emitRefSlotStr();
         $this->emitRefSlotCell();
         $this->emitRefBox();
+        $this->emitRefBoxAppend();
         $this->emitDerefCell();
         $this->emitValueAt();
         $this->emitArrayUnion();
@@ -3427,6 +3429,66 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_array_ref_slot_append(slotAddr, val) -> ptr` — `$r = &$a[]`: append
+     * `val` (a null of the element channel's representation) and answer the
+     * new element's address through {@see emitRefSlot}, which finds the key the
+     * append just made. A null array is created first, as php does.
+     */
+    private function emitRefSlotAppend(): void
+    {
+        $fn = $this->module->func('__mir_array_ref_slot_append', Type::ptr());
+        $slotAddr = $fn->param(Type::ptr(), 'slotAddr');
+        $val = $fn->param(Type::i64(), 'val');
+        $e = $fn->block('entry');
+        $mk = $fn->block('mk');
+        $have = $fn->block('have');
+        $b0 = $e->inttoptr($e->load(Type::i64(), $slotAddr), Type::ptr());
+        $e->brIf($e->icmp('eq', $b0, Value::null()), $mk, $have);
+        $na = $mk->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
+        $mk->store($mk->ptrtoint($na, Type::i64()), $slotAddr);
+        $mk->br($have);
+        $b1 = $have->inttoptr($have->load(Type::i64(), $slotAddr), Type::ptr());
+        $cow = $have->call('__mir_array_cow', Type::ptr(), [$b1]);
+        $flags = $have->load(Type::i64(), $this->hdr($have, $cow, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $isH = $have->icmp('ne', $this->hashedBit($have, $flags), Value::int(Type::i64(), 0));
+        $len = $have->load(Type::i64(), $cow);
+        $ni = $have->load(Type::i64(), $this->hdr($have, $cow, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $key = $have->select($isH, $ni, $len);
+        $nb = $have->call('__mir_array_append', Type::ptr(), [$cow, $val]);
+        $have->store($have->ptrtoint($nb, Type::i64()), $slotAddr);
+        $have->ret($have->call('__mir_array_ref_slot', Type::ptr(), [$slotAddr, $key]));
+    }
+
+    /**
+     * `__mir_array_ref_box_append(slotAddr) -> ptr` — `$r = &$a[]` as a BOX:
+     * append a CELL null and promote the new element ({@see emitRefBox}), so
+     * the reference survives the buffer's next relocation.
+     */
+    private function emitRefBoxAppend(): void
+    {
+        $fn = $this->module->func('__mir_array_ref_box_append', Type::ptr());
+        $slotAddr = $fn->param(Type::ptr(), 'slotAddr');
+        $e = $fn->block('entry');
+        $mk = $fn->block('mk');
+        $have = $fn->block('have');
+        $b0 = $e->inttoptr($e->load(Type::i64(), $slotAddr), Type::ptr());
+        $e->brIf($e->icmp('eq', $b0, Value::null()), $mk, $have);
+        $na = $mk->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
+        $mk->store($mk->ptrtoint($na, Type::i64()), $slotAddr);
+        $mk->br($have);
+        $b1 = $have->inttoptr($have->load(Type::i64(), $slotAddr), Type::ptr());
+        $cow = $have->call('__mir_array_cow', Type::ptr(), [$b1]);
+        $flags = $have->load(Type::i64(), $this->hdr($have, $cow, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $isH = $have->icmp('ne', $this->hashedBit($have, $flags), Value::int(Type::i64(), 0));
+        $len = $have->load(Type::i64(), $cow);
+        $ni = $have->load(Type::i64(), $this->hdr($have, $cow, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $key = $have->select($isH, $ni, $len);
+        $nb = $have->call('__mir_array_append', Type::ptr(), [$cow, Value::int(Type::i64(), MemoryAbi::CELL_NULL)]);
+        $have->store($have->ptrtoint($nb, Type::i64()), $slotAddr);
+        $have->ret($have->call('__mir_array_ref_box', Type::ptr(), [$slotAddr, $key]));
+    }
+
+    /**
      * `__mir_array_ref_box(slotAddr, key) -> ptr` — the address of an int-keyed
      * element's reference BOX, promoting the element if it is not one yet.
      *
@@ -4408,8 +4470,12 @@ final class UnifiedArrayRuntime
         $asis = $fn->block('asis');
         $dec = $fn->block('dec');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $dec);
-        $asis->ret($v);
-        $dec->ret($dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->elemHint($dec, $arr)]));
+        // A promoted element (cell(REF, box)) reads as its VALUE, like the
+        // typed element read does: an erased foreach / var_dump over an array
+        // holding `$r = &$a[$k]` printed the box address.
+        $asis->ret($asis->call('__mir_deref_cell', Type::i64(), [$v]));
+        $bd = $dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->elemHint($dec, $arr)]);
+        $dec->ret($dec->call('__mir_deref_cell', Type::i64(), [$bd]));
     }
 
     /**

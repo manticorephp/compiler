@@ -133,10 +133,13 @@ trait EmitLlvmArrays
      * ref-slot helper is int-only; string / cell keys and string-char indexing
      * (`$s[0]`) fall back to a value copy.
      */
-    private function arrayElemAddressable(ArrayAccess_ $aa): bool
+    private function arrayElemAddressable(ArrayAccess_ $aa, bool $append = false): bool
     {
-        if (!$this->arrayElemKeyKind($aa->index)) { return false; }
+        if (!$append && !$this->arrayElemKeyKind($aa->index)) { return false; }
         if (!$this->containerAddressable($aa->array)) { return false; }
+        // A nested container is opened into a raw scratch word whatever its
+        // static type ({@see containerCellPtr}).
+        if ($aa->array->kind === Node::KIND_ARRAY_ACCESS) { return true; }
         // Base must be a genuine (raw-pointer) array container. A bare-array
         // property read can infer UNKNOWN, so consult the declared prop type.
         if ($aa->array->type->isArray()) { return true; }

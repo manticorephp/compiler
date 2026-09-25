@@ -5068,6 +5068,12 @@ final class EmitLlvm implements EmitVisitor
             $cls = $base->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
+        // A NESTED container (`$a['k']` of `&$a['k'][$j]`): its element slot
+        // is itself addressable, and {@see containerCellPtr} opens it.
+        if ($base->kind === Node::KIND_ARRAY_ACCESS) {
+            return $this->arrayElemKeyKind($base->index) !== null
+                && $this->containerAddressable($base->array);
+        }
         return false;
     }
 
@@ -5078,6 +5084,10 @@ final class EmitLlvm implements EmitVisitor
      * cell. Used to feed `__mir_array_ref_slot` so a COW / relocation is stored
      * back where the array lives.
      */
+    /** IR a caller of {@see containerCellPtr} appends after its ref-slot call
+     *  (a nested container's write-back); '' otherwise. Taken and cleared. */
+    private string $containerCloseIr = '';
+
     private function containerCellPtr(Node $base): ?string
     {
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
@@ -5101,6 +5111,77 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValue = $this->locals->slots[$name];
             $this->lastValueType = 'ptr';
             return '';
+        }
+        if ($base->kind === Node::KIND_ARRAY_ACCESS) {
+            // A nested container: the ELEMENT slot of the outer array holds the
+            // inner one — as a tagged array cell on a cell channel, a raw
+            // pointer on a raw one, or nothing yet. The ref-slot helpers work
+            // on a raw pointer cell, so the inner array is OPENED into a scratch
+            // word (unboxed, or vivified to a fresh empty array — php creates
+            // it) and {@see $containerCloseIr} writes it back, re-boxed on a
+            // cell channel, once the caller's helper has COW-separated or grown
+            // it. Without this `$r = &$a['k'][$j]` degraded to a value copy and
+            // every write through it was lost.
+            $out = $this->byRefAddrOf($base);
+            if ($out === null) { return null; }
+            $this->rt->needsTagged = true;
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+            $w = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = load i64, ptr ' . $ep . "\n";
+            $tg = $this->ssa->allocReg();
+            $out .= '  ' . $tg . ' = icmp ugt i64 ' . $w . ', ' . '-4503599627370496' . "\n";
+            $sh = $this->ssa->allocReg();
+            $out .= '  ' . $sh . ' = lshr i64 ' . $w . ", 48\n";
+            $nb = $this->ssa->allocReg();
+            $out .= '  ' . $nb . ' = and i64 ' . $sh . ", 15\n";
+            $isA = $this->ssa->allocReg();
+            $out .= '  ' . $isA . ' = icmp eq i64 ' . $nb . ", 7\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $w . ", 281474976710655\n";
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = select i1 ' . $isA . ', i64 ' . $pm . ", i64 0\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = select i1 ' . $tg . ', i64 ' . $tp . ', i64 ' . $w . "\n";
+            $scr = $this->ssa->allocReg();
+            $out .= '  ' . $scr . " = alloca i64\n";
+            $out .= '  store i64 ' . $p . ', ptr ' . $scr . "\n";
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = icmp eq i64 ' . $p . ", 0\n";
+            $mkL = $this->ssa->allocLabel('rc.mk');
+            $okL = $this->ssa->allocLabel('rc.ok');
+            $out .= '  br i1 ' . $z . ', label %' . $mkL . ', label %' . $okL . "\n";
+            $out .= $mkL . ":\n";
+            $na = $this->ssa->allocReg();
+            $out .= '  ' . $na . " = call ptr @__mir_array_alloc(i64 0)\n";
+            $out .= '  store ptr ' . $na . ', ptr ' . $scr . "\n";
+            $out .= '  br label %' . $okL . "\n";
+            $out .= $okL . ":\n";
+            // Written back in the slot's OWN representation: tagged if it was
+            // tagged, raw if it was raw. A slot that held nothing takes the
+            // outer array's static channel: raw only on a statically ARRAY
+            // element, tagged (self-describing) otherwise — an unstamped raw
+            // pointer in an erased buffer reads back as a double.
+            // (Choosing by the node's type re-boxed a raw inner array in an
+            // `unknown`-element property, and its release walked a tagged word.)
+            $oel = $base->array->type->element ?? null;
+            $staticRaw = $oel !== null && $oel->isArray();
+            $bf = $tg;
+            if (!$staticRaw) {
+                $bf = $this->ssa->allocReg();
+                $out .= '  ' . $bf . ' = or i1 ' . $tg . ', ' . $z . "\n";
+            }
+            $cp = $this->ssa->allocReg();
+            $close = '  ' . $cp . ' = load i64, ptr ' . $scr . "\n";
+            $cb = $this->ssa->allocReg();
+            $close .= '  ' . $cb . ' = or i64 ' . $cp . ", -2533274790395904\n";
+            $cf = $this->ssa->allocReg();
+            $close .= '  ' . $cf . ' = select i1 ' . $bf . ', i64 ' . $cb . ', i64 ' . $cp . "\n";
+            $close .= '  store i64 ' . $cf . ', ptr ' . $ep . "\n";
+            $this->containerCloseIr = $close;
+            $this->lastValue = $scr;
+            $this->lastValueType = 'ptr';
+            return $out;
         }
         if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
             // The property field IS the cell holding the array pointer.

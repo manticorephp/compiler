@@ -1325,10 +1325,15 @@ trait EmitLlvmLocals
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $a;
-            $keyKind = $this->arrayElemKeyKind($aa->index);
-            if ($keyKind === null || !$this->arrayElemAddressable($aa)) { return null; }
+            // `&$c[]` references the element the append creates.
+            $isAppend = $aa->index->kind === Node::KIND_NULL_CONST;
+            $keyKind = $isAppend ? 'append' : $this->arrayElemKeyKind($aa->index);
+            if ($keyKind === null || !$this->arrayElemAddressable($aa, $isAppend)) { return null; }
             // ptr to the cell holding the array (for COW write-back).
+            $this->containerCloseIr = '';
             $out = $this->containerCellPtr($aa->array);
+            $close = $this->containerCloseIr;
+            $this->containerCloseIr = '';
             if ($out === null) { return null; }
             $slotPtr = $this->lastValue;
             // A `$GLOBALS`-viewed global cell holds the buffer BOXED
@@ -1352,7 +1357,14 @@ trait EmitLlvmLocals
                 $slotPtr = $scr;
             }
             $ep = $this->ssa->allocReg();
-            if ($keyKind === 'str') {
+            if ($keyKind === 'append') {
+                // The new element is null — a CELL null on a cell channel.
+                $elK = $aa->type->kind;
+                $nv = ($elK === Type::KIND_CELL || $elK === Type::KIND_UNKNOWN)
+                    ? (string)\Compile\MemoryAbi::CELL_NULL : '0';
+                $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot_append(ptr '
+                      . $slotPtr . ', i64 ' . $nv . ")\n";
+            } elseif ($keyKind === 'str') {
                 $out .= $this->emitNode($aa->index);
                 $out .= $this->coerceToPtr();
                 $keyReg = $this->lastValue;
@@ -1381,6 +1393,7 @@ trait EmitLlvmLocals
                 $out .= '  ' . $nb . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
                 $out .= '  store i64 ' . $nb . ', ptr ' . $viewCell . "\n";
             }
+            $out .= $close;
             $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
             $this->lastValue = $addr;
