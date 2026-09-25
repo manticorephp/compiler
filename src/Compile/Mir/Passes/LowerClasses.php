@@ -741,14 +741,26 @@ trait LowerClasses
     private function typeStaticLit(\Compile\Mir\ArrayLit $lit, ?Type $slot): void
     {
         $inner = null;
-        if ($slot !== null && !$this->staticLitElemsOpen($slot)) {
+        $fields = null;
+        if ($slot !== null && $slot->isShape()) {
+            // A shape slot types the literal as the shape itself: each field's
+            // nested literal takes that field's declared type.
+            $lit->type = $slot;
+            $fields = $slot->fields;
+        } elseif ($slot !== null && !$this->staticLitElemsOpen($slot)) {
             $lit->type = $slot;
             $inner = $slot->element;
         } else {
             $lit->type = $this->staticDefaultLitType($lit);
         }
         foreach ($lit->elements as $el) {
-            if ($el->value instanceof \Compile\Mir\ArrayLit) { $this->typeStaticLit($el->value, $inner); }
+            if (!($el->value instanceof \Compile\Mir\ArrayLit)) { continue; }
+            $ft = $inner;
+            if ($fields !== null && $el->key !== null
+                && ($el->key->kind === Node::KIND_STRING_CONST || $el->key->kind === Node::KIND_INT_CONST)) {
+                $ft = $fields[Type::shapeKey($el->key->value)] ?? null;
+            }
+            $this->typeStaticLit($el->value, $ft);
         }
     }
 

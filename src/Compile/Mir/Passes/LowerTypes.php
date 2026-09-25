@@ -465,6 +465,20 @@ trait LowerTypes
             || \strncmp($low, 'non-empty-list{', 15) === 0) {
             return $this->lowerArrayShape(\ltrim($hint, '?\\'));
         }
+        // `list<T>` / `non-empty-list<T>` are `T[]`, `non-empty-array<K, V>` is
+        // `array<K, V>`. Unrecognised they read as a generic CLASS nobody
+        // declares — erased — and the body-usage guess then retyped
+        // sebastian/diff's `non-empty-list<array{0: mixed, 1: int}> $diff` from
+        // a `substr($diff[$n][0], -1)` as vec[vec[string]]: `$entry[1]` read
+        // the int 0 as a null string pointer.
+        if (\strncmp($low, 'list<', 5) === 0 || \strncmp($low, 'non-empty-list<', 15) === 0) {
+            $base = \ltrim($hint, '?\\');
+            $lt = \strpos($base, '<');
+            return Type::vec($this->lowerTypeHint(\trim(\substr($base, $lt + 1, \strlen($base) - $lt - 2))));
+        }
+        if (\strncmp($low, 'non-empty-array<', 16) === 0) {
+            return $this->lowerTypeHint('array' . \substr(\ltrim($hint, '?\\'), 15));
+        }
         if (\strncmp($low, 'array<', 6) === 0) {
             $base = \ltrim($hint, '?\\');
             $lt = \strpos($base, '<');
@@ -911,8 +925,9 @@ trait LowerTypes
     {
         $n = \strlen($t);
         if ($n > 2 && \substr($t, $n - 2) === '[]') { return true; }
-        if (\strncmp(\strtolower(\ltrim($t, '?\\')), 'array<', 6) === 0) { return true; }
-        return false;
+        $low = \strtolower(\ltrim($t, '?\\'));
+        return \strncmp($low, 'array<', 6) === 0 || \strncmp($low, 'list<', 5) === 0
+            || \strncmp($low, 'non-empty-list<', 15) === 0 || \strncmp($low, 'non-empty-array<', 16) === 0;
     }
 
     /** True for a docblock array SHAPE (`array{…}`, `list{…}`,
