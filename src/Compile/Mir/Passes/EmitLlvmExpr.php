@@ -5500,9 +5500,31 @@ trait EmitLlvmExpr
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
-            return $out;
+            return $out . $this->conformToClaim($pt, $r);
         }
         return '';
+    }
+
+    /**
+     * An array leaving a CELL channel for a CONCRETE element claim: the cell
+     * may hold a buffer a cell writer rebuilt as cells (a `: array<K,V>|null`
+     * return boxes its typed array that way), and the typed consumer reads raw
+     * words — a boxed 5 read as -4222124650659835. The static claim is
+     * re-established where the buffer comes back, exactly as after a by-ref
+     * erased callee ({@see \Compile\Runtime\UnifiedArrayRuntime::emitArrayConform}):
+     * a CELL-hinted buffer is unboxed in place to the claimed kind, any other
+     * hint is left alone.
+     */
+    private function conformToClaim(Type $pt, string $word): string
+    {
+        if (!$pt->isVec() && !$pt->isAssoc()) { return ''; }
+        $el = $pt->element;
+        if ($el === null) { return ''; }
+        $code = $this->elementHintCodeForType($el);
+        if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return ''; }
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $word . " to ptr\n"
+            . '  call void @__mir_array_conform(ptr ' . $p . ', i64 ' . (string)$code . ")\n";
     }
 
     /**
