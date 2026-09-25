@@ -852,7 +852,19 @@ trait LowerTypes
         // in an object array and the next read took offset 16 of a tag → SIGSEGV.
         // A type parameter (`@param T`) is the same case: `T` cannot be written in
         // PHP syntax at all, so the docblock is its only source.
+        // A docblock naming nothing this program declares (a `@phpstan-type`
+        // alias, `non-empty-string`, a missing class) is NOT that type: it
+        // lowered to `unknown`, an erased raw word, where the missing hint means
+        // `mixed` — so a caller passed a string raw, and `is_string($x)` in the
+        // body could not tell it from an array (php-cs-fixer's
+        // `@param _PhpTokenPrototype $token` on Token::__construct).
         if ($hint === null && $docType !== null && $docType !== '') {
+            if ($this->lowerTypeHint($docType)->kind === Type::KIND_UNKNOWN
+                && !$this->isBareArrayHint($docType)
+                && !$this->looksLikeArrayElemType($docType)
+                && !$this->looksLikeArrayShapeType($docType)) {
+                return null;
+            }
             return $docType;
         }
         // `Box $b` + `@param Box<float> $b` — the SAME class, and the docblock
