@@ -476,6 +476,18 @@ trait LowerTypes
             $lt = \strpos($base, '<');
             return Type::vec($this->lowerTypeHint(\trim(\substr($base, $lt + 1, \strlen($base) - $lt - 2))));
         }
+        // `int<0, max>` / `int<min, -1>` — phpstan's integer range is an int,
+        // and its refined scalars are their base type.
+        if (\strncmp($low, 'int<', 4) === 0) { return Type::int_(); }
+        if ($low === 'positive-int' || $low === 'negative-int' || $low === 'non-negative-int'
+            || $low === 'non-positive-int' || $low === 'non-zero-int') {
+            return $nullable ? Type::numericCell() : Type::int_();
+        }
+        if ($low === 'non-empty-string' || $low === 'numeric-string' || $low === 'class-string'
+            || $low === 'literal-string' || $low === 'lowercase-string' || $low === 'non-falsy-string'
+            || $low === 'truthy-string' || \strncmp($low, 'class-string<', 13) === 0) {
+            return Type::string_();
+        }
         if (\strncmp($low, 'non-empty-array<', 16) === 0) {
             return $this->lowerTypeHint('array' . \substr(\ltrim($hint, '?\\'), 15));
         }
@@ -907,6 +919,11 @@ trait LowerTypes
         // stored a cell into a slot read raw (php-cs-fixer FixerOptionSorter).
         $low = \strtolower($base);
         if ($low === 'iterable' || $low === 'callable' || $low === 'object' || $low === 'mixed') { return false; }
+        // `int $n` + `@var int<0, max>` is a RANGE, not a class binding: taken,
+        // it lowered the property to `unknown` and a cell stored into it stayed
+        // tagged (sebastian/diff's `$contextLines`).
+        if ($low === 'int' || $low === 'integer' || $low === 'float' || $low === 'string'
+            || $low === 'bool' || $low === 'array') { return false; }
         return $base !== '' && $base === \ltrim($hint, '?\\');
     }
 
