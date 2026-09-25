@@ -527,6 +527,11 @@ function stdlib_sig_list(string $key, array $fallback): array
  */
 function assemble_jobs(): int {
     if (CompileArgs::$jobs !== 0) { return CompileArgs::$jobs; }
+    return host_jobs();
+}
+
+/** The host's core count less one, capped at 8 — what may run at once. */
+function host_jobs(): int {
     $n = 0;
     $probe = is_darwin() ? "sysctl -n hw.ncpu 2>/dev/null" : "nproc 2>/dev/null";
     $out = \shell_exec($probe);
@@ -880,7 +885,10 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     // Memory did not rise with the concurrency, because the peak belongs to
     // the COMPILER, which is still resident through the whole assembly.
     $batch = \count($cmds);
-    $auto = assemble_jobs();
+    // ⚠ Not assemble_jobs(): that is `-j`, which DEFAULTS TO 1, so a split
+    // asked for through MANTICORE_SPLIT_JOBS alone ran its parts one at a time
+    // (php-cs-fixer: 23 parts 31 s serial, 6.4 s in parallel).
+    $auto = CompileArgs::$jobs >= 2 ? CompileArgs::$jobs : host_jobs();
     if ($auto >= 1 && $auto < $batch) { $batch = $auto; }
     $envBatch = \getenv('MANTICORE_SPLIT_BATCH');
     if ($envBatch !== false && $envBatch !== '') {
@@ -972,7 +980,9 @@ function thinlto_link_flags(): string {
              . ' -Wl,-prune_interval_lto,0 -Wl,-prune_after_lto,86400'
              . ' -Wl,-max_relative_cache_size_lto,5';
     }
-    return ' -flto=thin -Wl,--thinlto-cache-dir=' . $dir
+    // GNU ld cannot read bitcode without the LLVMgold plugin, and the cache
+    // flag below is lld's own spelling anyway.
+    return ' -flto=thin -fuse-ld=lld -Wl,--thinlto-cache-dir=' . $dir
          . ' -Wl,--thinlto-cache-policy=prune_after=24h:cache_size=5%';
 }
 
