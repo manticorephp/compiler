@@ -3677,6 +3677,9 @@ trait EmitLlvmObjects
      *  when the result is cell), so the merged value is a uniform cell. */
     private function classlessMethodCandidates(int $argc): array
     {
+        // Every erased dynamic call site asked this — classes x methods walks
+        // per site — and the answer depends on the argument count alone.
+        if (isset($this->classlessCandidatesMemo[$argc])) { return $this->classlessCandidatesMemo[$argc]; }
         $out = [];
         foreach ($this->classes as $cd) {
             foreach ($cd->methodNames as $m => $_) {
@@ -3689,6 +3692,7 @@ trait EmitLlvmObjects
                 elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
             }
         }
+        $this->classlessCandidatesMemo[$argc] = $out;
         return $out;
     }
 
@@ -8686,9 +8690,22 @@ trait EmitLlvmObjects
     /** @param array<int,string> $cases */
     private function emitAdaptiveClassIdBranch(string $cid, array $cases, string $default): string
     {
+        // The ids nearly always arrive ascending (class-table order), so check
+        // before sorting: a usort here — a PHP merge sort whose comparator reads
+        // two erased arrays per step — was ~4 s of php-cs-fixer's EmitLlvm.
+        /** @var int[] $ids */
+        $ids = [];
+        $ascending = true;
+        $prev = \PHP_INT_MIN;
+        foreach ($cases as $id => $_l) {
+            $iv = (int)$id;
+            if ($iv < $prev) { $ascending = false; }
+            $prev = $iv;
+            $ids[] = $iv;
+        }
+        if (!$ascending) { \sort($ids); }
         $pairs = [];
-        foreach ($cases as $id => $label) { $pairs[] = [(int)$id, $label]; }
-        usort($pairs, static function (array $a, array $b): int { return $a[0] <=> $b[0]; });
+        foreach ($ids as $id) { $pairs[] = [$id, $cases[$id]]; }
         return $this->emitAdaptiveClassIdNode($cid, $pairs, $default);
     }
 
