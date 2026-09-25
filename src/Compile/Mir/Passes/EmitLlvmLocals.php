@@ -875,7 +875,11 @@ trait EmitLlvmLocals
         // alias arm below is the OTHER road to the same ownership, and it must
         // not fire on a store that already took the copy road.
         $copiedVecLocal = false;
-        if (\Compile\Mir\VecCopyOnAssign::copies($v, $sl->name, $this->frame->mutatedVecLocals)) {
+        // OwnershipFlow: `$x = $x` of one raw type is a re-label InferTypes
+        // plants, not an assignment — no copy, no +1 (the pass drops nothing).
+        $selfCopy = \Compile\Debug::$ownFlow && $v->kind === Node::KIND_LOAD_LOCAL
+            && $this->asLoadLocalNode($v)->name === $sl->name && $sl->type->kind !== Type::KIND_CELL;
+        if (!$selfCopy && \Compile\Mir\VecCopyOnAssign::copies($v, $sl->name, $this->frame->mutatedVecLocals)) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
@@ -930,14 +934,14 @@ trait EmitLlvmLocals
         // …and the RETAIN half of {@see \Compile\Mir\AliasOwn}: the release
         // half is {@see InsertMemoryOps::isOwnedObj}, and the two must read
         // the SAME predicate or the value is freed twice or never.
-        $aliasObjStr = \Compile\Mir\AliasOwn::coOwns($v) || \Compile\Mir\AliasOwn::strPropCoOwns($v);
+        $aliasObjStr = !$selfCopy && (\Compile\Mir\AliasOwn::coOwns($v) || \Compile\Mir\AliasOwn::strPropCoOwns($v));
         // `$b = $a` on an ARRAY the frame never mutates: no copy fires, so the
         // two names share one buffer and — until now — neither owned it. The
         // pass answered that by BLOCKING the source, which leaks everything it
         // held ({@see \Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns},
         // the one predicate both halves ask). Take the +1 here and the source
         // keeps its release.
-        $aliasArrayLocal = !$copiedVecLocal
+        $aliasArrayLocal = !$copiedVecLocal && !$selfCopy
             && $v->kind === Node::KIND_LOAD_LOCAL
             && \Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns(
                 $v->type, $sl->type, $this->enums, $this->classes);

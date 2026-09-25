@@ -90,6 +90,8 @@ final class OwnershipFlow implements Pass
 
     // ── per function ───────────────────────────────────────────────
     private string $fnName = '';
+    /** `MANTICORE_OWN_TRACE`, read once per run. */
+    private string $traceWant = '';
     /** False for a function {@see \Compile\Debug::$ownFlowOnly} leaves out: it
      *  keeps its registrations and every retain the conventions need, and gets
      *  no drop (a leak, never a free). */
@@ -150,6 +152,8 @@ final class OwnershipFlow implements Pass
     private array $catchById = [];
     /** @var array<string, int> managed name → the release class it registers */
     private array $regKey = [];
+    /** The function reads locals by runtime name ({@see scan}). */
+    private bool $dynNames = false;
     /** @var array<int, bool> array local-to-local alias stores that take a +1 */
     private array $aliasRetain = [];
 
@@ -167,6 +171,8 @@ final class OwnershipFlow implements Pass
         foreach ($module->closureCaptures as $name => $unused) { $this->closureFns[$name] = true; }
         $this->own = new Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $this->errors = [];
+        $want = \getenv('MANTICORE_OWN_TRACE');
+        $this->traceWant = $want === false ? '' : $want;
         foreach ($module->functions as $fn) {
             $this->lowerFunction($fn);
         }
@@ -193,8 +199,7 @@ final class OwnershipFlow implements Pass
     {
         $this->fnName = $fn->name;
         $this->releases = self::bisectAdmits($fn->name);
-        $want = \getenv('MANTICORE_OWN_TRACE');
-        $this->trace = $want !== false && $want !== '' && \str_contains($fn->name, $want);
+        $this->trace = $this->traceWant !== '' && \str_contains($fn->name, $this->traceWant);
         $this->excluded = [];
         $this->mixedHere = $this->mixed[$fn->name] ?? [];
         $this->mutatedVecs = VecCopyOnAssign::mutatedLocals($fn->body);
@@ -213,6 +218,7 @@ final class OwnershipFlow implements Pass
         $this->catchById = [];
         $this->regKey = [];
         $this->aliasRetain = [];
+        $this->dynNames = false;
         $this->inserted = [];
         $this->insName = [];
         $this->insKey = [];
@@ -300,6 +306,10 @@ final class OwnershipFlow implements Pass
             for ($i = 0; $i < $n; $i++) {
                 $name = $l1->fixName[$i];
                 $op = $l1->fixOp[$i];
+                if ($this->trace) {
+                    \error_log('OWNFLOW ' . $this->fnName . ': FIX ' . $op . ' ' . $name . ' on ' . $l1->fixKind[$i]
+                        . ' at line ' . (string)$l1->fixAt[$i]->line . ' pred line ' . (string)$l1->fixPred[$i]->line . ' class ' . OwnLattice::show($l1->fixKey[$i]));
+                }
                 if ($op === 'own_retain' && isset($force[$name])) { continue; }
                 if ($this->placeFix($op, $l1->fixKind[$i], $l1->fixAt[$i], $l1->fixPred[$i],
                         $l1->fixNoPred[$i], $name, $l1->fixKey[$i])) {
@@ -309,10 +319,14 @@ final class OwnershipFlow implements Pass
                     $force[$name] = true;
                     $newForce = true;
                 } else {
-                    $stuck[$name] = $l1->fixKind[$i];
+                    $stuck[$name] = $l1->fixKind[$i] . ' (line ' . (string)$l1->fixAt[$i]->line . ')';
                 }
             }
-            if ($newForce) { continue; }
+            if ($newForce) {
+                // The ops this round planned were never applied: forget them.
+                $this->inserted = [];
+                continue;
+            }
             if (\count($l1->conflicts) === 0 && $n === 0) {
                 $final = $l1;
                 break;
@@ -349,7 +363,16 @@ final class OwnershipFlow implements Pass
         foreach ($deadRead as $name => $line) {
             $what = $mismatch[$name] ?? '?';
             $this->errors[] = 'ownflow: $' . $name . ' read at line ' . (string)$line . ' in ' . $fn->name
-                . ' past a representation mismatch (' . $this->describe($what) . ')';
+                . ' past a representation mismatch (' . $this->describe($what) . '): the name is live there';
+        }
+        // A symbol-table reader (`compact` by a runtime name, `extract`,
+        // `get_defined_vars`) can read any local: no name is provably dead.
+        if ($this->dynNames) {
+            foreach ($mismatch as $name => $what) {
+                if (isset($deadRead[$name])) { continue; }
+                $this->errors[] = 'ownflow: $' . $name . ' in ' . $fn->name . ' meets a representation mismatch ('
+                    . $this->describe($what) . ') in a function that reads locals by runtime name';
+            }
         }
         if (\Compile\Stats::$on) { \Compile\Stats::bump('own.flow.mismatch', \count($mismatch)); }
         foreach ($mismatch as $name => $what) {
@@ -570,10 +593,14 @@ final class OwnershipFlow implements Pass
         } elseif ($k === Node::KIND_LOAD_LOCAL) {
             $ll = self::asLoadLocal($n);
             $lid = \spl_object_id($ll);
-            if (!isset($this->skipLoad[$lid]) && !isset($this->excluded[$ll->name])
-                && $this->keyString($ll->type) !== '') {
+            // EVERY read, whatever it is typed: a mismatch is allowed only where
+            // the name is dead, and a read of any type past it says it is not.
+            if (!isset($this->skipLoad[$lid]) && !isset($this->excluded[$ll->name])) {
                 $lat->loadName[$lid] = $ll->name;
             }
+        } elseif ($k === Node::KIND_CALL) {
+            $cf = \strtolower(\ltrim(self::asCall($n)->function, '\\'));
+            if ($cf === 'compact' || $cf === 'extract' || $cf === 'get_defined_vars') { $this->dynNames = true; }
         } elseif ($k === Node::KIND_MEMORY_OP) {
             $mt = self::asMemoryOp($n)->target;
             if ($mt !== null) { $this->skipLoad[\spl_object_id($mt)] = true; }
@@ -1155,8 +1182,18 @@ final class OwnershipFlow implements Pass
             }
             if ($at->kind !== Node::KIND_RETURN) { continue; }
             $r = self::asReturn($at);
+            // An ERASED conditional result is handed back as it stands — no
+            // arm is retained and the return takes no +1 (nothing names its rc
+            // kind) — so an owned local an arm may BE moves with it, as a whole
+            // returned local does: dropping it freed the caller's array.
+            $erasedArms = ($r->value !== null && $r->value->type->kind === Type::KIND_UNKNOWN)
+                ? self::armLocals($r->value) : [];
             $drops = [];
             foreach ($out as $name => $x) {
+                if (isset($erasedArms[$name])) {
+                    $this->say($r->line, $name, $x, 'return moves (erased arm)');
+                    continue;
+                }
                 if ($x > 0 && $rel) {
                     $drops[] = $this->dropOp($name, $x);
                     $this->say($r->line, $name, $x, 'return');
@@ -1251,9 +1288,23 @@ final class OwnershipFlow implements Pass
     private static function asBlock(Node $n): Block { return $n; }
     private static function asIf(Node $n): If_ { return $n; }
     private static function asFor(Node $n): For_ { return $n; }
+    private static function asCall(Node $n): \Compile\Mir\Call { return $n; }
     private static function asDoWhile(Node $n): DoWhile_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }
     private static function asReturn(Node $n): Return_ { return $n; }
+
+    /** The locals a conditional's arms may hand back as they stand.
+     *  @return array<string, bool> */
+    private static function armLocals(Node $v): array
+    {
+        if ($v->kind === Node::KIND_LOAD_LOCAL) { return [self::asLoadLocal($v)->name => true]; }
+        $out = [];
+        if (!CondOwn::isConditional($v)) { return $out; }
+        foreach (CondOwn::arms($v) as $arm) {
+            foreach (self::armLocals($arm) as $k => $ignored) { $out[$k] = true; }
+        }
+        return $out;
+    }
     private static function asConcat(Node $n): Concat { return $n; }
     private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }
     private static function asIncDec(Node $n): IncDec { return $n; }

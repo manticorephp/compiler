@@ -1,0 +1,26 @@
+ifElse   free if
+if
+ifElse   else
+param
+loopBack param
+loopBack   free lb1
+lb1
+brk   free brk
+brk
+cont   body 2
+  free c1
+c1
+sw   free sw1
+sw1
+sw param
+sw   free swd
+swd
+mt   free m1
+m1
+mt param
+ct   caught
+param
+ct   free try
+try
+end
+  free param

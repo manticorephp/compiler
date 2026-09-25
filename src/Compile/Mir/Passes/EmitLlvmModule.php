@@ -2036,26 +2036,18 @@ trait EmitLlvmModule
     }
 
     /**
-     * Release every owned RcHeap obj local of the current function except the ones the
-     * returned VALUE may alias (their ownership transfers to the caller). Slots are
-     * null-inited, so releasing an unassigned one is a no-op.
-     *
-     * @param array<string,bool> $exempt {@see returnedLocalNames()}
-     */
-    /**
      * The {@see OwnershipFlow} return path: the drop of every local the flow
-     * owns here — except a name the returned value may BE
-     * ({@see returnedLocalNames}), whose reference moves to the caller.
-     *
-     * @param array<string,bool> $exempt
+     * owns here ({@see Return_::$ownDrops}) but the one the return MOVES —
+     * `$moved`, the owned local that is the whole returned value, unless the
+     * return rebuilt it into a fresh cell array (then the source is dropped).
      */
-    private function ownReturnIr(Return_ $r, array $exempt): string
+    private function ownReturnIr(Return_ $r, string $moved): string
     {
         $out = '';
         foreach ($r->ownDrops as $d) {
             $t = $d->target;
             if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-            if (isset($exempt[$t->name])) { continue; }
+            if ($t->name === $moved) { continue; }
             $slot = $this->ownOpSlot($d, true);
             if ($slot === '') { continue; }
             $out .= $this->ownDropIr($slot, $d);
@@ -2063,6 +2055,13 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /**
+     * Release every owned RcHeap obj local of the current function except the ones the
+     * returned VALUE may alias (their ownership transfers to the caller). Slots are
+     * null-inited, so releasing an unassigned one is a no-op.
+     *
+     * @param array<string,bool> $exempt {@see returnedLocalNames()}
+     */
     private function emitRcReturnCleanup(array $exempt): string
     {
         $out = '';
@@ -2178,7 +2177,8 @@ trait EmitLlvmModule
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
             if (\Compile\Debug::$ownFlow) {
-                $out .= $this->ownReturnIr($r, $v === null ? [] : $this->returnedLocalNames($v));
+                $out .= $this->ownReturnIr($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
+                    ? $this->asLoadLocalNode($v)->name : '');
             }
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
@@ -2220,7 +2220,8 @@ trait EmitLlvmModule
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
         $leave = \Compile\Debug::$ownFlow
-            ? $this->ownReturnIr($r, $exempt) . $this->emitOwnedBoxReleases($exempt)
+            ? $this->ownReturnIr($r, ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '')
+                . $this->emitOwnedBoxReleases($exempt)
             : $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing

@@ -971,7 +971,9 @@ trait EmitLlvmControl
         if (!$this->foreachValueOwns($fe)) { return ''; }
         $slot = $this->locals->slots[$fe->valueVar];
         if (\Compile\Debug::$ownFlow) {
-            return $this->foreachPrevDrop($fe, false) . '  store i64 0, ptr ' . $slot . "\n";
+            // The pass drops what the slot holds at each binding, the first one
+            // included; the slot keeps its value when the loop never binds.
+            return '';
         }
         $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
         $out = '';
@@ -1222,16 +1224,15 @@ trait EmitLlvmControl
         // the store dominates the body: the drop then no-ops on iteration one,
         // and php's rule that `$v` survives the loop is untouched (the slot is
         // written before the body ever reads it).
-        if ($this->foreachValueOwns($fe)) {
+        if ($this->foreachValueOwns($fe) && !\Compile\Debug::$ownFlow) {
             // RELEASE, then zero. A second loop over the same NAME arrives here
             // with the first loop's last element still held at +1 (the
             // per-iteration drop only ever gives back the PREVIOUS one), and
             // zeroing alone stranded it — one leaked ref per loop, which is
             // exactly what `InferScans::scanByRefCaptureNode`'s two `$c` loops
             // do on every node of every function.
-            $fvFlavor = \Compile\Debug::$ownFlow ? '' : $this->discardReleaseFlavor($fe->array->type->element);
+            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
             $slot = $this->locals->slots[$fe->valueVar];
-            $out .= $this->foreachPrevDrop($fe, false);
             if ($fvFlavor !== '') {
                 $stale = $this->ssa->allocReg();
                 $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
