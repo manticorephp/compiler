@@ -3356,20 +3356,36 @@ trait EmitLlvmExpr
     private function emitIncDec(IncDec $n): string
     {
         $d = $n;
-        // `$s++` on a string local (typed CELL by inferIncDec): the value rides a
-        // cell — delegate to the stdlib Perl/numeric increment, which returns the
-        // next value (int/float/string) as a cell. Post returns the old cell.
-        if ($d->type->kind === Type::KIND_CELL && $d->op === '+'
-            && isset($this->locals->slots[$d->name])) {
-            $slot = $this->locals->slots[$d->name];
-            $old = $this->ssa->allocReg();
-            $out = '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
-            $new = $this->ssa->allocReg();
-            $out .= '  ' . $new . ' = call i64 @manticore___mir_str_increment(i64 ' . $old . ")\n";
-            $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
-            $this->lastValue = $d->prefix ? $new : $old;
-            $this->lastValueType = 'i64';
-            return $out;
+        // A CELL local (typed so by inferIncDec: a `++`'d string, or a `?int` /
+        // mixed value): the kind is only known at run time — delegate to the
+        // stdlib inc/dec, which returns the next value (int/float/string/null)
+        // as a cell. A raw `sub` on the tagged word decremented the TAG
+        // (php-cs-fixer's `$tokens[--$previousTokenIndex]` on a ?int index).
+        // Post returns the old cell.
+        if ($d->type->kind === Type::KIND_CELL) {
+            $out = '';
+            $ptr = '';
+            if (isset($this->locals->globalBacked[$d->name])) {
+                $ptr = $this->locals->globalBacked[$d->name];
+            } elseif (isset($this->locals->refLocals[$d->name]) && isset($this->locals->slots[$d->name])) {
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$d->name] . "\n";
+                $ptr = $this->ssa->allocReg();
+                $out .= '  ' . $ptr . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            } elseif (isset($this->locals->slots[$d->name])) {
+                $ptr = $this->locals->slots[$d->name];
+            }
+            if ($ptr !== '') {
+                $fn = $d->op === '+' ? '@manticore___mir_str_increment' : '@manticore___mir_str_decrement';
+                $old = $this->ssa->allocReg();
+                $out .= '  ' . $old . ' = load i64, ptr ' . $ptr . "\n";
+                $new = $this->ssa->allocReg();
+                $out .= '  ' . $new . ' = call i64 ' . $fn . '(i64 ' . $old . ")\n";
+                $out .= '  store i64 ' . $new . ', ptr ' . $ptr . "\n";
+                $this->lastValue = $d->prefix ? $new : $old;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
         }
         $instr = $d->op === '+' ? 'add' : 'sub';
         // Static locals (backed by a global cell) and by-ref params / captures

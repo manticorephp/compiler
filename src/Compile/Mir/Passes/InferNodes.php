@@ -1563,6 +1563,14 @@ trait InferNodes
             $node->type = Type::cell();
             return $node->type;
         }
+        // A CELL local (`?int` from a call, mixed) stays a cell: its kind is a
+        // run-time fact, and pinning it int made the emitter `sub` the tagged
+        // word ({@see EmitLlvmExpr::emitIncDec}).
+        $cur = $this->localTypes[$node->name] ?? null;
+        if ($cur !== null && $cur->kind === Type::KIND_CELL) {
+            $node->type = $cur;
+            return $cur;
+        }
         // `$x++` reads + writes an int local; pin the slot to int.
         $this->localTypes[$node->name] = Type::int_();
         return Type::int_();
@@ -1917,6 +1925,15 @@ trait InferNodes
                 // carries its runtime tag; emitMatch boxes every arm. An all-
                 // numeric (int|float) match stays a numeric cell (arith-able).
                 $result = $this->unifyToCell($result, $bt);
+            }
+            // A `null` arm beside a value arm (`0 => null, 1 => "7"`): a nullable
+            // cell, as a ternary pairs them — `unknown` returned every arm as a
+            // raw word through a `mixed` return.
+            elseif ($result->kind === Type::KIND_NULL && $this->isValueKind($bt)) {
+                $result = $this->nullableOf($bt);
+            }
+            elseif ($bt->kind === Type::KIND_NULL && $this->isValueKind($result)) {
+                $result = $this->nullableOf($result);
             }
             else { $result = Type::unknown(); }
         }
