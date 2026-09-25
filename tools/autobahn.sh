@@ -27,7 +27,6 @@ fi
 CASES="${AUTOBAHN_CASES:-[\"1.*\",\"2.*\",\"3.*\",\"4.*\",\"5.*\",\"6.*\",\"7.*\",\"9.*\",\"12.*\",\"13.*\"]}"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/autobahn.XXXXXX")"
-mkdir -p "$TMP/reports"
 
 SERVER_PID=""
 CONTAINER=""
@@ -45,6 +44,8 @@ cleanup() {
     exit "$ec"
 }
 trap cleanup EXIT
+
+mkdir -p "$TMP/reports"
 
 # Poll until something answers on host:port, up to (max * 0.25s).
 wait_for_port() {
@@ -81,6 +82,10 @@ summarize() {
                 $failed[] = $id;
             }
         }
+        if (count($counts) === 0) {
+            fwrite(STDERR, "no cases reported\n");
+            exit(1);
+        }
         ksort($counts);
         foreach ($counts as $b => $n) {
             echo "$b: $n\n";
@@ -95,7 +100,11 @@ summarize() {
 
 if [[ "$MODE" == "server" ]]; then
     printf 'building ws_echo... '
-    "$ROOT/bin/manticore" compile "$ROOT/examples/http/ws_echo.php" -o "$TMP/ws_echo" >"$TMP/build.log" 2>&1
+    if ! "$ROOT/bin/manticore" compile "$ROOT/examples/http/ws_echo.php" -o "$TMP/ws_echo" >"$TMP/build.log" 2>&1; then
+        echo "FAILED"
+        tail -40 "$TMP/build.log"
+        exit 1
+    fi
     echo "ok"
 
     "$TMP/ws_echo" 9001 &
@@ -116,7 +125,7 @@ EOF
         -v "$TMP/reports:/reports" \
         --add-host=host.docker.internal:host-gateway \
         crossbario/autobahn-testsuite \
-        wstest -m fuzzingclient -s /config/fuzzingclient.json 2>&1 | tail -60
+        wstest -m fuzzingclient -s /config/fuzzingclient.json 2>&1 | tail -40
 
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
@@ -142,10 +151,14 @@ EOF
     wait_for_port 127.0.0.1 9001
 
     printf 'building autobahn_client... '
-    "$ROOT/bin/manticore" compile "$ROOT/tools/autobahn_client.php" -o "$TMP/autobahn_client" >"$TMP/build.log" 2>&1
+    if ! "$ROOT/bin/manticore" compile "$ROOT/tools/autobahn_client.php" -o "$TMP/autobahn_client" >"$TMP/build.log" 2>&1; then
+        echo "FAILED"
+        tail -40 "$TMP/build.log"
+        exit 1
+    fi
     echo "ok"
 
-    "$TMP/autobahn_client" 127.0.0.1 2>&1 | tail -60
+    "$TMP/autobahn_client" 127.0.0.1 2>&1 | tail -40
 
     docker kill "$CONTAINER" >/dev/null 2>&1 || true
     CONTAINER=""
