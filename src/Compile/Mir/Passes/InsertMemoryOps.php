@@ -922,8 +922,7 @@ final class InsertMemoryOps implements Pass
             // @__mir_current_fiber global (owned by the user's own `$f`), not a
             // +1 ref — releasing it at scope exit would free the live fiber
             // mid-run (use-after-free ⇒ a garbage resumer ⇒ jump into hyperspace).
-            $fn = \ltrim($value->function, '\\');
-            if ($fn === '__mir_fiber_current') { return false; }
+            if (AliasOwn::builtinHandsBorrow($value->function)) { return false; }
             return !isset($this->ffiFns[$value->function]);
         }
         if ($k === Node::KIND_METHOD_CALL

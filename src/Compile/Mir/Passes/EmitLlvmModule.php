@@ -2505,7 +2505,7 @@ trait EmitLlvmModule
      */
     private function callHandsBorrow(Node $v): bool
     {
-        return $v instanceof \Compile\Mir\Call && \ltrim($v->function, '\\') === '__mir_fiber_current';
+        return $v instanceof \Compile\Mir\Call && \Compile\Mir\AliasOwn::builtinHandsBorrow($v->function);
     }
 
     private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
@@ -2524,7 +2524,6 @@ trait EmitLlvmModule
         // borrowed one (`return $this->handler;`) is retained like an object.
         if ($tk === Type::KIND_OBJ && $this->objTypeIsStruct($t)) { return false; }
         $k = $v->kind;
-        if ($this->callHandsBorrow($v)) { return true; }
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
             || \Compile\Mir\BitOp::mintsFresh($v)) {

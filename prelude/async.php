@@ -472,6 +472,10 @@ namespace Async {
         public ?\Ffi\Ptr $rbuf = null;
         public int $rbufLen = 0;
 
+        /** Unique for the life of the process — never reused, unlike an object id. */
+        public int $id = 0;
+        private static int $lastId = 0;
+
         /**
          * $owner is the scope that OWNS this task (settle/prune/escalate target)
          * and never changes. $scope is the innermost scope currently open INSIDE
@@ -480,10 +484,6 @@ namespace Async {
          * not on a scheduler-global stack is what makes nesting sound under
          * interleaving: a fiber can only ever read its OWN open scope.
          */
-        /** Unique for the life of the process — never reused, unlike an object id. */
-        public int $id = 0;
-        private static int $lastId = 0;
-
         public function __construct(
             public \Fiber $fiber,
             public TaskGroup $owner,

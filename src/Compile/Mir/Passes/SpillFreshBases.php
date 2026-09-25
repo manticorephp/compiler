@@ -101,7 +101,8 @@ final class SpillFreshBases
 
     public function run(Module $module): Module
     {
-        $this->notOwned = ['__mir_fiber_current' => true];
+        $this->notOwned = [];
+        foreach (\Compile\Mir\AliasOwn::borrowingBuiltins() as $b) { $this->notOwned[$b] = true; }
         $this->refMasks = [];
         $this->refVariadic = [];
         foreach ($module->functions as $fn) {
@@ -708,11 +709,12 @@ final class SpillFreshBases
     {
         $t = $v->type;
         $k = $v->kind;
+        $callee = $k === Node::KIND_CALL ? \ltrim($this->asCall($v)->function, '\\') : '';
         if ($t->kind === Type::KIND_CELL) {
             if (!$this->cellMayHoldRc($t)) { return false; }
             // A codegen builtin's cell result may be an element it BORROWED
             // (`current`, `end`); only a body's +1 return is owned.
-            if ($k === Node::KIND_CALL && !isset($this->refMasks[\ltrim($this->asCall($v)->function, '\\')])) { return false; }
+            if ($k === Node::KIND_CALL && !isset($this->refMasks[$callee])) { return false; }
         }
         if ($this->isFreshContainer($v, 2)) { return true; }
         // A closure a body returned is +1 like any object, and a closure local
@@ -720,11 +722,11 @@ final class SpillFreshBases
         // A read base is never one, which is why isFreshContainer refuses it.
         $cls = $t->kind === Type::KIND_OBJ ? ($t->class ?? '') : '';
         if ($t->kind === Type::KIND_CLOSURE || $cls === 'Closure' || \str_starts_with($cls, '__closure_')) {
-            if ($k === Node::KIND_CALL) { return isset($this->refMasks[\ltrim($this->asCall($v)->function, '\\')]) && !isset($this->notOwned[\ltrim($this->asCall($v)->function, '\\')]); }
+            if ($k === Node::KIND_CALL) { return isset($this->refMasks[$callee]) && !isset($this->notOwned[$callee]); }
             return $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE;
         }
         if ($t->kind === Type::KIND_STRING) {
-            if ($k === Node::KIND_CALL) { return !isset($this->notOwned[\ltrim($this->asCall($v)->function, '\\')]); }
+            if ($k === Node::KIND_CALL) { return !isset($this->notOwned[$callee]); }
             return $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE;
         }
         if (!CondOwn::isConditional($v) || !CondOwn::armsCoverable($v)) { return false; }

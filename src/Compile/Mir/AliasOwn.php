@@ -89,6 +89,25 @@ final class AliasOwn
         return $cls !== 'Closure' && !\str_starts_with($cls, '__closure_');
     }
 
+    /**
+     * The builtins whose result is a BORROW, not the +1 every other call hands
+     * back: `__mir_fiber_current()` reads the running fiber out of a global its
+     * owner holds. The one list the passes that own call results ask
+     * ({@see InsertMemoryOps::isOwnedObj}, SpillFreshBases, EmitLlvmModule's
+     * return retain).
+     *
+     * @return string[]
+     */
+    public static function borrowingBuiltins(): array
+    {
+        return ['__mir_fiber_current'];
+    }
+
+    public static function builtinHandsBorrow(string $fn): bool
+    {
+        return \in_array(\ltrim($fn, '\\'), self::borrowingBuiltins(), true);
+    }
+
     /** Does a destination slot co-own this value — i.e. is it an alias of a
      *  local holding an rc'd by-handle value? */
     public static function coOwns(Node $v): bool
