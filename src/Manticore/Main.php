@@ -2724,7 +2724,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         return 0;
     }
     $objPath = $base . ".o";
-    $objs = assemble_ir($ir, $base, "", true);
+    $objs = assemble_ir($ir, $base, "-ffunction-sections -fdata-sections", true);
     if ($objs === []) { dprint("build: assemble failed for " . $output); return 75; }
     $objList = \implode(" ", $objs);
     $linkExtra = "";
@@ -2767,6 +2767,11 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) { $linkExtra = $linkExtra . weak_undef_flags($weak); }
+    // Drop what nothing reaches, as cmd_compile does. A split module pins its
+    // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
+    // them across parts, so without this the originals all stayed: the compiler
+    // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
+    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections");
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
