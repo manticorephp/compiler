@@ -294,14 +294,29 @@ function __mc_url_parse(string $url): array|false
     /** @var array<string,mixed> $out */
     $out = [];
     if ($hasScheme) { $out['scheme'] = $scheme; }
-    if ($hasHost) { $out['host'] = $host; }
+    if ($hasHost) { $out['host'] = \__mc_url_ctl($host); }
     if ($hasPort) { $out['port'] = $port; }
-    if ($hasUser) { $out['user'] = $user; }
-    if ($hasPass) { $out['pass'] = $pass; }
-    if ($hasPath) { $out['path'] = $path; }
-    if ($hasQuery) { $out['query'] = $query; }
-    if ($hasFragment) { $out['fragment'] = $fragment; }
+    if ($hasUser) { $out['user'] = \__mc_url_ctl($user); }
+    if ($hasPass) { $out['pass'] = \__mc_url_ctl($pass); }
+    if ($hasPath) { $out['path'] = \__mc_url_ctl($path); }
+    if ($hasQuery) { $out['query'] = \__mc_url_ctl($query); }
+    if ($hasFragment) { $out['fragment'] = \__mc_url_ctl($fragment); }
     return $out;
+}
+
+/**
+ * php's `php_replace_controlchars`: every control byte (0x00-0x1F, 0x7F) of a
+ * component becomes `_`, so a CR/LF in a URL never reaches a request line or
+ * a header built from its parts.
+ */
+function __mc_url_ctl(string $s): string
+{
+    $n = \strlen($s);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = \ord($s[$i]);
+        if ($c < 32 || $c === 127) { $s[$i] = '_'; }
+    }
+    return $s;
 }
 
 function __mc_is_scheme(string $s): bool

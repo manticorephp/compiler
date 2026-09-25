@@ -130,4 +130,7 @@ async(function () use ($l, $port) {
     attempt($url, null, ['X-A: b' => 'x']);
     attempt($url, null, ['' => 'x']);
     attempt('ws:/x');
+    attempt("ws://ex.com/a\r\nX-Evil: 1");
+    attempt("ws://ex\r\n.com/");
+    attempt("ws://ex.com/a?q=\0");
 });

@@ -19,3 +19,6 @@ ValueError: Http\WebSocket\connect(): Argument #3 ($headers) must not contain CR
 ValueError: Http\WebSocket\connect(): Argument #3 ($headers) must not contain ":" in a header name
 ValueError: Http\WebSocket\connect(): Argument #3 ($headers) must not contain an empty header name
 Http\WebSocket\HandshakeException: WebSocket handshake failed: no host in "ws:/x"
+Http\WebSocket\HandshakeException: WebSocket handshake failed: CR, LF or NUL in the URL
+Http\WebSocket\HandshakeException: WebSocket handshake failed: CR, LF or NUL in the URL
+Http\WebSocket\HandshakeException: WebSocket handshake failed: CR, LF or NUL in the URL

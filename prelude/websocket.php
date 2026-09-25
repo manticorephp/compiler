@@ -996,6 +996,12 @@ function upgrade(\Http\Request $req, callable $session, ?Options $o = null): \Ht
 function connect(string $url, ?Options $o = null, array<string, string> $headers = []): Connection
 {
     $o = $o ?? new Options();
+    // The host, path and query go into the request line and the Host header
+    // verbatim: a CR, LF or NUL there is header injection, whatever parse_url
+    // makes of it.
+    if (\strpbrk($url, "\r\n\0") !== false) {
+        throw new HandshakeException('WebSocket handshake failed: CR, LF or NUL in the URL');
+    }
     $u = \parse_url($url);
     $scheme = \is_array($u) && isset($u['scheme']) ? \strtolower((string)$u['scheme']) : '';
     if ($scheme !== 'ws' && $scheme !== 'wss') {

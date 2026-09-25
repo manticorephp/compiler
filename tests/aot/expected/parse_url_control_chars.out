@@ -1,0 +1,24 @@
+{"scheme":"ws","host":"ex.com","path":"\/a__X-Evil: 1"}
+string(13) "/a__X-Evil: 1"
+string(6) "ex.com"
+{"scheme":"ws","host":"ex__.com","path":"\/a"}
+string(2) "/a"
+string(8) "ex__.com"
+{"scheme":"http","host":"ex_.com","port":8080,"path":"\/p","query":"q_=1_","fragment":"f_g"}
+string(2) "/p"
+string(7) "ex_.com"
+{"scheme":"ws","host":"h","user":"us_er","pass":"p_","path":"\/"}
+string(1) "/"
+string(1) "h"
+{"path":"s_c:\/\/h\/"}
+string(8) "s_c://h/"
+NULL
+{"path":"\/p_a"}
+string(4) "/p_a"
+NULL
+{"scheme":"ws","host":"ex.com_","port":80,"path":"\/"}
+string(1) "/"
+string(7) "ex.com_"
+{"scheme":"http","host":"h","path":"\/clean","query":"x=1","fragment":"y"}
+string(6) "/clean"
+string(1) "h"
