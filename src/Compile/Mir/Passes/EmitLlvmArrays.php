@@ -1203,7 +1203,7 @@ trait EmitLlvmArrays
         // it was promised a raw word, inventing a representation. A ref deref
         // only ever REMOVES one — `$refs[0]` in php IS the referenced value, and
         // there is no rvalue spelling for the binding itself.
-        if ($this->rt->needsRefCells) {
+        if ($this->rt->needsRefCells && $this->elemSlotMayHoldRef($aa->array->type)) {
             $this->rt->needsTagged = true;
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $reg . ")\n";
@@ -1832,6 +1832,19 @@ trait EmitLlvmArrays
     }
 
     /**
+     * Whether an element of an array typed `$t` can hold a REFERENCE box
+     * (`cell(REF, box)` after `$r = &$a[$k]`): only a slot that holds CELLS —
+     * the promotion retypes the base to cell elements. A raw `int[]` word that
+     * merely LOOKS like a REF tag (xxh128's accumulators are arbitrary 64-bit
+     * values) was dereferenced as a box and faulted.
+     */
+    private function elemSlotMayHoldRef(Type $t): bool
+    {
+        if (!$t->isArray() || $t->isShape()) { return true; }
+        $e = $t->element;
+        return $e === null || $e->kind === Type::KIND_CELL || $e->kind === Type::KIND_UNKNOWN;
+    }
+    /**
      * Write THROUGH a reference already sitting in the element slot.
      *
      * `$refs = [&$a]; $refs[0] = 10;` assigns to `$a` — the element holds a
@@ -2083,7 +2096,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
             }
-            if ($this->rt->needsRefCells && !$rebinds) {
+            if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -2115,7 +2128,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
             }
-            if ($this->rt->needsRefCells && !$rebinds) {
+            if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -2138,7 +2151,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
             }
-            if ($this->rt->needsRefCells && !$rebinds) {
+            if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }

@@ -1259,7 +1259,7 @@ trait EmitLlvmControl
             $ev = $ed;
             $this->markCellOpaque($ev);
         }
-        if ($this->rt->needsRefCells) {
+        if ($this->rt->needsRefCells && $this->elemSlotMayHoldRef($fe->array->type)) {
             $this->rt->needsTagged = true;
             $dr = $this->ssa->allocReg();
             $out .= '  ' . $dr . ' = call i64 @__manticore_deref(i64 ' . $ev . ")\n";
