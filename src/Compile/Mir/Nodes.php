@@ -161,6 +161,14 @@ final class StoreLocal extends Node
         parent::__construct(Node::KIND_STORE_LOCAL, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow} (MANTICORE_OWNFLOW=1): the slot's OLD
+     *  value — `drop` releases it after the new value is computed, `own_retain`
+     *  takes a +1 on it before a self-append consumes it. Not a child. */
+    public ?MemoryOp_ $ownOld = null;
+    /** `own_retain` of the value just stored: a borrowed store the flow forces
+     *  to own. Not a child. */
+    public ?MemoryOp_ $ownNew = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreLocal($this);
@@ -443,6 +451,15 @@ final class Return_ extends Node
     {
         parent::__construct(Node::KIND_RETURN, $type);
     }
+
+    /** Set by {@see Passes\OwnershipFlow}: the `drop` of every local owned on
+     *  this return path, run after the value (and any finally) is evaluated.
+     *  Not children.
+     *  @var MemoryOp_[] */
+    public array $ownDrops = [];
+    /** The returned local is OWNED on this path: its reference moves to the
+     *  caller. Otherwise the return takes the +1 a borrow owes. */
+    public bool $ownMove = false;
 
     public function accept(EmitVisitor $v): string
     {
@@ -1330,6 +1347,13 @@ final class Foreach_ extends Node
      *  {@see EmitLlvmLocals::preallocateLocals} so its slot alloca lands in the
      *  ENTRY block. Emitted lazily (and unhoisted) when still ''. */
     public string $iterName = '';
+
+    /** Set by {@see Passes\OwnershipFlow}: whether this loop's value binding
+     *  co-owns (the emitter retains each element), and the `drop` of the
+     *  value / key the slot holds at the head, run before each binding. */
+    public bool $ownCoOwn = false;
+    public ?MemoryOp_ $ownDropValue = null;
+    public ?MemoryOp_ $ownDropKey = null;
 
     public function accept(EmitVisitor $v): string
     {

@@ -5165,7 +5165,10 @@ trait EmitLlvmObjects
                     if (isset($this->frame->mixedFlagSlots[$name])) {
                         $flavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]);
                     }
-                    if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
+                    // OwnershipFlow put a `drop` ahead of this unset where the
+                    // slot is owned; the zeroing below is all that is left.
+                    if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])
+                        && !\Compile\Debug::$ownFlow) {
                         $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
                     }
                     $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";

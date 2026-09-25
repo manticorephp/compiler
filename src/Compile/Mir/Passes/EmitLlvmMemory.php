@@ -113,6 +113,7 @@ trait EmitLlvmMemory
     private function initRcObjSlots(Node $body, array $paramNames = [], array $copiedParams = []): string
     {
         $this->frame->rcObjLocals = [];
+        $this->frame->ownBorrowed = [];
         $this->collectRcObjLocals($body);
         $this->frame->paramNames = $paramNames;
         $this->frame->transferredLocals = [];
@@ -144,6 +145,9 @@ trait EmitLlvmMemory
             // entry so the frame co-owns the slot; the matching release
             // then cancels cleanly. (Slot already holds the incoming arg.)
             if (isset($paramNames[$name])) {
+                // OwnershipFlow: a param enters BORROWED; any +1 the frame needs
+                // is an `own_retain` op the pass placed.
+                if (\Compile\Debug::$ownFlow) { continue; }
                 // A BY-REF param's slot holds the caller's ADDRESS, not the
                 // value. Retaining it rc-bumps whatever sits at (addr-8) — the
                 // caller's stack — and the paired scope-exit release then frees
@@ -312,6 +316,7 @@ trait EmitLlvmMemory
             $why = '';
             if (isset($veto[$name])) { $why = 'mixed store'; }
             elseif (isset($this->frame->paramNames[$name])) { $why = 'param'; }
+            elseif (isset($this->frame->ownBorrowed[$name])) { $why = 'borrowed source'; }
             elseif (isset($this->frame->transferredLocals[$name])) { $why = 'transferred'; }
             elseif (isset($this->frame->elementSharedLocals[$name])) { $why = 'element-shared'; }
             elseif (!isset($this->frame->rcObjLocals[$name])) { $why = 'no release'; }
@@ -636,6 +641,64 @@ trait EmitLlvmMemory
         $iv = $this->ssa->allocReg();
         $out = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
         return $out . $this->rcRetainReg($iv, $flavor);
+    }
+
+    /**
+     * The slot an {@see OwnershipFlow} op acts on, or '' where the emitter keeps
+     * the name out of rc tracking: not registered (a reference or a
+     * global-backed binding), and — `$vetoTransfer`, for a DROP only — a local
+     * whose value moved into a borrowing container ({@see
+     * collectTransferredLocals}). A retain is never vetoed: the +1 an in-place
+     * append or a copy-on-write needs is not optional, and one no drop gives
+     * back is a leak, never a free.
+     */
+    private function ownOpSlot(\Compile\Mir\MemoryOp_ $mo, bool $vetoTransfer): string
+    {
+        $t = $mo->target;
+        if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { return ''; }
+        $name = $t->name;
+        if (!isset($this->frame->rcObjLocals[$name])) { return ''; }
+        if ($vetoTransfer && isset($this->frame->transferredLocals[$name])) { return ''; }
+        if (isset($this->locals->refLocals[$name]) || isset($this->locals->globalBacked[$name])) { return ''; }
+        return $this->locals->slots[$name] ?? '';
+    }
+
+    /** Release the word `$slot` holds by an OwnershipFlow `drop` op's flavor
+     *  (the slot is left as it is — the caller stores over it). */
+    private function ownDropIr(string $slot, \Compile\Mir\MemoryOp_ $mo): string
+    {
+        return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo));
+    }
+
+    /** `own_retain`: a +1 on the word `$slot` holds, at the depth its release
+     *  gives back; a MIXED slot retains the half its flag says is there. */
+    private function ownRetainSlot(string $slot, \Compile\Mir\MemoryOp_ $mo): string
+    {
+        $fl = $this->rcReleaseFlavor($mo);
+        if (!\str_starts_with($fl, 'mix')) { return $this->rcRetainSlot($slot, $fl); }
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $w = $this->ssa->allocReg();
+        $out = '  ' . $w . ' = load i64, ptr ' . $slot . "\n";
+        $tagged = $this->ssa->allocReg();
+        $out .= '  ' . $tagged . ' = icmp ugt i64 ' . $w . ', '
+            . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+        $isCell = $tagged;
+        $flagSlot = $this->frame->mixedFlagBySlot[$slot] ?? '';
+        if ($flagSlot !== '') {
+            $f = $this->ssa->allocReg();
+            $fb = $this->ssa->allocReg();
+            $isCell = $this->ssa->allocReg();
+            $out .= '  ' . $f . ' = load i64, ptr ' . $flagSlot . "\n";
+            $out .= '  ' . $fb . ' = icmp ne i64 ' . $f . ", 0\n";
+            $out .= '  ' . $isCell . ' = or i1 ' . $tagged . ', ' . $fb . "\n";
+        }
+        $cw = $this->ssa->allocReg();
+        $rw = $this->ssa->allocReg();
+        $out .= '  ' . $cw . ' = select i1 ' . $isCell . ', i64 ' . $w . ", i64 0\n";
+        $out .= '  ' . $rw . ' = select i1 ' . $isCell . ', i64 0, i64 ' . $w . "\n";
+        $out .= '  call void @__mir_cell_retain(i64 ' . $cw . ")\n";
+        return $out . $this->rcRetainReg($rw, \substr($fl, 3));
     }
 
     /**

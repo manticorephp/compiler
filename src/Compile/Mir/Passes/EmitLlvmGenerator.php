@@ -365,6 +365,8 @@ trait EmitLlvmGenerator
     private function genParamCoOwn(string $name, string $val): string
     {
         if (isset($this->locals->refLocals[$name])) { return ''; }
+        // OwnershipFlow: a param enters borrowed; the pass places any +1.
+        if (\Compile\Debug::$ownFlow) { return ''; }
         $mo = $this->frame->rcObjLocals[$name] ?? null;
         if ($mo === null) { return ''; }
         $fl = $this->rcReleaseFlavor($mo);

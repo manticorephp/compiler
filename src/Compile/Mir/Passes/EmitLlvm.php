@@ -3304,8 +3304,11 @@ final class EmitLlvm implements EmitVisitor
     {
         if ($n->kind === Node::KIND_MEMORY_OP) {
             $mo = $n;
-            if ($mo->op === 'rc_release' && $mo->target !== null
-                && $mo->target->kind === Node::KIND_LOAD_LOCAL) {
+            // `own_local` / `own_local_b` are OwnershipFlow's registration of the
+            // same set (`_b`: some source of it borrows); the pass's
+            // `drop` / `own_retain` ops are not registrations.
+            if (($mo->op === 'rc_release' || $mo->op === 'own_local' || $mo->op === 'own_local_b')
+                && $mo->target !== null && $mo->target->kind === Node::KIND_LOAD_LOCAL) {
                 // A BY-REF param's slot holds the caller's ADDRESS, not the
                 // value — the caller owns the lifetime, the callee co-owns
                 // nothing. Registering it as an owned rc local emits a
@@ -3330,6 +3333,7 @@ final class EmitLlvm implements EmitVisitor
                 // through an assoc value (a `'str'` read back mis-compares),
                 // but a node handle survives. Flavor is re-derived per use.
                 $this->frame->rcObjLocals[$mo->target->name] = $mo;
+                if ($mo->op === 'own_local_b') { $this->frame->ownBorrowed[$mo->target->name] = true; }
             }
             return;
         }
@@ -3883,6 +3887,15 @@ final class EmitLlvm implements EmitVisitor
             // emitReturn instead.
             $this->rt->needsArena = true;
             return "  call void @__mir_arena_leave()\n";
+        }
+        if ($mo->op === 'drop' || $mo->op === 'own_retain') {
+            $slot = $this->ownOpSlot($mo, $mo->op === 'drop');
+            if ($slot === '') { return ''; }
+            if ($mo->op === 'drop') {
+                return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo))
+                    . '  store i64 0, ptr ' . $slot . "\n";
+            }
+            return $this->ownRetainSlot($slot, $mo);
         }
         if ($mo->op === 'rc_release') {
             // Scope-exit drop of an owned RcHeap vec / obj local.

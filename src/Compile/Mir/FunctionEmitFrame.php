@@ -87,4 +87,8 @@ final class FunctionEmitFrame
     /** @var array<string, string> the same flags keyed by the local's SLOT, for
      *  the release helpers that only see the slot. Appended at the END. */
     public array $mixedFlagBySlot = [];
+    /** @var array<string, bool> OwnershipFlow locals some source of which is a
+     *  BORROW (a param, an alias, a non-co-owning binding): registered, but not
+     *  proven to hold element refs of their own. Appended at the END. */
+    public array $ownBorrowed = [];
 }

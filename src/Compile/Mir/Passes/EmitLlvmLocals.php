@@ -537,6 +537,31 @@ trait EmitLlvmLocals
         return $out;
     }
 
+    /**
+     * The {@see OwnershipFlow} op on a store's OLD value: `drop` releases what
+     * the slot holds (the new value is already computed, not yet stored);
+     * `own_retain` takes the +1 a self-append consumes. '' without the flag.
+     */
+    private function ownOldIr(StoreLocal $sl): string
+    {
+        $mo = $sl->ownOld;
+        if ($mo === null) { return ''; }
+        $slot = $this->ownOpSlot($mo, $mo->op === 'drop');
+        if ($slot === '') { return ''; }
+        if ($mo->op === 'own_retain') { return $this->ownRetainSlot($slot, $mo); }
+        return $this->ownDropIr($slot, $mo);
+    }
+
+    /** The +1 a borrowed store owes on the value it just stored: a name the
+     *  flow forces to own, or an array alias of another local. */
+    private function ownNewIr(StoreLocal $sl): string
+    {
+        $mo = $sl->ownNew;
+        if ($mo === null) { return ''; }
+        $slot = $this->ownOpSlot($mo, false);
+        return $slot === '' ? '' : $this->ownRetainSlot($slot, $mo);
+    }
+
     private function emitStoreLocal(StoreLocal $n): string
     {
         $sl = $n;
@@ -577,7 +602,8 @@ trait EmitLlvmLocals
                     for ($j = 2; $j < $k; $j = $j + 1) {
                         $rest = new \Compile\Mir\Concat($rest, $ops[$j]);
                     }
-                    return $this->emitSelfAppend($sl, new \Compile\Mir\Concat($op0, $rest));
+                    return $this->ownOldIr($sl)
+                        . $this->emitSelfAppend($sl, new \Compile\Mir\Concat($op0, $rest));
                 }
             }
         }
@@ -657,11 +683,14 @@ trait EmitLlvmLocals
                 $out .= $this->rcReleaseReg($gone, \substr(
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]), 3));
             }
-            if ($rebind) {
+            if (\Compile\Debug::$ownFlow) {
+                if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownOldIr($sl); }
+            } elseif ($rebind) {
                 $out .= $this->rcReleaseSlot($cellDest,
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
             }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
+            if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownNewIr($sl); }
             $this->lastValue = $boxed;
             $this->lastValueType = 'i64';
             return $out;
@@ -689,6 +718,7 @@ trait EmitLlvmLocals
             }
             $out .= $this->coerceToI64();
             $raw = $this->lastValue;
+            $out .= $this->ownOldIr($sl);
             $out .= '  store i64 ' . $raw . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             $this->lastValue = $raw;
             $this->lastValueType = 'i64';
@@ -743,6 +773,7 @@ trait EmitLlvmLocals
                 $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             } else {
+                $out .= $this->ownOldIr($sl);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             }
             $this->lastValue = $dv;
@@ -1031,12 +1062,15 @@ trait EmitLlvmLocals
             // local drops its previous value (the slot is null-inited, so
             // the first store releases null = no-op). Frees the per-
             // iteration value in `for (...) { $x = new Foo(); }`.
-            if (isset($this->frame->rcObjLocals[$sl->name])
+            if (\Compile\Debug::$ownFlow) {
+                $out .= $this->ownOldIr($sl);
+            } elseif (isset($this->frame->rcObjLocals[$sl->name])
                 && !isset($this->frame->transferredLocals[$sl->name])) {
                 $out .= $this->rcReleaseSlot($this->locals->slots[$sl->name],
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
             }
             $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $out .= $this->ownNewIr($sl);
         }
         $this->lastValue = $val;
         $this->lastValueType = 'i64';

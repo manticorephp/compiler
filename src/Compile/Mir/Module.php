@@ -390,6 +390,12 @@ final class Module
      *  mid-struct shifts every later offset. */
     public bool $hasClassAlias = false;
 
+    /** {@see Passes\OwnershipFlow}'s refusals — a flavor mismatch at a join, a
+     *  body the flow cannot walk. {@see Passes\Verify} fails the build on any.
+     *  Declared LAST, as above.
+     *  @var string[] */
+    public array $ownFlowErrors = [];
+
     public function markPassApplied(string $name): void
     {
         $this->passesApplied[$name] = true;

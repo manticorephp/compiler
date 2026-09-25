@@ -2042,6 +2042,27 @@ trait EmitLlvmModule
      *
      * @param array<string,bool> $exempt {@see returnedLocalNames()}
      */
+    /**
+     * The {@see OwnershipFlow} return path: the drop of every local the flow
+     * owns here — except a name the returned value may BE
+     * ({@see returnedLocalNames}), whose reference moves to the caller.
+     *
+     * @param array<string,bool> $exempt
+     */
+    private function ownReturnIr(Return_ $r, array $exempt): string
+    {
+        $out = '';
+        foreach ($r->ownDrops as $d) {
+            $t = $d->target;
+            if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            if (isset($exempt[$t->name])) { continue; }
+            $slot = $this->ownOpSlot($d, true);
+            if ($slot === '') { continue; }
+            $out .= $this->ownDropIr($slot, $d);
+        }
+        return $out;
+    }
+
     private function emitRcReturnCleanup(array $exempt): string
     {
         $out = '';
@@ -2156,6 +2177,9 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
+            if (\Compile\Debug::$ownFlow) {
+                $out .= $this->ownReturnIr($r, $v === null ? [] : $this->returnedLocalNames($v));
+            }
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             // Same slot hand-back as {@see finishReturn} — this branch exits
@@ -2186,13 +2210,18 @@ trait EmitLlvmModule
         // restricted to a direct `return $x;`.
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
             ? $this->asLoadLocalNode($v)->name : null;
+        // OwnershipFlow: a local moves only where the flow owns it; any other
+        // state returns as a borrow, retained below.
+        if (\Compile\Debug::$ownFlow && !$r->ownMove) { $returnedLocal = null; }
         // A REBUILT return hands back a fresh cell array, not the local — so the
         // "ownership transfers to the caller" exemption does not apply and the
         // local must be dropped like any other. `function mk(): mixed { $v = [];
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
-        $leave = $this->emitRcReturnCleanup($exempt);
+        $leave = \Compile\Debug::$ownFlow
+            ? $this->ownReturnIr($r, $exempt) . $this->emitOwnedBoxReleases($exempt)
+            : $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
         // arena_leave only covers fall-through). The return value is

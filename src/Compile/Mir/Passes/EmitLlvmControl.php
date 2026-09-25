@@ -201,11 +201,14 @@ trait EmitLlvmControl
             $gf = ($gelem->kind === Type::KIND_CELL || $gelem->kind === Type::KIND_UNKNOWN)
                 ? 'cell' : $this->discardReleaseFlavor($gelem);
             if ($gf !== '') { $out .= $this->rcRetainReg($cur, $gf); }
+            $out .= $this->foreachPrevDrop($fe, false);
         }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
+            $kw = $this->lastValue;
+            $out .= $this->foreachPrevDrop($fe, true);
+            $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
         $this->cf->enterLoop($endLabel, $stepLabel);
         $out .= $this->emitNode($fe->body);
@@ -665,12 +668,16 @@ trait EmitLlvmControl
         // only gives back the previous iteration's.
         if ($this->foreachValueOwns($fe)) {
             $out .= $this->foreachOwnedRebind($fe, $cur, false);
+        } else {
+            $out .= $this->foreachPrevDrop($fe, false);
         }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key');
             $out .= $this->coerceToI64();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
+            $kw = $this->lastValue;
+            $out .= $this->foreachPrevDrop($fe, true);
+            $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
         $this->cf->enterLoop($endL, $stepL);
         $out .= $this->emitNode($fe->body);
@@ -963,6 +970,9 @@ trait EmitLlvmControl
     {
         if (!$this->foreachValueOwns($fe)) { return ''; }
         $slot = $this->locals->slots[$fe->valueVar];
+        if (\Compile\Debug::$ownFlow) {
+            return $this->foreachPrevDrop($fe, false) . '  store i64 0, ptr ' . $slot . "\n";
+        }
         $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
         $out = '';
         if ($fl !== '') {
@@ -983,6 +993,7 @@ trait EmitLlvmControl
         $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
         if ($fl === '') { return ''; }
         $out = $retain ? $this->rcRetainReg($cur, $fl) : '';
+        if (\Compile\Debug::$ownFlow) { return $out . $this->foreachPrevDrop($fe, false); }
         $prev = $this->ssa->allocReg();
         $out .= '  ' . $prev . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         return $out . $this->rcReleaseReg($prev, $fl);
@@ -1012,7 +1023,22 @@ trait EmitLlvmControl
         // rc underflow to catch it. Every `InferTypes` method family reproduced
         // it independently, which is what a per-function bookkeeping bug looks
         // like and what a per-site one never does.
+        if (\Compile\Debug::$ownFlow && !$fe->ownCoOwn) { return false; }
         return isset($this->frame->rcObjLocals[$fe->valueVar]);
+    }
+
+    /**
+     * {@see OwnershipFlow}'s drop of what the value (`$key` false) or key slot
+     * still holds at a binding — present only where the flow owns it at the
+     * loop head. '' without the flag.
+     */
+    private function foreachPrevDrop(Foreach_ $fe, bool $key): string
+    {
+        if (!\Compile\Debug::$ownFlow) { return ''; }
+        $mo = $key ? $fe->ownDropKey : $fe->ownDropValue;
+        if ($mo === null) { return ''; }
+        $slot = $this->ownOpSlot($mo, true);
+        return $slot === '' ? '' : $this->ownDropIr($slot, $mo);
     }
 
     private function emitForeach(Foreach_ $n): string
@@ -1203,8 +1229,9 @@ trait EmitLlvmControl
             // zeroing alone stranded it — one leaked ref per loop, which is
             // exactly what `InferScans::scanByRefCaptureNode`'s two `$c` loops
             // do on every node of every function.
-            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
+            $fvFlavor = \Compile\Debug::$ownFlow ? '' : $this->discardReleaseFlavor($fe->array->type->element);
             $slot = $this->locals->slots[$fe->valueVar];
+            $out .= $this->foreachPrevDrop($fe, false);
             if ($fvFlavor !== '') {
                 $stale = $this->ssa->allocReg();
                 $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
@@ -1315,10 +1342,16 @@ trait EmitLlvmControl
             $fvFlavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
             if ($fvFlavor !== '') {
                 $out .= $this->rcRetainReg($ev, $fvFlavor);
-                $prev = $this->ssa->allocReg();
-                $out .= '  ' . $prev . ' = load i64, ptr ' . $valSlot . "\n";
-                $out .= $this->rcReleaseReg($prev, $fvFlavor);
+                if (\Compile\Debug::$ownFlow) {
+                    $out .= $this->foreachPrevDrop($fe, false);
+                } else {
+                    $prev = $this->ssa->allocReg();
+                    $out .= '  ' . $prev . ' = load i64, ptr ' . $valSlot . "\n";
+                    $out .= $this->rcReleaseReg($prev, $fvFlavor);
+                }
             }
+        } else {
+            $out .= $this->foreachPrevDrop($fe, false);
         }
         $out .= $this->foreachVarStore($fe->valueVar, $ev, $fe->array->type->element);
         if ($fe->keyVar !== null) {
@@ -1379,6 +1412,7 @@ trait EmitLlvmControl
             }
             $keyIsCell = $kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
                 || $vecErased || $keyK === Type::KIND_CELL;
+            $out .= $this->foreachPrevDrop($fe, true);
             $out .= $this->foreachVarStore($fe->keyVar, $kp,
                 $keyIsCell ? Type::cell() : $fe->array->type->key);
         }

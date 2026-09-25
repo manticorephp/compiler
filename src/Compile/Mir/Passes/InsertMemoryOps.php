@@ -49,6 +49,15 @@ final class InsertMemoryOps implements Pass
 
     public function requires(): array { return [InferAllocKind::NAME]; }
 
+    /** False under `MANTICORE_OWNFLOW=1`: the rc track plants no `rc_release`
+     *  ({@see OwnershipFlow} owns locals); the arena track runs as always. */
+    public bool $rcTrack = true;
+
+    /** @var array<string, array<string, Type>> fn → the MIXED names
+     *  {@see settleMixedSlots} decided → their raw slot type; OwnershipFlow's
+     *  input when the rc track is off. */
+    public array $mixedVerdict = [];
+
     /** @var array<string, string> owned local name → heap flavor */
     private array $ownedFlavor = [];
 
@@ -248,6 +257,11 @@ final class InsertMemoryOps implements Pass
         // either map.
         $this->scanStores($fn->body);
         $this->settleMixedSlots($fn);
+        if (!$this->rcTrack && \count($this->rcObjMixed) > 0) {
+            $mix = [];
+            foreach ($this->rcObjMixed as $mn => $unused) { $mix[$mn] = $this->rcObjType[$mn]; }
+            $this->mixedVerdict[$fn->name] = $mix;
+        }
         $storeBlocked = $this->rcObjBlocked;
         foreach ($fn->params as $p) {
             $this->blocked[$p->name] = true;
@@ -439,6 +453,7 @@ final class InsertMemoryOps implements Pass
         // conditionally-assigned local is safe (release on null = no-op).
         $rcReleases = [];
         foreach ($this->rcObjOrder as $name) {
+            if (!$this->rcTrack) { break; }
             if (isset($this->rcObjBlocked[$name])) { continue; }
             $type = $this->rcObjType[$name];
             // A slot the emitter fills with a RAW scalar has nothing to release,

@@ -4651,8 +4651,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if (CompileArgs::$stopBeforeMemoryOps) { return $module; }
         $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
+        $memOps->rcTrack = !\Compile\Debug::$ownFlow;
         $module = $memOps->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
+        if (\Compile\Debug::$ownFlow) {
+            $statT = \Compile\Stats::now();
+            $module = (new \Compile\Mir\Passes\OwnershipFlow($memOps->mixedVerdict))->run($module);
+            \Compile\Stats::step('OwnershipFlow', $statT, -1, -1);
+        }
         $memOps = null;
         \Manticore\Allocator::release('after-memory-ops');
         $statT = \Compile\Stats::now();
