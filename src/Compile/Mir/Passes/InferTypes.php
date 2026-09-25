@@ -730,6 +730,11 @@ final class InferTypes implements Pass
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
 
+    /** {@see declarersOf}: method => the classes whose OWN table names it, in
+     *  `$classes` order. `methodNames` is fixed at lowering, so this is per run.
+     *  @var array<string, string[]> */
+    private array $declarersIdx = [];
+
     /** @var array<string, \Compile\Mir\EnumDef> */
     private array $enums = [];
 
@@ -744,6 +749,7 @@ final class InferTypes implements Pass
         $this->callGraph = null;
         $this->rescanTouched = [];
         $this->classes = $module->classes;
+        $this->declarersIdx = [];
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;
         $this->fnByName = [];
@@ -3032,14 +3038,33 @@ final class InferTypes implements Pass
     {
         /** @var Type $found */
         $found = null;
-        foreach ($this->classes as $cd) {
-            if (!isset($cd->methodNames[$method])) { continue; }
-            $sig = $this->sigs[$cd->name . '__' . $method] ?? null;
+        foreach ($this->declarersOf($method) as $cn) {
+            $sig = $this->sigs[$cn . '__' . $method] ?? null;
             if ($sig === null) { continue; }
             if ($found === null) { $found = $sig; }
             elseif ($found->kind !== $sig->kind) { return Type::cell(); }
         }
         return $found;
+    }
+
+    /**
+     * The classes that declare `$method` themselves, in class-table order.
+     *
+     * Asked per call site on a cell or interface receiver, and every asker
+     * walked the whole class table — classes × sites hash probes, ~6 s of
+     * php-cs-fixer's front end. The answer depends on the method alone.
+     *
+     * @return string[]
+     */
+    private function declarersOf(string $method): array
+    {
+        if (isset($this->declarersIdx[$method])) { return $this->declarersIdx[$method]; }
+        $out = [];
+        foreach ($this->classes as $cd) {
+            if (isset($cd->methodNames[$method])) { $out[] = $cd->name; }
+        }
+        $this->declarersIdx[$method] = $out;
+        return $out;
     }
 
     /** Return type of iterator method `$m` on `$class`, resolving an interface
@@ -3052,9 +3077,7 @@ final class InferTypes implements Pass
         if ($joined !== null) { return $joined; }
         $c = $this->resolveMethodClass($class, $m);
         if ($c === '') {
-            foreach ($this->classes as $cd) {
-                if (isset($cd->methodNames[$m])) { $c = $cd->name; break; }
-            }
+            foreach ($this->declarersOf($m) as $cn) { $c = $cn; break; }
         }
         if ($c !== '' && isset($this->sigs[$c . '__' . $m])) { return $this->sigs[$c . '__' . $m]; }
         return $dflt;

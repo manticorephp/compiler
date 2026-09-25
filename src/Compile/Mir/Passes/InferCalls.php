@@ -866,17 +866,14 @@ trait InferCalls
                     \Compile\Stats::bump('inferCalls.iface_scan_sites', 1);
                     \Compile\Stats::bump('inferCalls.iface_scan_classes', \count($this->classes));
                 }
-                foreach ($this->classes as $cd) {
-                    if (!isset($cd->methodNames[$node->method])) { continue; }
-                    if ($this->classImplementsT($cd->name, $recvIface)) { $cls = $cd->name; break; }
+                foreach ($this->declarersOf($node->method) as $cn) {
+                    if ($this->classImplementsT($cn, $recvIface)) { $cls = $cn; break; }
                 }
             }
             // No implementing class in this module (a cross-module interface, or
             // a built-in like \Throwable) — fall back to the old name-only match.
             if ($cls === '') {
-                foreach ($this->classes as $cd) {
-                    if (isset($cd->methodNames[$node->method])) { $cls = $cd->name; break; }
-                }
+                foreach ($this->declarersOf($node->method) as $cn) { $cls = $cn; break; }
             }
             if ($cls !== '') {
                 $mangled = $cls . '__' . $node->method;

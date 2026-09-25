@@ -213,6 +213,13 @@ final class EmitLlvm implements EmitVisitor
      *  the one thing a hot path must not do. */
     private int $resolveMethodClassEntries = 0;
 
+    /** {@see EmitLlvmObjects::methodHolders}: method => [class => resolved holder].
+     *  @var array<string, array<string, string>> */
+    private array $methodHoldersIdx = [];
+
+    /** Class-table size the index was built against; a change drops it. */
+    private int $methodHoldersClassCount = -1;
+
     /** The window {@see EmitLlvmObjects::resolveMethodClass} keeps. Sized so the
      *  memo cannot outgrow the module it describes: ~256k entries is more than
      *  any single class-by-class sweep asks for, and two orders of magnitude
@@ -640,6 +647,8 @@ final class EmitLlvm implements EmitVisitor
         $this->classes = $module->classes;
         $this->resolveMethodClassCache = [];
         $this->resolveMethodClassEntries = 0;
+        $this->methodHoldersIdx = [];
+        $this->methodHoldersClassCount = -1;
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
@@ -2047,10 +2056,7 @@ final class EmitLlvm implements EmitVisitor
             $cls = $this->resolveMethodClass($static, $n->method);
             if ($cls === '') { $cls = $static; }
             if ($cls === '' || !isset($this->classes[$cls])) {
-                foreach ($this->classes as $cd) {
-                    $r = $this->resolveMethodClass($cd->name, $n->method);
-                    if ($r !== '') { $cls = $r; break; }
-                }
+                foreach ($this->methodHolders($n->method) as $r) { $cls = $r; break; }
             }
             $sig = $cls . '__' . $n->method;
             $off = 1;

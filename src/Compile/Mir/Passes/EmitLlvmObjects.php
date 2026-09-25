@@ -1347,9 +1347,8 @@ trait EmitLlvmObjects
      *  that repr is only safe when no object candidate shares the name. */
     private function nonEnumDeclares(string $method): bool
     {
-        foreach ($this->classes as $cd) {
-            if (isset($this->enums[$cd->name])) { continue; }
-            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
+        foreach ($this->methodHolders($method) as $cn => $_decl) {
+            if (!isset($this->enums[$cn])) { return true; }
         }
         return false;
     }
@@ -1357,10 +1356,7 @@ trait EmitLlvmObjects
     /** Whether ANY class in the table declares (or inherits) `$method`. */
     private function anyClassDeclares(string $method): bool
     {
-        foreach ($this->classes as $cd) {
-            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
-        }
-        return false;
+        return $this->methodHolders($method) !== [];
     }
 
     /**
@@ -1389,13 +1385,12 @@ trait EmitLlvmObjects
             return $this->magicPropertyHoldersCache[$key];
         }
         $holders = [];
-        foreach ($this->classes as $cd) {
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
             if ($cd->propertyOffset($prop) >= 0) { continue; }
             if ($cd->isStruct || $cd->usesBag()) { continue; }
-            if ($this->isClosureClass($cd->name) || $this->isEnumClass($cd->name)) { continue; }
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl === '') { continue; }
-            $holders[$cd->name] = $decl;
+            if ($this->isClosureClass($cn) || $this->isEnumClass($cn)) { continue; }
+            $holders[$cn] = $decl;
         }
         $this->magicPropertyHoldersCache[$key] = $holders;
         return $holders;
@@ -2093,14 +2088,13 @@ trait EmitLlvmObjects
     private function ifaceMethodHolders(string $iface, string $method): array
     {
         $holders = [];
-        foreach ($this->classes as $cd) {
-            if ($cd->isStruct || $this->isClosureClass($cd->name) || $this->isEnumClass($cd->name)) {
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
+            if ($cd->isStruct || $this->isClosureClass($cn) || $this->isEnumClass($cn)) {
                 continue;
             }
-            if (!$this->classImplements($cd->name, $iface)) { continue; }
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl === '') { continue; }
-            $holders[$cd->name] = $decl;
+            if (!$this->classImplements($cn, $iface)) { continue; }
+            $holders[$cn] = $decl;
         }
         return $holders;
     }
@@ -3441,11 +3435,9 @@ trait EmitLlvmObjects
     private function dynMethodHasRefParam(array $methods, int $argc): bool
     {
         foreach ($methods as $m => $_ignored) {
-            foreach ($this->classes as $cd) {
-                $decl = $this->resolveMethodClass($cd->name, (string)$m);
-                if ($decl === '') { continue; }
+            foreach ($this->methodHolders((string)$m) as $cn => $decl) {
                 if (!$this->methodTakesArgc($decl, (string)$m, $argc)) { continue; }
-                $sym = $this->lsbTarget($decl, (string)$m, $cd->name);
+                $sym = $this->lsbTarget($decl, (string)$m, $cn);
                 // ⚠ `anyRefParam`, NOT `refParams[$sym] !== []`. That field is a
                 // per-parameter BOOL ARRAY, so an ordinary one-argument method
                 // has `[false]` — non-empty — and the veto fired on every
@@ -3455,7 +3447,7 @@ trait EmitLlvmObjects
                     || ($this->sigs->returnsByRef[$sym] ?? false)) {
                     // ⚠ A conservative gate fails SILENTLY — name the veto.
                     if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
-                        \error_log('DYNM veto: ' . $cd->name . '::' . (string)$m . ' by-ref');
+                        \error_log('DYNM veto: ' . $cn . '::' . (string)$m . ' by-ref');
                     }
                     return true;
                 }
@@ -3686,9 +3678,8 @@ trait EmitLlvmObjects
         $erasedSyms = [];
         $distinct = [];
         $fallback = '';
-        foreach ($this->classes as $cd) {
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl === '') { continue; }
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
             if (!$this->methodTakesArgc($decl, $method, $argc)) { continue; }
             if ($fallback === '') { $fallback = $decl; }
             $fullPre = $this->lsbTarget($decl, $method, $cd->name);
@@ -6584,6 +6575,39 @@ trait EmitLlvmObjects
     }
 
     /**
+     * Every class that resolves `$method`, in `$this->classes` order, mapped to
+     * the class whose body it resolves to.
+     *
+     * The emitter asks "which classes answer `m`?" per CALL SITE — interface
+     * dispatch, erased receivers, dynamic names, magic holders — and each asker
+     * walked the whole class table: classes × sites parent-chain walks, 12 s of
+     * php-cs-fixer's EmitLlvm in `__mir_array_index_find`. The answer depends on
+     * the method only, so it is built once per method and holds HITS only (the
+     * pair memo above is bounded because it held the misses of a cross product).
+     * A class added after a build (a closure class) invalidates the whole index.
+     *
+     * @return array<string, string>
+     */
+    private function methodHolders(string $method): array
+    {
+        $n = \count($this->classes);
+        if ($n !== $this->methodHoldersClassCount) {
+            $this->methodHoldersIdx = [];
+            $this->methodHoldersClassCount = $n;
+        }
+        if (isset($this->methodHoldersIdx[$method])) {
+            return $this->methodHoldersIdx[$method];
+        }
+        $holders = [];
+        foreach ($this->classes as $cd) {
+            $decl = $this->resolveMethodClass($cd->name, $method);
+            if ($decl !== '') { $holders[$cd->name] = $decl; }
+        }
+        $this->methodHoldersIdx[$method] = $holders;
+        return $holders;
+    }
+
+    /**
      * The Generator iterator protocol as method calls on a frame ptr:
      * current()/key()/getReturn() read a frame slot; next()/rewind() drive
      * one resume; valid() primes a fresh generator then tests `state != -1`;
@@ -6989,16 +7013,11 @@ trait EmitLlvmObjects
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
         if ($static !== '' && !isset($this->classes[$static])) {
-            foreach ($this->classes as $cd) {
-                if (!$this->classImplementsIface($cd->name, $static)) { continue; }
-                $r = $this->resolveMethodClass($cd->name, $mc->method);
-                if ($r !== '') { $fallback = $r; break; }
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if ($this->classImplementsIface($cn, $static)) { $fallback = $r; break; }
             }
             if ($fallback === $static) {
-                foreach ($this->classes as $cd) {
-                    $r = $this->resolveMethodClass($cd->name, $mc->method);
-                    if ($r !== '') { $fallback = $r; break; }
-                }
+                foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
             }
         }
         // A fully ERASED receiver (`public $defn;` with no declared type) leaves
@@ -7011,10 +7030,7 @@ trait EmitLlvmObjects
         // and in the same order — resolve here too, so the ONE coercion the call
         // site emits speaks the ABI the arms were selected for.
         if ($static === '' && $fallback === '') {
-            foreach ($this->classes as $cd) {
-                $r = $this->resolveMethodClass($cd->name, $mc->method);
-                if ($r !== '') { $fallback = $r; break; }
-            }
+            foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
         }
         // An ENUM method takes its case ORDINAL as `$this`, not a pointer. A
         // cell receiver (`?Enum` is a cell — an ordinal cannot carry null, see
@@ -7270,11 +7286,9 @@ trait EmitLlvmObjects
             $firstImpl = '';
             \Compile\Stats::bump('dispatch.iface_sites', 1);
             \Compile\Stats::bump('dispatch.iface_classes_scanned', \count($this->classes));
-            foreach ($this->classes as $cd) {
-                if ($this->resolveMethodClass($cd->name, $mc->method) !== '') {
-                    $cands[] = $cd->name;
-                    if ($firstImpl === '') { $firstImpl = $cd->name; }
-                }
+            foreach ($this->methodHolders($mc->method) as $cn => $_decl) {
+                $cands[] = $cn;
+                if ($firstImpl === '') { $firstImpl = $cn; }
             }
             if ($fallback === $static && $firstImpl !== '') {
                 $r = $this->resolveMethodClass($firstImpl, $mc->method);
