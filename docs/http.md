@@ -442,12 +442,16 @@ where compression is on, and a program that never mentions `Http\` is untouched.
 
 ## Protocol takeover
 
-`Response::takeover(\Closure $fn): Response` hands a `101` (or any other) response's
-underlying socket to `$fn(\Resource $conn, \Buffer\ByteBuffer $buf, Server $server)`
-instead of writing a body: the head goes out, the write timeout is cleared, the SAPI
-request context ends (`header()` has no meaning past this point), and `$fn` runs with
-`$buf` still holding whatever bytes the client sent right after the request head. The
-server never reads or writes the connection again after that call returns.
+`Response::takeover(\Closure $fn): Response` marks a response for hand-off to
+`$fn(\Resource $conn, \Buffer\ByteBuffer $buf, Server $server)` instead of writing a
+body. Only a `101` on HTTP/1.1, with no unread streamed-body byte left on the wire,
+actually takes over; anything else — a different status, HTTP/1.0, a handler that
+marked takeover but left request-body bytes unread — is a handler bug and the server
+answers **500** without ever calling `$fn`. On a clean takeover: the head goes out,
+the write timeout is cleared, the SAPI request context ends (`header()` has no
+meaning past this point), and `$fn` runs with `$buf` still holding whatever bytes the
+client sent right after the request head. The server never reads or writes the
+connection again after that call returns.
 `Server::onStop(\Closure $fn): int` / `offStop(int $id)` register and unregister a hook
 that runs once when `stop()` is called — a long-lived takeover's only way to hear
 about a shutdown, since it owns the socket and the server's own loop cannot signal it

@@ -67,9 +67,10 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 - ✅ **`ext/zlib` incremental API** — `deflate_init`/`deflate_add`/`inflate_init`/
   `inflate_add`/`inflate_get_status`/`inflate_get_read_len` (`DeflateContext`,
   `InflateContext`), pure PHP, Zend-faithful (`tools/difftest.sh` is the oracle);
-  built as the permessage-deflate prerequisite above. Inflate output is released a
-  whole decoded block at a time; a data error returns `false`, matching the
-  existing one-shot `gzinflate` contract.
+  built as the permessage-deflate prerequisite above. Inflate decoding resumes at
+  the last complete unit (a symbol, a stored-block slice, a header field), so a
+  stream fed in any chunking answers what zlib answers; a data error returns
+  `false`, matching the existing one-shot `gzinflate` contract.
 - ✅ a closure in an array element is owned by the buffer (repr `CLO`, ABI v11): released on overwrite, `unset` and container death, co-owned by element reads, `foreach` and a direct `($a[$k])()` call; a `callable` that is not a closure env is never released as one; `unset` on a shared buffer separates first (br `websocket`, 2026-09-24).
 - ✅ array elements belong to the buffer — one ownership model and one key (hint) for every element walk; copies, spreads, unions and packs own what they hold (br `elemown`, 2026-09-23).
 - ✅ reference boxes are counted — the box and its value die with the last holder (ABI v9); a closure env is counted like an object wherever it is held; a by-value parameter and a property are promoted into a box by `&`; `$a = &$b` makes both names one reference (br `refbox`, 2026-09-23).

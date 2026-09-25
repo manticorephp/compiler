@@ -75,8 +75,10 @@ those are the handshake's own headers.
 The client validates the response itself: status must be `101`, `Sec-WebSocket-Accept`
 must match, a returned subprotocol must be one offered, a returned extension must be
 one offered — anything else raises `HandshakeException` naming the status line or
-what disagreed. **Redirects are not followed.** `connectTimeout` (10 s default) bounds
-the TCP/TLS connect **and** the handshake response together, as one deadline.
+what disagreed. A response head over 16 KiB with no `\r\n\r\n` yet also raises
+`HandshakeException` rather than waiting indefinitely for one. **Redirects are not
+followed.** `connectTimeout` (10 s default) bounds the TCP/TLS connect **and** the
+handshake response together, as one deadline.
 
 `connect()` needs no `Async\async()` scope — outside one it blocks the process on
 ordinary sockets, exactly like a script written before this feature existed:
@@ -130,7 +132,10 @@ fragmentation on send. `send()`/`sendBinary()` on a closed connection throws
 
 ## Closing
 
-`close(int $code = 1000, string $reason = '')`:
+`close(int $code = 1000, string $reason = '')` — `$code` must be a sendable close
+code (`closeCodeSendable`) and `$reason` at most 123 bytes (the close frame's
+payload is 2 bytes of code plus the reason, and a control frame caps at 125); either
+violation throws `ValueError` before anything is sent:
 
 - Called from the task that last ran `receive()` (or the connection's owning task,
   before any `receive()` has run) — the **reader** — it sends the Close frame and
@@ -268,9 +273,11 @@ separately, not something the WebSocket code itself holds onto.
 permessage-deflate is built on `deflate_init`/`deflate_add`/`inflate_init`/
 `inflate_add`/`inflate_get_status`/`inflate_get_read_len` (`DeflateContext`,
 `InflateContext`) — Zend's own API, pure PHP here, so `difftest` is its oracle for
-this part. Inflate output is released a whole decoded block at a time (matches
-Zend's concatenated bytes; per-call chunking may differ); a data error returns
-`false` rather than throwing, matching the existing one-shot `gzinflate` contract.
+this part. Inflate decoding resumes at the last complete unit — a symbol, a slice of
+a stored block, a block header, a container field — so a stream fed in any chunking
+answers what zlib answers, not a block-at-a-time approximation of it; a data error
+returns `false` rather than throwing, matching the existing one-shot `gzinflate`
+contract.
 
 ## Not in this layer (out of scope)
 
