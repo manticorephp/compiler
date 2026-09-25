@@ -225,6 +225,8 @@ final class Pmd
     public bool $clientNoCtx = false;
     public int $serverBits = 15;
     public int $clientBits = 15;
+    /** The accepted offer named server_max_window_bits: the answer must repeat it (§7.1.2.1), even at 15. */
+    public bool $serverBitsAsked = false;
     private bool $ourNoCtx = false;
     private int $ourBits = 15;
     private ?\DeflateContext $def = null;
@@ -285,7 +287,8 @@ final class Pmd
             $m = new Pmd();
             $m->serverNoCtx = isset($p['server_no_context_takeover']);
             $m->clientNoCtx = isset($p['client_no_context_takeover']);
-            $m->serverBits = isset($p['server_max_window_bits']) ? (int)$p['server_max_window_bits'] : 15;
+            $m->serverBitsAsked = isset($p['server_max_window_bits']);
+            $m->serverBits = $m->serverBitsAsked ? (int)$p['server_max_window_bits'] : 15;
             $m->clientBits = isset($p['client_max_window_bits']) && $p['client_max_window_bits'] !== ''
                 ? (int)$p['client_max_window_bits'] : 15;
             $m->forRole(false);
@@ -303,7 +306,7 @@ final class Pmd
         if ($this->clientNoCtx) {
             $h .= '; client_no_context_takeover';
         }
-        if ($this->serverBits !== 15) {
+        if ($this->serverBitsAsked || $this->serverBits !== 15) {
             $h .= '; server_max_window_bits=' . $this->serverBits;
         }
         if ($this->clientBits !== 15) {

@@ -15,11 +15,18 @@ w8 echo:Hello
 ext: []
 client w8: WebSocket handshake failed: server requires client_max_window_bits=8, which our deflater cannot honour
 client server-w8: connected
+client unknown: WebSocket handshake failed: server chose an unoffered extension "permessage-deflate; bogus"
+client dup: WebSocket handshake failed: server chose an unoffered extension "permessage-deflate; server_no_context_takeover; server_no_context_takeover"
+client two: WebSocket handshake failed: server chose an unoffered extension "permessage-deflate, permessage-deflate"
+client bare cmwb: WebSocket handshake failed: client_max_window_bits without a value
+client no-ctx: 3 echoed, lengths 24 24 24
 ext: permessage-deflate; client_max_window_bits=12
 ext: []
+ext: permessage-deflate; server_max_window_bits=15
 bomb 8:1009: EOF
 corrupt 8:1007: EOF
 rsv1-cont 8:1002: EOF
+rsv1-ping 8:1002: EOF
 plain ext: []
 rsv1-unnegotiated 8:1002: EOF
 plain ok

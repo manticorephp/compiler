@@ -143,6 +143,44 @@ function fakeServer(string $ext): string
     return $out;
 }
 
+/**
+ * A raw server that answers `client_no_context_takeover` although it was not
+ * offered (§7.1.1.2 lets it), then inflates each of $n client messages with a
+ * FRESH inflater — which only works if our client reset its deflater — and
+ * echoes the text back uncompressed. Answers the compressed lengths.
+ */
+function fakeNoCtxEcho(\Resource $l, int $n): string
+{
+    $s = stream_socket_accept($l, 5);
+    $b = new \Buffer\ByteBuffer();
+    while ($b->indexOf("\r\n\r\n") < 0) {
+        $chunk = fread($s, 8192);
+        if ($chunk === '' || $chunk === false) { return 'EOF in head'; }
+        $b->append($chunk);
+    }
+    $head = $b->read($b->indexOf("\r\n\r\n") + 4);
+    preg_match('/Sec-WebSocket-Key: (\S+)/i', $head, $m);
+    fwrite($s, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        . 'Sec-WebSocket-Accept: ' . \Http\WebSocket\acceptKey($m[1])
+        . "\r\nSec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover\r\n\r\n");
+    $p = new \Http\WebSocket\FrameParser($b, true, 1 << 20, true);
+    $lens = '';
+    for ($i = 0; $i < $n; $i++) {
+        while (($r = $p->parse()) === \Http\WebSocket\FrameParser::NEED) {
+            $chunk = fread($s, 65536);
+            if ($chunk === '' || $chunk === false) { return $lens . 'EOF'; }
+            $b->append($chunk);
+        }
+        if (!$p->rsv1) { return $lens . 'uncompressed'; }
+        $plain = inflate_add(inflate_init(ZLIB_ENCODING_RAW), $p->payload . "\x00\x00\xff\xff", ZLIB_SYNC_FLUSH);
+        if ($plain === false) { return $lens . 'needs history'; }
+        $lens .= strlen($p->payload) . ' ';
+        fwrite($s, \Http\WebSocket\encodeFrame(1, $plain, true, false, ''));
+    }
+    fclose($s);
+    return $lens;
+}
+
 $l = stream_socket_server('tcp://127.0.0.1:0');
 stream_set_blocking($l, false);
 $name = stream_socket_get_name($l, false);
@@ -254,6 +292,28 @@ async(function () use ($server, $port) {
     fclose($r->c);
     echo 'client w8: ', fakeServer("permessage-deflate; client_max_window_bits=8"), "\n";
     echo 'client server-w8: ', fakeServer("permessage-deflate; server_max_window_bits=8"), "\n";
+    echo 'client unknown: ', fakeServer("permessage-deflate; bogus"), "\n";
+    echo 'client dup: ', fakeServer("permessage-deflate; server_no_context_takeover; server_no_context_takeover"), "\n";
+    echo 'client two: ', fakeServer("permessage-deflate, permessage-deflate"), "\n";
+    echo 'client bare cmwb: ', fakeServer("permessage-deflate; client_max_window_bits"), "\n";
+
+    // Our client under a server-requested client_no_context_takeover.
+    $l2 = stream_socket_server('tcp://127.0.0.1:0');
+    $n2 = stream_socket_get_name($l2, false);
+    $p2 = (int)substr($n2, strrpos($n2, ':') + 1);
+    $t2 = spawn(function () use ($l2): string { return fakeNoCtxEcho($l2, 3); });
+    $c = WS\connect('ws://127.0.0.1:' . $p2 . '/', (new WS\Options())->compression(true)->closeTimeout(0.5));
+    $same = str_repeat('no context here ', 40);
+    $echoed = 0;
+    for ($i = 0; $i < 3; $i++) {
+        $c->send($same);
+        if ($c->receive()->data === $same) {
+            $echoed++;
+        }
+    }
+    $c->close();
+    echo 'client no-ctx: ', $echoed, ' echoed, lengths ', rtrim($t2->await()), "\n";
+    fclose($l2);
 
     // A malformed offer is skipped; the next acceptable one wins.
     $r = Raw::open($port, '/z0', "Sec-WebSocket-Extensions: permessage-deflate; bogus, permessage-deflate; client_max_window_bits=16, permessage-deflate; client_max_window_bits=12\r\n");
@@ -261,6 +321,11 @@ async(function () use ($server, $port) {
     fclose($r->c);
     $r = Raw::open($port, '/z0', "Sec-WebSocket-Extensions: x-other, permessage-deflate; server_no_context_takeover; server_no_context_takeover\r\n");
     echo 'ext: [', $r->ext(), "]\n";
+    fclose($r->c);
+
+    // An offer naming server_max_window_bits=15 gets it back (§7.1.2.1).
+    $r = Raw::open($port, '/z0', "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=15\r\n");
+    echo 'ext: ', $r->ext(), "\n";
     fclose($r->c);
 
     // 5. An inflation bomb: ~63 KB on the wire, 10 MB inflated, maxMessageSize 100000.
@@ -275,11 +340,15 @@ async(function () use ($server, $port) {
     echo 'corrupt ', $r->frame(), ' ', $r->frame(), "\n";
     fclose($r->c);
 
-    // 7. RSV1 on a continuation; RSV1 when nothing was negotiated.
+    // 7. RSV1 on a continuation, on a control frame; RSV1 when nothing was negotiated.
     $r = Raw::open($port, '/z', $offer);
     $r->send(1, "\xf2\x48\xcd", false, 0x40);
     $r->send(0, "\xc9\xc9\x07\x00", true, 0x40);
     echo 'rsv1-cont ', $r->frame(), ' ', $r->frame(), "\n";
+    fclose($r->c);
+    $r = Raw::open($port, '/z', $offer);
+    $r->send(9, 'p', true, 0x40);
+    echo 'rsv1-ping ', $r->frame(), ' ', $r->frame(), "\n";
     fclose($r->c);
     $r = Raw::open($port, '/plain', $offer);
     echo 'plain ext: [', $r->ext(), "]\n";
