@@ -946,6 +946,10 @@ trait EmitLlvmExpr
      *  those words as cells (EK_CELL) compared a raw-hinted `['k' => true]`
      *  unequal to itself. */
     private const EK_HINT   = 6;
+    /** A RAW object pointer (a plain class, not an enum ordinal, a struct, a
+     *  closure env or a foreign pointer): boxed as an object so the tagged
+     *  compare runs php's object compare on it — `[$x] == [$y]` was identity. */
+    private const EK_OBJ    = 7;
     /** Not a representation the array compare runtime can normalize. */
     private const EK_NONE   = -1;
 
@@ -968,6 +972,14 @@ trait EmitLlvmExpr
             $inner = $this->elemChainOf($t->element, $depth + 1);
             if ($inner === self::EK_NONE) { return self::EK_NONE; }
             return self::EK_ARRAY | ($inner << 4);
+        }
+        if ($t->kind === Type::KIND_OBJ) {
+            $cls = $t->class ?? '';
+            if ($this->isEnumClass($cls) || $this->objTypeIsStruct($t) || $this->isClosureClass($cls)
+                || $cls === 'Ffi\\Ptr') {
+                return self::EK_NONE;
+            }
+            return self::EK_OBJ;
         }
         return match ($t->kind) {
             Type::KIND_CELL, Type::KIND_UNKNOWN => self::EK_CELL,
@@ -1036,11 +1048,15 @@ trait EmitLlvmExpr
         $out .= "    i64 " . self::EK_STRING . ", label %asstr\n";
         $out .= "    i64 " . self::EK_BOOL   . ", label %asbool\n";
         $out .= "    i64 " . self::EK_ARRAY  . ", label %asarr\n";
+        $out .= "    i64 " . self::EK_OBJ    . ", label %asobj\n";
         $out .= "  ]\n";
         $out .= "cell:\n  ret i64 %v\n";
         $out .= "asarr:\n";
         $out .= "  %ap = inttoptr i64 %v to ptr\n";
         $out .= "  %ba = call i64 @__manticore_box_array(ptr %ap)\n  ret i64 %ba\n";
+        $out .= "asobj:\n";
+        $out .= "  %op = inttoptr i64 %v to ptr\n";
+        $out .= "  %bo = call i64 @__manticore_box_object(ptr %op)\n  ret i64 %bo\n";
         $out .= "asint:\n";
         $out .= "  %bi = call i64 @__manticore_box_int(i64 %v)\n  ret i64 %bi\n";
         $out .= "asfloat:\n";
