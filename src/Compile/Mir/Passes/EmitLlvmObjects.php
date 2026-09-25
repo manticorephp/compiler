@@ -495,7 +495,7 @@ trait EmitLlvmObjects
                     // raw-payload by-ref param: hand over an untagged scratch
                     // slot and re-box what the ctor left. Passing the cell slot
                     // makes the ctor dereference the tag bits.
-                    $out .= $this->emitByRefCellUnboxArg($a);
+                    $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai + 1] ?? null);
                     $reboxSlots[] = $this->refBoxSlot;
                     $reboxTmps[] = $this->refBoxTmp;
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)
@@ -5980,7 +5980,7 @@ trait EmitLlvmObjects
             ) {
                 // Cell lvalue → raw-payload by-ref param; see
                 // emitByRefCellUnboxArg. A vivified out-variable is exactly this.
-                $out .= $this->emitByRefCellUnboxArg($a);
+                $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai] ?? null);
                 $argList .= 'i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
                 $reboxTmps[] = $this->refBoxTmp;
@@ -7326,7 +7326,7 @@ trait EmitLlvmObjects
                 // slot and re-box afterwards; passing the cell slot itself makes
                 // the callee dereference the tag bits and `$obj->fill(1, $out)`
                 // read back float(6.36E-314).
-                $out .= $this->emitByRefCellUnboxArg($a);
+                $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai + 1] ?? null);
                 $argList .= ', i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
                 $reboxTmps[] = $this->refBoxTmp;

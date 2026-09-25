@@ -2177,7 +2177,7 @@ trait EmitLlvmCalls
      * Leaves the scratch address in `lastValue` and the caller-slot / scratch
      * pair in {@see $refBoxSlot} / {@see $refBoxTmp} for the post-call rebox.
      */
-    private function emitByRefCellUnboxArg(Node $a): string
+    private function emitByRefCellUnboxArg(Node $a, ?Type $pt = null): string
     {
         $out = $this->byRefAddrOf($a);
         $slotAddr = $this->lastValue;
@@ -2185,10 +2185,28 @@ trait EmitLlvmCalls
         $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
         $cv = $this->ssa->allocReg();
         $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
-        $raw = $this->ssa->allocReg();
-        $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+        $scalar = $pt !== null && $this->isByRefScalarParam($pt);
+        if ($scalar) {
+            // A SCALAR out-param (`preg_replace(…, int &$count)` handed a
+            // `?int &$count`): the callee reads and writes the raw int, so
+            // the scratch holds the decoded value, re-boxed by type after.
+            $this->lastValue = $cv;
+            $this->lastValueType = 'i64';
+            $out .= $this->unboxCellToType($pt);
+            if ($this->lastValueType === 'double') {
+                $bits = $this->ssa->allocReg();
+                $out .= '  ' . $bits . ' = bitcast double ' . $this->lastValue . " to i64\n";
+                $this->lastValue = $bits;
+                $this->lastValueType = 'i64';
+            }
+            $raw = $this->lastValue;
+        } else {
+            $raw = $this->ssa->allocReg();
+            $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+        }
         $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . " = alloca i64\n";
+        if ($scalar) { $this->byRefScalarTmps[$tmp] = $pt; }
         $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
         $taddr = $this->ssa->allocReg();
         $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
@@ -2219,7 +2237,18 @@ trait EmitLlvmCalls
             $out .= '  ' . $rv . ' = load i64, ptr ' . $tmp . "\n";
             $this->lastValue = $rv;
             $this->lastValueType = 'i64';
-            $out .= $this->boxToCell(Type::vec(Type::cell()));
+            $st = $this->byRefScalarTmps[$tmp] ?? null;
+            if ($st !== null) {
+                if ($st->kind === Type::KIND_FLOAT) {
+                    $d = $this->ssa->allocReg();
+                    $out .= '  ' . $d . ' = bitcast i64 ' . $rv . " to double\n";
+                    $this->lastValue = $d;
+                    $this->lastValueType = 'double';
+                }
+                $out .= $this->boxToCell($st);
+            } else {
+                $out .= $this->boxToCell(Type::vec(Type::cell()));
+            }
             $sp = $this->ssa->allocReg();
             $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sp . "\n";
@@ -2714,7 +2743,17 @@ trait EmitLlvmCalls
         if ($pt === null) { return false; }
         $pk = $pt->kind;
         return $pk === Type::KIND_UNKNOWN || $pk === Type::KIND_ARRAY
-            || $pk === Type::KIND_STRING;
+            || $pk === Type::KIND_STRING || $this->isByRefScalarParam($pt);
+    }
+
+    /** @var array<string, Type> scratch alloca → the scalar param type it re-boxes by */
+    private array $byRefScalarTmps = [];
+
+    /** A raw scalar by-ref param a cell lvalue must be decoded for. */
+    private function isByRefScalarParam(Type $pt): bool
+    {
+        $k = $pt->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL;
     }
 
     /**
@@ -3328,25 +3367,13 @@ trait EmitLlvmCalls
                 && $this->byRefNeedsCellUnbox($a, $ptypes, $ai)
             ) {
                 // Cell lvalue → raw-payload by-ref param: hand the callee a
-                // scratch slot holding the UNTAGGED payload, then re-box what it
+                // scratch slot holding the decoded payload, then re-box what it
                 // left back into the caller's slot. Passing the cell slot
                 // directly makes the callee deref the tag bits.
-                $out .= $this->byRefAddrOf($a);
-                $slotAddr = $this->lastValue;
-                $sp = $this->ssa->allocReg();
-                $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
-                $cv = $this->ssa->allocReg();
-                $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
-                $raw = $this->ssa->allocReg();
-                $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
-                $tmp = $this->ssa->allocReg();
-                $out .= '  ' . $tmp . " = alloca i64\n";
-                $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
-                $taddr = $this->ssa->allocReg();
-                $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
-                $argList .= 'i64 ' . $taddr;
-                $reboxSlots[] = $slotAddr;
-                $reboxTmps[] = $tmp;
+                $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai] ?? null);
+                $argList .= 'i64 ' . $this->lastValue;
+                $reboxSlots[] = $this->refBoxSlot;
+                $reboxTmps[] = $this->refBoxTmp;
             } elseif (($mask[$ai] ?? false) && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
@@ -3529,17 +3556,7 @@ trait EmitLlvmCalls
             $out .= '  call void @__mir_array_conform(ptr ' . $cap . ', i64 ' . (string)$conformKinds[$ci2] . ")\n";
             $ci2 = $ci2 + 1;
         }
-        foreach ($reboxTmps as $rtmp) {
-            $rv = $this->ssa->allocReg();
-            $out .= '  ' . $rv . ' = load i64, ptr ' . $rtmp . "\n";
-            $this->lastValue = $rv;
-            $this->lastValueType = 'i64';
-            $out .= $this->boxToCell(Type::vec(Type::cell()));
-            $rsp = $this->ssa->allocReg();
-            $out .= '  ' . $rsp . ' = inttoptr i64 ' . $reboxSlots[$bi] . " to ptr\n";
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $rsp . "\n";
-            $bi = $bi + 1;
-        }
+        $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $ci = 0;
         foreach ($cellBoxTmps as $ctmp) {
             $out .= $this->emitByRefCellWriteBack($ctmp, $cellBoxSlots[$ci], $cellBoxTypes[$ci]);
