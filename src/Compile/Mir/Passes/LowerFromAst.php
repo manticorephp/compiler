@@ -1359,6 +1359,20 @@ final class LowerFromAst implements Pass
         // materialise the late-static-binding specialisations.
         $this->emitLsbSpecializations($module);
         $this->releaseAllTraitBodies();
+        // `constant($name)` / `defined($name)` with a computed name: a table of
+        // every constant the program SPELLS in a string literal — the only
+        // names a computed one can be (the rule the by-name call arms follow).
+        // Before the class metadata goes: an arm names `\Foo::BAR`.
+        if ($this->sawDynConstant) {
+            $dcProg = \Parser\Parser::parseSource("<?php\n" . $this->dynConstantSrc($module, $mainStmts));
+            foreach ($dcProg->statements as $dstmt) {
+                if ($dstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$dstmt->decl->name] = $dstmt->decl;
+                $dfn = $this->lowerFunction($dstmt->decl);
+                $dfn->isPrelude = true;
+                $module->addFunction($dfn);
+            }
+        }
         $this->releaseAllClassMetadata();
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
@@ -1762,6 +1776,62 @@ final class LowerFromAst implements Pass
      * resolved statically (its function is simply not registered, and the ctor
      * throws at runtime), the same trade the class registry makes.
      */
+    /** A `constant()` / `defined()` call whose name is not a literal was lowered. */
+    public bool $sawDynConstant = false;
+
+    /**
+     * `__mc_constant(string): mixed` and `__mc_defined(string): bool` over every
+     * global (`T_ARRAY`, a `define`d name) and class (`Foo::BAR`) constant a
+     * string literal of the program names. Each arm is ordinary source
+     * (`return \T_ARRAY;`), so it resolves exactly as a direct fetch would. An
+     * unknown name is php's `Error: Undefined constant`.
+     */
+    /** @param \Compile\Mir\Node[] $mainStmts */
+    private function dynConstantSrc(Module $module, array $mainStmts): string
+    {
+        /** @var array<string, bool> $names */
+        $names = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->body !== null) { $this->collectConstLits($fn->body, $names); }
+        }
+        foreach ($mainStmts as $ms) { $this->collectConstLits($ms, $names); }
+        $arms = '';
+        $defs = '';
+        foreach ($names as $n => $_) {
+            $expr = '';
+            $dc = \strpos($n, '::');
+            if ($dc !== false && $dc > 0) {
+                // collectConstLits admitted only `Name::CONST` / `Name` shapes.
+                $cls = \substr($n, 0, $dc);
+                $cn = \substr($n, $dc + 2);
+                if ($this->findClassConst($cls, $cn) !== null) { $expr = '\\' . $cls . '::' . $cn; }
+            } else {
+                if ($this->predefinedConstant($n) !== null || isset($this->userConstants[$n])) { $expr = '\\' . $n; }
+            }
+            if ($expr === '') { continue; }
+            $q = $this->dqBody($n);
+            $arms .= "  if (\$n === \"" . $q . "\") { return " . $expr . "; }\n";
+            $defs .= "  if (\$n === \"" . $q . "\") { return true; }\n";
+        }
+        return "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $arms
+            . "  throw new \\Error('Undefined constant \"' . \$n . '\"');\n}\n"
+            . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $defs
+            . "  return false;\n}\n";
+    }
+
+    /** @param array<string, bool> $out */
+    private function collectConstLits(\Compile\Mir\Node $n, array &$out): void
+    {
+        if ($n->kind === \Compile\Mir\Node::KIND_STRING_CONST && $n instanceof \Compile\Mir\StringConst) {
+            $v = \ltrim($n->value, '\\');
+            // A constant NAME only: never a numeric string, which would land as
+            // an INT key in this string-keyed set.
+            if (\strlen($v) < 128 && \preg_match('/^[A-Za-z_][A-Za-z0-9_\\\\]*(::[A-Za-z_][A-Za-z0-9_]*)?$/D', $v) === 1) { $out[$v] = true; }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectConstLits($c, $out); }
+    }
+
     private function collectReflFnNames(Module $module): void
     {
         $this->reflFnDynamic = false;

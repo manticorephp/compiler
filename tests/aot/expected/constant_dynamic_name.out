@@ -1,0 +1,12 @@
+int(4)
+bool(true)
+string(4) "prod"
+bool(true)
+int(42)
+bool(true)
+int(8)
+bool(true)
+int(30719)
+bool(true)
+bool(false)
+Error: Undefined constant "NOPE_NOT_THERE"
