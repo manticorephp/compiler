@@ -284,6 +284,9 @@ final class EmitLlvm implements EmitVisitor
     /** Call-site signature registry for the module (fresh each {@see emit}). */
     private ?FunctionSignatures $sigs = null;
 
+    /** The ownership classifier ({@see \Compile\Mir\Ownership}; fresh each {@see emit}). */
+    private ?\Compile\Mir\Ownership $own = null;
+
     /** Arena-allocation state of the current function (fresh each {@see emit}). */
     private ?ArenaContext $arena = null;
 
@@ -655,6 +658,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->enums = $module->enums;
+        $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
@@ -3761,81 +3765,10 @@ final class EmitLlvm implements EmitVisitor
         return $this->freeStrTemp($op, $ptr);
     }
 
-    /**
-     * A string that was just produced fresh (concat result or an owned
-     * call/builtin return) — not a borrow (literal / local / property /
-     * element read). Such a value, once consumed (a concat operand, a
-     * borrowed call argument), is dead and can be freed.
-     */
-    private function isFreshStringTemp(Node $node): bool
-    {
-        if ($node->type->kind !== Type::KIND_STRING) { return false; }
-        $k = $node->kind;
-        // A conditional (ternary / `?:` / `??` / match) hands out +1 from EVERY
-        // arm ({@see EmitLlvmControl::armRetainPostBox}), so its result is a
-        // fresh temp exactly like a concat. Only the shapes CondOwn declares
-        // owned qualify — one with an erased arm stays borrowed.
-        if ($this->condOwnsResult($node)) { return true; }
-        if ($this->isStrCharRead($node)) { return true; }
-        // `(string)$int` / `(string)$float` MINT a buffer (__mir_int_to_str /
-        // __mir_float_to_str), so a consumer that frees its fresh operands must
-        // free this one: `strlen((string)$i)` and `$m[(string)$i] = 1` each
-        // leaked one string per call. The same arm is asked by the ownership
-        // pass ({@see Mir\Passes\InsertMemoryOps::isOwnedObj}) — the two sides
-        // have to answer identically, or a temp is freed twice or never.
-        // A STRING operand returns the SAME pointer — the one borrow.
-        if ($k === Node::KIND_CAST) {
-            // Every arm of the cast but ONE hands back a +1: int/float mint,
-            // a CELL retains the payload it aliases ({@see
-            // EmitLlvmExpr::cellStrResultOwnIr}), and the ERASED dispatch
-            // ({@see EmitLlvmExpr::coerceToStr}) is that same retain on its
-            // boxed arm, `__mir_int_to_str` on its raw arm and an IMMORTAL
-            // literal ("Array", "") on the rest — a release on rc < 0 is a
-            // no-op, so naming them all is sound and naming none of them
-            // stranded one buffer per `strlen((string)json_encode($v))`, where
-            // `strlen(json_encode($v))` was flat: `json_encode` types as
-            // `unknown` here, so the CELL arm never fired. Only a STRING
-            // operand comes back unchanged, and owning that would free the
-            // source.
-            if ($node->operand->type->kind === Type::KIND_STRING) {
-                // The pass-through arm INHERITS its operand's ownership.
-                // `(string)$borrow` is a borrow, but `(string)array_pop($t)`
-                // is the popped element itself and its owner is whoever
-                // consumes the cast — reading the arm as a flat borrow left
-                // that element unowned, which is the whole of `array_pop`'s
-                // and `array_shift`'s row in the ownership table.
-                return $this->isFreshStringTemp($node->operand);
-            }
-            return true;
-        }
-        return $k === Node::KIND_CONCAT || $k === Node::KIND_CALL
-            || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_INVOKE || \Compile\Mir\BitOp::mintsFresh($node);
-    }
+    /** {@see \Compile\Mir\Ownership::tempStrOwned} */
+    private function isFreshStringTemp(Node $node): bool { return $this->own->tempStrOwned($node); }
 
-    /**
-     * `$s[$i]` on a STRING base is an ALLOCATION, not a borrow:
-     * `__mir_str_char_at` mints a fresh 1-char headered buffer for every read
-     * ({@see DemoteCharLocals}, which exists because that allocation is
-     * expensive). Only the reads DemoteCharLocals could not prove dead reach the
-     * emitter, and a consumer that frees its other fresh operands has to free
-     * this one too — `$out = $out . $s[$i]` leaked one buffer per character,
-     * which is the whole of urldecode's 305 B/call. An ARRAY element read stays
-     * a borrow: it hands back the container's own reference.
-     *
-     * ONE predicate, asked by BOTH sides of the ownership contract. It lived
-     * inline in {@see isFreshStringTemp} only, so {@see EmitLlvmControl::armIsFresh}
-     * read the same node as BORROWED and a conditional arm normalizing to +1
-     * retained a buffer that was already +1: `$out . ($ok ? $s[$i] : '=')` — the
-     * shape of base64_encode's inner loop — leaked one char buffer per iteration
-     * at rc 1, and only the ternary form of it, which is why the identical
-     * ternary-free loop right above it was clean.
-     */
-    private function isStrCharRead(Node $n): bool
-    {
-        return $n->kind === Node::KIND_ARRAY_ACCESS
-            && $n->array->type->kind === Type::KIND_STRING;
-    }
+    private function isStrCharRead(Node $n): bool { return \Compile\Mir\Ownership::isStrCharRead($n); }
 
     /**
      * Drop the KEY temp of an array read / isset / unset, the exact mirror of
@@ -3892,63 +3825,8 @@ final class EmitLlvm implements EmitVisitor
         return $out . $this->rcReleaseReg($v, $flavor);
     }
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */
-    /**
-     * A fresh, OWNED cell temp — the cell twin of {@see isFreshStringTemp}.
-     *
-     * The +1 return convention covers cells: `EmitLlvmModule::emitReturn`
-     * retains a BORROWED cell payload before handing it back (both the
-     * boxing arm and the already-a-cell arm), for the stated reason that the
-     * caller may `__mir_cell_drop` a discarded result. So a call result IS the
-     * caller's to drop — the evidence is the one {@see
-     * EmitLlvmCalls::emitDiscardedCallRelease} already trusts: a user body was
-     * called (a name in paramTypes), and it does not return by reference.
-     *
-     * A BUILTIN result is not owned in general (many hand back a borrowed
-     * element), so only the emitters that provably MINT their result are named.
-     */
-    private function isFreshCellTemp(Node $n): bool
-    {
-        if ($n->type->kind !== Type::KIND_CELL) { return false; }
-        // A normalized conditional hands out +1 from every arm ({@see
-        // EmitLlvmControl::armRetainPreBox} retains the borrowed one), so a
-        // cell-typed `$_GET['a'] ?? '-'` is a fresh temp its consumer
-        // drops by the tagged word — exactly like a cell call result. Without
-        // this arm the +1 had no taker anywhere but an assignment: a concat
-        // operand, a builtin argument and a cast each stranded the payload.
-        if (\Compile\Mir\CondOwn::isConditional($n)) { return $this->condOwnsResult($n); }
-        $k = $n->kind;
-        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
-        if (\Compile\Mir\BitOp::mintsFresh($n)) { return true; }
-        if ($k !== Node::KIND_CALL) { return false; }
-        $fn = $n->function;
-        // `json_encode` boxes a buffer `__mir_json_enc` just allocated;
-        // `json_decode` boxes the value its parser just built. Both are fresh
-        // whichever path ran — the native builtin (flags 0) and the stdlib body
-        // alike — so the name answers for both.
-        if ($fn === 'json_encode' || $fn === 'json_decode') { return true; }
-        // `max`/`min` over ONE array delegate to the stdlib fold, and a PHP
-        // body's cell return is +1 by the return convention — so the winner is
-        // the caller's to drop, which is what lets the rebuilt argument array
-        // be freed ({@see EmitLlvmBuiltins::biMinMax}).
-        if ($fn === 'max' || $fn === 'min') { return true; }
-        // The CLASS C builtins ({@see EmitLlvmBuiltins::emitArrPtrArg}): the
-        // result IS an element or a key of the argument, and the emitter now
-        // retains it ({@see EmitLlvmBuiltins::cellEndpointRetain}) so the
-        // argument can be freed under it. That +1 is the caller's to give
-        // back. Naming them is the THIRD half of the one change — without it
-        // the retain is a leak, and it is safe when the dispatch falls
-        // through to a PHP body instead, which returns +1 by the return
-        // convention anyway.
-        foreach ([
-            'array_first', 'array_last', 'array_key_first', 'array_key_last',
-            'current', 'pos', 'key', 'reset', 'end', 'next', 'prev',
-        ] as $cn) {
-            if ($fn === $cn) { return true; }
-        }
-        if ($this->lastCallWasBuiltin) { return false; }
-        return isset($this->sigs->paramTypes[$fn])
-            && !($this->sigs->returnsByRef[$fn] ?? false);
-    }
+    /** {@see \Compile\Mir\Ownership::tempCellOwned} */
+    private function isFreshCellTemp(Node $n): bool { return $this->own->tempCellOwned($n, $this->lastCallWasBuiltin); }
 
     /**
      * Result reg of an {@see EmitLlvmBuiltins::emitPtrArg} operand that was a
@@ -4027,80 +3905,14 @@ final class EmitLlvm implements EmitVisitor
         return '';
     }
 
-    /**
-     * Flavor string for releasing an rc-managed value of type `$t`, or
-     * '' when `$t` is not rc-managed (scalar / void / #[Struct] / closure).
-     * Mirrors the {@see rcReleaseReg} vocabulary.
-     */
-    /** A scalar kind with no rc payload — an array of these needs no
-     *  per-element drop, so its release/retain can skip the repr bits. */
-    private function isNonRcScalarKind(string $k): bool
-    {
-        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
-    }
+    private function isNonRcScalarKind(string $k): bool { return \Compile\Mir\Ownership::isNonRcScalarKind($k); }
 
-    /**
-     * The rc flavor a CONDITIONAL result is retained / released by, or '' when
-     * it is not rc-managed. {@see discardReleaseFlavor} plus the union mapping:
-     * an all-object union rides a bare object pointer, so it drops like one —
-     * but only when EVERY member is a real rc'd class (a #[Struct] / closure /
-     * enum / Ffi\Ptr member has no rc header, and rc-managing one writes into
-     * the allocator's metadata).
-     */
-    private function condFlavor(Type $t): string
-    {
-        if ($t->kind !== Type::KIND_UNION) { return $this->discardReleaseFlavor($t); }
-        $atoms = $t->atoms;
-        if (\count($atoms) === 0) { return ''; }
-        foreach ($atoms as $a) {
-            if ($a->kind !== Type::KIND_OBJ) { return ''; }
-            $cls = $a->class ?? '';
-            if ($cls === '' || $cls === 'Ffi\\Ptr') { return ''; }
-            if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return ''; }
-            if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
-        }
-        return 'obj';
-    }
+    private function condFlavor(Type $t): string { return $this->own->condFlavor($t); }
 
-    /**
-     * Does this node yield an OWNED (+1) value because it is a conditional the
-     * emitter normalizes? The contract and the arm rule live in {@see CondOwn} —
-     * the same predicate {@see InsertMemoryOps::isOwnedObj} uses, so the two
-     * passes cannot disagree (one way leaks, the other double-frees).
-     *
-     * True here means: every arm was given a +1 of this node's result type
-     * ({@see EmitLlvmControl::armRetainPostBox}), so consumers must treat the
-     * result as a fresh temp — release it when done, never add a second retain.
-     */
-    private function condOwnsResult(Node $n): bool
-    {
-        if (!\Compile\Mir\CondOwn::isConditional($n)) { return false; }
-        if ($this->condFlavor($n->type) === '') { return false; }
-        return \Compile\Mir\CondOwn::armsCoverable($n);
-    }
+    /** {@see \Compile\Mir\Ownership::condOwnedTemp} */
+    private function condOwnsResult(Node $n): bool { return $this->own->condOwnedTemp($n); }
 
-    /**
-     * The `obj` / `str` / `buf` suffix for an array whose ELEMENT is an object,
-     * decided by running the element through the scalar-object guards above.
-     *
-     * The element branches used to guard only enums, so `vec[Closure]` answered
-     * `vecobj` and its release ran `__mir_rc_release` on a record with no rc
-     * header — the word at ptr-8 is the allocator's metadata. `serialize([$c])`
-     * trapped on it. A `#[Struct]` or `Ffi\Ptr` element had the same exposure,
-     * and a `Generator` element wants the string-style rc path its scalar form
-     * already asks for. One helper, so the two levels cannot disagree again.
-     */
-    private function elemObjFlavor(Type $el): string
-    {
-        $f = $this->discardReleaseFlavor($el);
-        if ($f === 'obj') { return 'obj'; }
-        if ($f === 'str') { return 'str'; }
-        // A closure element is owned by the buffer's CLO repr, which only the
-        // repr walk reads ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}).
-        if ($this->isClosureValueType($el)) { return ''; }
-        return 'buf';   // #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
-    }
+    private function elemObjFlavor(Type $el): string { return $this->own->elemObjFlavor($el); }
 
     /**
      * The helper-symbol suffix of a NESTED-ARRAY flavor, or '' when the flavor
@@ -4118,54 +3930,8 @@ final class EmitLlvm implements EmitVisitor
         return '';
     }
 
-    private function discardReleaseFlavor(Type $t): string
-    {
-        $k = $t->kind;
-        if ($k === Type::KIND_STRING) { return 'str'; }
-        // A CELL is tag-dispatched by __mir_cell_drop (scalars a no-op). Without
-        // this it fell through to '' — so `unset($r)` on a `Foo|false` local
-        // released NOTHING and its __destruct never ran.
-        if ($k === Type::KIND_CELL) { return 'cell'; }
-        if ($k === Type::KIND_OBJ) {
-            $cls = $t->class ?? '';
-            // `Ffi\Ptr` is a raw foreign address with NO rc header: the word at
-            // ptr-8 is the allocator's own metadata, not a refcount. Releasing
-            // one decrements that metadata in place and, at zero, hands the
-            // block to the string pool — silently corrupting the heap until a
-            // later free() trips a libmalloc assertion. Mirrors the guard in
-            // rcRetainRawByType; without it a DISCARDED `\Runtime\Libc\memset(...)`
-            // (any Ptr-returning FFI call used as a statement) corrupts the heap.
-            if ($cls === 'Ffi\\Ptr') { return ''; }
-            if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return ''; }
-            if ($this->isClosureClass($cls)) { return ''; }
-            if ($this->isEnumClass($cls)) { return ''; }
-            // A Generator frame carries a string-style rc header (rc@-8, free
-            // base = ptr-16) — release it via the str rc path so the frame
-            // buffer is freed on its last reference.
-            if ($cls === 'Generator') { return 'str'; }
-            return 'obj';
-        }
-        if ($t->isVec()) {
-            $el = $t->element;
-            if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vec' . $this->elemObjFlavor($el); }
-            if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
-            // A concrete scalar element (int/float/bool/null) has nothing to
-            // drop → buffer-only, skipping the repr-bit read. Only an ERASED
-            // element (unknown) reaches the repr path.
-            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'vecbuf'; }
-            return 'vec';
-        }
-        if ($t->isAssoc()) {
-            $el = $t->element;
-            if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assoc' . $this->elemObjFlavor($el); }
-            if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
-            if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
-            return 'assoc';
-        }
-        return '';
-    }
+    /** {@see \Compile\Mir\Ownership::releaseFlavor} */
+    private function discardReleaseFlavor(Type $t): string { return $this->own->releaseFlavor($t); }
 
     /**
      * The flavor with which an ELEMENT SLOT of `$arrType` releases the value an
@@ -4433,118 +4199,10 @@ final class EmitLlvm implements EmitVisitor
         return $flavor . 'own';
     }
 
-    /**
-     * A builtin whose ARRAY result is a fresh allocation the caller owns
-     * outright — every element minted or copied WITH a reference.
-     *
-     * A NAME list, like {@see callKeepsNoArg}: a builtin has no body for
-     * `sigs->paramTypes` to answer for, and the conservative default (not
-     * owned) is a LEAK of the whole array at every consumer. Anything absent
-     * keeps that leak, which is the safe direction — the wrong direction here
-     * frees an array a later reader still holds.
-     *
-     * `explode` / `str_split` / `preg_split` give every piece its own
-     * `__mir_str_alloc`; `range` / `array_fill` mint scalars; `array_keys` and
-     * `array_values` co-own each element they copy ({@see
-     * EmitLlvmBuiltins::emitArrPtrArg}, class B). A builtin that hands back a
-     * BORROWED array — or one of its elements — must never be listed.
-     */
-    private function builtinMintsOwnedArray(string $fn): bool
-    {
-        $p = \strrpos($fn, chr(92));
-        $bare = $p === false ? $fn : \substr($fn, $p + 1);
-        foreach ([
-            'explode', 'str_split', 'preg_split', 'array_keys', 'array_values',
-            'range', 'array_fill', 'str_getcsv',
-        ] as $n) {
-            if ($n === $bare) { return true; }
-        }
-        return false;
-    }
+    private function builtinMintsOwnedArray(string $fn): bool { return \Compile\Mir\Ownership::builtinMintsOwnedArray($fn); }
 
-    private function freshRcArgFlavor(Node $a): string
-    {
-        // A normalized conditional is +1 from every arm, so a borrowed-arg temp
-        // must be released after the call like any other fresh producer. Tested
-        // first: its result type may be a UNION (which the obj/array gate below
-        // would reject) and the flavor comes from condFlavor, not the arm.
-        if ($this->condOwnsResult($a)) {
-            // A CELL result is released like any other owned temp. It was
-            // exempted when this contract was written, with no reason recorded,
-            // and the exemption disagreed with {@see isFreshCellTemp} two lines
-            // down — which answers 'cell' for exactly this shape, an owned
-            // cell-typed argument temp. `count($m ?? mk())` on a `mixed $m`
-            // therefore stranded the whole assoc `mk()` built, once per call
-            // (measured: 2.5 MB at 1k iterations, 131 MB at 400k).
-            // `__mir_cell_drop` dispatches on the tag, so a scalar or `false`
-            // payload is a no-op.
-            return $this->condFlavor($a->type);
-        }
-        // A cell CALL result is owned by the caller under the same +1 return
-        // convention ({@see isFreshCellTemp}); `f(json_encode($v))` leaked the
-        // whole document. `__mir_cell_drop` dispatches on the tag, so a `false`
-        // or an int payload is a no-op.
-        if ($this->isFreshCellTemp($a)) { return 'cell'; }
-        // A closure LITERAL is a fresh +1: {@see EmitLlvmCalls::emitClosure}
-        // allocates an env with its own lifetime header at rc 1, and the
-        // callee co-owns whatever it keeps ({@see
-        // EmitLlvmMemory::rcRetainByType}'s closure arm retains a BORROWED
-        // closure on every alias / element / property store). Nobody freed
-        // the argument, so `array_filter($t, "strlen")` — a string callable
-        // coerced to a closure at lowering — allocated one env per call and
-        // freed none. Only the LITERAL: a closure read out of a local or a
-        // property is a borrow.
-        if ($a->kind === Node::KIND_CLOSURE) { return 'closure'; }
-        // …and so is a closure a CALL hands back, under the +1 return
-        // convention rcRetainByType's closure arm already reads as a transfer:
-        // `$reg->on($obj->makeHook())` retained it into the registry and the
-        // call's own count was never given back.
-        if ($this->isClosureValueType($a->type)) {
-            $ck = $a->kind;
-            if ($ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL || $ck === Node::KIND_INVOKE) { return 'closure'; }
-            if ($ck === Node::KIND_CALL) {
-                $cfn = $a->function;
-                if (isset($this->sigs->paramTypes[$cfn]) && !($this->sigs->returnsByRef[$cfn] ?? false)) { return 'closure'; }
-            }
-            return '';
-        }
-        $tk = $a->type->kind;
-        if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
-        $k = $a->kind;
-        // An array literal is always a fresh +1 (obj/vec/assoc alike). When its
-        // ELEMENTS are arrays, each of those went through this same argument
-        // path — a fresh one is registered here and released after the call, a
-        // borrowed one retained and given back — so the literal is only the
-        // BUFFER around them. Its release must not walk them: the repr-mode
-        // `vec` release happened to drop nothing only while such a buffer
-        // carried no repr bits, and dropping by the element hint freed
-        // `array_merge($a, f())`'s `f()` twice.
-        if ($k === Node::KIND_ARRAY_LIT) {
-            $el = $a->type->element;
-            if ($el !== null && $el->isArray()) { return $a->type->isAssoc() ? 'assocbuf' : 'vecbuf'; }
-            return $this->discardReleaseFlavor($a->type);
-        }
-        // An ASSOC result used to be exempted here, on the reading that
-        // isBorrowedObjReturn covered only obj/vec/string. It has covered
-        // assoc since — "vec AND assoc: both are one rc'd buffer" — so the
-        // exemption outlived its reason and made every assoc-returning
-        // builtin body leak its whole result: `count(array_flip($t))` and
-        // `count(array_combine($k, $v))` were 22-105 MB in the ownership
-        // table where the same loop over the argument alone is 1.8.
-        $owned = $k === Node::KIND_NEW_OBJ
-              || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
-        if ($k === Node::KIND_CALL) {
-            $fn = $a->function;
-            $owned = isset($this->sigs->paramTypes[$fn]) && !($this->sigs->returnsByRef[$fn] ?? false);
-            // …or a BUILTIN that mints a fresh array. paramTypes is evidence a
-            // user BODY was called, and a codegen builtin has no body — so
-            // `array_slice(explode($d, $s), 0, 2)` stranded the exploded vec:
-            // the arg was owned by nobody and the release was never emitted.
-            if (!$owned) { $owned = $this->builtinMintsOwnedArray($fn); }
-        }
-        if (!$owned) { return ''; }
-        return $this->discardReleaseFlavor($a->type);
-    }
+    /** {@see \Compile\Mir\Ownership::tempArgFlavor} */
+    private function freshRcArgFlavor(Node $a): string { return $this->own->tempArgFlavor($a, $this->lastCallWasBuiltin); }
 
     /**
      * Release flavor for the SOURCE of a cellify rebuild
@@ -4835,18 +4493,9 @@ final class EmitLlvm implements EmitVisitor
         return $has;
     }
 
-    private function isClosureClass(string $cls): bool
-    {
-        return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
-    }
+    private function isClosureClass(string $cls): bool { return \Compile\Mir\Ownership::isClosureClass($cls); }
 
-    /** A value that IS a closure env — `callable`/`Closure` under KIND_CLOSURE,
-     *  or the `obj<__closure_N>` / `obj<Closure>` handle a literal carries. */
-    private function isClosureValueType(Type $t): bool
-    {
-        if ($t->kind === Type::KIND_CLOSURE) { return true; }
-        return $t->kind === Type::KIND_OBJ && $this->isClosureClass($t->class ?? '');
-    }
+    private function isClosureValueType(Type $t): bool { return \Compile\Mir\Ownership::isClosureValueType($t); }
 
     /** An enum case is a value-type ORDINAL (no rc header) — never rc-managed,
      *  like an int. `$cls` is an obj type's class name. */

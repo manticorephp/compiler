@@ -882,6 +882,7 @@ trait EmitLlvmModule
 
     private function emitFunction(FunctionDef $fn): string
     {
+        $this->own->ctx->fn = $fn;
         // Signature-only stdlib import: emit a bare `declare`, no body. The
         // definition is linked from the prebuilt stdlib.o. Uniform i64 ABI →
         // arity-many i64 params (variadic packs into one vec arg → one param).
