@@ -244,6 +244,16 @@ final class Hub
 `broadcast()` skips and drops any connection that is closed or whose `send` fails —
 one dead client never stops the fan-out to the rest. See `examples/http/ws_chat.php`.
 
+It is **sequential**: each `send` returns only once that client has taken the whole
+frame, so recipients are served one after another from the calling task. A client
+that is slow but alive — one that keeps reading a few bytes, just often enough that
+its write never times out — holds up every recipient after it for as long as it
+takes to drain the message. `broadcast()` suits small rooms and small messages on
+healthy links. For a wide or large fan-out, give each connection its own writer: a
+task per client draining a bounded queue, with the broadcaster only enqueueing (and
+closing a client whose queue overflows), so one slow reader costs its own queue and
+nobody else's latency.
+
 ## Testing
 
 `tests/aot/cases/ws_*.php` (codec byte-exactness, the accept-key vector, loopback
