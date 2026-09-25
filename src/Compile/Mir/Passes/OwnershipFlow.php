@@ -718,15 +718,14 @@ final class OwnershipFlow implements Pass
                 if (!isset($this->feKeyOf[$val])) { $this->feKeyOf[$val] = $k; }
                 $this->noteOwnKey($val, $k);
             } else {
-                $vt = $fe->array->type->element;
-                $this->bindBorrow($lat, $id, $val, $vt === null ? Type::unknown() : $vt, true);
+                $this->bindBorrow($lat, $id, $val, $fe->array->type->element ?? Type::unknown(), true);
             }
         }
         $key = $fe->keyVar;
         if ($key !== null && !isset($this->excluded[$key])) {
             $at = $fe->array->type;
-            $kt = $at->isArray() ? $at->key : null;
-            if ($kt === null || $kt->kind === Type::KIND_UNKNOWN) { $kt = Type::cell(); }
+            $kt = $at->isArray() ? ($at->key ?? Type::cell()) : Type::cell();
+            if ($kt->kind === Type::KIND_UNKNOWN) { $kt = Type::cell(); }
             $this->bindBorrow($lat, $id, $key, $kt, false);
         }
     }
