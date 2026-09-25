@@ -24,3 +24,5 @@ string(3) "two"
 float(3)
 bool(true)
 f=false n=7 s='x' a=1 b=2 
+str_split mb_str_split 1,2,3
+str_pad mb_str_pad 1,2,3,4

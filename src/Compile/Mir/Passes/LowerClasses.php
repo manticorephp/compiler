@@ -583,7 +583,7 @@ trait LowerClasses
                     // cellDefault(), which would box the sentinel a second time.
                     $def = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
                 } else {
-                    $def = $this->cellDefault($isCellProp, $def);
+                    $def = $this->cellDefault($isCellProp, $def, $spt);
                 }
             }
             // A PRELUDE class's cell must coalesce, not collide: the prelude is
@@ -620,7 +620,7 @@ trait LowerClasses
                         if ($tIsCell && $tdef->kind === Node::KIND_NULL_CONST) {
                             $tdef = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
                         } else {
-                            $tdef = $this->cellDefault($tIsCell, $tdef);
+                            $tdef = $this->cellDefault($tIsCell, $tdef, $tspt);
                         }
                     }
                     $this->module->addGlobalCell(
@@ -704,16 +704,19 @@ trait LowerClasses
      *
      * A float default needs no wrap: an untagged double already IS a valid cell.
      */
-    private function cellDefault(bool $isCellProp, Node $def): Node
+    private function cellDefault(bool $isCellProp, Node $def, ?Type $slot = null): Node
     {
         $k = $def->kind;
         // An array slot's literal is never seen by InferTypes either: untyped,
         // `['f' => true, 'n' => 3]` was built with its elements RAW under no
         // element hint, and every erased reader (`foreach`, `array_merge`)
         // decoded the raw `1` as a double (sebastian/diff's
-        // `StrictUnifiedDiffOutputBuilder::$default`).
+        // `StrictUnifiedDiffOutputBuilder::$default`). Only where the slot
+        // itself leaves the elements open — erased, cell, or a shape whose
+        // fields decode by hint; a declared `array<string, array{…}>` already
+        // names its element and its readers take it raw.
         if (!$isCellProp) {
-            if ($k === Node::KIND_ARRAY_LIT) { $def->type = $this->staticDefaultLitType($def); }
+            if ($k === Node::KIND_ARRAY_LIT) { $this->typeStaticLit($def, $slot); }
             return $def;
         }
         // A float default is its own cell (canonical NaN-boxing); an ARRAY
@@ -730,6 +733,33 @@ trait LowerClasses
         // kind (the boxer rebuilds it as cells), anything else is a cell array.
         if ($k === Node::KIND_ARRAY_LIT) { $def->type = $this->staticDefaultLitType($def); }
         return new \Compile\Mir\Call('__mir_to_cell', [$def], Type::cell());
+    }
+
+    /** Type a static default literal and every literal nested in it: the slot's
+     *  own type where it names a concrete element (its readers take that
+     *  element raw), else the one its elements spell ({@see cellDefault}). */
+    private function typeStaticLit(\Compile\Mir\ArrayLit $lit, ?Type $slot): void
+    {
+        $inner = null;
+        if ($slot !== null && !$this->staticLitElemsOpen($slot)) {
+            $lit->type = $slot;
+            $inner = $slot->element;
+        } else {
+            $lit->type = $this->staticDefaultLitType($lit);
+        }
+        foreach ($lit->elements as $el) {
+            if ($el->value instanceof \Compile\Mir\ArrayLit) { $this->typeStaticLit($el->value, $inner); }
+        }
+    }
+
+    /** Whether a static array slot of type `$slot` leaves its literal's element
+     *  representation to the literal ({@see cellDefault}). */
+    private function staticLitElemsOpen(?Type $slot): bool
+    {
+        if ($slot === null || $slot->isShape()) { return true; }
+        if (!$slot->isArray()) { return true; }
+        $e = $slot->element;
+        return $e === null || $e->kind === Type::KIND_UNKNOWN || $e->kind === Type::KIND_CELL;
     }
 
     /** The static type of a static-default array literal, from its MIR

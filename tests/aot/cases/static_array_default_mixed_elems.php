@@ -33,3 +33,25 @@ final class Opts
 
 Opts::run(['fromFile' => 'a.php']);
 Opts::run([]);
+
+final class Map
+{
+    /** @var array<string, array{alternativeName: string, argumentCount: list<int>}> */
+    private static array $functionsMap = [
+        'str_split' => ['alternativeName' => 'mb_str_split', 'argumentCount' => [1, 2, 3]],
+        'stripos' => ['alternativeName' => 'mb_stripos', 'argumentCount' => [2, 3]],
+    ];
+
+    /** @var array<string, array{alternativeName: string, argumentCount: list<int>}> */
+    public array $functions;
+
+    public function __construct()
+    {
+        self::$functionsMap['str_pad'] = ['alternativeName' => 'mb_str_pad', 'argumentCount' => [1, 2, 3, 4]];
+        $this->functions = array_filter(self::$functionsMap, static fn (array $m): bool => $m['alternativeName'] !== 'mb_stripos');
+    }
+}
+
+foreach ((new Map())->functions as $name => $m) {
+    echo $name, ' ', $m['alternativeName'], ' ', implode(',', $m['argumentCount']), "\n";
+}
