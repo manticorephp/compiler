@@ -390,11 +390,20 @@ trait EmitLlvmArrays
      *
      * Leaves the value word in {@see elemValReg}.
      */
-    private function emitArrayLitValue(Node $value, bool $cellVals): string
+    private function emitArrayLitValue(Node $value, bool $cellVals, bool $inShape = false): string
     {
         $out = $this->emitNode($value);
         if ($cellVals) { $out .= $this->retainCellPayload($value); }
-        $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
+        // A SHAPE field's reader decodes the field word and then takes the
+        // field's DECLARED type — `counts: int[]` reads raw ints. The deep box
+        // rebuilt the nested array as cells, and `implode($s['counts'])`
+        // printed the tagged words. Tag the pointer; the array keeps its repr
+        // (and its hint, for an erased reader).
+        if ($cellVals && $inShape && $value->type->isArray()) {
+            $out .= $this->boxToCellShallow($value->type);
+        } else {
+            $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
+        }
         $val = $this->lastValue;
         $ret = '';
         if (!$cellVals) { $ret = $this->rcRetainByType($value, $val, null, 2); $out .= $ret; }
@@ -505,15 +514,30 @@ trait EmitLlvmArrays
             if ($el->key !== null) {
                 $keyIsString = $el->key->type->kind === Type::KIND_STRING
                     || $el->key->kind === Node::KIND_STRING_CONST;
+                // A CELL key (`[key($a) => …]`, a `int|string` value) is
+                // classified at run time, as `$a[$k] = …` does: set_int took
+                // the tagged word itself as the integer key.
+                $keyIsCell = !$keyIsString && $el->key->type->kind === Type::KIND_CELL;
                 $out .= $this->emitNode($el->key);
                 $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                 $keyReg = $this->lastValue;
-                $out .= $this->emitArrayLitValue($el->value, $cellVals);
+                $out .= $this->emitArrayLitValue($el->value, $cellVals, $al->type->isShape());
                 $val = $this->elemValReg;
                 $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
                 $next = $this->ssa->allocReg();
-                if ($keyIsString) {
+                if ($keyIsCell) {
+                    $this->rt->needsCellKey = true;
+                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $keyReg . ', i64 ' . $val . ")\n";
+                    $ik = $el->key->kind;
+                    if ($ik === Node::KIND_CALL || $ik === Node::KIND_METHOD_CALL
+                        || $ik === Node::KIND_STATIC_CALL || $ik === Node::KIND_INVOKE
+                        || $ik === Node::KIND_CONCAT || \Compile\Mir\BitOp::mintsFresh($el->key)) {
+                        $this->rt->needsRc = true;
+                        $this->rt->needsStrRc = true;
+                        $out .= '  call void @__mir_cell_drop(i64 ' . $keyReg . ")\n";
+                    }
+                } elseif ($keyIsString) {
                     $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $cur . ', ptr ' . $keyReg . ', i64 ' . $val . $this->litKeyHashArgs($el->key) . ")\n";
                     // Release our +1 on a fresh key temp — set_str retained its own
                     // (see the StoreElement path); a literal / local key is untouched.
@@ -523,7 +547,7 @@ trait EmitLlvmArrays
                 }
                 $out .= '  store ptr ' . $next . ', ptr ' . $slot . "\n";
             } else {
-                $out .= $this->emitArrayLitValue($el->value, $cellVals);
+                $out .= $this->emitArrayLitValue($el->value, $cellVals, $al->type->isShape());
                 $val = $this->elemValReg;
                 $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
@@ -596,7 +620,7 @@ trait EmitLlvmArrays
                 $out .= $this->coerceToPtr();
                 $keyReg = $this->lastValue;
             }
-            $out .= $this->emitArrayLitValue($el->value, $cellVals);
+            $out .= $this->emitArrayLitValue($el->value, $cellVals, $al->type->isShape());
             $val = $this->elemValReg;
             if ($shape === 'packed') {
                 $off = $hdr + $i * \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;

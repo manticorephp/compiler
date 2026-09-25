@@ -1,0 +1,31 @@
+array(1) {
+  [2]=>
+  string(1) "v"
+}
+array(1) {
+  ["q"]=>
+  string(1) "w"
+}
+array(2) {
+  [2]=>
+  int(3)
+  [3]=>
+  int(4)
+}
+array(2) {
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+}
+string(1) "c"
+int(2)
+string(1) "b"
+int(1)
+string(1) "b"
+int(1)
+int(2)
+string(1) "y"
+string(1) "c"
+string(1) "b"
+[[],{"1":"\n"},["a\n"],{"1":"b\n","2":"c\n","3":"d\n"}]

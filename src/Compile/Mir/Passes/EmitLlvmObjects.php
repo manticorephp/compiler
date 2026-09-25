@@ -5230,7 +5230,13 @@ trait EmitLlvmObjects
                               . ($keyIsString ? 'ptr ' : 'i64 ') . $key
                               . ($keyIsString ? $this->litKeyHashArgs($aa->index) : '') . ")\n";
                     }
-                    if ($keyIsCell) {
+                    if ($keyIsCell && $this->unsetBaseIsWritable($aa->array)) {
+                        $this->rt->needsCellKey = true;
+                        $r = $this->ssa->allocReg();
+                        $out .= '  ' . $r . ' = call ptr @__mir_array_unset_cell_at(ptr '
+                              . $arrPtr . ', i64 ' . $key . ")\n";
+                        $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
+                    } elseif ($keyIsCell) {
                         $this->rt->needsCellKey = true;
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
                     } elseif ($keyIsString) {

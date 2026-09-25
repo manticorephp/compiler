@@ -451,14 +451,26 @@ final class UnifiedArrayRuntime
         // null-check edge reaches without passing through $head).
         $rSlot = $e->alloca(Type::i64(), 'cr');   // read cursor
         $wSlot = $e->alloca(Type::i64(), 'cw');   // write cursor
+        $pSlot = $e->alloca(Type::i64(), 'cp');   // the internal pointer, renumbered
         $e->brIf($e->icmp('eq', $arr, Value::null()), $rz, $head);
         $rz->retVoid();
         $len = $head->load(Type::i64(), $arr);
         $head->store(Value::int(Type::i64(), 0), $rSlot);
         $head->store(Value::int(Type::i64(), 0), $wSlot);
+        // php's internal pointer is a PHYSICAL entry index, so it moves with
+        // its entry — onto the next live one when its own entry is a hole (php
+        // advances it at the delete). Resetting it made `end($a); prev($a);
+        // unset($a[$k]); current($a)` answer the FIRST element.
+        $oldPos = $head->call('__mir_array_ptr_get', Type::i64(), [$arr]);
+        $head->store(Value::int(Type::i64(), -1), $pSlot);
         $head->br($body);
         $r = $body->load(Type::i64(), $rSlot);
         $body->brIf($body->icmp('sge', $r, $len), $done, $live);
+        $atPos = $live->and_(
+            $live->icmp('eq', $r, $oldPos),
+            $live->icmp('eq', $live->load(Type::i64(), $pSlot), Value::int(Type::i64(), -1)),
+        );
+        $live->store($live->select($atPos, $live->load(Type::i64(), $wSlot), $live->load(Type::i64(), $pSlot)), $pSlot);
         $kind = $live->load(Type::i64(), $this->entryAddr($live, $arr, $r, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $live->brIf($live->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED)), $next, $copy);
         // Live entry: move it to the write cursor if they differ (memcpy the
@@ -475,6 +487,10 @@ final class UnifiedArrayRuntime
         // (HASHED flag). Then drop the now-stale index.
         $flags = $done->load(Type::i64(), $this->hdr($done, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $done->store($done->and_($flags, Value::int(Type::i64(), 255)), $this->hdr($done, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        // A pointer at or past the old end parks at the new one.
+        $np = $done->load(Type::i64(), $pSlot);
+        $np = $done->select($done->icmp('eq', $np, Value::int(Type::i64(), -1)), $wf, $np);
+        $done->call('__mir_array_ptr_set', Type::void(), [$arr, $np]);
         $done->call('__mir_array_index_drop', Type::void(), [$arr]);
         $done->retVoid();
     }
@@ -2767,8 +2783,9 @@ final class UnifiedArrayRuntime
         // array loses its repr on the first string-keyed insert and its release
         // stops dropping, and a reader loses the shape it decodes by.
         $srcFlags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        // …and the internal pointer: promotion keeps every entry at its index.
         $srcRepr = $e->and_($srcFlags, Value::int(Type::i64(),
-            MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
+            MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_PTR_FIELD_MASK));
         $e->store($e->or_($srcRepr, Value::int(Type::i64(), MemoryAbi::ARRAY_FLAG_HASHED)), $this->hdr($e, $nu, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $iSlot = $e->alloca(Type::i64(), 'i');
         $e->store(Value::int(Type::i64(), 0), $iSlot);
