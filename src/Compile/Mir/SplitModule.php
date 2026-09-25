@@ -181,10 +181,14 @@ final class SplitModule
             if ($p !== 0) {
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
-            $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $assign,
+            $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $defSize, $assign,
                                     $internal, $globalOrder, $globals, $owned);
             $body = '';
             foreach ($plan->mine as $s) { $body = $body . $defs[$s] . "\n"; }
+            foreach ($plan->avail as $s) {
+                $body = $body . $this->availHead($defHead[$s])
+                      . \substr($defs[$s], \strlen($defHead[$s])) . "\n";
+            }
             $out[] = $partHeader . "\n" . $declText . "\n"
                    . $plan->gtext . $plan->dtext . $plan->usedText . $body;
         }
@@ -357,6 +361,7 @@ final class SplitModule
      * @param string[]                            $defOrder
      * @param array<string, string>               $defHead
      * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, int>                  $defSize
      * @param array<string, int>                  $assign
      * @param array<string, bool>                 $internal
      * @param string[]                            $globalOrder
@@ -364,10 +369,10 @@ final class SplitModule
      * @param array<string, bool>                 $owned globals already defined by an earlier part
      */
     private function planPart(int $p, array $defOrder, array $defHead, array $defRefs,
-                              array $assign, array $internal, array $globalOrder,
-                              array $globals, array &$owned): PartPlan
+                              array $defSize, array $assign, array $internal,
+                              array $globalOrder, array $globals, array &$owned): PartPlan
     {
-        $plan = $this->closePart($p, $defOrder, $defRefs, $assign, $internal,
+        $plan = $this->closePart($p, $defOrder, $defRefs, $defSize, $assign, $internal,
                                  $globalOrder, $globals, $owned);
         $this->renderPart($plan, $p, $defHead, $assign, $internal, $globalOrder,
                           $globals);
@@ -381,14 +386,15 @@ final class SplitModule
      *
      * @param string[]                            $defOrder
      * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, int>                  $defSize
      * @param array<string, int>                  $assign
      * @param array<string, bool>                 $internal
      * @param string[]                            $globalOrder
      * @param array<string, string>               $globals
      */
-    private function closePart(int $p, array $defOrder, array $defRefs, array $assign,
-                               array $internal, array $globalOrder, array $globals,
-                               array &$owned): PartPlan
+    private function closePart(int $p, array $defOrder, array $defRefs, array $defSize,
+                               array $assign, array $internal, array $globalOrder,
+                               array $globals, array &$owned): PartPlan
     {
         /** @var string[] */
         $mine = [];
@@ -399,6 +405,29 @@ final class SplitModule
         /** @var array<string, bool> */
         $refs = [];
         foreach ($mine as $s) {
+            foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
+        }
+        // Small callees another part owns come along as `available_externally`
+        // copies: inlinable here, never emitted here. A part boundary is an
+        // INLINING boundary (8 plain parts made the compiler 69% slower) and
+        // what the inliner takes across it is exactly the small bodies. One that
+        // names a file-local definition stays out — it would drag that body's
+        // copy into the part as well.
+        /** @var array<string, bool> */
+        $availSet = [];
+        foreach ($mine as $s) {
+            foreach ($defRefs[$s] as $r => $_) {
+                if (isset($availSet[$r]) || !isset($assign[$r]) || $assign[$r] === $p) { continue; }
+                if (($defSize[$r] ?? self::AVAIL_MAX_BYTES + 1) > self::AVAIL_MAX_BYTES) { continue; }
+                if ($this->namesInternal($defRefs[$r], $internal)) { continue; }
+                $availSet[$r] = true;
+            }
+        }
+        /** @var string[] */
+        $avail = [];
+        foreach ($defOrder as $s) {
+            if (!isset($availSet[$s])) { continue; }
+            $avail[] = $s;
             foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
         }
         // Every file-local definition reachable from here, to a fixpoint.
@@ -473,6 +502,7 @@ final class SplitModule
         }
         $plan = new PartPlan();
         $plan->mine = $mine;
+        $plan->avail = $avail;
         $plan->refs = $refs;
         $plan->needG = $needG;
         $plan->ownG = $ownG;
@@ -521,9 +551,12 @@ final class SplitModule
             $gtext = $gtext . $this->externGlobal($gl) . "\n";
         }
         // Declares for what this part calls but another part defines.
+        /** @var array<string, bool> */
+        $availSet = [];
+        foreach ($plan->avail as $s) { $availSet[$s] = true; }
         $dtext = '';
         foreach ($refs as $r => $_) {
-            if (!isset($defHead[$r]) || isset($internal[$r])) { continue; }
+            if (!isset($defHead[$r]) || isset($internal[$r]) || isset($availSet[$r])) { continue; }
             if (($assign[$r] ?? -1) === $p) { continue; }
             $d = $this->declareFromDefine($defHead[$r]);
             if ($d !== '') { $dtext = $dtext . $d . "\n"; }
@@ -694,7 +727,7 @@ final class SplitModule
             if ($p !== 0) {
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
-            $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $assign,
+            $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $defSize, $assign,
                                     $internal, $globalOrder, $globals, $owned);
             $path = $outBase . '.p' . (string)$p . '.ll';
             if (!\Manticore\write_file($path,
@@ -706,6 +739,17 @@ final class SplitModule
             $o = \Manticore\fopen($path, 'ab');
             foreach ($plan->mine as $s) {
                 if (!$this->copyRange($in, $o, $buf, $cap, $defOff[$s], $defSize[$s])) {
+                    \Manticore\fclose($o);
+                    \Manticore\free($buf);
+                    \Manticore\fclose($in);
+                    return [];
+                }
+            }
+            foreach ($plan->avail as $s) {
+                $h = $this->availHead($defHead[$s]) . "\n";
+                $hl = \strlen($defHead[$s]) + 1;
+                if (\Manticore\fwrite($h, 1, \strlen($h), $o) !== \strlen($h)
+                    || !$this->copyRange($in, $o, $buf, $cap, $defOff[$s] + $hl, $defSize[$s] - $hl)) {
                     \Manticore\fclose($o);
                     \Manticore\free($buf);
                     \Manticore\fclose($in);
@@ -838,6 +882,39 @@ final class SplitModule
         }
         $sp = \strpos($s, ' ');
         return $sp === false ? \rtrim($s) : \substr($s, 0, $sp);
+    }
+
+    /** IR bytes up to which another part's callee is copied in `available_externally`. */
+    private const AVAIL_MAX_BYTES = 2048;
+
+    /**
+     * @param array<string, bool> $refs
+     * @param array<string, bool> $internal
+     */
+    private function namesInternal(array $refs, array $internal): bool
+    {
+        foreach ($refs as $r => $_) {
+            if (isset($internal[$r])) { return true; }
+        }
+        return false;
+    }
+
+    /** A definition header relinked `available_externally` — same signature and attributes. */
+    private function availHead(string $headLine): string
+    {
+        $rest = \substr($headLine, 7);
+        $keys = ['linkonce_odr ', 'weak_odr ', 'external ', 'dso_local ', 'weak ', 'linkonce '];
+        $again = true;
+        while ($again) {
+            $again = false;
+            foreach ($keys as $k) {
+                if (\str_starts_with($rest, $k)) {
+                    $rest = \substr($rest, \strlen($k));
+                    $again = true;
+                }
+            }
+        }
+        return 'define available_externally ' . $rest;
     }
 
     /** A `declare` taken from the definition's own header — never invented. */

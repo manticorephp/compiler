@@ -672,7 +672,28 @@ function clang_tuning_flags(): string {
     }
     return "";
 }
-function assemble_ir(string $ir, string $base, string $cflags): array {
+/**
+ * How many parts an APPLICATION's staged module is split into when nothing
+ * asked for a split, or 0 for the single serial `clang -O2`.
+ *
+ * One clang over a large module does not finish: php-cs-fixer's 230 MB ran
+ * past 18 minutes and 5 GB (and still 5 GB with inlining switched off — the
+ * module alone is ~20x its text in clang). Split, it is ~2 minutes at 2.2 GB,
+ * and {@see \Compile\Mir\SplitModule}'s `available_externally` copies keep the
+ * inlining a part boundary used to cost (the compiler built in 8 parts: +6.6%
+ * instead of +53%). The compiler's own module (~85 MB) is below the line, so
+ * `bin/build` is unchanged; a library never gets here — its `.o` is one unit.
+ */
+function auto_split_parts(int $irBytes): int {
+    if ($irBytes < CompileArgs::AUTO_SPLIT_MIN_BYTES) { return 0; }
+    $parts = \intdiv($irBytes + CompileArgs::AUTO_SPLIT_PART_BYTES - 1, CompileArgs::AUTO_SPLIT_PART_BYTES);
+    $hj = host_jobs();
+    if ($parts < $hj) { $parts = $hj; }
+    if ($parts > 64) { $parts = 64; }
+    return $parts;
+}
+
+function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit = false): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
     $stagedPrefix = "\x1eMANTICORE_STAGED_IR\n";
@@ -688,8 +709,17 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         $forcedJobs = $forcedSplit === false ? 0 : (int)$forcedSplit;
         if ($forcedJobs > 64) { $forcedJobs = 64; }
         $stagedJobs = $forcedJobs >= 2 ? $forcedJobs : assemble_jobs();
+        $stagedBytes = (int)\substr($payload, $cut + 1);
+        if ($autoSplit && $forcedSplit === false && CompileArgs::$jobs === 1) {
+            $autoParts = auto_split_parts($stagedBytes);
+            if ($autoParts >= 2) {
+                $stagedJobs = $autoParts;
+                \Compile\Stats::line('  assembly: auto split ' . (string)$autoParts
+                    . ' parts (' . (string)$stagedBytes . ' bytes)');
+            }
+        }
         return assemble_ir_file(\substr($payload, 0, $cut), $base, $cflags,
-                                (int)\substr($payload, $cut + 1), $stagedJobs);
+                                $stagedBytes, $stagedJobs);
     }
     $irBytes = \strlen($ir);
     $largeModule = $irBytes > 536870912;
@@ -816,8 +846,8 @@ function assemble_ir_file(string $llPath, string $base, string $cflags, int $irB
  * ⚠ A part boundary is an INLINING boundary: the compiler built as 8 plain parts
  * runs ~69% slower, which then makes every later build slower. That is what
  * `-flto=thin` is for — it defers the cross-module inlining to the link and
- * measured +3.4% instead. Splitting WITHOUT it is a build-time win paid for out
- * of the produced program, so this stays opt-in.
+ * measured +3.4% instead. Without it, the `available_externally` copies of small
+ * cross-part callees keep most of the inlining ({@see auto_split_parts}).
  *
  * @return string[] the part objects, or [] so the caller can fall back
  */
@@ -1435,6 +1465,12 @@ final class CompileArgs
      * not pass it.
      */
     public static int $jobs = 1;
+
+    /** Below this much staged IR an application assembles as ONE translation unit. */
+    public const AUTO_SPLIT_MIN_BYTES = 134217728;
+
+    /** Staged IR per part when the split is automatic: clang peaks at ~15x its input. */
+    public const AUTO_SPLIT_PART_BYTES = 10485760;
 
     /**
      * `--emit-library` — build the bundled stdlib as a standalone `.o`
@@ -2688,7 +2724,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         return 0;
     }
     $objPath = $base . ".o";
-    $objs = assemble_ir($ir, $base, "");
+    $objs = assemble_ir($ir, $base, "", true);
     if ($objs === []) { dprint("build: assemble failed for " . $output); return 75; }
     $objList = \implode(" ", $objs);
     $linkExtra = "";
