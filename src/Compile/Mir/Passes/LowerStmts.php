@@ -190,8 +190,21 @@ trait LowerStmts
      */
     private function hoistLvalueStmt(\Parser\Ast\Expr $e): ?Node
     {
+        // RE-ENTRANT: lowering a hoisted dim lowers any closure inside it on
+        // the spot, and that body's statements come back here. Keep the
+        // enclosing statement's pending temps and hand them back on exit.
+        $outerHoist = $this->lvHoist;
+        $outerTemps = $this->lvTemps;
         $this->lvHoist = [];
         $this->lvTemps = [];
+        $r = $this->hoistLvalueStmtInner($e);
+        $this->lvHoist = $outerHoist;
+        $this->lvTemps = $outerTemps;
+        return $r;
+    }
+
+    private function hoistLvalueStmtInner(\Parser\Ast\Expr $e): ?Node
+    {
         $k = $e->kind;
         $rewritten = null;
         if ($k === 'Assign') {
@@ -452,10 +465,19 @@ trait LowerStmts
     private function lowerForClause(array $exprs): ?Node
     {
         if (\count($exprs) === 0) { return null; }
-        if (\count($exprs) === 1) { return $this->lowerExpr($exprs[0]); }
+        // Each clause expression is a statement (its value is discarded), so a
+        // write target's effectful dims are hoisted INSIDE it — re-run with the
+        // step on every iteration, not once before the loop.
+        if (\count($exprs) === 1) { return $this->lowerClauseExpr($exprs[0]); }
         $stmts = [];
-        foreach ($exprs as $e) { $stmts[] = $this->lowerExpr($e); }
+        foreach ($exprs as $e) { $stmts[] = $this->lowerClauseExpr($e); }
         return new Block($stmts, Type::void());
+    }
+
+    private function lowerClauseExpr(\Parser\Ast\Expr $e): Node
+    {
+        $h = $this->hoistLvalueStmt($e);
+        return $h ?? $this->lowerExpr($e);
     }
 
     private function lowerForeach(\Parser\Ast\ForeachStmt $stmt): Node
