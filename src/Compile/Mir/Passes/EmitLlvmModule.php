@@ -2342,7 +2342,10 @@ trait EmitLlvmModule
             // owned-local transfers are already +1. The declared return type
             // is the fallback: it is what the CALLER assumes ({@see
             // ownershipReturnType}).
-            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+            if ($this->callHandsBorrow($v)) {
+                // rcRetainByType reads every call as a +1 transfer.
+                $out .= $this->rcRetainReg($this->lastValue, 'obj');
+            } elseif ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
             }
         }
@@ -2477,6 +2480,19 @@ trait EmitLlvmModule
         return true;
     }
 
+    /**
+     * The one call that is NOT a +1: `__mir_fiber_current()` reads the running
+     * fiber out of a global the fiber's owner holds ({@see
+     * InsertMemoryOps::isOwnedObj} refuses to own it for that reason). Returned
+     * as it stood, `Fiber::getCurrent()` handed its caller a borrow under the
+     * +1 convention, so a caller that owns the result — a local, a spilled
+     * `Fiber::getCurrent() !== null` operand — freed the live fiber.
+     */
+    private function callHandsBorrow(Node $v): bool
+    {
+        return $v instanceof \Compile\Mir\Call && \ltrim($v->function, '\\') === '__mir_fiber_current';
+    }
+
     private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
     {
         $t = $this->ownershipReturnType($v);
@@ -2493,6 +2509,7 @@ trait EmitLlvmModule
         // borrowed one (`return $this->handler;`) is retained like an object.
         if ($tk === Type::KIND_OBJ && $this->objTypeIsStruct($t)) { return false; }
         $k = $v->kind;
+        if ($this->callHandsBorrow($v)) { return true; }
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
             || \Compile\Mir\BitOp::mintsFresh($v)) {

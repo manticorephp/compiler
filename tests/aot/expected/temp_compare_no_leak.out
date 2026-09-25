@@ -1,0 +1,49 @@
+obj !== null: sum=52000 ok
+nobj !== null: sum=52000 ok
+nobj === null: sum=0 ok
+fnobj != null: sum=52000 ok
+fobj == fobj: sum=0 ok
+fobj === fobj: sum=0 ok
+obj instanceof: sum=52000 ok
+nobj instanceof: sum=52000 ok
+!nobj: sum=0 ok
+if (nobj): sum=52000 ok
+if (obj): sum=52000 ok
+is_object: sum=52000 ok
+is_null: sum=0 ok
+match true: sum=52000 ok
+while !== null: sum=104000 ok
+stmt obj: sum=52000 ok
+stmt fobj: sum=52000 ok
+str !== null: sum=52000 ok
+str === lit: sum=0 ok
+str == lit: sum=0 ok
+str <=> lit: sum=52000 ok
+!str: sum=0 ok
+if (str): sum=52000 ok
+stmt str: sum=52000 ok
+arr === []: sum=0 ok
+arr == []: sum=0 ok
+!arr: sum=0 ok
+if (arr): sum=52000 ok
+stmt arr: sum=52000 ok
+clo !== null: sum=52000 ok
+stmt clo: sum=52000 ok
+nobj ?: : sum=52000 ok
+nobj ?? : sum=52000 ok
+switch nstr: sum=52000 ok
+new !== null: sum=52000 ok
+clone instanceof: sum=52000 ok
+destruct if
+if body
+destruct else
+else body
+destruct while0
+while body 0
+destruct while1
+while body 1
+destruct stmt
+after stmt y
+fiber current 6
+outside current null
+done

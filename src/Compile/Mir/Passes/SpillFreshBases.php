@@ -2,6 +2,8 @@
 
 namespace Compile\Mir\Passes;
 
+use Compile\Mir\Block;
+use Compile\Mir\CondOwn;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
@@ -25,7 +27,10 @@ use Compile\Mir\Walk;
  * READS: the base is stored into a hidden local in place — `($__fb_N =
  * f())->data`, the shape {@see InsertMemoryOps} already handles for a
  * user-written `($m = f())->data` (release before the next store, and at scope
- * exit).
+ * exit). An operand a consumer reads to a SCALAR — a comparison, instanceof,
+ * `!`, a condition, a type predicate ({@see rewriteConsumed}) — is the same
+ * orphan and gets the same owner; a condition's is released at the head of
+ * the block it chose.
  *
  * WRITES and REFERENCES (`f()->arr[] = x`, `f()->n++`, `unset(f()->a[0])`,
  * `$r = &f()->arr`, `foreach (f()->arr as &$v)`, a by-ref argument) must not
@@ -520,30 +525,51 @@ final class SpillFreshBases
         $k = $n->kind;
         if ($k === Node::KIND_IF) {
             $i = $this->asIf($n);
+            $mark = \count($this->pending);
             $this->visit($i->cond);
-            $i->then->stmts = $this->stmtList($i->then->stmts);
+            $i->cond = $this->consume($i->cond);
+            $made = $this->takeSince($mark);
+            $i->then->stmts = $this->releasedFirst($made, $this->stmtList($i->then->stmts));
             $else = $i->else;
-            if ($else !== null) { $else->stmts = $this->stmtList($else->stmts); }
+            if ($else !== null) {
+                $else->stmts = $this->releasedFirst($made, $this->stmtList($else->stmts));
+            } elseif (\count($made) > 0) {
+                $i->else = new Block($this->releasedFirst($made, []), Type::void());
+            }
             return;
         }
         if ($k === Node::KIND_WHILE) {
             $w = $this->asWhile($n);
+            $mark = \count($this->pending);
             $this->visit($w->cond);
-            $w->body->stmts = $this->stmtList($w->body->stmts);
+            $w->cond = $this->consume($w->cond);
+            $made = \array_slice($this->pending, $mark);
+            $w->body->stmts = $this->releasedFirst($made, $this->stmtList($w->body->stmts));
             return;
         }
         if ($k === Node::KIND_DOWHILE) {
             $d = $this->asDoWhile($n);
             $d->body->stmts = $this->stmtList($d->body->stmts);
+            $mark = \count($this->pending);
             $this->visit($d->cond);
+            $d->cond = $this->consume($d->cond);
+            $made = \array_slice($this->pending, $mark);
+            $d->body->stmts = $this->releasedFirst($made, $d->body->stmts);
             return;
         }
         if ($k === Node::KIND_FOR) {
             $fo = $this->asFor($n);
             if ($fo->init !== null) { $this->visit($fo->init); }
-            if ($fo->cond !== null) { $this->visit($fo->cond); }
+            $made = [];
+            $cond = $fo->cond;
+            if ($cond !== null) {
+                $mark = \count($this->pending);
+                $this->visit($cond);
+                $fo->cond = $this->consume($cond);
+                $made = \array_slice($this->pending, $mark);
+            }
             if ($fo->step !== null) { $this->visit($fo->step); }
-            $fo->body->stmts = $this->stmtList($fo->body->stmts);
+            $fo->body->stmts = $this->releasedFirst($made, $this->stmtList($fo->body->stmts));
             return;
         }
         if ($k === Node::KIND_FOREACH) {
@@ -565,6 +591,7 @@ final class SpillFreshBases
         if ($k === Node::KIND_SWITCH) {
             $sw = $this->asSwitch($n);
             $this->visit($sw->subject);
+            $sw->subject = $this->consume($sw->subject);
             foreach ($sw->arms as $a) {
                 $arm = $this->asSwitchArm($a);
                 if ($arm->value !== null) { $this->visit($arm->value); }
@@ -576,6 +603,7 @@ final class SpillFreshBases
         // conditional's arm), whose spills belong to the enclosing statement.
         foreach (Walk::children($n) as $c) { $this->visit($c); }
         $this->rewriteRead($n);
+        $this->rewriteConsumed($n);
     }
 
     private function rewriteRead(Node $n): void
@@ -600,6 +628,156 @@ final class SpillFreshBases
         $rk = $n->type->kind;
         return $rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL
             || $rk === Type::KIND_NULL;
+    }
+
+    /**
+     * Operands a consumer reads to a SCALAR and then drops: `f() !== null`,
+     * `f() <=> $x`, `f() instanceof C`, `!f()`, `(bool)f()`, `is_object(f())`,
+     * the condition of an `if` / loop / ternary, the left of `??`, a `match` /
+     * `switch` subject. A fresh +1 there had no taker — the emitter drops a
+     * fresh STRING in some compare paths ({@see EmitLlvm::freeStrTemp}) and
+     * nothing else — so `while ($c->receive() !== null)` lost every Message.
+     * The operand gets the same in-place owner as a read's base. A spilled
+     * string is a StoreLocal, which no fresh-temp predicate names, so the
+     * emitter's own release of it goes quiet instead of doubling.
+     */
+    private function rewriteConsumed(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CMP) {
+            $c = $this->asCmp($n);
+            $c->left = $this->consume($c->left);
+            $c->right = $this->consume($c->right);
+        } elseif ($k === Node::KIND_SPACESHIP) {
+            $sp = $this->asSpaceship($n);
+            $sp->left = $this->consume($sp->left);
+            $sp->right = $this->consume($sp->right);
+        } elseif ($k === Node::KIND_INSTANCEOF) {
+            $io = $this->asInstanceof($n);
+            $io->operand = $this->consume($io->operand);
+        } elseif ($k === Node::KIND_NOT) {
+            $no = $this->asNot($n);
+            $no->operand = $this->consume($no->operand);
+        } elseif ($k === Node::KIND_CAST) {
+            $ca = $this->asCast($n);
+            if ($ca->target === 'bool') { $ca->operand = $this->consume($ca->operand); }
+        } elseif ($k === Node::KIND_TERNARY) {
+            $te = $this->asTernary($n);
+            $te->cond = $this->consume($te->cond);
+        } elseif ($k === Node::KIND_NULLCOALESCE) {
+            $nc = $this->asNullCoalesce($n);
+            $nc->left = $this->consume($nc->left);
+        } elseif ($k === Node::KIND_MATCH) {
+            $ma = $this->asMatch($n);
+            $ma->subject = $this->consume($ma->subject);
+        } elseif ($k === Node::KIND_CALL) {
+            $call = $this->asCall($n);
+            if ($this->isTypePredicate($call->function) && \count($call->args) === 1) {
+                $call->args = [$this->consume($call->args[0])];
+            }
+        }
+    }
+
+    private function isTypePredicate(string $fn): bool
+    {
+        $p = \strrpos($fn, chr(92));
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        foreach ([
+            'is_null', 'is_object', 'is_array', 'is_string', 'is_int', 'is_integer', 'is_long',
+            'is_float', 'is_double', 'is_bool', 'is_scalar', 'is_numeric', 'is_iterable',
+            'is_countable', 'is_callable', 'is_resource', 'boolval',
+        ] as $name) {
+            if ($name === $bare) { return true; }
+        }
+        return false;
+    }
+
+    private function consume(Node $v): Node
+    {
+        if (!$this->isFreshValue($v)) { return $v; }
+        return $this->spill($v);
+    }
+
+    /**
+     * A +1 value nobody else holds, of a kind whose local {@see InsertMemoryOps}
+     * releases: a fresh container ({@see isFreshContainer}), a string a call
+     * returned, or a conditional every arm of which is normalized to +1
+     * ({@see CondOwn}; the arms are the emitter's to settle, the result is not).
+     */
+    private function isFreshValue(Node $v): bool
+    {
+        $t = $v->type;
+        $k = $v->kind;
+        if ($t->kind === Type::KIND_CELL) {
+            if (!$this->cellMayHoldRc($t)) { return false; }
+            // A codegen builtin's cell result may be an element it BORROWED
+            // (`current`, `end`); only a body's +1 return is owned.
+            if ($k === Node::KIND_CALL && !isset($this->refMasks[\ltrim($this->asCall($v)->function, '\\')])) { return false; }
+        }
+        if ($this->isFreshContainer($v, 2)) { return true; }
+        // A closure a body returned is +1 like any object, and a closure local
+        // releases its env ({@see EmitLlvm::freshRcArgFlavor}'s closure arm).
+        // A read base is never one, which is why isFreshContainer refuses it.
+        $cls = $t->kind === Type::KIND_OBJ ? ($t->class ?? '') : '';
+        if ($t->kind === Type::KIND_CLOSURE || $cls === 'Closure' || \str_starts_with($cls, '__closure_')) {
+            if ($k === Node::KIND_CALL) { return isset($this->refMasks[\ltrim($this->asCall($v)->function, '\\')]) && !isset($this->notOwned[\ltrim($this->asCall($v)->function, '\\')]); }
+            return $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE;
+        }
+        if ($t->kind === Type::KIND_STRING) {
+            if ($k === Node::KIND_CALL) { return !isset($this->notOwned[\ltrim($this->asCall($v)->function, '\\')]); }
+            return $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE;
+        }
+        if (!CondOwn::isConditional($v) || !CondOwn::armsCoverable($v)) { return false; }
+        if (CondOwn::shapeIsRc($t)) { return $this->cellMayHoldRc($t); }
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        return $cls !== '' && !isset($this->notRc[$cls]) && !\str_starts_with($cls, '__closure_');
+    }
+
+    /** A cell whose atoms are all scalars (`int|false`, a numeric cell) owns nothing to drop. */
+    private function cellMayHoldRc(Type $t): bool
+    {
+        if ($t->kind !== Type::KIND_CELL) { return true; }
+        if ($t->isNumericCell()) { return false; }
+        $atoms = $t->atoms;
+        if (\count($atoms) === 0) { return true; }
+        foreach ($atoms as $a) {
+            $ak = $a->kind;
+            if ($ak !== Type::KIND_INT && $ak !== Type::KIND_FLOAT && $ak !== Type::KIND_BOOL && $ak !== Type::KIND_NULL) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * The spills made since `$mark`, taken off the statement's list: the caller
+     * releases them on every path itself.
+     *
+     * @return StoreLocal[]
+     */
+    private function takeSince(int $mark): array
+    {
+        $made = \array_slice($this->pending, $mark);
+        $this->pending = \array_slice($this->pending, 0, $mark);
+        return $made;
+    }
+
+    /**
+     * A condition is spent once it has answered: its spills are released at
+     * the head of the block it chose, where php has destroyed the temporary,
+     * instead of after the whole statement.
+     *
+     * @param StoreLocal[] $made
+     * @param Node[] $stmts
+     * @return Node[]
+     */
+    private function releasedFirst(array $made, array $stmts): array
+    {
+        if (\count($made) === 0) { return $stmts; }
+        $targets = [];
+        foreach ($made as $sl) { $targets[] = new LoadLocal($sl->name, $sl->type); }
+        $out = [new Unset_($targets, Type::void())];
+        foreach ($stmts as $s) { $out[] = $s; }
+        return $out;
     }
 
     private function spill(Node $base): StoreLocal
@@ -667,4 +845,12 @@ final class SpillFreshBases
     private function asCatch(mixed $n): \Compile\Mir\MirCatch { return $n; }
     private function asSwitchArm(mixed $n): \Compile\Mir\SwitchArm_ { return $n; }
     private function asBlock(Node $n): \Compile\Mir\Block { return $n; }
+    private function asCmp(Node $n): \Compile\Mir\Cmp { return $n; }
+    private function asSpaceship(Node $n): \Compile\Mir\Spaceship { return $n; }
+    private function asInstanceof(Node $n): \Compile\Mir\Instanceof_ { return $n; }
+    private function asNot(Node $n): \Compile\Mir\Not_ { return $n; }
+    private function asCast(Node $n): \Compile\Mir\Cast { return $n; }
+    private function asTernary(Node $n): \Compile\Mir\Ternary { return $n; }
+    private function asNullCoalesce(Node $n): \Compile\Mir\NullCoalesce_ { return $n; }
+    private function asMatch(Node $n): \Compile\Mir\Match_ { return $n; }
 }
