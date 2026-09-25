@@ -7487,12 +7487,6 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * The properties a class marks `#[\Manticore\Attr\CompareKey]` — its
-     * compare view, when non-empty ({@see \Compile\MemoryAbi::CMP_GROUP_KEYED}).
-     *
-     * @return array<string, bool>
-     */
-    /**
      * `Uncomparable` / `CompareNone` when the class or an ancestor carries
      * `#[\Manticore\Attr\Uncomparable]` / `#[\Manticore\Attr\CompareNone]`,
      * else ''. php's compare handler is inherited, so the mark is too.
@@ -7513,6 +7507,12 @@ trait EmitLlvmBuiltins
         return '';
     }
 
+    /**
+     * The properties a class marks `#[\Manticore\Attr\CompareKey]` — its
+     * compare view, when non-empty ({@see \Compile\MemoryAbi::CMP_GROUP_KEYED}).
+     *
+     * @return array<string, bool>
+     */
     private function cmpKeyProps(\Compile\Mir\ClassDef $cd): array
     {
         $out = [];
