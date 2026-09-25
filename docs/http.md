@@ -440,13 +440,28 @@ whether or not it calls it — about 6 k lines and 1.6 % of the binary. What tha
 code REACHES stays gated: `gzencode` is a stdlib symbol the linker resolves only
 where compression is on, and a program that never mentions `Http\` is untouched.
 
+## Protocol takeover
+
+`Response::takeover(\Closure $fn): Response` hands a `101` (or any other) response's
+underlying socket to `$fn(\Resource $conn, \Buffer\ByteBuffer $buf, Server $server)`
+instead of writing a body: the head goes out, the write timeout is cleared, the SAPI
+request context ends (`header()` has no meaning past this point), and `$fn` runs with
+`$buf` still holding whatever bytes the client sent right after the request head. The
+server never reads or writes the connection again after that call returns.
+`Server::onStop(\Closure $fn): int` / `offStop(int $id)` register and unregister a hook
+that runs once when `stop()` is called — a long-lived takeover's only way to hear
+about a shutdown, since it owns the socket and the server's own loop cannot signal it
+any other way. Both are protocol-agnostic; `Http\WebSocket` (`docs/websocket.md`) is
+the one consumer today.
+
 ## Not in this layer
 
-Routing, middleware, PSR-7/PSR-15, HTTP/2, WebSockets, multi-range
-(`multipart/byteranges`), brotli, and compression of a STREAMED body. PSR-7 wrappers are an
-ordinary pure-PHP package on top of this; the rest are their own epics.
+Routing, middleware, PSR-7/PSR-15, HTTP/2, multi-range (`multipart/byteranges`),
+brotli, and compression of a STREAMED body. PSR-7 wrappers are an ordinary pure-PHP
+package on top of this; the rest are their own epics.
 
 ## See also
 
-`docs/async.md` (the scheduler and the netpoller this rides on) ·
+`docs/async.md` (the scheduler and the netpoller this rides on) · `docs/websocket.md`
+(`Http\WebSocket`, built on `takeover()` above) ·
 `examples/http/` (`hello`, `stream`, `compat`, `static`) · `tests/aot/cases/http_*.php`.

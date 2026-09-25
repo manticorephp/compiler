@@ -214,6 +214,13 @@ reported rather than exited, and `Async\dump()` names every live task and where 
 spawned. An 8-worker prefork HTTP server does **150–160k rps** (`wrk`, plaintext
 keep-alive). See [`docs/async.md`](docs/async.md).
 
+**`Http\WebSocket`** puts RFC 6455 (+ RFC 7692 permessage-deflate) on the same
+`Http\Server`, and as an outbound client to third-party servers — one reader per
+connection, `foreach` over incoming messages, sending from any task, a callback
+layer with `Hub` broadcast. No Zend oracle for this one (`php` has no WebSocket
+layer), so it carries its own suite and an Autobahn|Testsuite gate.
+[`docs/websocket.md`](docs/websocket.md).
+
 **Native libraries** (zlib, libcurl, …) bind through FFI — `#[Library, Symbol]`
 attributes compile to direct C calls, and `#[Library]` is what puts the library on the
 link line; mechanism and C-type vocabulary in [`docs/ffi.md`](docs/ffi.md). The **module system**
