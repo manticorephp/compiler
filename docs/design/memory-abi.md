@@ -86,7 +86,9 @@ descriptor + 40 : ptr  cmp_view_fn  -- @__mir_cmpview_<id>: the COMPARE view as 
                                        only the #[CompareKey] props. Null: nothing to compare
 descriptor + 48 : i64  cmp_group    -- objects compare through their views only within one
                                        group: the class id, CMP_GROUP_KEYED (-1) for every
-                                       #[CompareKey] class, 0 (identity only) for an enum
+                                       #[CompareKey] class, 0 (identity only) for an enum and
+                                       an #[Uncomparable] class. #[CompareNone]: a null
+                                       cmp_view_fn under the class-id group (any two equal)
 ```
 
 `instanceof`, method dispatch and exception catch read `class_id` at descriptor offset 0;
