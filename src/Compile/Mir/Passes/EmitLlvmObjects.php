@@ -1188,6 +1188,16 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        if (\count($magic) >= self::MAGIC_SHARED_MIN) {
+            $lbl = $this->ssa->allocLabel('pr.magic');
+            foreach ($magic as $cname => $_decl) {
+                $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            }
+            $bodies .= $lbl . ":\n" . $this->magicDispatchCall('__get', $obj, $prop, '0');
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+            $magic = [];
+        }
         foreach ($magic as $cname => $declCls) {
             $lbl = $this->ssa->allocLabel('pr.magic');
             $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
@@ -1706,12 +1716,8 @@ trait EmitLlvmObjects
     private function emitCellStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
         $prop = $n->property;
-        $fixed = [];
-        $hasBag = false;
-        foreach ($this->classes as $cd) {
-            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
-            if ($cd->usesBag()) { $hasBag = true; }
-        }
+        $fixed = $this->fixedPropertyHolders($prop);
+        $hasBag = $this->bagClassNames() !== [];
         $out = $this->emitObjPtrOf($n->object);
         $objPtr = $this->lastValue;
         // Evaluate the RHS once; keep both a boxed-cell form (for cell slots) and
@@ -1736,6 +1742,11 @@ trait EmitLlvmObjects
         // Property overloading on an ERASED receiver: a class that declares
         // __set but not $prop takes the write through the method.
         $magic = $this->magicPropHolders($prop, '__set');
+        $within = '';
+        if ($n->object->type->kind === Type::KIND_OBJ) {
+            $within = $this->holdersWithin(\ltrim((string)($n->object->type->class ?? ''), '\\'),
+                                           $fixed, $magic, $hasBag);
+        }
         // No known holder → __set, bag store (stdClass), or drop; never offset-16.
         if (\count($fixed) === 0 && $magic === []) {
             if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
@@ -1744,7 +1755,10 @@ trait EmitLlvmObjects
             return $out;
         }
         // Single holder and no bag anywhere → the cell can only be that class.
-        if (\count($fixed) === 1 && !$hasBag && $magic === []) {
+        // Not after a narrowing: one holder AMONG the subtypes does not mean
+        // every subtype holds the slot, and the class_id default is what keeps
+        // a store into one that does not off a foreign offset.
+        if ($within === '' && \count($fixed) === 1 && !$hasBag && $magic === []) {
             $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
@@ -1752,47 +1766,11 @@ trait EmitLlvmObjects
         }
         // NO unconditional shortcut for a single magic holder — the receiver is
         // ERASED, so one declarer says nothing about the class in hand. Always
-        // dispatch on class_id.
-        // Runtime dispatch on the object's class_id — each holder stores its slot.
-        $out .= $this->emitLoadClassId($objPtr);
-        $cid = $this->classIdReg;
-        $end = $this->ssa->allocLabel('cs.end');
-        $def = $this->ssa->allocLabel('cs.default');
-        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
-        $bodies = '';
-        $seen = [];
-        /** @var array<string, string> {@see canonArm} */
-        $armSeen = [];
-        foreach ($fixed as $cd) {
-            if (isset($seen[$cd->name])) { continue; }
-            $seen[$cd->name] = true;
-            $lbl = $this->ssa->allocLabel('cs.case');
-            $arm = $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
-            $arm .= '  br label %' . $end . "\n";
-            $key = $this->canonArm($arm);
-            if (isset($armSeen[$key])) {
-                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
-                continue;
-            }
-            $armSeen[$key] = $lbl;
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $arm;
-        }
-        foreach ($magic as $cname => $declCls) {
-            if (isset($seen[$cname])) { continue; }
-            $seen[$cname] = true;
-            $lbl = $this->ssa->allocLabel('cs.magic');
-            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitMagicCall($declCls, '__set', $objPtr, $prop, $cellVal);
-            $bodies .= '  br label %' . $end . "\n";
-        }
-        $switch .= "  ]\n";
-        $out .= $switch . $bodies;
-        $out .= $def . ":\n";
-        if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
-        $out .= '  br label %' . $end . "\n";
-        $out .= $end . ":\n";
+        // dispatch on class_id — through the shared writer, as reads already do
+        // ({@see cellPropertyReadHelper}): the switch spliced into every site put
+        // 11k DOMNode/SimpleXMLElement __set arms into php-cs-fixer.
+        $out .= '  call void ' . $this->cellPropertyWriteHelper($prop, $within)
+              . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
         return $out;
@@ -2044,13 +2022,17 @@ trait EmitLlvmObjects
      * as an interned string ptr; lastValue ← the i64 result (a void method like
      * __set returns a dummy 0). All user methods emit as `define i64`.
      */
-    private function emitMagicCall(string $methodCls, string $method, string $objPtrReg, string $propName, ?string $valArg): string
+    private function emitMagicCall(string $methodCls, string $method, string $objPtrReg, string $propName,
+                                   ?string $valArg, string $nameI64 = ''): string
     {
         $oi = $this->ssa->allocReg();
         $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtrReg . " to i64\n";
-        $kid = $this->pool->intern($propName);
-        $si = $this->ssa->allocReg();
-        $out .= '  ' . $si . ' = ptrtoint ptr ' . $this->strLitId($kid) . " to i64\n";
+        $si = $nameI64;
+        if ($si === '') {
+            $kid = $this->pool->intern($propName);
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $this->strLitId($kid) . " to i64\n";
+        }
         $args = 'i64 ' . $oi . ', i64 ' . $si;
         if ($valArg !== null) { $args .= ', i64 ' . $valArg; }
         $target = $methodCls . '__' . $method;
@@ -2075,6 +2057,99 @@ trait EmitLlvmObjects
         $mrt = $this->sigs->returnType[$methodCls . '__' . $method] ?? null;
         if ($mrt !== null && $mrt->kind === Type::KIND_CELL) { $this->markCellOpaque($r); }
         return $out;
+    }
+
+    /** From this many overloading classes a helper's magic arms share one dispatcher. */
+    private const MAGIC_SHARED_MIN = 3;
+
+    /**
+     * Call the module's shared `__get`/`__set` dispatcher for `$prop` on `$obj`;
+     * lastValue ← its i64 (a cell for `__get`).
+     *
+     * Every per-property reader and writer carried one arm per class that
+     * overloads the method, and those arms differ only in the property NAME:
+     * php-cs-fixer's ~1 100 writers each had DOMNode's ten subclasses and
+     * SimpleXMLElement, 11k `__set` calls in all. The helper now sends every
+     * such class_id to one block, and the class switch lives once, here.
+     */
+    private function magicDispatchCall(string $method, string $obj, string $prop, string $val): string
+    {
+        $sym = $this->magicDispatchFn($method);
+        $kid = $this->pool->intern($prop);
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $obj . ', ptr '
+             . $this->strLitId($kid) . ', i64 ' . $val . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($method === '__get') { $this->markCellOpaque($r); }
+        return $out;
+    }
+
+    /** `i64 (ptr obj, ptr name, i64 val)` switching on class_id over every class
+     *  that overloads `$method` — the arm set of {@see magicPropHolders} for a
+     *  name no class declares. Built once per module. */
+    private function magicDispatchFn(string $method): string
+    {
+        $key = '__mc_magic_' . $method;
+        $sym = '@' . $this->mirHelperSym($key);
+        if (isset($this->propertyReadHelpers[$key])) { return $sym; }
+        $this->propertyReadHelpers[$key] = '';
+
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        // linkonce_odr, not internal: every property helper calls it, and a split
+        // module copies an internal body together with EVERY internal body that
+        // names it — all ~2 200 helpers into each part. The module token in the
+        // symbol keeps two modules' different bodies from coalescing.
+        $out = 'define linkonce_odr i64 ' . $sym . "(ptr %obj, ptr %name, i64 %val) {\nentry:\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . " = ptrtoint ptr %name to i64\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $this->rt->needsTagged = true;
+        $null = $this->ssa->allocReg();
+        $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        $out .= $this->emitLoadClassId('%obj');
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('md.end');
+        $switch = '  switch i64 ' . $cid . ', label %' . $end . " [\n";
+        $bodies = '';
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
+            if ($cd->isStruct || $cd->usesBag()) { continue; }
+            if ($this->isClosureClass($cn) || $this->isEnumClass($cn)) { continue; }
+            $lbl = $this->ssa->allocLabel('md.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $method === '__get'
+                ? $this->emitMagicGetCell($decl, '%obj', '', null, $ni)
+                : $this->emitMagicCall($decl, $method, '%obj', '', '%val', $ni);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $out .= $switch . "  ]\n" . $bodies . $end . ":\n";
+        $ret = $this->ssa->allocReg();
+        $out .= '  ' . $ret . ' = load i64, ptr ' . $res . "\n  ret i64 " . $ret . "\n}\n\n";
+        $this->propertyReadHelpers[$key] = $out;
+
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        return $sym;
     }
 
     private function hasEmittedFunction(string $name): bool
@@ -2232,9 +2307,10 @@ trait EmitLlvmObjects
      * in magic_get_set: a tag-4 address, SIGSEGV). `$want` is the access node's
      * own type; a concrete one wants the raw value and gets it.
      */
-    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop, ?Type $want = null): string
+    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop, ?Type $want = null,
+                                      string $nameI64 = ''): string
     {
-        $out = $this->emitMagicCall($declCls, '__get', $objPtrReg, $prop, null);
+        $out = $this->emitMagicCall($declCls, '__get', $objPtrReg, $prop, null, $nameI64);
         if ($want !== null && $want->kind !== Type::KIND_CELL && $want->kind !== Type::KIND_UNKNOWN) {
             return $out;
         }
@@ -3115,19 +3191,17 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop): string
+    private function cellPropertyWriteHelper(string $prop, string $within = ''): string
     {
-        $key = '__mc_prop_write_' . $this->mangle($prop);
+        $key = '__mc_prop_write_' . $this->mangle($prop)
+             . ($within === '' ? '' : '__in_' . $this->mangle($within));
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
-        $fixed = [];
-        $hasBag = false;
-        foreach ($this->classes as $cd) {
-            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
-            if ($cd->usesBag()) { $hasBag = true; }
-        }
+        $fixed = $this->fixedPropertyHolders($prop);
+        $hasBag = $this->bagClassNames() !== [];
         $magic = $this->magicPropHolders($prop, '__set');
+        if ($within !== '') { $this->holdersWithin($within, $fixed, $magic, $hasBag); }
 
         $oldSsa = $this->ssa;
         $oldLast = $this->lastValue;
@@ -3158,6 +3232,21 @@ trait EmitLlvmObjects
             $bodies .= $lbl . ":\n" . $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
             $bodies .= '  br label %' . $end . "\n";
         }
+        if (\count($magic) >= self::MAGIC_SHARED_MIN) {
+            $lbl = $this->ssa->allocLabel('pw.magic');
+            $any = false;
+            foreach ($magic as $cname => $_decl) {
+                if (isset($seen[$cname])) { continue; }
+                $seen[$cname] = true;
+                $any = true;
+                $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            }
+            if ($any) {
+                $bodies .= $lbl . ":\n" . $this->magicDispatchCall('__set', $obj, $prop, $cellVal);
+                $bodies .= '  br label %' . $end . "\n";
+            }
+            $magic = [];
+        }
         foreach ($magic as $cname => $declCls) {
             if (isset($seen[$cname])) { continue; }
             $seen[$cname] = true;
@@ -3182,6 +3271,40 @@ trait EmitLlvmObjects
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
+    }
+
+    /**
+     * Narrow a property's holders to the subtypes of `$scls` — the receiver's
+     * static class or interface — and answer `$scls`, or '' when nothing was
+     * narrowed. Every other holder is an arm that can never fire:
+     * `$this->whitespacesConfig = …` under `$this instanceof
+     * WhitespacesAwareFixerInterface` carried DOMNode's and SimpleXMLElement's
+     * __set arms. A filter that keeps nothing means the name is not one this
+     * module can answer for, so the full set stays rather than drop the real class.
+     *
+     * @param ClassDef[]            $fixed
+     * @param array<string, string> $magic
+     */
+    private function holdersWithin(string $scls, array &$fixed, array &$magic, bool &$hasBag): string
+    {
+        if ($scls === '') { return ''; }
+        $keepFixed = [];
+        foreach ($fixed as $cd) {
+            if ($this->classIsA($cd->name, $scls)) { $keepFixed[] = $cd; }
+        }
+        $keepMagic = [];
+        foreach ($magic as $cname => $declCls) {
+            if ($this->classIsA((string)$cname, $scls)) { $keepMagic[$cname] = $declCls; }
+        }
+        $keepBag = false;
+        foreach ($this->bagClassNames() as $bn) {
+            if ($this->classIsA((string)$bn, $scls)) { $keepBag = true; break; }
+        }
+        if ($keepFixed === [] && $keepMagic === [] && !$keepBag) { return ''; }
+        $fixed = $keepFixed;
+        $magic = $keepMagic;
+        $hasBag = $keepBag;
+        return $scls;
     }
 
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
