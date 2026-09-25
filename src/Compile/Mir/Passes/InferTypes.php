@@ -62,6 +62,8 @@ use Compile\Mir\StoreDynProp_;
 use Compile\Mir\Sub;
 use Compile\Mir\Type;
 use Compile\Mir\While_;
+use Compile\Mir\Break_;
+use Compile\Mir\Continue_;
 
 /**
  * Intra-procedural type-inference pass.
@@ -553,6 +555,13 @@ final class InferTypes implements Pass
      *  Discovered during inference (a call's kind isn't knowable to a pre-scan),
      *  so a promotion re-runs the function — see inferFunction. */
     private array $cellLoopLocals = [];
+    /** The body of the function being inferred ({@see InferNodes::inferForeach}'s
+     *  read-past-the-loop test). */
+    private ?Block $inferFnBody = null;
+    /** @var array<string, bool> foreach bindings boxed back on every path out
+     *  of the loop being inferred ({@see boxBackBeforeJumps}): an arm's box-back
+     *  before its jump serves that loop, never an if/else pair to unplant. */
+    private array $loopExitNames = [];
     /** Open `try` bodies, innermost last: the first type each saw per name
      *  ({@see noteTryStore}). @var array<int, array<string, Type>> */
     private array $tryStoreFrames = [];
@@ -2103,6 +2112,11 @@ final class InferTypes implements Pass
             $ti = self::boxBackIndex($then, $name);
             $ei = self::boxBackIndex($else, $name);
             if ($ti < 0 || $ei < 0) { continue; }
+            // A box-back before a loop-leaving jump serves the LOOP (the slot a
+            // re-kinded loop variable exits in), not this if/else pair.
+            if (isset($this->loopExitNames[$name])
+                && (self::boxBackEnd($then) !== \count($then->stmts)
+                    || self::boxBackEnd($else) !== \count($else->stmts))) { continue; }
             $tT = self::boxBackValueType($then->stmts[$ti]);
             $oT = self::boxBackValueType($else->stmts[$ei]);
             if ($tT->kind !== $oT->kind) { continue; }
@@ -2192,6 +2206,93 @@ final class InferTypes implements Pass
         // appended behind it kept the slot boxed by accident.
         $st->declaredType = $dest;
         return $st;
+    }
+
+    /** Does `$n` store a value to local `$name` (a StoreLocal or a nested foreach binding)? */
+    private static function storesTo(Node $n, string $name): bool
+    {
+        // A box-back (`$x = $x`, re-tagging the slot) is no store of a value.
+        if ($n instanceof StoreLocal && $n->name === $name
+            && !($n->value instanceof LoadLocal && $n->value->name === $name)) { return true; }
+        if ($n instanceof Foreach_ && ($n->valueVar === $name || $n->keyVar === $name)) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if (self::storesTo($c, $name)) { return true; }
+        }
+        return false;
+    }
+
+    /** How many reads of local `$name` sit under `$n` outside every foreach
+     *  that binds it (whose body reads its own binding). */
+    private static function readsOutsideBinders(Node $n, string $name): int
+    {
+        if ($n instanceof Foreach_ && ($n->valueVar === $name || $n->keyVar === $name)) {
+            return self::readsOutsideBinders($n->array, $name);
+        }
+        $c = ($n instanceof LoadLocal && $n->name === $name) ? 1 : 0;
+        foreach (Walk::children($n) as $ch) { $c = $c + self::readsOutsideBinders($ch, $name); }
+        return $c;
+    }
+
+    /**
+     * The box-back of `$name` before every `break` / `continue` under `$n` that
+     * leaves the loop whose body `$n` is: `$depth` loops / switches in between,
+     * so such a jump's level is `$depth + 1`. Idempotent across re-inference.
+     */
+    private function boxBackBeforeJumps(Node $n, string $name, Type $concrete, int $depth): void
+    {
+        if ($n instanceof Block) {
+            $out = [];
+            $changed = false;
+            foreach ($n->stmts as $i => $s) {
+                if (($s instanceof Break_ || $s instanceof Continue_) && $s->level === $depth + 1) {
+                    $prev = $i > 0 ? $n->stmts[$i - 1] : null;
+                    if (!($prev instanceof StoreLocal && $prev->name === $name && $prev->value instanceof LoadLocal
+                        && $prev->value->name === $name)) {
+                        $out[] = $this->boxBackStore($name, $concrete);
+                        $changed = true;
+                    }
+                }
+                $out[] = $s;
+            }
+            if ($changed) { $n->stmts = $out; }
+        }
+        $inner = $n instanceof While_ || $n instanceof For_ || $n instanceof DoWhile_
+            || $n instanceof Foreach_ || $n instanceof Switch_;
+        if ($n instanceof Switch_) {
+            foreach ($n->arms as $arm) {
+                $b = new Block($arm->body, Type::void());
+                $this->boxBackBeforeJumps($b, $name, $concrete, $depth + 1);
+                $arm->body = $b->stmts;
+            }
+            return;
+        }
+        if ($n instanceof TryCatch_) {
+            $b = new Block($n->tryBody, Type::void());
+            $this->boxBackBeforeJumps($b, $name, $concrete, $depth);
+            $n->tryBody = $b->stmts;
+            foreach ($n->catches as $c) {
+                $cb = new Block($c->body, Type::void());
+                $this->boxBackBeforeJumps($cb, $name, $concrete, $depth);
+                $c->body = $cb->stmts;
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->boxBackBeforeJumps($c, $name, $concrete, $inner ? $depth + 1 : $depth);
+        }
+    }
+
+    /** An element kind a binding boxes by TAG alone — no rebuild, no ordinal:
+     *  a scalar, a string, a plain object.
+     *  @param array<string, \Compile\Mir\EnumDef> $enums */
+    private static function bindBoxesByTag(Type $t, array $enums): bool
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
+            || $k === Type::KIND_STRING) { return true; }
+        if ($k !== Type::KIND_OBJ) { return false; }
+        $c = $t->class ?? '';
+        return $c !== '' && !isset($enums[$c]) && $c !== 'Closure' && !\str_starts_with($c, '__closure_');
     }
 
     /** Append the box-back to an arm — BEFORE a trailing `break`/`continue`:

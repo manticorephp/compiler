@@ -86,6 +86,7 @@ trait InferNodes
      */
     private function inferFunction(FunctionDef $fn): void
     {
+        $this->inferFnBody = $fn->body;
         $this->cellLoopLocals = [];
         $this->tryStoreFrames = [];
         $this->floatLoopLocals = [];
@@ -1824,6 +1825,29 @@ trait InferNodes
         if ($node->byRef && $at->isArray() && $elem->kind === Type::KIND_CELL) {
             $this->cellLoopLocals[$node->valueVar] = true;
         }
+        // A name a loop re-kinds ({@see loopMerge}) is a cell for the whole
+        // function, but a foreach BINDING is no store: the body reads the raw
+        // element, and the slot left the loop raw while every read past it
+        // dispatched by tag — `foreach (['x'] as $v) {} foreach ($objs as $v) {}
+        // var_dump($v);` printed a string pointer as a float. Box it back on
+        // every path out of the body, as an if/else merge does
+        // ({@see planMergeShadow}) — only for a name read somewhere no loop
+        // rebinds it first.
+        // A box-back of the binding before a jump out of this loop — this
+        // plant's, or an if/else merge's ahead of its arm's break — is the
+        // slot the loop exits in, whichever run planted it.
+        /** @var array<string, bool> $exitNames */
+        $exitNames = $this->loopExitNames;
+        if (!$node->byRef) { $exitNames[$node->valueVar] = true; }
+        if (!$node->byRef && $at->isArray() && isset($this->cellLoopLocals[$node->valueVar])
+            && self::bindBoxesByTag($elem, $this->enums) && $this->inferFnBody !== null
+            && !self::storesTo($node->body, $node->valueVar)
+            && self::readsOutsideBinders($this->inferFnBody, $node->valueVar) > 0) {
+            $this->plantBoxBack($node->body, $node->valueVar, $elem);
+            $this->boxBackBeforeJumps($node->body, $node->valueVar, $elem, 0);
+        }
+        $outerExitNames = $this->loopExitNames;
+        $this->loopExitNames = $exitNames;
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
@@ -1842,6 +1866,7 @@ trait InferNodes
         }
         $this->localTypes = $merged;
         $this->popJumpFrame();
+        $this->loopExitNames = $outerExitNames;
         return Type::void();
     }
 
