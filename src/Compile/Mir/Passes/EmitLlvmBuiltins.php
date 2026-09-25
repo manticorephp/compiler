@@ -4874,16 +4874,25 @@ trait EmitLlvmBuiltins
         }
         // Format into a buffer (sprintf; also printf when %e/%g needs fixing).
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-        $buf = $this->ssa->allocReg();
-        $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 256)\n";
-        $tmp = $this->ssa->allocReg();
-        $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf . ', i64 256, ptr ' . $fmtPtr . $vararg . ")\n";
-        $tl = $this->ssa->allocReg();
-        $out .= '  ' . $tl . ' = sext i32 ' . $tmp . " to i64\n";
-        $ov = $this->ssa->allocReg();
-        $out .= '  ' . $ov . ' = icmp sgt i64 ' . $tl . ", 255\n";
+        // Sized by a probe pass, as the stdout path is: a fixed 256-byte buffer
+        // CLAMPED every sprintf to 255 bytes — php-cs-fixer's diff template cut
+        // its hunk off mid-header.
+        $need = $this->ssa->allocReg();
+        $out .= '  ' . $need . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr null, i64 0, ptr '
+              . $fmtPtr . $vararg . ")\n";
+        $need64 = $this->ssa->allocReg();
+        $out .= '  ' . $need64 . ' = sext i32 ' . $need . " to i64\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp slt i64 ' . $need64 . ", 0\n";
         $cl = $this->ssa->allocReg();
-        $out .= '  ' . $cl . ' = select i1 ' . $ov . ', i64 255, i64 ' . $tl . "\n";
+        $out .= '  ' . $cl . ' = select i1 ' . $bad . ', i64 0, i64 ' . $need64 . "\n";
+        $cap = $this->ssa->allocReg();
+        $out .= '  ' . $cap . ' = add i64 ' . $cl . ", 1\n";
+        $buf = $this->ssa->allocReg();
+        $out .= '  ' . $buf . ' = call ptr @__mir_str_alloc(i64 ' . $cap . ")\n";
+        $tmp = $this->ssa->allocReg();
+        $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf . ', i64 ' . $cap
+              . ', ptr ' . $fmtPtr . $vararg . ")\n";
         $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $cl . ")\n";
         // PHP-style exponent (`e+03` → `e+3`): rewrite via the stdlib helper,
         // then release the intermediate snprintf buffer. Declare the extern only
@@ -4980,19 +4989,24 @@ trait EmitLlvmBuiltins
             $vtype = 'i64';
         }
         $val = $this->lastValue;
+        // Sized by a probe pass: a fixed 256-byte buffer clamped a long `%s`
+        // (or a wide `%-300s`) to 255 bytes.
+        $need = $this->ssa->allocReg();
+        $out .= '  ' . $need . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr null, i64 0, ptr '
+              . $fmtPtr . ', ' . $vtype . ' ' . $val . ")\n";
+        $need64 = $this->ssa->allocReg();
+        $out .= '  ' . $need64 . ' = sext i32 ' . $need . " to i64\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp slt i64 ' . $need64 . ", 0\n";
+        $cl = $this->ssa->allocReg();
+        $out .= '  ' . $cl . ' = select i1 ' . $bad . ', i64 0, i64 ' . $need64 . "\n";
+        $cap = $this->ssa->allocReg();
+        $out .= '  ' . $cap . ' = add i64 ' . $cl . ", 1\n";
         $buf = $this->ssa->allocReg();
-        $out .= '  ' . $buf . " = call ptr @__mir_str_alloc(i64 256)\n";
+        $out .= '  ' . $buf . ' = call ptr @__mir_str_alloc(i64 ' . $cap . ")\n";
         $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf
-              . ', i64 256, ptr ' . $fmtPtr . ', ' . $vtype . ' ' . $val . ")\n";
-        $tl = $this->ssa->allocReg();
-        $out .= '  ' . $tl . ' = sext i32 ' . $tmp . " to i64\n";
-        // snprintf returns the length it WOULD have written; clamp to the 255-byte
-        // buffer so a huge width doesn't set a length past the allocation.
-        $ov = $this->ssa->allocReg();
-        $out .= '  ' . $ov . ' = icmp sgt i64 ' . $tl . ", 255\n";
-        $cl = $this->ssa->allocReg();
-        $out .= '  ' . $cl . ' = select i1 ' . $ov . ', i64 255, i64 ' . $tl . "\n";
+              . ', i64 ' . $cap . ', ptr ' . $fmtPtr . ', ' . $vtype . ' ' . $val . ")\n";
         $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $cl . ")\n";
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
         return $out;
