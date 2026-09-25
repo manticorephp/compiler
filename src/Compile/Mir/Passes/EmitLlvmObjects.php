@@ -6640,8 +6640,12 @@ trait EmitLlvmObjects
         if ($m === 'key')     { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 24); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
-        if ($m === 'next')   { $out .= $this->genResumeCall($g); return $this->finishI64($out, '0'); }
+        // next()/send() on a generator nobody started run it to its first
+        // yield first, as php's ensureInitialized does: next() then steps past
+        // that yield, send() makes the value that yield's result.
+        if ($m === 'next')   { $out .= $this->genPrimeIfFresh($g); $out .= $this->genResumeCall($g); return $this->finishI64($out, '0'); }
         if ($m === 'send') {
+            $out .= $this->genPrimeIfFresh($g);
             $sentPtr = $this->ssa->allocReg();
             $out .= '  ' . $sentPtr . ' = getelementptr inbounds i8, ptr ' . $g . ", i64 40\n";
             if (\count($mc->args) >= 1) {

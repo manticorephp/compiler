@@ -821,6 +821,12 @@ trait InferCalls
             if ($m === 'current' || $m === 'send' || $m === 'throw') {
                 $et = $objType->element;
                 if ($et === null || $et->kind === Type::KIND_UNKNOWN) { $et = Type::cell(); }
+                // Null once the generator finished — which a raw int / float /
+                // bool cannot carry (it read 0 / 0.0 / false); a string or an
+                // object is a null pointer already.
+                $ek = $et->kind;
+                if ($ek === Type::KIND_INT || $ek === Type::KIND_FLOAT) { $et = Type::numericCell(); }
+                if ($ek === Type::KIND_BOOL) { $et = Type::cell(); }
                 $node->type = $et;
             } elseif ($m === 'key') {
                 // `key`@24 is stored BOXED — a generator's keys have no single

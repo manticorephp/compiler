@@ -319,9 +319,9 @@ trait EmitLlvmGenerator
     }
 
     /**
-     * A generator that finishes lets go of its last value: `current()` is null
-     * from here on, as in php, and the frame no longer holds the value
-     * the readers each took their own +1 of.
+     * A generator that finishes lets go of its last value: `current()` and
+     * `key()` are null from here on, as in php, and the frame no longer holds
+     * the value the readers each took their own +1 of.
      */
     private function genFinishCurrent(): string
     {
@@ -329,6 +329,7 @@ trait EmitLlvmGenerator
         $out = $this->genDropCurrent();
         $bn = $this->ssa->allocReg();
         $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $bn . ', ptr ' . $this->gen->keyPtr . "\n";
         return $out . '  store i64 ' . $bn . ', ptr ' . $this->gen->currentPtr . "\n";
     }
 
