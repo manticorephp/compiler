@@ -53,6 +53,8 @@ public bool $needsClosureRc = false;
      *  int/float/bool cell, strips a pointer one, keeps null NULL). */
     public bool $needsCellToStrPtr = false;
     public bool $needsTaggedToInt = false;
+    /** `__manticore_cell_to_int_arg`: a cell handed to an `int` param/return. */
+    public bool $needsCellToIntArg = false;
     public bool $needsTaggedToFloat = false;
     public bool $needsTaggedCompare = false;
     public bool $needsTaggedEq = false;

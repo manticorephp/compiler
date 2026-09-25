@@ -1,0 +1,16 @@
+bool(false)
+bool(true)
+array(2) {
+  [0]=>
+  string(2) "42"
+  [1]=>
+  string(2) "42"
+}
+int(1)
+int(1)
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "a"
+}

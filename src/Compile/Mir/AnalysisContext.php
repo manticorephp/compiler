@@ -35,6 +35,26 @@ final class AnalysisContext
      */
     public function beginRound(): void { $this->changes = new ChangeSet(); }
 
+    /**
+     * Whether a FULL inference has populated {@see $typeFp}. Before it, every
+     * function is unseen and none of them is "new"; after it, an unseen
+     * function is one a pass MINTED (a Monomorphize clone, a fresh closure
+     * body), and it has to be in the next scope.
+     */
+    public bool $seeded = false;
+
+    /**
+     * Rebuild the dependency graph once the module holds functions the graph
+     * has never seen — a clone is invisible to {@see DependencyIndex::invalidate}
+     * otherwise, and so are the edges of the callers that were repointed at it.
+     */
+    public function refresh(Module $module): void
+    {
+        if (\count($module->functions) === $this->dependencies->functionCount()) { return; }
+        $this->dependencies = DependencyIndex::build($module);
+        $this->barriers = InferenceBarriers::scan($module);
+    }
+
     public function invalidated(): array
     {
         return $this->dependencies->invalidateChanges($this->changes);

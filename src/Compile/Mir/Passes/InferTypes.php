@@ -118,15 +118,17 @@ final class InferTypes implements Pass
      * Only ever called for a function this run actually re-inferred: one that was
      * not visited cannot have moved.
      */
-    private function noteTypeChange(FunctionDef $fn): void
+    private function noteTypeChange(FunctionDef $fn): bool
     {
-        if ($this->ctx === null) { return; }
+        if ($this->ctx === null) { return false; }
         $fp = $this->typeFingerprint($fn);
         $seen = isset($this->ctx->typeFp[$fn->name]);
         $old = $seen ? $this->ctx->typeFp[$fn->name] : 0;
-        if ($seen && $old === $fp) { return; }
+        if ($seen && $old === $fp) { return false; }
         $this->ctx->typeFp[$fn->name] = $fp;
-        if ($seen) { $this->ctx->changes->addFunction($fn->name); }
+        if ($seen) { $this->ctx->changes->addFunction($fn->name); return true; }
+        if ($this->ctx->seeded) { $this->ctx->changes->addNewFunction($fn->name); return true; }
+        return false;
     }
 
     /**
@@ -151,6 +153,25 @@ final class InferTypes implements Pass
         $out = [];
         foreach ($module->functions as $fn) { $out[$fn->name] = $this->typeFingerprint($fn); }
         return $out;
+    }
+
+    /**
+     * Every node's kind and type in walk order — the harness prints the first
+     * line two passes disagree on, which names the node a scope missed.
+     * @return string[]
+     */
+    public function typeDump(FunctionDef $fn): array
+    {
+        $out = [];
+        $this->typeDumpNode($fn->body, $out);
+        return $out;
+    }
+
+    /** @param string[] $out */
+    private function typeDumpNode(Node $n, array &$out): void
+    {
+        $out[] = $n->kind . ' : ' . $n->type->toString();
+        foreach (Walk::children($n) as $c) { $this->typeDumpNode($c, $out); }
     }
 
     private function typeFingerprint(FunctionDef $fn): int
@@ -181,9 +202,11 @@ final class InferTypes implements Pass
     private function fpCallTypes(Node $n, int &$acc): void
     {
         $k = $n->kind;
+        // A closure literal's CAPTURES are what its body is seeded from, so they
+        // are observable the way call arguments are.
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_NEW_OBJ
-            || $k === Node::KIND_INVOKE) {
+            || $k === Node::KIND_INVOKE || $k === Node::KIND_CLOSURE) {
             $acc = $this->fpMix($acc, $this->typeCode($n->type));
             foreach (Walk::children($n) as $c) {
                 $acc = $this->fpMix($acc, $this->typeCode($c->type));
@@ -231,20 +254,158 @@ final class InferTypes implements Pass
     private function rescanScope(Module $module): ?array
     {
         if ($this->rescanTouched === []) { return null; }
-        if ($this->callGraph === null) {
-            $this->callGraph = \Compile\Mir\DependencyIndex::build($module);
-        }
         $out = [];
-        foreach ($this->callGraph->invalidate(\array_keys($this->rescanTouched)) as $name) {
+        foreach ($this->depGraph($module)->invalidate(\array_keys($this->rescanTouched)) as $name) {
             $out[$name] = true;
         }
         foreach ($this->rescanTouched as $name => $_) { $out[$name] = true; }
         return $out;
     }
 
+    /**
+     * The scoped pass: infer the seed wave, and whenever a function's observable
+     * types move, pull its direct neighbours in ({@see
+     * \Compile\Mir\DependencyIndex::neighbors}) — re-inferring one it already
+     * visited, since that visit read the old types. A static transitive closure
+     * reached 60-80% of the module; this reaches what actually moved. Each
+     * function re-enters at most a few times: past that the change is left to
+     * the next round, which the change set carries.
+     */
+    /**
+     * Pull the readers of every property retyped since the last call into the
+     * scope. @return array<string, bool> the functions pulled in
+     */
+    private function absorbRetypedProps(): array
+    {
+        $pulled = [];
+        if ($this->scopeNames === null || $this->ctx === null) { return $pulled; }
+        foreach ($this->ctx->changes->props as $prop => $unused) {
+            if (isset($this->propsAbsorbed[$prop])) { continue; }
+            $this->propsAbsorbed[$prop] = true;
+            foreach ($this->ctx->dependencies->usersOfProp((string)$prop) as $u => $unused2) {
+                $this->scopeNames[$u] = true;
+                $pulled[$u] = true;
+            }
+        }
+        return $pulled;
+    }
+
+    private function inferScopedWorklist(Module $module): void
+    {
+        $this->absorbRetypedProps();
+        $seed = [];
+        foreach ($this->functionsForScope($module) as $fn) { $seed[$fn->name] = true; }
+        $this->inferPropagating($module, 'scoped', $seed);
+    }
+
+    /** The call graph a propagation walks: the analysis context's when there is
+     *  one (kept current across Monomorphize), else this run's own. */
+    private function depGraph(Module $module): \Compile\Mir\DependencyIndex
+    {
+        if ($this->ctx !== null) { return $this->ctx->dependencies; }
+        if ($this->callGraph === null) {
+            $this->callGraph = \Compile\Mir\DependencyIndex::build($module);
+        }
+        return $this->callGraph;
+    }
+
+    /**
+     * Re-infer `$seed`, and whenever a function's observable types MOVE across
+     * its re-inference — the fingerprint before against the one after — pull
+     * its direct neighbours in ({@see \Compile\Mir\DependencyIndex::neighbors}),
+     * re-inferring one it already visited, since that visit read the old types.
+     * A static transitive closure over the callers reached most of the module
+     * for a change that moved a handful of functions. A function re-enters at
+     * most a few times; past that the change set carries it to the next round.
+     * A scoped pass widens its scope with whatever it pulls in.
+     *
+     * @param array<string, bool> $seed
+     */
+    private function inferPropagating(Module $module, string $reason, array $seed): void
+    {
+        $graph = $this->depGraph($module);
+        /** @var FunctionDef[] $queue */
+        $queue = [];
+        /** @var array<string, bool> $pending */
+        $pending = [];
+        foreach ($module->functions as $fn) {
+            if (!isset($seed[$fn->name])) { continue; }
+            $queue[] = $fn;
+            $pending[$fn->name] = true;
+            if ($this->scopeNames !== null) { $this->scopeNames[$fn->name] = true; }
+        }
+        /** @var array<string, int> $visits */
+        $visits = [];
+        for ($i = 0; $i < \count($queue); $i = $i + 1) {
+            $fn = $queue[$i];
+            unset($pending[$fn->name]);
+            $visits[$fn->name] = ($visits[$fn->name] ?? 0) + 1;
+            $before = $this->typeFingerprint($fn);
+            $this->inferFunction($fn);
+            $this->noteTypeChange($fn);
+            if ($this->typeFingerprint($fn) === $before) { continue; }
+            foreach ($graph->neighbors($fn->name) as $nb => $unused) {
+                if (isset($pending[$nb]) || ($visits[$nb] ?? 0) >= 4) { continue; }
+                $nfn = $this->fnByName[$nb] ?? null;
+                if ($nfn === null) { continue; }
+                if ($this->scopeNames !== null) { $this->scopeNames[$nb] = true; }
+                $pending[$nb] = true;
+                $queue[] = $nfn;
+            }
+        }
+        if (\Compile\Stats::$on) {
+            \Compile\Stats::bump('infer.rescan.' . $reason . '.calls', 1);
+            \Compile\Stats::bump('infer.rescan.' . $reason . '.functions', \count($queue));
+        }
+    }
+
+    /**
+     * Every node type of every function in `$names`, as one string: equal
+     * digests mean a re-inference moved nothing there. By Type INSTANCE: one id
+     * is one type, and two equal types that are separate objects only cost
+     * the caller one more round.
+     * @param array<string, bool> $names
+     */
+    private function bodyTypeDigest(Module $module, array $names): string
+    {
+        $acc = '';
+        foreach ($module->functions as $fn) {
+            if (!isset($names[$fn->name])) { continue; }
+            $this->digestIds = [];
+            $this->digestNode($fn->body);
+            $acc .= $fn->name . '=' . \implode(',', $this->digestIds) . ';';
+        }
+        return $acc;
+    }
+
+    /** @var int[] */
+    private array $digestIds = [];
+
+    private function digestNode(Node $n): void
+    {
+        $this->digestIds[] = $n->type->id;
+        foreach (Walk::children($n) as $c) { $this->digestNode($c); }
+    }
+
+    private function collectClosureNodes(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $this->closureNodeByName['__closure_' . (string)$n->id] = $n;
+            $this->sawClosures = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->collectClosureNodes($c); }
+    }
+
     /** Re-infer the current scope and record its aggregate cost. */
     private function inferFunctionsForScope(Module $module, string $reason = 'other', ?array $only = null): void
     {
+        // A scoped pass takes a property a scan just retyped IN THIS RUN to its
+        // readers now — left to the change set they would only follow a round
+        // later, and the round loop could already have closed.
+        $pulled = $this->absorbRetypedProps();
+        if ($only !== null) {
+            foreach ($pulled as $u => $unused) { $only[$u] = true; }
+        }
         $functions = $this->functionsForScope($module);
         if ($only !== null) {
             $selected = [];
@@ -330,6 +491,8 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
+    /** @var array<string, array<string, bool>> the {@see $forcedCellElemLocals} entries a by-ref CAPTURE proved; kept on the module across runs */
+    private array $byRefCaptureElemLocals = [];
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
      *  frames disagreed about the kind in that shared word. Both the outer local
      *  and the closure's capture param are recorded, and both become a CELL — the
@@ -501,6 +664,9 @@ final class InferTypes implements Pass
      */
     private array $rescanTargets = [];
 
+    /** @var array<string, bool> properties whose readers a scoped pass already pulled in */
+    private array $propsAbsorbed = [];
+
     /** @var array<string,bool> the global-backed names (`static $x`, `global $x`) of
      *  the function being inferred — one slot whose repr its decl decides for the
      *  whole program, never a branch merge. Reset per function. */
@@ -584,7 +750,10 @@ final class InferTypes implements Pass
         $this->closureNodeByName = [];
         $this->sawClosures = false;
         $this->undeclaredReturnFns = [];
-        foreach ($this->functionsForScope($module) as $fn) {
+        // The signature tables cover EVERY function, scoped run or not: a call
+        // from inside the scope to a function outside it still has to see that
+        // function's return, and a dispatch unions the returns of every class.
+        foreach ($module->functions as $fn) {
             // Remember the DECLARED return before any adoption below rewrites
             // it in place — a monomorphic clone must start from the declaration,
             // not from a type derived for the generic body ({@see
@@ -605,6 +774,22 @@ final class InferTypes implements Pass
             }
         }
         $this->declaredReturns = $module->declaredReturnTypes;
+        $this->byRefCellElemLocals = $module->inferByRefCellElemLocals;
+        $this->byRefCaptureCellLocals = $module->inferByRefCaptureCellLocals;
+        $this->globalVarTypes = $module->inferGlobalVarTypes;
+        $this->byRefCaptureElemLocals = $module->inferByRefCaptureElemLocals;
+        foreach ($this->byRefCaptureElemLocals as $fnName => $locals) {
+            foreach ($locals as $local => $unused) { $this->forcedCellElemLocals[$fnName][$local] = true; }
+        }
+        // A scoped run infers only part of the module, and a closure literal is
+        // recorded when its DEFINER is inferred — a definer outside the scope
+        // would leave its closure body with no capture seeds at all. Its nodes
+        // keep the types the last run gave them, so record them up front.
+        if ($this->scopeNames !== null) {
+            foreach ($module->functions as $fn) {
+                if (!isset($this->scopeNames[$fn->name])) { $this->collectClosureNodes($fn->body); }
+            }
+        }
         // Module pre-scan: a class property string-keyed anywhere
         // (`$this->prop[$k] = v`) is an assoc, not a vec. Retype it in the
         // ClassDef up front so its `[]` default + every load/store use the
@@ -637,9 +822,13 @@ final class InferTypes implements Pass
         // rule the local promotion follows, and the same reason it is computed
         // up front rather than forced afterwards.
         $this->scanRefCellProps($module);
-        foreach ($this->functionsForScope($module) as $fn) {
-            $this->inferFunction($fn);
-            $this->noteTypeChange($fn);
+        if ($this->scopeNames === null || $this->ctx === null) {
+            foreach ($this->functionsForScope($module) as $fn) {
+                $this->inferFunction($fn);
+                $this->noteTypeChange($fn);
+            }
+        } else {
+            $this->inferScopedWorklist($module);
         }
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
@@ -750,12 +939,18 @@ final class InferTypes implements Pass
         // on the index node (prior passes), re-infer: scanLocalShapes reads the
         // node ->type and flips `$o`'s `[]` literal to assoc. Bounded loop —
         // each flip removes the vec base, so it converges in one iteration.
+        // A pass that moved no type in its targets leaves the next one the very
+        // same input, so it is the fixpoint: a `$v[$cellKey] = …` on a genuine
+        // vec stays a match forever, and the loop re-inferred it to the guard
+        // in every InferTypes run.
         $guard = 0;
         while ($guard < 4) {
             $targets = $this->untypedAssocKeyStoreFunctions($module);
             if (\count($targets) === 0) { break; }
+            $before = $this->bodyTypeDigest($module, $targets);
             $this->inferFunctionsForScope($module, 'assoc_key', $targets);
             $guard = $guard + 1;
+            if ($this->bodyTypeDigest($module, $targets) === $before) { break; }
         }
         // Element erasure on a LOCAL: `$out = []` whose only clue is a store of an
         // already-CELL value (`$out[$k] = $v`). The pre-inference scan can't type a
@@ -887,6 +1082,11 @@ final class InferTypes implements Pass
             $this->inferFunctionsForScope($module, 'byref_capture_post');
             $guard = $guard + 1;
         }
+        if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
+        $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
+        $module->inferByRefCaptureCellLocals = $this->byRefCaptureCellLocals;
+        $module->inferGlobalVarTypes = $this->globalVarTypes;
+        $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
         $module->markPassApplied(self::NAME);
         return $module;
     }

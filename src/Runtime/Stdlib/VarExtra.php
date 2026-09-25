@@ -224,3 +224,70 @@ function class_alias(string $class, string $alias, bool $autoload = true): bool
 {
     return false;
 }
+
+// The type predicates are codegen builtins (inlined at every direct call); these
+// bodies are their NAMED form — the BOOTSTRAP RULE's PHP twin — so a call by a
+// runtime name reaches them: symfony OptionsResolver validates through
+// `self::VALIDATION_FUNCTIONS[$type]($value)`, which found no `is_string` to
+// dispatch to and rejected every `string[]` option. Inside each body the call
+// is the builtin again (emitBuiltin is asked before any defined function).
+
+function is_array(mixed $value): bool
+{
+    return \is_array($value);
+}
+
+function is_bool(mixed $value): bool
+{
+    return \is_bool($value);
+}
+
+function is_callable(mixed $value, bool $syntax_only = false, ?string &$callable_name = null): bool
+{
+    return \is_callable($value);
+}
+
+function is_float(mixed $value): bool
+{
+    return \is_float($value);
+}
+
+function is_double(mixed $value): bool
+{
+    return \is_float($value);
+}
+
+function is_int(mixed $value): bool
+{
+    return \is_int($value);
+}
+
+function is_integer(mixed $value): bool
+{
+    return \is_int($value);
+}
+
+function is_long(mixed $value): bool
+{
+    return \is_int($value);
+}
+
+function is_null(mixed $value): bool
+{
+    return \is_null($value);
+}
+
+function is_numeric(mixed $value): bool
+{
+    return \is_numeric($value);
+}
+
+function is_object(mixed $value): bool
+{
+    return \is_object($value);
+}
+
+function is_string(mixed $value): bool
+{
+    return \is_string($value);
+}

@@ -787,6 +787,34 @@ trait EmitLlvmCalls
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
+        // Codegen builtins with a stdlib twin, called by NAME: the arm is an
+        // ordinary call, which the builtin emitter answers inline. Fixed arity
+        // only (a spread would need the pack filled against their params).
+        if (!$hasSpread) {
+            foreach ($this->builtinTwinTot as $bname => $btot) {
+                if (isset($this->sigs->returnType[$bname])) { continue; }
+                $breq = $this->builtinTwinReq[$bname] ?? $btot;
+                if ($argc < $breq || $argc > $btot) { continue; }
+                $bh = \strtolower($this->builtinTwinRet[$bname] ?? '');
+                $brt = match ($bh) {
+                    'bool' => Type::bool_(), 'int' => Type::int_(), 'float' => Type::float_(),
+                    'string' => Type::string_(), default => Type::cell(),
+                };
+                $hitL = $this->ssa->allocLabel('dynf.bhit');
+                $nextL = $this->ssa->allocLabel('dynf.bnext');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($bname) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitNode(new \Compile\Mir\Call($bname, $iv->args, $brt));
+                $out .= $this->boxToCell($brt);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+        }
         if ($dynfSyms !== []) {
             $out .= $hasSpread
                 ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr)
@@ -1264,6 +1292,37 @@ trait EmitLlvmCalls
         $out .= '  ' . $stM . ' = and i64 ' . $raw . ", 281474976710655\n";
         $struct = $this->ssa->allocReg();
         $out .= '  ' . $struct . ' = inttoptr i64 ' . $stM . " to ptr\n";
+        // An INVOKABLE OBJECT in the slot (a class with __invoke — symfony's
+        // AllowedValueSubset handed through `mixed`) is not a closure struct:
+        // its slot 0 is a class descriptor, and calling through it as a code
+        // pointer crashed. An object carries RC_TAG_MAGIC at ptr-8 (a closure
+        // env does not), so it takes `->__invoke(...)` by runtime class. The
+        // callee is re-read for that call, so only a pure one qualifies.
+        $ck0 = $n->callee->kind;
+        if (($ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS)
+            && $this->anyClassHasMethod('__invoke')) {
+            $isObjT = $this->ssa->allocReg();
+            $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $objL = $this->ssa->allocLabel('erinv.obj');
+            $chkL = $this->ssa->allocLabel('erinv.objchk');
+            $cloL = $this->ssa->allocLabel('erinv.closure');
+            $out .= '  br i1 ' . $isObjT . ', label %' . $chkL . ', label %' . $cloL . "\n";
+            $out .= $chkL . ":\n";
+            $mp = $this->ssa->allocReg();
+            $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $struct . ", i64 -8\n";
+            $mw = $this->ssa->allocReg();
+            $out .= '  ' . $mw . ' = load i64, ptr ' . $mp . "\n";
+            $isRc = $this->ssa->allocReg();
+            $out .= '  ' . $isRc . ' = icmp eq i64 ' . $mw . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+            $out .= '  br i1 ' . $isRc . ', label %' . $objL . ', label %' . $cloL . "\n";
+            $out .= $objL . ":\n";
+            $mc = new \Compile\Mir\MethodCall_($n->callee, '__invoke', $n->args, Type::cell());
+            $out .= $this->emitNode($mc);
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $cloL . ":\n";
+        }
         // No boxing here: the uniform closure ABI ALREADY returns a scalar as a
         // tagged cell, so re-boxing turned a string cell into an int cell whose
         // payload was then dereferenced as a char* (segfault). The join unboxes
@@ -2962,7 +3021,23 @@ trait EmitLlvmCalls
 
     private function emitByRefArg(Node $a): string
     {
-        return $this->byRefAddrOf($a) ?? '';
+        $addr = $this->byRefAddrOf($a);
+        if ($addr !== null) { return $addr; }
+        // Not an lvalue — an OMITTED default (`?array &$m = null` called without
+        // it) arrives as the filled default expr. Back it with a throwaway slot,
+        // as {@see emitCall} does: answering '' left the previous argument's
+        // register as the "address", and the callee wrote through it
+        // (php-cs-fixer's `Preg::match($re, $s)` stored its matches at 0).
+        $tmp = $this->ssa->allocReg();
+        $out = '  ' . $tmp . " = alloca i64\n";
+        $out .= $this->emitNode($a);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**

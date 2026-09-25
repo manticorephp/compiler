@@ -1,0 +1,36 @@
+array(9) {
+  [0]=>
+  bool(false)
+  [1]=>
+  bool(true)
+  [2]=>
+  bool(true)
+  [3]=>
+  bool(true)
+  [4]=>
+  bool(true)
+  [5]=>
+  bool(true)
+  [6]=>
+  bool(true)
+  [7]=>
+  bool(false)
+  [8]=>
+  bool(true)
+}
+array(3) {
+  [0]=>
+  bool(true)
+  [1]=>
+  bool(true)
+  [2]=>
+  bool(false)
+}
+array(3) {
+  [0]=>
+  bool(false)
+  [1]=>
+  bool(false)
+  [2]=>
+  bool(true)
+}

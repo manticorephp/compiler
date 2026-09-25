@@ -224,6 +224,42 @@ final class Module
      */
     public array $declaredReturnTypes = [];
 
+    /**
+     * A fact InferTypes LEARNS about a function's locals: a local array holds
+     * cells because a by-ref callee appends a foreign element to it
+     * ({@see Passes\InferScans::scanByRefElemWiden}). It is read off the
+     * CALLEE's stores, never off the local's own types, so a later run cannot
+     * un-learn it. Kept on the module so the NEXT run starts from it: re-learned
+     * from scratch, every one of the dozen runs typed the local wrong first and
+     * then re-inferred the function and all its callers to correct it.
+     *
+     * NOT its sibling `forcedCellElemLocals` ({@see
+     * Passes\InferScans::scanLocalElemFromStores}): that one is derived from the
+     * local's stored values, which an early run sees less precisely — kept, it
+     * pinned a cell element a later run would not have. fn => local => true.
+     * @var array<string, array<string, bool>>
+     */
+    public array $inferByRefCellElemLocals = [];
+    /** @var array<string, array<string, bool>> by-ref CAPTURE locals that ride a cell, kept for the same reason ({@see Passes\InferScans::scanByRefCaptureWiden}) */
+    public array $inferByRefCaptureCellLocals = [];
+    /** @var array<string, Type> the unified type of each `global $x`, kept for the same reason ({@see Passes\InferScans::scanGlobalTypes}) */
+    public array $inferGlobalVarTypes = [];
+    /** @var array<string, array<string, bool>> the ELEMENT half of a by-ref capture disagreement: locals whose buffer rides cell elements on both frames ({@see Passes\InferScans::scanByRefCaptureWiden}) */
+    public array $inferByRefCaptureElemLocals = [];
+
+    /**
+     * Codegen builtins that ship a stdlib twin, by name: required and total
+     * parameter counts and the return type. Not functions of this module —
+     * a direct call stays inline — but a call by RUNTIME NAME
+     * ({@see Passes\EmitLlvmCalls::emitDynFnCall}) needs to know they exist.
+     * @var array<string, int>
+     */
+    public array $builtinTwinReq = [];
+    /** @var array<string, int> */
+    public array $builtinTwinTot = [];
+    /** @var array<string, string> the declared return HINT */
+    public array $builtinTwinRet = [];
+
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
     public function addGlobalCell(string $name, Node $default,

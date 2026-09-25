@@ -98,4 +98,18 @@ final class AliasOwn
         $k = $a->type->kind;
         return $k === Type::KIND_OBJ || $k === Type::KIND_STRING || $k === Type::KIND_CELL;
     }
+
+    /**
+     * Does a destination local co-own a STRING read out of a property or a
+     * static property? It must: the local's `.=` takes `__mir_str_append`'s
+     * in-place path whenever rc == 1, and a borrowed read left rc at the
+     * PROPERTY's 1 — `$sub = $this->subPath; $sub .= '/';` wrote into the
+     * property (symfony Finder's RecursiveDirectoryIterator::current grew
+     * `subPath` by one file name per iteration, then freed it under the object).
+     */
+    public static function strPropCoOwns(Node $v): bool
+    {
+        if ($v->type->kind !== Type::KIND_STRING) { return false; }
+        return $v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP;
+    }
 }

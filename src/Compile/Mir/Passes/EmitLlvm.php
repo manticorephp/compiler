@@ -372,6 +372,27 @@ final class EmitLlvm implements EmitVisitor
      *  `return` value ({@see Module::$includeSlots}). Read by the
      *  `require`/`include` builtin. @var array<string, string> */
     private array $includeSlots = [];
+    /**
+     * String literals of `$n` that name a builtin twin.
+     * @param array<string, int> $twins
+     * @param array<string, bool> $out
+     */
+    private function collectTwinNames(Node $n, array $twins, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STRING_CONST && $n instanceof \Compile\Mir\StringConst) {
+            $v = \strtolower(\ltrim($n->value, '\\'));
+            if (isset($twins[$v])) { $out[$v] = true; }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectTwinNames($c, $twins, $out); }
+    }
+
+    /** @var array<string, int> {@see Module::$builtinTwinReq} */
+    private array $builtinTwinReq = [];
+    /** @var array<string, int> */
+    private array $builtinTwinTot = [];
+    /** @var array<string, string> */
+    private array $builtinTwinRet = [];
 
     /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
      *  @var string[] */
@@ -653,6 +674,25 @@ final class EmitLlvm implements EmitVisitor
         $this->globalVarNames = $module->globalVarNames;
         $this->globalsViewNames = $module->globalsViewNames;
         $this->includeSlots = $module->includeSlots;
+        $this->builtinTwinReq = $module->builtinTwinReq;
+        $this->builtinTwinRet = $module->builtinTwinRet;
+        // Only a twin the program NAMES in a string literal can be the target of
+        // a call by name. Arming every one at every dynamic site inlined builtins
+        // the program never uses — `gc_collect_cycles` pulled the cycle
+        // collector into the module, and its possible-root buffering delayed
+        // destructors that php runs at once.
+        $this->builtinTwinTot = [];
+        if ($module->builtinTwinTot !== []) {
+            /** @var array<string, bool> $named */
+            $named = [];
+            foreach ($module->functions as $tf) {
+                if ($tf->isExtern) { continue; }
+                $this->collectTwinNames($tf->body, $module->builtinTwinTot, $named);
+            }
+            foreach ($named as $tn => $unused) {
+                $this->builtinTwinTot[$tn] = $module->builtinTwinTot[$tn];
+            }
+        }
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;
@@ -4600,6 +4640,9 @@ final class EmitLlvm implements EmitVisitor
         // A closure boxes as an OBJECT cell whose drop reaches the env
         // (`__mir_cell_drop` → `__mir_closure_release`), so the box co-owns it
         // like any object: rcRetainByType's closure arm, fresh ones transfer.
+        // A borrowed one (a `\Closure` param appended to a cell element) stored
+        // with no co-owner was freed by the caller's release of its temporary
+        // while the array still held it.
         if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
             && $k !== Type::KIND_CLOSURE && !$borrowedCellArray) {
             return '';
@@ -4777,6 +4820,21 @@ final class EmitLlvm implements EmitVisitor
      * `Command::run(\Closure $h)` retained `$h` and clobbered the commands
      * array header. Never rc-manage a closure.
      */
+    /** @var array<string, bool> */
+    private array $anyHasMethodMemo = [];
+
+    /** Does any class of the module (own or inherited) define `$method`? */
+    private function anyClassHasMethod(string $method): bool
+    {
+        if (isset($this->anyHasMethodMemo[$method])) { return $this->anyHasMethodMemo[$method]; }
+        $has = false;
+        foreach ($this->classes as $cname => $unused) {
+            if ($this->resolveMethodClass($cname, $method) !== '') { $has = true; break; }
+        }
+        $this->anyHasMethodMemo[$method] = $has;
+        return $has;
+    }
+
     private function isClosureClass(string $cls): bool
     {
         return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
@@ -4808,6 +4866,11 @@ final class EmitLlvm implements EmitVisitor
      * is passed by reference — true only for a by-ref param fed a plain
      * local (the address-of source). Shared by call / method / static call.
      */
+    /** A by-ref param fed a non-lvalue (an omitted default) still takes an
+     *  address: each call site's next arm backs it with a throwaway slot
+     *  ({@see EmitLlvmCalls::emitRefValueSlot}) and drops what the callee
+     *  wrote there. Routing it down the by-VALUE path handed the callee the
+     *  value as its address. */
     private function argIsByRef(array $mask, int $pi, Node $a): bool
     {
         return ($mask[$pi] ?? false) && $this->isByRefAddressable($a);

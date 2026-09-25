@@ -463,6 +463,13 @@ trait LowerClasses
             if ($td === null) { continue; }
             foreach ($td->methods as $tm) {
                 if (isset($excluded[$tn . '::' . $tm->name])) { continue; }
+                // An ABSTRACT trait method is a requirement, not a provider: php
+                // satisfies it with the inherited implementation. Registered as
+                // the class's own it shadowed the parent's body, and dispatch
+                // went to a symbol nobody emits — php-cs-fixer's fixers `use
+                // ConfigurableFixerTrait` (abstract getName) over AbstractFixer's.
+                if ($tm->isAbstract && $parent !== '' && isset($this->classTable[$parent])
+                    && isset($this->classTable[$parent]->methodMeta[$tm->name])) { continue; }
                 if (!isset($methodNames[$tm->name])) { $methodNames[$tm->name] = true; }
                 // A trait method mixed in is reported by PHP as declared on the
                 // USING class, not the trait — unlike an inherited one. The

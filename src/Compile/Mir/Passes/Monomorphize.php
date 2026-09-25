@@ -79,6 +79,8 @@ final class Monomorphize implements Pass
     /** @var string[] index-parallel to {@see $pendingRepointCalls}. */
     private array $pendingRepointNames = [];
 
+    public function __construct(private ?\Compile\Mir\AnalysisContext $ctx = null) {}
+
     public function name(): string { return self::NAME; }
 
     /** @return string[] */
@@ -175,7 +177,10 @@ final class Monomorphize implements Pass
         // Re-type: specialized bodies now have concrete params; rewritten
         // call sites resolve to the specialized sigs (and nested polymorphic
         // calls inside the clones become concrete for the next round).
-        $infer = new InferTypes();
+        // With the analysis context, so what a round moves — the clones, the
+        // repointed callers — is in the change set the next scoped pass reads.
+        if ($this->ctx !== null) { $this->ctx->refresh($module); }
+        $infer = new InferTypes(null, $this->ctx);
         $infer->run($module);
         return true;
     }

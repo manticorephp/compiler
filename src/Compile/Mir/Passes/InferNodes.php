@@ -1815,6 +1815,15 @@ trait InferNodes
             && $at->key->kind === Type::KIND_CELL) {
             $keyT = Type::cell();
         }
+        // `foreach ($a as &$v)` over CELL elements: the loop writes `$v`'s slot
+        // back into the element word at every step, so the slot IS the element's
+        // representation for the whole loop — every store boxes, like a local a
+        // loop re-kinds. Only the scalar merge box-backs covered it: `$v = static
+        // fn (…) => $v(…)` (php-cs-fixer FixerConfigurationResolver wrapping
+        // invokable allowed values) wrote a raw closure pointer into a cell array.
+        if ($node->byRef && $at->isArray() && $elem->kind === Type::KIND_CELL) {
+            $this->cellLoopLocals[$node->valueVar] = true;
+        }
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }

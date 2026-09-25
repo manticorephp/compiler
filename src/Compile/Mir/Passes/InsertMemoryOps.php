@@ -879,9 +879,10 @@ final class InsertMemoryOps implements Pass
         // the struct / enum / closure / Ffi\Ptr guards above are this caller's
         // own rc-eligibility test, which AliasOwn deliberately does not make.
         if (AliasOwn::coOwns($value)) { return true; }
-        // …and a STRING / OBJECT property read, which the emitter retains the same
-        // way ({@see AliasOwn::propReadCoOwns}).
-        if (AliasOwn::propReadCoOwns($value)) { return true; }
+        // …and a STRING / OBJECT property read and a STRING static-property read,
+        // which the emitter retains the same way ({@see AliasOwn::propReadCoOwns},
+        // {@see AliasOwn::strPropCoOwns}).
+        if (AliasOwn::propReadCoOwns($value) || AliasOwn::strPropCoOwns($value)) { return true; }
         // A string / cell bitwise op mints its result like a concat, on the
         // heap whatever the allocKind says ({@see \Compile\Mir\BitOp::mintsFresh}).
         if (\Compile\Mir\BitOp::mintsFresh($value)) { return true; }

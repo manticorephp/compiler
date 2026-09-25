@@ -967,4 +967,30 @@ final class Type
         }
         return $this->kind;
     }
+
+    /**
+     * Every field, spelled out: two types with the same exact string are
+     * interchangeable. {@see toString} is a golden-stable PRESENTATION — it
+     * prints a cell-keyed array as a `vec` and drops shapes — so a change test
+     * written against it took a real re-keying for no change at all.
+     */
+    public function exactString(): string
+    {
+        $s = $this->kind;
+        if ($this->class !== null) { $s .= '<' . (string)\strlen($this->class) . ':' . $this->class . '>'; }
+        if ($this->numeric) { $s .= '#n'; }
+        if ($this->declared) { $s .= '#d'; }
+        if ($this->key !== null) { $s .= '{k' . $this->key->exactString() . '}'; }
+        if ($this->element !== null) { $s .= '{e' . $this->element->exactString() . '}'; }
+        foreach ($this->atoms as $a) { $s .= '{a' . $a->exactString() . '}'; }
+        foreach ($this->typeArgs as $ta) { $s .= '{t' . $ta->exactString() . '}'; }
+        if ($this->fields !== null) {
+            $s .= '{f';
+            foreach ($this->fields as $fk => $ft) {
+                $s .= (string)\strlen($fk) . ':' . $fk . (isset($this->nullableFields[$fk]) ? '?' : '') . $ft->exactString();
+            }
+            $s .= '}';
+        }
+        return $s;
+    }
 }

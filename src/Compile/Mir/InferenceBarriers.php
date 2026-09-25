@@ -54,31 +54,10 @@ final class InferenceBarriers
     private function scanNode(Node $node): void
     {
         $this->nodes = $this->nodes + 1;
+        // Dispatch (dynamic or static), `new $cls`, dynamic and static
+        // properties, closures and indirect calls are EDGES in
+        // {@see DependencyIndex}; only what it cannot see stays a barrier.
         switch ($node->kind) {
-            case Node::KIND_INVOKE:
-                $this->add('indirect-call');
-                break;
-            case Node::KIND_METHOD_CALL:
-                $this->add('method-dispatch');
-                break;
-            case Node::KIND_STATIC_CALL:
-                $this->add('static-dispatch');
-                break;
-            case Node::KIND_NEW_DYN_OBJ:
-                $this->add('dynamic-class');
-                break;
-            case Node::KIND_DYN_PROP:
-            case Node::KIND_STORE_DYN_PROP:
-                $this->add('dynamic-property');
-                break;
-            case Node::KIND_STATIC_PROP:
-            case Node::KIND_STORE_STATIC_PROP:
-            case Node::KIND_STATIC_LOCAL_DECL:
-                $this->add('shared-state');
-                break;
-            case Node::KIND_CLOSURE:
-                $this->add('closure-capture');
-                break;
             case Node::KIND_REF_BIND:
             case Node::KIND_REF_ALIAS:
             case Node::KIND_REF_ADDR:

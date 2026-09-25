@@ -646,8 +646,8 @@ trait LowerFns
             $methE = $this->elemValue($els[1]);
             if ($methE->kind !== 'StringLiteral') { return null; }
             $m = $this->strLitValue($methE);
-            if ($recvE->kind === 'StringLiteral') {
-                $cls = \ltrim($this->strLitValue($recvE), '\\');
+            $cls = $this->callableClassOf($recvE);
+            if ($cls !== null) {
                 return $this->synthStaticClosure($cls, $m, $cls);
             }
             return $this->synthMethodClosure($this->lowerExpr($recvE), $m);

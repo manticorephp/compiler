@@ -154,6 +154,15 @@ trait EmitLlvmObjects
     private function emitNewDynObj(\Compile\Mir\NewDynObj $n): string
     {
         $out = $this->emitNode($n->classExpr);
+        // A name read off an erased channel (`foreach ($static_list as $class)
+        // { new $class(); }` — php-cs-fixer's registerBuiltInFixers) is a
+        // string CELL, and strcmp dereferenced its tag bits. The string unbox
+        // is the identity on a raw pointer ({@see unboxCellArg}).
+        $ck = $n->classExpr->type->kind;
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType(Type::string_());
+        }
         $out .= $this->coerceToI64();
         $nameI = $this->lastValue;
         $namePtr = $this->ssa->allocReg();
@@ -499,7 +508,7 @@ trait EmitLlvmObjects
                     $cellBoxTypes[] = $a->type;
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
-                } elseif (($mask[$ai + 1] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
+                } elseif ($mask[$ai + 1] ?? false) {
                     $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai);
                     $refSlotDrops .= $this->lastRefSlotDrop;
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -5853,7 +5862,7 @@ trait EmitLlvmObjects
             } elseif ($this->argIsByRef($mask, $ai, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
-            } elseif (($mask[$ai] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
+            } elseif ($mask[$ai] ?? false) {
                 $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai);
                 $argList .= 'i64 ' . $this->lastValue;
                 $refSlotDrops .= $this->lastRefSlotDrop;
@@ -7122,7 +7131,7 @@ trait EmitLlvmObjects
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
-            } elseif (($mask[$ai + 1] ?? false) && $a->kind !== Node::KIND_LOAD_LOCAL) {
+            } elseif ($mask[$ai + 1] ?? false) {
                 $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai);
                 $argList .= ', i64 ' . $this->lastValue;
                 $refSlotDrops .= $this->lastRefSlotDrop;

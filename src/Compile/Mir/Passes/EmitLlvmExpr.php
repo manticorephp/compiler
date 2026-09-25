@@ -759,6 +759,42 @@ trait EmitLlvmExpr
     }
 
     /**
+     * A cell reaching an `int` parameter or return: php's coercive typing, not
+     * a bare unbox. A STRING cell parses (`int $min` handed Finder's `'1'` depth
+     * target read the string's ADDRESS), a BOOL is 0/1, and every other word
+     * takes the plain unbox it always did — deliberately not {@see
+     * taggedToIntRuntime}, which reads an untagged word as a double, and a raw
+     * int still reaches cell slots ({@see \Compile\Mir\Passes\EmitLlvm::plausiblePtrIr}).
+     */
+    private function cellToIntArgRuntime(): string
+    {
+        $out  = "\ndefine i64 @__manticore_cell_to_int_arg(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  br i1 %istag, label %tagged, label %plain\n";
+        $out .= "tagged:\n";
+        $out .= "  %ts = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %ts, 15\n";
+        $out .= "  switch i64 %nib, label %plain [\n";
+        $out .= "    i64 2, label %asbool\n";
+        $out .= "    i64 4, label %asstr\n";
+        $out .= "  ]\n";
+        $out .= "asbool:\n";
+        $out .= "  %bb = and i64 %v, 1\n";
+        $out .= "  ret i64 %bb\n";
+        $out .= "asstr:\n";
+        $out .= "  %sp = and i64 %v, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= "  %sptr = inttoptr i64 %sp to ptr\n";
+        $out .= "  %sv = call i64 @__mir_str_to_int(ptr %sptr)\n";
+        $out .= "  ret i64 %sv\n";
+        $out .= "plain:\n";
+        $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
+        $out .= "  ret i64 %i\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
      * NaN-boxed cell → double (numeric context for float arithmetic / `/`).
      * int → sitofp, bool → 0/1, null → 0.0, string → strtod, float → its bits,
      * array → non-empty?1:0. Mirrors {@see taggedToIntRuntime} but yields a
@@ -905,6 +941,11 @@ trait EmitLlvmExpr
      *  elements (a `vec[vec[int]]` is 5 | (EK_INT << 4)). A raw inner array
      *  can't be recovered from a tag, so the chain carries every level. */
     private const EK_ARRAY  = 5;
+    /** The static kind is unknown — the array came through a CELL — so each
+     *  element is decoded by its BUFFER's hint (`__mir_elem_decode`). Reading
+     *  those words as cells (EK_CELL) compared a raw-hinted `['k' => true]`
+     *  unequal to itself. */
+    private const EK_HINT   = 6;
     /** Not a representation the array compare runtime can normalize. */
     private const EK_NONE   = -1;
 
@@ -969,6 +1010,22 @@ trait EmitLlvmExpr
      * double's bits are re-boxed through box_float so a signaling NaN can't
      * collide with the tagged range (0xFFF1..0xFFF8).
      */
+    /** `%<out> = <raw> as a cell`: by the chain, or by `%<arr>`'s buffer hint
+     *  when the chain is {@see EK_HINT}. */
+    private static function elemToCellByChain(string $arr, string $raw, string $ek, string $out): string
+    {
+        return '  %' . $out . 'h = icmp eq i64 %' . $ek . ', ' . (string)self::EK_HINT . "\n"
+            . '  br i1 %' . $out . 'h, label %' . $out . 'dec, label %' . $out . "chn\n"
+            . $out . "dec:\n"
+            . '  %' . $out . 'd = call i64 @__mir_elem_decode(ptr %' . $arr . ', i64 %' . $raw . ")\n"
+            . '  br label %' . $out . "j\n"
+            . $out . "chn:\n"
+            . '  %' . $out . 'c = call i64 @__mir_elem_to_cell(i64 %' . $raw . ', i64 %' . $ek . ")\n"
+            . '  br label %' . $out . "j\n"
+            . $out . "j:\n"
+            . '  %' . $out . ' = phi i64 [ %' . $out . 'd, %' . $out . 'dec ], [ %' . $out . 'c, %' . $out . "chn ]\n";
+    }
+
     private function elemToCellRuntime(): string
     {
         $out  = "\ndefine i64 @__mir_elem_to_cell(i64 %v, i64 %ek) {\nentry:\n";
@@ -1112,8 +1169,7 @@ trait EmitLlvmExpr
                 $out .= "recdiff:\n  ret i64 %rc\n";
             }
             $out .= "viacell:\n";
-            $out .= "  %va = call i64 @__mir_elem_to_cell(i64 %rawa, i64 %eka)\n";
-            $out .= "  %vb = call i64 @__mir_elem_to_cell(i64 %rawb, i64 %ekb)\n";
+            $out .= self::elemToCellByChain('a', 'rawa', 'eka', 'va') . self::elemToCellByChain('b', 'rawb', 'ekb', 'vb');
             if ($eq) {
                 $out .= "  %e = call i64 @__manticore_tagged_loose_eq(i64 %va, i64 %vb)\n";
                 $out .= "  %eb = icmp ne i64 %e, 0\n";
@@ -1175,8 +1231,7 @@ trait EmitLlvmExpr
         $out .= "  %re = call i1 @__mir_array_strict_eq(ptr %reca, i64 %eka1, ptr %recb, i64 %ekb1)\n";
         $out .= "  br i1 %re, label %cont, label %no\n";
         $out .= "viacell:\n";
-        $out .= "  %va = call i64 @__mir_elem_to_cell(i64 %rawa, i64 %eka)\n";
-        $out .= "  %vb = call i64 @__mir_elem_to_cell(i64 %rawb, i64 %ekb)\n";
+        $out .= self::elemToCellByChain('a', 'rawa', 'eka', 'va') . self::elemToCellByChain('b', 'rawb', 'ekb', 'vb');
         $out .= "  %veq = call i64 @__manticore_tagged_strict_eq(i64 %va, i64 %vb)\n";
         $out .= "  %veqb = icmp ne i64 %veq, 0\n";
         $out .= "  br i1 %veqb, label %cont, label %no\n";
@@ -1292,10 +1347,10 @@ trait EmitLlvmExpr
         $out .= "  %bap = and i64 %b, $mask\n";
         $out .= "  %bapp = inttoptr i64 %bap to ptr\n";
         if ($eq) {
-            $out .= "  %are = call i1 @__mir_array_loose_eq(ptr %aapp, i64 0, ptr %bapp, i64 0)\n";
+            $out .= "  %are = call i1 @__mir_array_loose_eq(ptr %aapp, i64 6, ptr %bapp, i64 6)\n";
             $out .= "  %arez = zext i1 %are to i64\n  ret i64 %arez\n";
         } else {
-            $out .= "  %arc = call i64 @__mir_array_compare(ptr %aapp, i64 0, ptr %bapp, i64 0)\n";
+            $out .= "  %arc = call i64 @__mir_array_compare(ptr %aapp, i64 6, ptr %bapp, i64 6)\n";
             $out .= "  ret i64 %arc\n";
         }
         $out .= "arrmix:\n";
@@ -1578,7 +1633,7 @@ trait EmitLlvmExpr
         $out .= "  %apap = inttoptr i64 %apa to ptr\n";
         $out .= "  %apb = and i64 %b, 281474976710655\n";
         $out .= "  %apbp = inttoptr i64 %apb to ptr\n";
-        $out .= "  %ase = call i1 @__mir_array_strict_eq(ptr %apap, i64 0, ptr %apbp, i64 0)\n";
+        $out .= "  %ase = call i1 @__mir_array_strict_eq(ptr %apap, i64 6, ptr %apbp, i64 6)\n";
         $out .= "  %asez = zext i1 %ase to i64\n  ret i64 %asez\n";
         $out .= "chkstr2:\n";
         $out .= "  %isstr = icmp eq i64 %ta, 4\n";
@@ -4934,11 +4989,36 @@ trait EmitLlvmExpr
         // slipped through. Routing through the tagged runtime is correct for any
         // payload (int/float, and a string cell keeps php's juggling). Restrict
         // to a numeric raw side so a cell-vs-array/object identity is untouched.
-        if ($lk === Type::KIND_CELL && ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT)) {
+        //
+        // An ORDERING against a STRING or BOOL takes the same road: eq/ne already
+        // returned through the tagged branch above, but `$c < "\x80"` fell to
+        // the raw-carrier compare and answered false for every byte — polyfill-
+        // mbstring's `$s[$i] < "\x80" ? 1 : $ulenMask[…]` then stepped by 0
+        // and spun forever growing the string.
+        $ordJug = !$isEq && !$isNe;
+        $rNum = $rk === Type::KIND_INT || $rk === Type::KIND_FLOAT
+            || ($ordJug && ($rk === Type::KIND_STRING || $rk === Type::KIND_BOOL));
+        $lNum = $lk === Type::KIND_INT || $lk === Type::KIND_FLOAT
+            || ($ordJug && ($lk === Type::KIND_STRING || $lk === Type::KIND_BOOL));
+        // An ARRAY against a cell, eq/ne: the same road, with the array tagged
+        // SHALLOWLY (never rebuilt) so the runtime compares by value through its
+        // hint. The carriers were compared as pointers — php-cs-fixer's
+        // `$this->configuration['include'] !== $defaults` was true for equal
+        // arrays and every fixer refused its own default configuration.
+        if (($isEq || $isNe) && $lk === Type::KIND_CELL && $rk === Type::KIND_ARRAY) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $chunks[] = $this->shallowBoxToCell($c->right->type);
+            $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
+        } elseif (($isEq || $isNe) && $rk === Type::KIND_CELL && $lk === Type::KIND_ARRAY) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $chunks[] = $this->shallowBoxToCell($c->left->type);
+            $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
+        }
+        if ($lk === Type::KIND_CELL && $rNum) {
             $this->lastValue = $r; $this->lastValueType = $rt;
             $chunks[] = $this->boxToCell($c->right->type);
             $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
-        } elseif ($rk === Type::KIND_CELL && ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT)) {
+        } elseif ($rk === Type::KIND_CELL && $lNum) {
             $this->lastValue = $l; $this->lastValueType = $lt;
             $chunks[] = $this->boxToCell($c->left->type);
             $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
@@ -5299,7 +5379,7 @@ trait EmitLlvmExpr
     /**
      * Unbox the cell currently in lastValue (i64) to the representation a
      * concrete target type `$pt` expects: bool → `& 1`, int → unbox_int,
-     * array/string/object → strip the NaN tag to the payload pointer. Any other
+     * array/string/object/closure → strip the NaN tag to the payload pointer. Any other
      * kind (cell/float/unknown/…) is left as-is. Used at every cell→concrete
      * boundary (call arg, `return`): a cell carries tag bits a typed consumer
      * would mis-read (a boxed `false` is non-zero → truthy; a boxed array
@@ -5339,8 +5419,10 @@ trait EmitLlvmExpr
             return $out;
         }
         if ($pk === Type::KIND_INT) {
+            $this->rt->needsCellToIntArg = true;
+            $this->rt->needsStrtol = true;
             $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
+            $out = '  ' . $r . ' = call i64 @__manticore_cell_to_int_arg(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;
@@ -5394,7 +5476,10 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
-        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ) {
+        // A CLOSURE is boxed like an object ({@see boxToCell}): left out, a
+        // `\Closure` return or argument read out of a cell element handed the
+        // tagged word on as the closure pointer.
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;

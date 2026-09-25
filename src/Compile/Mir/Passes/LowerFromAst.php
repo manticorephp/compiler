@@ -1204,7 +1204,24 @@ final class LowerFromAst implements Pass
             // signature has no way to reconstruct.
             if (isset($this->externMethodSyms[$name])) { continue; }
             if (isset($this->fnDecls[$name])) { continue; }
-            if ($this->isCodegenBuiltin($name)) { continue; }
+            // A codegen builtin's stdlib twin is still DECLARED — not
+            // registered for direct calls (those stay inline, emitBuiltin is
+            // asked first), but present so a call by RUNTIME NAME finds a
+            // symbol: `self::VALIDATION_FUNCTIONS[$type]($value)` reached no
+            // `is_string` and symfony OptionsResolver rejected every option.
+            if ($this->isCodegenBuiltin($name)) {
+                $req = 0;
+                foreach ($extDecl->params as $bp) {
+                    if (!($bp->default instanceof \Parser\Ast\Expr) && !$bp->variadic) { $req = $req + 1; }
+                }
+                $module->builtinTwinReq[$name] = $req;
+                $module->builtinTwinTot[$name] = \count($extDecl->params);
+                // The HINT, not a lowered Type: lowering a type hint registers
+                // what it names, and this runs for every builtin twin in the
+                // stdlib whether or not the program ever calls one by name.
+                $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
+                continue;
+            }
             $this->fnDecls[$name] = $extDecl;
             // Register the bare-name alias for a namespaced import, exactly as
             // the in-source pre-pass does, so an unqualified `strncmp()` in the
@@ -3249,14 +3266,37 @@ final class LowerFromAst implements Pass
         $m = $this->strLitValue($methE);
         $args = [];
         foreach ($astArgs as $a) { $args[] = $this->lowerExpr($a); }
-        if ($recvE->kind === 'StringLiteral') {
-            $cls = \ltrim($this->strLitValue($recvE), '\\');
+        $cls = $this->callableClassOf($recvE);
+        if ($cls !== null) {
             return new StaticCall_($cls, $m, $args, Type::unknown(), $cls);
         }
         return new MethodCall_($this->lowerExpr($recvE), $m, $args, Type::unknown());
     }
 
     private function elemValue(\Parser\Ast\ArrayElement $e): \Parser\Ast\Expr { return $e->value; }
+
+    /**
+     * The class a callable array's RECEIVER names at compile time, or null for
+     * an object receiver: `'C'`, `C::class`, `self::class`, `parent::class`,
+     * `__CLASS__`. Only the string literal was recognised, so `[__CLASS__, 'm']`
+     * (symfony's polyfill-mbstring title case) and `[self::class, 'm']` became
+     * METHOD closures over a class-name string, and the callback handed back
+     * garbage.
+     */
+    private function callableClassOf(\Parser\Ast\Expr $e): ?string
+    {
+        if ($e->kind === 'StringLiteral') { return \ltrim($this->strLitValue($e), '\\'); }
+        if ($e->kind === 'StaticAccess' && \strtolower($this->staticAccessName($e)) === 'class') {
+            return \ltrim($this->resolveStaticClass($this->staticAccessClass($e)), '\\');
+        }
+        if ($e->kind === 'MagicConstant' && $this->currentLowerClass !== ''
+            && \strtoupper($this->magicConstName($e)) === '__CLASS__') {
+            return $this->currentLowerClass;
+        }
+        return null;
+    }
+
+    private function magicConstName(\Parser\Ast\MagicConstant $e): string { return $e->name; }
 
     private function lowerClone(\Parser\Ast\CloneExpr $expr): Node
     {
@@ -4045,8 +4085,9 @@ final class LowerFromAst implements Pass
             $methE = $this->elemValue($els[1]);
             if ($methE->kind !== 'StringLiteral') { return null; }
             $m = $this->strLitValue($methE);
-            if ($recvE->kind === 'StringLiteral') {
-                return ['kind' => 'arr_static', 'class' => \ltrim($this->strLitValue($recvE), '\\'), 'method' => $m];
+            $rcls = $this->callableClassOf($recvE);
+            if ($rcls !== null) {
+                return ['kind' => 'arr_static', 'class' => $rcls, 'method' => $m];
             }
             if ($recvE->kind === 'Variable') {
                 // `[$o, "m"]` — the receiver is read back from the array slot at
@@ -5438,7 +5479,16 @@ final class LowerFromAst implements Pass
      */
     private function lowerInstanceof(\Parser\Ast\InstanceofExpr $e): Node
     {
-        return new Instanceof_($this->lowerExpr($e->operand), \ltrim($e->class, '\\'));
+        // `instanceof self|static|parent` names a class the way `new self` does.
+        // Left literal, the test compared against a class called "self", and the
+        // narrowing it drives typed the operand `obj<self>` — so symfony Finder's
+        // `if ($children instanceof self) { $children->rootPath = …; }` wrote
+        // into no slot, and every nested path doubled its directory.
+        $low = \strtolower($e->class);
+        $cls = ($low === 'self' || $low === 'static' || $low === 'parent')
+            ? $this->resolveStaticClass($e->class)
+            : \ltrim($e->class, '\\');
+        return new Instanceof_($this->lowerExpr($e->operand), $cls);
     }
 
     /**
