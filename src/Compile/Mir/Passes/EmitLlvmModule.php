@@ -1052,6 +1052,10 @@ trait EmitLlvmModule
                     // `$f(mk())` with `mk(): mixed` hands a bare-`array` param a
                     // tagged word, and the body's COW dereferenced the tag bits.
                     $bodySink->write($this->arrayHintedEntryMask($pp, $slot));
+                    if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $pp, true)) {
+                        $copiedParams[$cn] = true;
+                        $bodySink->write($this->paramEntryCopyIr($pp, $slot));
+                    }
                 }
             }
         } else {
@@ -1107,27 +1111,7 @@ trait EmitLlvmModule
                 // released at scope exit ({@see VecCopyOnAssign::paramCopiedOnEntry}).
                 if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, false)) {
                     $copiedParams[$p->name] = true;
-                    $ld = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $ld . ' = load i64, ptr ' . $slot . "\n");
-                    $lp = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n");
-                    $cp = $this->ssa->allocReg();
-                    if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
-                        // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so
-                        // a tag-aware copy separates each boxed-array element (a
-                        // nested `$x[0][] = …` on a het `[[1,2], "s"]` would else
-                        // share the inner array). Safe only here — raw vecs can't
-                        // be tag-inspected (a large/neg int could look boxed).
-                        $bodySink->write('  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n");
-                    } else {
-                        $depth = $this->arrayCopyDepth($p->type);
-                        if ($depth < 0) { $depth = 0; }
-                        $bodySink->write('  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
-                              . ', i64 ' . (string)$depth . ")\n");
-                    }
-                    $ci = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n");
-                    $bodySink->write('  store i64 ' . $ci . ', ptr ' . $slot . "\n");
+                    $bodySink->write($this->paramEntryCopyIr($p, $slot));
                 }
             }
         }
@@ -2553,6 +2537,39 @@ trait EmitLlvmModule
      * pointer (every userspace address fits the 48 payload bits). Not for a
      * param PROMOTED to a cell, whose tag is the point.
      */
+    /**
+     * The prologue COPY of a by-value array param the body mutates in place
+     * ({@see \Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry}) — a named
+     * function's and a closure's alike, so an `unset($a[$k])` / `$a[] = …` on a
+     * closure param no longer reaches the caller's buffer.
+     */
+    private function paramEntryCopyIr(\Compile\Mir\Param $p, string $slot): string
+    {
+        $out = '';
+        $ld = $this->ssa->allocReg();
+        $out .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
+        $lp = $this->ssa->allocReg();
+        $out .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
+        $cp = $this->ssa->allocReg();
+        if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
+            // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so
+            // a tag-aware copy separates each boxed-array element (a
+            // nested `$x[0][] = …` on a het `[[1,2], "s"]` would else
+            // share the inner array). Safe only here — raw vecs can't
+            // be tag-inspected (a large/neg int could look boxed).
+            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
+        } else {
+            $depth = $this->arrayCopyDepth($p->type);
+            if ($depth < 0) { $depth = 0; }
+            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+                  . ', i64 ' . (string)$depth . ")\n";
+        }
+        $ci = $this->ssa->allocReg();
+        $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
+        $out .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
+        return $out;
+    }
+
     private function arrayHintedEntryMask(\Compile\Mir\Param $p, string $slot): string
     {
         if ($p->byRef || !$p->arrayHinted || $p->type->kind === Type::KIND_CELL) { return ''; }

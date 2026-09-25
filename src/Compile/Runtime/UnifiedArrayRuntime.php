@@ -1379,10 +1379,20 @@ final class UnifiedArrayRuntime
             $doarr->and_($doarr->ptrtoint($icp, Type::i64()), Value::int(Type::i64(), 281474976710655)),
             Value::int(Type::i64(), -2533274790395904),
         );
+        // Written back at its POSITION, into the fresh copy's own slot. `set_int`
+        // took the position for an INT KEY: on a string-keyed (hashed) array it
+        // APPENDED a new entry holding another array, which this same walk then
+        // visited — `clone` of an object whose `array` property held an array
+        // under a string key (symfony OptionsResolver::$defaults) never returned.
         $bc2 = $doarr->load(Type::ptr(), $copySlot);
-        $nc = $doarr->call('__mir_array_set_int', Type::ptr(), [$bc2, $bi, $iv]);
-        $doarr->store($nc, $copySlot);
-        $doarr->br($cont);
+        $pk = $fn->block('cc_packed');
+        $hs = $fn->block('cc_hashed');
+        $cflags = $doarr->load(Type::i64(), $this->hdr($doarr, $bc2, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $doarr->brIf($doarr->icmp('ne', $this->hashedBit($doarr, $cflags), Value::int(Type::i64(), 0)), $hs, $pk);
+        $pk->store($iv, $this->packedSlot($pk, $bc2, $bi));
+        $pk->br($cont);
+        $hs->store($iv, $this->entryAddr($hs, $bc2, $bi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $hs->br($cont);
 
         $cont->store($cont->add($cont->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
         $cont->br($head);
@@ -4400,6 +4410,25 @@ final class UnifiedArrayRuntime
         return $b->inttoptr($b->and_($ai, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
     }
 
+    /**
+     * The hint an element READ decodes by: {@see elemHint}, except that a
+     * buffer owning raw closure envs ({@see MemoryAbi::ARRAY_REPR_CLO}, no
+     * hint) hands each word out as the OBJECT cell it is. An erased reader —
+     * `array_values`' `foreach ($arr as $v) { $out[] = $v; }` — then co-owns
+     * it by tag (`__mir_cell_retain` → `__mir_closure_retain`) instead of
+     * copying an uncounted word the source gives back when it dies. Decode
+     * only: the ownership walks never read this (an OBJ drop would release an
+     * env through the object path).
+     */
+    private function decodeHint(Block $b, Value $arr): Value
+    {
+        $flags = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $desc = $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        return $b->select($b->icmp('eq', $desc, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_CLO)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_OBJ),
+            $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK)));
+    }
+
     /** The element-kind hint of `$arr`'s flags word, still shifted. */
     private function elemHint(Block $b, Value $arr): Value
     {
@@ -4429,7 +4458,7 @@ final class UnifiedArrayRuntime
         $dec = $fn->block('dec');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $dec);
         $asis->ret($v);
-        $dec->ret($dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->elemHint($dec, $arr)]));
+        $dec->ret($dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->decodeHint($dec, $arr)]));
     }
 
     /**

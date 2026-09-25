@@ -1830,6 +1830,45 @@ trait EmitLlvmArrays
         return $this->rcReleaseReg($word, $flavor);
     }
 
+    /**
+     * Hand back (in lastValue, as a ptr) the buffer `$a` names, SEPARATED from
+     * every other holder at every level, top-down: the root copy-on-writes and
+     * is written back, then each nested element is re-read out of its now
+     * private parent, copy-on-writes and is written back into it. Bottom-up
+     * does not work — an inner buffer held once by a SHARED parent has rc 1,
+     * so its own COW keeps it and the write lands in the other holder too.
+     */
+    private function emitSeparatedArray(Node $a, bool $asCell): string
+    {
+        $out = '';
+        if ($a->kind === Node::KIND_ARRAY_ACCESS) {
+            $out .= $this->emitSeparatedArray($a->array, $a->array->type->kind === Type::KIND_CELL);
+        }
+        $out .= $this->emitNode($a);
+        $out .= $this->arrayBaseToPtr($a->type);
+        $cur = $this->lastValue;
+        // An ABSENT level stays absent: writing a copy of nothing back would
+        // create the key php's unset never creates.
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca ptr\n";
+        $out .= '  store ptr ' . $cur . ', ptr ' . $slot . "\n";
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $cur . ", null\n";
+        $doL = $this->ssa->allocLabel('sep.do');
+        $endL = $this->ssa->allocLabel('sep.end');
+        $out .= '  br i1 ' . $isNull . ', label %' . $endL . ', label %' . $doL . "\n" . $doL . ":\n";
+        $cow = $this->ssa->allocReg();
+        $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($a->type, $a) . '(ptr ' . $cur . ")\n";
+        $out .= $this->vecWriteBack($a, $cow, $asCell);
+        $out .= '  store ptr ' . $cow . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n" . $endL . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -1838,8 +1877,16 @@ trait EmitLlvmArrays
         // read path in emitArrayAccessUnified). Without this the store inttoptr's
         // the boxed bits → SIGSEGV in __mir_array_append/set.
         $baseCell = $se->array->type->kind === Type::KIND_CELL;
-        $out = $this->emitNode($se->array);
-        $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+        // A NESTED base is separated top-down ({@see emitSeparatedArray}): its
+        // own COW alone kept an inner buffer that a SHARED parent held once, so
+        // `$cp = $d; $d['a']['b']['c'] = 9;` wrote into `$cp` as well.
+        $sepNested = $se->array->kind === Node::KIND_ARRAY_ACCESS && $this->unsetBaseIsWritable($se->array);
+        if ($sepNested) {
+            $out = $this->emitSeparatedArray($se->array, $baseCell);
+        } else {
+            $out = $this->emitNode($se->array);
+            $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+        }
         $arrPtr = $this->lastValue;
         // COW shared buffers (PHP array value semantics) before mutating. The
         // clone co-owns every key / value it now shares with the source, so the
@@ -1856,7 +1903,7 @@ trait EmitLlvmArrays
             $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $arrPtr . ")\n";
             $out .= $this->vecWriteBack($se->array, $cow, $baseCell);
             $arrPtr = $cow;
-        } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
+        } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS && !$sepNested) {
             $cow = $this->ssa->allocReg();
             $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $arrPtr . ")\n";
             $arrPtr = $cow;

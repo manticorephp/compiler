@@ -746,7 +746,13 @@ final class MemoryAbi
      * \Compile\Runtime\UnifiedArrayRuntime::emitCloStamp}), and by a closure
      * literal. Dropped / co-owned through `__mir_closure_release` /
      * `__mir_closure_retain`, which leave every non-env word alone. Only read
-     * while the hint is 0: a described buffer is owned by its hint. */
+     * while the hint is 0: a described buffer is owned by its hint.
+     *
+     * ⚠ "Non-env" is decided by a HEURISTIC, not a type: the helpers read the
+     * word at `p-32` and compare it with {@see CLOSURE_TAG_MAGIC}. A string's
+     * `hash@-32` or the allocator bytes before an array are read too; a false
+     * positive needs those 8 bytes to equal the exact magic. Words that are no
+     * plain heap address (null, < 64 KiB, NaN-tagged) are refused unread. */
     public const ARRAY_REPR_CLO  = 10;
 
     /**

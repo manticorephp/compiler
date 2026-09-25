@@ -428,6 +428,26 @@ trait EmitLlvmMemory
         foreach (\Compile\Mir\VecCopyOnAssign::mutatedLocals($n) as $name => $ignored) {
             $this->frame->mutatedVecLocals[$name] = true;
         }
+        $this->collectByRefArrayArgs($n);
+    }
+
+    /**
+     * An array local handed to a user function's BY-REF parameter is mutated
+     * too — the callee writes (or unsets) through the caller's slot, so
+     * `$copy = $a; f($a);` must have separated `$copy` first. The static scan
+     * cannot see it (it has no signatures); the emitter can.
+     */
+    private function collectByRefArrayArgs(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $refs = $this->sigs->refParams[$n->function] ?? [];
+            foreach ($n->args as $i => $a) {
+                if (($refs[$i] ?? false) && $a->kind === Node::KIND_LOAD_LOCAL && $a->type->isArray()) {
+                    $this->frame->mutatedVecLocals[$a->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectByRefArrayArgs($c); }
     }
     /**
      * Whether php declares $fn's FIRST parameter by reference over an array,

@@ -62,6 +62,7 @@ final class VecCopyOnAssign
     /**
      * Whether `$p` is COPIED on function entry: a by-value `array`-hinted param
      * the body element-stores into (`$p[$k] = …`, `$p[] = …`, `$p[0][] = …`)
+     * or unsets an entry of (`unset($p[$k])`)
      * takes a private copy so the store never reaches the caller's buffer
      * ({@see \Compile\Mir\Passes\EmitLlvmModule}). That copy is a fresh rc=1
      * buffer the FRAME owns, so the same answer decides OWNERSHIP too: the
@@ -69,12 +70,12 @@ final class VecCopyOnAssign
      * ({@see \Compile\Mir\Passes\InsertMemoryOps}, {@see
      * \Compile\Mir\Passes\EmitLlvmMemory::initRcObjSlots}). Without the release
      * every call leaked the copy — `InferTypes` alone stranded a map per
-     * mutated `array` param per call. A closure or generator prologue copies
-     * nothing, so neither does this.
+     * mutated `array` param per call. A closure prologue copies the same way
+     * (a closure CAPTURE is no array-hinted param); a generator's copies nothing.
      */
     public static function paramCopiedOnEntry(FunctionDef $fn, Param $p, bool $isClosure): bool
     {
-        if ($isClosure || $fn->isGenerator) { return false; }
+        if ($fn->isGenerator) { return false; }
         if ($p->byRef || !$p->arrayHinted) { return false; }
         return self::storesInto($fn->body, $p->name);
     }
@@ -90,6 +91,17 @@ final class VecCopyOnAssign
             }
             if ($base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name) {
                 return true;
+            }
+        }
+        // `unset($p[$k])` / `unset($p[$a][$b])` removes an entry IN PLACE —
+        // the same write as a store, and without the entry copy it reached
+        // the caller's buffer (`f($q)` took `'a'` out of the caller's `$q`).
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach ($n->targets as $t) {
+                if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
+                $base = $t;
+                while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
+                if ($base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name) { return true; }
             }
         }
         foreach (Walk::children($n) as $c) {

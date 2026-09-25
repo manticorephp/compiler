@@ -5171,8 +5171,19 @@ trait EmitLlvmObjects
                     $out .= $this->emitMethodCall($mc);
                 } elseif ($aa->array->type->kind !== Type::KIND_STRING) {
                     $baseCell = $aa->array->type->kind === Type::KIND_CELL;
-                    $out .= $this->emitNode($aa->array);
-                    $out .= $this->arrayBaseToPtr($aa->array->type);
+                    // Separate every SHARED level first, top-down, exactly as a
+                    // write must: the unset below deletes in place, so
+                    // `$copy = $this->map; unset($this->map[$k]);` took the entry
+                    // out of `$copy` too, and `$m = $n; unset($n['x']['p']);` out
+                    // of `$m['x']` (and, now that a closure slot gives its count
+                    // back, dropped an env the copy still listed). The clones
+                    // co-own what they share.
+                    if ($this->unsetBaseIsWritable($aa->array)) {
+                        $out .= $this->emitSeparatedArray($aa->array, $baseCell);
+                    } else {
+                        $out .= $this->emitNode($aa->array);
+                        $out .= $this->arrayBaseToPtr($aa->array->type);
+                    }
                     $arrPtr = $this->lastValue;
                     $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
@@ -5185,19 +5196,6 @@ trait EmitLlvmObjects
                     // overwrite leak ({@see \Compile\Debug::$rcElemSlotDrop}).
                     // Read the word BEFORE the helper removes the entry; drop it
                     // after, so the array never observes a freed element.
-                    // Separate a SHARED buffer first, exactly as an element
-                    // store does: the HASHED unset deleted in place, so
-                    // `$copy = $this->map; unset($this->map[$k]);` took the
-                    // entry out of `$copy` too (and, now that a closure slot
-                    // gives its count back, dropped the env `$copy` still
-                    // listed). The clone co-owns what it shares.
-                    if ($this->unsetBaseIsWritable($aa->array)) {
-                        $cow = $this->ssa->allocReg();
-                        $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($aa->array->type, $aa->array)
-                              . '(ptr ' . $arrPtr . ")\n";
-                        $out .= $this->vecWriteBack($aa->array, $cow, $baseCell);
-                        $arrPtr = $cow;
-                    }
                     $sgBase = $this->superglobalCellBase($aa->array);
                     $dropFlavor = $this->elemSlotDropFlavor($aa->array->type, $sgBase);
                     $curE = '';
@@ -5351,6 +5349,13 @@ trait EmitLlvmObjects
      *  local (including a by-ref param or a `global`) or an object property. */
     private function unsetBaseIsWritable(Node $base): bool
     {
+        // A NESTED base is written back level by level ({@see
+        // emitSeparatedArray}) when its root can be.
+        if ($base->kind === Node::KIND_ARRAY_ACCESS) {
+            $pk = $base->array->type->kind;
+            if (!$base->array->type->isArray() && $pk !== Type::KIND_CELL && $pk !== Type::KIND_UNKNOWN) { return false; }
+            return $this->unsetBaseIsWritable($base->array);
+        }
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
             return isset($this->locals->slots[$base->name])
                 || isset($this->locals->globalBacked[$base->name]);

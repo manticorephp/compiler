@@ -199,6 +199,64 @@ measure('sorted hooks', function (int $i): int {
     return $hs[0]() + $v[2]();
 });
 
+// Every array builder over a `Closure[]`, its source unset before the result
+// is called: a builder copies closure words out of a buffer that owns them, so
+// the copy must take its own count. Rows marked unbounded still keep their
+// closures (the builder's result does not record that it owns them); they pin
+// correctness.
+function mkc(int $v): \Closure { return (new Pad($v))->hook(); }
+/** @return array<int, \Closure> */
+function srcc(int $i): array { /** @var array<int, \Closure> $a */ $a = []; $a[] = mkc($i); $a[] = mkc($i + 1); $a[] = mkc($i + 2); return $a; }
+function b_values(int $i): int { $a = srcc($i); $z = array_values($a); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder values', fn (int $i): int => b_values($i % 5));
+function b_merge(int $i): int { $a = srcc($i); $z = array_merge($a, [mkc(4)]); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder merge', fn (int $i): int => b_merge($i % 5));
+function b_slice(int $i): int { $a = srcc($i); $z = array_slice($a, 1); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder slice', fn (int $i): int => b_slice($i % 5));
+function b_reverse(int $i): int { $a = srcc($i); $z = array_reverse($a); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder reverse', fn (int $i): int => b_reverse($i % 5));
+function b_filter(int $i): int { $a = srcc($i); $z = array_filter($a, fn ($f) => $f() > 1); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder filter', fn (int $i): int => b_filter($i % 5));
+function b_map(int $i): int { $a = srcc($i); $z = array_map(fn ($f) => $f, $a); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder map', fn (int $i): int => b_map($i % 5));
+function b_combine(int $i): int { $a = srcc($i); $z = array_combine(['a', 'b', 'c'], $a); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder combine', fn (int $i): int => b_combine($i % 5));
+function b_chunk(int $i): int { $a = srcc($i); $z = array_chunk($a, 2)[0]; unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder chunk', fn (int $i): int => b_chunk($i % 5));
+function b_unique(int $i): int { $a = srcc($i); $z = array_unique($a, SORT_REGULAR); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder unique', fn (int $i): int => b_unique($i % 5));
+function b_diff_key(int $i): int { $a = srcc($i); $z = array_diff_key($a, [0 => 1]); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder diff_key', fn (int $i): int => b_diff_key($i % 5));
+function b_intersect_key(int $i): int { $a = srcc($i); $z = array_intersect_key($a, [1 => 1, 2 => 1]); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder intersect_key', fn (int $i): int => b_intersect_key($i % 5));
+function b_copy(int $i): int { $a = srcc($i); $z = $a; unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder copy', fn (int $i): int => b_copy($i % 5));
+function b_splice(int $i): int { $a = srcc($i); $z = array_splice($a, 1, 1); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder splice', fn (int $i): int => b_splice($i % 5), false);
+function b_pad(int $i): int { $a = srcc($i); $z = array_pad($a, 5, mkc(7)); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder pad', fn (int $i): int => b_pad($i % 5), false);
+function b_fill(int $i): int { $a = srcc($i); $z = array_fill(0, 3, mkc(5)); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder fill', fn (int $i): int => b_fill($i % 5), false);
+function b_replace(int $i): int { $a = srcc($i); $z = array_replace($a, [1 => mkc(8)]); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder replace', fn (int $i): int => b_replace($i % 5), false);
+function b_spread(int $i): int { $a = srcc($i); $z = [...$a, mkc(6)]; unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder spread', fn (int $i): int => b_spread($i % 5), false);
+function b_union(int $i): int { $a = srcc($i); $z = $a + [5 => mkc(6)]; unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder union', fn (int $i): int => b_union($i % 5), false);
+function b_iterator_to_array(int $i): int { $a = srcc($i); $z = iterator_to_array(new ArrayIterator($a)); unset($a); $n = 0; foreach ($z as $f) { $n += $f(); } return $n; }
+measure('builder iterator_to_array', fn (int $i): int => b_iterator_to_array($i % 5), false);
+
+/** @var array<string, \Closure> $ss */
+$ss = ['x' => mkc(1), 'y' => mkc(2)];
+$mr = array_merge_recursive($ss, ['z' => mkc(4)]);
+['x' => $lx] = $ss;
+[$l0, $l1] = srcc(1);
+$cf = mkc(3);
+$cm = compact('cf');
+$col = array_column([['f' => mkc(1)], ['f' => mkc(2)]], 'f');
+unset($ss, $cf);
+echo 'merge_recursive ', $mr['z'](), ' list ', $lx(), $l0(), $l1(), ' compact ', $cm['cf'](), ' column ', $col[1](), "\n";
+
 echo 'left: ', $reg->count(), "\n";
 
 // A closure capturing $this stored in its own object is a cycle: php frees it

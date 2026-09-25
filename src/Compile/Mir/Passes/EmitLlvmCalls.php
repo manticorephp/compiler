@@ -1762,7 +1762,11 @@ trait EmitLlvmCalls
         // as an array pointer, so a boxed array there SIGSEGVed.
         $paramErased = $pt !== null && $pt->kind === Type::KIND_CELL;
         if ($this->isCellBoxableArg($at)
-            || ($paramErased && $at->isArray() && $this->hasConcreteScalarElem($at))) {
+            || ($paramErased && $at->isArray() && $this->hasConcreteScalarElem($at))
+            // A closure env into a CELL param is the OBJECT cell it is: raw, the
+            // callee's cell retain / drop skip it, so `fn ($f) => $f` handed
+            // back an uncounted word (array_map over `Closure[]`).
+            || ($paramErased && $this->isClosureValueType($at))) {
             return $this->boxToCell($at);
         }
         return $this->coerceToI64();

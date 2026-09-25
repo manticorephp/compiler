@@ -625,10 +625,21 @@ final class InsertMemoryOps implements Pass
         $ve = $value->element;
         $se = $slot->element;
         if ($ve === null || $se === null) { return false; }
+        // Two CLOSURE elements are one representation whatever they are
+        // spelled (`closure` / `obj<__closure_N>`); the alias's repr-walk pair
+        // ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}) co-owns and gives back.
+        if (self::isClosureElem($ve) && self::isClosureElem($se)) { return true; }
         if ($ve->kind !== $se->kind) { return false; }
         if ($ve->kind !== Type::KIND_STRING && $ve->kind !== Type::KIND_OBJ) { return false; }
         if ($ve->kind === Type::KIND_OBJ && ($ve->class ?? '') !== ($se->class ?? '')) { return false; }
         return self::elemReadCoOwns($ve, $enums, $classes);
+    }
+
+    private static function isClosureElem(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
+        $c = $t->class ?? '';
+        return $t->kind === Type::KIND_OBJ && ($c === 'Closure' || \str_starts_with($c, '__closure_'));
     }
 
     public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool

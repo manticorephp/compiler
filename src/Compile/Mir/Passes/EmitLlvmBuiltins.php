@@ -1106,6 +1106,16 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_float(double ' . $ed . ")\n";
         } elseif ($ek === Type::KIND_BOOL) {
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_bool(i64 ' . $ev . ")\n";
+        } elseif ($this->isClosureValueType($elem)) {
+            // A closure ELEMENT is an env pointer: an OBJECT cell, whose
+            // `__mir_cell_drop` reaches `__mir_closure_release`. The rebuilt
+            // array co-owns it through the helper that leaves any non-env word
+            // (a callable string / array in a `callable` slot) alone — and a
+            // `KIND_CLOSURE` element used to fall to `box_int` below.
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
+            $elemRetain = 'closure';
         } elseif ($this->isEnumType($elem)) {
             // An enum ELEMENT is an ordinal, exactly like a scalar enum value —
             // resolve the singleton before boxing. `box_object` on the raw word

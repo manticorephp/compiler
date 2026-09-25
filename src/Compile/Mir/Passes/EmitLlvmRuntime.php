@@ -1293,7 +1293,10 @@ trait EmitLlvmRuntime
      * generated beside the closure body, from the same type switch), so the
      * two halves cannot drift.
      *
-     * ⚠ The magic lives 32 bytes BEFORE the value pointer, so both helpers
+     * ⚠ The guard is a HEURISTIC read, not a proof ({@see \Compile\MemoryAbi::
+     * ARRAY_REPR_CLO}): a `callable` slot's string / array word is told apart
+     * only by its `p-32` bytes not being the exact magic.
+     * The magic lives 32 bytes BEFORE the value pointer, so both helpers
      * read `p-32` on a pointer that might not have a header. That is the same
      * probe the Generator frame does at `-24`: the read stays inside the heap
      * (never a fresh page boundary in practice) and a false positive needs an
