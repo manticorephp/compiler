@@ -963,7 +963,8 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_bytes($bodyPath, "\n\n")) {
                         throw new \RuntimeException('EmitLlvm: cannot append sink separator');
                     }
-                    \Manticore\system('rm -f ' . $rawBodyPath . ' ' . $hoistedPath);
+                    \Manticore\sys_unlink($rawBodyPath);
+                    \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $rawBodyBytes;
                 } elseif ($rawBodyBytes < $fileHoistThreshold) {
                     // Small functions do not justify a filesystem round-trip. Keep
@@ -1007,7 +1008,8 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                         throw new \RuntimeException('EmitLlvm: cannot append staged hoisted body ' . $hoistedPath);
                     }
-                    \Manticore\system('rm -f ' . $fnPath . ' ' . $hoistedPath);
+                    \Manticore\sys_unlink($fnPath);
+                    \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $nBody;
                 }
             } else {
@@ -1158,7 +1160,8 @@ final class EmitLlvm implements EmitVisitor
                 if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                     throw new \RuntimeException('EmitLlvm: cannot append helper body ' . $label);
                 }
-                \Manticore\system('rm -f ' . $rawPath . ' ' . $hoistedPath);
+                \Manticore\sys_unlink($rawPath);
+                \Manticore\sys_unlink($hoistedPath);
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
@@ -1209,7 +1212,7 @@ final class EmitLlvm implements EmitVisitor
                     "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n")) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
             }
-            \Manticore\system('rm -f ' . $bodyPath);
+            \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
             $stagedBytes = \strlen($preamble) + $bodyBytes;
             // PruneIr used to be unreachable from here: this branch returns the
@@ -1227,7 +1230,7 @@ final class EmitLlvm implements EmitVisitor
                     throw new \RuntimeException('EmitLlvm: cannot prune staged IR ' . $this->streamIrPath);
                 }
                 if ($prune->dropped > 0) {
-                    \Manticore\system('mv -f ' . $prunedPath . ' ' . $this->streamIrPath);
+                    \Manticore\sys_rename($prunedPath, $this->streamIrPath);
                     $stagedBytes = $stagedBytes - $prune->droppedBytes;
                 }
                 \Compile\Stats::step('  prune staged IR', $statT, $prune->kept, $prune->dropped);

@@ -636,9 +636,14 @@ trait EmitLlvmCalls
         if (!$hasSpread) {
             $clean = [];
             foreach ($this->sigs->returnType as $cname => $crt) {
-                if (\strpos($cname, '__') !== false) { continue; }
-                $cpt = $this->sigs->paramTypes[$cname] ?? [];
-                if (\count($cpt) !== $argc) { continue; }
+                if (!$this->dynfNameable($cname)) { continue; }
+                // Arity by RANGE, not by count: the thunk builds an ordinary call
+                // from its loads, so emitCall fills the omitted defaults exactly as
+                // it does at a direct site. Requiring the full count left every
+                // callee with an optional parameter (trim, json_encode, …) as an
+                // inline arm that re-emits the argument nodes — 17k arms on
+                // php-cs-fixer, one `new RuntimeException(...)` per arm.
+                if (!$this->dynfArityFits($cname, $argc)) { continue; }
                 if ($this->anyRefParam($cname)) { continue; }
                 // No carrier filter: a cell argument is uniform, so the
                 // float-vs-pointer pairing an inline arm cannot even emit is
@@ -661,7 +666,7 @@ trait EmitLlvmCalls
             // wants past the fixed prefix.
             $clean = [];
             foreach ($this->sigs->returnType as $cname => $crt) {
-                if (\strpos($cname, '__') !== false) { continue; }
+                if (!$this->dynfNameable($cname)) { continue; }
                 $cpt = $this->sigs->paramTypes[$cname] ?? [];
                 if (\count($cpt) < $numFixed) { continue; }
                 if ($this->anyRefParam($cname)) { continue; }
@@ -688,7 +693,7 @@ trait EmitLlvmCalls
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynf.end');
         foreach ($this->sigs->returnType as $fname => $rt) {
-            if (\strpos($fname, '__') !== false) { continue; }
+            if (!$this->dynfNameable($fname)) { continue; }
             if (isset($dynfSyms[$fname])) { continue; }
             $ptypes = $this->sigs->paramTypes[$fname] ?? [];
             $pdefs = $this->sigs->paramDefaults[$fname] ?? [];
@@ -1268,8 +1273,9 @@ trait EmitLlvmCalls
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         $out .= $this->cellTagIr($raw);
+        $tag = $this->cellTagReg;
         $isStr = $this->ssa->allocReg();
-        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -1302,7 +1308,7 @@ trait EmitLlvmCalls
         if (($ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS)
             && $this->anyClassHasMethod('__invoke')) {
             $isObjT = $this->ssa->allocReg();
-            $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+            $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $tag . ", 8\n";
             $objL = $this->ssa->allocLabel('erinv.obj');
             $chkL = $this->ssa->allocLabel('erinv.objchk');
             $cloL = $this->ssa->allocLabel('erinv.closure');
@@ -2107,6 +2113,29 @@ trait EmitLlvmCalls
             $bi = $bi + 1;
         }
         return $out;
+    }
+
+    /**
+     * Can a runtime NAME reach `$fname`? Not an internal `__` helper, and not a
+     * Monomorphize clone: `ksort$mono$p0_vec_cell` is no name php can spell, the
+     * name `ksort` reaches the original, and every clone was one more inline arm.
+     */
+    private function dynfNameable(string $fname): bool
+    {
+        return \strpos($fname, '__') === false && !\str_contains($fname, '$mono$');
+    }
+
+    /** Does a call with `$argc` arguments fit `$fname`'s required..total range? */
+    private function dynfArityFits(string $fname, int $argc): bool
+    {
+        $ptypes = $this->sigs->paramTypes[$fname] ?? [];
+        $pdefs = $this->sigs->paramDefaults[$fname] ?? [];
+        $tot = \count($ptypes);
+        if ($argc > $tot) { return false; }
+        for ($pi = $argc; $pi < $tot; $pi = $pi + 1) {
+            if (($pdefs[$pi] ?? null) === null) { return false; }
+        }
+        return true;
     }
 
     /** Does `$fname` declare any parameter by reference? */

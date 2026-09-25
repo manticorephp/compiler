@@ -51,6 +51,14 @@ function argv(int $i): \Ffi\Ptr {}
 #[Library('c'), Symbol('system'), CType('int')]
 function system(string $cmd): int { return 0; }
 
+// A staged-IR temp is removed and renamed through libc, never `system('rm …')`:
+// fork+exec per file cost ~57 s of a php-cs-fixer build (5810 hoisted bodies).
+#[Library('c'), Symbol('unlink'), CType('int')]
+function sys_unlink(string $path): int { return 0; }
+
+#[Library('c'), Symbol('rename'), CType('int')]
+function sys_rename(string $from, string $to): int { return 0; }
+
 #[Library('c'), Symbol('fopen')]
 function fopen(string $path, string $mode): \Ffi\Ptr {}
 
