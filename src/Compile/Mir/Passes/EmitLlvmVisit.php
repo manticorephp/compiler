@@ -145,6 +145,16 @@ trait EmitLlvmVisit
     public function visitStoreLocal(StoreLocal $n): string
     {
         $out = $this->emitStoreLocal($n);
+        // A MIXED slot records which representation this store left in it —
+        // the same answer the ownership plan read ({@see InsertMemoryOps::
+        // slotStoredType}), so every later release drops what is really there.
+        $flag = $this->frame->mixedFlagSlots[$n->name] ?? '';
+        if ($flag !== '') {
+            // 0 = a raw rc pointer; 1 = anything else (a cell, a raw scalar).
+            $sk = InsertMemoryOps::slotStoredType($n)->kind;
+            $raw = $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
+            $out .= '  store i64 ' . ($raw ? '0' : '1') . ', ptr ' . $flag . "\n";
+        }
         $this->checkCellSink('store_local', $n->type, $n, $n->value);
         return $out;
     }

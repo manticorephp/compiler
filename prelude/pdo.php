@@ -292,6 +292,7 @@ final class __McPdo
 
 // ── PDO ─────────────────────────────────────────────────────────────────────
 
+#[\Manticore\Attr\Uncomparable]
 class PDO
 {
     public const PARAM_NULL = 0;
@@ -673,6 +674,7 @@ class PDO
 
 // ── PDOStatement ────────────────────────────────────────────────────────────
 
+#[\Manticore\Attr\Uncomparable]
 class PDOStatement implements IteratorAggregate
 {
     public string $queryString = '';

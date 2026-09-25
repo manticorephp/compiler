@@ -19,7 +19,7 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      */
-    public const VERSION = 10;
+    public const VERSION = 12;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -80,6 +80,11 @@ final class MemoryAbi
      * pointer. {@see LowerClasses} registers this constant for those cells.
      */
     public const CELL_NULL = -3659174697238528;
+
+    /** `0xFFF0000000000000`: an i64 word unsigned-GREATER than this carries a
+     *  cell tag; anything at or below it is a raw double (or, in a raw slot, a
+     *  pointer — every userspace address fits the 48 payload bits). */
+    public const CELL_TAGGED_MIN = -4503599627370496;
 
     /**
      * Sentinel at a `#[Struct]` instance's `ptr-8`. A struct is a value type
@@ -355,6 +360,32 @@ final class MemoryAbi
      * `get_object_vars` inside `manticore_stdlib.o` reach an application class.
      */
     public const DESCRIPTOR_PROPS_FN_OFFSET = 32;
+
+    /**
+     * `ptr` — `@__mir_cmpview_<id>`, or null for a class with nothing to
+     * compare (no properties, no bag). Returns the object's COMPARE VIEW as a
+     * FRESH `assoc[string, cell]`: EVERY declared property (private and
+     * protected too — php compares the whole property table, which is not what
+     * the public {@see DESCRIPTOR_PROPS_FN_OFFSET} view shows) in declaration
+     * order, then the bag; or, for a class that marks properties
+     * `#[\Manticore\Attr\CompareKey]`, exactly those. What the generic
+     * `__mir_obj_compare` hands to the array compare for `==` / `<=>`.
+     */
+    public const DESCRIPTOR_CMP_VIEW_FN_OFFSET = 40;
+
+    /**
+     * `i64` — the COMPARE GROUP: two objects are compared through their views
+     * only when their groups are equal, else they never equal and order as
+     * uncomparable (php's rule for objects of different classes). A plain
+     * class's group is its own class id; every class with a
+     * {@see CMP_GROUP_KEYED} view shares one group, which is how php's custom
+     * handlers that compare ACROSS classes (a DateTime against a
+     * DateTimeImmutable, by instant) are expressed.
+     */
+    public const DESCRIPTOR_CMP_GROUP_OFFSET = 48;
+
+    /** The compare group of every class with `#[CompareKey]` properties. */
+    public const CMP_GROUP_KEYED = -1;
 
     // ─── Reflection metadata (`@__mc_rmeta_<id>`) ─────────────────
 
@@ -714,6 +745,28 @@ final class MemoryAbi
     public const ARRAY_REPR_OBJ  = 4;   // 2<<1 — raw obj ptrs → __mir_rc_release
     public const ARRAY_REPR_ARR  = 6;   // 3<<1 — raw nested arrays → __mir_array_release
     public const ARRAY_REPR_CELL = 8;   // 4<<1 — boxed cells → __mir_cell_drop (tag dispatch)
+    /**
+     * 5<<1 — raw CLOSURE-slot words, each env holding one count this buffer
+     * took (v11). A `Closure`/`callable` element has no hint of its own (the
+     * hint nibble is full, and a closure env must not decode as an object), so
+     * its slots used to take a count on every store and give it back never.
+     * The owner is this repr, never the static element type, because a
+     * `callable` slot also carries words that are NOT envs (a function-name
+     * string, an `[obj, 'm']` array) and builders copy closure words without
+     * counting them: only a buffer whose every closure word is counted may
+     * say so. Stamped by a closure-element store only when it is the buffer's
+     * sole element or the buffer already says CLO ({@see
+     * \Compile\Runtime\UnifiedArrayRuntime::emitCloStamp}), and by a closure
+     * literal. Dropped / co-owned through `__mir_closure_release` /
+     * `__mir_closure_retain`, which leave every non-env word alone. Only read
+     * while the hint is 0: a described buffer is owned by its hint.
+     *
+     * ⚠ "Non-env" is decided by a HEURISTIC, not a type: the helpers read the
+     * word at `p-32` and compare it with {@see CLOSURE_TAG_MAGIC}. A string's
+     * `hash@-32` or the allocator bytes before an array are read too; a false
+     * positive needs those 8 bytes to equal the exact magic. Words that are no
+     * plain heap address (null, < 64 KiB, NaN-tagged) are refused unread. */
+    public const ARRAY_REPR_CLO  = 10;
 
     /**
      * Bits 4-6: the ELEMENT-KIND HINT — what the elements ARE, with no claim

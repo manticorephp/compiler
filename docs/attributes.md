@@ -284,6 +284,62 @@ carried in the `.sig` exactly like `byref` / `refout`. Used across
 
 ---
 
+## Object comparison
+
+php's `==`, `!=`, `<`, `<=>` on two objects run the class's compare handler:
+by default every property in declaration order, but many internal classes
+bring their own (`DateTime` by instant, `CurlHandle` never equal, `HashContext`
+always equal). A Manticore class that re-implements such a class keeps
+different private state than Zend's C struct, so its compare behaviour is
+declared instead of derived. Without any of these attributes a class compares
+like a php user class: two objects of one class property by property, objects
+of different classes never equal.
+
+### `Manticore\Attr\CompareKey`
+
+On a **property**: only the marked properties are the object's value for
+`==` / `<=>`, compared in declaration order. Objects of *different* classes
+that both mark keys compare too, which is how a handler that compares across
+classes is written (`DateTime` against `DateTimeImmutable`, by instant).
+
+```php
+final class DateTime
+{
+    #[\Manticore\Attr\CompareKey] private int $ts = 0;
+    #[\Manticore\Attr\CompareKey] private int $us = 0;
+    private string $zname = 'UTC';   // not part of the value
+}
+```
+
+- **Target:** `TARGET_PROPERTY`. A subclass inherits the marked properties.
+- **Used by:** `DateTime`, `DateTimeImmutable`.
+
+### `Manticore\Attr\CompareNone`
+
+On a **class**: the php class has no properties, so two instances are `==` and
+`<=>` answers 0, whatever hidden state this implementation keeps. `!=` / `<`
+follow from that.
+
+- **Target:** `TARGET_CLASS`. Inherited by subclasses, like php's handler.
+- **Used by:** `HashContext`, `Fiber`.
+
+### `Manticore\Attr\Uncomparable`
+
+On a **class**: the php class declares its objects uncomparable. `==` is
+identity, and `<=>` of two distinct instances answers 1 (so `<` and `>` are both
+false).
+
+- **Target:** `TARGET_CLASS`. Inherited by subclasses.
+- **Used by:** `CurlHandle`, `CurlMultiHandle`, `CurlShareHandle`, `PDO`,
+  `PDOStatement`, `DateInterval`, `OpenSSLAsymmetricKey`, `Socket`,
+  `AddressInfo`, `DeflateContext`, `InflateContext`.
+
+An enum case compares by identity with no attribute. How each choice is laid
+out at run time (the compare view and the compare group in the class
+descriptor): [design/memory-abi.md](design/memory-abi.md) §3 (the class descriptor).
+
+---
+
 ## FFI
 
 The `Ffi\*` attributes — `#[Library]`, `#[Symbol]`, `#[CType]`, `#[Weak]`,

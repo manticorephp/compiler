@@ -64,6 +64,50 @@ final class AliasOwn
         return $v;
     }
 
+    /**
+     * Does `$x = $obj->s` take a reference on a STRING it reads out of a
+     * property? The array snapshot has always retained; a string read was a
+     * bare borrow, so the slot's release-before-overwrite had to be vetoed for
+     * the whole class, and the idiom that hands a buffer out and resets it —
+     * `$r = $c->out; $c->out = ''; return $r;` — stranded one buffer per call:
+     * the return retained the borrow and the overwrite released nothing.
+     * A co-owned read lets the slot drop what it overwrites.
+     *
+     * An OBJECT read the same way: `$d = $this->def; if (…) { $d = new…;
+     * $this->def = $d; }` is how a lazily (re)built member is written, and the
+     * borrow vetoed `$def` for the whole class — permessage-deflate's per-message
+     * context under `server_no_context_takeover` was never released. A closure
+     * env is not an object here: its reads keep their own borrowed rule.
+     */
+    public static function propReadCoOwns(Node $v): bool
+    {
+        if ($v->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        $k = $v->type->kind;
+        if ($k === Type::KIND_STRING) { return true; }
+        if ($k !== Type::KIND_OBJ) { return false; }
+        $cls = $v->type->class ?? '';
+        return $cls !== 'Closure' && !\str_starts_with($cls, '__closure_');
+    }
+
+    /**
+     * The builtins whose result is a BORROW, not the +1 every other call hands
+     * back: `__mir_fiber_current()` reads the running fiber out of a global its
+     * owner holds. The one list the passes that own call results ask
+     * ({@see InsertMemoryOps::isOwnedObj}, SpillFreshBases, EmitLlvmModule's
+     * return retain).
+     *
+     * @return string[]
+     */
+    public static function borrowingBuiltins(): array
+    {
+        return ['__mir_fiber_current'];
+    }
+
+    public static function builtinHandsBorrow(string $fn): bool
+    {
+        return \in_array(\ltrim($fn, '\\'), self::borrowingBuiltins(), true);
+    }
+
     /** Does a destination slot co-own this value — i.e. is it an alias of a
      *  local holding an rc'd by-handle value? */
     public static function coOwns(Node $v): bool

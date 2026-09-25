@@ -1293,7 +1293,10 @@ trait EmitLlvmRuntime
      * generated beside the closure body, from the same type switch), so the
      * two halves cannot drift.
      *
-     * ⚠ The magic lives 32 bytes BEFORE the value pointer, so both helpers
+     * ⚠ The guard is a HEURISTIC read, not a proof ({@see \Compile\MemoryAbi::
+     * ARRAY_REPR_CLO}): a `callable` slot's string / array word is told apart
+     * only by its `p-32` bytes not being the exact magic.
+     * The magic lives 32 bytes BEFORE the value pointer, so both helpers
      * read `p-32` on a pointer that might not have a header. That is the same
      * probe the Generator frame does at `-24`: the read stays inside the heap
      * (never a fresh page boundary in practice) and a false positive needs an
@@ -1305,10 +1308,17 @@ trait EmitLlvmRuntime
         $hdr   = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
         $mOff  = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
         $dOff  = (string)\Compile\MemoryAbi::CLOSURE_DROP_OFFSET;
+        // Only a plain heap address can carry the header: null, a small
+        // sentinel or a NaN-tagged word (a cell that reached a closure-typed
+        // slot unboxed) is left alone before `p-32` is read.
+        $guard  = "  %pi = ptrtoint ptr %p to i64\n";
+        $guard .= "  %lo = icmp ult i64 %pi, 65536\n";
+        $guard .= "  %hi = icmp ugt i64 %pi, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $guard .= "  %bad = or i1 %lo, %hi\n";
+        $guard .= "  br i1 %bad, label %done, label %hdr\n";
         $out  = "define void @__mir_closure_retain(ptr %p) {\n";
         $out .= "entry:\n";
-        $out .= "  %z = icmp eq ptr %p, null\n";
-        $out .= "  br i1 %z, label %done, label %hdr\n";
+        $out .= $guard;
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
@@ -1356,8 +1366,7 @@ trait EmitLlvmRuntime
         $out .= "}\n";
         $out .= "define void @__mir_closure_release(ptr %p) {\n";
         $out .= "entry:\n";
-        $out .= "  %z = icmp eq ptr %p, null\n";
-        $out .= "  br i1 %z, label %done, label %hdr\n";
+        $out .= $guard;
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
@@ -1923,7 +1932,7 @@ trait EmitLlvmRuntime
     {
         $descs = '';
         $defs = '';
-        /** @var int[] class ids to register in the name→rmeta registry */
+        /** @var string[] class ids to register in the name→rmeta registry */
         $reflIds = [];
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
@@ -2061,12 +2070,48 @@ trait EmitLlvmRuntime
                     . "  ret i64 %pri\n}\n";
                 $propsFld = 'ptr ' . $sym;
             }
+            // The COMPARE view and group ({@see \Compile\MemoryAbi::
+            // DESCRIPTOR_CMP_VIEW_FN_OFFSET}). Same derivation rule as the props
+            // view above — a pure function of the class — so it coalesces too.
+            $cmpViewFld = 'ptr null';
+            $cmpGroup = (int)$id;
+            $cmpMark = $this->classCmpMark($cls);
+            if (isset($this->enums[$cls->name]) || $cmpMark === 'Uncomparable') {
+                // A case is compared by identity alone (its singleton carries
+                // ENUM_TAG_MAGIC, which the runtime checks first), and so is a
+                // class php declares uncomparable (a CurlHandle, a DeflateContext).
+                $cmpGroup = 0;
+            } elseif ($cmpMark === 'CompareNone') {
+                // php's class has no properties: two instances are equal
+                // whatever hidden state this one keeps (a HashContext).
+            } elseif (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
+                $keyed = $this->cmpKeyProps($cls);
+                if ($keyed !== []) { $cmpGroup = \Compile\MemoryAbi::CMP_GROUP_KEYED; }
+                $cIr = $this->emitDeclaredPropsArray('%o', $cls->name, false, true);
+                $cRes = $this->lastValue;
+                if ($keyed === [] && $cls->usesBag()) {
+                    $cbg = $this->ssa->allocReg();
+                    $cbv = $this->ssa->allocReg();
+                    $cun = $this->ssa->allocReg();
+                    $cIr .= '  ' . $cbg . ' = getelementptr inbounds i8, ptr %o, i64 '
+                          . (string)$cls->bagOffset() . "\n";
+                    $cIr .= '  ' . $cbv . ' = load ptr, ptr ' . $cbg . "\n";
+                    $cIr .= '  ' . $cun . ' = call ptr @__mir_array_union(ptr '
+                          . $cRes . ', ptr ' . $cbv . ")\n";
+                    $cRes = $cun;
+                }
+                $csym = \Compile\Mir\RuntimeLibrary::cmpViewFnSymbol((int)$id);
+                $defs .= 'define i64 ' . $csym . "(ptr %o) {\nentry:\n" . $cIr
+                    . '  %cvi = ptrtoint ptr ' . $cRes . " to i64\n"
+                    . "  ret i64 %cvi\n}\n";
+                $cmpViewFld = 'ptr ' . $csym;
+            }
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
             // `ptr null` in its descriptor and emits no full reflection block.
             if (!$this->reflectWants($cls->name)) {
                 $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld);
+                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -2134,7 +2179,7 @@ trait EmitLlvmRuntime
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
-                $dynFld, $propsFld);
+                $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;

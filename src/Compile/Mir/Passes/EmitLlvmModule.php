@@ -902,6 +902,7 @@ trait EmitLlvmModule
         $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
+        $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;
         $this->arena->vecAllocated = false;
@@ -1048,20 +1049,16 @@ trait EmitLlvmModule
                     $bodySink->write($this->unboxCellToType($pp->type));
                     $bodySink->write($this->coerceToI64());
                     $bodySink->write('  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n");
-                } elseif (!$pp->byRef && $pp->arrayHinted && $pp->type->kind !== Type::KIND_CELL) {
-                    // An array param arrives as an array CELL under the same ABI;
-                    // its body reads a raw buffer pointer, so strip the tag (the
-                    // identity on an already-raw pointer) — the named-function
-                    // prologue below does the same.
-                    $mk = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $mk . ' = and i64 %arg.' . $cn . ", 281474976710655\n");
-                    $bodySink->write('  store i64 ' . $mk . ', ptr ' . $slot . "\n");
                 } else {
                     $bodySink->write('  store i64 %arg.' . $cn . ', ptr ' . $slot . "\n");
-                }
-                if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $pp, true)) {
-                    $copiedParams[$cn] = true;
-                    $bodySink->write($this->paramCopyOnEntryIr($pp, $slot));
+                    // The same payload mask a named function's prologue takes:
+                    // `$f(mk())` with `mk(): mixed` hands a bare-`array` param a
+                    // tagged word, and the body's COW dereferenced the tag bits.
+                    $bodySink->write($this->arrayHintedEntryMask($pp, $slot));
+                    if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $pp, true)) {
+                        $copiedParams[$cn] = true;
+                        $bodySink->write($this->paramEntryCopyIr($pp, $slot));
+                    }
                 }
             }
         } else {
@@ -1102,13 +1099,7 @@ trait EmitLlvmModule
                 // call site BOXES the argument (see
                 // tests/aot/cases/array_param_mixed_field.php) — there the tag is
                 // the point, and stripping it hands `var_dump` a raw buffer.
-                if (!$p->byRef && $p->arrayHinted && $p->type->kind !== Type::KIND_CELL) {
-                    $rw = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $rw . ' = load i64, ptr ' . $slot . "\n");
-                    $mk = $this->ssa->allocReg();
-                    $bodySink->write('  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n");
-                    $bodySink->write('  store i64 ' . $mk . ', ptr ' . $slot . "\n");
-                }
+                $bodySink->write($this->arrayHintedEntryMask($p, $slot));
                 // PHP arrays are values: a by-VALUE array param the body mutates
                 // in place (`$x[] = …` / `$x[$k] = …` / nested `$x[0][] = …`) must
                 // not alias the caller's buffer. Copy it on entry so the mutation
@@ -1123,7 +1114,7 @@ trait EmitLlvmModule
                 // released at scope exit ({@see VecCopyOnAssign::paramCopiedOnEntry}).
                 if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, false)) {
                     $copiedParams[$p->name] = true;
-                    $bodySink->write($this->paramCopyOnEntryIr($p, $slot));
+                    $bodySink->write($this->paramEntryCopyIr($p, $slot));
                 }
             }
         }
@@ -2154,34 +2145,6 @@ trait EmitLlvmModule
     /** Typed reads — a base-`Node` field access resolves by OFFSET under self-host. */
     private function asLoadLocalNode(\Compile\Mir\LoadLocal $n): \Compile\Mir\LoadLocal { return $n; }
 
-    /**
-     * PHP arrays are values: a by-value array param the body mutates is copied
-     * on entry so the mutation stays private (the frame's own +1, released at
-     * scope exit — {@see \Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry}).
-     */
-    private function paramCopyOnEntryIr(\Compile\Mir\Param $p, string $slot): string
-    {
-        $ld = $this->ssa->allocReg();
-        $out = '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
-        $lp = $this->ssa->allocReg();
-        $out .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
-        $cp = $this->ssa->allocReg();
-        if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
-            // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so a
-            // tag-aware copy separates each boxed-array element (a nested
-            // `$x[0][] = …` on a het `[[1,2], "s"]` would else share the inner
-            // array). Safe only here — raw vecs can't be tag-inspected.
-            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
-        } else {
-            $depth = $this->arrayCopyDepth($p->type);
-            if ($depth < 0) { $depth = 0; }
-            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
-                  . ', i64 ' . (string)$depth . ")\n";
-        }
-        $ci = $this->ssa->allocReg();
-        $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
-        return $out . '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
-    }
 
     /** The `ARRAY_ELEM_HINT_*` code a returned array must be conformed to, or
      *  null: the declared return names a concrete raw element and the value's
@@ -2240,6 +2203,7 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
+            $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             // Same slot hand-back as {@see finishReturn} — this branch exits
             // before it, so a `return` inside a generator's try leaked one slot
@@ -2458,7 +2422,10 @@ trait EmitLlvmModule
             // owned-local transfers are already +1. The declared return type
             // is the fallback: it is what the CALLER assumes ({@see
             // ownershipReturnType}).
-            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+            if ($this->callHandsBorrow($v)) {
+                // rcRetainByType reads every call as a +1 transfer.
+                $out .= $this->rcRetainReg($this->lastValue, 'obj');
+            } elseif ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
             }
         }
@@ -2593,6 +2560,19 @@ trait EmitLlvmModule
         return true;
     }
 
+    /**
+     * The one call that is NOT a +1: `__mir_fiber_current()` reads the running
+     * fiber out of a global the fiber's owner holds ({@see
+     * InsertMemoryOps::isOwnedObj} refuses to own it for that reason). Returned
+     * as it stood, `Fiber::getCurrent()` handed its caller a borrow under the
+     * +1 convention, so a caller that owns the result — a local, a spilled
+     * `Fiber::getCurrent() !== null` operand — freed the live fiber.
+     */
+    private function callHandsBorrow(Node $v): bool
+    {
+        return $v instanceof \Compile\Mir\Call && \Compile\Mir\AliasOwn::builtinHandsBorrow($v->function);
+    }
+
     private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
     {
         $t = $this->ownershipReturnType($v);
@@ -2645,5 +2625,54 @@ trait EmitLlvmModule
             return false; // transfer of an owned local
         }
         return true; // param / alias / property / array read — borrow
+    }
+
+    /**
+     * Strip a NaN tag off a by-value bare-`array` param on entry: its slot is
+     * read as a RAW buffer pointer throughout the body. The identity on a raw
+     * pointer (every userspace address fits the 48 payload bits). Not for a
+     * param PROMOTED to a cell, whose tag is the point.
+     */
+    /**
+     * The prologue COPY of a by-value array param the body mutates in place
+     * ({@see \Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry}) — a named
+     * function's and a closure's alike, so an `unset($a[$k])` / `$a[] = …` on a
+     * closure param no longer reaches the caller's buffer.
+     */
+    private function paramEntryCopyIr(\Compile\Mir\Param $p, string $slot): string
+    {
+        $out = '';
+        $ld = $this->ssa->allocReg();
+        $out .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
+        $lp = $this->ssa->allocReg();
+        $out .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
+        $cp = $this->ssa->allocReg();
+        if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
+            // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so
+            // a tag-aware copy separates each boxed-array element (a
+            // nested `$x[0][] = …` on a het `[[1,2], "s"]` would else
+            // share the inner array). Safe only here — raw vecs can't
+            // be tag-inspected (a large/neg int could look boxed).
+            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
+        } else {
+            $depth = $this->arrayCopyDepth($p->type);
+            if ($depth < 0) { $depth = 0; }
+            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+                  . ', i64 ' . (string)$depth . ")\n";
+        }
+        $ci = $this->ssa->allocReg();
+        $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
+        $out .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
+        return $out;
+    }
+
+    private function arrayHintedEntryMask(\Compile\Mir\Param $p, string $slot): string
+    {
+        if ($p->byRef || !$p->arrayHinted || $p->type->kind === Type::KIND_CELL) { return ''; }
+        $rw = $this->ssa->allocReg();
+        $mk = $this->ssa->allocReg();
+        return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
+            . '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n"
+            . '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
     }
 }

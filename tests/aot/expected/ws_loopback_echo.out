@@ -1,0 +1,14 @@
+protocol=v1
+echo:hi
+0 bin 0
+125 bin 125
+126 bin 126
+65535 bin 65535
+65536 bin 65536
+1048576 bin 1048576
+echo:héllo 😀
+client code=1000 open=no
+closed exception
+server path=/chat?room=1
+closer: returned at once
+reader: echo:x null code=1000

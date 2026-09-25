@@ -339,6 +339,12 @@ final class EmitLlvm implements EmitVisitor
     /** Arg-list suffix produced by the most recent {@see emitDefaultArgPad}. */
     private string $lastPadArgs = '';
 
+    /** Post-call IR releasing the by-ref slots that pad backed ({@see omittedRefSlotDrop}). */
+    private string $lastPadDrops = '';
+
+    /** Post-call IR releasing the slot of the latest {@see emitRefValueSlot}. */
+    private string $lastRefSlotDrop = '';
+
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
     private ?GeneratorContext $gen = null;
@@ -536,6 +542,9 @@ final class EmitLlvm implements EmitVisitor
      *  back to this and re-pads from its OWN declaration
      *  ({@see Passes\EmitLlvmObjects::vdArmArity}). */
     private int $vdSiteArgc = 0;
+    /** Post-call release of the by-ref pad slots the latest {@see Passes\EmitLlvmObjects::vdArmArity}
+     *  created for its arm ({@see omittedRefSlotDrop}); emitted right after that arm's call. */
+    private string $vdArmDrops = '';
     /** Scratch: caller slot address / scratch cell slot of the by-ref argument
      *  {@see EmitLlvmCalls::emitByRefCellBox} just boxed. */
     private string $refBoxSlot = '';
@@ -799,6 +808,8 @@ final class EmitLlvm implements EmitVisitor
         $this->cloneErasedSym = '';
         $this->dynmSyms = [];
         $this->dynmExtraBodies = '';
+        $this->scmpSyms = [];
+        $this->scmpExtraBodies = '';
         $this->dynfThunks = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
@@ -959,7 +970,8 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_bytes($bodyPath, "\n\n")) {
                         throw new \RuntimeException('EmitLlvm: cannot append sink separator');
                     }
-                    \Manticore\system('rm -f ' . $rawBodyPath . ' ' . $hoistedPath);
+                    \Manticore\sys_unlink($rawBodyPath);
+                    \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $rawBodyBytes;
                 } elseif ($rawBodyBytes < $fileHoistThreshold) {
                     // Small functions do not justify a filesystem round-trip. Keep
@@ -1003,7 +1015,8 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                         throw new \RuntimeException('EmitLlvm: cannot append staged hoisted body ' . $hoistedPath);
                     }
-                    \Manticore\system('rm -f ' . $fnPath . ' ' . $hoistedPath);
+                    \Manticore\sys_unlink($fnPath);
+                    \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $nBody;
                 }
             } else {
@@ -1120,6 +1133,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->emitErasedIfaceFns();
         $extraBodies .= $this->vdExtraBodies;
         $extraBodies .= $this->dynmExtraBodies;
+        $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
@@ -1153,7 +1167,8 @@ final class EmitLlvm implements EmitVisitor
                 if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                     throw new \RuntimeException('EmitLlvm: cannot append helper body ' . $label);
                 }
-                \Manticore\system('rm -f ' . $rawPath . ' ' . $hoistedPath);
+                \Manticore\sys_unlink($rawPath);
+                \Manticore\sys_unlink($hoistedPath);
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
@@ -1204,7 +1219,7 @@ final class EmitLlvm implements EmitVisitor
                     "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n")) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
             }
-            \Manticore\system('rm -f ' . $bodyPath);
+            \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
             $stagedBytes = \strlen($preamble) + $bodyBytes;
             // PruneIr used to be unreachable from here: this branch returns the
@@ -1222,7 +1237,7 @@ final class EmitLlvm implements EmitVisitor
                     throw new \RuntimeException('EmitLlvm: cannot prune staged IR ' . $this->streamIrPath);
                 }
                 if ($prune->dropped > 0) {
-                    \Manticore\system('mv -f ' . $prunedPath . ' ' . $this->streamIrPath);
+                    \Manticore\sys_rename($prunedPath, $this->streamIrPath);
                     $stagedBytes = $stagedBytes - $prune->droppedBytes;
                 }
                 \Compile\Stats::step('  prune staged IR', $statT, $prune->kept, $prune->dropped);
@@ -1395,7 +1410,7 @@ final class EmitLlvm implements EmitVisitor
             // Same spelling as the ordinary path — the symbol coalesces by name,
             // so a type that disagreed would be one symbol defined two ways.
             $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld);
+                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld, 'ptr null', 0);
         }
         $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
         // LLVM symbol infix must fold `\` (namespaced enums like Io\Poll\Backend
@@ -2243,6 +2258,13 @@ final class EmitLlvm implements EmitVisitor
     /** Bodies for {@see EmitLlvmObjects::dynmChainFn}, flushed with the others. */
     private string $dynmExtraBodies = '';
 
+    /** struct class|mode => its compare helper ({@see EmitLlvmExpr::structCmpSym}). */
+    /** @var array<string, string> */
+    private array $scmpSyms = [];
+
+    /** Bodies of those helpers, flushed with the other lazy helpers. */
+    private string $scmpExtraBodies = '';
+
     /** callee|arg-kind key => the uniform `i64 (i64…)` thunk's symbol.
      *  {@see EmitLlvmCalls::dynfThunk} */
     /** @var array<string, string> */
@@ -2366,11 +2388,12 @@ final class EmitLlvm implements EmitVisitor
      * the retain; if the two ever disagree this scan either leaks (harmless) or
      * blesses a borrow as owned (a free of a live value).
      *
-     * ARRAY only. A `string` / object property read emits NO retain at all, so
-     * `$s = $this->name;` leaves the local pointing at a value the slot still
-     * owns — which is exactly why a string slot may only drop when the property
-     * is read NOWHERE. And an array read through the cell box-back arm does not
-     * retain either: that arm returns before ever reaching the retain.
+     * An ARRAY, a STRING and an OBJECT ({@see \Compile\Mir\AliasOwn::propReadCoOwns}).
+     * A closure env read emits NO retain the local's release would balance, so
+     * `$c = $this->cb;` leaves the local pointing at a value the slot still owns
+     * — which is exactly why such a slot may only drop when the property is read
+     * NOWHERE. And a read through the cell box-back arm does not retain either:
+     * that arm returns before ever reaching the retain.
      */
     private function storeLocalRetainsProp(Node $store, Node $pa): bool
     {
@@ -2383,6 +2406,7 @@ final class EmitLlvm implements EmitVisitor
             // it leaked the whole previous array.
             return $pa->type->isArray() && $this->isSuperglobalName($store->name);
         }
+        if (\Compile\Mir\AliasOwn::propReadCoOwns($pa)) { return true; }
         return $pa->type->isArray()
             || $this->slotIsArrayHinted($pa->object, $pa->property, $pa->type);
     }
@@ -2529,6 +2553,9 @@ final class EmitLlvm implements EmitVisitor
             // ({@see EmitLlvmEscape::operandHeldSafely}).
             foreach (\Compile\Mir\Walk::children($parent) as $c) {
                 if ($c->kind === Node::KIND_PROPERTY_ACCESS && $this->operandHeldSafely($parent, $c)) { continue; }
+                // The closure an invoke CALLS is pinned for the call ({@see
+                // EmitLlvmCalls::invokePinsCallee}); it is not handed to anyone.
+                if ($parent instanceof \Compile\Mir\Invoke_ && $this->invokePinsCallee($parent, $c)) { continue; }
                 $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
             }
             return;
@@ -2883,10 +2910,20 @@ final class EmitLlvm implements EmitVisitor
      * so the read cannot be stranded by its slot's later release. The same
      * narrowing {@see elemReadIsOwned} makes: a struct, a closure, an enum and
      * a foreign pointer take no retain and keep the veto.
+     *
+     * An ARRAY read qualifies on the same terms: a borrowed array is never an
+     * owned producer to {@see EmitLlvmMemory::rcRetainByType}, so the raw arm
+     * retains its buffer, and the boxed arm either retains it (an erased-element
+     * array, {@see retainCellPayload}) or copies it into a fresh cell array
+     * ({@see boxToCell}). `$lh = [$c->lcount, $c->lsym]` vetoed both slots, so
+     * every `$c->lcount = $lh[0]` stranded the table it overwrote — inflate's
+     * Huffman tables, one set per `inflate_add`.
      */
     private function storeCoOwnsPropRead(Node $c): bool
     {
-        return $c->kind === Node::KIND_PROPERTY_ACCESS && $this->storeRetainsKind($c->type);
+        if ($c->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        if ($c->type->isVec() || $c->type->isAssoc()) { return true; }
+        return $this->storeRetainsKind($c->type);
     }
 
     /** The value kinds a container / property store takes a reference on:
@@ -3410,6 +3447,11 @@ final class EmitLlvm implements EmitVisitor
         $tk = $valueNode->type->kind;
         $cls = $valueNode->type->class ?? '';
         if ($boxed && $tk === Type::KIND_CELL) { return true; }
+        // rcRetainByType's closure arm co-owns every borrowed closure (the
+        // helper self-guards on the env magic). Answering "borrowed" here
+        // marked the local transferred as well, so a stored closure local
+        // kept one count nobody gave back.
+        if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && $this->isClosureClass($cls))) { return true; }
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY
@@ -4070,7 +4112,10 @@ final class EmitLlvm implements EmitVisitor
         $f = $this->discardReleaseFlavor($el);
         if ($f === 'obj') { return 'obj'; }
         if ($f === 'str') { return 'str'; }
-        return 'buf';   // closure / #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
+        // A closure element is owned by the buffer's CLO repr, which only the
+        // repr walk reads ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}).
+        if ($this->isClosureValueType($el)) { return ''; }
+        return 'buf';   // #[Struct] / Ffi\Ptr / enum ordinal: nothing to drop
     }
 
     /**
@@ -4174,6 +4219,11 @@ final class EmitLlvm implements EmitVisitor
         $k = $el->kind;
         if ($k === Type::KIND_UNKNOWN) { return ''; }
         if ($k === Type::KIND_CELL) { return $cellElemOwned ? 'cell' : ''; }
+        // A closure slot drops through the buffer's own ownership record
+        // (`__mir_array_clo_drop`, {@see \Compile\MemoryAbi::ARRAY_REPR_CLO}):
+        // the static type cannot say whether this buffer counted its closure
+        // words, and a `callable` slot may hold a word that is no env at all.
+        if ($this->isClosureValueType($el)) { return 'clogated'; }
         // Which element KINDS may drop — `obj,arr` by default, because a
         // compiler built with STRING-element drops miscompiles itself
         // ({@see \Compile\Debug::$elemDropKinds} carries the repro). Also the
@@ -4461,6 +4511,19 @@ final class EmitLlvm implements EmitVisitor
         // freed none. Only the LITERAL: a closure read out of a local or a
         // property is a borrow.
         if ($a->kind === Node::KIND_CLOSURE) { return 'closure'; }
+        // …and so is a closure a CALL hands back, under the +1 return
+        // convention rcRetainByType's closure arm already reads as a transfer:
+        // `$reg->on($obj->makeHook())` retained it into the registry and the
+        // call's own count was never given back.
+        if ($this->isClosureValueType($a->type)) {
+            $ck = $a->kind;
+            if ($ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL || $ck === Node::KIND_INVOKE) { return 'closure'; }
+            if ($ck === Node::KIND_CALL) {
+                $cfn = $a->function;
+                if (isset($this->sigs->paramTypes[$cfn]) && !($this->sigs->returnsByRef[$cfn] ?? false)) { return 'closure'; }
+            }
+            return '';
+        }
         $tk = $a->type->kind;
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY) { return ''; }
         $k = $a->kind;
@@ -4590,9 +4653,12 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValueType = $st;
             return $o;
         }
-        // A CLOSURE is counted like an object: a borrowed one (a `\Closure`
-        // param appended to a cell element) stored with no co-owner was freed
-        // by the caller's release of its temporary while the array still held it.
+        // A closure boxes as an OBJECT cell whose drop reaches the env
+        // (`__mir_cell_drop` → `__mir_closure_release`), so the box co-owns it
+        // like any object: rcRetainByType's closure arm, fresh ones transfer.
+        // A borrowed one (a `\Closure` param appended to a cell element) stored
+        // with no co-owner was freed by the caller's release of its temporary
+        // while the array still held it.
         if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
             && $k !== Type::KIND_CLOSURE && !$borrowedCellArray) {
             return '';
@@ -4816,12 +4882,14 @@ final class EmitLlvm implements EmitVisitor
      * is passed by reference — true only for a by-ref param fed a plain
      * local (the address-of source). Shared by call / method / static call.
      */
-    /** A by-ref PARAM always takes an address — a non-lvalue (an omitted
-     *  default) gets a throwaway slot from {@see emitByRefArg}. Routing it
-     *  down the by-VALUE path handed the callee the value as its address. */
+    /** A by-ref param fed a non-lvalue (an omitted default) still takes an
+     *  address: each call site's next arm backs it with a throwaway slot
+     *  ({@see EmitLlvmCalls::emitRefValueSlot}) and drops what the callee
+     *  wrote there. Routing it down the by-VALUE path handed the callee the
+     *  value as its address. */
     private function argIsByRef(array $mask, int $pi, Node $a): bool
     {
-        return (bool)($mask[$pi] ?? false);
+        return ($mask[$pi] ?? false) && $this->isByRefAddressable($a);
     }
 
     /** Push a trace frame (`display` name + call-site `line`) before a user call;

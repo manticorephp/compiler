@@ -185,13 +185,15 @@ final class HoistAllocas
                 \Manticore\fclose($out);
                 if (!\Manticore\append_file_path($allocPath, $output)
                     || !\Manticore\append_file_path($restPath, $output)) { $ok = false; }
-                \Manticore\system('rm -f ' . $allocPath . ' ' . $restPath);
+                \Manticore\sys_unlink($allocPath);
+                \Manticore\sys_unlink($restPath);
                 if ($ok) {
                     $out = \Manticore\fopen($output, 'ab');
                     if ($out === null) { $ok = false; }
                 }
             } else {
-                \Manticore\system('rm -f ' . $allocPath . ' ' . $restPath);
+                \Manticore\sys_unlink($allocPath);
+                \Manticore\sys_unlink($restPath);
             }
         }
         \Manticore\free($buf);

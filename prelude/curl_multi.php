@@ -75,6 +75,7 @@ function __mc_curlsh_strerror(#[\Ffi\CType('int')] int $code): \Ffi\Ptr {}
 
 // ── Handles ─────────────────────────────────────────────────────────────────
 
+#[\Manticore\Attr\Uncomparable]
 final class CurlMultiHandle
 {
     public int $addr = 0;
@@ -89,6 +90,7 @@ final class CurlMultiHandle
     }
 }
 
+#[\Manticore\Attr\Uncomparable]
 final class CurlShareHandle
 {
     public int $addr = 0;

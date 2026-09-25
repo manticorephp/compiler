@@ -466,11 +466,28 @@ trait LowerFns
     }
 
     /**
+     * A closure param's default, lowered in the scope that declared it:
+     * `$defaultScope` names the class of a forwarded method (`C::m(...)`,
+     * `$o->m(...)`), whose `self::X` default is that class's, not the
+     * caller's; null keeps the lexical scope of a closure literal.
+     */
+    private function lowerParamDefault(\Parser\Ast\Param $p, ?string $defaultScope): ?Node
+    {
+        if ($p->default === null) { return null; }
+        if ($defaultScope === null || $defaultScope === '') { return $this->lowerExpr($p->default); }
+        $saved = $this->currentLowerClass;
+        $this->currentLowerClass = $defaultScope;
+        $d = $this->lowerExpr($p->default);
+        $this->currentLowerClass = $saved;
+        return $d;
+    }
+
+    /**
      * @param string[]            $capNames
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -503,14 +520,22 @@ trait LowerFns
                 // untyped param. The uniform closure ABI passes every arg as a
                 // tagged cell (so a dynamic `callable` dispatch works), so an
                 // untyped param must carry the tag; an unknown-typed param would
-                // read the raw bits and a string arg renders as its pointer.
-                type: $this->lowerParamType($p->typeHint),
+                // read the raw bits and a string arg renders as its pointer. A
+                // variadic is ONE vec param, as for a named function.
+                type: ($p->variadic ?? false)
+                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    : $this->lowerParamType($p->typeHint),
                 byRef: (bool)($p->byRef ?? false),
                 variadic: (bool)($p->variadic ?? false),
+                // The call site pads an omitted trailing param from this: the
+                // closure ABI carries no arity, so without it the entry read
+                // whatever the register held.
+                default: $this->lowerParamDefault($p, $defaultScope),
             );
-            // As for a named function: the entry masks a bare-`array` param's
-            // tag, which the uniform ABI always hands in — `array_reduce`'s
-            // `static function (array $carry, …)` ran COW on the tagged word.
+            // The entry masks a bare-`array` param to its payload and copies it
+            // when the body mutates it, as a named function's does: a cell
+            // argument (`$f(mk())` with `mk(): mixed`) otherwise reached the
+            // COW as a tagged word.
             $cp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $cp->type->isArray();
             $params[] = $cp;
         }

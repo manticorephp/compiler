@@ -1388,7 +1388,10 @@ trait InferScans
             $k = $t->kind;
             if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_INT) { continue; }
             $prev = $this->globalVarTypes[$name] ?? null;
-            if ($prev === null || $prev->kind !== $k) {
+            // The map outlives the run ({@see Module::$inferGlobalVarTypes}):
+            // a same-kind type a later run narrowed (`vec[unknown]` → the
+            // `vec[vec[int]]` NarrowReturns made concrete) must replace it.
+            if ($prev === null || $prev->exactString() !== $t->exactString()) {
                 $this->globalVarTypes[$name] = $t;
                 $changed = true;
             }
@@ -2244,9 +2247,8 @@ trait InferScans
      * InferTypes::$localTypes}: `isStringKey` consults it, so this scan has to
      * stay on the same side of the seeding loops in {@see
      * InferNodes::inferFunctionOnce} that it is on today. That is also why the
-     * key-used / arith-used group ({@see scanLocalFacts}) is a SECOND walk and
-     * not part of this one: the float seeding writes `localTypes` in between,
-     * and `subscriptBaseIsString` reads it.
+     * arith-used / by-ref-pinned group ({@see scanLocalFacts}) is a SECOND walk
+     * and not part of this one.
      *
      * Profiling: 43 of 43 callers of `Walk::children` were `InferTypes`, and the
      * seven whole-body scans allocated 9.5 MB of child arrays EACH on the 1/4
@@ -2375,44 +2377,6 @@ trait InferScans
                 $this->recordDisqualified[$sl->name] = true;
             }
         }
-    }
-
-    /** Mark locals used as an array index/key — a merge-cell key does not
-     *  render through the cell-key dispatch yet, so such names stay raw.
-     *
-     *  A STRING subscript is NOT that. `$s[$i]` is a byte OFFSET into a string:
-     *  it has no key channel, no vec-vs-assoc question, and the emitter unboxes
-     *  a tagged index there. Counting it as a key pinned the offset local raw,
-     *  which is how an `int $pos` that a loop body reassigns from `strpos()`
-     *  missed the cell promotion — and then held a boxed word while the loop
-     *  guard still compared it with a raw `icmp slt`. */
-    private function scanKeyUsedNode(Node $n, string $k): void
-    {
-        if ($k === Node::KIND_ARRAY_ACCESS) {
-            if (!$this->subscriptBaseIsString($n->array)) { $this->markKeyLocal($n->index); }
-        } elseif ($k === Node::KIND_STORE_ELEMENT) {
-            if (!$this->subscriptBaseIsString($n->array)) { $this->markKeyLocal($n->index); }
-        }
-    }
-
-    /**
-     * Whether a subscript base is statically a STRING, so its index is a byte
-     * offset rather than a key.
-     *
-     * This scan runs BEFORE the body is inferred on every round, so the node's
-     * own type is only trustworthy from round 2 on. A declared `string` PARAM
-     * is already in {@see InferTypes::$localTypes} when the scan runs, which is
-     * what makes the common case (a parser walking its input) work on round 1 —
-     * and round 1 is the only one that happens when nothing else gets promoted.
-     */
-    private function subscriptBaseIsString(Node $base): bool
-    {
-        if ($base->type->kind === Type::KIND_STRING) { return true; }
-        if ($base->kind === Node::KIND_LOAD_LOCAL) {
-            $t = $this->localTypes[$base->name] ?? null;
-            return $t !== null && $t->kind === Type::KIND_STRING;
-        }
-        return false;
     }
 
     /**
@@ -2561,11 +2525,11 @@ trait InferScans
     }
 
     /**
-     * ONE traversal for the four LATE per-local facts: built-from-`[]`,
-     * key-used, arith-used, by-ref-pinned. Four whole-body walks before, and
+     * ONE traversal for the three LATE per-local facts: built-from-`[]`,
+     * arith-used, by-ref-pinned. Separate whole-body walks before, and
      * they fuse for the same reason as {@see scanLocalShapes} — disjoint output
      * sets, no scan reading another's, and nothing writes `localTypes` between
-     * the four call sites they used to occupy.
+     * the call sites they used to occupy.
      *
      * The `$seed` / `$bad` / `$read` by-ref accumulators stay by-ref: `$bad` is
      * handed to {@see markLocalNamesIn}, which takes `array &$out`, and passing
@@ -2580,7 +2544,6 @@ trait InferScans
     private function walkLocalFacts(Node $n, array &$seed, array &$bad, array &$read, bool $inClosure): void
     {
         $k = $n->kind;
-        $this->scanKeyUsedNode($n, $k);
         $this->scanArithUsedNode($n, $k);
         $this->scanRefPinnedNode($n, $k);
         if ($k === Node::KIND_ARRAY_ACCESS && $n->array->kind === Node::KIND_LOAD_LOCAL) {

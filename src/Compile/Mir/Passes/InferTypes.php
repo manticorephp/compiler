@@ -538,10 +538,6 @@ final class InferTypes implements Pass
      *  slot is a self-describing cell AFTER the if; reads before/inside the
      *  branches stay concrete (forward inference), reads after read the cell. */
     private array $cellMergeLocals = [];
-    /** @var array<string,bool> locals used as an array INDEX/KEY anywhere in the
-     *  fn — ineligible for cell-merge promotion (the cell-key store/access path
-     *  does not yet render a NaN-boxed key, so a merge-cell key mis-dispatches). */
-    private array $keyUsedLocals = [];
     /** @var array<string,bool> locals used as an ARITHMETIC operand (`+ - * / %`,
      *  unary `-`) anywhere in the fn. Discriminates the one ambiguous loop shape:
      *  a `null`-seeded accumulator whose body types UNKNOWN. `unknown + int` is
@@ -562,6 +558,30 @@ final class InferTypes implements Pass
      *  Discovered during inference (a call's kind isn't knowable to a pre-scan),
      *  so a promotion re-runs the function — see inferFunction. */
     private array $cellLoopLocals = [];
+    /** Open `try` bodies, innermost last: the first type each saw per name
+     *  ({@see noteTryStore}). @var array<int, array<string, Type>> */
+    private array $tryStoreFrames = [];
+    /** Open loop / switch frames, innermost last, and the joined state each
+     *  `break` / `continue` carries to that frame. Inference walks the tree
+     *  forward, so a jump edge never meets the state it lands in unless it is
+     *  recorded here and joined ({@see joinLocals}) at its target: the loop
+     *  exit, the loop header (via the body end), the switch exit.
+     *  @var array<int, array<string, Type>> */
+    private array $jumpBreaks = [];
+    /** @var array<int, array<string, Type>> */
+    private array $jumpConts = [];
+    /** @var array<int, bool> */
+    private array $jumpBreakSet = [];
+    /** @var array<int, bool> */
+    private array $jumpContSet = [];
+    /** @var array<int, bool> a `switch` frame: `continue` leaves it like `break` */
+    private array $jumpIsSwitch = [];
+    /** States a forward `goto` carries to a label not reached yet.
+     *  @var array<string, array<string, Type>> */
+    private array $gotoPending = [];
+    /** The state at each label already passed (a backward `goto` joins it).
+     *  @var array<string, array<string, Type>> */
+    private array $labelStates = [];
     /** The CURRENT function's slice of {@see $byRefCaptureCellLocals} — the same
      *  role {@see $cellLoopLocals} plays for a loop-rekinded slot: every store
      *  boxes, every read dispatches by tag. */
@@ -2036,40 +2056,30 @@ final class InferTypes implements Pass
      * after the if; mark the name so mergeLocals types post-merge reads cell.
      * Reads BEFORE/INSIDE the branches stay concrete (the box is last), and a
      * later concrete re-assignment re-narrows the slot — so the original name
-     * keeps its reps everywhere else (no whole-name promotion, no array/key
-     * reuse hazard). Scalar-only: a string used raw stays raw on its own paths.
+     * keeps its reps everywhere else (no whole-name promotion). An array KEY is
+     * no exception: a cell key dispatches by tag on read, store, isset and
+     * unset, and exempting one left the merge typed `unknown` — a raw int on
+     * one path and a boxed word on the other, fed raw into `add i64`.
+     * Scalar-only: a string used raw stays raw on its own paths.
      * @param array<string,Type> $thenLocals @param array<string,Type> $otherLocals
      */
-    private function planMergeShadow(If_ $node, array $thenLocals, array $otherLocals, bool $hasElse): void
+    private function planMergeShadow(If_ $node, array $thenLocals, array $otherLocals): void
     {
         foreach ($thenLocals as $name => $tT) {
             if (!isset($otherLocals[$name])) { continue; }
             $oT = $otherLocals[$name];
-            $tOk = $this->isScalarOrCell($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
-            $oOk = $this->isScalarOrCell($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
-            // An ARRAY arm merging with a CELL arm is the same problem one level
-            // up: `$t = []; if (is_array($r)) { $t = $r; }` over a `mixed $r`
-            // leaves a slot that holds a RAW buffer pointer on one path and a
-            // NaN-boxed cell on the other, and their union types UNKNOWN — so
-            // the very next `foreach ($t as …)` reads whichever the static type
-            // guessed and faults. Box the array arm so the slot is uniformly
-            // tagged. Only against a CELL sibling: two array arms already agree
-            // on the raw repr, and demoting those would cost every branchy
-            // array local a boxing round-trip.
-            $tOk = $tOk || ($tT->isArray() && $oT->kind === Type::KIND_CELL);
-            $oOk = $oOk || ($oT->isArray() && $tT->kind === Type::KIND_CELL);
+            // Any two DIFFERENT kinds a cell carries (a scalar, a string, an
+            // array, an object) share no raw word: their union types UNKNOWN,
+            // and every consumer reads whichever repr the static type guessed —
+            // `$t = []; if (is_array($r)) { $t = $r; }` over a `mixed $r` faulted
+            // in the next foreach; `'abc'` vs `[1,2]` printed a pointer. Box both
+            // arms so the slot is uniformly tagged. Two arms of one kind (two
+            // arrays, two objects) agree on the raw repr and stay raw.
+            $tOk = $this->cellCarries($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
+            $oOk = $this->cellCarries($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
             if (!$tOk || !$oOk) { continue; }
             if ($tT->kind === $oT->kind) { continue; }
-            if (isset($this->cellMergeLocals[$name])) { continue; }
-            // A key-used local is held back only while no arm is a cell yet: one
-            // that already is (a foreach key off an erased array, re-bound to
-            // `strtolower($from)` on one path) reaches every key site tagged
-            // anyway, and leaving the string arm raw typed the merge UNKNOWN —
-            // `isset($default[$from])` then looked up a pointer (php-cs-fixer
-            // phpdoc_return_self_reference's normalizer).
-            $anyCell = $tT->kind === Type::KIND_CELL || $oT->kind === Type::KIND_CELL;
-            if ((isset($this->keyUsedLocals[$name]) && !$anyCell)
-                || isset($this->refPinnedLocals[$name])) { continue; }
+            if (isset($this->refPinnedLocals[$name])) { continue; }
             // A static / global-backed slot has ONE repr, its decl's (the join of
             // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
             // planted here would retype the local cell against a string slot.
@@ -2080,119 +2090,112 @@ final class InferTypes implements Pass
             // after `$f = 1.5` is still float on the next run, so without this
             // every run appended one more `$f = $f` per arm (four per arm at
             // the fixpoint, each an own_alias + drop + store in the binary).
-            if (!self::endsWithBoxBack($node->then, $name)) {
-                $node->then->stmts[] = $this->boxBackStore($name, $tT);
-            }
-            if (!$hasElse) {
+            $this->plantBoxBack($node->then, $name, $tT);
+            if ($node->else === null) {
                 $node->else = new Block([$this->boxBackStore($name, $oT)], Type::void());
-            } elseif (!self::endsWithBoxBack($node->else, $name)) {
-                $node->else->stmts[] = $this->boxBackStore($name, $oT);
+            } else {
+                $this->plantBoxBack($node->else, $name, $oT);
             }
         }
     }
 
     /**
-     * {@see planMergeShadow} for a `switch`: N exits instead of two, on the
-     * same terms per name. The box-back goes before an exit's break/continue
-     * (or at the end of the arm that falls off the switch); the HEAD exit —
-     * no default arm, no case taken — gets a synthesized default arm holding
-     * its box-backs, after a `break` that keeps the last arm from falling into
-     * it. Idempotent: the next run finds the box-backs, and the synthesized
-     * default makes the head an ordinary arm.
+     * The inverse of {@see planMergeShadow}, for a promotion a LATER run no
+     * longer needs. The plant is sticky (`declaredType`), but the arm types it
+     * was planted on are not: `$t = tables(); $lh = $t[0];` beside `$lh =
+     * build();` disagreed while `tables()` still returned the `null|array`
+     * static as a cell, and agreed (`vec[vec[int]]` both) once NarrowReturns
+     * and Monomorphize made them concrete. The box-backs then stayed, so every
+     * pass through the merge rebuilt the array as a fresh cell array (a copy of
+     * every element) and boxed it into a slot whose raw predecessor nothing
+     * released — the whole Huffman table, per inflate call. Two arms of one kind
+     * agree on the raw word, which is exactly the case planMergeShadow skips, so
+     * take the pair back out and let the slot stay raw.
      *
-     * @param int[] $exitArms arm index of each exit, -1 for the head
-     * @param array<string, Type> $exitTypes "exit#name" → that exit's type
+     * Only a PAIR — one box-back of the name ending each arm — is taken back:
+     * that is the shape planMergeShadow plants and nothing else does. The caller
+     * leaves a diverging if/else alone, and types each name answered here with
+     * the union of its two arms: the slot leaves both raw.
+     *
+     * @return array<string,Type> name => its merged type past the if/else
      */
-    private function planSwitchMergeShadow(Switch_ $node, array $exitArms, array $exitTypes): void
+    private function unplantAgreedBoxBacks(Block $then, Block $else): array
     {
-        $k = \count($exitArms);
-        if ($k < 2) { return; }
-        /** @var array<string, Type> $headBoxes */
-        $headBoxes = [];
-        foreach ($exitTypes as $key0 => $t0) {
-            if (\strncmp($key0, '0#', 2) !== 0) { continue; }
-            $name = \substr($key0, 2);
-            /** @var Type[] $ts */
-            $ts = [];
-            $inAll = true;
-            for ($i = 0; $i < $k; $i = $i + 1) {
-                $ek = (string)$i . '#' . $name;
-                if (!isset($exitTypes[$ek])) { $inAll = false; break; }
-                $ts[] = $exitTypes[$ek];
-            }
-            if (!$inAll) { continue; }
-            $sameKind = true;
-            $hasCell = false;
-            foreach ($ts as $t) {
-                if ($t->kind !== $t0->kind) { $sameKind = false; }
-                if ($t->kind === Type::KIND_CELL) { $hasCell = true; }
-            }
-            if ($sameKind) { continue; }
-            $ok = true;
-            foreach ($ts as $t) {
-                if ($this->isScalarOrCell($t)) { continue; }
-                if ($t->isArray() && $hasCell) { continue; }
-                if ($t->kind === Type::KIND_NULL) {
-                    $boxes = true;
-                    foreach ($ts as $u) {
-                        if ($u->kind !== Type::KIND_NULL && !$this->nullBoxesWith($u)) { $boxes = false; }
-                    }
-                    if ($boxes) { continue; }
-                }
-                $ok = false;
-            }
-            if (!$ok) { continue; }
-            if (isset($this->cellMergeLocals[$name])) { continue; }
-            if ((isset($this->keyUsedLocals[$name]) && !$hasCell)
-                || isset($this->refPinnedLocals[$name])) { continue; }
-            if (isset($this->globalBackedNames[$name])
-                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
-            $this->cellMergeLocals[$name] = true;
-            for ($i = 0; $i < $k; $i = $i + 1) {
-                $ai = $exitArms[$i];
-                if ($ai < 0) { $headBoxes[$name] = $ts[$i]; continue; }
-                $arm = $node->arms[$ai];
-                $arm->body = self::withBoxBack($arm->body, $this->boxBackStore($name, $ts[$i]));
-            }
+        $out = [];
+        $names = self::trailingBoxBackNames($then);
+        foreach ($names as $name) {
+            $ti = self::boxBackIndex($then, $name);
+            $ei = self::boxBackIndex($else, $name);
+            if ($ti < 0 || $ei < 0) { continue; }
+            $tT = self::boxBackValueType($then->stmts[$ti]);
+            $oT = self::boxBackValueType($else->stmts[$ei]);
+            if ($tT->kind !== $oT->kind) { continue; }
+            $then->stmts = self::withoutStmt($then->stmts, $ti);
+            $else->stmts = self::withoutStmt($else->stmts, $ei);
+            $out[$name] = $this->unionTypes($tT, $oT);
         }
-        if (\count($headBoxes) === 0) { return; }
-        $lastIdx = \count($node->arms) - 1;
-        if ($lastIdx >= 0) {
-            $lastArm = $node->arms[$lastIdx];
-            $n = \count($lastArm->body);
-            $end = $n > 0 ? $lastArm->body[$n - 1] : null;
-            if ($end === null || !$this->armTerminates($end)) { $lastArm->body[] = new \Compile\Mir\Break_(1); }
-        }
-        /** @var Node[] $stmts */
-        $stmts = [];
-        foreach ($headBoxes as $name => $t) { $stmts[] = $this->boxBackStore($name, $t); }
-        $node->arms[] = new \Compile\Mir\SwitchArm_(null, $stmts);
+        return $out;
     }
 
-    /**
-     * `$body` with `$box` placed before its trailing break/continue (or at its
-     * end), unless the run of box-backs there already stores that name.
-     * @param Node[] $body
-     * @return Node[]
-     */
-    private static function withBoxBack(array $body, StoreLocal $box): array
+    /** The names of the box-back run ending `$block` ({@see boxBackEnd}).
+     *  @return string[] */
+    private static function trailingBoxBackNames(Block $block): array
     {
-        $n = \count($body);
-        $cut = $n;
-        if ($n > 0 && ($body[$n - 1]->kind === Node::KIND_BREAK || $body[$n - 1]->kind === Node::KIND_CONTINUE)) {
-            $cut = $n - 1;
-        }
-        for ($i = $cut - 1; $i >= 0; $i--) {
-            $st = $body[$i];
-            if (!($st instanceof StoreLocal) || !($st->value instanceof LoadLocal)
-                || $st->value->name !== $st->name) { break; }
-            if ($st->name === $box->name) { return $body; }
-        }
-        /** @var Node[] $out */
         $out = [];
-        for ($i = 0; $i < $cut; $i = $i + 1) { $out[] = $body[$i]; }
-        $out[] = $box;
-        for ($i = $cut; $i < $n; $i = $i + 1) { $out[] = $body[$i]; }
+        for ($i = self::boxBackEnd($block) - 1; $i >= 0; $i--) {
+            $name = self::selfStoreName($block->stmts[$i]);
+            if ($name === '') { break; }
+            $out[] = $name;
+        }
+        return $out;
+    }
+
+    /** Index of `$name`'s box-back in the run ending `$block`, -1 when none —
+     *  the lookup {@see endsWithBoxBack} answers yes/no for. A box-back is a
+     *  store typed cell over a non-cell read of its own name. */
+    private static function boxBackIndex(Block $block, string $name): int
+    {
+        for ($i = self::boxBackEnd($block) - 1; $i >= 0; $i--) {
+            $st = $block->stmts[$i];
+            $sn = self::selfStoreName($st);
+            if ($sn === '') { return -1; }
+            if ($sn !== $name) { continue; }
+            if ($st->type->kind !== Type::KIND_CELL) { return -1; }
+            $vt = self::boxBackValueType($st);
+            if ($vt->kind === Type::KIND_CELL || $vt->kind === Type::KIND_UNKNOWN) { return -1; }
+            return $i;
+        }
+        return -1;
+    }
+
+    /** The name of a `$x = $x` self-store, '' for any other statement. */
+    private static function selfStoreName(Node $st): string
+    {
+        if (!($st instanceof StoreLocal)) { return ''; }
+        $v = $st->value;
+        if (!($v instanceof LoadLocal)) { return ''; }
+        return $v->name === $st->name ? $st->name : '';
+    }
+
+    /** The concrete type a box-back boxes — narrowed first: a field of a
+     *  subclass read through a base `Node` faults natively. */
+    private static function boxBackValueType(Node $st): Type
+    {
+        if (!($st instanceof StoreLocal)) { return Type::unknown(); }
+        $v = $st->value;
+        if (!($v instanceof LoadLocal)) { return Type::unknown(); }
+        return $v->type;
+    }
+
+    /** @param Node[] $stmts
+     *  @return Node[] */
+    private static function withoutStmt(array $stmts, int $at): array
+    {
+        $out = [];
+        $n = \count($stmts);
+        for ($i = 0; $i < $n; $i++) {
+            if ($i !== $at) { $out[] = $stmts[$i]; }
+        }
         return $out;
     }
 
@@ -2215,13 +2218,40 @@ final class InferTypes implements Pass
         return $st;
     }
 
+    /** Append the box-back to an arm — BEFORE a trailing `break`/`continue`:
+     *  behind the jump it is dead code, and the slot leaves the arm raw to the
+     *  loop header or exit that reads it as the cell this merge promised. */
+    private function plantBoxBack(Block $arm, string $name, Type $concrete): void
+    {
+        $end = self::boxBackEnd($arm);
+        if (self::endsWithBoxBack($arm, $name, $end)) { return; }
+        $st = $this->boxBackStore($name, $concrete);
+        $c = \count($arm->stmts);
+        if ($end === $c) {
+            $arm->stmts[] = $st;
+            return;
+        }
+        $jump = $arm->stmts[$c - 1];
+        $arm->stmts[$c - 1] = $st;
+        $arm->stmts[] = $jump;
+    }
+
+    /** Where an arm's box-backs end: before its trailing break/continue. */
+    private static function boxBackEnd(Block $arm): int
+    {
+        $c = \count($arm->stmts);
+        if ($c === 0) { return 0; }
+        $k = $arm->stmts[$c - 1]->kind;
+        return $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE ? $c - 1 : $c;
+    }
+
     /** Does `$block` already end in the `$name = $name` box-back store
      *  {@see boxBackStore} appends? Any trailing run of box-backs for other
      *  names is looked through, so the order they were appended in does not
-     *  matter. */
-    private static function endsWithBoxBack(Block $block, string $name): bool
+     *  matter. `$end` = one past the last box-back slot ({@see boxBackEnd}). */
+    private static function endsWithBoxBack(Block $block, string $name, int $end): bool
     {
-        for ($i = \count($block->stmts) - 1; $i >= 0; $i--) {
+        for ($i = $end - 1; $i >= 0; $i--) {
             $st = $block->stmts[$i];
             if (!($st instanceof StoreLocal) || !($st->value instanceof LoadLocal)
                 || $st->value->name !== $st->name) {
@@ -2276,13 +2306,6 @@ final class InferTypes implements Pass
         return $k === Type::KIND_OBJ || $k === Type::KIND_UNION
             || $k === Type::KIND_UNKNOWN || $k === Type::KIND_ARRAY
             || $k === Type::KIND_STRING || $k === Type::KIND_CLOSURE;
-    }
-
-    private function markKeyLocal(Node $idx): void
-    {
-        if ($idx->kind === Node::KIND_LOAD_LOCAL) {
-            $this->keyUsedLocals[$idx->name] = true;
-        }
     }
 
     private function markArithLocal(?Node $operand): void
@@ -2542,8 +2565,7 @@ final class InferTypes implements Pass
             // `$x = null;` seed via `box_null`. A numeric body types directly, so
             // no entry/body chicken-and-egg — key on the body kind here.
             if ($st->kind === Type::KIND_NULL && ($this->nullBoxesWith($bt) || $arithUnknown)) {
-                if (isset($this->keyUsedLocals[$name])
-                    || isset($this->refPinnedLocals[$name])) { continue; }
+                if (isset($this->refPinnedLocals[$name])) { continue; }
                 $out[$name] = Type::cell();
                 if (!isset($this->cellLoopLocals[$name])) {
                     $this->cellLoopLocals[$name] = true;
@@ -2551,9 +2573,12 @@ final class InferTypes implements Pass
                 }
                 continue;
             }
-            if (!$this->isScalarOrCell($st) || !$this->isScalarOrCell($bt)) { continue; }
-            if (isset($this->keyUsedLocals[$name])
-                || isset($this->refPinnedLocals[$name])) { continue; }
+            // Any other pair with no raw word in common ({@see joinDisagrees}):
+            // an array entry the body leaves a cell (the if/else box-back inside
+            // the body produces exactly that), a string the body turns into an
+            // array, an object into an int.
+            if (!$this->joinDisagrees($st, $bt)) { continue; }
+            if (isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
                 $this->cellLoopLocals[$name] = true;
@@ -2561,6 +2586,173 @@ final class InferTypes implements Pass
             }
         }
         return $out;
+    }
+
+    /**
+     * Where two control-flow paths meet with no if/else to plant a box-back on
+     * (a `switch` arm entered by a jump or by fall-through, the arms leaving
+     * it, a `catch` entered from anywhere in its `try`, the paths out of a
+     * `try`/`catch`): a name the paths hold in representations that share no
+     * raw word is pinned a cell for the whole function — the {@see loopMerge}
+     * discipline, so every store boxes and every read dispatches by tag.
+     *
+     * @param array<string, Type> $a
+     * @param array<string, Type> $b
+     * @return array<string, Type>
+     */
+    private function joinLocals(array $a, array $b): array
+    {
+        $out = $this->mergeLocals($a, $b);
+        foreach ($a as $name => $at) {
+            if (!isset($b[$name]) || !$this->joinDisagrees($at, $b[$name])) { continue; }
+            if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
+                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
+            $out[$name] = Type::cell();
+            if (!isset($this->cellLoopLocals[$name])) {
+                $this->cellLoopLocals[$name] = true;
+                $this->loopPromoGrew = true;
+            }
+        }
+        return $out;
+    }
+
+    private function resetJumpState(): void
+    {
+        $this->jumpBreaks = [];
+        $this->jumpConts = [];
+        $this->jumpBreakSet = [];
+        $this->jumpContSet = [];
+        $this->jumpIsSwitch = [];
+        $this->gotoPending = [];
+        $this->labelStates = [];
+    }
+
+    private function pushJumpFrame(bool $isSwitch): void
+    {
+        $this->jumpBreaks[] = [];
+        $this->jumpConts[] = [];
+        $this->jumpBreakSet[] = false;
+        $this->jumpContSet[] = false;
+        $this->jumpIsSwitch[] = $isSwitch;
+    }
+
+    /** A loop body re-inferred: the edges the previous pass recorded are stale. */
+    private function resetJumpFrame(): void
+    {
+        $i = \count($this->jumpIsSwitch) - 1;
+        $this->jumpBreaks[$i] = [];
+        $this->jumpConts[$i] = [];
+        $this->jumpBreakSet[$i] = false;
+        $this->jumpContSet[$i] = false;
+    }
+
+    /** Leave a frame: the `break` edges meet the state after the construct. */
+    private function popJumpFrame(): void
+    {
+        $i = \count($this->jumpIsSwitch) - 1;
+        if ($this->jumpBreakSet[$i]) {
+            $this->localTypes = $this->joinLocals($this->localTypes, $this->jumpBreaks[$i]);
+        }
+        \array_pop($this->jumpBreaks);
+        \array_pop($this->jumpConts);
+        \array_pop($this->jumpBreakSet);
+        \array_pop($this->jumpContSet);
+        \array_pop($this->jumpIsSwitch);
+    }
+
+    /** The end of a loop body: the `continue` edges meet the back-edge state. */
+    private function joinContinues(): void
+    {
+        $i = \count($this->jumpIsSwitch) - 1;
+        if ($this->jumpContSet[$i]) {
+            $this->localTypes = $this->joinLocals($this->localTypes, $this->jumpConts[$i]);
+        }
+    }
+
+    private function noteJump(int $level, bool $isContinue): void
+    {
+        $i = \count($this->jumpIsSwitch) - ($level < 1 ? 1 : $level);
+        if ($i < 0) { return; }
+        if ($isContinue && !$this->jumpIsSwitch[$i]) {
+            $this->jumpConts[$i] = $this->jumpContSet[$i]
+                ? $this->joinLocals($this->jumpConts[$i], $this->localTypes) : $this->localTypes;
+            $this->jumpContSet[$i] = true;
+            return;
+        }
+        $this->jumpBreaks[$i] = $this->jumpBreakSet[$i]
+            ? $this->joinLocals($this->jumpBreaks[$i], $this->localTypes) : $this->localTypes;
+        $this->jumpBreakSet[$i] = true;
+    }
+
+    /** A `goto` to a label already passed can only pin (the label's reads are
+     *  typed); the re-run the pin triggers types them on the cell. */
+    private function noteGoto(string $label): void
+    {
+        if (isset($this->labelStates[$label])) {
+            $this->joinLocals($this->labelStates[$label], $this->localTypes);
+            return;
+        }
+        $this->gotoPending[$label] = isset($this->gotoPending[$label])
+            ? $this->joinLocals($this->gotoPending[$label], $this->localTypes) : $this->localTypes;
+    }
+
+    private function noteLabel(string $name): void
+    {
+        if (isset($this->gotoPending[$name])) {
+            $this->localTypes = $this->joinLocals($this->localTypes, $this->gotoPending[$name]);
+            unset($this->gotoPending[$name]);
+        }
+        $this->labelStates[$name] = $this->localTypes;
+    }
+
+    /**
+     * A store inside a `try` body: the catch can be entered right after it, so
+     * the value it leaves meets every other state of the try (and the entry
+     * map) at the catch — including one a later store undoes before the try's
+     * end. Each open try frame keeps the first type it saw per name; a store
+     * that disagrees with it pins the name the way {@see joinLocals} does.
+     */
+    private function noteTryStore(string $name): void
+    {
+        if (!isset($this->localTypes[$name])) { return; }
+        $t = $this->localTypes[$name];
+        $n = \count($this->tryStoreFrames);
+        for ($i = 0; $i < $n; $i++) {
+            $frame = $this->tryStoreFrames[$i];
+            if (!isset($frame[$name])) {
+                $frame[$name] = $t;
+                $this->tryStoreFrames[$i] = $frame;
+                continue;
+            }
+            $this->joinLocals([$name => $frame[$name]], [$name => $t]);
+        }
+    }
+
+    /** Two reprs of one slot with no raw word in common — the pairs
+     *  {@see loopMerge} and {@see planMergeShadow} box. */
+    private function joinDisagrees(Type $a, Type $b): bool
+    {
+        if ($a->kind === $b->kind) { return false; }
+        if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
+        if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
+        return $this->cellCarries($a) && $this->cellCarries($b);
+    }
+
+    /** A kind a cell carries by its tag: a scalar, a string, an array, an
+     *  object. Two different ones in one slot share no raw word, and their
+     *  union is `unknown` — a type with no representation. */
+    private function cellCarries(Type $t): bool
+    {
+        return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ;
+    }
+
+    /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */
+    private static function stmtsDiverge(array $stmts): bool
+    {
+        $c = \count($stmts);
+        if ($c === 0) { return false; }
+        $k = $stmts[$c - 1]->kind;
+        return $k === Node::KIND_RETURN || $k === Node::KIND_THROW;
     }
 
     private function widenNumeric(Type $a, Type $b): ?Type
@@ -2611,23 +2803,25 @@ final class InferTypes implements Pass
         // which is what made a caller rebuild the boxed array as if its values
         // were raw (SIGSEGV) or read them raw (garbage floats).
         if ($cur->kind === Type::KIND_CELL) { return $cur; }
-        // Two closure literals are one representation — a raw env pointer — so
-        // the element is `closure`, not a cell: `$copy = $asserts; $copy[] = fn…`
-        // re-typed the buffer's element to cell AFTER the first closure rode in
-        // raw, and the invoke read that raw word as a cell (called through 0).
-        if ($this->isClosureElem($cur) && $this->isClosureElem($vt)) {
-            return $cur->kind === Type::KIND_OBJ && $vt->kind === Type::KIND_OBJ && $cur->class === $vt->class
-                ? $cur : Type::closure();
+        // Two closure values are ONE representation — the raw env pointer a
+        // `Closure` slot holds — whether spelled `closure` or a literal's own
+        // `obj<__closure_N>`. The union has no such member and fell to a cell,
+        // so `$hooks[] = $this->make()` into a `Closure[]` boxed every slot.
+        if ($this->isClosureElemType($cur) && $this->isClosureElemType($vt)) {
+            return $cur->kind === Type::KIND_OBJ && $vt->kind === Type::KIND_OBJ
+                && ($cur->class ?? '') === ($vt->class ?? '') ? $cur : Type::closure();
         }
         $u = $this->unionTypes($cur, $vt);
         if ($u->kind === Type::KIND_UNKNOWN || $u->kind === Type::KIND_NULL) { return Type::cell(); }
         return $u;
     }
 
-    private function isClosureElem(Type $t): bool
+    private function isClosureElemType(Type $t): bool
     {
         if ($t->kind === Type::KIND_CLOSURE) { return true; }
-        return $t->kind === Type::KIND_OBJ && \str_starts_with($t->class ?? '', '__closure_');
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $c = $t->class ?? '';
+        return $c === 'Closure' || \str_starts_with($c, '__closure_');
     }
 
     /** Backing kind via a typed param (self-host slot offset). */
@@ -2658,8 +2852,28 @@ final class InferTypes implements Pass
         foreach ($types as $t) {
             if ($t->kind !== Type::KIND_OBJ) { $allObj = false; break; }
         }
-        if ($allObj) { return Type::union($types); }
+        if ($allObj) { return $this->objUnion($types); }
         return $first;
+    }
+
+    /**
+     * {@see Type::union} for arms this pass knows the classes of. An ENUM case
+     * is carried as its ORDINAL, not a pointer, so a union that names an enum
+     * next to another class has no representation — `E::B` and `F::Z` are both
+     * ordinal 1, and every consumer (var_dump, a boxed return, `==`) read the
+     * ordinal as an object pointer and faulted. Such a join is a `cell`: each
+     * arm boxes its own case singleton ({@see EmitLlvmBuiltins::boxToCell}).
+     *
+     * @param Type[] $arms
+     */
+    private function objUnion(array $arms): Type
+    {
+        $u = Type::union($arms);
+        if ($u->kind !== Type::KIND_UNION) { return $u; }
+        foreach ($u->atoms as $a) {
+            if (isset($this->enums[$a->class ?? ''])) { return Type::cell(); }
+        }
+        return $u;
     }
 
     private function unionPropType(Type $u, string $prop): ?Type

@@ -417,6 +417,10 @@ final class LowerFromAst implements Pass
      *  Async\ types and its parser names Buffer\ByteBuffer. Implies
      *  bufferSrc + asyncSrc + sapiSrc + obSrc. */
     public string $httpSrc = '';
+    /** Http\WebSocket — DEMAND-GATED on its own qualifier. Braced-namespace
+     *  tree, parsed after Http\: it calls Http\headEnd/splitHead and
+     *  Http\Response::takeover, and names Http\Request in its signatures. */
+    public string $wsSrc = '';
     /** ext/simplexml + ext/libxml — DEMAND-GATED. Global namespace, so it rides
      *  the concatenated blob rather than the braced tier. Carries the libxml2
      *  binds, the __McXmlDoc node table, SimpleXMLElement and the libxml_*
@@ -566,6 +570,17 @@ final class LowerFromAst implements Pass
     public bool $emitLibrary = false;
 
     /**
+     * Building the bundled runtime library (`runtime: true`, the stdlib): it
+     * exports the php-visible classes it defines ({@see isPublicRuntimeType}) and
+     * nothing else a user library does. A program holds a `DeflateContext`,
+     * `InflateContext` or `HashContext` in its own properties, arrays and locals;
+     * unexported, the name resolved to no class there, every such slot erased to
+     * KIND_UNKNOWN, and an erased slot owns nothing — an overwritten or dying
+     * holder never released the object.
+     */
+    public bool $exportRuntimeTypes = false;
+
+    /**
      * Class / interface / enum declarations hydrated from a dependency's
      * `.sig` ({@see \Manticore\Sig::classDeclsFromJson}). Spliced into the
      * statement list just after the prelude window, so they register, sort and
@@ -599,6 +614,17 @@ final class LowerFromAst implements Pass
      */
     private array $externMethodSyms = [];
 
+    /**
+     * A runtime-library type a program can name: global namespace, and not
+     * `stdClass`, which every module registers for itself. `Runtime\…` classes
+     * are the library's own machinery.
+     */
+    private function isPublicRuntimeType(string $name): bool
+    {
+        $n = \ltrim($name, '\\');
+        return $n !== 'stdClass' && \strpos($n, '\\') === false;
+    }
+
     /** Whether this FQN was imported from a dependency's `.sig`. */
     private function isExternClassName(string $name): bool
     {
@@ -613,6 +639,15 @@ final class LowerFromAst implements Pass
     private ?Module $module = null;
     private int $closureCounter = 0;
     private int $destrCounter = 0;
+
+    /** Counter for the `__lv_N` temps {@see LowerStmts::hoistLvalueStmt} makes. */
+    private int $lvCounter = 0;
+
+    /** @var Node[] the temp stores of the lvalue being hoisted, in evaluation order */
+    private array $lvHoist = [];
+
+    /** @var string[] the temp names of the lvalue being hoisted */
+    private array $lvTemps = [];
 
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
@@ -714,6 +749,10 @@ final class LowerFromAst implements Pass
         // Register every class name first so a class can reference
         // itself / a later-declared sibling in a property type hint
         // (e.g. `?Node $next`) before its full def exists.
+        // The built-in `stdClass` is synthesized only AFTER every class is built
+        // (below), so without its name here a `?\stdClass $o` property lowered to
+        // an erased slot that never released the object it was overwritten over.
+        $this->knownClassNames['stdClass'] = true;
         $sIdx = -1;
         foreach ($stmts as $stmt) {
             $sIdx = $sIdx + 1;
@@ -742,7 +781,9 @@ final class LowerFromAst implements Pass
                 // so a library's internal trait keeps working and only an
                 // attempt to `use` one across the boundary fails, with the
                 // ordinary unknown-trait error. {@see Module::$typeDecls}
-                if ($this->emitLibrary && $sIdx >= $preludeCount
+                if (($this->emitLibrary
+                            || ($this->exportRuntimeTypes && $this->isPublicRuntimeType($this->classDeclName($cdecl))))
+                        && $sIdx >= $preludeCount
                         && ($cdecl->kind ?? 'class') !== 'trait'
                         && !isset($this->externClassNames[$this->classDeclName($cdecl)])) {
                     $module->typeDecls[$this->classDeclName($cdecl)] = $cdecl;
@@ -1450,7 +1491,9 @@ final class LowerFromAst implements Pass
                 }
             }
         }
-        if ($this->emitLibrary) { $this->recordExportConstants($module); }
+        if ($this->emitLibrary || $this->exportRuntimeTypes) {
+            $this->recordExportConstants($module, $this->emitLibrary);
+        }
         // `#[Overload('f')]` — source and imported alike; ResolveOverloads
         // retargets fitting calls to `f` once argument types are known.
         foreach ($module->functions as $fd) {
@@ -1671,7 +1714,7 @@ final class LowerFromAst implements Pass
      * reduces to the single string a dependent needs — no cross-class
      * reference has to survive into the file.
      */
-    private function recordExportConstants(Module $module): void
+    private function recordExportConstants(Module $module, bool $globals): void
     {
         $saved = $this->currentLowerClass;
         foreach ($module->typeDecls as $tname => $tdecl) {
@@ -1682,6 +1725,7 @@ final class LowerFromAst implements Pass
             }
         }
         $this->currentLowerClass = $saved;
+        if (!$globals) { return; }
         foreach ($this->userConstants as $cname => $cexpr) {
             $module->globalConstValues[$cname] =
                 \Compile\Mir\Passes\ConstFold::foldOne($this->lowerExpr($cexpr));
@@ -3145,7 +3189,7 @@ final class LowerFromAst implements Pass
      * wrapper. `null` declParams (unknown arity, e.g. a builtin) falls back to
      * a single cell param. Returns `[Param[], Node[]]`.
      */
-    private function fccParamsAndArgs(?array $declParams): array
+    private function fccParamsAndArgs(?array $declParams, ?string $defaultScope = null): array
     {
         $mir = [];
         $loads = [];
@@ -3157,8 +3201,13 @@ final class LowerFromAst implements Pass
             /** @var \Parser\Ast\Param[] $dp */
             $dp = $declParams;
             foreach ($dp as $p) {
-                $t = $this->lowerParamType($p->typeHint);
-                $mir[] = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false));
+                $t = ($p->variadic ?? false)
+                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    : $this->lowerParamType($p->typeHint);
+                $fp = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
+                    default: $this->lowerParamDefault($p, $defaultScope));
+                $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $t->isArray();
+                $mir[] = $fp;
                 $loads[] = new LoadLocal($p->name, $t);
             }
         } else {
@@ -3190,7 +3239,7 @@ final class LowerFromAst implements Pass
         }
         $call = new StaticCall_($class, $method, $loads, Type::unknown(), $scope);
         $body = new Block([new Return_($call, Type::void())], Type::void());
-        return $this->finishClosure([], $declParams, $body, null);
+        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class);
     }
 
     /** Closure capturing `$recv` and forwarding to `$recv->$method(...)`.
@@ -3207,7 +3256,7 @@ final class LowerFromAst implements Pass
         // arm concrete, which is what triggers the ternary's cell-lift.)
         $declParams = null;
         if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
-        [$mir, $loads] = $this->fccParamsAndArgs($declParams);
+        [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
     }

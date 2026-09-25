@@ -1,0 +1,10 @@
+read local: TypeError String offset cast occurred
+read literal: TypeError String offset cast occurred
+write local: TypeError String offset cast occurred
+read bool: TypeError String offset cast occurred
+isset: true
+empty: false
+coalesce: a
+isset literal: true
+fn read: TypeError String offset cast occurred
+fn write: TypeError String offset cast occurred

@@ -1,0 +1,6 @@
+ternary cast of an element: sum=1302600 growth ok
+ternary cast of an int: sum=695578 growth ok
+elvis cast: sum=887225 growth ok
+coalesce cast: sum=965896 growth ok
+match cast: sum=591481 growth ok
+9 7 4 5 1

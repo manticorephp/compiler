@@ -1,0 +1,19 @@
+append: sum=20200 growth ok
+keyed store: sum=20200 growth ok
+increment: sum=20200 growth ok
+compound concat: sum=20200 growth ok
+reference: sum=80800 growth ok
+by-ref foreach: sum=20200 growth ok
+destructure read: sum=40400 growth ok
+destructure write: sum=20200 growth ok
+unset element: sum=20200 growth ok
+by-ref builtin arg: sum=20200 growth ok
+by-value foreach: sum=40400 growth ok
+4
+A
+destruct t1
+t1
+B
+destruct t2
+C 2
+done

@@ -606,7 +606,7 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+        if ($this->intPair($n->left, $n->right)) {
             $l = $n->left->value;
             $r = $n->right->value;
             $v = 0;
@@ -621,12 +621,25 @@ final class ConstFold implements Pass
     {
         $n->left  = $this->foldNode($n->left);
         $n->right = $this->foldNode($n->right);
-        if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
+        if ($this->intPair($n->left, $n->right)) {
             $l = $n->left->value;
             $r = $n->right->value;
             return new BoolConst($this->cmpInt($n->op, $l, $r), Type::bool_());
         }
         return $n;
+    }
+
+    /**
+     * Two integer constants a comparison may fold. An enum CASE is an
+     * `int_const` too — its ORDINAL, typed `obj<E>` — and php's enums are
+     * uncomparable (`E::A < E::B` is false, `<=>` is 1) and never equal across
+     * enums (`E::A == F::X` is false though both ordinals are 0): folding the
+     * ordinals answered all three wrong. Those stay for the emitter.
+     */
+    private function intPair(Node $l, Node $r): bool
+    {
+        return $l->kind === Node::KIND_INT_CONST && $r->kind === Node::KIND_INT_CONST
+            && $l->type->kind !== Type::KIND_OBJ && $r->type->kind !== Type::KIND_OBJ;
     }
 
     private function cmpInt(string $op, int $l, int $r): bool

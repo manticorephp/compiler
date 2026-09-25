@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **9** (v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **11** (v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -69,7 +69,7 @@ offset 8  : i64  rc_word               -- packed rc | color | buffered
 offset 16 : ...  properties
 ```
 
-The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr }`, 40 bytes) is a static global, `linkonce_odr`
+The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr, ptr, i64 }`, 56 bytes) is a static global, `linkonce_odr`
 so each class has exactly one across every separately-linked object:
 
 ```
@@ -81,6 +81,14 @@ descriptor + 32 : ptr  props_fn     -- @__mir_props_<id>: declared props + bag a
                                        assoc; what json_encode / (array) / get_object_vars
                                        read from inside stdlib.o. Null for a class with
                                        neither properties nor a bag
+descriptor + 40 : ptr  cmp_view_fn  -- @__mir_cmpview_<id>: the COMPARE view as a FRESH assoc —
+                                       every declared prop (any visibility) then the bag, or
+                                       only the #[CompareKey] props. Null: nothing to compare
+descriptor + 48 : i64  cmp_group    -- objects compare through their views only within one
+                                       group: the class id, CMP_GROUP_KEYED (-1) for every
+                                       #[CompareKey] class, 0 (identity only) for an enum and
+                                       an #[Uncomparable] class. #[CompareNone]: a null
+                                       cmp_view_fn under the class-id group (any two equal)
 ```
 
 `instanceof`, method dispatch and exception catch read `class_id` at descriptor offset 0;
@@ -165,13 +173,24 @@ Flags-word bitfields:
 | Bits | Field | Notes |
 |---|---|---|
 | 0 | `ARRAY_FLAG_HASHED` | cleared ⇒ PACKED |
-| 1..3 | element repr (`ARRAY_REPR_*`, shift 1) | 0 RAW, 2 STR, 4 OBJ, 6 ARR, 8 CELL |
+| 1..3 | element repr (`ARRAY_REPR_*`, shift 1) | 0 RAW, 2 STR, 4 OBJ, 6 ARR, 8 CELL, 10 CLO |
 | 8..35 | tombstone counter (`ARRAY_TOMB_SHIFT`, 28 bits) | **every read must mask** |
 | 36..63 | internal pointer (`ARRAY_PTR_SHIFT`, 28 bits) | `current()`/`next()` cursor |
 
 The element-repr nibble is the runtime-truthful record of what retain / release / COW must
 do to each element. It is stamped **as elements are stored**, so it travels with the array
 through erased aliases — unlike the compile-time flavour guess.
+
+`CLO` (v11) is the one repr a CONCRETE array stamps: a `Closure` / `callable` element has no
+hint code, and its static type cannot be the owner because a `callable` slot also holds
+words that are not closure envs (a function-name string, an `[obj, 'm']` array) and builders
+copy closure words without counting them. So a closure-element store stamps `CLO` only when
+the value it wrote is the buffer's sole element, or the buffer already says `CLO`; a closure
+literal stamps it outright. Its element op is `__mir_closure_retain` / `__mir_closure_release`,
+which act only on a word carrying `CLOSURE_TAG_MAGIC` — anything else is left alone. The
+overwrite / `unset` drop of a closure slot is the runtime-gated `__mir_array_clo_drop`, so a
+buffer that never said `CLO` never gives back a count it did not take. Read only while the
+element hint is 0.
 
 ⚠ The tombstone counter used to run to bit 63. It is now bounded so the internal pointer can
 live above it: an unmasked `flags >> 8` reads the pointer as tombstones, and

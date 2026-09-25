@@ -272,6 +272,12 @@ trait LowerPrelude
             $ht = \Parser\Parser::parseSource("<?php\n" . $this->httpSrc);
             foreach ($ht->statements as $s) { $stmts[] = $s; }
         }
+        // Http\WebSocket — after Http\: it calls Http\headEnd/splitHead and
+        // Http\Response::takeover, and names Http\Request in its signatures.
+        if ($this->wsSrc !== '') {
+            $ws = \Parser\Parser::parseSource("<?php\n" . $this->wsSrc);
+            foreach ($ws->statements as $s) { $stmts[] = $s; }
+        }
         return $stmts;
     }
 
@@ -1109,6 +1115,14 @@ trait LowerPrelude
             // ext/zlib: the container a gz* function wraps its DEFLATE stream in.
             'ZLIB_ENCODING_RAW' => -15, 'ZLIB_ENCODING_DEFLATE' => 15,
             'ZLIB_ENCODING_GZIP' => 31,
+            // ext/zlib: deflate_add() flush modes, deflate_init() strategies, zlib status codes.
+            'ZLIB_NO_FLUSH' => 0, 'ZLIB_PARTIAL_FLUSH' => 1, 'ZLIB_SYNC_FLUSH' => 2,
+            'ZLIB_FULL_FLUSH' => 3, 'ZLIB_FINISH' => 4, 'ZLIB_BLOCK' => 5,
+            'ZLIB_DEFAULT_STRATEGY' => 0, 'ZLIB_FILTERED' => 1, 'ZLIB_HUFFMAN_ONLY' => 2,
+            'ZLIB_RLE' => 3, 'ZLIB_FIXED' => 4,
+            'ZLIB_OK' => 0, 'ZLIB_STREAM_END' => 1, 'ZLIB_NEED_DICT' => 2, 'ZLIB_ERRNO' => -1,
+            'ZLIB_STREAM_ERROR' => -2, 'ZLIB_DATA_ERROR' => -3, 'ZLIB_MEM_ERROR' => -4,
+            'ZLIB_BUF_ERROR' => -5, 'ZLIB_VERSION_ERROR' => -6,
             // getimagesize()s format tags. In ext/standard, not GD.
             'IMAGETYPE_UNKNOWN' => 0, 'IMAGETYPE_GIF' => 1, 'IMAGETYPE_JPEG' => 2,
             'IMAGETYPE_PNG' => 3, 'IMAGETYPE_SWF' => 4, 'IMAGETYPE_PSD' => 5,
@@ -1191,6 +1205,8 @@ trait LowerPrelude
             'STREAM_SERVER_BIND' => 4, 'STREAM_SERVER_LISTEN' => 8,
             'STREAM_CLIENT_CONNECT' => 4, 'STREAM_CLIENT_ASYNC_CONNECT' => 2,
             'STREAM_CLIENT_PERSISTENT' => 1,
+            // stream_socket_shutdown $how — php's values, equal to SHUT_RD/WR/RDWR on both hosts.
+            'STREAM_SHUT_RD' => 0, 'STREAM_SHUT_WR' => 1, 'STREAM_SHUT_RDWR' => 2,
             // stream_socket_enable_crypto methods — php's values; bit 0 selects
             // CLIENT (1) vs SERVER (0). TLS_* is the version-agnostic combination.
             'STREAM_CRYPTO_METHOD_ANY_CLIENT' => 127, 'STREAM_CRYPTO_METHOD_ANY_SERVER' => 126,

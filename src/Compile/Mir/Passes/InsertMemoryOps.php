@@ -92,6 +92,43 @@ final class InsertMemoryOps implements Pass
      *  about this has no single correct release flavor and is blocked. */
     private array $rcObjSlotBoxed = [];
 
+    /** @var array<string, Type> owned rc local → the slot type of its first
+     *  owned RAW store (the raw half of a {@see $rcObjMixed} name). */
+    private array $rcObjRawType = [];
+
+    /** @var array<string, bool> owned rc local → it took an owned store into a
+     *  CELL slot. */
+    private array $rcObjCellSeen = [];
+
+    /** @var array<string, bool> owned rc locals whose slot is a raw string /
+     *  object on some paths and a cell on others — the flow-sensitive cell
+     *  promotion at an if/else merge ({@see InferTypes::planMergeShadow}). No
+     *  one static flavor releases both, so the release reads a per-slot
+     *  "holds a cell" flag the emitter keeps beside the slot
+     *  ({@see EmitLlvmMemory::mixedReleaseIr}). */
+    private array $rcObjMixed = [];
+
+    /** @var array<string, bool> names a foreach binds (its own ownership path). */
+    private array $rcObjForeachVar = [];
+
+    /** @var array<string, bool> names bound to other storage or aliased by a
+     *  reference ({@see collectRefNames}) — a write through the alias lands in
+     *  the slot without the store that keeps a MIXED slot's flag. */
+    private array $rcObjRefName = [];
+
+    /** @var array<string, bool[]> fn name → per-param by-ref mask */
+    private array $refMasks = [];
+
+    /** @var array<string, bool> fn name → its variadic tail is by-ref */
+    private array $refVariadic = [];
+
+    /** @var array<string, int> closure fn name → capture count (the call's
+     *  leading params) */
+    private array $closureCaptureCount = [];
+
+    /** @var array<string, bool> names that took a raw SCALAR store. */
+    private array $rcObjRawScalar = [];
+
     /** @var array<string, bool> owned array names EVERY owned store of which is
      *  a `__mir_array_copy` — so the name's buffer is this frame's own and
      *  releasing it cannot free anything another owner still holds. */
@@ -141,6 +178,19 @@ final class InsertMemoryOps implements Pass
         foreach ($module->functions as $fn) {
             if ($fn->ffiSymbol !== null) { $this->ffiFns[$fn->name] = true; }
         }
+        $this->refMasks = [];
+        $this->refVariadic = [];
+        foreach ($module->functions as $fn) {
+            $mask = [];
+            $tail = false;
+            foreach ($fn->params as $p) {
+                $mask[] = $p->byRef;
+                $tail = $p->variadic && $p->byRef;
+            }
+            $this->refMasks[$fn->name] = $mask;
+            $this->refVariadic[$fn->name] = $tail;
+        }
+        $this->closureCaptureCount = $module->closureCaptures;
         foreach ($module->functions as $fn) {
             $this->lowerFunction($fn);
         }
@@ -162,6 +212,13 @@ final class InsertMemoryOps implements Pass
         $this->rcObjNeutral = [];
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
+        $this->rcObjRawType = [];
+        $this->rcObjCellSeen = [];
+        $this->rcObjMixed = [];
+        $this->rcObjForeachVar = [];
+        $this->rcObjRawScalar = [];
+        $this->rcObjRefName = [];
+        $this->collectRefNames($fn->body);
         $this->rcObjErasedProp = [];
         $this->rcObjCopyOnly = [];
         $this->blockReason = [];
@@ -189,15 +246,45 @@ final class InsertMemoryOps implements Pass
         // The conservative direction is a leak, not a free: a param reassigned
         // to a fresh array on every path keeps that array alive to the end of
         // the process instead of being freed at scope exit.
+        // The walk runs FIRST so the blocks it records can be told apart from
+        // the blanket param block below ({@see $storeBlocked}); it never reads
+        // either map.
+        $this->scanStores($fn->body);
+        $this->settleMixedSlots($fn);
+        $storeBlocked = $this->rcObjBlocked;
         foreach ($fn->params as $p) {
             $this->blocked[$p->name] = true;
             $this->rcObjBlocked[$p->name] = true;
             $this->noteBlock($p->name, 'param', $p->type);
         }
 
-        $this->scanStores($fn->body);
+        // The FIRST exception: a BY-VALUE object or string param the body
+        // REASSIGNS from an owned producer (`$o = $o ?? new Options()`,
+        // `if ($o === null) { $o = new O(); }`, `$s = trim($s)`). The blanket
+        // block took both the release-before-overwrite and the scope-exit
+        // release away, so whatever the frame stored there was never freed —
+        // and a conditional's borrowed arm (`$o` itself) is retained to +1 by
+        // the ownership contract, so even the CALLER's object leaked one count
+        // per call. Registering the param gives it the entry retain + scope-exit
+        // release {@see EmitLlvmMemory::initRcObjSlots} pairs for exactly this
+        // shape: the entry +1 makes the caller's value the frame's to release,
+        // on overwrite or at exit, and a param never reassigned on the path
+        // taken is retained and released once. Only when every store to the
+        // name is owned and agrees with the param's own slot flavor — any
+        // borrowed or mismatched store keeps the block (a leak, never a free).
+        foreach ($fn->params as $p) {
+            if ($p->byRef || $p->variadic) { continue; }
+            $pk = $p->type->kind;
+            if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING) { continue; }
+            if ($pk === Type::KIND_OBJ && $this->isClosureType($p->type)) { continue; }
+            $st = $this->rcObjType[$p->name] ?? null;
+            if ($st === null || isset($storeBlocked[$p->name])) { continue; }
+            if ($this->rcSlotFlavor($st) !== $this->rcSlotFlavor($p->type)) { continue; }
+            if ($this->rcObjSlotBoxed[$p->name] ?? false) { continue; }
+            unset($this->rcObjBlocked[$p->name]);
+        }
 
-        // ONE exception to the blanket param block above: a BY-VALUE string
+        // The SECOND exception to the blanket param block: a BY-VALUE string
         // param the body self-appends to (`$out .= …`). The append takes
         // __mir_str_append's in-place fast path whenever rc == 1 — and rc IS 1
         // there, because that single reference is the CALLER'S. The callee then
@@ -224,7 +311,7 @@ final class InsertMemoryOps implements Pass
             }
         }
 
-        // The SECOND exception, and the same discipline: a BY-VALUE `mixed`
+        // The THIRD exception, and the same discipline: a BY-VALUE `mixed`
         // param the body MUTATES AS AN ARRAY (`$v[$k] = …`, `$v[] = …`,
         // `unset($v[$k])`, `$v[$k] = &$x`). An `array`-hinted param is copied on
         // entry for this ({@see EmitLlvmModule}'s copy_deep); a `mixed` one was
@@ -237,7 +324,7 @@ final class InsertMemoryOps implements Pass
         // Witness: symfony/polyfill-deepclone's `$values[$k] = &$value`, which
         // must rebind the CALLEE's element and leave the caller's `'p' => &$a`
         // exactly as it was.
-        // The THIRD: an `array` param the prologue COPIES because the body
+        // The FOURTH: an `array` param the prologue COPIES because the body
         // stores into it. The slot holds the frame's private +1, not the
         // caller's value, so it is an owned local like any other — released at
         // scope exit, handed on by a `return`, released before a reassignment.
@@ -318,6 +405,10 @@ final class InsertMemoryOps implements Pass
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
             if ($t !== null && $t->kind === Type::KIND_OBJ) { continue; }
+            // …and a CELL: its drop dispatches on the tag the slot carries, so a
+            // neutral store (a boxed scalar, null, an immortal literal) leaves
+            // it nothing to over-release.
+            if ($t !== null && $t->kind === Type::KIND_CELL) { continue; }
             // …and an ARRAY every owned store of which is a COPY. The SIGBUS this
             // block was written for is a SHARED buffer (`$conds = null; … $conds
             // = [];`, whose buffer a live MatchArm_ still held); a copy is the
@@ -364,6 +455,7 @@ final class InsertMemoryOps implements Pass
                 : ($type->isVec() ? 'vec'
                 : ($type->isAssoc() ? 'assoc'
                 : ($this->isClosureType($type) ? 'closure' : 'obj'))));
+            if (isset($this->rcObjMixed[$name])) { $flavor = 'mix' . $flavor; }
             $target = new LoadLocal($name, $type);
             $rcReleases[] = new MemoryOp_('rc_release', $flavor, $target, Type::void());
         }
@@ -400,6 +492,7 @@ final class InsertMemoryOps implements Pass
             $this->ownTrace('RCOBJ ' . $onm
                 . ' type=' . ($ot === null ? '?' : $ot->toString())
                 . ' flavor=' . ($ot === null ? '?' : $this->rcSlotFlavor($ot))
+                . (isset($this->rcObjMixed[$onm]) ? ' MIXED' : '')
                 . (isset($this->rcObjBlocked[$onm]) ? ' BLOCKED' : ' released'));
         }
         foreach ($this->ownedFlavor as $onm => $ofl) {
@@ -532,10 +625,21 @@ final class InsertMemoryOps implements Pass
         $ve = $value->element;
         $se = $slot->element;
         if ($ve === null || $se === null) { return false; }
+        // Two CLOSURE elements are one representation whatever they are
+        // spelled (`closure` / `obj<__closure_N>`); the alias's repr-walk pair
+        // ({@see \Compile\MemoryAbi::ARRAY_REPR_CLO}) co-owns and gives back.
+        if (self::isClosureElem($ve) && self::isClosureElem($se)) { return true; }
         if ($ve->kind !== $se->kind) { return false; }
         if ($ve->kind !== Type::KIND_STRING && $ve->kind !== Type::KIND_OBJ) { return false; }
         if ($ve->kind === Type::KIND_OBJ && ($ve->class ?? '') !== ($se->class ?? '')) { return false; }
         return self::elemReadCoOwns($ve, $enums, $classes);
+    }
+
+    private static function isClosureElem(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
+        $c = $t->class ?? '';
+        return $t->kind === Type::KIND_OBJ && ($c === 'Closure' || \str_starts_with($c, '__closure_'));
     }
 
     public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
@@ -550,13 +654,20 @@ final class InsertMemoryOps implements Pass
         // null and on an IMMORTAL literal (negative rc) — so a slot holding a
         // constant costs nothing and a heap string is counted like any other.
         if ($t->kind === Type::KIND_STRING) { return true; }
+        // A CLOSURE element is co-owned too, now that its slot gives its count
+        // back on overwrite / unset / container death ({@see \Compile\MemoryAbi::
+        // ARRAY_REPR_CLO}): `$f = $a[$k]; unset($a[$k]); $f();` would otherwise
+        // call a freed env. rcRetainByType's closure arm takes the +1 and the
+        // local's `closure` release gives it back — both through the helpers
+        // that act only on a word carrying the env magic.
+        if ($t->kind === Type::KIND_CLOSURE) { return true; }
         if ($t->kind === Type::KIND_OBJ) {
             $c = $t->class ?? '';
             if ($c === '') { return true; }
             // ★★★ REFUSE EXACTLY WHAT THE RETAIN MACHINERY REFUSES. This used to
             // exclude enums ALONE, while the emitter's half takes its +1 through
             // {@see EmitLlvmMemory::rcRetainByType}, which SILENTLY returns ''
-            // for a closure, a `#[Struct]`, an `Ffi\Ptr` and a `Generator` too.
+            // for a `#[Struct]`, an `Ffi\Ptr` and a `Generator` (a closure has its own arm).
             // Agreeing with itself is not enough — a predicate that says "owned"
             // where the retain emits nothing leaves the pass's scope-exit
             // release with NOTHING to balance it, and these are precisely the
@@ -567,7 +678,7 @@ final class InsertMemoryOps implements Pass
             // not a refcount at all.
             if (isset($enums[$c])) { return false; }
             if ($c === 'Ffi\\Ptr') { return false; }
-            if ($c === 'Closure' || \str_starts_with($c, '__closure_')) { return false; }
+            if ($c === 'Closure' || \str_starts_with($c, '__closure_')) { return true; }
             // A Generator retains through the STRING rc path and would be
             // released through the object one — a flavor disagreement of the
             // same family [[rc-flavor-disagreement]]. Left out entirely.
@@ -596,11 +707,47 @@ final class InsertMemoryOps implements Pass
      */
     public static function foreachValueCoOwns(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): bool
     {
-        if (!\Compile\Debug::$rcForeachValueOwns) { return false; }
-        if ($fe->byRef) { return false; }
+        return self::foreachValueSlotType($fe, $enums, $classes) !== null;
+    }
+
+    /**
+     * The type a co-owning loop binds its value at — the flavor both halves
+     * retain and release by — or null when the loop does not co-own.
+     *
+     * Besides a proven vec/assoc, the two ITERATOR loops `emitForeach` routes
+     * by the subject's static type co-own too, because their step already
+     * hands out a +1 and a borrowed loop variable stranded it on every
+     * iteration:
+     *  - a GENERATOR subject: its frame owns `current`@16 and the loop takes
+     *    its own +1 of it ({@see EmitLlvmGenerator::emitYield}); bound at the
+     *    element type the loop unboxes to, a tagged cell when that is erased.
+     *  - an Iterator-protocol subject whose `current()` answers a CELL: a
+     *    Generator iterator (`getIterator(): \Generator`) and an interface one
+     *    that classifies at run time — every arm of that step is +1.
+     *    A user Iterator CLASS answers its declared raw type, which this pass
+     *    does not see; it stays borrowed.
+     *
+     * @param array<string, mixed> $enums
+     */
+    public static function foreachValueSlotType(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): ?Type
+    {
+        if (!\Compile\Debug::$rcForeachValueOwns) { return null; }
+        if ($fe->byRef) { return null; }
         $at = $fe->array->type;
-        if (!$at->isVec() && !$at->isAssoc()) { return false; }
-        return self::elemReadCoOwns($at->element, $enums, $classes);
+        if ($at->isVec() || $at->isAssoc()) {
+            return self::elemReadCoOwns($at->element, $enums, $classes) ? $at->element : null;
+        }
+        if ($at->kind !== Type::KIND_OBJ) { return null; }
+        if (($at->class ?? '') === 'Generator') {
+            $el = $at->element;
+            if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) {
+                return Type::cell();
+            }
+            return self::elemReadCoOwns($el, $enums, $classes) ? $el : null;
+        }
+        $ic = $fe->iterClass;
+        if ($ic === 'Generator' || ($ic !== '' && !isset($classes[$ic]))) { return Type::cell(); }
+        return null;
     }
 
     /**
@@ -669,6 +816,9 @@ final class InsertMemoryOps implements Pass
         if ($tk === Type::KIND_CLOSURE) {
             $ck = $value->kind;
             if ($ck === Node::KIND_CALL) { return !isset($this->ffiFns[$value->function]); }
+            // An ELEMENT read co-owns ({@see elemReadCoOwns}; the emitter half
+            // is EmitLlvmLocals::elemReadCoOwn).
+            if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
             return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                 || $ck === Node::KIND_INVOKE;
         }
@@ -702,13 +852,14 @@ final class InsertMemoryOps implements Pass
             // retains a borrowed closure it returns
             // ({@see EmitLlvmModule::isBorrowedObjReturn}), a returned owned
             // local transfers. So a call / invoke producer is owned; any other
-            // (an alias, a property or element read) stays a borrow. Refusing
+            // (an alias, a property read) stays a borrow; an element read co-owns. Refusing
             // them all meant a closure that left the frame that built it —
             // returned, then dropped — was never released, nor was anything
             // it captured.
             if ($cls === 'Closure' || \str_starts_with($cls, '__closure_')) {
                 $ck = $value->kind;
                 if ($ck === Node::KIND_CALL) { return !isset($this->ffiFns[$value->function]); }
+                if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
                 return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                     || $ck === Node::KIND_INVOKE;
             }
@@ -728,7 +879,10 @@ final class InsertMemoryOps implements Pass
         // the struct / enum / closure / Ffi\Ptr guards above are this caller's
         // own rc-eligibility test, which AliasOwn deliberately does not make.
         if (AliasOwn::coOwns($value)) { return true; }
-        if (AliasOwn::strPropCoOwns($value)) { return true; }
+        // …and a STRING / OBJECT property read and a STRING static-property read,
+        // which the emitter retains the same way ({@see AliasOwn::propReadCoOwns},
+        // {@see AliasOwn::strPropCoOwns}).
+        if (AliasOwn::propReadCoOwns($value) || AliasOwn::strPropCoOwns($value)) { return true; }
         // A string / cell bitwise op mints its result like a concat, on the
         // heap whatever the allocKind says ({@see \Compile\Mir\BitOp::mintsFresh}).
         if (\Compile\Mir\BitOp::mintsFresh($value)) { return true; }
@@ -768,8 +922,7 @@ final class InsertMemoryOps implements Pass
             // @__mir_current_fiber global (owned by the user's own `$f`), not a
             // +1 ref — releasing it at scope exit would free the live fiber
             // mid-run (use-after-free ⇒ a garbage resumer ⇒ jump into hyperspace).
-            $fn = \ltrim($value->function, '\\');
-            if ($fn === '__mir_fiber_current') { return false; }
+            if (AliasOwn::builtinHandsBorrow($value->function)) { return false; }
             return !isset($this->ffiFns[$value->function]);
         }
         if ($k === Node::KIND_METHOD_CALL
@@ -898,7 +1051,7 @@ final class InsertMemoryOps implements Pass
      * SIGSEGV'd at scope exit on `0xfff7…`, i.e. the tag, not a heap pointer.
      * One owner for the slot's representation, or the release frees a tag.
      */
-    private function slotStoredType(StoreLocal $sl): Type
+    public static function slotStoredType(StoreLocal $sl): Type
     {
         $st = $sl->type->kind;
         $vt = $sl->value->type->kind;
@@ -1055,6 +1208,232 @@ final class InsertMemoryOps implements Pass
             || $value->type->kind === Type::KIND_NULL;
     }
 
+    private function isNonRcScalar(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
+    }
+
+    /**
+     * Decide every name that took owned stores into BOTH a raw slot and a cell
+     * slot. That is InferTypes' flow-sensitive promotion: the slot is raw up to
+     * an if/else merge and a cell after it, where a self-boxing `$x = box($x)`
+     * converts it in place. It used to be blocked outright — a leak of the whole
+     * value on every call (`$d = ''; $d .= $p; if ($z) { $q = $n ? null : f($d);
+     * …; $d = $q; } return $d;`, ~2.5x the string per call).
+     *
+     * A raw STRING or OBJECT is boxed by tagging the same pointer, so the box-back
+     * moves the one reference and the slot owns exactly one value throughout; an
+     * ARRAY box-back may rebuild the buffer as a cell array that co-owns every
+     * element, and the emitter then gives the raw predecessor back on the spot.
+     * The release only has to know which representation the slot holds when it
+     * runs: the emitter keeps a flag beside the slot, written by every store
+     * ({@see slotStoredType}) — "a raw rc pointer" or not (a cell, a raw scalar)
+     * — so the answer is exact at every return, overwrite and scope exit. A
+     * closure / struct / enum / Generator has no tag a cell drop can trust, a
+     * param arrives holding the caller's value, a foreach binding has its own
+     * ownership path and a generator's locals live in its frame: all of those
+     * stay blocked (a leak, never a free of a tag).
+     */
+    private function settleMixedSlots(FunctionDef $fn): void
+    {
+        $params = [];
+        foreach ($fn->params as $p) { $params[$p->name] = true; }
+        foreach ($this->rcObjRawType as $name => $rawT) {
+            if (!isset($this->rcObjCellSeen[$name])) { continue; }
+            if (isset($this->rcObjBlocked[$name])) { continue; }
+            if (!$fn->isGenerator && !isset($params[$name])
+                && !isset($this->rcObjForeachVar[$name]) && !isset($this->rcObjRefName[$name])
+                && $this->mixableRaw($rawT)) {
+                $this->rcObjMixed[$name] = true;
+                $this->rcObjType[$name] = $rawT;
+                continue;
+            }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "repr", $rawT);
+        }
+        foreach ($this->rcObjRawScalar as $name => $ignored) {
+            if (isset($this->rcObjMixed[$name])) { continue; }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "notowned", $this->rcObjType[$name] ?? null);
+        }
+        // Any other name whose slot type disagrees with a cell store it took
+        // (registered by a path that recorded no raw type) keeps the block.
+        foreach ($this->rcObjCellSeen as $name => $ignored) {
+            if (isset($this->rcObjMixed[$name])) { continue; }
+            $t = $this->rcObjType[$name] ?? null;
+            if ($t === null || $t->kind === Type::KIND_CELL) { continue; }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "repr", $t);
+        }
+    }
+
+    /**
+     * Every local a reference can reach, or that lives outside the frame: a
+     * `static` / `global` binding, either side of `$r = &$d`, a `$r = &f()`
+     * target, a by-ref closure capture, a by-ref foreach (its variable and the
+     * array it walks), the root of a `&` address or reference cell, and the
+     * root of every argument a by-ref parameter receives. A write through any
+     * of those reaches the slot without its StoreLocal, so a MIXED slot's flag
+     * would not see it ({@see settleMixedSlots}). An unresolved callee pins
+     * every local argument (a false pin is a leak, a miss a double free).
+     */
+    private function collectRefNames(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STATIC_LOCAL_DECL) {
+            $this->rcObjRefName[$this->asStaticLocalDecl($n)->name] = true;
+        } elseif ($k === Node::KIND_REF_ALIAS) {
+            $ra = $this->asRefAlias($n);
+            $this->rcObjRefName[$ra->target] = true;
+            $this->rcObjRefName[$ra->source] = true;
+        } elseif ($k === Node::KIND_REF_BIND) {
+            $this->rcObjRefName[$this->asRefBind($n)->target] = true;
+        } elseif ($k === Node::KIND_REF_ADDR) {
+            $rd = $this->asRefAddr($n);
+            $this->rcObjRefName[$rd->target] = true;
+            $this->refRoot($rd->lvalue);
+        } elseif ($k === Node::KIND_REF_CELL) {
+            $this->refRoot($this->asRefCell($n)->refSource);
+        } elseif ($k === Node::KIND_CLOSURE) {
+            $cl = $this->asClosure($n);
+            $i = 0;
+            foreach ($cl->captures as $cap) {
+                if ($cl->captureByRef[$i] ?? false) { $this->refRoot($cap); }
+                $i = $i + 1;
+            }
+        } elseif ($k === Node::KIND_FOREACH) {
+            $fe = $this->asForeachNode($n);
+            if ($fe->byRef) {
+                $this->rcObjRefName[$fe->valueVar] = true;
+                $this->refRoot($fe->array);
+            }
+        } else {
+            $this->refArgRoots($n);
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefNames($c); }
+    }
+
+    /** Mark the local at the bottom of an lvalue chain. */
+    private function refRoot(Node $n): void
+    {
+        $cur = $n;
+        while (true) {
+            $k = $cur->kind;
+            if ($k === Node::KIND_LOAD_LOCAL) {
+                $this->rcObjRefName[$this->asLoadLocal($cur)->name] = true;
+                return;
+            }
+            if ($k === Node::KIND_PROPERTY_ACCESS) { $cur = $this->asPropertyAccessNode($cur)->object; }
+            elseif ($k === Node::KIND_ARRAY_ACCESS) { $cur = $this->asArrayAccessNode($cur)->array; }
+            else { return; }
+        }
+    }
+
+    /** The by-ref argument roots of a call-shaped node. */
+    private function refArgRoots(Node $n): void
+    {
+        $k = $n->kind;
+        $fn = '';
+        $offset = 0;
+        $args = [];
+        $builtin = false;
+        if ($k === Node::KIND_CALL) {
+            $c = $this->asCallNode($n);
+            $fn = \ltrim($c->function, '\\');
+            $args = $c->args;
+            $builtin = true;
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            $sc = $this->asStaticCallNode($n);
+            $fn = $this->resolveMethodFn($sc->class, $sc->method);
+            $args = $sc->args;
+        } elseif ($k === Node::KIND_NEW_OBJ) {
+            $no = $this->asNewObjNode($n);
+            $fn = $this->resolveMethodFn($no->class, '__construct');
+            $args = $no->args;
+            $offset = 1;
+        } elseif ($k === Node::KIND_METHOD_CALL) {
+            $mc = $this->asMethodCallNode($n);
+            $recv = $mc->object->type->class ?? '';
+            $fn = $recv === '' ? '' : $this->resolveMethodFn($recv, $mc->method);
+            $args = $mc->args;
+            $offset = 1;
+        } elseif ($k === Node::KIND_INVOKE) {
+            $iv = $this->asInvokeNode($n);
+            $fn = $iv->callee->type->class ?? '';
+            $args = $iv->args;
+            $offset = $this->closureCaptureCount[$fn] ?? 0;
+        } else {
+            return;
+        }
+        if (!isset($this->refMasks[$fn])) {
+            if ($builtin) {
+                if (\count($args) > 0 && ($fn === 'current' || $fn === 'pos' || $fn === 'key'
+                    || $fn === 'next' || $fn === 'prev' || $fn === 'reset' || $fn === 'end'
+                    || $fn === 'array_pop' || $fn === 'array_shift' || $fn === 'array_unshift')) {
+                    $this->refRoot($args[0]);
+                }
+                return;
+            }
+            foreach ($args as $a) { $this->refRoot($a); }
+            return;
+        }
+        $mask = $this->refMasks[$fn];
+        $cnt = \count($mask);
+        $tail = $this->refVariadic[$fn] ?? false;
+        $i = 0;
+        foreach ($args as $a) {
+            $p = $i + $offset;
+            $byRef = $p < $cnt ? $mask[$p] : false;
+            if (!$byRef && $tail && $p >= $cnt - 1) { $byRef = true; }
+            if ($byRef) { $this->refRoot($a); }
+            $i = $i + 1;
+        }
+    }
+
+    private function resolveMethodFn(string $class, string $method): string
+    {
+        $cur = $class;
+        $guard = 0;
+        while ($cur !== '' && $guard < 64) {
+            $cand = $cur . '__' . $method;
+            if (isset($this->refMasks[$cand])) { return $cand; }
+            $cur = isset($this->classes[$cur]) ? $this->classes[$cur]->parent : '';
+            $guard = $guard + 1;
+        }
+        return '';
+    }
+
+    private function asStaticLocalDecl(Node $n): \Compile\Mir\StaticLocalDecl_ { return $n; }
+    private function asRefAlias(Node $n): \Compile\Mir\RefAlias_ { return $n; }
+    private function asRefBind(Node $n): \Compile\Mir\RefBind_ { return $n; }
+    private function asRefAddr(Node $n): \Compile\Mir\RefAddr_ { return $n; }
+    private function asRefCell(Node $n): \Compile\Mir\RefCell_ { return $n; }
+    private function asClosure(Node $n): \Compile\Mir\Closure_ { return $n; }
+    private function asForeachNode(Node $n): \Compile\Mir\Foreach_ { return $n; }
+    private function asLoadLocal(Node $n): LoadLocal { return $n; }
+    private function asPropertyAccessNode(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
+    private function asArrayAccessNode(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
+    private function asCallNode(Node $n): \Compile\Mir\Call { return $n; }
+    private function asStaticCallNode(Node $n): \Compile\Mir\StaticCall_ { return $n; }
+    private function asNewObjNode(Node $n): \Compile\Mir\NewObj { return $n; }
+    private function asMethodCallNode(Node $n): \Compile\Mir\MethodCall_ { return $n; }
+    private function asInvokeNode(Node $n): \Compile\Mir\Invoke_ { return $n; }
+
+    /** A raw slot type a cell can hold and a tagged drop can release. An array
+     *  box-back may REBUILD the buffer; the emitter then releases the raw
+     *  predecessor itself ({@see EmitLlvmLocals::emitStoreLocal}). */
+    private function mixableRaw(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_STRING) { return true; }
+        if ($t->kind === Type::KIND_ARRAY) { return true; }
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        if ($cls === '' || $cls === 'Generator') { return false; }
+        return $this->objClassIsRc($cls);
+    }
+
     /** {@see CondOwn} — the shared half of the contract, plus this pass's own
      *  rc-eligibility guard on the result type. */
     private function isOwnedCond(Node $value): bool
@@ -1121,7 +1500,7 @@ final class InsertMemoryOps implements Pass
                 && self::foreachValueCoOwns($fe, $this->enums, $this->classes)
                 && !isset($this->feOwnVeto[$fe->valueVar]);
             if ($feOwns) {
-                $et = $fe->array->type->element;
+                $et = self::foreachValueSlotType($fe, $this->enums, $this->classes);
                 // ★★★ The loop variable is a STORE like any other, so it owes the
                 // same FLAVOR agreement {@see rcSlotFlavor} enforces on
                 // KIND_STORE_LOCAL. Registering `rcObjType` directly here walked
@@ -1146,10 +1525,18 @@ final class InsertMemoryOps implements Pass
                     $this->rcObjSlotBoxed[$fe->valueVar] = $et->kind === Type::KIND_CELL;
                     $this->rcObjPlainOwner[$fe->valueVar] = true;
                 }
+                // The binding is a store of the element's repr: it takes part in
+                // the raw-vs-cell decision {@see settleMixedSlots} makes.
+                if ($et !== null && $et->kind === Type::KIND_CELL) {
+                    $this->rcObjCellSeen[$fe->valueVar] = true;
+                } elseif ($et !== null && !isset($this->rcObjRawType[$fe->valueVar])) {
+                    $this->rcObjRawType[$fe->valueVar] = $et;
+                }
             } else {
                 $this->rcObjBlocked[$fe->valueVar] = true;
                 $this->noteBlock($fe->valueVar, "foreach", null);
             }
+            $this->rcObjForeachVar[$fe->valueVar] = true;
             // `blocked` is the ARENA/alloc-flavor set, not the rc one: the loop
             // var is never an allocation of this frame either way.
             $this->blocked[$fe->valueVar] = true;
@@ -1168,7 +1555,7 @@ final class InsertMemoryOps implements Pass
             // double-free / over-release a borrow); an owned-obj store
             // (a `new` or an obj-returning call — both yield rc=1)
             // registers it.
-            $slotType = $this->slotStoredType($sl);
+            $slotType = self::slotStoredType($sl);
             $boxedSlot = $slotType->kind === Type::KIND_CELL;
             // An ERASED array-property read carries KIND_UNKNOWN, which has no rc
             // flavor at all — so even once it is owned (below) the release ladder
@@ -1201,6 +1588,17 @@ final class InsertMemoryOps implements Pass
             // …and a STATIC vec read, owned by the COPY the general path makes
             // ({@see isOwnedObj}): the box-back arm returns before that copy
             // too, boxing the static's own buffer by pointer.
+            // The merge box-back `$x = box($x)` converts the slot IN PLACE: the
+            // one reference it held moves into the cell (the emitter gives back
+            // a rebuilt array's raw predecessor itself). It neither owns nor
+            // borrows — only the slot's representation changes, which is what
+            // {@see settleMixedSlots} decides on.
+            if ($boxedSlot && $value->kind === Node::KIND_LOAD_LOCAL
+                && $value->name === $name && $value->type->kind !== Type::KIND_CELL) {
+                $this->rcObjCellSeen[$name] = true;
+                $this->blocked[$name] = true;
+                return;
+            }
             $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
                 || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS)
                 || ($value->kind === Node::KIND_STATIC_PROP && $value->type->isVec());
@@ -1225,10 +1623,15 @@ final class InsertMemoryOps implements Pass
                 // no single release flavor that is right for both — the scope-exit
                 // release reads the slot, not the producer. Block: a leak, never a
                 // free of a tag.
-                if (isset($this->rcObjSlotBoxed[$name])
-                    && $this->rcObjSlotBoxed[$name] !== $boxedSlot) {
+                // …unless the raw side is one string / object flavor: that pair
+                // is decided after the walk ({@see settleMixedSlots}).
+                if ($boxedSlot) {
+                    $this->rcObjCellSeen[$name] = true;
+                } elseif (!isset($this->rcObjRawType[$name])) {
+                    $this->rcObjRawType[$name] = $slotType;
+                } elseif ($this->rcSlotFlavor($this->rcObjRawType[$name]) !== $this->rcSlotFlavor($slotType)) {
                     $this->rcObjBlocked[$name] = true;
-                    $this->noteBlock($name, "repr", $slotType);
+                    $this->noteBlock($name, "flavor", $slotType);
                 }
                 $this->rcObjSlotBoxed[$name] = $boxedSlot;
                 // …and two stores that disagree about the slot's rc FLAVOR are
@@ -1252,7 +1655,8 @@ final class InsertMemoryOps implements Pass
                 $prevFlavor = isset($this->rcObjType[$name])
                     ? $this->rcSlotFlavor($this->rcObjType[$name]) : '';
                 $nowFlavor = $this->rcSlotFlavor($slotType);
-                if ($prevFlavor !== '' && $nowFlavor !== '' && $prevFlavor !== $nowFlavor) {
+                if ($prevFlavor !== '' && $nowFlavor !== '' && $prevFlavor !== $nowFlavor
+                    && $prevFlavor !== 'cell' && $nowFlavor !== 'cell') {
                     $this->rcObjBlocked[$name] = true;
                     $this->noteBlock($name, "flavor", $slotType);
                 }
@@ -1281,10 +1685,19 @@ final class InsertMemoryOps implements Pass
                 $isCopy = $ownedCopy || $this->storeMakesArrayCopy($sl);
                 if (!isset($this->rcObjCopyOnly[$name])) { $this->rcObjCopyOnly[$name] = $isCopy; }
                 elseif (!$isCopy) { $this->rcObjCopyOnly[$name] = false; }
-            } elseif ($this->isRcNeutralStore($value)) {
+            } elseif ($this->isRcNeutralStore($value)
+                || ($boxedSlot && $this->isNonRcScalar($value->type))) {
+                // A scalar boxed into a CELL slot is a value, not a reference:
+                // `$x = 0;` ahead of a loop that re-kinds `$x` to a string
+                // blocked the name, and every string the loop stored leaked.
                 // Decided after the walk — a neutral store only survives when
                 // EVERY owned store to the name is a conditional.
                 $this->rcObjNeutral[$name] = true;
+            } elseif ($this->isNonRcScalar($value->type) && $this->isNonRcScalar($slotType)) {
+                // A RAW scalar owns nothing either, but only a MIXED slot can
+                // tell it from a raw pointer at release time (its flag says "not
+                // a raw rc value"); anywhere else it keeps the block.
+                $this->rcObjRawScalar[$name] = true;
             } else {
                 $this->rcObjBlocked[$name] = true;
                 $this->noteBlock($name, "notowned", $value->type);

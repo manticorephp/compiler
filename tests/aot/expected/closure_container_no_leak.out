@@ -1,0 +1,48 @@
+local only: sum=102305990 growth ok
+array<int,Closure> element unset: sum=102305990 growth ok
+array<int,Closure> element overwrite: sum=102305990 growth ok
+array<string,callable> element unset: sum=102509990 growth ok
+array<int,mixed> element unset: sum=7000 growth ok
+?Closure property overwrite: sum=102305990 growth ok
+callable property overwrite: sum=102305990 growth ok
+static property overwrite: sum=7020990 growth ok
+holder dies: sum=204000 growth ok
+local array dies: sum=204611980 growth ok
+untyped local array: sum=102000 growth ok
+copy then unset: sum=102305990 growth ok
+read then unset: sum=102305990 growth ok
+hook unregisters itself: sum=102305990 growth ok
+foreach over hooks: sum=204611980 growth ok
+sorted hooks: sum=103194854 growth ok
+builder values: sum=306918000 growth ok
+builder merge: sum=409326000 growth ok
+builder slice: sum=204714000 growth ok
+builder reverse: sum=306918000 growth ok
+builder filter: sum=306918000 growth ok
+builder map: sum=306918000 growth ok
+builder combine: sum=306918000 growth ok
+builder chunk: sum=204510000 growth ok
+builder unique: sum=306918000 growth ok
+builder diff_key: sum=204714000 growth ok
+builder intersect_key: sum=204714000 growth ok
+builder copy: sum=306918000 growth ok
+builder splice: sum=7021000 growth ok
+builder pad: sum=35063000 growth ok
+builder fill: sum=21105000 growth ok
+builder replace: sum=21049000 growth ok
+builder spread: sum=28105000 growth ok
+builder union: sum=28105000 growth ok
+builder iterator_to_array: sum=21063000 growth ok
+merge_recursive 1004 list 100110011002 compact 1003 column 1002
+left: 4
+self: 64
+static => Tool::rev
+sarr => 2 parts
+mfcc => t:AB
+arrow => ab!!
+str => strtoupper
+arr => 2 parts
+fcc => ba
+clo => ab!
+strrev [q] 4
+done

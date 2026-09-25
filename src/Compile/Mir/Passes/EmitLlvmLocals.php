@@ -611,10 +611,55 @@ trait EmitLlvmLocals
             if ($ownsCell && $coOwn === '') {
                 $out .= $this->retainCellPayload($sl->value);
             }
+            // An owned plain local that is NOT boxing its own value in place
+            // (`$x = box($x)` moves the one reference) is an ordinary rebind:
+            // an alias co-owns what it boxes, and the predecessor is released —
+            // the pair {@see InsertMemoryOps::isOwnedObj} planned for this name.
+            // Without it a loop-promoted `$x = str_repeat(…) . $i` dropped every
+            // previous string on the floor.
+            $v0 = $sl->value;
+            $selfBox = $v0->kind === Node::KIND_LOAD_LOCAL && $v0->name === $sl->name;
+            $rebind = !$selfBox
+                && !isset($this->locals->globalBacked[$sl->name])
+                && isset($this->frame->rcObjLocals[$sl->name])
+                && !isset($this->frame->transferredLocals[$sl->name]);
+            if ($rebind && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
+                $out .= $this->coerceToI64();
+                $rawV = $this->lastValue;
+                $out .= $this->rcRetainByType($v0, $rawV, null, 3);
+                $this->lastValue = $rawV;
+                $this->lastValueType = 'i64';
+            }
+            // A MIXED slot boxing its own raw value: a string or object keeps
+            // its pointer under the tag, but an array may be REBUILT as a fresh
+            // cell array that co-owns every element — then the raw predecessor
+            // is this slot's reference to give back.
+            $mixSelf = $selfBox && $v0->type->kind === Type::KIND_ARRAY
+                && isset($this->frame->mixedFlagSlots[$sl->name]);
+            $oldRaw = '';
+            if ($mixSelf) {
+                $out .= $this->coerceToI64();
+                $oldRaw = $this->lastValue;
+            }
             $out .= $this->boxToCell($sl->value->type, $sl->value);
             $boxed = $this->lastValue;
             if ($ownsCell) {
                 $out .= $this->globalCellOwnIr($sl, $boxed, true);
+            }
+            if ($mixSelf) {
+                $pay = $this->ssa->allocReg();
+                $moved = $this->ssa->allocReg();
+                $gone = $this->ssa->allocReg();
+                $out .= '  ' . $pay . ' = and i64 ' . $boxed . ', '
+                    . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $out .= '  ' . $moved . ' = icmp eq i64 ' . $pay . ', ' . $oldRaw . "\n";
+                $out .= '  ' . $gone . ' = select i1 ' . $moved . ', i64 0, i64 ' . $oldRaw . "\n";
+                $out .= $this->rcReleaseReg($gone, \substr(
+                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]), 3));
+            }
+            if ($rebind) {
+                $out .= $this->rcReleaseSlot($cellDest,
+                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
             }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             $this->lastValue = $boxed;
@@ -887,7 +932,11 @@ trait EmitLlvmLocals
         // release ({@see InsertMemoryOps::isOwnedObj}, which owns exactly this
         // shape) would give back element refs the copy never took.
         $aliasStaticVecCopy = $copiedVecProp && $v->kind === Node::KIND_STATIC_PROP;
-        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal || $aliasStaticVecCopy) {
+        // `$r = $c->out` — a STRING / OBJECT property read co-owns what it reads, so the
+        // slot may drop what it overwrites ({@see \Compile\Mir\AliasOwn::
+        // propReadCoOwns}; the release half is {@see InsertMemoryOps::isOwnedObj}).
+        $aliasStrProp = \Compile\Mir\AliasOwn::propReadCoOwns($v);
+        if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal || $aliasStaticVecCopy || $aliasStrProp) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;
             // An array-HINTED slot whose type erased to unknown carries no kind
@@ -977,7 +1026,7 @@ trait EmitLlvmLocals
                 && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes);
             $out .= $this->globalCellOwnIr($sl, $val,
                 $copiedVecLocal || $copiedVecProp || $aliasObjStr || $aliasArrayProp
-                || $aliasArrayLocal || $elemOwned);
+                || $aliasArrayLocal || $aliasStrProp || $elemOwned);
             $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->globalBacked[$sl->name] . "\n";
         } elseif (isset($this->locals->refLocals[$sl->name])) {
             $addr = $this->ssa->allocReg();

@@ -1,0 +1,53 @@
+enc=-15 mode=0 roundtrip=ok
+enc=-15 mode=2 roundtrip=ok
+enc=-15 mode=3 roundtrip=ok
+enc=-15 mode=1 roundtrip=ok
+enc=-15 mode=5 roundtrip=ok
+enc=15 mode=0 roundtrip=ok
+enc=15 mode=2 roundtrip=ok
+enc=15 mode=3 roundtrip=ok
+enc=15 mode=1 roundtrip=ok
+enc=15 mode=5 roundtrip=ok
+enc=31 mode=0 roundtrip=ok
+enc=31 mode=2 roundtrip=ok
+enc=31 mode=3 roundtrip=ok
+enc=31 mode=1 roundtrip=ok
+enc=31 mode=5 roundtrip=ok
+0000ffff
+0000ffff
+HelloHello
+takeover
+full-flush independent
+''
+'again'
+window=9 ok
+window=10 ok
+window=11 ok
+window=12 ok
+window=13 ok
+window=14 ok
+window=15 ok
+window=8 raw false
+window=8 gzip false
+window=8 zlib 1895 ok
+''
+''
+''
+''
+0000ffff abcdef
+long >128K enc=-15 mode=2 window=15 ok
+long >128K enc=31 mode=2 window=15 ok
+long >128K enc=-15 mode=0 window=15 ok
+long >128K enc=31 mode=0 window=15 ok
+long >128K enc=-15 mode=2 window=9 ok
+long >128K enc=31 mode=2 window=9 ok
+long >128K enc=-15 mode=0 window=9 ok
+long >128K enc=31 mode=0 window=9 ok
+the quick brown fox
+stored bytes
+ValueError: deflate_init(): Argument #1 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE
+ValueError: deflate_init(): "level" option must be between -1 and 9
+ValueError: deflate_init(): "memory" option must be between 1 and 9
+ValueError: deflate_init(): "window" option must be between 8 and 15
+ValueError: deflate_init(): "strategy" option must be one of ZLIB_FILTERED, ZLIB_HUFFMAN_ONLY, ZLIB_RLE, ZLIB_FIXED, or ZLIB_DEFAULT_STRATEGY
+ValueError: deflate_add(): Argument #3 ($flush_mode) must be one of ZLIB_NO_FLUSH, ZLIB_PARTIAL_FLUSH, ZLIB_SYNC_FLUSH, ZLIB_FULL_FLUSH, ZLIB_BLOCK, or ZLIB_FINISH

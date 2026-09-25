@@ -1,0 +1,7 @@
+static cache: sum=2244000 growth ok
+static cache by-ref: sum=2652000 growth ok
+param element: sum=1224000 growth ok
+global: sum=1122000 growth ok
+static prop: sum=1122000 growth ok
+returned: sum=1122000 growth ok
+done

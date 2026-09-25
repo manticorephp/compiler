@@ -161,6 +161,7 @@ function __mc_der_name(string $d, int $start, int $len): array
  * state; this one carries the SubjectPublicKeyInfo DER it was built from, which
  * is everything openssl_pkey_get_details answers from.
  */
+#[\Manticore\Attr\Uncomparable]
 class OpenSSLAsymmetricKey
 {
     public string $spki = '';

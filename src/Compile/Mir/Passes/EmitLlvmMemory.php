@@ -124,7 +124,17 @@ trait EmitLlvmMemory
         $this->frame->ownElemLocals = [];
         $this->collectOwnElemLocals($body);
         $out = '';
+        $this->frame->mixedFlagSlots = [];
+        $this->frame->mixedFlagBySlot = [];
         foreach ($this->frame->rcObjLocals as $name => $mo) {
+            if (\str_starts_with($mo->flavor, 'mix') && !isset($paramNames[$name])
+                && isset($this->locals->slots[$name])) {
+                $flag = $this->ssa->allocReg();
+                $out .= $this->localSlotAlloca($flag);
+                $out .= '  store i64 0, ptr ' . $flag . "\n";
+                $this->frame->mixedFlagSlots[$name] = $flag;
+                $this->frame->mixedFlagBySlot[$this->locals->slots[$name]] = $flag;
+            }
             // A reassigned obj/str/vec/assoc PARAM holds the caller's
             // incoming (borrowed) value. The first `$p = ...` reassignment
             // emits a release-before-overwrite of that old value, and a
@@ -365,6 +375,8 @@ trait EmitLlvmMemory
         $fallback = null;
         if ($value->kind === Node::KIND_PROPERTY_ACCESS) {
             if (!$this->storeLocalRetainsProp($store, $value)) { return null; }
+            // A co-owned STRING / OBJECT read has no elements to pair.
+            if (\Compile\Mir\AliasOwn::propReadCoOwns($value)) { return null; }
             // ⚠ Character-for-character {@see EmitLlvmLocals::emitStoreLocal}'s
             // `$fallback`: an array-HINTED slot whose type erased to unknown
             // carries no kind for the retain to dispatch on, so the emitter names
@@ -416,6 +428,26 @@ trait EmitLlvmMemory
         foreach (\Compile\Mir\VecCopyOnAssign::mutatedLocals($n) as $name => $ignored) {
             $this->frame->mutatedVecLocals[$name] = true;
         }
+        $this->collectByRefArrayArgs($n);
+    }
+
+    /**
+     * An array local handed to a user function's BY-REF parameter is mutated
+     * too — the callee writes (or unsets) through the caller's slot, so
+     * `$copy = $a; f($a);` must have separated `$copy` first. The static scan
+     * cannot see it (it has no signatures); the emitter can.
+     */
+    private function collectByRefArrayArgs(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $refs = $this->sigs->refParams[$n->function] ?? [];
+            foreach ($n->args as $i => $a) {
+                if (($refs[$i] ?? false) && $a->kind === Node::KIND_LOAD_LOCAL && $a->type->isArray()) {
+                    $this->frame->mutatedVecLocals[$a->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectByRefArrayArgs($c); }
     }
     /**
      * Whether php declares $fn's FIRST parameter by reference over an array,
@@ -504,6 +536,12 @@ trait EmitLlvmMemory
         // element-bearing flavors below can carry the suffix, and the gate that
         // sets the flag already proved retain and release name the same one
         // ({@see collectOwnElemLocals}).
+        // A MIXED slot: the raw half's own flavor, behind the `mix` marker that
+        // routes the release through the slot's representation flag.
+        if (\str_starts_with($mo->flavor, 'mix')) {
+            $rawMo = new MemoryOp_($mo->op, \substr($mo->flavor, 3), $t, Type::void());
+            return 'mix' . $this->rcReleaseFlavorPlain($rawMo, $shared);
+        }
         $ownEl = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
             && isset($this->frame->ownElemLocals[$t->name]);
         $f = $this->rcReleaseFlavorPlain($mo, $shared);
@@ -557,7 +595,7 @@ trait EmitLlvmMemory
             if ($t === null || $shared) { return 'vecbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'vecobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A NESTED array element — the member the flavor family was
             // missing, so this fell through to the plain repr walk and
@@ -576,7 +614,7 @@ trait EmitLlvmMemory
             if ($t === null || $shared) { return 'assocbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '')) { return 'assocobj'; }
+            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'assoc'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
@@ -767,7 +805,43 @@ trait EmitLlvmMemory
     {
         $iv = $this->ssa->allocReg();
         $out = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
+        if (\str_starts_with($flavor, 'mix')) {
+            return $out . $this->mixedReleaseIr($iv, \substr($flavor, 3),
+                $this->frame->mixedFlagBySlot[$slot] ?? '');
+        }
         return $out . $this->rcReleaseReg($iv, $flavor);
+    }
+
+    /**
+     * Release a MIXED slot's word ({@see \Compile\Mir\Passes\InsertMemoryOps::
+     * settleMixedSlots}): a raw `$raw`-flavor pointer on some paths, a cell on
+     * others. A tagged word is a cell whatever the flag says; an untagged one is
+     * released as a raw pointer only when the flag says the last store left one
+     * (a boxed float or a raw scalar carries no tag). Both drops null-guard, so
+     * the half not taken gets 0.
+     */
+    private function mixedReleaseIr(string $w, string $raw, string $flagSlot): string
+    {
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $tagged = $this->ssa->allocReg();
+        $out = '  ' . $tagged . ' = icmp ugt i64 ' . $w . ', '
+            . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+        $isCell = $tagged;
+        if ($flagSlot !== '') {
+            $fl = $this->ssa->allocReg();
+            $fb = $this->ssa->allocReg();
+            $isCell = $this->ssa->allocReg();
+            $out .= '  ' . $fl . ' = load i64, ptr ' . $flagSlot . "\n";
+            $out .= '  ' . $fb . ' = icmp ne i64 ' . $fl . ", 0\n";
+            $out .= '  ' . $isCell . ' = or i1 ' . $tagged . ', ' . $fb . "\n";
+        }
+        $cw = $this->ssa->allocReg();
+        $rw = $this->ssa->allocReg();
+        $out .= '  ' . $cw . ' = select i1 ' . $isCell . ', i64 ' . $w . ", i64 0\n";
+        $out .= '  ' . $rw . ' = select i1 ' . $isCell . ', i64 0, i64 ' . $w . "\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $cw . ")\n";
+        return $out . $this->rcReleaseReg($rw, $raw);
     }
 
     /** Emit a release of the rc value carried in the i64 register `$i64reg`. */
@@ -786,6 +860,9 @@ trait EmitLlvmMemory
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             return '  call void @__mir_cell_drop(i64 ' . $i64reg . ")\n";
+        }
+        if (\str_starts_with($flavor, 'mix')) {
+            return $this->mixedReleaseIr($i64reg, \substr($flavor, 3), '');
         }
         $fn = '@__mir_array_release';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }

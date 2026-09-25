@@ -37,6 +37,10 @@ use Compile\Mir\TryCatch_;
 use Compile\Mir\MirCatch;
 use Compile\Mir\Ternary;
 use Compile\Mir\Switch_;
+use Compile\Mir\Break_;
+use Compile\Mir\Continue_;
+use Compile\Mir\Goto_;
+use Compile\Mir\Label_;
 use Compile\Mir\SwitchArm_;
 use Compile\Mir\Match_;
 use Compile\Mir\MatchArm_;
@@ -83,6 +87,7 @@ trait InferNodes
     private function inferFunction(FunctionDef $fn): void
     {
         $this->cellLoopLocals = [];
+        $this->tryStoreFrames = [];
         $this->floatLoopLocals = [];
         $this->nullLoopLocals = [];
         $this->elemLoopLocals = [];
@@ -200,6 +205,7 @@ trait InferNodes
         // Only `__main` binds a `global $x` name implicitly (no decl node) — a
         // same-named local in any other scope is an ordinary local.
         $this->inMainBody = $fn->name === '__main';
+        $this->resetJumpState();
         // The bisect handle — see Debug::$inferResetLocals.
         if (\Compile\Debug::$inferResetLocals !== []) {
             $rl = \Compile\Debug::$inferResetLocals;
@@ -219,7 +225,6 @@ trait InferNodes
             if ($all || isset($rl['recordLocals'])) { $this->recordLocals = []; }
             if ($all || isset($rl['floatLocals'])) { $this->floatLocals = []; }
             if ($all || isset($rl['cellMergeLocals'])) { $this->cellMergeLocals = []; }
-            if ($all || isset($rl['keyUsedLocals'])) { $this->keyUsedLocals = []; }
             if ($all || isset($rl['arithUsedLocals'])) { $this->arithUsedLocals = []; }
             if ($all || isset($rl['cellCaptureLocals'])) { $this->cellCaptureLocals = []; }
             if ($all || isset($rl['localBuiltArrays'])) { $this->localBuiltArrays = []; }
@@ -493,16 +498,11 @@ trait InferNodes
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
-        $this->keyUsedLocals = [];
         $this->arithUsedLocals = [];
         $this->refPinnedLocals = [];
-        // ONE walk for the four late facts — key-used, arith-used, by-ref-pinned,
-        // and which arrays this function builds from `[]` (the soundness gate on
-        // the elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
-        //
-        // It has to stay a SECOND walk, after the float seeding above: that
-        // seeding writes `localTypes`, and `subscriptBaseIsString` reads it to
-        // decide whether a subscript index is a key or a byte offset.
+        // ONE walk for the late facts — arith-used, by-ref-pinned, and which
+        // arrays this function builds from `[]` (the soundness gate on the
+        // elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
         $this->scanLocalFacts($fn->body);
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
@@ -536,6 +536,13 @@ trait InferNodes
         foreach ($this->elemLoopLocals as $eln => $ety) {
             if ($this->isParamName($fn, $eln)) { continue; }
             $this->localTypes[$eln] = $ety;
+        }
+        // A param default is emitted at a call site that omits the argument
+        // (a closure pad, a method-call pad) and boxed by its type there, so
+        // it has to carry one: untyped, `[1, 2]` crossed into an erased param
+        // as a raw array its elements were never cellified for.
+        foreach ($fn->params as $p) {
+            if ($p->default !== null) { $this->inferNode($p->default); }
         }
         $this->inferNode($fn->body);
         // A function returning a CLOSURE loses the concrete `obj<__closure_N>`
@@ -670,7 +677,11 @@ trait InferNodes
             return $node->type;
         }
         if ($kind === Node::KIND_LOAD_LOCAL)  { return $this->inferLoadLocal($node); }
-        if ($kind === Node::KIND_STORE_LOCAL) { return $this->inferStoreLocal($node); }
+        if ($kind === Node::KIND_STORE_LOCAL) {
+            $st = $this->inferStoreLocal($node);
+            if (\count($this->tryStoreFrames) > 0) { $this->noteTryStore($node->name); }
+            return $st;
+        }
         if ($kind === Node::KIND_ADD)         { return $this->inferAdd($node); }
         if ($kind === Node::KIND_SUB)         { return $this->inferSub($node); }
         if ($kind === Node::KIND_MUL)         { return $this->inferMul($node); }
@@ -712,10 +723,10 @@ trait InferNodes
         if ($kind === Node::KIND_FOREACH)     { return $this->inferForeach($node); }
         if ($kind === Node::KIND_SWITCH)      { return $this->inferSwitch($node); }
         if ($kind === Node::KIND_MATCH)       { return $this->inferMatch($node); }
-        if ($kind === Node::KIND_BREAK
-            || $kind === Node::KIND_CONTINUE
-            || $kind === Node::KIND_GOTO
-            || $kind === Node::KIND_LABEL) { return Type::void(); }
+        if ($node instanceof Break_)    { $this->noteJump($node->level, false); return Type::void(); }
+        if ($node instanceof Continue_) { $this->noteJump($node->level, true); return Type::void(); }
+        if ($node instanceof Goto_)     { $this->noteGoto($node->label); return Type::void(); }
+        if ($node instanceof Label_)    { $this->noteLabel($node->name); return Type::void(); }
         if ($kind === Node::KIND_YIELD) {
             $y = $node;
             if ($y->key !== null) {
@@ -1032,14 +1043,30 @@ trait InferNodes
 
     private function inferTryCatch(TryCatch_ $n): Type
     {
+        $saved = $this->localTypes;
+        // Every store the try makes is a state a throw can leave for the catch,
+        // not only its end: {@see noteTryStore} pins a name any of them re-kinds.
+        $this->tryStoreFrames[] = $saved;
         foreach ($n->tryBody as $s) { $this->inferNode($s); }
+        \array_pop($this->tryStoreFrames);
+        $tryEnd = $this->localTypes;
+        // A catch is entered from ANY point of the try, so it sees the entry
+        // map and the try's end at once; the paths out are the try's end and
+        // every catch's. A name they re-kind is joined like a loop's.
+        $catchEntry = $this->joinLocals($saved, $tryEnd);
+        $exit = self::stmtsDiverge($n->tryBody) ? null : $tryEnd;
         foreach ($n->catches as $c) {
+            $this->localTypes = $catchEntry;
             // Bind `$e` to the first declared catch type (obj<T>).
             if ($c->var !== null && \count($c->types) > 0) {
                 $this->localTypes[$c->var] = Type::obj($c->types[0]);
             }
             foreach ($c->body as $s) { $this->inferNode($s); }
+            if (!self::stmtsDiverge($c->body)) {
+                $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
+            }
         }
+        $this->localTypes = $exit ?? $catchEntry;
         foreach ($n->finallyBody as $s) { $this->inferNode($s); }
         return Type::void();
     }
@@ -1180,15 +1207,28 @@ trait InferNodes
      * differing element on either side floors to a cell, since the result
      * carries both.
      */
+    /** `$known + <erased>`: the known side's keys with a cell element. */
+    private function unionWithErased(Type $known): Type
+    {
+        $e = $known->element;
+        if ($known->isShape() || $e === null || $e->kind === Type::KIND_CELL || $e->kind === Type::KIND_UNKNOWN) {
+            return $known;
+        }
+        return $known->isAssoc() ? Type::assoc($known->key ?? Type::string_(), Type::cell()) : Type::vec(Type::cell());
+    }
+
     private function arrayUnionType(Node $left, Node $right): ?Type
     {
         $lt = $this->inferNode($left);
         $rt = $this->inferNode($right);
         if (!$lt->isArray() && !$rt->isArray()) { return null; }
-        // Only one side typed as an array: the other is erased (unknown/cell),
-        // so nothing narrower than the known side is provable.
-        if (!$rt->isArray()) { return $lt; }
-        if (!$lt->isArray()) { return $rt; }
+        // Only one side typed as an array: the other is erased (unknown/cell).
+        // Its buffer may carry another element hint, and then the runtime
+        // union is a CELL buffer ({@see UnifiedArrayRuntime::emitArrayUnion}) —
+        // a cell element reads either shape through the hint, the known side's
+        // raw element reads only its own.
+        if (!$rt->isArray()) { return $this->unionWithErased($lt); }
+        if (!$lt->isArray()) { return $this->unionWithErased($rt); }
         // An absent / UNKNOWN element is NO EVIDENCE, not a conflict: `[] + $l`
         // copies `$l`'s slots verbatim, so the result has exactly `$l`'s element
         // repr. Flooring that to a cell made the reader unbox raw string
@@ -1424,7 +1464,7 @@ trait InferNodes
         // for the fall-through, and a later cell op reads it raw → crash.
         $thenDiv = $this->blockDiverges($node->then);
         if ($node->else === null) {
-            $this->planMergeShadow($node, $thenLocals, $saved, false);
+            $this->planMergeShadow($node, $thenLocals, $saved);
             if ($thenDiv) {
                 // `if (NEG) return/throw;` — the fall-through is the NEGATION of
                 // the guard, so narrow as if the un-negated form held below
@@ -1439,11 +1479,23 @@ trait InferNodes
         $this->localTypes = $saved;
         $this->inferNode($node->else);
         $elseLocals = $this->localTypes;
-        $this->planMergeShadow($node, $thenLocals, $elseLocals, true);
         $elseDiv = $this->blockDiverges($node->else);
+        /** @var array<string,Type> $agreed */
+        $agreed = [];
+        if (!$thenDiv && !$elseDiv) {
+            $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else);
+        }
+        $this->planMergeShadow($node, $thenLocals, $elseLocals);
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
         elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }
-        else                            { $this->localTypes = $this->mergeLocals($thenLocals, $elseLocals); }
+        else {
+            $this->localTypes = $this->mergeLocals($thenLocals, $elseLocals);
+            // The slot leaves both arms raw now, whatever another merge of the
+            // same name decided: `cellMergeLocals` is per NAME, not per merge.
+            foreach ($agreed as $name => $t) {
+                $this->localTypes[$name] = $t;
+            }
+        }
         return Type::void();
     }
 
@@ -1462,15 +1514,20 @@ trait InferNodes
         // `while ($n->kind === KIND_X) { … }` types `$n` as X inside). The merge
         // below unions back the un-narrowed pre-loop map, so it stays body-scoped.
         $this->narrowFromCond($node->cond);
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->narrowFromCond($node->cond);
             $this->inferNode($node->body);
+            $this->joinContinues();
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -1622,7 +1679,7 @@ trait InferNodes
             // a static `B|C` union, so the method-call site dispatches on the
             // runtime class_id instead of binding to the then-branch's class. A
             // single shared class collapses back to `obj<…>` in Type::union.
-            $node->type = Type::union([$t, $e]);
+            $node->type = $this->objUnion([$t, $e]);
         }
         // `$c ? [] : [$x]` — an EMPTY array literal carries NO element type, so
         // the sibling arm's type is the whole answer. The `$t->kind === $e->kind`
@@ -1813,16 +1870,21 @@ trait InferNodes
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->localTypes[$node->valueVar] = $elem;
             if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
             $this->inferNode($node->body);
+            $this->joinContinues();
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -1830,71 +1892,30 @@ trait InferNodes
     {
         $this->inferNode($node->subject);
         $saved = $this->localTypes;
-        // Each arm is ENTERED from the switch head: an arm that follows one
-        // ending in break/return/throw/continue starts from the head's locals,
-        // not from what its sibling assigned — `case A: $d = explode(…); break;
-        // default: esc($d);` typed `$d` a vec in the default arm. Only a real
-        // fall-through (a non-empty arm with no terminator) carries its state on.
-        //
-        // What LEAVES the switch is merged, the way an if/else merges its two
-        // arms: every arm that exits by break/continue or by falling off the
-        // last arm, plus the head itself when no default arm catches it. It
-        // used to be discarded — `$x = 0; switch (…) { default: $x = $t; }` read
-        // `$x` as the head's int afterwards and handed the string's ADDRESS on
-        // (symfony Finder's `$minDepth = $maxDepth = $cmp->getTarget()`).
-        //
-        // The exits are kept FLAT ("exit#name" → Type), never as a list of
-        // maps: a nested array is the known self-host miscompile shape — under
-        // Zend a list of maps planted the box-backs, natively it read nothing.
-        $carry = false;
-        $last = \count($node->arms) - 1;
+        // An arm is entered by the jump from the subject AND, when the arm
+        // above does not end in a jump, by falling through it; control leaves
+        // by any arm that does not return/throw, or past every case when there
+        // is no `default`. A name those paths re-kind is joined like a loop's.
+        $prev = null;
+        $exit = null;
         $hasDefault = false;
-        /** @var int[] $exitArms */
-        $exitArms = [];
-        /** @var array<string, Type> $exitTypes */
-        $exitTypes = [];
-        foreach ($node->arms as $ai => $arm) {
-            if (!$carry) { $this->localTypes = $saved; }
+        $this->pushJumpFrame(true);
+        foreach ($node->arms as $arm) {
             if ($arm->value === null) { $hasDefault = true; }
+            $this->localTypes = $prev === null ? $saved : $this->joinLocals($saved, $prev);
             if ($arm->value !== null) { $this->inferNode($arm->value); }
             foreach ($arm->body as $s) { $this->inferNode($s); }
             $n = \count($arm->body);
-            $end = $n > 0 ? $arm->body[$n - 1] : null;
-            $carry = $n > 0 && !$this->armTerminates($arm->body[$n - 1]);
-            if ($end !== null && $this->blockDiverges($end)) { continue; }
-            $leaves = $ai === $last
-                || ($end !== null && ($end->kind === Node::KIND_BREAK || $end->kind === Node::KIND_CONTINUE));
-            if (!$leaves) { continue; }
-            $ei = (string)\count($exitArms) . '#';
-            $exitArms[] = $ai;
-            foreach ($this->localTypes as $name => $t) { $exitTypes[$ei . $name] = $t; }
-        }
-        if (!$hasDefault) {
-            $ei = (string)\count($exitArms) . '#';
-            $exitArms[] = -1;
-            foreach ($saved as $name => $t) { $exitTypes[$ei . $name] = $t; }
-        }
-        $k = \count($exitArms);
-        if ($k === 0) {
-            $this->localTypes = $saved;
-            return Type::void();
-        }
-        $this->planSwitchMergeShadow($node, $exitArms, $exitTypes);
-        // Merged AFTER planting: the box-backs mark their names in
-        // cellMergeLocals, which is what types those reads cell past the merge.
-        /** @var array<string, Type> $merged */
-        $merged = [];
-        for ($i = 0; $i < $k; $i = $i + 1) {
-            /** @var array<string, Type> $st */
-            $st = [];
-            $pre = (string)$i . '#';
-            $pl = \strlen($pre);
-            foreach ($exitTypes as $key => $t) {
-                if (\strncmp($key, $pre, $pl) === 0) { $st[\substr($key, $pl)] = $t; }
+            $prev = $n > 0 && $this->armTerminates($arm->body[$n - 1]) ? null : $this->localTypes;
+            if (!self::stmtsDiverge($arm->body)) {
+                $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
             }
-            $merged = $i === 0 ? $st : $this->mergeLocals($merged, $st);
         }
-        $this->localTypes = $merged;
+        if (!$hasDefault || $exit === null) {
+            $exit = $exit === null ? $saved : $this->joinLocals($saved, $exit);
+        }
+        $this->localTypes = $exit;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -1910,12 +1931,22 @@ trait InferNodes
         $this->inferNode($node->subject);
         $result = Type::unknown();
         $first = true;
+        // The arms are ALTERNATIVE paths: each is entered after the conditions
+        // tested so far, and the value leaves by whichever ran. A `throw` arm
+        // (and the unhandled-match error) never reaches the join.
+        $condState = $this->localTypes;
+        $exit = null;
         foreach ($node->arms as $arm) {
+            $this->localTypes = $condState;
             $conds = $arm->conds;
             if ($conds !== null) {
                 foreach ($conds as $c) { $this->inferNode($c); }
             }
+            $condState = $this->localTypes;
             $bt = $this->inferNode($arm->body);
+            if ($arm->body->kind !== Node::KIND_THROW) {
+                $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
+            }
             if ($first) { $result = $bt; $first = false; }
             elseif ($result->kind === $bt->kind) { /* keep */ }
             elseif ($result->kind === Type::KIND_CELL || $bt->kind === Type::KIND_CELL
@@ -1937,6 +1968,7 @@ trait InferNodes
             }
             else { $result = Type::unknown(); }
         }
+        $this->localTypes = $exit ?? $condState;
         $node->type = $result;
         return $result;
     }
@@ -1953,32 +1985,42 @@ trait InferNodes
         if ($node->init !== null) { $this->inferNode($node->init); }
         if ($node->cond !== null) { $this->inferNode($node->cond); }
         $saved = $this->localTypes;
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         if ($node->step !== null) { $this->inferNode($node->step); }
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->inferNode($node->body);
+            $this->joinContinues();
             if ($node->step !== null) { $this->inferNode($node->step); }
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
     private function inferDoWhile(DoWhile_ $node): Type
     {
         $saved = $this->localTypes;
+        $this->pushJumpFrame(false);
         $this->inferNode($node->body);
+        $this->joinContinues();
         $this->inferNode($node->cond);
         $merged = $this->loopMerge($saved, $this->localTypes);
         if ($this->localTypesWidened($saved, $merged)) {
+            $this->resetJumpFrame();
             $this->localTypes = $merged;
             $this->inferNode($node->body);
+            $this->joinContinues();
             $this->inferNode($node->cond);
             $merged = $this->loopMerge($saved, $this->localTypes);
         }
         $this->localTypes = $merged;
+        $this->popJumpFrame();
         return Type::void();
     }
 
@@ -2225,7 +2267,12 @@ trait InferNodes
                     : ($at->isAssoc() ? ($at->key ?? Type::string_()) : Type::string_());
                 $this->localTypes[$name] = Type::assoc($key, $elem);
             } elseif ($at->isVec()
-                || ($at->kind === Type::KIND_UNKNOWN && $it->kind !== Type::KIND_STRING)) {
+                || ($at->kind === Type::KIND_UNKNOWN && $it->kind !== Type::KIND_STRING
+                    // An ERASED PARAM holds the caller's elements, which this
+                    // store says nothing about: `$a[] = 9` on a closure's bare
+                    // `array $a` fed `mk(): mixed` retyped it vec[int] and the
+                    // boxed `1, 2` rendered as raw words.
+                    && !isset($this->currentParamTypes[$name]))) {
                 // A STRING-keyed store into an ERASED local says nothing about the
                 // container, and this arm would claim two things at once: that it is
                 // a VEC (it is not — the key is a string) and that its element type

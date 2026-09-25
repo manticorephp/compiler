@@ -128,6 +128,17 @@ class OutOfRangeException extends LogicException {}
 class TypeError extends Error {}
 
 /**
+ * `==` / `<=>` reached an object that is already being compared — a cyclic
+ * graph. php refuses exactly so. Called from the IR of the generic object
+ * compare ({@see \Compile\Mir\Passes\EmitLlvmExpr::objCompareRuntime}), never
+ * from PHP source.
+ */
+function __mir_obj_cmp_recursion(): void
+{
+    throw new Error('Nesting level too deep - recursive dependency?');
+}
+
+/**
  * The shape read's throw: a docblock `array{…}` claimed field `$where` holds
  * a `$expected`, the buffer's word says otherwise. Called from the IR the
  * shape check emits ({@see \Compile\Mir\Passes\EmitLlvmArrays}), never from
@@ -136,6 +147,108 @@ class TypeError extends Error {}
 function __mir_shape_type_error(mixed $v, string $where, string $expected): void
 {
     throw new TypeError($where . ' must be of type ' . $expected . ', ' . get_debug_type($v) . ' given');
+}
+
+/**
+ * A string offset that arrived as a CELL or a STRING → the byte offset php
+ * uses. Called from the IR ({@see \Compile\Mir\Passes\EmitLlvmArrays::
+ * coerceStrOffset}), never from PHP source. An integer string (surrounding
+ * whitespace allowed) is that int; a float form, an overflow or no leading
+ * integer at all is php's TypeError, and so is an array or an object. An
+ * integer followed by other bytes (`"1x"`) is where php WARNS `Illegal string
+ * offset` and reads the leading int — here it throws that text (where Zend
+ * warns, Manticore throws). null / bool / float are the same case: php warns
+ * `String offset cast occurred` and uses the cast, so they throw that text.
+ * Only a READ or a WRITE comes here; isset / empty / `??` take the keys below.
+ */
+function __mir_str_offset(mixed $k): int
+{
+    if (\is_int($k)) { return $k; }
+    if (\is_array($k) || \is_object($k)) {
+        throw new TypeError('Cannot access offset of type ' . (\is_object($k) ? \get_class($k) : 'array') . ' on string');
+    }
+    if (!\is_string($k)) { throw new TypeError('String offset cast occurred'); }
+    $form = __mir_str_offset_form($k);
+    if ($form === 2) {
+        throw new TypeError('Cannot access offset of type string on string');
+    }
+    if ($form === 1) {
+        throw new TypeError('Illegal string offset "' . $k . '"');
+    }
+    return (int)$k;
+}
+
+/**
+ * `isset($s[$k])`'s key: the offset, or PHP_INT_MIN — out of range for every
+ * string — when php's isset answers false whatever the length: any string
+ * that is not a plain integer string, any array or object. `empty` and `??`
+ * probe through it too.
+ */
+function __mir_str_offset_isset_key(mixed $k): int
+{
+    if (\is_array($k) || \is_object($k)) { return \PHP_INT_MIN; }
+    if (!\is_string($k)) { return (int)$k; }
+    if (__mir_str_offset_form($k) !== 0) { return \PHP_INT_MIN; }
+    return (int)$k;
+}
+
+/**
+ * `$s[$k] ?? d`'s presence key — and the key of every INNER fetch of an
+ * isset / empty / `??` chain (`$s['1x'][0]`), which php makes in the same
+ * mode: read like the offset itself ("1x", an array or object throws), except
+ * that a non-numeric string is simply absent (PHP_INT_MIN, no string has it)
+ * and null / bool / float cast without a warning.
+ */
+function __mir_str_offset_coalesce_key(mixed $k): int
+{
+    if (\is_string($k) && __mir_str_offset_form($k) === 2) { return \PHP_INT_MIN; }
+    if (!\is_string($k) && !\is_array($k) && !\is_object($k)) { return (int)$k; }
+    return __mir_str_offset($k);
+}
+
+/**
+ * php's `is_numeric_string_ex` verdict on a string offset: 0 = an integer
+ * string, 1 = an integer followed by other bytes, 2 = anything else (a float
+ * form such as `1.`, `.5`, `1e5`, an int overflow, no leading integer).
+ */
+function __mir_str_offset_form(string $k): int
+{
+    $n = \strlen($k);
+    $i = 0;
+    while ($i < $n && __mir_str_offset_ws($k[$i])) { $i++; }
+    $neg = false;
+    if ($i < $n && ($k[$i] === '+' || $k[$i] === '-')) { $neg = $k[$i] === '-'; $i++; }
+    while ($i < $n && $k[$i] === '0') { $i++; }
+    $start = $i;
+    while ($i < $n && __mir_str_offset_digit($k[$i])) { $i++; }
+    $digits = $i - $start;
+    $hadZero = $start > 0 && $k[$start - 1] === '0';
+    if ($digits === 0 && !$hadZero) { return 2; }
+    if ($digits > 19) { return 2; }
+    if ($digits === 19) {
+        $cmp = \strcmp(\substr($k, $start, 19), '9223372036854775808');
+        if ($cmp > 0 || ($cmp === 0 && !$neg)) { return 2; }
+    }
+    if ($i < $n && $k[$i] === '.') { return 2; }
+    if ($i < $n && ($k[$i] === 'e' || $k[$i] === 'E')) {
+        $j = $i + 1;
+        if ($j < $n && ($k[$j] === '+' || $k[$j] === '-')) { $j++; }
+        if ($j < $n && __mir_str_offset_digit($k[$j])) { return 2; }
+    }
+    while ($i < $n && __mir_str_offset_ws($k[$i])) { $i++; }
+    return $i === $n ? 0 : 1;
+}
+
+function __mir_str_offset_ws(string $c): bool
+{
+    $o = \ord($c);
+    return $o === 32 || ($o >= 9 && $o <= 13);
+}
+
+function __mir_str_offset_digit(string $c): bool
+{
+    $o = \ord($c);
+    return $o >= 48 && $o <= 57;
 }
 
 class ArgumentCountError extends TypeError {}

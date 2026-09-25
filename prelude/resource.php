@@ -346,6 +346,7 @@ final class Resource
  * (a global function needs it public). Unavoidable — php's is a true internal
  * opaque class. Every other introspection is byte-identical.
  */
+#[\Manticore\Attr\Uncomparable]
 final class Socket
 {
     public int $fd;
@@ -413,6 +414,7 @@ final class Socket
  * *_explain can hand back the php-shaped array. Prelude-resident for the same
  * reason as \Socket.
  */
+#[\Manticore\Attr\Uncomparable]
 final class AddressInfo
 {
     public int $family;

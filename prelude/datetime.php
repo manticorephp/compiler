@@ -204,6 +204,7 @@ class DateTimeZone
  * two private scalars plus a __get so the public value can be int|false without
  * a `mixed` property.
  */
+#[\Manticore\Attr\Uncomparable]
 class DateInterval
 {
     public int $y = 0;
@@ -326,8 +327,8 @@ class DateInterval
 /** A mutable date and time. */
 class DateTime implements DateTimeInterface
 {
-    private int $ts = 0;
-    private int $us = 0;
+    #[\Manticore\Attr\CompareKey] private int $ts = 0;
+    #[\Manticore\Attr\CompareKey] private int $us = 0;
     private int $zid = 0;
     private string $zname = 'UTC';
     private int $ztype = 3;
@@ -509,8 +510,8 @@ class DateTime implements DateTimeInterface
 /** An immutable date and time: every mutator returns a NEW instance. */
 class DateTimeImmutable implements DateTimeInterface
 {
-    private int $ts = 0;
-    private int $us = 0;
+    #[\Manticore\Attr\CompareKey] private int $ts = 0;
+    #[\Manticore\Attr\CompareKey] private int $us = 0;
     private int $zid = 0;
     private string $zname = 'UTC';
     private int $ztype = 3;

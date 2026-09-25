@@ -1,0 +1,15 @@
+?? default: sum=701400 growth ok
+?? passed: sum=4999969900 growth ok
+if null default: sum=701400 growth ok
+if null passed: sum=4999969900 growth ok
+always reassigned: sum=5000070100 growth ok
+string reassigned: sum=4308589 growth ok
+reassigned in a loop: sum=202000 growth ok
+same object
+kept made
+destruct made
+destruct inner
+5
+still outer
+destruct outer
+done

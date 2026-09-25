@@ -2736,6 +2736,10 @@ final class Response
 
     private bool $close = false;
 
+    /** A `Closure(\Resource, \Buffer\ByteBuffer, Server): void` that owns the
+     *  socket after a 101 ({@see takeover}). */
+    private ?\Closure $takeoverFn = null;
+
     public function __construct(int $status = 200, string $body = '')
     {
         $this->headers = new Headers();
@@ -2976,6 +2980,26 @@ final class Response
         $this->close = true;
         return $this;
     }
+
+    /**
+     * Hand the connection to $fn once this response's head is written.
+     *
+     * Protocol-agnostic: the server writes the status line and headers, ends
+     * the request context, and calls `$fn($conn, $buf, $server)` in the same
+     * fiber — `$buf` holds whatever the peer sent past the request head. The
+     * connection is closed when $fn returns and is never read as HTTP again.
+     * Only a 101 on HTTP/1.1 may take over; anything else answers 500.
+     */
+    public function takeover(\Closure $fn): Response
+    {
+        $this->takeoverFn = $fn;
+        return $this;
+    }
+
+    public function isTakeover(): bool { return $this->takeoverFn !== null; }
+
+    /** @internal */
+    public function takeoverFn(): ?\Closure { return $this->takeoverFn; }
 
     public function getBody(): string
     {
@@ -3683,6 +3707,12 @@ final class ChunkedWriter
     }
 }
 
+/** @internal One connection's pending takeover, set by Server::serveOne. */
+final class Takeover
+{
+    public ?Response $res = null;
+}
+
 /**
  * An HTTP/1.1 server: `(new Server($addr))->serve($handler)`, where `$handler`
  * is `callable(Request): Response`.
@@ -3768,6 +3798,10 @@ final class Server
     private int $statOpen = 0;
     private int $statAccepted = 0;
     private int $statErrors = 0;
+    private int $statUpgraded = 0;
+    /** @var array<int, \Closure> */
+    private array<int, \Closure> $stopHooks = [];
+    private int $stopSeq = 0;
 
     public function __construct(string $addr = 'tcp://127.0.0.1:8080', mixed $context = null)
     {
@@ -3919,15 +3953,60 @@ final class Server
     }
 
     /**
+     * Run $fn once when {@see stop} is called — how a long-lived takeover
+     * (a WebSocket session) learns the server is going down. Returns an id
+     * for {@see offStop}.
+     *
+     * A takeover that upgrades DURING or AFTER `stop()` (dispatch was already
+     * in flight, or `stop()` raced it) registers into a hook list that will
+     * never run again — `stop()` is one-shot. $fn runs INLINE here instead,
+     * so a session that checks in late still hears the server is going down.
+     */
+    public function onStop(\Closure $fn): int
+    {
+        $this->stopSeq = $this->stopSeq + 1;
+        if ($this->stopped) {
+            try {
+                $fn();
+            } catch (\Throwable $e) {
+                $this->statErrors = $this->statErrors + 1;
+            }
+            return $this->stopSeq;
+        }
+        $this->stopHooks[$this->stopSeq] = $fn;
+        return $this->stopSeq;
+    }
+
+    public function offStop(int $id): void
+    {
+        unset($this->stopHooks[$id]);
+    }
+
+    /**
      * Ask the accept loop to wind down. In-flight requests are NOT interrupted:
-     * the group joins them, which is what graceful means.
+     * the group joins them, which is what graceful means. Every registered
+     * {@see onStop} hook runs once, here — a live takeover's only signal that
+     * the server is going down.
      */
     public function stop(): void
     {
+        if ($this->stopped) {
+            return;
+        }
         $this->stopped = true;
+        $hooks = $this->stopHooks;
+        $this->stopHooks = [];
+        foreach ($hooks as $fn) {
+            try {
+                $fn();
+            } catch (\Throwable $e) {
+                // One hook's failure must not keep the others from running.
+                $this->statErrors = $this->statErrors + 1;
+            }
+        }
     }
 
-    /** @return array<string,int> served / open / accepted / errors / stopped */
+    /** @return array<string,int> served / open / accepted / errors / upgraded / stopped */
     public function stats(): array<string, int>
     {
         $out = [];
@@ -3935,6 +4014,7 @@ final class Server
         $out['open'] = $this->statOpen;
         $out['accepted'] = $this->statAccepted;
         $out['errors'] = $this->statErrors;
+        $out['upgraded'] = $this->statUpgraded;
         $out['stopped'] = $this->stopped ? 1 : 0;
         return $out;
     }
@@ -4028,8 +4108,9 @@ final class Server
             $this->maxFileUploads,
             $this->uploadMaxFilesize,
         );
+        $tk = new Takeover();
         try {
-            $this->pump($conn, $buf, $out, $parser);
+            $this->pump($conn, $buf, $out, $parser, $tk);
         } finally {
             // Whatever is queued goes out before the socket does, on EVERY
             // exit — an early return with a response still in the vector is a
@@ -4039,7 +4120,7 @@ final class Server
     }
 
     /** The keep-alive loop proper. {@see connection} owns the flush contract. */
-    private function pump(\Resource $conn, \Buffer\ByteBuffer $buf, Outbox $out, Parser $parser): void
+    private function pump(\Resource $conn, \Buffer\ByteBuffer $buf, Outbox $out, Parser $parser, Takeover $tk): void
     {
         $handled = 0;
         while (!$this->stopped) {
@@ -4105,12 +4186,24 @@ final class Server
                 $keep = (bool)\Async\Context::withValue(
                     self::CTX_REQUEST,
                     $req,
-                    function () use ($conn, $out, $req, $handled) {
-                        return $this->serveOne($conn, $out, $req, $handled);
+                    function () use ($conn, $out, $req, $handled, $tk) {
+                        return $this->serveOne($conn, $out, $req, $handled, $tk);
                     },
                 );
             } finally {
                 \Manticore\Sapi\requestEnd();
+            }
+            $res = $tk->res;
+            if ($res !== null) {
+                // After requestEnd(): a takeover runs with no request context.
+                $out->flush();
+                // pump()'s idle/header read deadline (as short as 0.3s under a
+                // tight config) is a REQUEST-parsing concern; a session must
+                // not inherit it. 0 clears both directions back to the stream
+                // layer's own default (stream_set_timeout, Net.php).
+                $this->setTimeout($conn, 0.0);
+                $this->runTakeover($conn, $buf, $res);
+                return;
             }
             if (!$keep) {
                 return;
@@ -4134,7 +4227,7 @@ final class Server
      *
      * @return bool whether the connection may be reused
      */
-    private function serveOne(\Resource $conn, Outbox $out, Request $req, int $handled): bool
+    private function serveOne(\Resource $conn, Outbox $out, Request $req, int $handled, Takeover $tk): bool
     {
         if ($req->hasBody() && !$req->streamed
             && \strncasecmp($req->contentType(), 'multipart/form-data', 19) === 0
@@ -4144,6 +4237,28 @@ final class Server
             return false;
         }
         $res = $this->dispatch($req);
+        if ($res->isTakeover()) {
+            // An unread streamed-body byte is a request byte the wire hasn't
+            // finished delivering; handing it to the new protocol as ITS
+            // first byte is a handler bug (it never read what it asked for),
+            // same tier as a takeover that is not a clean 101/1.1.
+            $rd = $req->streamed ? $req->stream() : null;
+            $bodyLeft = $rd !== null && !$rd->eof();
+            if ($res->status !== Status::SWITCHING_PROTOCOLS || $req->version !== '1.1' || $bodyLeft) {
+                $this->statErrors = $this->statErrors + 1;
+                $this->writeError($out, 500);
+                return false;
+            }
+            $h = $res->headers;
+            if ($this->serverName !== '' && !$h->has('server')) {
+                $h->add('Server', $this->serverName);
+            }
+            \Manticore\Sapi\responseSent();
+            $out->add(statusLine(101, '1.1') . $h->render());
+            $this->statUpgraded = $this->statUpgraded + 1;
+            $tk->res = $res;
+            return false;
+        }
         $keep = $req->isKeepAlive()
             && !$res->wantsClose()
             && !$this->stopped
@@ -4170,6 +4285,22 @@ final class Server
         $keep = $this->writeResponse($conn, $out, $req, $res, $keep);
         $this->statServed = $this->statServed + 1;
         return $keep;
+    }
+
+    /** Run a takeover closure; its escape is an error, never the server's end. */
+    private function runTakeover(\Resource $conn, \Buffer\ByteBuffer $buf, Response $res): void
+    {
+        $fn = $res->takeoverFn();
+        if ($fn === null) {
+            return;
+        }
+        try {
+            $fn($conn, $buf, $this);
+        } catch (\Async\CancelledException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            $this->statErrors = $this->statErrors + 1;
+        }
     }
 
     /**

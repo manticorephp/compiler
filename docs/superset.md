@@ -166,6 +166,7 @@ for compiler instructions: the file still parses and runs under `php`.
 | `#[Ffi\Weak]` | `declare extern_weak`, so a symbol absent on this target resolves to null instead of failing the link; Darwin's `-Wl,-U` allowance is derived from these | nothing |
 | `#[Ffi\Variadic($fixed)]` | the named-param count of a C variadic callee, so the call gets a variadic type and its varargs land where `va_arg` looks | C declaration |
 | `#[Manticore\Attr\CellArg]` | an element-CONSUMING `array` parameter: the call site boxes each element so a compiled-once stdlib callee always sees self-describing cells | nothing — the representation question does not exist in Zend |
+| `#[Manticore\Attr\CompareKey]` / `CompareNone` / `Uncomparable` | declares how a class's objects compare under `==` / `<=>` — by the marked properties (also across classes), always equal, or never equal — for a class whose php original has its own compare handler ([attributes.md § Object comparison](attributes.md#object-comparison)) | the engine's per-class C compare handler |
 
 **Checked, never lowered:** the ownership family `#[Ffi\Borrow]` / `BorrowMut` / `Take` /
 `Give` / `StaticPtr`, the one with no analogue anywhere in PHP. The compiler enforces where

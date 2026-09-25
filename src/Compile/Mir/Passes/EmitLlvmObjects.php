@@ -347,6 +347,7 @@ trait EmitLlvmObjects
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
                 }
+                $padDrops = '';
                 if ($spreadArr !== '') {
                     // The pack covers every param past the fixed prefix; each
                     // defaulted one it does not reach falls back to its default.
@@ -360,6 +361,7 @@ trait EmitLlvmObjects
                     // `$this`, provided args cover [1 .. argc]).
                     $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
                     $argList .= $this->lastPadArgs;
+                    $padDrops = $this->lastPadDrops;
                 }
                 // func_get_args() channel: what the SOURCE wrote, before the pad
                 // above widened the list. Kept across the merge with the spread
@@ -375,6 +377,7 @@ trait EmitLlvmObjects
                 $out .= '  ' . $cr . ' = call i64 @manticore_'
                       . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
                       . '(' . $argList . ")\n";
+                $out .= $padDrops;
             }
             // The MIR node is typed CELL (`new_dyn %n() : cell`), so the value
             // has to BE one — this stored the bare `ptrtoint` instead, and every
@@ -454,6 +457,7 @@ trait EmitLlvmObjects
             $cellBoxTypes = [];
             $reboxSlots = [];
             $reboxTmps = [];
+            $refSlotDrops = '';
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
@@ -504,6 +508,9 @@ trait EmitLlvmObjects
                     $cellBoxTypes[] = $a->type;
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
+                } elseif ($mask[$ai + 1] ?? false) {
+                    $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai);
+                    $refSlotDrops .= $this->lastRefSlotDrop;
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
                     // static type so the ctor reads the runtime tag.
@@ -568,6 +575,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
                   . '(' . $argList . ")\n";
             $out .= $this->btPop();
+            $out .= $refSlotDrops;
             $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
             $ci = 0;
             foreach ($cellBoxTmps as $ctmp) {
@@ -2442,9 +2450,13 @@ trait EmitLlvmObjects
                 $val = $this->lastValue;
                 $res = $raw;
                 $resTy = 'i64';
-            } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_CLOSURE) {
-                // rc-managed payload (string/object/closure) — retain the RAW ptr
+            } elseif ($vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_CLOSURE
+                || $vk === Type::KIND_UNION) {
+                // rc-managed payload (string/object/closure, and an object UNION,
+                // which is the same bare object pointer) — retain the RAW ptr
                 // before boxing (a tagged cell would mis-locate the rc header).
+                // A union fell to the scalar arm: boxed, never retained, and the
+                // holder's drop freed an object its source still owned.
                 $out .= $this->coerceToI64();
                 $raw = $this->lastValue;
                 $out .= $this->rcRetainByType($n->value, $raw, $propType, 4);
@@ -4922,11 +4934,15 @@ trait EmitLlvmObjects
             // String receiver: isset($s[$i]) — the binary-safe length lives in
             // the header (at ptr-16), NOT at ptr (that's the first data byte),
             // and a negative offset counts from the end — the helper does both.
-            $out = $this->emitNode($aa->array);
+            // Taken before the operands are emitted: a nested `??` in the index
+            // must not see (or clear) this one's mode.
+            $mode = $this->strOffsetCoalesce ? 'coalesce' : 'isset';
+            $this->strOffsetCoalesce = false;
+            $out = $this->emitStrOffsetBase($aa->array);
             $out .= $this->coerceToPtr();
             $arr = $this->lastValue;
             $out .= $this->emitNode($aa->index);
-            $out .= $this->coerceToI64();
+            $out .= $this->coerceStrOffset($aa->index, $mode);
             $idx = $this->lastValue;
             $ok = $this->ssa->allocReg();
             $out .= '  ' . $ok . ' = call i1 @__mir_str_offset_isset(ptr ' . $arr
@@ -5190,6 +5206,10 @@ trait EmitLlvmObjects
                         && $this->isClosureValueType($t->type)) {
                         $flavor = 'closure';
                     }
+                    // A MIXED slot releases by its representation flag.
+                    if (isset($this->frame->mixedFlagSlots[$name])) {
+                        $flavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]);
+                    }
                     if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
                         $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
                     }
@@ -5205,8 +5225,19 @@ trait EmitLlvmObjects
                     $out .= $this->emitMethodCall($mc);
                 } elseif ($aa->array->type->kind !== Type::KIND_STRING) {
                     $baseCell = $aa->array->type->kind === Type::KIND_CELL;
-                    $out .= $this->emitNode($aa->array);
-                    $out .= $this->arrayBaseToPtr($aa->array->type);
+                    // Separate every SHARED level first, top-down, exactly as a
+                    // write must: the unset below deletes in place, so
+                    // `$copy = $this->map; unset($this->map[$k]);` took the entry
+                    // out of `$copy` too, and `$m = $n; unset($n['x']['p']);` out
+                    // of `$m['x']` (and, now that a closure slot gives its count
+                    // back, dropped an env the copy still listed). The clones
+                    // co-own what they share.
+                    if ($this->unsetBaseIsWritable($aa->array)) {
+                        $out .= $this->emitSeparatedArray($aa->array, $baseCell);
+                    } else {
+                        $out .= $this->emitNode($aa->array);
+                        $out .= $this->arrayBaseToPtr($aa->array->type);
+                    }
                     $arrPtr = $this->lastValue;
                     $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
@@ -5230,9 +5261,11 @@ trait EmitLlvmObjects
                               . ($keyIsString ? 'ptr ' : 'i64 ') . $key
                               . ($keyIsString ? $this->litKeyHashArgs($aa->index) : '') . ")\n";
                     }
+                    $dropArr = $arrPtr;
                     if ($keyIsCell && $this->unsetBaseIsWritable($aa->array)) {
                         $this->rt->needsCellKey = true;
                         $r = $this->ssa->allocReg();
+                        $dropArr = $r;
                         $out .= '  ' . $r . ' = call ptr @__mir_array_unset_cell_at(ptr '
                               . $arrPtr . ', i64 ' . $key . ")\n";
                         $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
@@ -5250,6 +5283,7 @@ trait EmitLlvmObjects
                         // base (`$a[0][1]`) keeps the old in-place call, where a
                         // packed unset is still the historical no-op.
                         $r = $this->ssa->allocReg();
+                        $dropArr = $r;
                         $out .= '  ' . $r . ' = call ptr @__mir_array_unset_at(ptr '
                               . $arrPtr . ', i64 ' . $key . ")\n";
                         $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
@@ -5262,7 +5296,7 @@ trait EmitLlvmObjects
                     if ($keyIsCell || $keyIsString) {
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
-                    if ($dropFlavor !== '') { $out .= $this->rcReleaseReg($curE, $dropFlavor); }
+                    if ($dropFlavor !== '') { $out .= $this->elemSlotReleaseIr($curE, $dropFlavor, $dropArr); }
                 }
             }
             // Property overloading: `unset($obj->undeclaredProp)` on a class
@@ -5369,6 +5403,13 @@ trait EmitLlvmObjects
      *  local (including a by-ref param or a `global`) or an object property. */
     private function unsetBaseIsWritable(Node $base): bool
     {
+        // A NESTED base is written back level by level ({@see
+        // emitSeparatedArray}) when its root can be.
+        if ($base->kind === Node::KIND_ARRAY_ACCESS) {
+            $pk = $base->array->type->kind;
+            if (!$base->array->type->isArray() && $pk !== Type::KIND_CELL && $pk !== Type::KIND_UNKNOWN) { return false; }
+            return $this->unsetBaseIsWritable($base->array);
+        }
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
             return isset($this->locals->slots[$base->name])
                 || isset($this->locals->globalBacked[$base->name]);
@@ -5912,6 +5953,7 @@ trait EmitLlvmObjects
         $cellBoxTmps = [];
         $cellBoxTypes = [];
         $ai = 0;
+        $refSlotDrops = '';
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
@@ -5954,6 +5996,10 @@ trait EmitLlvmObjects
             } elseif ($this->argIsByRef($mask, $ai, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
+            } elseif ($mask[$ai] ?? false) {
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai);
+                $argList .= 'i64 ' . $this->lastValue;
+                $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its static type.
                 $out .= $this->emitNode($a);
@@ -6011,6 +6057,7 @@ trait EmitLlvmObjects
         // arrive short — never leave a trailing optional unset.
         $out .= $this->emitDefaultArgPad($cls . '__' . $n->method, $ai, !$first);
         $argList .= $this->lastPadArgs;
+        $padDrops = $refSlotDrops . $this->lastPadDrops;
         $btName = '';
         if ($this->rt->needsBacktrace) {
             $btName = $n->class . '::' . $n->method;
@@ -6021,6 +6068,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
               . '(' . $argList . ")\n";
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $padDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
@@ -6196,6 +6244,7 @@ trait EmitLlvmObjects
      */
     private function vdArmArity(array $parts, array $cTypes, string $sym): string
     {
+        $this->vdArmDrops = '';
         if ($sym === '' || $this->spreadTail !== null) { return ''; }
         $want = \count($this->sigs->paramTypes[$sym] ?? $cTypes);
         if ($want === 0) { return ''; }
@@ -6227,6 +6276,7 @@ trait EmitLlvmObjects
         }
         $out = $this->emitDefaultArgPad($sym, $have, true);
         $this->vdArmList = \implode(', ', $parts) . $this->lastPadArgs;
+        $this->vdArmDrops = $this->lastPadDrops;
         return $out;
     }
 
@@ -6480,7 +6530,7 @@ trait EmitLlvmObjects
             $bodyChunks[] = $this->vdArmArgs($argList, $argOutTypes,
                                               $this->sigs->paramTypes[$targets[$c]] ?? [], $targets[$c]);
             $bodyChunks[] = '  ' . $r . ' = call i64 @manticore_' . $this->mangle($targets[$c])
-                           . '(' . $this->vdArmList . ")\n";
+                           . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
             // Cell-typed result over candidates whose declared returns DISAGREE:
             // box each arm's raw return by its OWN return type so the merged value
             // is a uniform, self-describing cell (a mixed-repr raw merge would read
@@ -6504,7 +6554,7 @@ trait EmitLlvmObjects
         $out .= $this->vdArmArgs($argList, $argOutTypes,
                                  $this->sigs->paramTypes[$fallback] ?? [], $fallback);
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
-              . '(' . $this->vdArmList . ")\n";
+              . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
         if ($boxCell) {
             $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
             $rd = $this->lastValue;
@@ -6686,6 +6736,26 @@ trait EmitLlvmObjects
      * current. Frame: [resume_fn@0, state@8, current@16, key@24, nextkey@32,
      * sent@40, retval@48].
      */
+    /**
+     * `current()` / `send()` / `throw()` hand out the frame's `current`@16,
+     * which the frame owns and drops at the next yield
+     * ({@see EmitLlvmGenerator::emitYield}). A method call's result is the
+     * caller's +1 ({@see InsertMemoryOps::isOwnedObj}), so take one — read at
+     * the type the caller was handed; an erased one is still the tagged cell.
+     */
+    private function genCurrentRetain(Type $t, string $reg): string
+    {
+        $k = $t->kind;
+        $fl = ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) ? 'cell'
+            : ($this->isClosureValueType($t) ? 'closure' : $this->discardReleaseFlavor($t));
+        if ($fl === '') { return ''; }
+        $sv = $this->lastValue;
+        $out = $this->rcRetainReg($reg, $fl);
+        $this->lastValue = $sv;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitGeneratorMethod(\Compile\Mir\MethodCall_ $mc): string
     {
         $out = $this->emitNode($mc->object);
@@ -6705,6 +6775,7 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
             $out = $this->finishI64($out, $this->lastValue);
             if ($mc->type->kind === Type::KIND_CELL) {
                 $this->markCellOpaque($this->lastValue);
@@ -6714,8 +6785,12 @@ trait EmitLlvmObjects
         if ($m === 'key')     { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 24); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
-        if ($m === 'next')   { $out .= $this->genResumeCall($g); return $this->finishI64($out, '0'); }
+        // next()/send() on a generator nobody started run it to its first
+        // yield first, as php's ensureInitialized does: next() then steps past
+        // that yield, send() makes the value that yield's result.
+        if ($m === 'next')   { $out .= $this->genPrimeIfFresh($g); $out .= $this->genResumeCall($g); return $this->finishI64($out, '0'); }
         if ($m === 'send') {
+            $out .= $this->genPrimeIfFresh($g);
             $sentPtr = $this->ssa->allocReg();
             $out .= '  ' . $sentPtr . ' = getelementptr inbounds i8, ptr ' . $g . ", i64 40\n";
             if (\count($mc->args) >= 1) {
@@ -6729,6 +6804,7 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
             $out = $this->finishI64($out, $this->lastValue);
             if ($mc->type->kind === Type::KIND_CELL) {
                 $this->markCellOpaque($this->lastValue);
@@ -6750,6 +6826,7 @@ trait EmitLlvmObjects
             $out .= $this->genFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
             $out = $this->finishI64($out, $this->lastValue);
             if ($mc->type->kind === Type::KIND_CELL) {
                 $this->markCellOpaque($this->lastValue);
@@ -7118,6 +7195,7 @@ trait EmitLlvmObjects
         $reboxSlots = [];
         $reboxTmps = [];
         $cellBoxTmps = [];
+        $refSlotDrops = '';
         $static = $mc->object->type->class ?? '';
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
@@ -7268,6 +7346,10 @@ trait EmitLlvmObjects
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
+            } elseif ($mask[$ai + 1] ?? false) {
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai);
+                $argList .= ', i64 ' . $this->lastValue;
+                $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // A tagged (mixed/union) param: NaN-box the arg by its static
                 // type so the callee reads its runtime tag — mirrors the
@@ -7369,6 +7451,10 @@ trait EmitLlvmObjects
         // `$this`, so provided params cover indices [0 .. $ai].
         $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true);
         $argList .= $this->lastPadArgs;
+        // The fallback's by-ref pad slots are the site's: an arm that re-pads
+        // leaves them holding the default, one that keeps them sees the
+        // callee's write — either way this site releases them once.
+        $refSlotDrops .= $this->lastPadDrops;
         // The pad above is the FALLBACK's. Record what the site really wrote so
         // a dispatch arm can cut back to it ({@see vdArmArity}).
         $this->vdSiteArgc = $ai + 1;
@@ -7522,7 +7608,7 @@ trait EmitLlvmObjects
             $out .= $this->vdArmArgs($argList, $argOutTypes, $this->sigs->paramTypes[$sym] ?? [], $sym);
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($sym)
-                  . '(' . $this->vdArmList . ")\n";
+                  . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
             // An erased thunk already returns a cell; boxing it again double-boxes.
             if ($boxCell && !isset($erasedSyms[$sym])) {
                 $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
@@ -7534,6 +7620,7 @@ trait EmitLlvmObjects
         }
         $this->spreadTail = null;
         if ($btName !== '') { $out .= $this->btPop(); }
+        $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
         foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }

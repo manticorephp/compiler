@@ -1,0 +1,14 @@
+function result ->string: sum=4208400 growth ok
+method result ->string: sum=4208400 growth ok
+nullable method result ->string: sum=4208400 growth ok
+static result ->string: sum=4208400 growth ok
+new ->string: sum=4208400 growth ok
+result ->array: sum=300600 growth ok
+borrowed result ->object->string: sum=400800 growth ok
+result [0] string: sum=4208400 growth ok
+result [0]->string: sum=4208400 growth ok
+result [k] array: sum=300600 growth ok
+got destruct temp
+temp
+held held
+done
