@@ -617,7 +617,10 @@ final class Connection implements \IteratorAggregate
 
     private function sendData(int $op, string $data): void
     {
-        if ($this->pmd !== null && \strlen($data) >= $this->o->compressionMinBytes) {
+        // An EMPTY message always goes plain: deflate_add('') is a no-op, so it
+        // would go out as RSV1 with no payload, and the peer's inflater would
+        // wait inside a stored block and garble the next message.
+        if ($this->pmd !== null && $data !== '' && \strlen($data) >= $this->o->compressionMinBytes) {
             $ok = !$this->closed && !$this->sentClose && $this->writeRaw($data, $op);
         } else {
             $ok = $this->writeFrame($op, $data, false);

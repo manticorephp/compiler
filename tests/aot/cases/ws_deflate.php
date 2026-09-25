@@ -222,6 +222,13 @@ async(function () use ($server, $port) {
     $r->send(1, 'tiny');
     $r->frame();
     echo $r->rsv1 ? 'rsv1 ' : 'plain ', unz($inf, $r->payload), "\n";
+    // An empty message goes plain even at compressionMinBytes(0), and the
+    // shared window carries on intact after it.
+    $r->send(2, '');
+    echo 'empty ', $r->frame(), ' ', $r->rsv1 ? 'rsv1' : 'plain', "\n";
+    $r->send(1, 'after');
+    $r->frame();
+    echo $r->rsv1 ? 'rsv1 ' : 'plain ', unz($inf, $r->payload), "\n";
     fclose($r->c);
 
     // compressionMinBytes (256 by default): a short reply goes plain, a long one compressed.

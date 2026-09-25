@@ -3,6 +3,8 @@ rsv1 echo:Hello
 rsv1 echo:Hello
 server takeover
 rsv1 echo:tiny
+empty 2: plain
+rsv1 echo:after
 short reply plain 105
 long reply compressed 305
 50 ok, echo:tiny
