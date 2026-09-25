@@ -1190,6 +1190,16 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        if (\count($magic) >= self::MAGIC_SHARED_MIN) {
+            $lbl = $this->ssa->allocLabel('pr.magic');
+            foreach ($magic as $cname => $_decl) {
+                $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            }
+            $bodies .= $lbl . ":\n" . $this->magicDispatchCall('__get', $obj, $prop, '0');
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+            $magic = [];
+        }
         foreach ($magic as $cname => $declCls) {
             $lbl = $this->ssa->allocLabel('pr.magic');
             $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
@@ -1349,9 +1359,8 @@ trait EmitLlvmObjects
      *  that repr is only safe when no object candidate shares the name. */
     private function nonEnumDeclares(string $method): bool
     {
-        foreach ($this->classes as $cd) {
-            if (isset($this->enums[$cd->name])) { continue; }
-            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
+        foreach ($this->methodHolders($method) as $cn => $_decl) {
+            if (!isset($this->enums[$cn])) { return true; }
         }
         return false;
     }
@@ -1359,10 +1368,7 @@ trait EmitLlvmObjects
     /** Whether ANY class in the table declares (or inherits) `$method`. */
     private function anyClassDeclares(string $method): bool
     {
-        foreach ($this->classes as $cd) {
-            if ($this->resolveMethodClass($cd->name, $method) !== '') { return true; }
-        }
-        return false;
+        return $this->methodHolders($method) !== [];
     }
 
     /**
@@ -1391,13 +1397,12 @@ trait EmitLlvmObjects
             return $this->magicPropertyHoldersCache[$key];
         }
         $holders = [];
-        foreach ($this->classes as $cd) {
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
             if ($cd->propertyOffset($prop) >= 0) { continue; }
             if ($cd->isStruct || $cd->usesBag()) { continue; }
-            if ($this->isClosureClass($cd->name) || $this->isEnumClass($cd->name)) { continue; }
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl === '') { continue; }
-            $holders[$cd->name] = $decl;
+            if ($this->isClosureClass($cn) || $this->isEnumClass($cn)) { continue; }
+            $holders[$cn] = $decl;
         }
         $this->magicPropertyHoldersCache[$key] = $holders;
         return $holders;
@@ -1713,12 +1718,8 @@ trait EmitLlvmObjects
     private function emitCellStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
         $prop = $n->property;
-        $fixed = [];
-        $hasBag = false;
-        foreach ($this->classes as $cd) {
-            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
-            if ($cd->usesBag()) { $hasBag = true; }
-        }
+        $fixed = $this->fixedPropertyHolders($prop);
+        $hasBag = $this->bagClassNames() !== [];
         $out = $this->emitObjPtrOf($n->object);
         $objPtr = $this->lastValue;
         // Evaluate the RHS once; keep both a boxed-cell form (for cell slots) and
@@ -1743,6 +1744,11 @@ trait EmitLlvmObjects
         // Property overloading on an ERASED receiver: a class that declares
         // __set but not $prop takes the write through the method.
         $magic = $this->magicPropHolders($prop, '__set');
+        $within = '';
+        if ($n->object->type->kind === Type::KIND_OBJ) {
+            $within = $this->holdersWithin(\ltrim((string)($n->object->type->class ?? ''), '\\'),
+                                           $fixed, $magic, $hasBag);
+        }
         // No known holder → __set, bag store (stdClass), or drop; never offset-16.
         if (\count($fixed) === 0 && $magic === []) {
             if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
@@ -1751,7 +1757,10 @@ trait EmitLlvmObjects
             return $out;
         }
         // Single holder and no bag anywhere → the cell can only be that class.
-        if (\count($fixed) === 1 && !$hasBag && $magic === []) {
+        // Not after a narrowing: one holder AMONG the subtypes does not mean
+        // every subtype holds the slot, and the class_id default is what keeps
+        // a store into one that does not off a foreign offset.
+        if ($within === '' && \count($fixed) === 1 && !$hasBag && $magic === []) {
             $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
@@ -1759,47 +1768,11 @@ trait EmitLlvmObjects
         }
         // NO unconditional shortcut for a single magic holder — the receiver is
         // ERASED, so one declarer says nothing about the class in hand. Always
-        // dispatch on class_id.
-        // Runtime dispatch on the object's class_id — each holder stores its slot.
-        $out .= $this->emitLoadClassId($objPtr);
-        $cid = $this->classIdReg;
-        $end = $this->ssa->allocLabel('cs.end');
-        $def = $this->ssa->allocLabel('cs.default');
-        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
-        $bodies = '';
-        $seen = [];
-        /** @var array<string, string> {@see canonArm} */
-        $armSeen = [];
-        foreach ($fixed as $cd) {
-            if (isset($seen[$cd->name])) { continue; }
-            $seen[$cd->name] = true;
-            $lbl = $this->ssa->allocLabel('cs.case');
-            $arm = $this->emitCellSlotStore($objPtr, $cd, $prop, $cellVal);
-            $arm .= '  br label %' . $end . "\n";
-            $key = $this->canonArm($arm);
-            if (isset($armSeen[$key])) {
-                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
-                continue;
-            }
-            $armSeen[$key] = $lbl;
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $arm;
-        }
-        foreach ($magic as $cname => $declCls) {
-            if (isset($seen[$cname])) { continue; }
-            $seen[$cname] = true;
-            $lbl = $this->ssa->allocLabel('cs.magic');
-            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitMagicCall($declCls, '__set', $objPtr, $prop, $cellVal);
-            $bodies .= '  br label %' . $end . "\n";
-        }
-        $switch .= "  ]\n";
-        $out .= $switch . $bodies;
-        $out .= $def . ":\n";
-        if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
-        $out .= '  br label %' . $end . "\n";
-        $out .= $end . ":\n";
+        // dispatch on class_id — through the shared writer, as reads already do
+        // ({@see cellPropertyReadHelper}): the switch spliced into every site put
+        // 11k DOMNode/SimpleXMLElement __set arms into php-cs-fixer.
+        $out .= '  call void ' . $this->cellPropertyWriteHelper($prop, $within)
+              . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
         return $out;
@@ -2051,13 +2024,17 @@ trait EmitLlvmObjects
      * as an interned string ptr; lastValue ← the i64 result (a void method like
      * __set returns a dummy 0). All user methods emit as `define i64`.
      */
-    private function emitMagicCall(string $methodCls, string $method, string $objPtrReg, string $propName, ?string $valArg): string
+    private function emitMagicCall(string $methodCls, string $method, string $objPtrReg, string $propName,
+                                   ?string $valArg, string $nameI64 = ''): string
     {
         $oi = $this->ssa->allocReg();
         $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtrReg . " to i64\n";
-        $kid = $this->pool->intern($propName);
-        $si = $this->ssa->allocReg();
-        $out .= '  ' . $si . ' = ptrtoint ptr ' . $this->strLitId($kid) . " to i64\n";
+        $si = $nameI64;
+        if ($si === '') {
+            $kid = $this->pool->intern($propName);
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $this->strLitId($kid) . " to i64\n";
+        }
         $args = 'i64 ' . $oi . ', i64 ' . $si;
         if ($valArg !== null) { $args .= ', i64 ' . $valArg; }
         $target = $methodCls . '__' . $method;
@@ -2084,6 +2061,99 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** From this many overloading classes a helper's magic arms share one dispatcher. */
+    private const MAGIC_SHARED_MIN = 3;
+
+    /**
+     * Call the module's shared `__get`/`__set` dispatcher for `$prop` on `$obj`;
+     * lastValue ← its i64 (a cell for `__get`).
+     *
+     * Every per-property reader and writer carried one arm per class that
+     * overloads the method, and those arms differ only in the property NAME:
+     * php-cs-fixer's ~1 100 writers each had DOMNode's ten subclasses and
+     * SimpleXMLElement, 11k `__set` calls in all. The helper now sends every
+     * such class_id to one block, and the class switch lives once, here.
+     */
+    private function magicDispatchCall(string $method, string $obj, string $prop, string $val): string
+    {
+        $sym = $this->magicDispatchFn($method);
+        $kid = $this->pool->intern($prop);
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $obj . ', ptr '
+             . $this->strLitId($kid) . ', i64 ' . $val . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($method === '__get') { $this->markCellOpaque($r); }
+        return $out;
+    }
+
+    /** `i64 (ptr obj, ptr name, i64 val)` switching on class_id over every class
+     *  that overloads `$method` — the arm set of {@see magicPropHolders} for a
+     *  name no class declares. Built once per module. */
+    private function magicDispatchFn(string $method): string
+    {
+        $key = '__mc_magic_' . $method;
+        $sym = '@' . $this->mirHelperSym($key);
+        if (isset($this->propertyReadHelpers[$key])) { return $sym; }
+        $this->propertyReadHelpers[$key] = '';
+
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        // linkonce_odr, not internal: every property helper calls it, and a split
+        // module copies an internal body together with EVERY internal body that
+        // names it — all ~2 200 helpers into each part. The module token in the
+        // symbol keeps two modules' different bodies from coalescing.
+        $out = 'define linkonce_odr i64 ' . $sym . "(ptr %obj, ptr %name, i64 %val) {\nentry:\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . " = ptrtoint ptr %name to i64\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $this->rt->needsTagged = true;
+        $null = $this->ssa->allocReg();
+        $out .= '  ' . $null . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $null . ', ptr ' . $res . "\n";
+        $out .= $this->emitLoadClassId('%obj');
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('md.end');
+        $switch = '  switch i64 ' . $cid . ', label %' . $end . " [\n";
+        $bodies = '';
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
+            if ($cd->isStruct || $cd->usesBag()) { continue; }
+            if ($this->isClosureClass($cn) || $this->isEnumClass($cn)) { continue; }
+            $lbl = $this->ssa->allocLabel('md.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            $bodies .= $method === '__get'
+                ? $this->emitMagicGetCell($decl, '%obj', '', null, $ni)
+                : $this->emitMagicCall($decl, $method, '%obj', '', '%val', $ni);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $out .= $switch . "  ]\n" . $bodies . $end . ":\n";
+        $ret = $this->ssa->allocReg();
+        $out .= '  ' . $ret . ' = load i64, ptr ' . $res . "\n  ret i64 " . $ret . "\n}\n\n";
+        $this->propertyReadHelpers[$key] = $out;
+
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        return $sym;
+    }
+
     private function hasEmittedFunction(string $name): bool
     {
         return isset($this->definedFns[$this->mangle($name)])
@@ -2095,14 +2165,13 @@ trait EmitLlvmObjects
     private function ifaceMethodHolders(string $iface, string $method): array
     {
         $holders = [];
-        foreach ($this->classes as $cd) {
-            if ($cd->isStruct || $this->isClosureClass($cd->name) || $this->isEnumClass($cd->name)) {
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
+            if ($cd->isStruct || $this->isClosureClass($cn) || $this->isEnumClass($cn)) {
                 continue;
             }
-            if (!$this->classImplements($cd->name, $iface)) { continue; }
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl === '') { continue; }
-            $holders[$cd->name] = $decl;
+            if (!$this->classImplements($cn, $iface)) { continue; }
+            $holders[$cn] = $decl;
         }
         return $holders;
     }
@@ -2240,9 +2309,10 @@ trait EmitLlvmObjects
      * in magic_get_set: a tag-4 address, SIGSEGV). `$want` is the access node's
      * own type; a concrete one wants the raw value and gets it.
      */
-    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop, ?Type $want = null): string
+    private function emitMagicGetCell(string $declCls, string $objPtrReg, string $prop, ?Type $want = null,
+                                      string $nameI64 = ''): string
     {
-        $out = $this->emitMagicCall($declCls, '__get', $objPtrReg, $prop, null);
+        $out = $this->emitMagicCall($declCls, '__get', $objPtrReg, $prop, null, $nameI64);
         if ($want !== null && $want->kind !== Type::KIND_CELL && $want->kind !== Type::KIND_UNKNOWN) {
             return $out;
         }
@@ -3168,19 +3238,17 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop): string
+    private function cellPropertyWriteHelper(string $prop, string $within = ''): string
     {
-        $key = '__mc_prop_write_' . $this->mangle($prop);
+        $key = '__mc_prop_write_' . $this->mangle($prop)
+             . ($within === '' ? '' : '__in_' . $this->mangle($within));
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
-        $fixed = [];
-        $hasBag = false;
-        foreach ($this->classes as $cd) {
-            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
-            if ($cd->usesBag()) { $hasBag = true; }
-        }
+        $fixed = $this->fixedPropertyHolders($prop);
+        $hasBag = $this->bagClassNames() !== [];
         $magic = $this->magicPropHolders($prop, '__set');
+        if ($within !== '') { $this->holdersWithin($within, $fixed, $magic, $hasBag); }
 
         $oldSsa = $this->ssa;
         $oldLast = $this->lastValue;
@@ -3211,6 +3279,21 @@ trait EmitLlvmObjects
             $bodies .= $lbl . ":\n" . $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
             $bodies .= '  br label %' . $end . "\n";
         }
+        if (\count($magic) >= self::MAGIC_SHARED_MIN) {
+            $lbl = $this->ssa->allocLabel('pw.magic');
+            $any = false;
+            foreach ($magic as $cname => $_decl) {
+                if (isset($seen[$cname])) { continue; }
+                $seen[$cname] = true;
+                $any = true;
+                $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
+            }
+            if ($any) {
+                $bodies .= $lbl . ":\n" . $this->magicDispatchCall('__set', $obj, $prop, $cellVal);
+                $bodies .= '  br label %' . $end . "\n";
+            }
+            $magic = [];
+        }
         foreach ($magic as $cname => $declCls) {
             if (isset($seen[$cname])) { continue; }
             $seen[$cname] = true;
@@ -3235,6 +3318,40 @@ trait EmitLlvmObjects
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
+    }
+
+    /**
+     * Narrow a property's holders to the subtypes of `$scls` — the receiver's
+     * static class or interface — and answer `$scls`, or '' when nothing was
+     * narrowed. Every other holder is an arm that can never fire:
+     * `$this->whitespacesConfig = …` under `$this instanceof
+     * WhitespacesAwareFixerInterface` carried DOMNode's and SimpleXMLElement's
+     * __set arms. A filter that keeps nothing means the name is not one this
+     * module can answer for, so the full set stays rather than drop the real class.
+     *
+     * @param ClassDef[]            $fixed
+     * @param array<string, string> $magic
+     */
+    private function holdersWithin(string $scls, array &$fixed, array &$magic, bool &$hasBag): string
+    {
+        if ($scls === '') { return ''; }
+        $keepFixed = [];
+        foreach ($fixed as $cd) {
+            if ($this->classIsA($cd->name, $scls)) { $keepFixed[] = $cd; }
+        }
+        $keepMagic = [];
+        foreach ($magic as $cname => $declCls) {
+            if ($this->classIsA((string)$cname, $scls)) { $keepMagic[$cname] = $declCls; }
+        }
+        $keepBag = false;
+        foreach ($this->bagClassNames() as $bn) {
+            if ($this->classIsA((string)$bn, $scls)) { $keepBag = true; break; }
+        }
+        if ($keepFixed === [] && $keepMagic === [] && !$keepBag) { return ''; }
+        $fixed = $keepFixed;
+        $magic = $keepMagic;
+        $hasBag = $keepBag;
+        return $scls;
     }
 
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
@@ -3488,11 +3605,9 @@ trait EmitLlvmObjects
     private function dynMethodHasRefParam(array $methods, int $argc): bool
     {
         foreach ($methods as $m => $_ignored) {
-            foreach ($this->classes as $cd) {
-                $decl = $this->resolveMethodClass($cd->name, (string)$m);
-                if ($decl === '') { continue; }
+            foreach ($this->methodHolders((string)$m) as $cn => $decl) {
                 if (!$this->methodTakesArgc($decl, (string)$m, $argc)) { continue; }
-                $sym = $this->lsbTarget($decl, (string)$m, $cd->name);
+                $sym = $this->lsbTarget($decl, (string)$m, $cn);
                 // ⚠ `anyRefParam`, NOT `refParams[$sym] !== []`. That field is a
                 // per-parameter BOOL ARRAY, so an ordinary one-argument method
                 // has `[false]` — non-empty — and the veto fired on every
@@ -3502,7 +3617,7 @@ trait EmitLlvmObjects
                     || ($this->sigs->returnsByRef[$sym] ?? false)) {
                     // ⚠ A conservative gate fails SILENTLY — name the veto.
                     if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
-                        \error_log('DYNM veto: ' . $cd->name . '::' . (string)$m . ' by-ref');
+                        \error_log('DYNM veto: ' . $cn . '::' . (string)$m . ' by-ref');
                     }
                     return true;
                 }
@@ -3733,9 +3848,8 @@ trait EmitLlvmObjects
         $erasedSyms = [];
         $distinct = [];
         $fallback = '';
-        foreach ($this->classes as $cd) {
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl === '') { continue; }
+        foreach ($this->methodHolders($method) as $cn => $decl) {
+            $cd = $this->classes[$cn];
             if (!$this->methodTakesArgc($decl, $method, $argc)) { continue; }
             if ($fallback === '') { $fallback = $decl; }
             $fullPre = $this->lsbTarget($decl, $method, $cd->name);
@@ -3995,6 +4109,7 @@ trait EmitLlvmObjects
             }
             $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
             $dp2->line = $dp->line;
+            $dp2->scope = $dp->scope;
             $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
             $iv2->line = $iv->line;
             return $out . $this->emitDynMethodCall($dp2, $iv2);
@@ -4002,6 +4117,10 @@ trait EmitLlvmObjects
         $recv = $dp->object;
         $nameNode = $dp->name;
         $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
+        if ($methods !== null && $this->dynamicMethodMeta) {
+            $viaTable = $this->emitDynMethodDispatch($dp, $iv, $methods);
+            if ($viaTable !== null) { return $viaTable; }
+        }
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
             // Evaluate the name for side effects and yield null (open case).
@@ -4425,6 +4544,196 @@ trait EmitLlvmObjects
 
     /** Existing name-chain dispatcher, retained as the semantic fallback when
      * the lightweight table has no ordinary/magic entry for this runtime name. */
+    /**
+     * `$o->$m(args)` through the class's method table, with php's visibility:
+     * `__mc_dyn_method_dispatch` runs a method the call site's scope may see,
+     * sends one it may not (or an undeclared name) to `__call` or throws php's
+     * Error. Inline arms remain only for the names the table cannot run — a
+     * by-ref or variadic signature, an abstract row, a prelude class without a
+     * table — and those arms re-emit the operands, so they need plain locals.
+     *
+     * Replaces, for every shape it accepts, the name chains that spliced one
+     * arm per method in the PROGRAM into the site (1 391 arms in
+     * TraceableEventDispatcher::__call) and that called private methods from
+     * any scope and answered an unknown name with null. Null = not this shape;
+     * the caller keeps the older paths.
+     *
+     * @param array<string, Type> $methods
+     */
+    private function emitDynMethodDispatch(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): ?string
+    {
+        $recv = $dp->object;
+        $rk = $recv->type->kind;
+        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN
+            && $rk !== Type::KIND_UNION && $rk !== Type::KIND_OBJ) {
+            return null;
+        }
+        $argc = \count($iv->args);
+        /** @var Node[] $fixedArgs */
+        $fixedArgs = $iv->args;
+        $pack = null;
+        $packElem = null;
+        foreach ($iv->args as $i => $a) {
+            if ($a->kind !== Node::KIND_SPREAD) { continue; }
+            if ($argc !== 1) { return null; }
+            $op = $this->asSpreadNode($a)->operand;
+            // `...[a, b]` is the argument list `a, b`.
+            if ($op instanceof \Compile\Mir\ArrayLit) {
+                $fixedArgs = [];
+                foreach ($op->elements as $e) {
+                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { return null; }
+                    $fixedArgs[] = $e->value;
+                }
+                continue;
+            }
+            $pt = $op->type;
+            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { return null; }
+            $el = $pt->element;
+            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+                $packElem = $el;
+            }
+            $pack = $op;
+        }
+        $inline = $this->dynInlineOnlyNames($methods);
+        if ($inline !== [] && !$this->dynOperandsPlain($dp, $iv)) { return null; }
+
+        $out = $this->emitObjPtrOf($recv);
+        $out .= $this->coerceToI64();
+        $recvArg = $this->lastValue;
+        $out .= $this->emitDynMemberKey($dp->name);
+        $keyP = $this->lastValue;
+        // A borrowed cell pack rides as is; a concrete-element one is rebuilt
+        // as cells (the trampoline's contract) and that copy is ours to drop.
+        $fresh = $pack === null || $packElem !== null;
+        if ($pack !== null) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToPtr();
+            if ($packElem !== null) {
+                $out .= $this->emitVecToCellArray($packElem);
+                $out .= $this->cellToPtr();
+            }
+        } else {
+            $elems = [];
+            foreach ($fixedArgs as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell())));
+            $out .= $this->coerceToPtr();
+        }
+        $argsP = $this->lastValue;
+        [$relSym, $relN] = $this->dynScopeRelated($dp->scope);
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $this->rt->needsStrcmp = true;
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = call i1 @__mc_dyn_method_dispatch(i64 ' . $recvArg . ', ptr ' . $keyP
+              . ', ptr ' . $argsP . ', ptr ' . $this->litStr($dp->scope) . ', ptr ' . $relSym
+              . ', i64 ' . (string)$relN . ', ptr ' . $res . ")\n";
+        if ($fresh) {
+            $ai = $this->ssa->allocReg();
+            $out .= '  ' . $ai . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+            $out .= $this->rcReleaseReg($ai, 'veccell');
+        }
+        $endL = $this->ssa->allocLabel('dynd.end');
+        $inlL = $this->ssa->allocLabel('dynd.inline');
+        $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
+        $out .= $inlL . ":\n";
+        if ($inline !== []) {
+            $out .= $this->emitDynMethodInlineFallback($dp, $iv, $inline);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /**
+     * The candidate names `__mc_dyn_method_dispatch` can hand back unrun: some
+     * class declaring the name has no uniform trampoline for it (by-ref,
+     * variadic, abstract) or no method table at all (prelude, struct).
+     *
+     * @param array<string, Type> $methods
+     * @return array<string, Type>
+     */
+    private function dynInlineOnlyNames(array $methods): array
+    {
+        $out = [];
+        foreach ($methods as $m => $rt) {
+            foreach ($this->methodHolders((string)$m) as $cn => $decl) {
+                $cd = $this->classes[$cn];
+                if ($cd->isStruct || $cd->isPreludeClass) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.no_table', 1); }
+                    $out[$m] = $rt;
+                    break;
+                }
+                $mm = $this->classes[$decl]->methodMeta[(string)$m] ?? null;
+                // An abstract row belongs to a class that is never the receiver:
+                // the concrete class in hand has its own row.
+                if ($mm !== null && $mm->isAbstract) { continue; }
+                if ($mm === null || !\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.signature', 1); }
+                    $out[$m] = $rt;
+                    break;
+                }
+                $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, (string)$m);
+                if (!isset($this->sigs->paramTypes[$tramp])) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.no_tramp', 1); }
+                    $out[$m] = $rt;
+                    break;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** Receiver, name and every argument can be emitted twice: plain locals/literals. */
+    private function dynOperandsPlain(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): bool
+    {
+        if ($dp->object->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        $nk = $dp->name->kind;
+        if ($nk !== Node::KIND_LOAD_LOCAL && $nk !== Node::KIND_STRING_CONST) { return false; }
+        foreach ($iv->args as $a) {
+            $x = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+            if ($x->kind !== Node::KIND_LOAD_LOCAL && $x->kind !== Node::KIND_STRING_CONST
+                && $x->kind !== Node::KIND_INT_CONST) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The classes a protected method's declarer may be for scope `$scope` to see
+     * it — the scope's ancestors and descendants — as a `[n x ptr]` of names.
+     *
+     * @return array{string, int} [symbol or 'null', n]
+     */
+    private function dynScopeRelated(string $scope): array
+    {
+        if ($scope === '') { return ['null', 0]; }
+        if (isset($this->dynScopeRelTables[$scope])) { return $this->dynScopeRelTables[$scope]; }
+        $names = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->name === $scope) { continue; }
+            if ($this->classIsA($cd->name, $scope) || $this->classIsA($scope, $cd->name)) {
+                $names[] = 'ptr ' . $this->litStr(\ltrim($cd->name, '\\'));
+            }
+        }
+        if ($names === []) {
+            $this->dynScopeRelTables[$scope] = ['null', 0];
+            return ['null', 0];
+        }
+        $sym = '@.dynd.rel.' . (string)\count($this->dynScopeRelTables);
+        $this->dynfExtraBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($names)
+            . ' x ptr] [' . \implode(', ', $names) . "]\n";
+        $this->dynScopeRelTables[$scope] = [$sym, \count($names)];
+        return [$sym, \count($names)];
+    }
+
     private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): string
     {
         $recv = $dp->object;
@@ -6731,6 +7040,39 @@ trait EmitLlvmObjects
     }
 
     /**
+     * Every class that resolves `$method`, in `$this->classes` order, mapped to
+     * the class whose body it resolves to.
+     *
+     * The emitter asks "which classes answer `m`?" per CALL SITE — interface
+     * dispatch, erased receivers, dynamic names, magic holders — and each asker
+     * walked the whole class table: classes × sites parent-chain walks, 12 s of
+     * php-cs-fixer's EmitLlvm in `__mir_array_index_find`. The answer depends on
+     * the method only, so it is built once per method and holds HITS only (the
+     * pair memo above is bounded because it held the misses of a cross product).
+     * A class added after a build (a closure class) invalidates the whole index.
+     *
+     * @return array<string, string>
+     */
+    private function methodHolders(string $method): array
+    {
+        $n = \count($this->classes);
+        if ($n !== $this->methodHoldersClassCount) {
+            $this->methodHoldersIdx = [];
+            $this->methodHoldersClassCount = $n;
+        }
+        if (isset($this->methodHoldersIdx[$method])) {
+            return $this->methodHoldersIdx[$method];
+        }
+        $holders = [];
+        foreach ($this->classes as $cd) {
+            $decl = $this->resolveMethodClass($cd->name, $method);
+            if ($decl !== '') { $holders[$cd->name] = $decl; }
+        }
+        $this->methodHoldersIdx[$method] = $holders;
+        return $holders;
+    }
+
+    /**
      * The Generator iterator protocol as method calls on a frame ptr:
      * current()/key()/getReturn() read a frame slot; next()/rewind() drive
      * one resume; valid() primes a fresh generator then tests `state != -1`;
@@ -7202,16 +7544,11 @@ trait EmitLlvmObjects
         $fallback = $this->resolveMethodClass($static, $mc->method);
         if ($fallback === '') { $fallback = $static; }
         if ($static !== '' && !isset($this->classes[$static])) {
-            foreach ($this->classes as $cd) {
-                if (!$this->classImplementsIface($cd->name, $static)) { continue; }
-                $r = $this->resolveMethodClass($cd->name, $mc->method);
-                if ($r !== '') { $fallback = $r; break; }
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if ($this->classImplementsIface($cn, $static)) { $fallback = $r; break; }
             }
             if ($fallback === $static) {
-                foreach ($this->classes as $cd) {
-                    $r = $this->resolveMethodClass($cd->name, $mc->method);
-                    if ($r !== '') { $fallback = $r; break; }
-                }
+                foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
             }
         }
         // A fully ERASED receiver (`public $defn;` with no declared type) leaves
@@ -7224,10 +7561,7 @@ trait EmitLlvmObjects
         // and in the same order — resolve here too, so the ONE coercion the call
         // site emits speaks the ABI the arms were selected for.
         if ($static === '' && $fallback === '') {
-            foreach ($this->classes as $cd) {
-                $r = $this->resolveMethodClass($cd->name, $mc->method);
-                if ($r !== '') { $fallback = $r; break; }
-            }
+            foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
         }
         // An ENUM method takes its case ORDINAL as `$this`, not a pointer. A
         // cell receiver (`?Enum` is a cell — an ordinal cannot carry null, see
@@ -7496,11 +7830,9 @@ trait EmitLlvmObjects
             $firstImpl = '';
             \Compile\Stats::bump('dispatch.iface_sites', 1);
             \Compile\Stats::bump('dispatch.iface_classes_scanned', \count($this->classes));
-            foreach ($this->classes as $cd) {
-                if ($this->resolveMethodClass($cd->name, $mc->method) !== '') {
-                    $cands[] = $cd->name;
-                    if ($firstImpl === '') { $firstImpl = $cd->name; }
-                }
+            foreach ($this->methodHolders($mc->method) as $cn => $_decl) {
+                $cands[] = $cn;
+                if ($firstImpl === '') { $firstImpl = $cn; }
             }
             if ($fallback === $static && $firstImpl !== '') {
                 $r = $this->resolveMethodClass($firstImpl, $mc->method);

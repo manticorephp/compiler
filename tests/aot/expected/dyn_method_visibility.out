@@ -1,0 +1,28 @@
+A::pub(2)
+A::pub(4)
+A::pub(6)
+A::pub(5)
+A::pub(7)
+A::pub(3)
+Error: Call to private method A::priv() from global scope
+Error: Call to private method A::priv() from global scope
+A::priv(6)
+Error: Call to private method A::priv() from scope B
+A::priv(7)
+Error: Call to private method A::priv() from scope Other
+Error: Call to protected method A::prot() from global scope
+Error: Call to protected method A::prot() from global scope
+A::prot(6)
+A::prot(5)
+A::prot(7)
+Error: Call to protected method A::prot() from scope Other
+Error: Call to undefined method A::nope()
+Error: Call to undefined method A::nope()
+Error: Call to undefined method A::nope()
+Error: Call to undefined method B::nope()
+Error: Call to undefined method B::nope()
+Error: Call to undefined method A::nope()
+M::__call(hidden,2)
+M::__call(hidden,1)
+M::__call(missing,2)
+M::__call(missing,1)

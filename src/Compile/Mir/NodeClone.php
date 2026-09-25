@@ -178,7 +178,12 @@ final class NodeClone
         if ($k === Node::KIND_NEW_DYN_OBJ) { $d = $n; $c = new NewDynObj(self::node($d->classExpr), self::nodes($d->args), $n->type); $c->srcArgc = $d->srcArgc; return $c; }
         if ($k === Node::KIND_PROPERTY_ACCESS) { $x = self::asPropertyAccess($n); return new PropertyAccess_(self::node($x->object), $x->property, $n->type); }
         if ($k === Node::KIND_STORE_PROPERTY) { $x = self::asStoreProperty($n); return new StoreProperty(self::node($x->object), $x->property, self::node($x->value), $n->type); }
-        if ($k === Node::KIND_DYN_PROP) { $x = self::asDynProp($n); return new DynProp_(self::node($x->object), self::node($x->name), $n->type); }
+        if ($k === Node::KIND_DYN_PROP) {
+            $x = self::asDynProp($n);
+            $d = new DynProp_(self::node($x->object), self::node($x->name), $n->type);
+            $d->scope = $x->scope;
+            return $d;
+        }
         if ($k === Node::KIND_STORE_DYN_PROP) { $x = self::asStoreDynProp($n); return new StoreDynProp_(self::node($x->object), self::node($x->name), self::node($x->value), $n->type); }
         if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); return new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); }
         if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); return new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); }

@@ -19,7 +19,7 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      */
-    public const VERSION = 12;
+    public const VERSION = 13;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -352,6 +352,21 @@ final class MemoryAbi
 
     /** `ptr` — compiler-owned lightweight dynamic-method table, or null. */
     public const DESCRIPTOR_DYN_METHODS_OFFSET = 24;
+
+    /**
+     * One row of that table: `{ ptr name, ptr tramp, ptr declaring-class name,
+     * i64 visibility }`. The last two decide whether a dynamic `$o->$m()` may
+     * reach the method from its call site's scope ({@see DYN_METHOD_VIS_PUBLIC}).
+     * v12: the row was `{ name, tramp }` and every private method was callable.
+     */
+    public const DYN_METHOD_ROW_SIZE = 32;
+    public const DYN_METHOD_ROW_NAME_OFFSET = 0;
+    public const DYN_METHOD_ROW_TRAMP_OFFSET = 8;
+    public const DYN_METHOD_ROW_DECL_OFFSET = 16;
+    public const DYN_METHOD_ROW_VIS_OFFSET = 24;
+    public const DYN_METHOD_VIS_PUBLIC = 0;
+    public const DYN_METHOD_VIS_PROTECTED = 1;
+    public const DYN_METHOD_VIS_PRIVATE = 2;
 
     /**
      * `ptr` — `@__mir_props_<id>`, or null for a class with neither declared

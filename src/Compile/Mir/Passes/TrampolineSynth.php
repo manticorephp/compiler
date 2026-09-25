@@ -183,6 +183,21 @@ final class TrampolineSynth
         return $out . "  return null;\n}\n";
     }
 
+    /**
+     * php's Error for a dynamic `$o->$name()` that resolves to nothing the
+     * call site may run: `$kind` -1 = no such method, 1 = protected, 2 =
+     * private (MemoryAbi::DYN_METHOD_VIS_*); `$scope` '' = global scope. Called
+     * from `__mc_dyn_method_dispatch` after the class's `__call` was not there.
+     */
+    public static function dynMethodErrorSource(): string
+    {
+        return "function __mc_dyn_method_error(object \$o, string \$name, int \$kind, string \$decl, string \$scope): mixed {\n"
+            . "  if (\$kind < 0) { throw new \\Error('Call to undefined method ' . \\get_class(\$o) . '::' . \$name . '()'); }\n"
+            . "  \$v = \$kind === 2 ? 'private' : 'protected';\n"
+            . "  throw new \\Error('Call to ' . \$v . ' method ' . \$decl . '::' . \$name . '() from '\n"
+            . "      . (\$scope === '' ? 'global scope' : 'scope ' . \$scope));\n"
+            . "}\n";
+    }
     /** `new \\C(args)` — recv ignored. Arms from the ctor's required..total. */
     private static function ctorTramp(string $class, ?MethodMeta $ctor): string
     {

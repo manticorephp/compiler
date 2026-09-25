@@ -769,7 +769,18 @@ trait EmitLlvmArrays
         $hdr = \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
         $arr = $this->ssa->allocReg();
         $out  = '  ' . $arr . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
+        $table = $cellVals || $count < self::LIT_TABLE_MIN ? '' : $this->litConstTable($al, $shape);
+        if ($table !== '') {
+            $bytes = $count * ($shape === 'packed' ? \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE
+                                                   : \Compile\MemoryAbi::ARRAY_ENTRY_SIZE);
+            $dst = $this->ssa->allocReg();
+            $out .= '  ' . $dst . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . (string)$hdr . "\n";
+            $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+            $cp = $this->ssa->allocReg();
+            $out .= '  ' . $cp . ' = call ptr @memcpy(ptr ' . $dst . ', ptr ' . $table . ', i64 ' . (string)$bytes . ")\n";
+        }
         foreach ($al->elements as $i => $el) {
+            if ($table !== '') { break; }
             // NOT `$keyReg = null` then a string: a null-union local infers
             // unsoundly under the native self-build (the slot carries a raw
             // payload, and the concat below then prints a POINTER instead of the
@@ -831,6 +842,61 @@ trait EmitLlvmArrays
         $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /** From this many elements a constant literal is a data table, not code. */
+    private const LIT_TABLE_MIN = 16;
+
+    /**
+     * A known-shape literal whose every key and value is an int or string
+     * CONSTANT, as one `private constant` laid out exactly like the buffer's
+     * entries — the symbol, or '' when some element is not a constant word.
+     *
+     * Emitted element by element, a lookup table is 3 stores and a key retain
+     * per entry, straight-line: polyfill-mbstring and symfony/string put 16k of
+     * them into php-cs-fixer's `main` (8.6 MB of IR, 17.5 s of `clang -O2` on
+     * that one function, and the function the whole-module optimizer never
+     * finished). A table is a `memcpy`. The words need no counts: a string
+     * literal is immortal (rc -1), so the retain the element path pays on each
+     * key and value is a no-op at run time.
+     */
+    private function litConstTable(ArrayLit $al, string $shape): string
+    {
+        $et = $al->type->element;
+        if ($et === null || ($et->kind !== Type::KIND_INT && $et->kind !== Type::KIND_STRING)) { return ''; }
+        $ew = \intdiv($shape === 'packed' ? \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE
+                                          : \Compile\MemoryAbi::ARRAY_ENTRY_SIZE, 8);
+        $kindW = \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_KIND_OFFSET, 8);
+        $keyW = \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_KEY_OFFSET, 8);
+        $valW = $shape === 'packed' ? 0 : \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET, 8);
+        $words = [];
+        foreach ($al->elements as $el) {
+            $v = $el->value;
+            $vw = '';
+            if ($v instanceof IntConst && $et->kind === Type::KIND_INT && $v->type->kind === Type::KIND_INT) {
+                $vw = (string)$v->value;
+            } elseif ($v instanceof StringConst && $et->kind === Type::KIND_STRING
+                      && $v->type->kind === Type::KIND_STRING) {
+                $vw = 'ptrtoint (ptr ' . $this->litStr($v->value) . ' to i64)';
+            } else {
+                return '';
+            }
+            /** @var string[] $entry */
+            $entry = \array_fill(0, $ew, '0');
+            $entry[$valW] = $vw;
+            if ($shape === 'hashed') {
+                $k = $el->key;
+                if (!($k instanceof StringConst)) { return ''; }
+                $entry[$kindW] = (string)\Compile\MemoryAbi::ARRAY_KIND_STRING;
+                $entry[$keyW] = 'ptrtoint (ptr ' . $this->litStr($k->value) . ' to i64)';
+            }
+            foreach ($entry as $w) { $words[] = 'i64 ' . $w; }
+        }
+        $sym = '@.lit.' . (string)$this->litTableCount;
+        $this->litTableCount = $this->litTableCount + 1;
+        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
+            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
+        return $sym;
     }
 
     /**

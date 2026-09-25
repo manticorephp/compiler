@@ -1504,6 +1504,15 @@ final class LowerFromAst implements Pass
                     }
                 }
             }
+            // The Error `__mc_dyn_method_dispatch` throws for a method the call
+            // site may not see, or one that does not exist.
+            $errProg = \Parser\Parser::parseSource("<?php\n"
+                . \Compile\Mir\Passes\TrampolineSynth::dynMethodErrorSource());
+            foreach ($errProg->statements as $estmt) {
+                if ($estmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$estmt->decl->name] = $estmt->decl;
+                $module->addFunction($this->lowerFunction($estmt->decl));
+            }
         }
         if ($this->emitLibrary || $this->exportRuntimeTypes) {
             $this->recordExportConstants($module, $this->emitLibrary);

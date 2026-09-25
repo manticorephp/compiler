@@ -527,6 +527,11 @@ function stdlib_sig_list(string $key, array $fallback): array
  */
 function assemble_jobs(): int {
     if (CompileArgs::$jobs !== 0) { return CompileArgs::$jobs; }
+    return host_jobs();
+}
+
+/** The host's core count less one, capped at 8 — what may run at once. */
+function host_jobs(): int {
     $n = 0;
     $probe = is_darwin() ? "sysctl -n hw.ncpu 2>/dev/null" : "nproc 2>/dev/null";
     $out = \shell_exec($probe);
@@ -667,7 +672,28 @@ function clang_tuning_flags(): string {
     }
     return "";
 }
-function assemble_ir(string $ir, string $base, string $cflags): array {
+/**
+ * How many parts an APPLICATION's staged module is split into when nothing
+ * asked for a split, or 0 for the single serial `clang -O2`.
+ *
+ * One clang over a large module does not finish: php-cs-fixer's 230 MB ran
+ * past 18 minutes and 5 GB (and still 5 GB with inlining switched off — the
+ * module alone is ~20x its text in clang). Split, it is ~2 minutes at 2.2 GB,
+ * and {@see \Compile\Mir\SplitModule}'s `available_externally` copies keep the
+ * inlining a part boundary used to cost (the compiler built in 8 parts: +6.6%
+ * instead of +53%). The compiler's own module (~85 MB) is below the line, so
+ * `bin/build` is unchanged; a library never gets here — its `.o` is one unit.
+ */
+function auto_split_parts(int $irBytes): int {
+    if ($irBytes < CompileArgs::AUTO_SPLIT_MIN_BYTES) { return 0; }
+    $parts = \intdiv($irBytes + CompileArgs::AUTO_SPLIT_PART_BYTES - 1, CompileArgs::AUTO_SPLIT_PART_BYTES);
+    $hj = host_jobs();
+    if ($parts < $hj) { $parts = $hj; }
+    if ($parts > 64) { $parts = 64; }
+    return $parts;
+}
+
+function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit = false): array {
     $llPath = $base . ".ll";
     $objPath = $base . ".o";
     $stagedPrefix = "\x1eMANTICORE_STAGED_IR\n";
@@ -683,8 +709,17 @@ function assemble_ir(string $ir, string $base, string $cflags): array {
         $forcedJobs = $forcedSplit === false ? 0 : (int)$forcedSplit;
         if ($forcedJobs > 64) { $forcedJobs = 64; }
         $stagedJobs = $forcedJobs >= 2 ? $forcedJobs : assemble_jobs();
+        $stagedBytes = (int)\substr($payload, $cut + 1);
+        if ($autoSplit && $forcedSplit === false && CompileArgs::$jobs === 1) {
+            $autoParts = auto_split_parts($stagedBytes);
+            if ($autoParts >= 2) {
+                $stagedJobs = $autoParts;
+                \Compile\Stats::line('  assembly: auto split ' . (string)$autoParts
+                    . ' parts (' . (string)$stagedBytes . ' bytes)');
+            }
+        }
         return assemble_ir_file(\substr($payload, 0, $cut), $base, $cflags,
-                                (int)\substr($payload, $cut + 1), $stagedJobs);
+                                $stagedBytes, $stagedJobs);
     }
     $irBytes = \strlen($ir);
     $largeModule = $irBytes > 536870912;
@@ -811,8 +846,8 @@ function assemble_ir_file(string $llPath, string $base, string $cflags, int $irB
  * ⚠ A part boundary is an INLINING boundary: the compiler built as 8 plain parts
  * runs ~69% slower, which then makes every later build slower. That is what
  * `-flto=thin` is for — it defers the cross-module inlining to the link and
- * measured +3.4% instead. Splitting WITHOUT it is a build-time win paid for out
- * of the produced program, so this stays opt-in.
+ * measured +3.4% instead. Without it, the `available_externally` copies of small
+ * cross-part callees keep most of the inlining ({@see auto_split_parts}).
  *
  * @return string[] the part objects, or [] so the caller can fall back
  */
@@ -880,7 +915,10 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     // Memory did not rise with the concurrency, because the peak belongs to
     // the COMPILER, which is still resident through the whole assembly.
     $batch = \count($cmds);
-    $auto = assemble_jobs();
+    // ⚠ Not assemble_jobs(): that is `-j`, which DEFAULTS TO 1, so a split
+    // asked for through MANTICORE_SPLIT_JOBS alone ran its parts one at a time
+    // (php-cs-fixer: 23 parts 31 s serial, 6.4 s in parallel).
+    $auto = CompileArgs::$jobs >= 2 ? CompileArgs::$jobs : host_jobs();
     if ($auto >= 1 && $auto < $batch) { $batch = $auto; }
     $envBatch = \getenv('MANTICORE_SPLIT_BATCH');
     if ($envBatch !== false && $envBatch !== '') {
@@ -972,7 +1010,9 @@ function thinlto_link_flags(): string {
              . ' -Wl,-prune_interval_lto,0 -Wl,-prune_after_lto,86400'
              . ' -Wl,-max_relative_cache_size_lto,5';
     }
-    return ' -flto=thin -Wl,--thinlto-cache-dir=' . $dir
+    // GNU ld cannot read bitcode without the LLVMgold plugin, and the cache
+    // flag below is lld's own spelling anyway.
+    return ' -flto=thin -fuse-ld=lld -Wl,--thinlto-cache-dir=' . $dir
          . ' -Wl,--thinlto-cache-policy=prune_after=24h:cache_size=5%';
 }
 
@@ -1425,6 +1465,12 @@ final class CompileArgs
      * not pass it.
      */
     public static int $jobs = 1;
+
+    /** Below this much staged IR an application assembles as ONE translation unit. */
+    public const AUTO_SPLIT_MIN_BYTES = 134217728;
+
+    /** Staged IR per part when the split is automatic: clang peaks at ~15x its input. */
+    public const AUTO_SPLIT_PART_BYTES = 10485760;
 
     /**
      * `--emit-library` — build the bundled stdlib as a standalone `.o`
@@ -2678,7 +2724,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
         return 0;
     }
     $objPath = $base . ".o";
-    $objs = assemble_ir($ir, $base, "");
+    $objs = assemble_ir($ir, $base, "-ffunction-sections -fdata-sections", true);
     if ($objs === []) { dprint("build: assemble failed for " . $output); return 75; }
     $objList = \implode(" ", $objs);
     $linkExtra = "";
@@ -2721,6 +2767,11 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) { $linkExtra = $linkExtra . weak_undef_flags($weak); }
+    // Drop what nothing reaches, as cmd_compile does. A split module pins its
+    // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
+    // them across parts, so without this the originals all stayed: the compiler
+    // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
+    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections");
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.

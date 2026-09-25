@@ -1505,8 +1505,16 @@ trait EmitLlvmRuntime
             // Runtime lookup can then distinguish them from a genuinely missing
             // name and route the call to the old semantic fallback before trying
             // the class's __call handler.
+            $declName = \ltrim($mm->declaringClass !== '' ? $mm->declaringClass : $cls->name, '\\');
+            $declSym = '@.dynm.decl.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($declSym, $declName);
+            $vis = match ($mm->visibility) {
+                'private' => \Compile\MemoryAbi::DYN_METHOD_VIS_PRIVATE,
+                'protected' => \Compile\MemoryAbi::DYN_METHOD_VIS_PROTECTED,
+                default => \Compile\MemoryAbi::DYN_METHOD_VIS_PUBLIC,
+            };
             $rows[] = \Compile\Mir\RuntimeLibrary::dynamicMethodRow(
-                $this->strSymBytes($nameSym), $trampFld);
+                $this->strSymBytes($nameSym), $trampFld, $this->strSymBytes($declSym), $vis);
             $i = $i + 1;
         }
         // A class may have no ordinary fixed-shape methods but still need a

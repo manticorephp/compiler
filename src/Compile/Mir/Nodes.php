@@ -1702,6 +1702,11 @@ final class DynProp_ extends Node
         parent::__construct(Node::KIND_DYN_PROP, $type);
     }
 
+    /** The LEXICAL class of the call site ("" = global scope): a dynamic
+     *  `$o->$m()` may reach a private/protected method only from its class
+     *  (or, protected, its hierarchy) — php's visibility rule is per call site. */
+    public string $scope = '';
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitDynProp($this);
