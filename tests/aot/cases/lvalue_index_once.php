@@ -49,3 +49,14 @@ $trace = [];
 $z = [[0]];
 for ($q = 0, $z[tf('init')][0] = 1; $q < 3; $q++, $z[tf('s')][0]++) { }
 echo count($trace), json_encode($z), "\n";
+
+// A dynamic property name is evaluated before the dims to its right. (Only the
+// order is pinned: a dim write through a dynamic property name is lost natively
+// — a pre-existing gap, the store lands in a copy.)
+final class DynH { public array $n = [0, 0]; }
+function tn(string $s): string { global $trace; $trace[] = $s; return 'n'; }
+$trace = [];
+$dh = new DynH();
+$dh->{tn('n')}[tf('i')] = tf('v') + 5;
+$dh->{tn('n2')}[tf('i2')] .= 'x';
+echo implode(",", $trace), "\n";

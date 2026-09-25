@@ -272,7 +272,26 @@ trait LowerStmts
     {
         if ($e->kind === 'ArrayAccess') { return $this->hoistLvDim($e); }
         if ($e->kind === 'PropertyAccess') { return $this->hoistLvProp($e); }
+        if ($e->kind === 'DynProp') { return $this->hoistLvDynProp($e); }
         return $e;
+    }
+
+    /** `$o->{f()}[g()] = v`: the receiver, then the NAME, are evaluated before
+     *  the dims to their right — php's order is n, i, v. */
+    private function hoistLvDynProp(\Parser\Ast\DynProp $e): \Parser\Ast\Expr
+    {
+        if ($e->nullsafe) { return $e; }
+        $obj = $e->object;
+        $ok = $obj->kind;
+        if ($ok === 'ArrayAccess' || $ok === 'PropertyAccess' || $ok === 'DynProp') {
+            $obj = $this->hoistLvChain($obj);
+        } elseif (!$this->lvPure($obj)) {
+            $obj = $this->lvTemp($obj);
+        }
+        $name = $e->name;
+        if (!$this->lvPure($name)) { $name = $this->lvTemp($name); }
+        if ($obj === $e->object && $name === $e->name) { return $e; }
+        return new \Parser\Ast\DynProp($obj, $name, false, $e->span);
     }
 
     private function hoistLvDim(\Parser\Ast\ArrayAccess $e): \Parser\Ast\Expr
@@ -291,7 +310,7 @@ trait LowerStmts
         if ($e->nullsafe) { return $e; }
         $obj = $e->object;
         $ok = $obj->kind;
-        if ($ok === 'ArrayAccess' || $ok === 'PropertyAccess') {
+        if ($ok === 'ArrayAccess' || $ok === 'PropertyAccess' || $ok === 'DynProp') {
             $obj = $this->hoistLvChain($obj);
         } elseif (!$this->lvPure($obj)) {
             // An object is a handle: evaluating the receiver into a temp is
