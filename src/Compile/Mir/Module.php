@@ -181,6 +181,9 @@ final class Module
      *  method trampolines, even when the program never mentions Reflection. */
     public bool $needsDynamicMethodMeta = false;
 
+    /** @var array<string, bool> method names `[$obj, 'name']` literals spell */
+    public array $callableArrayMethods = [];
+
     /** Method FunctionDef name ("Class__method") → backtrace frame display
      *  ("Class->method" / "Class::method"). Built at lowering (stable string
      *  ops); EmitLlvm stamps the correct name at a method's entry, because the

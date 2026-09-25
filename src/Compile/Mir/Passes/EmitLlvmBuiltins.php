@@ -3693,8 +3693,8 @@ trait EmitLlvmBuiltins
         // is_null and is_object must runtime-check the pointer instead of
         // short-circuiting on the static obj type (which would answer null=never,
         // object=always). is_null → ptr==0; is_object → ptr!=0.
-        if (($a->type->kind === Type::KIND_OBJ || $a->type->kind === Type::KIND_CLOSURE)
-            && ($kind === Type::KIND_NULL || $kind === Type::KIND_OBJ)) {
+        if (($a->type->kind === Type::KIND_OBJ && ($kind === Type::KIND_NULL || $kind === Type::KIND_OBJ))
+            || ($a->type->kind === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
@@ -3712,7 +3712,10 @@ trait EmitLlvmBuiltins
         // nothing else, so a raw string / int / null keeps the constant `false`
         // rather than a guess. (Raw null vs raw int 0 is genuinely undecidable
         // here; do not extend the erasure by guessing.)
-        if ($a->type->kind === Type::KIND_UNKNOWN || $a->type->kind === Type::KIND_CELL) {
+        // A `callable` slot too: it holds a closure env, a callable ARRAY or
+        // an invokable object, and only the header tells them apart.
+        if ($a->type->kind === Type::KIND_UNKNOWN || $a->type->kind === Type::KIND_CELL
+            || $a->type->kind === Type::KIND_CLOSURE) {
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $v = $this->lastValue;

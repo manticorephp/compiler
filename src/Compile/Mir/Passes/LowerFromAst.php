@@ -1363,6 +1363,7 @@ final class LowerFromAst implements Pass
         if ($this->sawDynFnExists) {
             $module->knownFnNames = $this->collectKnownFnNames();
         }
+        foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -1460,6 +1461,25 @@ final class LowerFromAst implements Pass
         return $module;
     }
     /** Whether a lowered module contains `$object->$name(...)`. */
+    /**
+     * Method names a would-be CALLABLE ARRAY literal (`[$obj, 'method']`) names,
+     * into {@see Module::$callableArrayMethods}: the only names an erased
+     * invoke of such an array can reach ({@see EmitLlvmCalls::emitErasedInvoke}).
+     */
+    private function collectCallableArrayMethods(Node $node, Module $module): void
+    {
+        if ($node instanceof \Compile\Mir\ArrayLit && \count($node->elements) === 2) {
+            $e0 = $node->elements[0];
+            $e1 = $node->elements[1];
+            if ($e0->key === null && $e1->key === null
+                && $e1->value instanceof \Compile\Mir\StringConst
+                && $e0->value->kind !== Node::KIND_STRING_CONST) {
+                $module->callableArrayMethods[$e1->value->value] = true;
+            }
+        }
+        foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
+    }
+
     private function moduleHasDynamicMethodInvoke(Module $module): bool
     {
         foreach ($module->functions as $fn) {

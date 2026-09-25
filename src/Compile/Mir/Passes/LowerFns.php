@@ -625,7 +625,14 @@ trait LowerFns
             if ($cls !== null) {
                 return $this->synthStaticClosure($cls, $m, $cls);
             }
-            return $this->synthMethodClosure($this->lowerExpr($recvE), $m);
+            // A receiver whose class is unknown here leaves the arity unknown
+            // too, and a one-param shim dropped every later argument. Keep the
+            // ARRAY: an invoke of the `callable` slot dispatches it by name
+            // ({@see EmitLlvmCalls::emitErasedInvoke}).
+            $recvN = $this->lowerExpr($recvE);
+            $rcls = $recvN->type->class ?? '';
+            if ($rcls === '' || $this->resolveMethodParams($rcls, $m) === null) { return null; }
+            return $this->synthMethodClosure($recvN, $m);
         }
         return null;
     }

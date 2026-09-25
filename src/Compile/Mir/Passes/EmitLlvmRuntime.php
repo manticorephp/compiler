@@ -1314,7 +1314,7 @@ trait EmitLlvmRuntime
         $out .= "  %m = load i64, ptr %mp\n";
         $out .= "  %mm = and i64 %m, " . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
         $out .= "  %ism = icmp eq i64 %mm, " . $magic . "\n";
-        $out .= "  br i1 %ism, label %rcb, label %done\n";
+        $out .= "  br i1 %ism, label %rcb, label %other\n";
         $out .= "rcb:\n";
         $out .= "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n";
         $out .= "  %c = load i64, ptr %rp\n";
@@ -1323,6 +1323,33 @@ trait EmitLlvmRuntime
         $out .= "inc:\n";
         $out .= "  %c1 = add i64 %c, 1\n";
         $out .= "  store i64 %c1, ptr %rp\n";
+        $out .= "  br label %done\n";
+        // A `callable` slot also holds words that are no env: a callable ARRAY
+        // (`[$obj, 'm']`) or an invokable OBJECT. The slot takes a count on
+        // those too — the release side leaves them alone, so the worst case is
+        // a leak, never the UAF a no-op retain gave (the caller's release of
+        // the literal freed the array a property still held).
+        $out .= "other:\n";
+        $out .= "  %hp = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        $out .= "  %h = load i64, ptr %hp\n";
+        $out .= "  %isobj = icmp eq i64 %h, " . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+        $out .= "  br i1 %isobj, label %objinc, label %arrchk\n";
+        $out .= "objinc:\n";
+        $out .= "  %orp = getelementptr inbounds i8, ptr %p, i64 8\n";
+        $out .= "  %oc = load i64, ptr %orp\n";
+        $out .= "  %oc1 = add i64 %oc, 1\n";
+        $out .= "  store i64 %oc1, ptr %orp\n";
+        $out .= "  br label %done\n";
+        $out .= "arrchk:\n";
+        $out .= "  %isv = icmp eq i64 %h, " . (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC . "\n";
+        $out .= "  %isa = icmp eq i64 %h, " . (string)\Compile\MemoryAbi::ASSOC_TAG_MAGIC . "\n";
+        $out .= "  %isarr = or i1 %isv, %isa\n";
+        $out .= "  br i1 %isarr, label %arrinc, label %done\n";
+        $out .= "arrinc:\n";
+        $out .= "  %arp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_RC_OFFSET . "\n";
+        $out .= "  %ac = load i64, ptr %arp\n";
+        $out .= "  %ac1 = add i64 %ac, 1\n";
+        $out .= "  store i64 %ac1, ptr %arp\n";
         $out .= "  br label %done\n";
         $out .= "done:\n";
         $out .= "  ret void\n";

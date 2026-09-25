@@ -1219,7 +1219,11 @@ trait EmitLlvmCalls
         // function-NAME string held in the same slot never reached the by-name
         // dispatch at all. Decide on the runtime tag instead.
         $ck = $iv->callee->type->kind;
-        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN) {
+        // A `callable` slot (KIND_CLOSURE) may hold a callable ARRAY or an
+        // invokable object as well as a closure env: classify it like an
+        // erased value.
+        if ($ck === Type::KIND_CELL || $ck === Type::KIND_UNKNOWN || $ck === Type::KIND_CLOSURE
+            || $iv->callee->type->isArray()) {
             return $this->emitErasedInvoke($n);
         }
         // The closure struct is the env: the __closure fn unpacks its own
@@ -1257,7 +1261,55 @@ trait EmitLlvmCalls
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         $out .= $this->cellTagIr($raw);
-        $tag = $this->cellTagReg;
+        $tag0 = $this->cellTagReg;
+        // A RAW word is classified by its allocator header, as if it were
+        // boxed: array magic at -8 → tag 7, object/enum magic → tag 8. A
+        // `callable` slot holds a callable ARRAY raw ({@see emitInvoke}), and a
+        // raw word otherwise read as a double went to the closure arm.
+        $tslot = $this->ssa->allocReg();
+        $out .= '  ' . $tslot . " = alloca i64\n";
+        $out .= '  store i64 ' . $tag0 . ', ptr ' . $tslot . "\n";
+        // …and so is the payload of an OBJECT-tagged box: a callable array
+        // stored through a `callable` slot into an erased buffer reads back
+        // boxed by the buffer's object hint.
+        $rb = $this->ssa->allocReg();
+        $out .= '  ' . $rb . ' = icmp ugt i64 ' . $raw . ", -4503599627370496\n";
+        $is8 = $this->ssa->allocReg();
+        $out .= '  ' . $is8 . ' = icmp eq i64 ' . $tag0 . ", 8\n";
+        $nb = $this->ssa->allocReg();
+        $out .= '  ' . $nb . ' = xor i1 ' . $rb . ", true\n";
+        $probe = $this->ssa->allocReg();
+        $out .= '  ' . $probe . ' = or i1 ' . $nb . ', ' . $is8 . "\n";
+        $pw = $this->ssa->allocReg();
+        $out .= '  ' . $pw . ' = and i64 ' . $raw . ", 281474976710655\n";
+        $rawL = $this->ssa->allocLabel('erinv.raw');
+        $rchkL = $this->ssa->allocLabel('erinv.rawchk');
+        $tdoneL = $this->ssa->allocLabel('erinv.tag');
+        $out .= '  br i1 ' . $probe . ', label %' . $rawL . ', label %' . $tdoneL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($pw);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $rchkL . ', label %' . $tdoneL . "\n";
+        $out .= $rchkL . ":\n";
+        $rp8 = $this->ssa->allocReg();
+        $out .= '  ' . $rp8 . ' = inttoptr i64 ' . $pw . " to ptr\n";
+        $rg8 = $this->ssa->allocReg();
+        $out .= '  ' . $rg8 . ' = getelementptr inbounds i8, ptr ' . $rp8 . ", i64 -8\n";
+        $rw8 = $this->ssa->allocReg();
+        $out .= '  ' . $rw8 . ' = load i64, ptr ' . $rg8 . "\n";
+        $isArrM = $this->magicMatchIr($rw8, [\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            \Compile\MemoryAbi::ARRAY_TAG_ARENA, \Compile\MemoryAbi::ASSOC_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $isObjM = $this->magicMatchIr($rw8, [\Compile\MemoryAbi::RC_TAG_MAGIC, \Compile\MemoryAbi::ENUM_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $t8 = $this->ssa->allocReg();
+        $out .= '  ' . $t8 . ' = select i1 ' . $isObjM . ', i64 8, i64 ' . $tag0 . "\n";
+        $t7 = $this->ssa->allocReg();
+        $out .= '  ' . $t7 . ' = select i1 ' . $isArrM . ', i64 7, i64 ' . $t8 . "\n";
+        $out .= '  store i64 ' . $t7 . ', ptr ' . $tslot . "\n";
+        $out .= '  br label %' . $tdoneL . "\n";
+        $out .= $tdoneL . ":\n";
+        $tag = $this->ssa->allocReg();
+        $out .= '  ' . $tag . ' = load i64, ptr ' . $tslot . "\n";
         $isStr = $this->ssa->allocReg();
         $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tag . ", 4\n";
         $res = $this->ssa->allocReg();
@@ -1289,6 +1341,66 @@ trait EmitLlvmCalls
         // env does not), so it takes `->__invoke(...)` by runtime class. The
         // callee is re-read for that call, so only a pure one qualifies.
         $ck0 = $n->callee->kind;
+        // A CALLABLE ARRAY (`[$obj, 'method']`, tag 7) is no closure env either:
+        // calling through its header jumped to the array's length word (symfony
+        // EventDispatcher::callListeners over `[$progressOutput, 'on…']`). It is
+        // `$c[0]->{$c[1]}(...)`, and the only names `$c[1]` can hold are the ones
+        // a `[$x, 'name']` literal spells ({@see Module::$callableArrayMethods}):
+        // one strcmp arm each, an erased-receiver method call by runtime class.
+        // The callee is re-read per arm, so only a pure one qualifies.
+        if ($this->callableArrayMethods !== []) {
+            $isArrT = $this->ssa->allocReg();
+            $out .= '  ' . $isArrT . ' = icmp eq i64 ' . $tag . ", 7\n";
+            $arrL = $this->ssa->allocLabel('erinv.arr');
+            $noArrL = $this->ssa->allocLabel('erinv.notarr');
+            $out .= '  br i1 ' . $isArrT . ', label %' . $arrL . ', label %' . $noArrL . "\n";
+            $out .= $arrL . ":\n";
+            // The classified ARRAY, as a proper array cell in a scratch local —
+            // the callee's own word may be raw or object-tagged.
+            $avName = '__erinv_arr' . \substr($this->ssa->allocReg(), 2);
+            $avSlot = $this->ssa->allocReg();
+            $out .= '  ' . $avSlot . " = alloca i64\n";
+            $avW = $this->ssa->allocReg();
+            $out .= '  ' . $avW . ' = or i64 ' . $pw . ", -2533274790395904\n";
+            $out .= '  store i64 ' . $avW . ', ptr ' . $avSlot . "\n";
+            $this->locals->slots[$avName] = $avSlot;
+            $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $res . "\n";
+            $mname = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                new \Compile\Mir\IntConst(1, Type::int_()), Type::cell());
+            $out .= $this->emitNode($mname);
+            $out .= $this->coerceToI64();
+            $mw = $this->lastValue;
+            $out .= $this->cellTagIr($mw);
+            $isS = $this->ssa->allocReg();
+            $out .= '  ' . $isS . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+            $sL = $this->ssa->allocLabel('erinv.arrname');
+            $out .= '  br i1 ' . $isS . ', label %' . $sL . ', label %' . $endL . "\n";
+            $out .= $sL . ":\n";
+            $mm = $this->ssa->allocReg();
+            $out .= '  ' . $mm . ' = and i64 ' . $mw . ", 281474976710655\n";
+            $mp = $this->ssa->allocReg();
+            $out .= '  ' . $mp . ' = inttoptr i64 ' . $mm . " to ptr\n";
+            $this->rt->needsStrcmp = true;
+            foreach ($this->callableArrayMethods as $cm => $_) {
+                $hitL = $this->ssa->allocLabel('erinv.arrhit');
+                $nextL = $this->ssa->allocLabel('erinv.arrnext');
+                $cr = $this->ssa->allocReg();
+                $out .= '  ' . $cr . ' = call i32 @strcmp(ptr ' . $mp . ', ptr ' . $this->litStr((string)$cm) . ")\n";
+                $ce = $this->ssa->allocReg();
+                $out .= '  ' . $ce . ' = icmp eq i32 ' . $cr . ", 0\n";
+                $out .= '  br i1 ' . $ce . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $recv = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                    new \Compile\Mir\IntConst(0, Type::int_()), Type::cell());
+                $out .= $this->emitNode(new \Compile\Mir\MethodCall_($recv, (string)$cm, $n->args, Type::cell()));
+                $out .= $this->coerceToI64();
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $noArrL . ":\n";
+        }
         if (($ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS)
             && $this->anyClassHasMethod('__invoke')) {
             $isObjT = $this->ssa->allocReg();

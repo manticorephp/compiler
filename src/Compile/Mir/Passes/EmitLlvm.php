@@ -310,6 +310,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** Compiler-owned lightweight method tables for erased dynamic calls. */
     private bool $dynamicMethodMeta = false;
+    /** @var array<string, bool> {@see Module::$callableArrayMethods} */
+    private array $callableArrayMethods = [];
 
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
@@ -647,6 +649,7 @@ final class EmitLlvm implements EmitVisitor
         $this->reflectAll = $module->reflectAll;
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
+        $this->callableArrayMethods = $module->callableArrayMethods;
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
