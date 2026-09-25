@@ -31,9 +31,11 @@ edges
   if-else @L4 if <- L0 block: {n} -> {n}
   break @L5 break <- L5 break: {n} -> {n}
   if-else @L5 if <- L5 cmp: {n} -> {n}
+  loop-entry @L5 while <- L5 while: {n} -> {n}
   loop-back @L5 while <- L5 if: {n} -> {n}
   loop-exit @L5 while <- L5 cmp: {n} -> {n}
   continue @L6 continue <- L6 continue: {e,k,n,v} -> {n}
+  loop-entry @L6 foreach <- L6 foreach: {n} -> {n}
   loop-exit @L6 foreach <- L6 array_lit: {n} -> {n}
   switch-arm @L7 switch <- L7 int_const: {n} -> {n}
   break @L7 break <- L7 break: {g,n} -> {n}
@@ -84,9 +86,11 @@ edges
   if-else @L14 if <- L14 store_local: {b,n} -> {n}
   break @L15 break <- L15 break: {c,n} -> {n}
   if-else @L15 if <- L15 cmp: {c,n} -> {c,n}
+  loop-entry @L15 while <- L15 while: {n} -> {n}
   loop-back @L15 while <- L15 store_local: {c,d,n} -> {n}
   loop-exit @L15 while <- L15 cmp: {n} -> {n}
   continue @L16 continue <- L16 continue: {e,k,n,v} -> {n}
+  loop-entry @L16 foreach <- L16 foreach: {n} -> {n}
   loop-exit @L16 foreach <- L16 array_lit: {n} -> {n}
   switch-arm @L17 switch <- L17 int_const: {n} -> {n}
   break @L17 break <- L17 break: {g,n} -> {n}

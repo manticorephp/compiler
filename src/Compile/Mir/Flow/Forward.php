@@ -28,8 +28,14 @@ use Compile\Mir\While_;
  * The tree IS the CFG: a statement's successor is the next statement, a loop
  * iterates its body to a fixpoint of the head state, and the non-local jumps
  * (break / continue / goto / return / throw) carry their state to the target
- * that joins them. A state is `array<string, int>`; `null` inside this class
- * means "unreachable" and never reaches the {@see Lattice}.
+ * that joins them. A state is `array<string, int>`; the DEAD state (one
+ * reserved key no local can be named) means "unreachable" and never reaches
+ * the {@see Lattice}.
+ *
+ * ⚠ Not `null`: natively `array<string, int>|null` is a union, i.e. a CELL, and
+ * a typed array returned through one is rebuilt with NaN-boxed elements that the
+ * lattice's typed reads then take as raw ints (a state value 1 read back as
+ * -4222124650659839).
  *
  * - `stateBefore()` answers, per `spl_object_id`, the state at entry of every
  *   node the walk evaluated: statements AND expression nodes.
@@ -51,6 +57,11 @@ use Compile\Mir\While_;
  *   loop-back           the loop / last body stmt (the step for a for with a
  *                       step, the condition for a do-while); out = fall-through
  *                       only, every `continue` is its own edge
+ *   loop-entry          the loop / itself: the state before the loop (after a
+ *                       for's init, a foreach's subject) into the converged head
+ *   loop-body           the loop / last body stmt: a for WITH a step and a
+ *                       do-while only — the body's fall-through into the step /
+ *                       the condition, which their loop-back edge starts after
  *   loop-exit           the loop / its condition (a foreach: its subject)
  *   break / continue    the Break_ / Continue_ / itself — after a finally it
  *                       left: the finally's last stmt
@@ -74,6 +85,7 @@ use Compile\Mir\While_;
 final class Forward
 {
     private const CAP = 64;
+    private const DEAD = '#dead';
 
     /** @var array<int, array<string, int>> */
     private array $before = [];
@@ -180,7 +192,7 @@ final class Forward
             $this->labelSeen = [];
             $this->sawGoto = false;
             $out = $this->block($body, $entry);
-            if ($out !== null) {
+            if (!self::isDead($out)) {
                 $this->edge('return', $body, $this->tailOf($body->stmts, null), 0, $out, $out);
             }
             if (!$this->sawGoto || $this->sameGotos()) { break; }
@@ -219,14 +231,30 @@ final class Forward
     // ── states ────────────────────────────────────────────────────
 
     /**
-     * @param array<string, int>|null $a
-     * @param array<string, int>|null $b
-     * @return array<string, int>|null
+     * The unreachable state — never handed to the lattice.
+     *
+     * @return array<string, int>
      */
-    private function joinOpt(?array $a, ?array $b): ?array
+    private static function deadState(): array
     {
-        if ($a === null) { return $b; }
-        if ($b === null) { return $a; }
+        return [self::DEAD => 1];
+    }
+
+    /** @param array<string, int> $s */
+    private static function isDead(array $s): bool
+    {
+        return isset($s[self::DEAD]);
+    }
+
+    /**
+     * @param array<string, int> $a
+     * @param array<string, int> $b
+     * @return array<string, int>
+     */
+    private function joinOpt(array $a, array $b): array
+    {
+        if (self::isDead($a)) { return $b; }
+        if (self::isDead($b)) { return $a; }
         return $this->lattice->join($a, $b);
     }
 
@@ -248,10 +276,12 @@ final class Forward
     }
 
     /**
+     * `$joined` dead: the target resolves it later.
+     *
      * @param array<string, int> $out
-     * @param array<string, int>|null $joined
+     * @param array<string, int> $joined
      */
-    private function edge(string $kind, Node $at, ?Node $pred, int $idx, array $out, ?array $joined): string
+    private function edge(string $kind, Node $at, ?Node $pred, int $idx, array $out, array $joined): string
     {
         $key = $kind . '#' . (string)\spl_object_id($at) . '#' . (string)$idx;
         $this->edgeKind[$key] = $kind;
@@ -262,7 +292,7 @@ final class Forward
             unset($this->edgePred[$key]);
         }
         $this->edgeOut[$key] = $out;
-        if ($joined !== null) { $this->edgeJoined[$key] = $joined; }
+        if (!self::isDead($joined)) { $this->edgeJoined[$key] = $joined; }
         return $key;
     }
 
@@ -285,12 +315,12 @@ final class Forward
     // ── statements ────────────────────────────────────────────────
 
     /**
-     * @param array<string, int>|null $s
-     * @return array<string, int>|null
+     * @param array<string, int> $s
+     * @return array<string, int>
      */
-    private function block(Block $b, ?array $s): ?array
+    private function block(Block $b, array $s): array
     {
-        if ($s !== null) { $this->note($b, $s); }
+        if (!self::isDead($s)) { $this->note($b, $s); }
         return $this->seq($b->stmts, $s, $b);
     }
 
@@ -298,10 +328,10 @@ final class Forward
      * `$owner` stands as the predecessor of a label that opens the list.
      *
      * @param Node[] $stmts
-     * @param array<string, int>|null $s
-     * @return array<string, int>|null
+     * @param array<string, int> $s
+     * @return array<string, int>
      */
-    private function seq(array $stmts, ?array $s, Node $owner): ?array
+    private function seq(array $stmts, array $s, Node $owner): array
     {
         $prev = $owner;
         foreach ($stmts as $st) {
@@ -312,13 +342,13 @@ final class Forward
     }
 
     /**
-     * @param array<string, int>|null $s
-     * @return array<string, int>|null
+     * @param array<string, int> $s
+     * @return array<string, int>
      */
-    private function stmt(Node $n, ?array $s, Node $prev): ?array
+    private function stmt(Node $n, array $s, Node $prev): array
     {
         if ($n instanceof Label_) { return $this->label($n, $s, $prev); }
-        if ($s === null) { return $this->dead($n); }
+        if (self::isDead($s)) { return $this->dead($n); }
         if ($n instanceof Block) { return $this->block($n, $s); }
         if ($n instanceof If_) {
             $this->note($n, $s);
@@ -351,23 +381,23 @@ final class Forward
         if ($n instanceof Break_) {
             $this->note($n, $s);
             $this->jump('break', $n, $n, $this->frameAt($n->level, 'break'), '', $s);
-            return null;
+            return self::deadState();
         }
         if ($n instanceof Continue_) {
             $this->note($n, $s);
             $this->jump('continue', $n, $n, $this->frameAt($n->level, 'continue'), '', $s);
-            return null;
+            return self::deadState();
         }
         if ($n instanceof Goto_) {
             $this->note($n, $s);
             $this->sawGoto = true;
             $this->jump('goto', $n, $n, -1, $n->label, $s);
-            return null;
+            return self::deadState();
         }
         if ($n instanceof Return_) {
             $out = $this->expr($n, $s);
-            if ($out !== null) { $this->jump('return', $n, $n, -1, '', $out); }
-            return null;
+            if (!self::isDead($out)) { $this->jump('return', $n, $n, -1, '', $out); }
+            return self::deadState();
         }
         return $this->expr($n, $s);
     }
@@ -375,38 +405,38 @@ final class Forward
     /**
      * An unreachable statement: only a label inside it can revive the path.
      *
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function dead(Node $n): ?array
+    private function dead(Node $n): array
     {
-        if ($n instanceof Block) { return $this->seq($n->stmts, null, $n); }
+        if ($n instanceof Block) { return $this->seq($n->stmts, self::deadState(), $n); }
         if ($n instanceof If_) {
-            $t = $this->seq($n->then->stmts, null, $n->then);
-            $e = $n->else === null ? null : $this->seq($n->else->stmts, null, $n->else);
+            $t = $this->seq($n->then->stmts, self::deadState(), $n->then);
+            $e = $n->else === null ? self::deadState() : $this->seq($n->else->stmts, self::deadState(), $n->else);
             return $this->joinOpt($t, $e);
         }
         if ($n instanceof TryCatch_) {
             $this->labelScan = [];
             $this->labelsIn($n);
-            if (\count($this->labelScan) === 0) { return null; }
-            return $this->tryCatch($n, null);
+            if (\count($this->labelScan) === 0) { return self::deadState(); }
+            return $this->tryCatch($n, self::deadState());
         }
-        return null;
+        return self::deadState();
     }
 
     /**
-     * @param array<string, int>|null $s
-     * @return array<string, int>|null
+     * @param array<string, int> $s
+     * @return array<string, int>
      */
-    private function label(Label_ $n, ?array $s, Node $prev): ?array
+    private function label(Label_ $n, array $s, Node $prev): array
     {
         $name = $n->name;
         $in = $s;
         if (isset($this->gotoPrev[$name])) { $in = $this->joinOpt($in, $this->gotoPrev[$name]); }
         if (isset($this->gotoIn[$name])) { $in = $this->joinOpt($in, $this->gotoIn[$name]); }
-        if ($in === null) { return null; }
+        if (self::isDead($in)) { return $in; }
         $this->labelSeen[$name] = true;
-        if ($s !== null) { $this->edge('fallthrough', $n, $prev, 0, $s, $in); }
+        if (!self::isDead($s)) { $this->edge('fallthrough', $n, $prev, 0, $s, $in); }
         if (isset($this->gotoKeys[$name])) {
             foreach ($this->gotoKeys[$name] as $k => $unused) { $this->edgeJoined[$k] = $in; }
         }
@@ -416,19 +446,19 @@ final class Forward
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function ifStmt(If_ $n, array $s): ?array
+    private function ifStmt(If_ $n, array $s): array
     {
         $c = $this->expr($n->cond, $s);
-        if ($c === null) { return null; }
+        if (self::isDead($c)) { return $c; }
         $t = $this->block($n->then, $c);
         $e = $n->else === null ? $c : $this->block($n->else, $c);
         $out = $this->joinOpt($t, $e);
-        if ($t !== null) {
+        if (!self::isDead($t)) {
             $this->edge('if-then', $n, $this->tailOf($n->then->stmts, $n->then), 0, $t, $out);
         }
-        if ($e !== null) {
+        if (!self::isDead($e)) {
             $ePred = $n->else === null ? $n->cond : $this->tailOf($n->else->stmts, $n->else);
             $this->edge('if-else', $n, $ePred, 0, $e, $out);
         }
@@ -461,16 +491,16 @@ final class Forward
         \array_pop($this->frContKeys);
     }
 
-    /** @return array<string, int>|null */
-    private function breaks(int $f): ?array
+    /** @return array<string, int> */
+    private function breaks(int $f): array
     {
-        return $this->frHasBreak[$f] ? $this->frBreak[$f] : null;
+        return $this->frHasBreak[$f] ? $this->frBreak[$f] : self::deadState();
     }
 
-    /** @return array<string, int>|null */
-    private function continues(int $f): ?array
+    /** @return array<string, int> */
+    private function continues(int $f): array
     {
-        return $this->frHasCont[$f] ? $this->frCont[$f] : null;
+        return $this->frHasCont[$f] ? $this->frCont[$f] : self::deadState();
     }
 
     /** Frame a `break N` / `continue N` targets. */
@@ -493,26 +523,27 @@ final class Forward
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function whileLoop(While_ $n, array $s): ?array
+    private function whileLoop(While_ $n, array $s): array
     {
         $head = $s;
         $f = -1;
-        $c = null;
-        $b = null;
+        $c = self::deadState();
+        $b = self::deadState();
         for ($i = 0; ; $i++) {
             $this->tooMany($i);
             $f = $this->pushFrame(false);
             $c = $this->expr($n->cond, $head);
-            $b = $c === null ? null : $this->block($n->body, $c);
+            $b = self::isDead($c) ? $c : $this->block($n->body, $c);
             $back = $this->joinOpt($b, $this->continues($f));
-            $next = $back === null ? $s : $this->lattice->join($s, $back);
+            $next = self::isDead($back) ? $s : $this->lattice->join($s, $back);
             if ($this->lattice->equal($next, $head)) { break; }
             $this->popFrame();
             $head = $next;
         }
         $exit = $this->joinOpt($c, $this->breaks($f));
+        $this->edge('loop-entry', $n, $n, 0, $s, $head);
         $this->closeLoop($n, $f, $head, $head,
             $this->tailOf($n->body->stmts, $n->body), $b, $n->cond, $c, $exit);
         return $exit;
@@ -520,34 +551,38 @@ final class Forward
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function forLoop(For_ $n, array $s): ?array
+    private function forLoop(For_ $n, array $s): array
     {
         $s0 = $n->init === null ? $s : $this->expr($n->init, $s);
-        if ($s0 === null) { return null; }
+        if (self::isDead($s0)) { return $s0; }
         $head = $s0;
         $f = -1;
-        $c = null;
-        $b = null;
-        $stepIn = null;
-        $back = null;
+        $c = self::deadState();
+        $b = self::deadState();
+        $stepIn = self::deadState();
+        $back = self::deadState();
         for ($i = 0; ; $i++) {
             $this->tooMany($i);
             $f = $this->pushFrame(false);
             $c = $n->cond === null ? $head : $this->expr($n->cond, $head);
-            $b = $c === null ? null : $this->block($n->body, $c);
+            $b = self::isDead($c) ? $c : $this->block($n->body, $c);
             $stepIn = $this->joinOpt($b, $this->continues($f));
-            $back = $stepIn === null || $n->step === null ? $stepIn : $this->expr($n->step, $stepIn);
-            $next = $back === null ? $s0 : $this->lattice->join($s0, $back);
+            $back = self::isDead($stepIn) || $n->step === null ? $stepIn : $this->expr($n->step, $stepIn);
+            $next = self::isDead($back) ? $s0 : $this->lattice->join($s0, $back);
             if ($this->lattice->equal($next, $head)) { break; }
             $this->popFrame();
             $head = $next;
         }
-        $condExit = $n->cond === null ? null : $c;
+        $condExit = $n->cond === null ? self::deadState() : $c;
         $exit = $this->joinOpt($condExit, $this->breaks($f));
+        $this->edge('loop-entry', $n, $n, 0, $s0, $head);
         $step = $n->step;
         if ($step !== null) {
+            if (!self::isDead($b) && !self::isDead($stepIn)) {
+                $this->edge('loop-body', $n, $this->tailOf($n->body->stmts, $n->body), 0, $b, $stepIn);
+            }
             $this->closeLoop($n, $f, $head, $stepIn, $step, $back, $n->cond, $condExit, $exit);
         } else {
             $this->closeLoop($n, $f, $head, $stepIn,
@@ -558,41 +593,46 @@ final class Forward
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function doWhileLoop(DoWhile_ $n, array $s): ?array
+    private function doWhileLoop(DoWhile_ $n, array $s): array
     {
         $head = $s;
         $f = -1;
-        $condIn = null;
-        $c = null;
+        $b = self::deadState();
+        $condIn = self::deadState();
+        $c = self::deadState();
         for ($i = 0; ; $i++) {
             $this->tooMany($i);
             $f = $this->pushFrame(false);
             $b = $this->block($n->body, $head);
             $condIn = $this->joinOpt($b, $this->continues($f));
-            $c = $condIn === null ? null : $this->expr($n->cond, $condIn);
-            $next = $c === null ? $s : $this->lattice->join($s, $c);
+            $c = self::isDead($condIn) ? $condIn : $this->expr($n->cond, $condIn);
+            $next = self::isDead($c) ? $s : $this->lattice->join($s, $c);
             if ($this->lattice->equal($next, $head)) { break; }
             $this->popFrame();
             $head = $next;
         }
         $exit = $this->joinOpt($c, $this->breaks($f));
+        $this->edge('loop-entry', $n, $n, 0, $s, $head);
+        if (!self::isDead($b) && !self::isDead($condIn)) {
+            $this->edge('loop-body', $n, $this->tailOf($n->body->stmts, $n->body), 0, $b, $condIn);
+        }
         $this->closeLoop($n, $f, $head, $condIn, $n->cond, $c, $n->cond, $c, $exit);
         return $exit;
     }
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function foreachLoop(Foreach_ $n, array $s): ?array
+    private function foreachLoop(Foreach_ $n, array $s): array
     {
         $arr = $this->expr($n->array, $s);
-        if ($arr === null) { return null; }
+        if (self::isDead($arr)) { return $arr; }
         $head = $arr;
         $f = -1;
-        $b = null;
+        $b = self::deadState();
         for ($i = 0; ; $i++) {
             $this->tooMany($i);
             $f = $this->pushFrame(false);
@@ -600,12 +640,13 @@ final class Forward
             $bound = $this->lattice->transfer($n, $head);
             $b = $this->block($n->body, $bound);
             $back = $this->joinOpt($b, $this->continues($f));
-            $next = $back === null ? $arr : $this->lattice->join($arr, $back);
+            $next = self::isDead($back) ? $arr : $this->lattice->join($arr, $back);
             if ($this->lattice->equal($next, $head)) { break; }
             $this->popFrame();
             $head = $next;
         }
         $exit = $this->joinOpt($head, $this->breaks($f));
+        $this->edge('loop-entry', $n, $n, 0, $arr, $head);
         $this->closeLoop($n, $f, $head, $head,
             $this->tailOf($n->body->stmts, $n->body), $b, $n->array, $head, $exit);
         return $exit;
@@ -616,18 +657,18 @@ final class Forward
      * `continue` lands: the head, the for step or the do-while condition.
      *
      * @param array<string, int> $head
-     * @param array<string, int>|null $contTo
-     * @param array<string, int>|null $back
-     * @param array<string, int>|null $condExit
-     * @param array<string, int>|null $exit
+     * @param array<string, int> $contTo
+     * @param array<string, int> $back
+     * @param array<string, int> $condExit
+     * @param array<string, int> $exit
      */
-    private function closeLoop(Node $n, int $f, array $head, ?array $contTo,
-        ?Node $backPred, ?array $back, ?Node $exitPred, ?array $condExit, ?array $exit): void
+    private function closeLoop(Node $n, int $f, array $head, array $contTo,
+        ?Node $backPred, array $back, ?Node $exitPred, array $condExit, array $exit): void
     {
-        if ($contTo !== null) { $this->resolve($this->frContKeys[$f], $contTo); }
-        if ($exit !== null) { $this->resolve($this->frBreakKeys[$f], $exit); }
-        if ($back !== null) { $this->edge('loop-back', $n, $backPred, 0, $back, $head); }
-        if ($condExit !== null && $exit !== null) {
+        if (!self::isDead($contTo)) { $this->resolve($this->frContKeys[$f], $contTo); }
+        if (!self::isDead($exit)) { $this->resolve($this->frBreakKeys[$f], $exit); }
+        if (!self::isDead($back)) { $this->edge('loop-back', $n, $backPred, 0, $back, $head); }
+        if (!self::isDead($condExit) && !self::isDead($exit)) {
             $this->edge('loop-exit', $n, $exitPred, 0, $condExit, $exit);
         }
         $this->popFrame();
@@ -637,12 +678,12 @@ final class Forward
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function switchStmt(Switch_ $n, array $s): ?array
+    private function switchStmt(Switch_ $n, array $s): array
     {
         $d = $this->expr($n->subject, $s);
-        if ($d === null) { return null; }
+        if (self::isDead($d)) { return $d; }
         /** @var array<int, array<string, int>> $dispatch */
         $dispatch = [];
         /** @var array<int, Node> $dispPred */
@@ -652,38 +693,38 @@ final class Forward
         foreach ($n->arms as $i => $arm) {
             $v = $arm->value;
             if ($v === null) { $default = $i; continue; }
-            if ($d !== null) { $d = $this->expr($v, $d); }
-            if ($d !== null) {
+            if (!self::isDead($d)) { $d = $this->expr($v, $d); }
+            if (!self::isDead($d)) {
                 $dispatch[$i] = $d;
                 $dispPred[$i] = $v;
                 $lastVal = $v;
             }
         }
-        if ($default >= 0 && $d !== null) {
+        if ($default >= 0 && !self::isDead($d)) {
             $dispatch[$default] = $d;
             $dispPred[$default] = $lastVal;
         }
         $f = $this->pushFrame(true);
-        $prev = null;
+        $prev = self::deadState();
         $prevPred = $n->subject;
         $count = \count($n->arms);
         foreach ($n->arms as $i => $arm) {
             $in = $prev;
             if (isset($dispatch[$i])) { $in = $this->joinOpt($in, $dispatch[$i]); }
-            if ($in !== null) {
+            if (!self::isDead($in)) {
                 if (isset($dispatch[$i])) {
                     $this->edge('switch-arm', $n, $dispPred[$i], $i, $dispatch[$i], $in);
                 }
-                if ($prev !== null) { $this->edge('fallthrough', $n, $prevPred, $i, $prev, $in); }
+                if (!self::isDead($prev)) { $this->edge('fallthrough', $n, $prevPred, $i, $prev, $in); }
             }
             $prev = $this->seq($arm->body, $in, $n);
             $prevPred = $this->tailOf($arm->body, $prevPred);
         }
-        $noMatch = $default < 0 ? $d : null;
+        $noMatch = $default < 0 ? $d : self::deadState();
         $exit = $this->joinOpt($this->joinOpt($prev, $noMatch), $this->joinOpt($this->breaks($f), $this->continues($f)));
-        if ($exit !== null) {
-            if ($prev !== null) { $this->edge('fallthrough', $n, $prevPred, $count, $prev, $exit); }
-            if ($noMatch !== null) { $this->edge('switch-arm', $n, $lastVal, $count, $noMatch, $exit); }
+        if (!self::isDead($exit)) {
+            if (!self::isDead($prev)) { $this->edge('fallthrough', $n, $prevPred, $count, $prev, $exit); }
+            if (!self::isDead($noMatch)) { $this->edge('switch-arm', $n, $lastVal, $count, $noMatch, $exit); }
             $this->resolve($this->frBreakKeys[$f], $exit);
             $this->resolve($this->frContKeys[$f], $exit);
         }
@@ -694,12 +735,12 @@ final class Forward
     // ── try / catch / finally ─────────────────────────────────────
 
     /**
-     * `$s` null: the try is dead code entered only through a label inside it.
+     * `$s` dead: the try is dead code entered only through a label inside it.
      *
-     * @param array<string, int>|null $s
-     * @return array<string, int>|null
+     * @param array<string, int> $s
+     * @return array<string, int>
      */
-    private function tryCatch(TryCatch_ $n, ?array $s): ?array
+    private function tryCatch(TryCatch_ $n, array $s): array
     {
         $fin = $n->hasFinally;
         $ff = -1;
@@ -710,8 +751,9 @@ final class Forward
             $this->labelsIn($n);
             $this->finLabels[$ff] = $this->labelScan;
         }
-        $this->thrAcc[] = $s === null ? [] : $s;
-        $this->thrHas[] = $s !== null;
+        $live = !self::isDead($s);
+        $this->thrAcc[] = $live ? $s : [];
+        $this->thrHas[] = $live;
         $tExit = $this->seq($n->tryBody, $s, $n);
         $catchIn = \array_pop($this->thrAcc);
         $catchHas = \array_pop($this->thrHas);
@@ -722,11 +764,11 @@ final class Forward
         $norm = $tExit;
         /** @var array<int, string> $fKeys */
         $fKeys = [];
-        if ($fin && $tExit !== null) {
-            $fKeys[] = $this->edge('finally', $n, $this->tailOf($n->tryBody, $n), 0, $tExit, null);
+        if ($fin && !self::isDead($tExit)) {
+            $fKeys[] = $this->edge('finally', $n, $this->tailOf($n->tryBody, $n), 0, $tExit, self::deadState());
         }
         foreach ($n->catches as $i => $c) {
-            $cin = null;
+            $cin = self::deadState();
             if ($catchHas) {
                 $head = \count($c->body) === 0 ? $n : $c->body[0];
                 $this->edge('catch', $n, $head, $i, $catchIn, $catchIn);
@@ -734,8 +776,8 @@ final class Forward
             }
             $ce = $this->seq($c->body, $cin, $n);
             $norm = $this->joinOpt($norm, $ce);
-            if ($fin && $ce !== null) {
-                $fKeys[] = $this->edge('finally', $n, $this->tailOf($c->body, $n), $i + 1, $ce, null);
+            if ($fin && !self::isDead($ce)) {
+                $fKeys[] = $this->edge('finally', $n, $this->tailOf($c->body, $n), $i + 1, $ce, self::deadState());
             }
         }
         if (!$fin) { return $norm; }
@@ -746,7 +788,7 @@ final class Forward
         \array_pop($this->finLabels);
         $finIn = $norm;
         if ($thrownHas) {
-            $fKeys[] = $this->edge('finally', $n, null, -1, $thrown, null);
+            $fKeys[] = $this->edge('finally', $n, null, -1, $thrown, self::deadState());
             $finIn = $this->joinOpt($finIn, $thrown);
         }
         /** @var array<int, int> $mine */
@@ -756,9 +798,9 @@ final class Forward
             $mine[] = $d;
             $at = $this->defAt[$d];
             $finIn = $this->joinOpt($finIn, $this->defState[$d]);
-            $fKeys[] = $this->edge('finally', $n, $at, -2 - \spl_object_id($at), $this->defState[$d], null);
+            $fKeys[] = $this->edge('finally', $n, $at, -2 - \spl_object_id($at), $this->defState[$d], self::deadState());
         }
-        if ($finIn !== null) { $this->resolve($fKeys, $finIn); }
+        if (!self::isDead($finIn)) { $this->resolve($fKeys, $finIn); }
         $fOut = $this->seq($n->finallyBody, $finIn, $n);
         $fTail = $this->tailOf($n->finallyBody, $n);
         foreach ($mine as $d) {
@@ -768,11 +810,11 @@ final class Forward
             $label = $this->defLabel[$d];
             unset($this->defKind[$d], $this->defAt[$d], $this->defTarget[$d],
                 $this->defLabel[$d], $this->defState[$d], $this->defOwner[$d]);
-            if ($fOut !== null) { $this->jump($kind, $at, $fTail, $target, $label, $fOut); }
+            if (!self::isDead($fOut)) { $this->jump($kind, $at, $fTail, $target, $label, $fOut); }
         }
-        if ($fOut === null) { return null; }
+        if (self::isDead($fOut)) { return $fOut; }
         $this->mayThrow($fOut);
-        return $norm === null ? null : $fOut;
+        return self::isDead($norm) ? $norm : $fOut;
     }
 
     private function labelsIn(Node $n): void
@@ -816,14 +858,14 @@ final class Forward
             return;
         }
         if ($kind === 'goto') {
-            $key = $this->edge('goto', $at, $pred, 0, $s, null);
+            $key = $this->edge('goto', $at, $pred, 0, $s, self::deadState());
             $this->gotoIn[$label] = isset($this->gotoIn[$label])
                 ? $this->lattice->join($this->gotoIn[$label], $s) : $s;
             if (!isset($this->gotoKeys[$label])) { $this->gotoKeys[$label] = []; }
             $this->gotoKeys[$label][$key] = true;
             return;
         }
-        $key = $this->edge($kind, $at, $pred, 0, $s, null);
+        $key = $this->edge($kind, $at, $pred, 0, $s, self::deadState());
         if ($kind === 'continue' && !$this->frSwitch[$target]) {
             $this->frCont[$target] = $this->frHasCont[$target]
                 ? $this->lattice->join($this->frCont[$target], $s) : $s;
@@ -840,12 +882,12 @@ final class Forward
     // ── expressions ───────────────────────────────────────────────
 
     /**
-     * Evaluate `$n` in php's order; null once a `throw` ends the path.
+     * Evaluate `$n` in php's order; dead once a `throw` ends the path.
      *
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function expr(Node $n, array $s): ?array
+    private function expr(Node $n, array $s): array
     {
         $this->note($n, $s);
         if ($n instanceof Ternary) { return $this->ternary($n, $s); }
@@ -853,26 +895,26 @@ final class Forward
         if ($n instanceof Match_) { return $this->matchExpr($n, $s); }
         foreach (Walk::children($n) as $c) {
             $r = $this->expr($c, $s);
-            if ($r === null) { return null; }
+            if (self::isDead($r)) { return $r; }
             $s = $r;
         }
         $this->mayThrow($s);
         $out = $this->lattice->transfer($n, $s);
         if ($n instanceof Throw_) {
             $this->jump('throw', $n, $n, -1, '', $out);
-            return null;
+            return self::deadState();
         }
         return $out;
     }
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function ternary(Ternary $n, array $s): ?array
+    private function ternary(Ternary $n, array $s): array
     {
         $c = $this->expr($n->cond, $s);
-        if ($c === null) { return null; }
+        if (self::isDead($c)) { return $c; }
         $then = $n->then;
         $t = $then === null ? $c : $this->expr($then, $c);
         $e = $this->expr($n->else_, $c);
@@ -881,38 +923,38 @@ final class Forward
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function coalesce(NullCoalesce_ $n, array $s): ?array
+    private function coalesce(NullCoalesce_ $n, array $s): array
     {
         $l = $this->expr($n->left, $s);
-        if ($l === null) { return null; }
+        if (self::isDead($l)) { return $l; }
         $r = $this->expr($n->right, $l);
         return $this->branchJoin($n, $n->left, $l, $n->right, $r);
     }
 
     /**
-     * @param array<string, int>|null $t
-     * @param array<string, int>|null $e
-     * @return array<string, int>|null
+     * @param array<string, int> $t
+     * @param array<string, int> $e
+     * @return array<string, int>
      */
-    private function branchJoin(Node $n, Node $tPred, ?array $t, Node $ePred, ?array $e): ?array
+    private function branchJoin(Node $n, Node $tPred, array $t, Node $ePred, array $e): array
     {
         $out = $this->joinOpt($t, $e);
-        if ($out === null) { return null; }
-        if ($t !== null) { $this->edge('if-then', $n, $tPred, 0, $t, $out); }
-        if ($e !== null) { $this->edge('if-else', $n, $ePred, 0, $e, $out); }
+        if (self::isDead($out)) { return $out; }
+        if (!self::isDead($t)) { $this->edge('if-then', $n, $tPred, 0, $t, $out); }
+        if (!self::isDead($e)) { $this->edge('if-else', $n, $ePred, 0, $e, $out); }
         return $this->lattice->transfer($n, $out);
     }
 
     /**
      * @param array<string, int> $s
-     * @return array<string, int>|null
+     * @return array<string, int>
      */
-    private function matchExpr(Match_ $n, array $s): ?array
+    private function matchExpr(Match_ $n, array $s): array
     {
         $d = $this->expr($n->subject, $s);
-        if ($d === null) { return null; }
+        if (self::isDead($d)) { return $d; }
         /** @var array<int, array<string, int>> $armIn */
         $armIn = [];
         $default = -1;
@@ -920,12 +962,12 @@ final class Forward
             $conds = $arm->conds;
             if ($conds === null) { $default = $i; continue; }
             foreach ($conds as $c) {
-                if ($d === null) { break; }
+                if (self::isDead($d)) { break; }
                 $d = $this->expr($c, $d);
-                if ($d !== null) { $armIn[$i] = isset($armIn[$i]) ? $this->lattice->join($armIn[$i], $d) : $d; }
+                if (!self::isDead($d)) { $armIn[$i] = isset($armIn[$i]) ? $this->lattice->join($armIn[$i], $d) : $d; }
             }
         }
-        if ($d !== null) {
+        if (!self::isDead($d)) {
             if ($default >= 0) {
                 $armIn[$default] = $d;
             } else {
@@ -934,15 +976,15 @@ final class Forward
         }
         /** @var array<int, array<string, int>> $armOut */
         $armOut = [];
-        $out = null;
+        $out = self::deadState();
         foreach ($n->arms as $i => $arm) {
             if (!isset($armIn[$i])) { continue; }
             $r = $this->expr($arm->body, $armIn[$i]);
-            if ($r === null) { continue; }
+            if (self::isDead($r)) { continue; }
             $armOut[$i] = $r;
             $out = $this->joinOpt($out, $r);
         }
-        if ($out === null) { return null; }
+        if (self::isDead($out)) { return $out; }
         foreach ($n->arms as $i => $arm) {
             if (isset($armOut[$i])) { $this->edge('match-arm', $arm->body, $arm->body, 0, $armOut[$i], $out); }
         }

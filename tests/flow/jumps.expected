@@ -47,17 +47,23 @@ edges
   break @L9 break <- L9 break: {i,j,n,q,v} -> {i,j,n}
   if-else @L9 if <- L9 load_local: {i,j,n,q,v} -> {i,j,n,q,v}
   continue @L9 continue <- L9 continue: {i,j,n,q,v} -> {i,j,n}
+  loop-entry @L9 foreach <- L9 foreach: {i,j,n} -> {i,j,n}
   loop-exit @L9 foreach <- L9 array_lit: {i,j,n} -> {i,j,n}
+  loop-entry @L8 for <- L8 for: {i,j,n} -> {i,j,n}
+  loop-body @L8 for <- L9 foreach: {i,j,n} -> {i,j,n}
   loop-back @L8 for <- L8 incdec: {i,j,n} -> {i,j,n}
   loop-exit @L8 for <- L8 cmp: {i,j,n} -> {i,j,n}
   continue @L11 continue <- L11 continue: {i,j,n,r} -> {i,j,n,r}
   if-else @L11 if <- L11 load_local: {i,j,n,r} -> {i,j,n,r}
+  loop-entry @L11 dowhile <- L11 dowhile: {i,j,n} -> {i,j,n}
+  loop-body @L11 dowhile <- L11 store_local: {i,j,n,r,s} -> {i,j,n,r}
   loop-back @L11 dowhile <- L11 cmp: {i,j,n,r} -> {i,j,n}
   loop-exit @L11 dowhile <- L11 cmp: {i,j,n,r} -> {i,j,n,r}
   break @L13 break <- L13 break: {i,j,m,n,r} -> {i,j,n,r}
   if-else @L13 if <- L13 load_local: {i,j,m,n,r} -> {i,j,m,n,r}
   finally @L13 try_catch <- -: {i,j,m,n,r} -> {i,j,m,n,r}
   finally @L13 try_catch <- L13 return: {i,j,m,n,r} -> {i,j,m,n,r}
+  loop-entry @L13 while <- L13 while: {i,j,n,r} -> {i,j,n,r}
   loop-exit @L13 while <- L13 bool_const: {i,j,n,r} -> {i,j,n,r}
   finally @L12 try_catch <- L13 while: {i,j,n,r} -> {i,j,n,r}
   finally @L12 try_catch <- -: {i,j,n,r} -> {i,j,n,r}
