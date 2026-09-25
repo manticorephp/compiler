@@ -831,6 +831,7 @@ final class EmitLlvm implements EmitVisitor
         $this->litTableBodies = '';
         $this->litTableCount = 0;
         $this->dynScopeRelTables = [];
+        $this->newDynTableCache = null;
         $this->dynfLookupEmitted = false;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
@@ -2300,6 +2301,10 @@ final class EmitLlvm implements EmitVisitor
     /** {@see EmitLlvmObjects::dynScopeRelated}: scope class => [symbol, n].
      *  @var array<string, array{string, int}> */
     private array $dynScopeRelTables = [];
+
+    /** {@see EmitLlvmObjects::newDynTable}, per module.
+     *  @var array{string, int, array<string, bool>}|null */
+    private ?array $newDynTableCache = null;
 
     private int $litTableCount = 0;
 

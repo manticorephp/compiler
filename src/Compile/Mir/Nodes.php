@@ -1702,6 +1702,9 @@ final class DynProp_ extends Node
         parent::__construct(Node::KIND_DYN_PROP, $type);
     }
 
+    /** No visibility check — a callable array's method ({@see RuntimeLibrary}'s dispatch). */
+    public const ANY_SCOPE = '*';
+
     /** The LEXICAL class of the call site ("" = global scope): a dynamic
      *  `$o->$m()` may reach a private/protected method only from its class
      *  (or, protected, its hierarchy) — php's visibility rule is per call site. */
