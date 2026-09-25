@@ -1,0 +1,6 @@
+after clear-all: 6
+after unset: 9
+typed obj: 11
+untyped: 14
+self-assign alive: 15 1
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz

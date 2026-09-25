@@ -5827,6 +5827,18 @@ trait EmitLlvmObjects
             $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;
         }
+        // Release-before-overwrite, AFTER the retain (a self-assignment goes
+        // 1 → 2 → 1), as an instance property and a global cell do: the slot
+        // owns what it holds, and nothing gave the previous value back —
+        // php-cs-fixer's `Tokens::clearCache()` (`self::$cache = []`) kept every
+        // file's token collection alive, ~1 MB a file.
+        $drop = $box ? 'cell' : ($n->declared !== null && $dk !== Type::KIND_UNKNOWN
+            ? $this->discardReleaseFlavor($n->declared) : '');
+        if ($drop !== '') {
+            $old = $this->ssa->allocReg();
+            $out .= '  ' . $old . ' = load i64, ptr ' . $n->global . "\n";
+            $out .= $this->rcReleaseReg($old, $drop);
+        }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
         $this->noteCellSinkStored($val);
         $this->lastValue = $res;
