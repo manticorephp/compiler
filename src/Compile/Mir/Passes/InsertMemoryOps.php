@@ -198,7 +198,6 @@ final class InsertMemoryOps implements Pass
     private function lowerFunction(FunctionDef $fn): void
     {
         $this->traceFn = $fn->name;
-        $this->own->ctx->fn = $fn;
         $this->ownedFlavor = [];
         $this->blocked = [];
         $this->ownedOrder = [];

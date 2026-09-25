@@ -4499,10 +4499,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** An enum case is a value-type ORDINAL (no rc header) — never rc-managed,
      *  like an int. `$cls` is an obj type's class name. */
-    private function isEnumClass(string $cls): bool
-    {
-        return $cls !== '' && isset($this->enums[$cls]);
-    }
+    private function isEnumClass(string $cls): bool { return $this->own->isEnumClass($cls); }
 
     private function objTypeIsStruct(Type $t): bool
     {

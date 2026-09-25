@@ -10,10 +10,16 @@ namespace Compile\Mir;
  * a call argument, a concat operand, a base read). Each side's drift used to
  * be a leak or a double free, because the two halves lived in two classes.
  *
- * A code > 0 is Own(flavor) — {@see STR} … {@see CLOSURE}, with the {@see MIXED}
- * bit for a slot whose representation is raw on some paths and a cell on others;
- * {@see BORROW} is an rc value this site does not own; {@see NONE} is a value
- * with no refcount at all.
+ * A code > 0 is Own(flavor); {@see BORROW} is an rc value this site does not
+ * own; {@see NONE} is a value with no refcount at all.
+ *
+ * ★ The flavor code IS the release-helper choice. {@see flavorOf} derives it
+ * from the SAME decision {@see releaseFlavor} / {@see condFlavor} make (class
+ * tables, struct / enum / `Ffi\Ptr` guards), so a class with no rc header is
+ * NONE, never BORROW, and {@see flavorName} of a code names the helper family
+ * the release takes: a Generator is {@see GEN}, released through the `str`
+ * path. A closure env ({@see CLOSURE}) is the one rc value releaseFlavor does
+ * not name — it drops through `closure`.
  *
  * {@see CondOwn} (conditionals) and {@see AliasOwn} (aliases, property reads,
  * borrowing builtins) are the shared sub-contracts both sides call through here.
@@ -34,7 +40,11 @@ final class Ownership
     public const ASSOC = 4;
     public const CELL = 5;
     public const CLOSURE = 6;
+    /** A Generator frame: string-style rc header, released by the `str` helper. */
+    public const GEN = 7;
 
+    /** OR-ed onto a code for a slot raw on some paths and a cell on others.
+     *  Produced by the ownership-flow pass (Task 4); nothing sets it yet. */
     public const MIXED = 8;
 
     public OwnershipContext $ctx;
@@ -60,8 +70,8 @@ final class Ownership
      *  before an overwrite)? */
     public function classifyStored(Node $v): int
     {
-        if ($this->storedOwned($v)) { return self::ownCode($v->type); }
-        return self::flavorOf($v->type) > 0 ? self::BORROW : self::NONE;
+        if ($this->storedOwned($v)) { return $this->ownCode($v->type); }
+        return $this->flavorOf($v->type) > 0 ? self::BORROW : self::NONE;
     }
 
     /**
@@ -85,12 +95,17 @@ final class Ownership
      *  - Invoke of an obj / array / cell result: stored Own, temp Borrow
      *    (a closure- or string-typed Invoke agrees);
      *  - Clone and an array-union Add: stored Own, temp Borrow;
-     *  - Call of an obj / array / closure / cell result: stored Own for every
-     *    callee but an FFI fn or a borrowing builtin; temp Own only for a body
-     *    in the module that does not return by reference, plus the named
-     *    minting builtins (array: builtinMintsOwnedArray; cell: json_encode /
-     *    json_decode / max / min / the endpoint builtins) — a cell Call also
-     *    reads the emitter-only `$lastCallWasBuiltin`;
+     *  - Call of an obj / array / closure / cell result to a NON-FFI callee:
+     *    stored Own for every one but a borrowing builtin; temp Own only for a
+     *    fn with a FunctionDef in the module ({@see OwnershipContext::$moduleFns})
+     *    that does not return by reference, plus the named minting builtins
+     *    (array: builtinMintsOwnedArray; cell: json_encode / json_decode / max /
+     *    min / the endpoint builtins) — a cell Call also reads the emitter-only
+     *    `$lastCallWasBuiltin`. So a builtin, a by-ref-returning body and a
+     *    stdlib name the module does not define differ;
+     *  - Call of an array / cell / non-`Ffi\Ptr` obj / closure result to an FFI
+     *    fn: stored Borrow (externFns), temp Own — moduleFns holds the FFI
+     *    declaration, so tempArgFlavor / tempCellOwned read it as a body;
      *  - Call of a STRING result to an FFI fn: stored Borrow, temp Own;
      *  - NewObj / ArrayLit / Concat whose allocKind is not RC_HEAP (arena):
      *    stored Borrow, temp Own;
@@ -108,10 +123,13 @@ final class Ownership
         if ($k === Type::KIND_CELL) {
             return $this->tempCellOwned($v, $lastCallWasBuiltin) ? self::CELL : self::BORROW;
         }
-        if ($this->tempArgFlavor($v, $lastCallWasBuiltin) !== '') { return self::ownCode($v->type); }
-        return self::flavorOf($v->type) > 0 ? self::BORROW : self::NONE;
+        if ($this->tempArgFlavor($v, $lastCallWasBuiltin) !== '') { return $this->ownCode($v->type); }
+        return $this->flavorOf($v->type) > 0 ? self::BORROW : self::NONE;
     }
 
+    /** The release-helper family of a code — for an Own code, exactly what
+     *  {@see releaseFlavor} answers for the type it was derived from (`vec` /
+     *  `assoc` name the family; the element depth stays releaseFlavor's). */
     public static function flavorName(int $code): string
     {
         if ($code === self::BORROW) { return 'borrow'; }
@@ -122,7 +140,7 @@ final class Ownership
             $mix = 'mix';
             $base = $code - self::MIXED;
         }
-        if ($base === self::STR) { return $mix . 'str'; }
+        if ($base === self::STR || $base === self::GEN) { return $mix . 'str'; }
         if ($base === self::OBJ) { return $mix . 'obj'; }
         if ($base === self::VEC) { return $mix . 'vec'; }
         if ($base === self::ASSOC) { return $mix . 'assoc'; }
@@ -131,36 +149,36 @@ final class Ownership
         return $mix . '?' . $base;
     }
 
-    /** The flavor a SLOT of this representation is released by, or NONE when it
-     *  carries no refcount. An all-object union rides a bare object pointer. */
-    public static function flavorOf(Type $slot): int
+    /** The code a SLOT of this type is released by, or NONE when it carries no
+     *  refcount — the {@see releaseFlavor} decision (the {@see condFlavor} one
+     *  for a UNION), plus the closure env it does not name. */
+    public function flavorOf(Type $slot): int
     {
-        $k = $slot->kind;
-        if ($k === Type::KIND_STRING) { return self::STR; }
-        if ($k === Type::KIND_CELL) { return self::CELL; }
-        if ($k === Type::KIND_CLOSURE) { return self::CLOSURE; }
-        if ($k === Type::KIND_OBJ) {
-            return self::isClosureClass($slot->class ?? '') ? self::CLOSURE : self::OBJ;
-        }
-        if ($k === Type::KIND_ARRAY) { return $slot->isAssoc() ? self::ASSOC : self::VEC; }
-        if ($k === Type::KIND_UNION) {
-            $atoms = $slot->atoms;
-            if (\count($atoms) === 0) { return self::NONE; }
-            foreach ($atoms as $a) {
-                if ($a->kind !== Type::KIND_OBJ) { return self::NONE; }
-            }
-            return self::OBJ;
-        }
+        if (self::isClosureValueType($slot)) { return self::CLOSURE; }
+        $f = $slot->kind === Type::KIND_UNION ? $this->condFlavor($slot) : $this->releaseFlavor($slot);
+        if ($f === '') { return self::NONE; }
+        if ($f === 'str') { return $slot->kind === Type::KIND_OBJ ? self::GEN : self::STR; }
+        if ($f === 'cell') { return self::CELL; }
+        if ($f === 'obj') { return self::OBJ; }
+        if (\str_starts_with($f, 'assoc')) { return self::ASSOC; }
+        if (\str_starts_with($f, 'vec')) { return self::VEC; }
         return self::NONE;
     }
 
-    /** The Own code of a value classified owned. The one owned value with no
-     *  slot flavor is an ERASED bare-`array` property read (KIND_UNKNOWN), which
-     *  vec and assoc release through the one buffer family. */
-    private static function ownCode(Type $t): int
+    /**
+     * The Own code of a value classified owned. Two owned values have no slot
+     * flavor, and both codes are CONVENTIONS — a consumer releases by the SLOT's
+     * representation, never by this code:
+     *  - an ERASED bare-`array` property read (KIND_UNKNOWN) → VEC (vec and
+     *    assoc release through the one buffer family);
+     *  - a store-side conditional over a UNION with an empty-class obj atom
+     *    (the TWIN-DRIFT {@see condOwnedStored} names) → OBJ.
+     */
+    private function ownCode(Type $t): int
     {
-        $c = self::flavorOf($t);
-        return $c > 0 ? $c : self::VEC;
+        $c = $this->flavorOf($t);
+        if ($c > 0) { return $c; }
+        return $t->kind === Type::KIND_UNION ? self::OBJ : self::VEC;
     }
 
     public static function isClosureClass(string $cls): bool
@@ -184,7 +202,9 @@ final class Ownership
             || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
     }
 
-    private function isEnumClass(string $cls): bool
+    /** An enum case is a value-type ORDINAL (no rc header) — never rc-managed,
+     *  like an int. `$cls` is an obj type's class name. */
+    public function isEnumClass(string $cls): bool
     {
         return $cls !== '' && isset($this->ctx->enums[$cls]);
     }
@@ -437,6 +457,9 @@ final class Ownership
      * Does an ELEMENT read of this type co-own what it hands out? One predicate
      * for the store side ({@see storedOwned}) and the emitter's element-read
      * retain ({@see Passes\EmitLlvmLocals::elemReadCoOwn}).
+     *
+     * @param array<string, EnumDef> $enums
+     * @param array<string, ClassDef> $classes
      */
     public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
     {
@@ -673,7 +696,7 @@ final class Ownership
             if ($fn === $cn) { return true; }
         }
         if ($lastCallWasBuiltin) { return false; }
-        return isset($this->ctx->definedFns[$fn])
+        return isset($this->ctx->moduleFns[$fn])
             && !($this->ctx->returnsByRef[$fn] ?? false);
     }
 
@@ -757,7 +780,7 @@ final class Ownership
             if ($ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL || $ck === Node::KIND_INVOKE) { return 'closure'; }
             if ($ck === Node::KIND_CALL) {
                 $cfn = $a->function;
-                if (isset($this->ctx->definedFns[$cfn]) && !($this->ctx->returnsByRef[$cfn] ?? false)) { return 'closure'; }
+                if (isset($this->ctx->moduleFns[$cfn]) && !($this->ctx->returnsByRef[$cfn] ?? false)) { return 'closure'; }
             }
             return '';
         }
@@ -788,7 +811,7 @@ final class Ownership
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
-            $owned = isset($this->ctx->definedFns[$fn]) && !($this->ctx->returnsByRef[$fn] ?? false);
+            $owned = isset($this->ctx->moduleFns[$fn]) && !($this->ctx->returnsByRef[$fn] ?? false);
             // …or a BUILTIN that mints a fresh array. A module body is evidence
             // a user BODY was called, and a codegen builtin has no body — so
             // `array_slice(explode($d, $s), 0, 2)` stranded the exploded vec:
