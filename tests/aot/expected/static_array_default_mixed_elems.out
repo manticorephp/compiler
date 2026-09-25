@@ -1,0 +1,26 @@
+bool(true)
+int(3)
+string(5) "a.php"
+float(1.5)
+bool(true)
+float(1.5)
+f=false n=7 s='x' 
+a=1 b=2 
+int(1)
+string(3) "two"
+float(3)
+bool(true)
+f=false n=7 s='x' a=1 b=2 
+bool(true)
+int(3)
+NULL
+float(1.5)
+bool(true)
+float(1.5)
+f=false n=7 s='x' 
+a=1 b=2 
+int(1)
+string(3) "two"
+float(3)
+bool(true)
+f=false n=7 s='x' a=1 b=2 

@@ -706,8 +706,16 @@ trait LowerClasses
      */
     private function cellDefault(bool $isCellProp, Node $def): Node
     {
-        if (!$isCellProp) { return $def; }
         $k = $def->kind;
+        // An array slot's literal is never seen by InferTypes either: untyped,
+        // `['f' => true, 'n' => 3]` was built with its elements RAW under no
+        // element hint, and every erased reader (`foreach`, `array_merge`)
+        // decoded the raw `1` as a double (sebastian/diff's
+        // `StrictUnifiedDiffOutputBuilder::$default`).
+        if (!$isCellProp) {
+            if ($k === Node::KIND_ARRAY_LIT) { $def->type = $this->staticDefaultLitType($def); }
+            return $def;
+        }
         // A float default is its own cell (canonical NaN-boxing); an ARRAY
         // literal must box like a scalar or the slot reads back a bare pointer
         // under a cell claim (`public static mixed $a = [1, 2]` var_dumped a
