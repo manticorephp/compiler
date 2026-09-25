@@ -817,6 +817,7 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
         $this->litTableCount = 0;
+        $this->dynScopeRelTables = [];
         $this->dynfLookupEmitted = false;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
@@ -2282,6 +2283,10 @@ final class EmitLlvm implements EmitVisitor
 
     /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
     private string $litTableBodies = '';
+
+    /** {@see EmitLlvmObjects::dynScopeRelated}: scope class => [symbol, n].
+     *  @var array<string, array{string, int}> */
+    private array $dynScopeRelTables = [];
 
     private int $litTableCount = 0;
 

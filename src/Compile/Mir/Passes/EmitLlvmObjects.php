@@ -4062,6 +4062,7 @@ trait EmitLlvmObjects
             }
             $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
             $dp2->line = $dp->line;
+            $dp2->scope = $dp->scope;
             $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
             $iv2->line = $iv->line;
             return $out . $this->emitDynMethodCall($dp2, $iv2);
@@ -4069,6 +4070,10 @@ trait EmitLlvmObjects
         $recv = $dp->object;
         $nameNode = $dp->name;
         $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
+        if ($methods !== null && $this->dynamicMethodMeta) {
+            $viaTable = $this->emitDynMethodDispatch($dp, $iv, $methods);
+            if ($viaTable !== null) { return $viaTable; }
+        }
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
             // Evaluate the name for side effects and yield null (open case).
@@ -4492,6 +4497,196 @@ trait EmitLlvmObjects
 
     /** Existing name-chain dispatcher, retained as the semantic fallback when
      * the lightweight table has no ordinary/magic entry for this runtime name. */
+    /**
+     * `$o->$m(args)` through the class's method table, with php's visibility:
+     * `__mc_dyn_method_dispatch` runs a method the call site's scope may see,
+     * sends one it may not (or an undeclared name) to `__call` or throws php's
+     * Error. Inline arms remain only for the names the table cannot run — a
+     * by-ref or variadic signature, an abstract row, a prelude class without a
+     * table — and those arms re-emit the operands, so they need plain locals.
+     *
+     * Replaces, for every shape it accepts, the name chains that spliced one
+     * arm per method in the PROGRAM into the site (1 391 arms in
+     * TraceableEventDispatcher::__call) and that called private methods from
+     * any scope and answered an unknown name with null. Null = not this shape;
+     * the caller keeps the older paths.
+     *
+     * @param array<string, Type> $methods
+     */
+    private function emitDynMethodDispatch(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): ?string
+    {
+        $recv = $dp->object;
+        $rk = $recv->type->kind;
+        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN
+            && $rk !== Type::KIND_UNION && $rk !== Type::KIND_OBJ) {
+            return null;
+        }
+        $argc = \count($iv->args);
+        /** @var Node[] $fixedArgs */
+        $fixedArgs = $iv->args;
+        $pack = null;
+        $packElem = null;
+        foreach ($iv->args as $i => $a) {
+            if ($a->kind !== Node::KIND_SPREAD) { continue; }
+            if ($argc !== 1) { return null; }
+            $op = $this->asSpreadNode($a)->operand;
+            // `...[a, b]` is the argument list `a, b`.
+            if ($op instanceof \Compile\Mir\ArrayLit) {
+                $fixedArgs = [];
+                foreach ($op->elements as $e) {
+                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { return null; }
+                    $fixedArgs[] = $e->value;
+                }
+                continue;
+            }
+            $pt = $op->type;
+            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { return null; }
+            $el = $pt->element;
+            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+                $packElem = $el;
+            }
+            $pack = $op;
+        }
+        $inline = $this->dynInlineOnlyNames($methods);
+        if ($inline !== [] && !$this->dynOperandsPlain($dp, $iv)) { return null; }
+
+        $out = $this->emitObjPtrOf($recv);
+        $out .= $this->coerceToI64();
+        $recvArg = $this->lastValue;
+        $out .= $this->emitDynMemberKey($dp->name);
+        $keyP = $this->lastValue;
+        // A borrowed cell pack rides as is; a concrete-element one is rebuilt
+        // as cells (the trampoline's contract) and that copy is ours to drop.
+        $fresh = $pack === null || $packElem !== null;
+        if ($pack !== null) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToPtr();
+            if ($packElem !== null) {
+                $out .= $this->emitVecToCellArray($packElem);
+                $out .= $this->cellToPtr();
+            }
+        } else {
+            $elems = [];
+            foreach ($fixedArgs as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell())));
+            $out .= $this->coerceToPtr();
+        }
+        $argsP = $this->lastValue;
+        [$relSym, $relN] = $this->dynScopeRelated($dp->scope);
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $res . "\n";
+        $this->rt->needsStrcmp = true;
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = call i1 @__mc_dyn_method_dispatch(i64 ' . $recvArg . ', ptr ' . $keyP
+              . ', ptr ' . $argsP . ', ptr ' . $this->litStr($dp->scope) . ', ptr ' . $relSym
+              . ', i64 ' . (string)$relN . ', ptr ' . $res . ")\n";
+        if ($fresh) {
+            $ai = $this->ssa->allocReg();
+            $out .= '  ' . $ai . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+            $out .= $this->rcReleaseReg($ai, 'veccell');
+        }
+        $endL = $this->ssa->allocLabel('dynd.end');
+        $inlL = $this->ssa->allocLabel('dynd.inline');
+        $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
+        $out .= $inlL . ":\n";
+        if ($inline !== []) {
+            $out .= $this->emitDynMethodInlineFallback($dp, $iv, $inline);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /**
+     * The candidate names `__mc_dyn_method_dispatch` can hand back unrun: some
+     * class declaring the name has no uniform trampoline for it (by-ref,
+     * variadic, abstract) or no method table at all (prelude, struct).
+     *
+     * @param array<string, Type> $methods
+     * @return array<string, Type>
+     */
+    private function dynInlineOnlyNames(array $methods): array
+    {
+        $out = [];
+        foreach ($methods as $m => $rt) {
+            foreach ($this->methodHolders((string)$m) as $cn => $decl) {
+                $cd = $this->classes[$cn];
+                if ($cd->isStruct || $cd->isPreludeClass) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.no_table', 1); }
+                    $out[$m] = $rt;
+                    break;
+                }
+                $mm = $this->classes[$decl]->methodMeta[(string)$m] ?? null;
+                // An abstract row belongs to a class that is never the receiver:
+                // the concrete class in hand has its own row.
+                if ($mm !== null && $mm->isAbstract) { continue; }
+                if ($mm === null || !\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.signature', 1); }
+                    $out[$m] = $rt;
+                    break;
+                }
+                $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, (string)$m);
+                if (!isset($this->sigs->paramTypes[$tramp])) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.no_tramp', 1); }
+                    $out[$m] = $rt;
+                    break;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** Receiver, name and every argument can be emitted twice: plain locals/literals. */
+    private function dynOperandsPlain(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): bool
+    {
+        if ($dp->object->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        $nk = $dp->name->kind;
+        if ($nk !== Node::KIND_LOAD_LOCAL && $nk !== Node::KIND_STRING_CONST) { return false; }
+        foreach ($iv->args as $a) {
+            $x = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+            if ($x->kind !== Node::KIND_LOAD_LOCAL && $x->kind !== Node::KIND_STRING_CONST
+                && $x->kind !== Node::KIND_INT_CONST) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The classes a protected method's declarer may be for scope `$scope` to see
+     * it — the scope's ancestors and descendants — as a `[n x ptr]` of names.
+     *
+     * @return array{string, int} [symbol or 'null', n]
+     */
+    private function dynScopeRelated(string $scope): array
+    {
+        if ($scope === '') { return ['null', 0]; }
+        if (isset($this->dynScopeRelTables[$scope])) { return $this->dynScopeRelTables[$scope]; }
+        $names = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->name === $scope) { continue; }
+            if ($this->classIsA($cd->name, $scope) || $this->classIsA($scope, $cd->name)) {
+                $names[] = 'ptr ' . $this->litStr(\ltrim($cd->name, '\\'));
+            }
+        }
+        if ($names === []) {
+            $this->dynScopeRelTables[$scope] = ['null', 0];
+            return ['null', 0];
+        }
+        $sym = '@.dynd.rel.' . (string)\count($this->dynScopeRelTables);
+        $this->dynfExtraBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($names)
+            . ' x ptr] [' . \implode(', ', $names) . "]\n";
+        $this->dynScopeRelTables[$scope] = [$sym, \count($names)];
+        return [$sym, \count($names)];
+    }
+
     private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): string
     {
         $recv = $dp->object;

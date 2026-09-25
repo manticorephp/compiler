@@ -645,7 +645,9 @@ trait LowerExprs
             return $pa->nullsafe ? $this->lowerNullsafeProp($pa) : $this->lowerPropertyAccess($pa);
         }
         if ($expr->kind === 'DynProp') {
-            return new DynProp_($this->lowerExpr($this->dynPropObject($expr)), $this->lowerExpr($this->dynPropName($expr)), Type::cell());
+            $dyn = new DynProp_($this->lowerExpr($this->dynPropObject($expr)), $this->lowerExpr($this->dynPropName($expr)), Type::cell());
+            $dyn->scope = $this->currentLowerClass;
+            return $dyn;
         }
         if ($expr->kind === 'MethodCall')     { return $this->lowerMethodCall($expr); }
         if ($expr->kind === 'StaticCall')     { return $this->lowerStaticCall($expr); }

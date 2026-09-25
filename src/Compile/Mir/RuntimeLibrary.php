@@ -92,7 +92,7 @@ final class RuntimeLibrary
     /** Lightweight dynamic-method row: stable name plus uniform thunk pointer. */
     public static function dynamicMethodRowType(): string
     {
-        return '{ ptr, ptr }';
+        return '{ ptr, ptr, ptr, i64 }';
     }
 
     /** Lightweight per-class dynamic-method table: rows plus optional __call thunk. */
@@ -114,10 +114,11 @@ final class RuntimeLibrary
         return [$def, 'ptr ' . $sym];
     }
 
-    /** Build one `{ ptr name, ptr trampoline }` row. */
-    public static function dynamicMethodRow(string $nameIr, string $tramp): string
+    /** Build one `{ ptr name, ptr trampoline, ptr declaring class, i64 visibility }` row. */
+    public static function dynamicMethodRow(string $nameIr, string $tramp, string $declIr, int $vis): string
     {
-        return self::dynamicMethodRowType() . ' { ptr ' . $nameIr . ', ptr ' . $tramp . ' }';
+        return self::dynamicMethodRowType() . ' { ptr ' . $nameIr . ', ptr ' . $tramp
+             . ', ptr ' . $declIr . ', i64 ' . (string)$vis . ' }';
     }
 
     /**
@@ -837,14 +838,14 @@ final class RuntimeLibrary
         $out .= "  %done = icmp uge i64 %i, %cnt\n";
         $out .= "  br i1 %done, label %miss, label %check\n";
         $out .= "check:\n";
-        $out .= "  %off = mul i64 %i, 16\n";
+        $out .= '  %off = mul i64 %i, ' . (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE . "\n";
         $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
         $out .= "  %np = load ptr, ptr %row\n";
         $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %cmp, 0\n";
         $out .= "  br i1 %eq, label %hit, label %next\n";
         $out .= "hit:\n";
-        $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
+        $out .= '  %fp = getelementptr i8, ptr %row, i64 ' . (string)\Compile\MemoryAbi::DYN_METHOD_ROW_TRAMP_OFFSET . "\n";
         $out .= "  %fv = load ptr, ptr %fp\n";
         $out .= "  %fi = ptrtoint ptr %fv to i64\n";
         $out .= "  ret i64 %fi\n";
@@ -868,7 +869,7 @@ final class RuntimeLibrary
         $out .= "  %done = icmp uge i64 %i, %cnt\n";
         $out .= "  br i1 %done, label %hmiss, label %hcheck\n";
         $out .= "hcheck:\n";
-        $out .= "  %off = mul i64 %i, 16\n";
+        $out .= '  %off = mul i64 %i, ' . (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE . "\n";
         $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
         $out .= "  %np = load ptr, ptr %row\n";
         $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
@@ -958,6 +959,123 @@ final class RuntimeLibrary
         $out .= "  %result = call i64 %fp(i64 %obj, i64 %argsI)\n";
         $out .= "  ret i64 %result\n";
         $out .= "miss2:\n  ret i64 0\n}\n";
+        $out .= self::dynamicMethodDispatch();
+        return $out;
+    }
+
+    /**
+     * `i1 @__mc_dyn_method_dispatch(i64 obj, ptr name, ptr args, ptr scope,
+     *  ptr rel, i64 nrel, ptr outp)` — php's resolution of an ERASED
+     * `$obj->$name(...$args)` called from class `scope` ('' = global scope).
+     *
+     * A declared method the scope may see runs through its trampoline; one it
+     * may not see — private outside its declaring class, protected outside that
+     * class's hierarchy (`rel` lists the scope's ancestors and descendants) —
+     * and an undeclared name go to the class's `__call`, or throw php's Error
+     * through `__mc_dyn_method_error`. 1 = handled (result in `outp`); 0 = a
+     * visible method with no uniform trampoline (by-ref, variadic, abstract) or
+     * a class without a table (prelude): the caller's inline arms own those.
+     */
+    private static function dynamicMethodDispatch(): string
+    {
+        $rs = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE;
+        $tr = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_TRAMP_OFFSET;
+        $dc = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_DECL_OFFSET;
+        $vs = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_VIS_OFFSET;
+        $descOff = (string)\Compile\MemoryAbi::DESCRIPTOR_DYN_METHODS_OFFSET;
+        $out = "define i1 @__mc_dyn_method_dispatch(i64 %obj, ptr %name, ptr %args, ptr %scope, ptr %rel, i64 %nrel, ptr %outp) {\nentry:\n";
+        $out .= "  %objp = inttoptr i64 %obj to ptr\n";
+        $out .= "  %descI = load i64, ptr %objp\n";
+        $out .= "  %descNull = icmp eq i64 %descI, 0\n";
+        $out .= "  br i1 %descNull, label %inline, label %haveDesc\n";
+        $out .= "haveDesc:\n";
+        $out .= "  %descp = inttoptr i64 %descI to ptr\n";
+        $out .= '  %dynP = getelementptr i8, ptr %descp, i64 ' . $descOff . "\n";
+        $out .= "  %dyn = load ptr, ptr %dynP\n";
+        $out .= "  %dynNull = icmp eq ptr %dyn, null\n";
+        $out .= "  br i1 %dynNull, label %inline, label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %cnt = load i64, ptr %dyn\n";
+        $out .= "  %rowsP = getelementptr i8, ptr %dyn, i64 8\n";
+        $out .= "  %rows = load ptr, ptr %rowsP\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %scan ], [ %i1, %next ]\n";
+        $out .= "  %done = icmp uge i64 %i, %cnt\n";
+        $out .= "  br i1 %done, label %absent, label %check\n";
+        $out .= "check:\n";
+        $out .= '  %off = mul i64 %i, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
+        $out .= "  %np = load ptr, ptr %row\n";
+        $out .= "  %c = call i32 @strcmp(ptr %np, ptr %name)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  br i1 %eq, label %found, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "found:\n";
+        $out .= '  %visP = getelementptr i8, ptr %row, i64 ' . $vs . "\n";
+        $out .= "  %vis = load i64, ptr %visP\n";
+        $out .= '  %declP = getelementptr i8, ptr %row, i64 ' . $dc . "\n";
+        $out .= "  %decl = load ptr, ptr %declP\n";
+        $out .= "  %isPub = icmp eq i64 %vis, " . (string)\Compile\MemoryAbi::DYN_METHOD_VIS_PUBLIC . "\n";
+        $out .= "  br i1 %isPub, label %visible, label %notPub\n";
+        $out .= "notPub:\n";
+        $out .= "  %sc = call i32 @strcmp(ptr %scope, ptr %decl)\n";
+        $out .= "  %same = icmp eq i32 %sc, 0\n";
+        $out .= "  br i1 %same, label %visible, label %notSame\n";
+        $out .= "notSame:\n";
+        $out .= "  %isProt = icmp eq i64 %vis, " . (string)\Compile\MemoryAbi::DYN_METHOD_VIS_PROTECTED . "\n";
+        $out .= "  br i1 %isProt, label %relLoop, label %hidden\n";
+        $out .= "relLoop:\n";
+        $out .= "  %j = phi i64 [ 0, %notSame ], [ %j1, %relNext ]\n";
+        $out .= "  %rdone = icmp uge i64 %j, %nrel\n";
+        $out .= "  br i1 %rdone, label %hidden, label %relCheck\n";
+        $out .= "relCheck:\n";
+        $out .= "  %roff = mul i64 %j, 8\n";
+        $out .= "  %rp = getelementptr i8, ptr %rel, i64 %roff\n";
+        $out .= "  %rn = load ptr, ptr %rp\n";
+        $out .= "  %rc = call i32 @strcmp(ptr %rn, ptr %decl)\n";
+        $out .= "  %req = icmp eq i32 %rc, 0\n";
+        $out .= "  br i1 %req, label %visible, label %relNext\n";
+        $out .= "relNext:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %relLoop\n";
+        $out .= "visible:\n";
+        $out .= '  %tp = getelementptr i8, ptr %row, i64 ' . $tr . "\n";
+        $out .= "  %tramp = load ptr, ptr %tp\n";
+        $out .= "  %tnull = icmp eq ptr %tramp, null\n";
+        $out .= "  br i1 %tnull, label %inline, label %invoke\n";
+        $out .= "invoke:\n";
+        $out .= "  %argsI = ptrtoint ptr %args to i64\n";
+        $out .= "  %result = call i64 %tramp(i64 %obj, i64 %argsI)\n";
+        $out .= "  store i64 %result, ptr %outp\n";
+        $out .= "  ret i1 true\n";
+        $out .= "hidden:\n";
+        $out .= "  br label %magic\n";
+        $out .= "absent:\n";
+        $out .= "  br label %magic\n";
+        $out .= "magic:\n";
+        $out .= "  %kind = phi i64 [ %vis, %hidden ], [ -1, %absent ]\n";
+        $out .= "  %errDecl = phi ptr [ %decl, %hidden ], [ %name, %absent ]\n";
+        $out .= "  %magicP = getelementptr i8, ptr %dyn, i64 16\n";
+        $out .= "  %mfn = load ptr, ptr %magicP\n";
+        $out .= "  %mnull = icmp eq ptr %mfn, null\n";
+        $out .= "  br i1 %mnull, label %error, label %invokeMagic\n";
+        $out .= "invokeMagic:\n";
+        $out .= "  %nameI = ptrtoint ptr %name to i64\n";
+        $out .= "  %margsI = ptrtoint ptr %args to i64\n";
+        $out .= "  %mres = call i64 %mfn(i64 %obj, i64 %nameI, i64 %margsI)\n";
+        $out .= "  store i64 %mres, ptr %outp\n";
+        $out .= "  ret i1 true\n";
+        $out .= "error:\n";
+        $out .= "  %eNameI = ptrtoint ptr %name to i64\n";
+        $out .= "  %eDeclI = ptrtoint ptr %errDecl to i64\n";
+        $out .= "  %eScopeI = ptrtoint ptr %scope to i64\n";
+        $out .= "  %eres = call i64 @manticore___mc_dyn_method_error(i64 %obj, i64 %eNameI, i64 %kind, i64 %eDeclI, i64 %eScopeI)\n";
+        $out .= "  store i64 %eres, ptr %outp\n";
+        $out .= "  ret i1 true\n";
+        $out .= "inline:\n  ret i1 false\n}\n";
         return $out;
     }
 
