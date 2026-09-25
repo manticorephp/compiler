@@ -1,0 +1,70 @@
+function g
+  L4 store_local: {n}
+  L5 label: {i,n}
+  L6 incdec: {i,n}
+  L7 if: {i,n}
+    then
+      L7 store_local: {i,n}
+      L7 goto: {i,n,p}
+  L8 for: {i,n}
+    body
+      L9 foreach: {i,j,n}
+        body
+          L9 store_local: {i,j,n,v}
+          L9 if: {i,j,n,q,v}
+            then
+              L9 break: {i,j,n,q,v}
+          L9 continue: {i,j,n,q,v}
+  L11 dowhile: {i,j,n}
+    body
+      L11 store_local: {i,j,n}
+      L11 if: {i,j,n,r}
+        then
+          L11 continue: {i,j,n,r}
+      L11 store_local: {i,j,n,r}
+  L12 try_catch: {i,j,n,r}
+    try
+      L13 while: {i,j,n,r}
+        body
+          L13 store_local: {i,j,n,r}
+          L13 if: {i,j,m,n,r}
+            then
+              L13 break: {i,j,m,n,r}
+          L13 try_catch: {i,j,m,n,r}
+            try
+              L13 return: {i,j,m,n,r}
+            finally
+              L13 store_local: {i,j,m,n,r}
+    finally
+      L14 store_local: {i,j,n,r}
+  L15 store_local: {i,j,n,r,w}
+  L16 echo: {i,j,n,o,r,w,y}
+  L17 return: {i,j,n,o,r,w,y}
+edges
+  fallthrough @L5 label <- L4 store_local: {i,n} -> {i,n}
+  goto @L7 goto <- L7 goto: {i,n,p} -> {i,n}
+  if-else @L7 if <- L7 cmp: {i,n} -> {i,n}
+  break @L9 break <- L9 break: {i,j,n,q,v} -> {i,j,n}
+  if-else @L9 if <- L9 load_local: {i,j,n,q,v} -> {i,j,n,q,v}
+  continue @L9 continue <- L9 continue: {i,j,n,q,v} -> {i,j,n}
+  loop-exit @L9 foreach <- L9 array_lit: {i,j,n} -> {i,j,n}
+  loop-back @L8 for <- L8 incdec: {i,j,n} -> {i,j,n}
+  loop-exit @L8 for <- L8 cmp: {i,j,n} -> {i,j,n}
+  continue @L11 continue <- L11 continue: {i,j,n,r} -> {i,j,n,r}
+  if-else @L11 if <- L11 load_local: {i,j,n,r} -> {i,j,n,r}
+  loop-back @L11 dowhile <- L11 cmp: {i,j,n,r} -> {i,j,n}
+  loop-exit @L11 dowhile <- L11 cmp: {i,j,n,r} -> {i,j,n,r}
+  break @L13 break <- L13 break: {i,j,m,n,r} -> {i,j,n,r}
+  if-else @L13 if <- L13 load_local: {i,j,m,n,r} -> {i,j,m,n,r}
+  finally @L13 try_catch <- -: {i,j,m,n,r} -> {i,j,m,n,r}
+  finally @L13 try_catch <- L13 return: {i,j,m,n,r} -> {i,j,m,n,r}
+  loop-exit @L13 while <- L13 bool_const: {i,j,n,r} -> {i,j,n,r}
+  finally @L12 try_catch <- L13 while: {i,j,n,r} -> {i,j,n,r}
+  finally @L12 try_catch <- -: {i,j,n,r} -> {i,j,n,r}
+  finally @L12 try_catch <- L13 return: {fin,i,j,m,n,r} -> {i,j,n,r}
+  return @L13 return <- L14 store_local: {i,j,n,r,w} -> {i,j,n,r,w}
+  throw @L15 throw <- L15 throw: {i,j,n,r,w} -> {i,j,n,r,w}
+  match-arm @L15 store_local <- L15 store_local: {i,j,n,o,r,w} -> {i,j,n,o,r,w}
+  if-then @L16 ternary <- L16 int_const: {i,j,n,o,r,w,y} -> {i,j,n,o,r,w,y}
+  if-else @L16 ternary <- L16 int_const: {i,j,n,o,r,w,y} -> {i,j,n,o,r,w,y}
+  return @L17 return <- L17 return: {i,j,n,o,r,w,y} -> {i,j,n,o,r,w,y}

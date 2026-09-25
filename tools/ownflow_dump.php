@@ -4,9 +4,13 @@
  * Zend-hosted driver for {@see \Compile\Mir\Flow\Forward}: lowers ONE file
  * through the pipeline up to SpillFreshBases (the point where ownership
  * analysis will run), then runs a "definitely defined" lattice over one
- * function and prints the state before every statement.
+ * function and prints the state before every statement, then every edge.
  *
- *   php -d xdebug.mode=off tools/ownflow_dump.php <file.php> <fn>
+ *   php -d xdebug.mode=off tools/ownflow_dump.php <file.php> <fn>[,<fn>...] [diverge]
+ *
+ * `diverge` swaps in a lattice whose `equal` never holds, so any loop must hit
+ * Forward's iteration cap. A LogicException from Forward is printed, not fatal.
+ * `tools/ownflow_check.sh` diffs this output against `tests/flow/*.expected`.
  *
  * MC_SRC / MC_SIG / MANTICORE_PRELUDE default to this checkout.
  */
@@ -56,11 +60,12 @@ if (!\function_exists('str_bytes')) {
 \Compile\Debug::initFromEnvironment();
 
 if ($argc < 3) {
-    \fwrite(STDERR, "usage: ownflow_dump.php <file.php> <fn>\n");
+    \fwrite(STDERR, "usage: ownflow_dump.php <file.php> <fn>[,<fn>...] [diverge]\n");
     exit(64);
 }
 $file = $argv[1];
-$fnName = $argv[2];
+$fnNames = \explode(',', $argv[2]);
+$diverge = $argc > 3 && $argv[3] === 'diverge';
 if (!\is_file($file)) {
     \fwrite(STDERR, "not a file: $file\n");
     exit(66);
@@ -85,20 +90,12 @@ if ($module === null) {
     exit(70);
 }
 
-$fn = null;
-foreach ($module->functions as $f) {
-    if (\strtolower($f->name) === \strtolower($fnName)) { $fn = $f; break; }
-}
-if ($fn === null) {
-    \fwrite(STDERR, "no function $fnName\n");
-    exit(65);
-}
 
 /** "Definitely defined": name → 1 once stored on every path; join = intersection. */
 final class DefinedLattice implements Lattice
 {
     /** @param array<string,int> $params */
-    public function __construct(private array $params) {}
+    public function __construct(private array $params, private bool $diverge) {}
 
     public function entry(): array { return $this->params; }
 
@@ -113,6 +110,7 @@ final class DefinedLattice implements Lattice
 
     public function equal(array $a, array $b): bool
     {
+        if ($this->diverge) { return false; }
         if (\count($a) !== \count($b)) { return false; }
         foreach ($a as $k => $v) {
             if (!isset($b[$k])) { return false; }
@@ -148,10 +146,15 @@ final class DefinedLattice implements Lattice
     /** @var string[] */
     public array $edges = [];
 
-    public function onEdge(string $kind, Node $at, array $out, array $joined): void
+    public function onEdge(string $kind, Node $at, ?Node $pred, array $out, array $joined): void
     {
-        $this->edges[] = $kind . ' @' . ($at->line > 0 ? 'L' . $at->line : '?') . ' ' . $at->kind
+        $this->edges[] = $kind . ' @' . self::where($at) . ' <- ' . ($pred === null ? '-' : self::where($pred))
             . ': ' . self::fmt($out) . ' -> ' . self::fmt($joined);
+    }
+
+    public static function where(Node $n): string
+    {
+        return 'L' . (string)$n->line . ' ' . $n->kind;
     }
 
     /** @param array<string,int> $s */
@@ -163,12 +166,6 @@ final class DefinedLattice implements Lattice
     }
 }
 
-$params = [];
-foreach ($fn->params as $p) { $params[$p->name] = 1; }
-$lat = new DefinedLattice($params);
-$flow = new Forward($lat);
-$flow->run($fn->body);
-$before = $flow->stateBefore();
 
 /** @param Node[] $stmts */
 function dumpStmts(array $stmts, array $before, int $depth): void
@@ -208,7 +205,27 @@ function nestedBodies(Node $s): array
     return $out;
 }
 
-echo "function {$fn->name}\n";
-dumpStmts($fn->body->stmts, $before, 1);
-echo "edges\n";
-foreach ($lat->edges as $e) { echo '  ' . $e . "\n"; }
+foreach ($fnNames as $fnName) {
+    $fn = null;
+    foreach ($module->functions as $f) {
+        if (\strtolower($f->name) === \strtolower($fnName)) { $fn = $f; break; }
+    }
+    if ($fn === null) {
+        \fwrite(STDERR, "no function $fnName\n");
+        exit(65);
+    }
+    $params = [];
+    foreach ($fn->params as $p) { $params[$p->name] = 1; }
+    $lat = new DefinedLattice($params, $diverge);
+    $flow = new Forward($lat);
+    echo "function {$fn->name}\n";
+    try {
+        $flow->run($fn->body);
+    } catch (\LogicException $e) {
+        echo '  LogicException: ' . $e->getMessage() . "\n";
+        continue;
+    }
+    dumpStmts($fn->body->stmts, $flow->stateBefore(), 1);
+    echo "edges\n";
+    foreach ($lat->edges as $e) { echo '  ' . $e . "\n"; }
+}

@@ -11,15 +11,20 @@ use Compile\Mir\Node;
  * lattice's own business (bottom, or "unknown").
  *
  * `transfer` sees every expression node AFTER its children were evaluated, and
- * every statement that is not control flow. Control nodes (If_, loops, Switch_,
- * TryCatch_, Break_, Continue_, Goto_, Label_, Block) never reach it, with one
- * exception: a Foreach_ is passed at the top of EVERY iteration, after the head
- * join, and that call is its key/value binding.
+ * every statement that is not pure control flow. Of the nodes that steer
+ * control, these DO reach it: Return_ and Throw_ (after their operand, before
+ * the jump), Ternary, NullCoalesce_ and Match_ (once, on the join of their
+ * arms), and Foreach_ — at the top of EVERY iteration, after the head join, as
+ * its key/value binding. If_, While_, For_, DoWhile_, Switch_, TryCatch_,
+ * Break_, Continue_, Goto_, Label_ and Block never do.
  *
  * `onEdge` is called once per control edge after the whole body converged, in
- * the order the edges were first taken: `$out` is the state leaving the
- * predecessor, `$joined` the merged state at the target. See {@see Forward} for
- * which node `$at` names per kind.
+ * the order the edges were first taken. `$at` names the edge's construct,
+ * `$pred` the node that ends the predecessor path (null only for an implicit
+ * source: the exceptional path into a finally, or the fall-off return of an
+ * empty body — whose `$at` is the body Block itself). `$out` is the state
+ * leaving the predecessor, `$joined` the merged state at the target. The
+ * per-kind table is on {@see Forward}.
  */
 interface Lattice
 {
@@ -58,5 +63,5 @@ interface Lattice
      * @param array<string, int> $out
      * @param array<string, int> $joined
      */
-    public function onEdge(string $kind, Node $at, array $out, array $joined): void;
+    public function onEdge(string $kind, Node $at, ?Node $pred, array $out, array $joined): void;
 }

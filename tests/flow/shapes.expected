@@ -1,0 +1,102 @@
+function f
+  L4 if: {n}
+    then
+    else
+  L5 while: {n}
+    body
+      L5 if: {n}
+        then
+          L5 break: {n}
+  L6 foreach: {n}
+    body
+      L6 store_local: {k,n,v}
+      L6 continue: {e,k,n,v}
+  L7 switch: {n}
+    case#0
+      L7 store_local: {n}
+      L7 break: {g,n}
+    default#1
+      L7 store_local: {n}
+  L8 try_catch: {n}
+    try
+      L8 store_local: {n}
+    catch#0
+      L8 store_local: {n,x}
+    finally
+      L8 store_local: {n}
+  L9 label: {n,w}
+  L10 return: {n,w}
+edges
+  if-then @L4 if <- L0 block: {n} -> {n}
+  if-else @L4 if <- L0 block: {n} -> {n}
+  break @L5 break <- L5 break: {n} -> {n}
+  if-else @L5 if <- L5 cmp: {n} -> {n}
+  loop-back @L5 while <- L5 if: {n} -> {n}
+  loop-exit @L5 while <- L5 cmp: {n} -> {n}
+  continue @L6 continue <- L6 continue: {e,k,n,v} -> {n}
+  loop-exit @L6 foreach <- L6 array_lit: {n} -> {n}
+  switch-arm @L7 switch <- L7 int_const: {n} -> {n}
+  break @L7 break <- L7 break: {g,n} -> {n}
+  switch-arm @L7 switch <- L7 int_const: {n} -> {n}
+  fallthrough @L7 switch <- L7 store_local: {h,n} -> {n}
+  finally @L8 try_catch <- L8 store_local: {n,t} -> {n}
+  catch @L8 try_catch <- L8 store_local: {n} -> {n}
+  finally @L8 try_catch <- L8 store_local: {n,u,x} -> {n}
+  finally @L8 try_catch <- -: {n} -> {n}
+  fallthrough @L9 label <- L8 try_catch: {n,w} -> {n,w}
+  return @L10 return <- L10 return: {n,w} -> {n,w}
+function f2
+  L14 if: {n}
+    then
+      L14 store_local: {n}
+    else
+      L14 store_local: {n}
+  L15 while: {n}
+    body
+      L15 store_local: {n}
+      L15 if: {c,n}
+        then
+          L15 break: {c,n}
+      L15 store_local: {c,n}
+  L16 foreach: {n}
+    body
+      L16 store_local: {k,n,v}
+      L16 continue: {e,k,n,v}
+  L17 switch: {n}
+    case#0
+      L17 store_local: {n}
+      L17 break: {g,n}
+    default#1
+      L17 store_local: {n}
+  L18 try_catch: {n}
+    try
+      L18 store_local: {n}
+    catch#0
+      L18 store_local: {n,x}
+    finally
+      L18 store_local: {n}
+  L19 label: {n,w}
+  L19 store_local: {n,w}
+  L20 echo: {n,w,z}
+  L21 return: {n,w,z}
+edges
+  if-then @L14 if <- L14 store_local: {a,n} -> {n}
+  if-else @L14 if <- L14 store_local: {b,n} -> {n}
+  break @L15 break <- L15 break: {c,n} -> {n}
+  if-else @L15 if <- L15 cmp: {c,n} -> {c,n}
+  loop-back @L15 while <- L15 store_local: {c,d,n} -> {n}
+  loop-exit @L15 while <- L15 cmp: {n} -> {n}
+  continue @L16 continue <- L16 continue: {e,k,n,v} -> {n}
+  loop-exit @L16 foreach <- L16 array_lit: {n} -> {n}
+  switch-arm @L17 switch <- L17 int_const: {n} -> {n}
+  break @L17 break <- L17 break: {g,n} -> {n}
+  switch-arm @L17 switch <- L17 int_const: {n} -> {n}
+  fallthrough @L17 switch <- L17 store_local: {h,n} -> {n}
+  finally @L18 try_catch <- L18 store_local: {n,t} -> {n}
+  catch @L18 try_catch <- L18 store_local: {n} -> {n}
+  finally @L18 try_catch <- L18 store_local: {n,u,x} -> {n}
+  finally @L18 try_catch <- -: {n} -> {n}
+  fallthrough @L19 label <- L18 try_catch: {n,w} -> {n,w}
+  if-then @L20 ternary <- L20 int_const: {n,w,z} -> {n,w,z}
+  if-else @L20 ternary <- L20 int_const: {n,w,z} -> {n,w,z}
+  return @L21 return <- L21 return: {n,w,z} -> {n,w,z}
