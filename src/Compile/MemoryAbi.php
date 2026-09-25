@@ -778,8 +778,8 @@ final class MemoryAbi
 
     /**
      * Everything BELOW the pointer field — what compaction keeps. Compaction
-     * renumbers entries, so it resets the tombstone count AND the pointer,
-     * which is why the old `and flags, 255` is still the right reset.
+     * renumbers entries, so it resets the tombstone count and REMAPS the pointer;
+     * `and flags, 255` is the reset, the pointer is written back after it.
      */
     public const ARRAY_FLAGS_LOW_MASK = 255;
 

@@ -2619,7 +2619,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
         // live_len BEFORE any cursor access: it compacts a tombstoned buffer,
-        // and compaction resets the flags word (and therefore the cursor).
+        // and compaction RENUMBERS the entries (and the cursor with them).
         $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
 

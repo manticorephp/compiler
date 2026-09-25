@@ -4012,7 +4012,7 @@ final class UnifiedArrayRuntime
         $off = $fn->block('off');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $off, $go);
         // live_len FIRST: it COMPACTS when the buffer carries tombstones, and
-        // compaction resets the flags word — reading the pointer before that
+        // compaction renumbers the entries — reading the pointer before that
         // would hand back a position the compaction is about to invalidate.
         $len = $go->call('__mir_array_live_len', Type::i64(), [$arr]);
         $cur = $go->call('__mir_array_ptr_get', Type::i64(), [$arr]);
