@@ -1396,6 +1396,12 @@ final class CompileArgs
     public static bool $keepIr = false;
 
     /**
+     * `lower_module` returns right after SpillFreshBases — the MIR an ownership
+     * analysis sees, before InsertMemoryOps. Set by `tools/ownflow_dump.php`.
+     */
+    public static bool $stopBeforeMemoryOps = false;
+
+    /**
      * `-j<n>` — assemble the module as `n` independent objects through that many
      * concurrent `clang` processes ({@see \Compile\Mir\SplitModule}). `-j0`
      * picks from the host's core count. Unset means 1: ONE object, exactly what
@@ -4642,6 +4648,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\SpillFreshBases())->run($module);
         \Compile\Stats::step('SpillFreshBases', $statT, -1, -1);
+        if (CompileArgs::$stopBeforeMemoryOps) { return $module; }
         $statT = \Compile\Stats::now();
         $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
         $module = $memOps->run($module);
