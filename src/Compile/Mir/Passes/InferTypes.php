@@ -1512,8 +1512,13 @@ final class InferTypes implements Pass
         }
         if ($node->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $node;
+            // A STRING key reads one field of a record, and a record's fields
+            // differ: `$e['type'] . '_'` proves nothing about `$e['static']`,
+            // which the vec[string] guess then read as a string pointer
+            // (php-cs-fixer's OrderedClassElementsFixer::getTypePosition).
             if ($aa->array->kind === Node::KIND_LOAD_LOCAL
-                && $aa->index->kind !== Node::KIND_NULL_CONST) {
+                && $aa->index->kind !== Node::KIND_NULL_CONST
+                && !$this->isStringOperand($aa->index)) {
                 $nm = $aa->array->name;
                 if (isset($cand[$nm])) { return $nm; }
             }
