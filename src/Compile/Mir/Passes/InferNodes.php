@@ -1841,7 +1841,6 @@ trait InferNodes
         if (!$node->byRef) { $exitNames[$node->valueVar] = true; }
         if (!$node->byRef && $at->isArray() && isset($this->cellLoopLocals[$node->valueVar])
             && self::bindBoxesByTag($elem, $this->enums) && $this->inferFnBody !== null
-            && !self::storesTo($node->body, $node->valueVar)
             && self::readsOutsideBinders($this->inferFnBody, $node->valueVar) > 0) {
             $this->plantBoxBack($node->body, $node->valueVar, $elem);
             $this->boxBackBeforeJumps($node->body, $node->valueVar, $elem, 0);

@@ -2208,19 +2208,6 @@ final class InferTypes implements Pass
         return $st;
     }
 
-    /** Does `$n` store a value to local `$name` (a StoreLocal or a nested foreach binding)? */
-    private static function storesTo(Node $n, string $name): bool
-    {
-        // A box-back (`$x = $x`, re-tagging the slot) is no store of a value.
-        if ($n instanceof StoreLocal && $n->name === $name
-            && !($n->value instanceof LoadLocal && $n->value->name === $name)) { return true; }
-        if ($n instanceof Foreach_ && ($n->valueVar === $name || $n->keyVar === $name)) { return true; }
-        foreach (Walk::children($n) as $c) {
-            if (self::storesTo($c, $name)) { return true; }
-        }
-        return false;
-    }
-
     /** How many reads of local `$name` sit under `$n` outside every foreach
      *  that binds it (whose body reads its own binding). */
     private static function readsOutsideBinders(Node $n, string $name): int

@@ -16,3 +16,10 @@ function mdb(array $objs): void { foreach (['x'] as $v) {} foreach ($objs as $v)
 mdb([]);
 mdb([new O(7), new O(1)]);
 mdb([new O(1)]);
+// …and a body that also stores to the binding: the break leaves before the
+// store, with the element still raw in the slot.
+/** @param O[] $objs */
+function mds(array $objs): void { foreach (['x'] as $v) {} foreach ($objs as $v) { if ($v->i > 5) { break; } $v = 'small'; } var_dump($v); }
+mds([]);
+mds([new O(9)]);
+mds([new O(1)]);
