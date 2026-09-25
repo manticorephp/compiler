@@ -1,0 +1,20 @@
+c1 join 1
+c2 join 2
+c3 join 3
+c1 join 2
+c1 join 3
+c2 join 3
+c1 2: hi
+c2 2: hi
+c3 2: hi
+c3 code=1011
+h2 sent=1 count=1
+c1 1: x
+c2 1: x
+c1 code=1000
+hub sent=1
+c2 last
+error boom
+close 1011
+close 1000
+hub count=1

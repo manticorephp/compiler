@@ -1139,4 +1139,95 @@ function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, a
     return new Connection($sock, $buf, true, $o, $proto, null, $remote, $pmd);
 }
 
+interface Handler
+{
+    public function onOpen(Connection $c): void;
+    public function onMessage(Connection $c, Message $m): void;
+    public function onClose(Connection $c, int $code, string $reason): void;
+    public function onError(Connection $c, \Throwable $e): void;
+}
+
+/**
+ * Drive a Connection through a Handler: onOpen, onMessage per message, and
+ * onClose exactly once. An exception from onOpen/onMessage goes to onError and
+ * closes the connection with 1011; one from onError is dropped.
+ */
+function run(Connection $c, Handler $h): void
+{
+    try {
+        $h->onOpen($c);
+        while (($m = $c->receive()) !== null) {
+            $h->onMessage($c, $m);
+        }
+    } catch (\Async\CancelledException $e) {
+        throw $e;
+    } catch (\Throwable $e) {
+        try {
+            $h->onError($c, $e);
+        } catch (\Throwable $e2) {
+        }
+        if ($c->isOpen()) {
+            try {
+                $c->close(1011);
+            } catch (\Throwable $e3) {
+            }
+        }
+    } finally {
+        $h->onClose($c, $c->closeCode(), $c->closeReason());
+    }
+}
+
+/** A session for {@see upgrade}: runs the Handler over each accepted connection. */
+function handler(Handler $h): \Closure
+{
+    return function (Connection $c) use ($h): void {
+        run($c, $h);
+    };
+}
+
+/** A set of connections to broadcast to. Closed ones are skipped and dropped. */
+final class Hub
+{
+    /** @var array<int, Connection> */
+    private array<int, Connection> $conns = [];
+
+    public function add(Connection $c): void
+    {
+        $this->conns[\spl_object_id($c)] = $c;
+    }
+
+    public function remove(Connection $c): void
+    {
+        unset($this->conns[\spl_object_id($c)]);
+    }
+
+    public function count(): int
+    {
+        return \count($this->conns);
+    }
+
+    /** @return int how many connections the message was sent to */
+    public function broadcast(string $data, bool $binary = false): int
+    {
+        $sent = 0;
+        foreach ($this->conns as $id => $c) {
+            if (!$c->isOpen()) {
+                unset($this->conns[$id]);
+                continue;
+            }
+            try {
+                if ($binary) {
+                    $c->sendBinary($data);
+                } else {
+                    $c->send($data);
+                }
+                $sent = $sent + 1;
+            } catch (\Throwable $e) {
+                unset($this->conns[$id]);
+            }
+        }
+        return $sent;
+    }
+}
+
 }
