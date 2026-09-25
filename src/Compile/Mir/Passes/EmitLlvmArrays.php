@@ -390,10 +390,33 @@ trait EmitLlvmArrays
      *
      * Leaves the value word in {@see elemValReg}.
      */
+    /**
+     * Whether an array of type `$t` reads back exactly through its element HINT
+     * alone, all the way down — scalars, strings, plain objects, cells. An enum
+     * element is an ORDINAL that only the deep box turns back into its case, so
+     * an array holding one (at any depth) must be rebuilt, not tagged.
+     */
+    private function hintDecodesExactly(Type $t): bool
+    {
+        if ($t->fields !== null) {
+            foreach ($t->fields as $f) {
+                if (!$this->hintDecodesExactly($f)) { return false; }
+            }
+            return true;
+        }
+        if ($t->isArray()) { return $t->element === null || $this->hintDecodesExactly($t->element); }
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) { return !$this->isEnumType($t); }
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
+            || $k === Type::KIND_STRING || $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN
+            || $k === Type::KIND_NULL;
+    }
+
     private function emitArrayLitValue(Node $value, bool $cellVals, bool $inShape = false): string
     {
         $out = $this->emitNode($value);
-        $shallow = $cellVals && $inShape && $value->type->isArray();
+        $shallow = $cellVals && $inShape && $value->type->isArray()
+            && $this->hintDecodesExactly($value->type);
         if ($shallow) {
             // The tag shares the array rather than rebuilding it, so a
             // BORROWED one (a local) needs the co-owner +1 a rebuild never

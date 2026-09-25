@@ -5409,6 +5409,19 @@ trait EmitLlvmExpr
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
+            // A cell array reaching a CONCRETE element claim (`/** @var
+            // list<array{…}> $p */ $p = $decoded['packages']` off json_decode)
+            // still holds CELL elements; the typed reader takes them raw.
+            // Conform the buffer to the claim — a no-op unless it is hinted CELL.
+            // Never a SHAPE: its reads check each field against the hint.
+            if (($pt->isVec() || $pt->isAssoc()) && !$pt->isShape() && $pt->element !== null) {
+                $code = $this->elementHintCodeForType($pt->element);
+                if ($code !== null && $code !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
+                    $cp = $this->ssa->allocReg();
+                    $out .= '  ' . $cp . ' = inttoptr i64 ' . $r . " to ptr\n";
+                    $out .= '  call void @__mir_array_conform(ptr ' . $cp . ', i64 ' . (string)$code . ")\n";
+                }
+            }
             return $out;
         }
         return '';

@@ -2189,7 +2189,7 @@ trait EmitLlvmModule
     private function returnConformKind(Type $vt): ?int
     {
         $rt = $this->frame->returnType;
-        if ($rt === null || !($rt->isVec() || $rt->isAssoc()) || $rt->element === null) { return null; }
+        if ($rt === null || !($rt->isVec() || $rt->isAssoc()) || $rt->isShape() || $rt->element === null) { return null; }
         $code = $this->elementHintCodeForType($rt->element);
         if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return null; }
         if ($vt->kind === Type::KIND_CELL || $vt->kind === Type::KIND_UNKNOWN) { return $code; }

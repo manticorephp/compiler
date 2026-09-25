@@ -949,6 +949,15 @@ trait EmitLlvmLocals
             && $this->viewSlotBoxes($sl->value->type)) {
             $out .= $this->boxForViewSlot($sl->value->type, $sl->value);
         }
+        // A store pinned to a concrete ARRAY by an inline `@var` (the value a
+        // cell — `$decoded['packages'] ?? $decoded`): the slot holds the raw
+        // pointer every reader of that type takes, not the tagged word, and
+        // the buffer conforms to the declared element ({@see unboxCellToType}).
+        elseif ($sl->type->isArray() && $sl->value->type->kind === Type::KIND_CELL
+            && !isset($this->locals->globalBacked[$sl->name])) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType($sl->type);
+        }
         $val = $this->lastValue;
         // Coerce float values back into the slot's i64 cell with a
         // bitcast. Pointers (strings) ptrtoint similarly so the
