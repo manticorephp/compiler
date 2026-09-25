@@ -2183,6 +2183,21 @@ trait EmitLlvmModule
         return $out . '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
     }
 
+    /** The `ARRAY_ELEM_HINT_*` code a returned array must be conformed to, or
+     *  null: the declared return names a concrete raw element and the value's
+     *  own static element is a cell or erased (or the value is a cell). */
+    private function returnConformKind(Type $vt): ?int
+    {
+        $rt = $this->frame->returnType;
+        if ($rt === null || !($rt->isVec() || $rt->isAssoc()) || $rt->element === null) { return null; }
+        $code = $this->elementHintCodeForType($rt->element);
+        if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return null; }
+        if ($vt->kind === Type::KIND_CELL || $vt->kind === Type::KIND_UNKNOWN) { return $code; }
+        if (!($vt->isVec() || $vt->isAssoc())) { return null; }
+        $ve = $vt->element;
+        return ($ve === null || $ve->kind === Type::KIND_CELL || $ve->kind === Type::KIND_UNKNOWN) ? $code : null;
+    }
+
     private function emitReturn(Return_ $n): string
     {
         $r = $n;
@@ -2409,6 +2424,18 @@ trait EmitLlvmModule
                     || $this->frame->returnType->isArray())) {
                 $out .= $this->coerceToI64();
                 $out .= $this->unboxCellToType($this->frame->returnType);
+            }
+            // An array whose ELEMENTS are cells (an `iterable` / `mixed` / bare
+            // `array` value) returned under a CONCRETE element claim — `sort(
+            // iterable $o): array` + `@return list<FixerOptionInterface>` — is
+            // conformed to that claim ({@see __mir_array_conform}, a no-op on a
+            // buffer not hinted CELL): the caller reads the elements raw.
+            $ck = $this->returnConformKind($v->type);
+            if ($ck !== null) {
+                $out .= $this->coerceToI64();
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $out .= '  call void @__mir_array_conform(ptr ' . $cp . ', i64 ' . (string)$ck . ")\n";
             }
             // A FLOAT value returned from an `: int` function is CONVERTED, not
             // reinterpreted. The i64 carrier below is a BITCAST (a float rides

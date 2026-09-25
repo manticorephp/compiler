@@ -393,13 +393,26 @@ trait EmitLlvmArrays
     private function emitArrayLitValue(Node $value, bool $cellVals, bool $inShape = false): string
     {
         $out = $this->emitNode($value);
-        if ($cellVals) { $out .= $this->retainCellPayload($value); }
+        $shallow = $cellVals && $inShape && $value->type->isArray();
+        if ($shallow) {
+            // The tag shares the array rather than rebuilding it, so a
+            // BORROWED one (a local) needs the co-owner +1 a rebuild never
+            // did; an owned producer's +1 transfers ({@see rcRetainByType}).
+            $sv = $this->lastValue;
+            $st = $this->lastValueType;
+            $out .= $this->coerceToI64();
+            $out .= $this->rcRetainByType($value, $this->lastValue, null, 2);
+            $this->lastValue = $sv;
+            $this->lastValueType = $st;
+        } elseif ($cellVals) {
+            $out .= $this->retainCellPayload($value);
+        }
         // A SHAPE field's reader decodes the field word and then takes the
         // field's DECLARED type — `counts: int[]` reads raw ints. The deep box
         // rebuilt the nested array as cells, and `implode($s['counts'])`
         // printed the tagged words. Tag the pointer; the array keeps its repr
         // (and its hint, for an erased reader).
-        if ($cellVals && $inShape && $value->type->isArray()) {
+        if ($shallow) {
             $out .= $this->boxToCellShallow($value->type);
         } else {
             $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();

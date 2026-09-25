@@ -11,3 +11,8 @@ final class M {
 /** @param array{name: string, counts: int[]} $s */
 function sh(array $s): void { echo implode(',', $s['counts']), ' ', $s['counts'][0] * 2, "\n"; }
 sh(['name' => 'y', 'counts' => [4, 5]]);
+function makeRec($id) { $tags = ["a", "b"]; return ["id" => $id, "tags" => $tags]; }
+$r = makeRec(7);
+$t = $r["tags"];
+var_dump($t);
+echo $r["tags"][1], "\n";
