@@ -481,6 +481,11 @@ final class EmitLlvm implements EmitVisitor
     /** The call being argued is a direct call to a PHP (non-FFI) function
      *  whose declared params are its own ({@see unboxCellArg}). */
     private bool $argsRenderScalars = false;
+    /** @var array<string, string> by-ref foreach value var → alloca holding 1
+     *  when its latest store in the body left a CELL ({@see foreachWriteBackEncode}) */
+    private array $feCellFlags = [];
+    /** @var array<string, bool> …and whether the body emitted such a store */
+    private array $feCellFlagSet = [];
     /**
      * Library build (prebuilt stdlib.o): suppress the `@main` entry point so
      * the object links cleanly alongside a user program's own `@main`. Set by
@@ -3550,17 +3555,13 @@ final class EmitLlvm implements EmitVisitor
     /**
      * Emit `$a` as a plain i64 for a builtin arg that expects an integer
      * (substr offset/length, …). A tagged-cell operand — e.g. a `strpos`
-     * result carried as `int|false` — is unboxed; the builtin handlers
+     * result carried as `int|false`, a float, a numeric string — coerces as php
+     * does ({@see coerceIntArg}); the builtin handlers
      * emit args directly, bypassing the call loop's {@see unboxCellArg}.
      */
     private function emitIntArg(Node $a): string
     {
-        $out = $this->emitNode($a);
-        $out .= $this->coerceToI64();
-        if ($a->type->kind === Type::KIND_CELL) {
-            $out .= $this->unboxCellInt($this->lastValue);
-        }
-        return $out;
+        return $this->emitNode($a) . $this->coerceIntArg($a);
     }
 
     /** A concrete scalar param the uniform closure ABI passes as a cell — the
@@ -3972,6 +3973,9 @@ final class EmitLlvm implements EmitVisitor
         // the caller's to drop, which is what lets the rebuilt argument array
         // be freed ({@see EmitLlvmBuiltins::biMinMax}).
         if ($fn === 'max' || $fn === 'min') { return true; }
+        // The weak registry's way back to an object retains what it boxes
+        // ({@see EmitLlvmBuiltins::biObjFromAddr}).
+        if ($fn === '__mc_obj_from_addr') { return true; }
         // The CLASS C builtins ({@see EmitLlvmBuiltins::emitArrPtrArg}): the
         // result IS an element or a key of the argument, and the emitter now
         // retains it ({@see EmitLlvmBuiltins::cellEndpointRetain}) so the

@@ -163,6 +163,16 @@ trait EmitLlvmBuiltins
                 $out .= $this->rcReleaseReg($reg, $flavor);
                 continue;
             }
+            // A fresh cell behind an {@see emitPtrArg} payload: dropped by its
+            // tagged word, unless the builtin already did ({@see freeStrTemp}).
+            if ($flavor === 'cellptr') {
+                $cw = $this->ptrArgCellByReg[$reg] ?? '';
+                if ($cw !== '') {
+                    unset($this->ptrArgCellByReg[$reg]);
+                    $out .= $this->rcReleaseReg($cw, 'cell');
+                }
+                continue;
+            }
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = ptrtoint ptr ' . $reg . " to i64\n";
             $out .= $this->rcReleaseReg($r, $flavor);
@@ -413,6 +423,8 @@ trait EmitLlvmBuiltins
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
+        if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
+        if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
         if ($name === 'current' && \count($args) === 1) { return $this->biArrayCursor($args, 'current'); }
         if ($name === 'pos' && \count($args) === 1)     { return $this->biArrayCursor($args, 'current'); }
@@ -1517,7 +1529,24 @@ trait EmitLlvmBuiltins
         $safe = $this->ssa->allocReg();
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $ptr . "\n";
-        if ($cellTemp !== '') { $this->ptrArgCellByReg[$safe] = $cellTemp; }
+        if ($cellTemp !== '') {
+            // A string builtin gives the cell back itself ({@see freeStrTemp});
+            // every other consumer left it stranded. The deferred entry drops
+            // it after the builtin unless that already happened.
+            $this->ptrArgCellByReg[$safe] = $cellTemp;
+            $this->arrArgTempRegs[] = $safe;
+            $this->arrArgTempFlavors[] = 'cellptr';
+        }
+        // An OWNED object temp (`get_class(mk())`, `spl_object_id(self::key($o))`)
+        // is given back after the builtin, like an array temp ({@see
+        // emitArrPtrArg}): a builtin reads an object argument, and one that
+        // keeps it retains it. Every one of them stranded the object — WeakMap's
+        // offsetExists kept each key alive.
+        if ($arg->type->kind === Type::KIND_OBJ && \str_starts_with($ptr, '%')
+            && $this->freshRcArgFlavor($arg) === 'obj') {
+            $this->arrArgTempRegs[] = $ptr;
+            $this->arrArgTempFlavors[] = 'obj';
+        }
         $this->lastValue = $safe;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2520,6 +2549,41 @@ trait EmitLlvmBuiltins
         $this->lastValueType = 'i64';
         return $out;
     }
+
+    /**
+     * `__mc_weak_arm()` — point the free path's death hook
+     * ({@see dropRuntimeBody}) at the prelude's `__mc_weak_forget`. Emitted
+     * only from prelude/weak.php, the module that defines the target. The
+     * stdlib no-op is the bootstrap twin.
+     */
+    private function biWeakArm(): string
+    {
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return '  store ptr @manticore_' . $this->mangle('__mc_weak_forget') . ", ptr @__mc_weak_hook\n";
+    }
+
+    /**
+     * `__mc_obj_from_addr($a)` — the live object at address `$a` (an
+     * `spl_object_id`), retained and boxed: the one way back from the
+     * unretained address a WeakMap / WeakReference keeps. The caller vouches
+     * the object is alive (the registry forgets it on the free path).
+     * @param Node[] $args
+     */
+    private function biObjFromAddr(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $out = $this->emitIntArg($args[0]);
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $out .= '  call void @__mir_rc_retain(ptr ' . $p . ")\n";
+        $bx = $this->ssa->allocReg();
+        $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $p . ")\n";
+        $this->lastValue = $bx;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($bx);
+        return $out;
+    }
     /**
      * `array_is_list($a)` — a key walk in the runtime ({@see
      * UnifiedArrayRuntime::emitArrayIsList}); class A ({@see emitArrPtrArg}):
@@ -3189,6 +3253,21 @@ trait EmitLlvmBuiltins
      */
     private function coerceIntArg(Node $arg): string
     {
+        // An `int` parameter takes a CELL by php's coercive rules — a float
+        // truncates, a numeric string parses. `__manticore_unbox_int` reads an
+        // int payload only, so `str_repeat('-', max(0, 27.0))` repeated zero
+        // times (symfony's ProgressBar drew an empty bar).
+        if ($arg->type->kind === Type::KIND_CELL) {
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsStrtol = true;
+            $out = $this->coerceToI64();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         return $this->coerceArithOperand($arg, false);
     }
 

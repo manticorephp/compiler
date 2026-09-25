@@ -521,6 +521,21 @@ trait EmitLlvmExpr
         $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret ptr %arr\n";
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r = call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)\n  ret ptr %r\n}\n";
+
+        // Where a live by-ref foreach's element went after the body
+        // ({@see EmitLlvmControl::emitForeach}): the position of the key the
+        // walk captured (`__mir_array_key_cell_at`), -1 when the body removed it.
+        $out .= "define i64 @__mir_array_pos_cell(ptr %arr, i64 %k) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
+        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
+        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
+        $out .= "  br i1 %isstr, label %s, label %i\n";
+        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
+        $out .= "  %r1 = call i64 @__mir_array_pos_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
+        $out .= "  %r2 = call i64 @__mir_array_pos_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
         return $out;
     }
 

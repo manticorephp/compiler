@@ -154,6 +154,8 @@ final class UnifiedArrayRuntime
         $this->emitImplodeInt();
         $this->emitIssetInt();
         $this->emitIssetStr();
+        $this->emitPosInt();
+        $this->emitPosStr();
         $this->emitUnsetStr();
         $this->emitUnsetInt();
         $this->emitUnsetAt();
@@ -5564,6 +5566,115 @@ final class UnifiedArrayRuntime
         $next->br($head);
         $hit->ret(Value::int(Type::i64(), 1));
         $z->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_array_pos_int(arr, idx) -> i64` — the POSITION of int key `idx`
+     * (what foreach walks: PACKED slot, HASHED entry index), -1 when absent.
+     * A live by-ref foreach finds its element again after the body.
+     */
+    private function emitPosInt(): void
+    {
+        $fn = $this->module->func('__mir_array_pos_int', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $idx = $fn->param(Type::i64(), 'idx');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $packed = $fn->block('packed');
+        $doidx = $fn->block('doidx');
+        $classify = $fn->block('classify');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $iSlot = $chk->alloca(Type::i64(), 'i');
+        $rSlot = $chk->alloca(Type::i64(), 'r');
+        $chk->store(Value::int(Type::i64(), 0), $iSlot);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $doidx, $packed);
+        $ok = $packed->and_(
+            $packed->icmp('sge', $idx, Value::int(Type::i64(), 0)),
+            $packed->icmp('slt', $idx, $len),
+        );
+        $pin = $fn->block('pin');
+        $packed->brIf($ok, $pin, $z);
+        $pin->ret($idx);
+        // HASHED index fast path: -2 → linear, -1 → absent, else present.
+        $rf = $doidx->call('__mir_array_index_find', Type::i64(),
+            [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT), Value::null(), $idx, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $doidx->store($rf, $rSlot);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $head, $classify);
+        $classify->ret($classify->load(Type::i64(), $rSlot));
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $z, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $next, $kok);
+        $k = $kok->load(Type::i64(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->icmp('eq', $k, $idx), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($hit->load(Type::i64(), $iSlot));
+        $z->ret(Value::int(Type::i64(), -1));
+    }
+
+    /**
+     * `__mir_array_pos_str(arr, key, hash, haveHash) -> i64` — the position
+     * of string key `key`, -1 when absent. PACKED has no string keys.
+     */
+    private function emitPosStr(): void
+    {
+        $fn = $this->module->func('__mir_array_pos_str', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $key = $fn->param(Type::ptr(), 'key');
+        $hash = $fn->param(Type::i64(), 'hash');
+        $haveHash = $fn->param(Type::i64(), 'haveHash');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $gate = $fn->block('gate');
+        $doidx = $fn->block('doidx');
+        $classify = $fn->block('classify');
+        $preh = $fn->block('preh');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $hpre = $fn->block('hpre');
+        $cmp = $fn->block('cmp');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $iSlot = $chk->alloca(Type::i64(), 'i');
+        $rSlot = $chk->alloca(Type::i64(), 'r');
+        $effSlot = $chk->alloca(Type::i64(), 'effh');
+        $chk->store(Value::int(Type::i64(), 0), $iSlot);
+        $chk->brIf($chk->icmp('eq', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $z, $gate);
+        // A null key never matches; else index fast path (-2 → linear).
+        $gate->brIf($gate->icmp('eq', $key, Value::null()), $z, $doidx);
+        $rf = $doidx->call('__mir_array_index_find', Type::i64(),
+            [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key, Value::int(Type::i64(), 0), $hash, $haveHash]);
+        $doidx->store($rf, $rSlot);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $preh, $classify);
+        $classify->ret($classify->load(Type::i64(), $rSlot));
+        $preh->store($this->scanProbeHash($preh, $key, $hash, $haveHash), $effSlot);
+        $preh->br($head);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $z, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
+        $tk = $kok->load(Type::ptr(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $hpre);
+        $this->hashPrefilter($hpre, $tk, $effSlot, $cmp, $next);
+        $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$tk, $key]), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($hit->load(Type::i64(), $iSlot));
+        $z->ret(Value::int(Type::i64(), -1));
     }
 
     /**

@@ -3959,6 +3959,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
     $opensslSrc = prelude_src_or_empty("openssl_x509.php");
+    $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
@@ -4251,6 +4252,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
         || $demand->mentions('OpenSSLAsymmetricKey');
+    // WeakMap / WeakReference: two global class names php owns outright.
+    $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
@@ -4439,6 +4442,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
+        $lower->weakSrc = $useWeak ? $weakSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -4868,7 +4872,7 @@ function analyze_prelude_files(): array {
         // The Buffer\ and Http\ class trees, same reasoning as the demand-gated
         // trees above: closed-world analysis must know every prelude class a
         // user program can name.
-        "buffer.php", "http.php", "websocket.php",
+        "buffer.php", "http.php", "websocket.php", "weak.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the
         // same reason as Buffer\/Http\.

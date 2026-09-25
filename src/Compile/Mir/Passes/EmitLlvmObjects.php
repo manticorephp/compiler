@@ -425,6 +425,21 @@ trait EmitLlvmObjects
         // array pointer and eventually crashing in __mir_array_cow_str.
         $className = \ltrim($n->class, '\\');
         $cd = $this->classes[$className] ?? $this->classes[$n->class] ?? null;
+        // No class of that name exists anywhere in the program: php's
+        // `Error: Class "X" not found`, raised when reached. This allocated a
+        // bare 16-byte header and ran on — `new \WeakMap()` then took array
+        // paths over an object and SIGSEGV'd (symfony's ProgressBar).
+        if ($cd === null) {
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst('Class "' . $className . '" not found', Type::string_())],
+                Type::cell(),
+            );
+            $out = $this->emitBuiltin($thr) ?? '';
+            $this->lastValue = 'null';
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $out = $this->emitObjAllocInit($cd);
         $obj = $this->lastValue;
         // ctor call — resolve through the parent chain (a subclass

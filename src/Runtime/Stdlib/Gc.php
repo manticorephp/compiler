@@ -41,3 +41,18 @@ function gc_mem_caches(): int
 {
     return 0;
 }
+
+/**
+ * Bootstrap twins of the weak-reference codegen builtins (prelude/weak.php);
+ * a compiler that knows the builtins never calls these. Arming is a no-op, so
+ * the free path never reports a death and the twin of the address→object
+ * step is never reached.
+ */
+function __mc_weak_arm(): void
+{
+}
+
+function __mc_obj_from_addr(int $addr): mixed
+{
+    throw new \Error('WeakMap/WeakReference need a compiler that knows __mc_obj_from_addr');
+}

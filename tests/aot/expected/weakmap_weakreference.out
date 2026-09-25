@@ -1,0 +1,13 @@
+2 y vb
+drop a
+~K a
+1
+0
+WeakMap key must be an object
+bool(true)
+bool(true)
+~K b
+NULL
+2
+1
+end
