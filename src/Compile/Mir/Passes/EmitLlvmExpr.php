@@ -2629,9 +2629,17 @@ trait EmitLlvmExpr
             $out .= '  ' . $nx . ' = load i64, ptr ' . $fp . "\n";
             $cur = $nx;
         }
-        // A present-but-NULL leaf value also takes the default.
+        // A present-but-NULL leaf value also takes the default — in either
+        // representation, as the one-hop coalesce reads it: a null POINTER is 0
+        // (a `?T` object / string / array slot), a null SCALAR the boxed-NULL
+        // sentinel. Testing the sentinel alone kept a raw 0 from `?T $p = null`
+        // and handed the caller a NULL object (`$n->type->element ?? T::unknown()`).
+        $vz = $this->ssa->allocReg();
+        $out .= '  ' . $vz . ' = icmp eq i64 ' . $cur . ", 0\n";
+        $vs = $this->ssa->allocReg();
+        $out .= '  ' . $vs . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
         $vn = $this->ssa->allocReg();
-        $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
+        $out .= '  ' . $vn . ' = or i1 ' . $vz . ', ' . $vs . "\n";
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
             $this->lastValue = $cur;
