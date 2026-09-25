@@ -815,6 +815,8 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfThunks = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
+        $this->litTableBodies = '';
+        $this->litTableCount = 0;
         $this->dynfLookupEmitted = false;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
@@ -1137,6 +1139,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->dynmExtraBodies;
         $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
+        $extraBodies .= $this->litTableBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -2276,6 +2279,11 @@ final class EmitLlvm implements EmitVisitor
 
     /** Thunk bodies + row globals for the table path, flushed with the others. */
     private string $dynfExtraBodies = '';
+
+    /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
+    private string $litTableBodies = '';
+
+    private int $litTableCount = 0;
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
