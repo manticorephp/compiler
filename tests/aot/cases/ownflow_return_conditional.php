@@ -1,4 +1,5 @@
 <?php
+// regression guard: passes without the flag
 // `return $c ? $x : $y` with both locals owned: the taken arm goes to the
 // caller, the other dies at the return — once each, in php's order. Covered
 // (one class) and not covered (two classes, a union result) alike.

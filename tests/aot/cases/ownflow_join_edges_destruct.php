@@ -1,4 +1,5 @@
 <?php
+// regression guard: passes without the flag
 // A local borrowed on one path (a param) and owned on another meets at a join
 // on every edge kind; each owned object must die exactly once, in php's order,
 // and the borrowed one never (it outlives the calls).
