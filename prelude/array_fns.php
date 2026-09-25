@@ -168,6 +168,9 @@ function array_filter(array $arr, ?callable $cb = null, int $mode = 0): array
  */
 function usort(array &$arr, callable $cmp): bool
 {
+    // php reindexes: a sparse or string-keyed array sorts its VALUES, and
+    // the merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`).
+    if (!\array_is_list($arr)) { $arr = \array_values($arr); }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
@@ -248,6 +251,9 @@ function sort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return usort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    // php reindexes: a sparse or string-keyed array sorts its VALUES, and
+    // the merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`).
+    if (!\array_is_list($arr)) { $arr = \array_values($arr); }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
@@ -287,6 +293,9 @@ function rsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return usort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    // php reindexes: a sparse or string-keyed array sorts its VALUES, and
+    // the merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`).
+    if (!\array_is_list($arr)) { $arr = \array_values($arr); }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
