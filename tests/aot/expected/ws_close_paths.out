@@ -12,6 +12,9 @@ gap: EOF
 gap: closer returned at once, receive null code=1006
 noreader: 8:1000:done
 noreader: EOF
+Http\WebSocket\Connection::close(): Argument #2 ($reason) must be valid UTF-8
+Http\WebSocket\Connection::close(): Argument #2 ($reason) must be valid UTF-8
+Http\WebSocket\Connection::close(): Argument #2 ($reason) must be at most 123 bytes
 noreader code=1000 ok
 client: hi
 client: null code=1000 bye

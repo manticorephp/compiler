@@ -543,6 +543,9 @@ final class Connection implements \IteratorAggregate
         if (\strlen($reason) > 123) {
             throw new \ValueError('Http\\WebSocket\\Connection::close(): Argument #2 ($reason) must be at most 123 bytes');
         }
+        if (!utf8Ok($reason)) {
+            throw new \ValueError('Http\\WebSocket\\Connection::close(): Argument #2 ($reason) must be valid UTF-8');
+        }
         if ($this->closed || $this->sentClose) {
             return;
         }

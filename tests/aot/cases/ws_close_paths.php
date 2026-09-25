@@ -139,8 +139,13 @@ function session(\Http\Request $req): \Http\Response
             return;
         }
         if ($path === '/noreader') {
+            // A reason that is not UTF-8 (or too long) never reaches the wire.
+            $bad = '';
+            foreach (["bad \xff", "\xc3\x28", str_repeat('r', 124)] as $reason) {
+                try { $ws->close(1000, $reason); } catch (\ValueError $e) { $bad .= $e->getMessage() . "\n"; }
+            }
             $ws->close(1000, 'done');
-            Seen::$s = 'noreader code=' . $ws->closeCode() . ' ' . $ws->closeReason();
+            Seen::$s = $bad . 'noreader code=' . $ws->closeCode() . ' ' . $ws->closeReason();
             return;
         }
         if (str_starts_with($path, '/idle')) {
