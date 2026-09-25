@@ -411,6 +411,8 @@ trait EmitLlvmBuiltins
         if ($name === 'debug_backtrace')              { return $this->biDebugBacktrace(); }
         if ($name === 'array_first' && \count($args) === 1)     { return $this->biArrayEndpoint($args, false, false); }
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
+        if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
+        if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
         if ($name === 'current' && \count($args) === 1) { return $this->biArrayCursor($args, 'current'); }
         if ($name === 'pos' && \count($args) === 1)     { return $this->biArrayCursor($args, 'current'); }
@@ -1496,6 +1498,13 @@ trait EmitLlvmBuiltins
             // identity on a value that was already a raw string pointer.
             $out .= $this->unboxCellToType(Type::string_());
             $out .= $this->coerceToPtr();
+        } elseif ($arg->type->kind === Type::KIND_INT || $arg->type->kind === Type::KIND_FLOAT
+            || $arg->type->kind === Type::KIND_BOOL) {
+            // A scalar where a string is expected is RENDERED, as php does in
+            // coercive mode (`strlen(12345)` is 5): `inttoptr` made the number
+            // an address, and symfony's progress bar `str_pad($bar->getProgress(),
+            // …)` faulted on the first file.
+            $out .= $this->coerceToStr($arg, false);
         } else {
             $out .= $this->coerceToPtr();
         }
@@ -2481,6 +2490,50 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $r);
     }
 
+    /**
+     * `__mc_array_reindex($arr)` — php's sort family renumbers the values of a
+     * sparse or string-keyed array. A codegen builtin, not a PHP-level
+     * `$arr = array_values($arr)`: rebinding the by-ref `$arr` inside the sort
+     * bodies changed how every one of them co-owned its elements (a closure
+     * list leaked per sort). Separates a shared buffer and writes the clone
+     * back, exactly as a cursor move does ({@see biArrayCursor}), then
+     * renumbers in place ({@see UnifiedArrayRuntime::emitArrayReindexInplace}).
+     * The stdlib body of the same name is the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biArrayReindex(array $args): string
+    {
+        $arrNode = $args[0];
+        $arrT = $arrNode->type;
+        $out = $this->emitArrPtrArg($arrNode);
+        $p = $this->lastValue;
+        if ($arrNode->kind === Node::KIND_LOAD_LOCAL
+            || $arrNode->kind === Node::KIND_PROPERTY_ACCESS
+            || $arrNode->kind === Node::KIND_STATIC_PROP) {
+            $cow = $this->ssa->allocReg();
+            $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrT, $arrNode) . '(ptr ' . $p . ")\n";
+            $out .= $this->vecWriteBack($arrNode, $cow, $arrT->kind === Type::KIND_CELL);
+            $p = $cow;
+        }
+        $out .= '  call void @__mir_array_reindex_inplace(ptr ' . $p . ")\n";
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+    /**
+     * `array_is_list($a)` — a key walk in the runtime ({@see
+     * UnifiedArrayRuntime::emitArrayIsList}); class A ({@see emitArrPtrArg}):
+     * the result references nothing of the argument. The stdlib body stays
+     * as the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biArrayIsList(array $args): string
+    {
+        $out = $this->emitArrPtrArg($args[0]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_array_is_list(ptr ' . $this->lastValue . ")\n";
+        return $this->finishI64($out, $r);
+    }
     /**
      * `array_first` / `array_last` (PHP 8.5) and `array_key_first` /
      * `array_key_last`: the first/last VALUE (or KEY) of `$a` as a tagged cell,

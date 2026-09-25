@@ -168,9 +168,11 @@ function array_filter(array $arr, ?callable $cb = null, int $mode = 0): array
  */
 function usort(array &$arr, callable $cmp): bool
 {
-    // php reindexes: a sparse or string-keyed array sorts its VALUES, and
-    // the merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`).
-    if (!\array_is_list($arr)) { $arr = \array_values($arr); }
+    // php renumbers the VALUES of a sparse or string-keyed array, and the
+    // merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`). A
+    // codegen builtin — never `$arr = …` here, which changed how the body
+    // co-owns its elements.
+    \__mc_array_reindex($arr);
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
@@ -246,14 +248,16 @@ function __mc_sort_cmp(mixed $a, mixed $b, int $flags): int
 
 function sort(array &$arr, int $flags = 0): bool
 {
+    // php renumbers the VALUES of a sparse or string-keyed array, and the
+    // merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`). A
+    // codegen builtin — never `$arr = …` here, which changed how the body
+    // co-owns its elements.
+    \__mc_array_reindex($arr);
     // A non-default flag routes through usort — decorate-free, and it reuses
     // the same proven merge sort instead of duplicating six flagged bodies.
     if ($flags !== 0) {
         return usort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
-    // php reindexes: a sparse or string-keyed array sorts its VALUES, and
-    // the merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`).
-    if (!\array_is_list($arr)) { $arr = \array_values($arr); }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];
@@ -290,12 +294,14 @@ function sort(array &$arr, int $flags = 0): bool
  */
 function rsort(array &$arr, int $flags = 0): bool
 {
+    // php renumbers the VALUES of a sparse or string-keyed array, and the
+    // merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`). A
+    // codegen builtin — never `$arr = …` here, which changed how the body
+    // co-owns its elements.
+    \__mc_array_reindex($arr);
     if ($flags !== 0) {
         return usort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
-    // php reindexes: a sparse or string-keyed array sorts its VALUES, and
-    // the merge below walks 0..n-1 (php-cs-fixer sorts `$cases[$index]`).
-    if (!\array_is_list($arr)) { $arr = \array_values($arr); }
     $n = count($arr);
     if ($n < 2) { return true; }
     $tmp = [];

@@ -469,6 +469,11 @@ final class EmitLlvm implements EmitVisitor
     private array $rtExterns = [];
     /** @var array<string, bool> mangled module-fn name → defined (for extern detection) */
     private array $definedFns = [];
+    /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
+    private array $ffiFnNames = [];
+    /** The call being argued is a direct call to a PHP (non-FFI) function
+     *  whose declared params are its own ({@see unboxCellArg}). */
+    private bool $argsRenderScalars = false;
     /**
      * Library build (prebuilt stdlib.o): suppress the `@main` entry point so
      * the object links cleanly alongside a user program's own `@main`. Set by
@@ -754,6 +759,7 @@ final class EmitLlvm implements EmitVisitor
             // emitted once, here, before any body is.
             if ($fn->usesFuncArgs) { $this->rt->needsFuncArgs = true; }
             $this->definedFns[$this->mangle($fn->name)] = true;
+            if ($fn->ffiSymbol !== null) { $this->ffiFnNames[$fn->name] = true; }
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
             // The demand-gated fiber prelude is present iff the program uses
             // \Fiber ⇒ settle needsFibers BEFORE the preamble emits its module

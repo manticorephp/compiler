@@ -343,6 +343,8 @@ trait EmitLlvmObjects
                     } else {
                         $out .= $this->coerceToI64();
                         $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                        // No temp list on this path: never let the flag reach another site.
+                        $this->takeScalarStrArgTemp();
                     }
                     $argList .= ', i64 ' . $this->lastValue;
                     $ai = $ai + 1;
@@ -543,7 +545,7 @@ trait EmitLlvmObjects
                         // Latent here since the ctor arm landed — a fresh cell
                         // argument to a CONSTRUCTOR is simply rarer than one to
                         // a method. Same defect, same fix, one shape.
-                    } elseif ($this->isFreshStringTemp($a)) {
+                    } elseif ($this->takeScalarStrArgTemp() || $this->isFreshStringTemp($a)) {
                         $argTemps[] = $this->lastValue;
                     } else {
                         // A fresh obj / vec / assoc temp handed to a CONSTRUCTOR
@@ -6028,7 +6030,7 @@ trait EmitLlvmObjects
                     // `async_sleep_transparent` printed `results:` where php
                     // prints `results: a,b,c` — 11 async/http cases from one
                     // missing `elseif`.
-                } elseif ($this->isFreshStringTemp($a)) {                    $argTemps[] = $this->lastValue;
+                } elseif ($this->takeScalarStrArgTemp() || $this->isFreshStringTemp($a)) {                    $argTemps[] = $this->lastValue;
                 } else {
                     // …and the rc temp, on the terms the CONSTRUCTOR path
                     // ({@see emitNew}) and the free-function one ({@see
@@ -7419,7 +7421,7 @@ trait EmitLlvmObjects
                     // `async_sleep_transparent` printed `results:` where php
                     // prints `results: a,b,c` — 11 async/http cases from one
                     // missing `elseif`.
-                } elseif ($this->isFreshStringTemp($a)) {                    $argTemps[] = $this->lastValue;
+                } elseif ($this->takeScalarStrArgTemp() || $this->isFreshStringTemp($a)) {                    $argTemps[] = $this->lastValue;
                 } else {
                     // …and the rc temp, on the terms the CONSTRUCTOR path
                     // ({@see emitNew}) and the free-function one ({@see

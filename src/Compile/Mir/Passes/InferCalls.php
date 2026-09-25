@@ -441,6 +441,8 @@ trait InferCalls
         // first/last value or key as a tagged cell, null on empty (codegen
         // builtin {@see EmitLlvmBuiltins::biArrayEndpoint}). A cell result lets
         // the key variants carry the full int|string|null union.
+        if ($n === 'array_is_list' && \count($args) === 1) { return Type::bool_(); }
+        if ($n === '__mc_array_reindex' && \count($args) === 1) { return Type::void(); }
         if (($n === 'array_first' || $n === 'array_last'
             || $n === 'array_key_first' || $n === 'array_key_last')
             && \count($args) === 1) {

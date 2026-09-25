@@ -1865,8 +1865,11 @@ final class LowerFromAst implements Pass
         } elseif ($n instanceof \Compile\Mir\NewObj
             && \ltrim($n->class, '\\') === 'ReflectionFunction'
             && \count($n->args) >= 1) {
-            if ($n->args[0] instanceof \Compile\Mir\StringConst) {
-                $this->registerReflFn(\ltrim($n->args[0]->value, '\\'), $module);
+            // Through a LOCAL: `instanceof` on an element does not narrow it, and
+            // `->value` then read as the base Node's (an int).
+            $a0 = $n->args[0];
+            if ($a0 instanceof \Compile\Mir\StringConst) {
+                $this->registerReflFn(\ltrim($a0->value, '\\'), $module);
             } else {
                 $this->reflFnDynamic = true;
             }

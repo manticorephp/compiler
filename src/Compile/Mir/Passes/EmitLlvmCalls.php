@@ -3308,6 +3308,7 @@ trait EmitLlvmCalls
         $ptypes = $this->sigs->paramTypes[$c->function] ?? [];
         $ai = 0;
         $omitRefDrops = '';
+        $this->argsRenderScalars = !isset($this->ffiFnNames[$c->function]) && $ptypes !== [];
         // Fresh string-temp arg carriers freed after the call: a borrow the
         // callee retains if it keeps it (the +1 convention), so the caller's
         // transient is dead once the call returns.
@@ -3476,7 +3477,7 @@ trait EmitLlvmCalls
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($cellArgTemp !== '') {
                     $rcArgRegs[] = $cellArgTemp; $rcArgFlavs[] = 'cell';
-                } elseif ($this->isFreshStringTemp($a)) {
+                } elseif ($this->takeScalarStrArgTemp() || $this->isFreshStringTemp($a)) {
                     $argTemps[] = $this->lastValue;
                 } else {
                     $rf = $this->freshRcArgFlavor($a);
@@ -3489,6 +3490,7 @@ trait EmitLlvmCalls
             }
             $ai = $ai + 1;
         }
+        $this->argsRenderScalars = false;
         // Trailing params the call omitted. Lowering normally fills these from
         // the callee's declaration ({@see LowerFns::defaultFillArgs}), but only
         // when that declaration is known where the call is lowered — a call in a

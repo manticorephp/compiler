@@ -5538,6 +5538,17 @@ trait EmitLlvmExpr
      *
      * @param array<int, bool> $ahmask
      */
+    /** The string {@see unboxCellArg} rendered from a scalar arg, or ''. */
+    private string $scalarStrArgTemp = '';
+
+    /** Hand the caller the rendered-scalar temp to free after the call. */
+    private function takeScalarStrArgTemp(): bool
+    {
+        $t = $this->scalarStrArgTemp !== '';
+        $this->scalarStrArgTemp = '';
+        return $t;
+    }
+
     private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
         $ak = $a->type->kind;
@@ -5579,6 +5590,28 @@ trait EmitLlvmExpr
         if ($pt !== null && $ak === Type::KIND_UNKNOWN
             && ($pt->kind === Type::KIND_STRING || $pt->isArray())) {
             return $this->unboxCellToType($pt) . $this->coerceToI64();
+        }
+        // A SCALAR bound to a string param is rendered, as php does in coercive
+        // mode (`str_pad($bar->getProgress(), …)`, `strtoupper(5)`): the raw
+        // integer crossed as a string POINTER. The fresh text is the caller's
+        // to free after the call ({@see takeScalarStrArgTemp}).
+        // Only a DIRECT call to a known PHP function renders ({@see
+        // $argsRenderScalars}): a method / invoke site argues against the
+        // FALLBACK's params, not the callee's, and an FFI binding's `string`
+        // param takes a raw ADDRESS the stdlib holds as an int.
+        if ($pt !== null && $pt->kind === Type::KIND_STRING && $this->argsRenderScalars
+            && ($ak === Type::KIND_INT || $ak === Type::KIND_FLOAT || $ak === Type::KIND_BOOL)) {
+            $out = '';
+            if ($ak === Type::KIND_FLOAT && $this->lastValueType === 'i64') {
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+                $this->lastValue = $d;
+                $this->lastValueType = 'double';
+            }
+            $out .= $this->coerceToStr($a, false);
+            $out .= $this->coerceToI64();
+            $this->scalarStrArgTemp = $this->lastValue;
+            return $out;
         }
         if ($ak !== Type::KIND_CELL) { return ''; }
         if ($pt === null) { return ''; }
