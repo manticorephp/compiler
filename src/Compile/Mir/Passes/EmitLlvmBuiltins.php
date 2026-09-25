@@ -6671,10 +6671,29 @@ trait EmitLlvmBuiltins
         $cls = $this->reflClassName($args[0]);
         $m = $this->reflLitStr($args[1]);
         if ($cls !== '' && $m !== '') {
-            $out = $this->reflEvalArgs($args);
-            return $this->biConstBool($out, $this->resolveMethodClass($cls, $m) !== '');
+            $found = $this->resolveMethodClass($cls, $m) !== '';
+            // An object's STATIC class is a lower bound: `method_exists($this,
+            // 'processToken')` in an abstract parent asks about the runtime
+            // subclass (php-cs-fixer's AbstractTransformer). Fold `false` only
+            // when no class below it declares the method either.
+            if ($found || $args[0]->kind === Node::KIND_STRING_CONST
+                || !$this->subclassDeclaresMethod($cls, $m)) {
+                return $this->biConstBool($this->reflEvalArgs($args), $found);
+            }
         }
         return $this->biMethodExistsDynamic($args);
+    }
+
+    /** Whether a class that is-a `$cls` (other than itself) declares `$m`. */
+    private function subclassDeclaresMethod(string $cls, string $m): bool
+    {
+        foreach ($this->classes as $cd) {
+            $nm = $cd->name;
+            if ($nm !== $cls && isset($cd->methodNames[$m]) && $this->classIsA($nm, $cls)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
