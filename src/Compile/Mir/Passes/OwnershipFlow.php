@@ -1182,18 +1182,8 @@ final class OwnershipFlow implements Pass
             }
             if ($at->kind !== Node::KIND_RETURN) { continue; }
             $r = self::asReturn($at);
-            // An ERASED conditional result is handed back as it stands — no
-            // arm is retained and the return takes no +1 (nothing names its rc
-            // kind) — so an owned local an arm may BE moves with it, as a whole
-            // returned local does: dropping it freed the caller's array.
-            $erasedArms = ($r->value !== null && $r->value->type->kind === Type::KIND_UNKNOWN)
-                ? self::armLocals($r->value) : [];
             $drops = [];
             foreach ($out as $name => $x) {
-                if (isset($erasedArms[$name])) {
-                    $this->say($r->line, $name, $x, 'return moves (erased arm)');
-                    continue;
-                }
                 if ($x > 0 && $rel) {
                     $drops[] = $this->dropOp($name, $x);
                     $this->say($r->line, $name, $x, 'return');
@@ -1292,19 +1282,6 @@ final class OwnershipFlow implements Pass
     private static function asDoWhile(Node $n): DoWhile_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }
     private static function asReturn(Node $n): Return_ { return $n; }
-
-    /** The locals a conditional's arms may hand back as they stand.
-     *  @return array<string, bool> */
-    private static function armLocals(Node $v): array
-    {
-        if ($v->kind === Node::KIND_LOAD_LOCAL) { return [self::asLoadLocal($v)->name => true]; }
-        $out = [];
-        if (!CondOwn::isConditional($v)) { return $out; }
-        foreach (CondOwn::arms($v) as $arm) {
-            foreach (self::armLocals($arm) as $k => $ignored) { $out[$k] = true; }
-        }
-        return $out;
-    }
     private static function asConcat(Node $n): Concat { return $n; }
     private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }
     private static function asIncDec(Node $n): IncDec { return $n; }

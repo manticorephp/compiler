@@ -1,0 +1,28 @@
+-- bareMix src
+~base
+got src
+-- typedMix src
+~tbase
+got src
+-- bareOwn x
+~y
+got x
+~x
+-- typedOwn x
+~ty
+got tx
+~tx
+-- typedMix base
+got tbase
+~tbase
+-- bareOwn y
+~x
+got y
+~y
+-- typedOwn y
+~tx
+got ty
+~ty
+-- end
+~src
+done

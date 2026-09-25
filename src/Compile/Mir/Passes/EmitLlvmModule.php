@@ -2040,19 +2040,77 @@ trait EmitLlvmModule
      * owns here ({@see Return_::$ownDrops}) but the one the return MOVES —
      * `$moved`, the owned local that is the whole returned value, unless the
      * return rebuilt it into a fresh cell array (then the source is dropped).
+     * An `$arms` name is dropped only when the returned word `$val` is not the
+     * one its slot holds ({@see retLeave}).
+     *
+     * @param array<string,bool> $arms
      */
-    private function ownReturnIr(Return_ $r, string $moved): string
+    private function ownReturnIr(Return_ $r, string $moved, array $arms, string $val): string
     {
         $out = '';
+        $vm = '';
+        $taken = '';
         foreach ($r->ownDrops as $d) {
             $t = $d->target;
             if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-            if ($t->name === $moved) { continue; }
+            $name = $this->asLoadLocalNode($t)->name;
+            if ($name === $moved) { continue; }
             $slot = $this->ownOpSlot($d, true);
             if ($slot === '') { continue; }
-            $out .= $this->ownDropIr($slot, $d);
+            if (!isset($arms[$name]) || $val === '') {
+                $out .= $this->ownDropIr($slot, $d);
+                continue;
+            }
+            // The arm that ran IS the returned word (payload bits: the value may
+            // have been boxed since): that one moves, once; every other drops.
+            if ($vm === '') {
+                $vm = $this->ssa->allocReg();
+                $out .= '  ' . $vm . ' = and i64 ' . $val . ", 281474976710655\n";
+            }
+            $w = $this->ssa->allocReg();
+            $wm = $this->ssa->allocReg();
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = load i64, ptr ' . $slot . "\n";
+            $out .= '  ' . $wm . ' = and i64 ' . $w . ", 281474976710655\n";
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $wm . ', ' . $vm . "\n";
+            if ($taken !== '') {
+                $fresh = $this->ssa->allocReg();
+                $nt = $this->ssa->allocReg();
+                $or = $this->ssa->allocReg();
+                $out .= '  ' . $nt . ' = xor i1 ' . $taken . ", true\n";
+                $out .= '  ' . $fresh . ' = and i1 ' . $eq . ', ' . $nt . "\n";
+                $out .= '  ' . $or . ' = or i1 ' . $taken . ', ' . $eq . "\n";
+                $eq = $fresh;
+                $taken = $or;
+            } else {
+                $taken = $eq;
+            }
+            $dropL = $this->ssa->allocLabel('ret.armdrop');
+            $keepL = $this->ssa->allocLabel('ret.armkeep');
+            $out .= '  br i1 ' . $eq . ', label %' . $keepL . ', label %' . $dropL . "\n";
+            $out .= $dropL . ":\n" . $this->ownDropIr($slot, $d) . '  br label %' . $keepL . "\n";
+            $out .= $keepL . ":\n";
         }
         return $out;
+    }
+
+    /**
+     * A return's leave sequence: `$leave` as the default path built it, behind
+     * the {@see OwnershipFlow} drops when the flag is on. The drops wait for the
+     * returned word `$val`: a conditional ({@see returnedLocalNames}) this
+     * return took no +1 on (`$retained`) hands back one arm's reference as it
+     * stands — an erased arm names no rc kind to retain by — so the owned local
+     * that arm read moves and the others drop, decided by identity at run time.
+     */
+    private function retLeave(Return_ $r, ?Node $v, string $moved, bool $retained, string $val, string $leave): string
+    {
+        if (!\Compile\Debug::$ownFlow) { return $leave; }
+        /** @var array<string,bool> $arms */
+        $arms = [];
+        if (!$retained && $v !== null && \Compile\Mir\CondOwn::isConditional($v)) {
+            $arms = $this->returnedLocalNames($v);
+        }
+        return $this->ownReturnIr($r, $moved, $arms, $val) . $leave;
     }
 
     /**
@@ -2177,8 +2235,8 @@ trait EmitLlvmModule
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
             if (\Compile\Debug::$ownFlow) {
-                $out .= $this->ownReturnIr($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
-                    ? $this->asLoadLocalNode($v)->name : '');
+                $out .= $this->retLeave($r, $v, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
+                    ? $this->asLoadLocalNode($v)->name : '', false, $v !== null ? $this->lastValue : '', '');
             }
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
@@ -2219,9 +2277,12 @@ trait EmitLlvmModule
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        // OwnershipFlow's drops are emitted once the value is ({@see retLeave}):
+        // an arm a conditional hands back as it stands is dropped by identity.
+        $ownMoved = ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '';
+        $retained = false;
         $leave = \Compile\Debug::$ownFlow
-            ? $this->ownReturnIr($r, ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '')
-                . $this->emitOwnedBoxReleases($exempt)
+            ? $this->emitOwnedBoxReleases($exempt)
             : $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
@@ -2233,7 +2294,7 @@ trait EmitLlvmModule
         // allocated.
         $leave .= $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         if ($v === null) {
-            return $this->finishReturn('', $this->implicitReturnValue(), $leave);
+            return $this->finishReturn('', $this->implicitReturnValue(), $this->retLeave($r, $v, $ownMoved, false, '', $leave));
         }
         // By-ref return: yield the *address* of the returned lvalue as i64.
         // `return $n` (a by-ref param forwards its held address, a plain local
@@ -2242,7 +2303,7 @@ trait EmitLlvmModule
         if ($this->frame->returnsByRef) {
             $addrIr = $this->byRefAddrOf($v);
             if ($addrIr !== null) {
-                return $this->finishReturn($addrIr, $this->lastValue, $leave);
+                return $this->finishReturn($addrIr, $this->lastValue, $this->retLeave($r, $v, $ownMoved, false, $this->lastValue, $leave));
             }
         }
         $out = $this->emitNode($v);
@@ -2258,16 +2319,19 @@ trait EmitLlvmModule
             // buffer the object still owned, and the caller's release freed it
             // — the next `.=` on the property wrote into freed memory.
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $out .= $this->retainCellPayload($v);
+                $ri = $this->retainCellPayload($v);
+                $retained = $ri !== '';
+                $out .= $ri;
             } elseif ($v->type->kind === Type::KIND_CELL && $this->isBorrowedCellReturn($v, $returnedLocal)) {
                 // …and a borrowed CELL (`return $this->mixed;`), by tag.
                 $this->rt->needsRc = true;
                 $this->rt->needsStrRc = true;
                 $out .= $this->coerceToI64();
                 $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                $retained = true;
             }
             $out .= $this->boxToCell($v->type, $v);
-            return $this->finishReturn($out, $this->lastValue, $leave);
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
         // integer-arithmetic-on-cells path (`$x * 2` where $x is a plain cell
@@ -2279,7 +2343,7 @@ trait EmitLlvmModule
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
             $out .= $this->boxLastByRepr();
-            return $this->finishReturn($out, $this->lastValue, $leave);
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
         }
         // The declared return is a CELL-element array but this arm still holds a
         // CONCRETE-element one: the arms disagreed (`return [false,'loc']` beside
@@ -2294,7 +2358,7 @@ trait EmitLlvmModule
             // returns a uniform i64, so it rides the carrier like every other
             // pointer return.
             $out .= $this->coerceToI64();
-            return $this->finishReturn($out, $this->lastValue, $leave);
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
         }
         // A `mixed` / union (cell) return boxes the value to a tagged
         // cell unless it already is one.
@@ -2310,7 +2374,9 @@ trait EmitLlvmModule
             // borrowed-buffer UAF. Gated by isBorrowedObjReturn so owned
             // producers (call/new/concat/owned-local) keep their fresh +1.
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $out .= $this->retainCellPayload($v);
+                $ri = $this->retainCellPayload($v);
+                $retained = $ri !== '';
+                $out .= $ri;
             }
             // An UNKNOWN value may ALREADY be a tagged cell (an element read out
             // of a bare-`array` slot). boxToCell would int-box it a second time.
@@ -2324,6 +2390,7 @@ trait EmitLlvmModule
                     $this->rt->needsStrRc = true;
                     $out .= $this->coerceToI64();
                     $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                    $retained = true;
                 }
                 $out .= $this->boxUnknownIfRaw();
             } else {
@@ -2346,6 +2413,7 @@ trait EmitLlvmModule
                 $this->rt->needsStrRc = true;
                 $out .= $this->coerceToI64();
                 $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                $retained = true;
             }
             // A cell value returned where the declared type is concrete
             // (`return $mixed[$i]` from a `: int` fn) must be unboxed — else the
@@ -2390,11 +2458,14 @@ trait EmitLlvmModule
             if ($this->callHandsBorrow($v)) {
                 // rcRetainByType reads every call as a +1 transfer.
                 $out .= $this->rcRetainReg($this->lastValue, 'obj');
+                $retained = true;
             } elseif ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
+                $ri = $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
+                $retained = $ri !== '';
+                $out .= $ri;
             }
         }
-        return $this->finishReturn($out, $this->lastValue, $leave);
+        return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
     }
 
     /**
