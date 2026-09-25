@@ -317,9 +317,9 @@ trait EmitLlvmArrays
             $out .= $this->boxToCell(Type::string_());
             return $out . $this->strOffsetViaPrelude($mode);
         }
-        // A float / bool offset is read and written after php's `String offset
+        // A float / bool / null offset is read and written after php's `String offset
         // cast occurred` warning — thrown here — while isset / empty / `??` cast.
-        if (($k === Type::KIND_FLOAT || $k === Type::KIND_BOOL) && $mode === 'read') {
+        if (($k === Type::KIND_FLOAT || $k === Type::KIND_BOOL || $k === Type::KIND_NULL) && $mode === 'read') {
             $out = $this->boxToCell($index->type);
             return $out . $this->strOffsetViaPrelude($mode);
         }
