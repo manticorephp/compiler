@@ -7,7 +7,9 @@
 # AUTOBAHN_CASES overrides the case list (a JSON array string), e.g.
 #   AUTOBAHN_CASES='["1.*"]' bash tools/autobahn.sh server
 #
-# Exits 1 when any case's behavior is FAILED.
+# AUTOBAHN_TIMEOUT bounds the server-mode fuzzing run in seconds (default 1800).
+#
+# Exits 1 when any case's behavior is FAILED, or on a timeout.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,7 +40,7 @@ cleanup() {
         wait "$SERVER_PID" 2>/dev/null || true
     fi
     if [[ -n "$CONTAINER" ]]; then
-        docker kill "$CONTAINER" >/dev/null 2>&1 || true
+        docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     fi
     rm -rf "$TMP"
     exit "$ec"
@@ -58,7 +60,7 @@ wait_for_port() {
         fi
         sleep 0.25
     done
-    exec 3>&- 3<&- 2>/dev/null || true
+    exec 3>&- 3<&- || true
     return 0
 }
 
@@ -120,12 +122,29 @@ if [[ "$MODE" == "server" ]]; then
 }
 EOF
 
-    docker run --rm \
+    # Detached and bounded: a case list that matches nothing (or a server that
+    # stops answering) leaves wstest waiting forever in the foreground.
+    CONTAINER="$(docker run -d \
         -v "$TMP:/config" \
         -v "$TMP/reports:/reports" \
         --add-host=host.docker.internal:host-gateway \
         crossbario/autobahn-testsuite \
-        wstest -m fuzzingclient -s /config/fuzzingclient.json 2>&1 | tail -40
+        wstest -m fuzzingclient -s /config/fuzzingclient.json)"
+    limit="${AUTOBAHN_TIMEOUT:-1800}"
+    waited=0
+    while [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" == "true" ]]; do
+        if [[ "$waited" -ge "$limit" ]]; then
+            docker logs "$CONTAINER" 2>&1 | tail -40
+            docker kill "$CONTAINER" >/dev/null 2>&1 || true
+            echo "autobahn: fuzzingclient still running after ${limit}s (AUTOBAHN_TIMEOUT), killed" >&2
+            exit 1
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    docker logs "$CONTAINER" 2>&1 | tail -40
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    CONTAINER=""
 
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
