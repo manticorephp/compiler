@@ -6129,11 +6129,22 @@ trait EmitLlvmObjects
         $out = '';
         $changed = false;
         $n = \count($parts);
+        $ahmask = $sym !== '' ? ($this->sigs->arrayHintedParams[$sym] ?? []) : [];
         $i = 1;                       // index 0 is the implicit `$this`
         while ($i < $n) {
             $src = $srcTypes[$i] ?? null;
             $ct = $cTypes[$i] ?? null;
-            if ($src !== null && $ct !== null
+            // A bare-`array` param is `unknown` but reads a RAW array pointer
+            // ({@see unboxCellArg}, same case).
+            if ($src !== null && $ct !== null && $src->kind === Type::KIND_CELL
+                && $ct->kind === Type::KIND_UNKNOWN && ($ahmask[$i] ?? false)
+                && \str_starts_with($parts[$i], 'i64 ')) {
+                $this->lastValue = \substr($parts[$i], 4);
+                $this->lastValueType = 'i64';
+                $out .= $this->unboxCellToType(Type::vec(Type::unknown())) . $this->coerceToI64();
+                $parts[$i] = 'i64 ' . $this->lastValue;
+                $changed = true;
+            } elseif ($src !== null && $ct !== null
                 && $src->kind !== Type::KIND_UNKNOWN && $ct->kind !== Type::KIND_UNKNOWN
                 && \str_starts_with($parts[$i], 'i64 ')) {
                 $srcCell = $src->kind === Type::KIND_CELL;
@@ -7290,13 +7301,26 @@ trait EmitLlvmObjects
                 // EmitLlvmCalls::emitCall}, same arm).
                 $cellTmp = $this->isFreshCellTemp($a);
                 if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
-                $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
-                $argList .= ', i64 ' . $this->lastValue;
-                // unboxCellArg lowers a CELL arg to the param's repr; everything
-                // else crosses in the argument's own.
+                // A CELL arg crosses TAGGED and each arm unboxes it to its own
+                // parameter ({@see vdArmArgs}). Unboxed here, against the
+                // FALLBACK's signature, the tag was gone before the arm that
+                // actually runs could read it: php-cs-fixer's erased
+                // `$this[$i]->equals($edge)` picked `Signature::equals(obj)`,
+                // stripped a string cell to its payload, and the Token arm
+                // re-boxed that string as an OBJECT.
                 $pt = $ptypes[$ai + 1] ?? null;
-                $argOutTypes[$ai + 1] = ($a->type->kind === Type::KIND_CELL && $pt !== null)
-                    ? $pt : $a->type;
+                if ($a->type->kind === Type::KIND_CELL) {
+                    if ($pt !== null) {
+                        $this->checkCellSink('call_arg', $pt, $a, $a);
+                    } else {
+                        $this->checkCellSinkUnchecked();
+                    }
+                    $argOutTypes[$ai + 1] = Type::cell();
+                } else {
+                    $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                    $argOutTypes[$ai + 1] = $a->type;
+                }
+                $argList .= ', i64 ' . $this->lastValue;
                 if ($cellTmp) {
                     // ★ ALREADY released — by the TAGGED word recorded above.
                     // `freshRcArgFlavor` answers 'cell' for this very node, so
