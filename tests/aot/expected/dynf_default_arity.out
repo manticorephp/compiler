@@ -1,0 +1,27 @@
+string(3) "a.."
+string(5) "a...."
+int(14)
+int(21)
+int(111)
+int(103)
+string(3) "<x>"
+string(1) "y"
+string(1) "y"
+string(5) "[1,2]"
+string(3) "z.."
+string(3) "<z>"
+string(1) "z"
+array(3) {
+  [0]=>
+  string(1) "z"
+  [1]=>
+  string(1) "z"
+  [2]=>
+  string(1) "z"
+}
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(5)
+}

@@ -1,0 +1,11 @@
+string(12) "always_first"
+bool(false)
+array(2) {
+  [0]=>
+  string(1) "b"
+  [1]=>
+  string(1) "c"
+}
+int(4)
+string(5) "plain"
+bool(true)

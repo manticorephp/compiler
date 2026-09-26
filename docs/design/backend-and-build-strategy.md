@@ -75,6 +75,7 @@ ABI, and the same `clang` at the end. Not on the table.
 | Path | Flags | Why |
 |---|---|---|
 | Shipped artifact, `lib/*.o`, anything whose own speed matters | `-O2`, no split | a part boundary is an inlining boundary; the compiler built as 8 parts runs 43% slower, which then slows every later build |
+| An application whose staged IR is ≥128 MB (php-cs-fixer: 230 MB) | `-O2`, auto split into ~10 MB parts | one `clang -O2` over the whole module never finished (>18 min, >5 GB); split it is ~2 min at 2.2 GB. Small cross-part callees ride along as `available_externally` copies, so the boundary costs +6.6% instead of +53% (compiler built in 8 parts, 2026-09-25) |
 | `bin/build` producing the installed `bin/manticore` | `-O2` + ThinLTO on the link | the compiler's speed compounds into every future build |
 | **Iteration loop** — compile a program to run once, a filtered `tests/aot` run, an IR-volume A/B | **`-O1 -j0`, no LTO** | `clang -O2` is the single largest term; `-O1` keeps mem2reg and always-inline and drops the GVN/inliner cost that dominates our IR |
 | A binary `lldb` must walk | `-O0 --keep-ir` | readable codegen, no reordering |

@@ -1161,6 +1161,7 @@ trait EmitLlvmModule
             $this->locals->unsetBound[$uname] = $fl;
         }
         $bodySink->write($this->emitRefCellBoxes($fn->body, $paramNames, $paramTypes));
+        $bodySink->write($this->emitElemRefBoxSlots($fn->body));
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
         // header). The caller pushed a bare method-name placeholder because a
@@ -1408,6 +1409,35 @@ trait EmitLlvmModule
         foreach ($this->locals->ownedBoxes as $name => $_) {
             $out .= $this->ownedBoxReleaseIr($name, isset($exempt[$name]));
         }
+        foreach ($this->locals->elemRefBoxes as $ename => $eo) {
+            $eb = $this->ssa->allocReg();
+            $out .= '  ' . $eb . ' = load ptr, ptr ' . $eo . "\n";
+            $out .= '  call void @__mir_ref_release(ptr ' . $eb . ")\n";
+        }
+        return $out;
+    }
+
+    /**
+     * One `alloca ptr` (null) per local a `$name = &$a[$k]` binds: the frame's
+     * count on the element's reference box ({@see EmitLlvmObjects::emitRefAddr}),
+     * released on every exit and on each rebinding. Not in a generator (its
+     * locals live in the frame and it keeps the address alias).
+     */
+    private function emitElemRefBoxSlots(Node $body): string
+    {
+        $this->locals->elemRefBoxes = [];
+        $this->locals->elemRefTargets = [];
+        if ($this->gen->inGenerator) { return ''; }
+        $this->locals->collectElemRefTargets($body);
+        $out = '';
+        foreach ($this->locals->elemRefTargets as $ename => $_) {
+            if (!isset($this->locals->slots[$ename])) { continue; }
+            $o = $this->ssa->allocReg();
+            $out .= '  ' . $o . " = alloca ptr\n";
+            $out .= '  store ptr null, ptr ' . $o . "\n";
+            $this->locals->elemRefBoxes[$ename] = $o;
+        }
+        if ($out !== '') { $this->rt->needsRefCells = true; }
         return $out;
     }
 
@@ -2005,6 +2035,7 @@ trait EmitLlvmModule
         // matching line in the ordinary function emitter.
         $this->locals->ownedBoxes = [];
         $body .= $this->emitRefCellBoxes($fn->body, []);
+        $body .= $this->emitElemRefBoxSlots($fn->body);
         // A global cell whose default is not a link-time constant (an array
         // literal on a static property) is built HERE, before any top-level
         // statement, so the first read/append sees a real array and not 0.
@@ -2192,6 +2223,23 @@ trait EmitLlvmModule
     /** Typed reads — a base-`Node` field access resolves by OFFSET under self-host. */
     private function asLoadLocalNode(\Compile\Mir\LoadLocal $n): \Compile\Mir\LoadLocal { return $n; }
 
+
+    /** The `ARRAY_ELEM_HINT_*` code a returned array must be conformed to, or
+     *  null: the declared return names a concrete raw element and the value's
+     *  own static element is a cell or erased. A CELL / UNKNOWN value is not
+     *  conformed here: its unbox ({@see unboxCellToType}) already did, and a
+     *  second conform is a second walk of the buffer. */
+    private function returnConformKind(Type $vt): ?int
+    {
+        $rt = $this->frame->returnType;
+        if ($rt === null || !($rt->isVec() || $rt->isAssoc()) || $rt->isShape() || $rt->element === null) { return null; }
+        $code = $this->elementHintCodeForType($rt->element);
+        if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return null; }
+        if (!($vt->isVec() || $vt->isAssoc())) { return null; }
+        $ve = $vt->element;
+        return ($ve === null || $ve->kind === Type::KIND_CELL || $ve->kind === Type::KIND_UNKNOWN) ? $code : null;
+    }
+
     private function emitReturn(Return_ $n): string
     {
         $r = $n;
@@ -2340,9 +2388,15 @@ trait EmitLlvmModule
         // a 0 header is misread as a double — so box it by its runtime repr.
         // A passthrough `return $x` of a cell param is typed CELL (handled
         // above), never reaches here; arrays/objects travel raw (below).
+        // An i64 carrier is probed rather than int-boxed: a bare-`array` param
+        // is UNKNOWN too, and the uniform ABI handed it in already TAGGED —
+        // `static fn ($o, array $v): array => $v` returned an int-boxed array
+        // cell (php-cs-fixer's option normalizers). The probe still int-boxes a
+        // raw int and leaves a tagged word alone.
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
-            $out .= $this->boxLastByRepr();
+            $out .= ($this->lastValueType === 'double' || $this->lastValueType === 'ptr')
+                ? $this->boxLastByRepr() : $this->boxUnknownShallowIr();
             return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
         }
         // The declared return is a CELL-element array but this arm still holds a
@@ -2433,6 +2487,18 @@ trait EmitLlvmModule
                     || $this->frame->returnType->isArray())) {
                 $out .= $this->coerceToI64();
                 $out .= $this->unboxCellToType($this->frame->returnType);
+            }
+            // An array whose ELEMENTS are cells (an `iterable` / `mixed` / bare
+            // `array` value) returned under a CONCRETE element claim — `sort(
+            // iterable $o): array` + `@return list<FixerOptionInterface>` — is
+            // conformed to that claim ({@see __mir_array_conform}, a no-op on a
+            // buffer not hinted CELL): the caller reads the elements raw.
+            $ck = $this->returnConformKind($v->type);
+            if ($ck !== null) {
+                $out .= $this->coerceToI64();
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $out .= '  call void @__mir_array_conform(ptr ' . $cp . ', i64 ' . (string)$ck . ")\n";
             }
             // A FLOAT value returned from an `: int` function is CONVERTED, not
             // reinterpreted. The i64 carrier below is a BITCAST (a float rides

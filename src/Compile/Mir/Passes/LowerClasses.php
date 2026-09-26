@@ -421,6 +421,16 @@ trait LowerClasses
                 // places because the layouts are built by two separate walks.
                 $types[$tprop->name] = ($tveff === null || $tveff === '')
                     ? Type::cell() : $this->lowerTypeHint($tveff);
+                // The per-slot facts every array-property scan keys on. Without
+                // them a trait's `?array $configuration` looked un-hinted, so a
+                // whole store of a cell-valued array never widened the slot off
+                // its doc shape (`array{strategy: 'a'|'b'}` → assoc[string,
+                // string]) and the element write released a tagged cell as a
+                // raw string (php-cs-fixer ConfigurableFixerTrait).
+                $arrHinted[$tprop->name] = $this->isBareArrayHint($tveff) || $types[$tprop->name]->isArray();
+                $neverObj[$tprop->name] = $this->hintNeverObject($tveff);
+                $docList[$tprop->name] = $this->isElemOnlyArrayDoc($tveff);
+                if ($tprop->isReadonly) { $roProps[$tprop->name] = true; }
             }
         }
         // PHP 8.4 property hooks: inherit the parent's map, then record each
@@ -506,6 +516,7 @@ trait LowerClasses
         // A class with defaulted properties but no user ctor gets a
         // synthesised one (see lowerClassMethods) — flag it so NewObj
         // calls it.
+        $userCtor = isset($methodNames['__construct']);
         foreach ($decl->properties as $prop) {
             if ($prop->isStatic) { continue; }
             if ($prop->default !== null) { $methodNames['__construct'] = true; break; }
@@ -519,6 +530,15 @@ trait LowerClasses
                     if ($this->traitPropHasDefault($tprop)) { $methodNames['__construct'] = true; break; }
                 }
             }
+        }
+        // The synthesised ctor IS the inherited one's body run as this class,
+        // so for late static binding it forwards like `parent::__construct()`:
+        // counted as an override, it withheld the ancestor's `__lsb<this>` copy
+        // and `static::class` in AbstractFixer's ctor named AbstractFixer
+        // (php-cs-fixer's configurable proxy fixers, whose trait defaults a
+        // property, all registered as "abstract").
+        if (!$userCtor && isset($methodNames['__construct'])) {
+            $this->forwardsToParent[$decl->name . '::__construct'] = true;
         }
         // The TRANSITIVE closure, not just the `implements` line: an interface
         // may extend others (`WrappableOutputFormatterInterface extends
@@ -563,7 +583,7 @@ trait LowerClasses
                     // cellDefault(), which would box the sentinel a second time.
                     $def = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
                 } else {
-                    $def = $this->cellDefault($isCellProp, $def);
+                    $def = $this->cellDefault($isCellProp, $def, $spt);
                 }
             }
             // A PRELUDE class's cell must coalesce, not collide: the prelude is
@@ -600,7 +620,7 @@ trait LowerClasses
                         if ($tIsCell && $tdef->kind === Node::KIND_NULL_CONST) {
                             $tdef = new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_());
                         } else {
-                            $tdef = $this->cellDefault($tIsCell, $tdef);
+                            $tdef = $this->cellDefault($tIsCell, $tdef, $tspt);
                         }
                     }
                     $this->module->addGlobalCell(
@@ -684,10 +704,21 @@ trait LowerClasses
      *
      * A float default needs no wrap: an untagged double already IS a valid cell.
      */
-    private function cellDefault(bool $isCellProp, Node $def): Node
+    private function cellDefault(bool $isCellProp, Node $def, ?Type $slot = null): Node
     {
-        if (!$isCellProp) { return $def; }
         $k = $def->kind;
+        // An array slot's literal is never seen by InferTypes either: untyped,
+        // `['f' => true, 'n' => 3]` was built with its elements RAW under no
+        // element hint, and every erased reader (`foreach`, `array_merge`)
+        // decoded the raw `1` as a double (sebastian/diff's
+        // `StrictUnifiedDiffOutputBuilder::$default`). Only where the slot
+        // itself leaves the elements open — erased, cell, or a shape whose
+        // fields decode by hint; a declared `array<string, array{…}>` already
+        // names its element and its readers take it raw.
+        if (!$isCellProp) {
+            if ($k === Node::KIND_ARRAY_LIT) { $this->typeStaticLit($def, $slot); }
+            return $def;
+        }
         // A float default is its own cell (canonical NaN-boxing); an ARRAY
         // literal must box like a scalar or the slot reads back a bare pointer
         // under a cell claim (`public static mixed $a = [1, 2]` var_dumped a
@@ -702,6 +733,45 @@ trait LowerClasses
         // kind (the boxer rebuilds it as cells), anything else is a cell array.
         if ($k === Node::KIND_ARRAY_LIT) { $def->type = $this->staticDefaultLitType($def); }
         return new \Compile\Mir\Call('__mir_to_cell', [$def], Type::cell());
+    }
+
+    /** Type a static default literal and every literal nested in it: the slot's
+     *  own type where it names a concrete element (its readers take that
+     *  element raw), else the one its elements spell ({@see cellDefault}). */
+    private function typeStaticLit(\Compile\Mir\ArrayLit $lit, ?Type $slot): void
+    {
+        $inner = null;
+        $fields = null;
+        if ($slot !== null && $slot->isShape()) {
+            // A shape slot types the literal as the shape itself: each field's
+            // nested literal takes that field's declared type.
+            $lit->type = $slot;
+            $fields = $slot->fields;
+        } elseif ($slot !== null && !$this->staticLitElemsOpen($slot)) {
+            $lit->type = $slot;
+            $inner = $slot->element;
+        } else {
+            $lit->type = $this->staticDefaultLitType($lit);
+        }
+        foreach ($lit->elements as $el) {
+            if (!($el->value instanceof \Compile\Mir\ArrayLit)) { continue; }
+            $ft = $inner;
+            if ($fields !== null && $el->key !== null
+                && ($el->key->kind === Node::KIND_STRING_CONST || $el->key->kind === Node::KIND_INT_CONST)) {
+                $ft = $fields[Type::shapeKey($el->key->value)] ?? null;
+            }
+            $this->typeStaticLit($el->value, $ft);
+        }
+    }
+
+    /** Whether a static array slot of type `$slot` leaves its literal's element
+     *  representation to the literal ({@see cellDefault}). */
+    private function staticLitElemsOpen(?Type $slot): bool
+    {
+        if ($slot === null || $slot->isShape()) { return true; }
+        if (!$slot->isArray()) { return true; }
+        $e = $slot->element;
+        return $e === null || $e->kind === Type::KIND_UNKNOWN || $e->kind === Type::KIND_CELL;
     }
 
     /** The static type of a static-default array literal, from its MIR

@@ -744,8 +744,10 @@ function __mc_multisort_apply(array &$arr, array $perm): void
  */
 function array_all(array $a, callable $predicate): bool
 {
-    foreach ($a as $value) {
-        if (!$predicate($value)) { return false; }
+    // php hands the predicate ($value, $key). Keys through array_keys — see
+    // array_find_key.
+    foreach (\array_keys($a) as $key) {
+        if (!$predicate($a[$key], $key)) { return false; }
     }
     return true;
 }
@@ -756,8 +758,8 @@ function array_all(array $a, callable $predicate): bool
  */
 function array_any(array $a, callable $predicate): bool
 {
-    foreach ($a as $value) {
-        if ($predicate($value)) { return true; }
+    foreach (\array_keys($a) as $key) {
+        if ($predicate($a[$key], $key)) { return true; }
     }
     return false;
 }
@@ -765,8 +767,9 @@ function array_any(array $a, callable $predicate): bool
 /** Return the first value accepted by `$predicate`, or null when absent. */
 function array_find(array $a, callable $predicate): mixed
 {
-    foreach ($a as $value) {
-        if ($predicate($value)) { return $value; }
+    foreach (\array_keys($a) as $key) {
+        $value = $a[$key];
+        if ($predicate($value, $key)) { return $value; }
     }
     return null;
 }
@@ -782,7 +785,7 @@ function array_find_key(array $a, callable $predicate): int|string|null
     $keys = array_keys($a);
     foreach ($keys as $key) {
         $value = $a[$key];
-        if ($predicate($value)) { return $key; }
+        if ($predicate($value, $key)) { return $key; }
     }
     return null;
 }

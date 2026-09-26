@@ -1,0 +1,7 @@
+string(34) ""\/**\n     * a\n       * b\n *\/""
+int(2)
+string(32) ""\/**\n     * a\n     * b\n *\/""
+int(2)
+int(0)
+float(2.5)
+bool(true)

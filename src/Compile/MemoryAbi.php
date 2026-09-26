@@ -19,7 +19,7 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      */
-    public const VERSION = 11;
+    public const VERSION = 13;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -124,13 +124,26 @@ final class MemoryAbi
      *
      * The two spare words carry what a string has no use for and a closure
      * cannot do without: the per-closure RETAIN and DROP functions, which
-     * co-own / release exactly the captures this env holds. A closure with NO
-     * captures owns nothing and keeps the old bare allocation — it has no
-     * magic here, and every helper below then leaves it alone.
+     * co-own / release exactly the captures this env holds; both are null when
+     * the env owns nothing. Every closure literal carries the header, so the
+     * magic is also what `instanceof Closure` tests at run time.
      *
      * `rc = -1` marks an immortal env, the same convention string literals use.
      */
     public const CLOSURE_TAG_MAGIC = 0x7E66000000000007;
+
+    /**
+     * Bits 8..23 of a closure env's magic word carry its SHAPE,
+     * `(env slots << 1) | slot-1-is-$this`, so a rebind of a closure whose
+     * literal the call site cannot name copies the right number of slots and
+     * only replaces a real `$this`. The shape rides in the env because the
+     * code pointer cannot key it: SplitModule gives every part its own copy of
+     * an `internal` closure body. Every test of the magic masks these bits.
+     */
+    public const CLOSURE_SHAPE_SHIFT = 8;
+
+    /** `~0xFFFF00`: the magic word with its shape bits cleared. */
+    public const CLOSURE_MAGIC_MASK = -16776961;
 
     /**
      * Sentinel at a REFERENCE BOX's `data-8`. A PHP reference is two or more
@@ -339,6 +352,21 @@ final class MemoryAbi
 
     /** `ptr` — compiler-owned lightweight dynamic-method table, or null. */
     public const DESCRIPTOR_DYN_METHODS_OFFSET = 24;
+
+    /**
+     * One row of that table: `{ ptr name, ptr tramp, ptr declaring-class name,
+     * i64 visibility }`. The last two decide whether a dynamic `$o->$m()` may
+     * reach the method from its call site's scope ({@see DYN_METHOD_VIS_PUBLIC}).
+     * v12: the row was `{ name, tramp }` and every private method was callable.
+     */
+    public const DYN_METHOD_ROW_SIZE = 32;
+    public const DYN_METHOD_ROW_NAME_OFFSET = 0;
+    public const DYN_METHOD_ROW_TRAMP_OFFSET = 8;
+    public const DYN_METHOD_ROW_DECL_OFFSET = 16;
+    public const DYN_METHOD_ROW_VIS_OFFSET = 24;
+    public const DYN_METHOD_VIS_PUBLIC = 0;
+    public const DYN_METHOD_VIS_PROTECTED = 1;
+    public const DYN_METHOD_VIS_PRIVATE = 2;
 
     /**
      * `ptr` — `@__mir_props_<id>`, or null for a class with neither declared
@@ -818,8 +846,8 @@ final class MemoryAbi
 
     /**
      * Everything BELOW the pointer field — what compaction keeps. Compaction
-     * renumbers entries, so it resets the tombstone count AND the pointer,
-     * which is why the old `and flags, 255` is still the right reset.
+     * renumbers entries, so it resets the tombstone count and REMAPS the pointer;
+     * `and flags, 255` is the reset, the pointer is written back after it.
      */
     public const ARRAY_FLAGS_LOW_MASK = 255;
 

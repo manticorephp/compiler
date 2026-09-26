@@ -1,0 +1,7 @@
+array(1) {
+  [0]=>
+  string(1) "c"
+}
+my_str_split user 2
+plain_fn user 1
+strlen int

@@ -241,6 +241,10 @@ trait InferNodes
         $this->refCellLocalsCur = [];
         $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
         $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
+        // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
+        // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
+        // box — a cell — whatever it is later assigned.
+        $this->collectElemRefTargetsInfer($fn->body);
         // A `static $x;` whose stores are scalar rides a CELL for the same
         // reason a ref-taken slot does: its null start must stay observable
         // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
@@ -394,6 +398,24 @@ trait InferNodes
         // write `$b['note'] = 'hi'` through the by-ref param, and the record's
         // per-field int slot has no room for the string. A record is a shape
         // claim about the WHOLE local, and a by-ref callee is part of that whole.
+        // The root local of an element reference (`$r = &$c[$k]`, `&$c[]`,
+        // `&$l['k'][$j]`): the element is promoted into a reference BOX, and the
+        // slot then holds cell(REF, box) — a cell channel whatever the other
+        // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
+        // a raw string pointer.
+        $this->refElemBases = [];
+        $this->collectRefElemBases($fn->body);
+        foreach ($this->refElemBases as $name => $unused) {
+            unset($this->recordLocals[$name]);
+            if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
+            $this->cellElemLocals[$name] = true;
+            if (isset($this->assocLocals[$name])) {
+                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+                $this->localTypes[$name] = Type::assoc($key, Type::cell());
+            } else {
+                $this->localTypes[$name] = Type::vec(Type::cell());
+            }
+        }
         foreach ($this->byRefCellElemLocals[$fn->name] ?? [] as $name => $unused) {
             unset($this->recordLocals[$name]);
             // A record literal is string-keyed by definition; once it stops being
@@ -1186,15 +1208,28 @@ trait InferNodes
      * differing element on either side floors to a cell, since the result
      * carries both.
      */
+    /** `$known + <erased>`: the known side's keys with a cell element. */
+    private function unionWithErased(Type $known): Type
+    {
+        $e = $known->element;
+        if ($known->isShape() || $e === null || $e->kind === Type::KIND_CELL || $e->kind === Type::KIND_UNKNOWN) {
+            return $known;
+        }
+        return $known->isAssoc() ? Type::assoc($known->key ?? Type::string_(), Type::cell()) : Type::vec(Type::cell());
+    }
+
     private function arrayUnionType(Node $left, Node $right): ?Type
     {
         $lt = $this->inferNode($left);
         $rt = $this->inferNode($right);
         if (!$lt->isArray() && !$rt->isArray()) { return null; }
-        // Only one side typed as an array: the other is erased (unknown/cell),
-        // so nothing narrower than the known side is provable.
-        if (!$rt->isArray()) { return $lt; }
-        if (!$lt->isArray()) { return $rt; }
+        // Only one side typed as an array: the other is erased (unknown/cell).
+        // Its buffer may carry another element hint, and then the runtime
+        // union is a CELL buffer ({@see UnifiedArrayRuntime::emitArrayUnion}) —
+        // a cell element reads either shape through the hint, the known side's
+        // raw element reads only its own.
+        if (!$rt->isArray()) { return $this->unionWithErased($lt); }
+        if (!$lt->isArray()) { return $this->unionWithErased($rt); }
         // An absent / UNKNOWN element is NO EVIDENCE, not a conflict: `[] + $l`
         // copies `$l`'s slots verbatim, so the result has exactly `$l`'s element
         // repr. Flooring that to a cell made the reader unbox raw string
@@ -1586,6 +1621,14 @@ trait InferNodes
             $node->type = Type::cell();
             return $node->type;
         }
+        // A CELL local (`?int` from a call, mixed) stays a cell: its kind is a
+        // run-time fact, and pinning it int made the emitter `sub` the tagged
+        // word ({@see EmitLlvmExpr::emitIncDec}).
+        $cur = $this->localTypes[$node->name] ?? null;
+        if ($cur !== null && $cur->kind === Type::KIND_CELL) {
+            $node->type = $cur;
+            return $cur;
+        }
         // `$x++` reads + writes an int local; pin the slot to int.
         $this->localTypes[$node->name] = Type::int_();
         return Type::int_();
@@ -1937,6 +1980,15 @@ trait InferNodes
                 // carries its runtime tag; emitMatch boxes every arm. An all-
                 // numeric (int|float) match stays a numeric cell (arith-able).
                 $result = $this->unifyToCell($result, $bt);
+            }
+            // A `null` arm beside a value arm (`0 => null, 1 => "7"`): a nullable
+            // cell, as a ternary pairs them — `unknown` returned every arm as a
+            // raw word through a `mixed` return.
+            elseif ($result->kind === Type::KIND_NULL && $this->isValueKind($bt)) {
+                $result = $this->nullableOf($bt);
+            }
+            elseif ($bt->kind === Type::KIND_NULL && $this->isValueKind($result)) {
+                $result = $this->nullableOf($result);
             }
             else { $result = Type::unknown(); }
         }
@@ -2422,5 +2474,36 @@ trait InferNodes
         }
         $node->type = $vt;
         return $vt;
+    }
+    /** @var array<string, bool> {@see collectRefElemBases} */
+    private array $refElemBases = [];
+
+    private function collectRefElemBases(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
+            $b = $n->lvalue;
+            $guard = 0;
+            while ($b instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) {
+                $b = $b->array;
+                $guard = $guard + 1;
+            }
+            if ($b instanceof \Compile\Mir\LoadLocal) { $this->refElemBases[$b->name] = true; }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefElemBases($c); }
+    }
+    private function collectElemRefTargetsInfer(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue instanceof \Compile\Mir\ArrayAccess_) {
+            $lv = $n->lvalue;
+            $el = $lv->array->type->element ?? null;
+            $ek = $el === null ? Type::KIND_UNKNOWN : $el->kind;
+            $root = $lv->array;
+            $guard = 0;
+            while ($root instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) { $root = $root->array; $guard = $guard + 1; }
+            if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN || $root instanceof \Compile\Mir\LoadLocal) {
+                $this->refCellLocalsCur[$n->target] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectElemRefTargetsInfer($c); }
     }
 }

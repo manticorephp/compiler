@@ -243,6 +243,11 @@ final class InferTypes implements Pass
      * @var array<string, bool>
      */
     private array $rescanTouched = [];
+    /** @var array<string, string[]> "fn#idx" → caller candidate params its erased sites forward */
+    private array $callArgForward = [];
+    private string $callArgScanFn = '';
+    /** @var array<string, int> */
+    private array $callArgScanParams = [];
 
     private ?\Compile\Mir\DependencyIndex $callGraph = null;
 
@@ -739,6 +744,11 @@ final class InferTypes implements Pass
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
 
+    /** {@see declarersOf}: method => the classes whose OWN table names it, in
+     *  `$classes` order. `methodNames` is fixed at lowering, so this is per run.
+     *  @var array<string, string[]> */
+    private array $declarersIdx = [];
+
     /** @var array<string, \Compile\Mir\EnumDef> */
     private array $enums = [];
 
@@ -753,6 +763,7 @@ final class InferTypes implements Pass
         $this->callGraph = null;
         $this->rescanTouched = [];
         $this->classes = $module->classes;
+        $this->declarersIdx = [];
         $this->enums = $module->enums;
         $this->typeDefs = $module->typeDefs;
         $this->fnByName = [];
@@ -1516,8 +1527,13 @@ final class InferTypes implements Pass
         }
         if ($node->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $node;
+            // A STRING key reads one field of a record, and a record's fields
+            // differ: `$e['type'] . '_'` proves nothing about `$e['static']`,
+            // which the vec[string] guess then read as a string pointer
+            // (php-cs-fixer's OrderedClassElementsFixer::getTypePosition).
             if ($aa->array->kind === Node::KIND_LOAD_LOCAL
-                && $aa->index->kind !== Node::KIND_NULL_CONST) {
+                && $aa->index->kind !== Node::KIND_NULL_CONST
+                && !$this->isStringOperand($aa->index)) {
                 $nm = $aa->array->name;
                 if (isset($cand[$nm])) { return $nm; }
             }
@@ -1590,7 +1606,26 @@ final class InferTypes implements Pass
                 // poison a concrete observation from another call site. (Recursive
                 // quicksort's `&$a` erased to int → `<` compiled as an integer
                 // compare on string pointers; see preserve_known_type_principle.)
-                if ($this->isUnknownArrayElem($a->type)) { continue; }
+                // Only a forwarded CANDIDATE param is deferred — resolved after
+                // collection by what that param resolves to. Any other erased
+                // arg (a bare-`array` property, a call result) is a site whose
+                // elements nobody can see: skipping it let a sibling site's
+                // concrete element stand for it.
+                if ($this->isUnknownArrayElem($a->type)) {
+                    // An empty `[]` has no element to disagree with.
+                    if ($a->kind === Node::KIND_ARRAY_LIT && $a instanceof \Compile\Mir\ArrayLit
+                        && \count($a->elements) === 0) { continue; }
+                    $srcIdx = $a->kind === Node::KIND_LOAD_LOCAL ? ($this->callArgScanParams[$a->name] ?? -1) : -1;
+                    $srcKey = $srcIdx >= 0 ? $this->callArgScanFn . '#' . (string)$srcIdx : '';
+                    if ($srcKey !== '' && isset($cand[$srcKey])) {
+                        $this->callArgForward[$key][] = $srcKey;
+                        continue;
+                    }
+                    $conflict[$key] = true;
+                    $erasedArg[$key] = true;
+                    unset($observed[$key]);
+                    continue;
+                }
                 $isAssoc = $a->type->isAssoc();
                 // A CELL-KEYED array (a mixed int+string key literal, or a
                 // buffer rebuilt through a cell-keyed `$o[$k]=…`) reports
@@ -3120,14 +3155,33 @@ final class InferTypes implements Pass
     {
         /** @var Type $found */
         $found = null;
-        foreach ($this->classes as $cd) {
-            if (!isset($cd->methodNames[$method])) { continue; }
-            $sig = $this->sigs[$cd->name . '__' . $method] ?? null;
+        foreach ($this->declarersOf($method) as $cn) {
+            $sig = $this->sigs[$cn . '__' . $method] ?? null;
             if ($sig === null) { continue; }
             if ($found === null) { $found = $sig; }
             elseif ($found->kind !== $sig->kind) { return Type::cell(); }
         }
         return $found;
+    }
+
+    /**
+     * The classes that declare `$method` themselves, in class-table order.
+     *
+     * Asked per call site on a cell or interface receiver, and every asker
+     * walked the whole class table — classes × sites hash probes, ~6 s of
+     * php-cs-fixer's front end. The answer depends on the method alone.
+     *
+     * @return string[]
+     */
+    private function declarersOf(string $method): array
+    {
+        if (isset($this->declarersIdx[$method])) { return $this->declarersIdx[$method]; }
+        $out = [];
+        foreach ($this->classes as $cd) {
+            if (isset($cd->methodNames[$method])) { $out[] = $cd->name; }
+        }
+        $this->declarersIdx[$method] = $out;
+        return $out;
     }
 
     /** Return type of iterator method `$m` on `$class`, resolving an interface
@@ -3140,9 +3194,7 @@ final class InferTypes implements Pass
         if ($joined !== null) { return $joined; }
         $c = $this->resolveMethodClass($class, $m);
         if ($c === '') {
-            foreach ($this->classes as $cd) {
-                if (isset($cd->methodNames[$m])) { $c = $cd->name; break; }
-            }
+            foreach ($this->declarersOf($m) as $cn) { $c = $cn; break; }
         }
         if ($c !== '' && isset($this->sigs[$c . '__' . $m])) { return $this->sigs[$c . '__' . $m]; }
         return $dflt;

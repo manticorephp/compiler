@@ -314,21 +314,29 @@ trait LowerExprs
                 return new BoolConst(true, Type::bool_());
             }
             // `defined("NAME")` → compile-time bool against predefined +
-            // user constants. A non-literal name conservatively folds false.
+            // user constants. A non-literal name asks {@see dynConstantSrc}'s
+            // table at run time: folding it false answered no for every name.
             if ($fnBare === 'defined' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
-                $known = false;
-                if ($a0->kind === 'StringLiteral') {
-                    $nm = $this->constBareName($this->stringLitValue($a0));
-                    $known = $this->predefinedConstant($nm) !== null
-                        || isset($this->userConstants[$nm]);
+                if ($a0->kind !== 'StringLiteral') {
+                    $this->sawDynConstant = true;
+                    return new Call('__mc_defined', [$this->lowerExpr($a0)], Type::bool_());
                 }
+                $nm = $this->constBareName($this->stringLitValue($a0));
+                $known = $this->predefinedConstant($nm) !== null
+                    || isset($this->userConstants[$nm]);
                 return new BoolConst($known, Type::bool_());
             }
-            // `constant("NAME")` → the resolved constant value. An unknown /
-            // non-literal name folds to null (PHP throws; null degrades safely).
+            // `constant("NAME")` → the resolved constant value. A non-literal
+            // name is looked up at run time ({@see dynConstantSrc}) — it folded
+            // to null, and php-cs-fixer's `constant('T_ARRAY')` keyword table
+            // came out empty.
             if ($fnBare === 'constant' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
+                if ($a0->kind !== 'StringLiteral') {
+                    $this->sawDynConstant = true;
+                    return new Call('__mc_constant', [$this->lowerExpr($a0)], Type::cell());
+                }
                 if ($a0->kind === 'StringLiteral') {
                     $nm = $this->constBareName($this->stringLitValue($a0));
                     $pre = $this->predefinedConstant($nm);
@@ -645,7 +653,9 @@ trait LowerExprs
             return $pa->nullsafe ? $this->lowerNullsafeProp($pa) : $this->lowerPropertyAccess($pa);
         }
         if ($expr->kind === 'DynProp') {
-            return new DynProp_($this->lowerExpr($this->dynPropObject($expr)), $this->lowerExpr($this->dynPropName($expr)), Type::cell());
+            $dyn = new DynProp_($this->lowerExpr($this->dynPropObject($expr)), $this->lowerExpr($this->dynPropName($expr)), Type::cell());
+            $dyn->scope = $this->currentLowerClass;
+            return $dyn;
         }
         if ($expr->kind === 'MethodCall')     { return $this->lowerMethodCall($expr); }
         if ($expr->kind === 'StaticCall')     { return $this->lowerStaticCall($expr); }
@@ -668,6 +678,13 @@ trait LowerExprs
                 // (which frame-backs its iterator state across the inner
                 // yield) and works uniformly for arrays and sub-generators.
                 $src = $yv !== null ? $this->lowerExpr($yv) : new LoadLocal('this', Type::unknown());
+                // Anything but a literal array goes through the prelude's
+                // normaliser: a foreach whose body yields cannot take the erased
+                // Generator/Traversable dispatch (it would emit the yield twice),
+                // so an erased source degraded to the array-only walk.
+                if ($yv !== null && $yv->kind !== 'ArrayLit' && $this->splIteratorsSrc !== '') {
+                    $src = new \Compile\Mir\Call('__mc_yf_gen', [$src], Type::obj('Generator'));
+                }
                 $n = $this->yieldFromCounter;
                 $this->yieldFromCounter = $n + 1;
                 $kv = '__yf_k' . (string)$n;

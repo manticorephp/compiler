@@ -59,4 +59,12 @@ final class PartPlan
 
     /** The `@llvm.compiler.used` anchor pinning this part's linkonce_odr bodies. */
     public string $usedText = '';
+
+    /**
+     * Small definitions another part OWNS that this part calls, copied in as
+     * `available_externally` so they can still be inlined here, in module order.
+     *
+     * @var string[]
+     */
+    public array $avail = [];
 }

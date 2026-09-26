@@ -973,6 +973,12 @@ final class LowerFromAst implements Pass
             }
         }
 
+        foreach ($module->interfaceNames as $ifn => $_) {
+            $ian = [];
+            $iav = [];
+            $this->collectInterfaceNames($ifn, $ian, $iav);
+            $module->interfaceAncestors[$ifn] = \array_keys($ian);
+        }
         // Reify every `Box<float>` the program's docblocks bind. Runs HERE: the
         // origin classes (and their parents) now exist, and no body has been
         // lowered yet — so a spec class is already in the class table when a body
@@ -1353,6 +1359,20 @@ final class LowerFromAst implements Pass
         // materialise the late-static-binding specialisations.
         $this->emitLsbSpecializations($module);
         $this->releaseAllTraitBodies();
+        // `constant($name)` / `defined($name)` with a computed name: a table of
+        // every constant the program SPELLS in a string literal — the only
+        // names a computed one can be (the rule the by-name call arms follow).
+        // Before the class metadata goes: an arm names `\Foo::BAR`.
+        if ($this->sawDynConstant) {
+            $dcProg = \Parser\Parser::parseSource("<?php\n" . $this->dynConstantSrc($module, $mainStmts));
+            foreach ($dcProg->statements as $dstmt) {
+                if ($dstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$dstmt->decl->name] = $dstmt->decl;
+                $dfn = $this->lowerFunction($dstmt->decl);
+                $dfn->isPrelude = true;
+                $module->addFunction($dfn);
+            }
+        }
         $this->releaseAllClassMetadata();
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
@@ -1398,6 +1418,7 @@ final class LowerFromAst implements Pass
         if ($this->sawDynFnExists) {
             $module->knownFnNames = $this->collectKnownFnNames();
         }
+        foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -1483,6 +1504,15 @@ final class LowerFromAst implements Pass
                     }
                 }
             }
+            // The Error `__mc_dyn_method_dispatch` throws for a method the call
+            // site may not see, or one that does not exist.
+            $errProg = \Parser\Parser::parseSource("<?php\n"
+                . \Compile\Mir\Passes\TrampolineSynth::dynMethodErrorSource());
+            foreach ($errProg->statements as $estmt) {
+                if ($estmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$estmt->decl->name] = $estmt->decl;
+                $module->addFunction($this->lowerFunction($estmt->decl));
+            }
         }
         if ($this->emitLibrary || $this->exportRuntimeTypes) {
             $this->recordExportConstants($module, $this->emitLibrary);
@@ -1497,6 +1527,25 @@ final class LowerFromAst implements Pass
         return $module;
     }
     /** Whether a lowered module contains `$object->$name(...)`. */
+    /**
+     * Method names a would-be CALLABLE ARRAY literal (`[$obj, 'method']`) names,
+     * into {@see Module::$callableArrayMethods}: the only names an erased
+     * invoke of such an array can reach ({@see EmitLlvmCalls::emitErasedInvoke}).
+     */
+    private function collectCallableArrayMethods(Node $node, Module $module): void
+    {
+        if ($node instanceof \Compile\Mir\ArrayLit && \count($node->elements) === 2) {
+            $e0 = $node->elements[0];
+            $e1 = $node->elements[1];
+            if ($e0->key === null && $e1->key === null
+                && $e1->value instanceof \Compile\Mir\StringConst
+                && $e0->value->kind !== Node::KIND_STRING_CONST) {
+                $module->callableArrayMethods[$e1->value->value] = true;
+            }
+        }
+        foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
+    }
+
     private function moduleHasDynamicMethodInvoke(Module $module): bool
     {
         foreach ($module->functions as $fn) {
@@ -1736,30 +1785,115 @@ final class LowerFromAst implements Pass
      * resolved statically (its function is simply not registered, and the ctor
      * throws at runtime), the same trade the class registry makes.
      */
+    /** A `constant()` / `defined()` call whose name is not a literal was lowered. */
+    public bool $sawDynConstant = false;
+
+    /**
+     * `__mc_constant(string): mixed` and `__mc_defined(string): bool` over every
+     * global (`T_ARRAY`, a `define`d name) and class (`Foo::BAR`) constant a
+     * string literal of the program names. Each arm is ordinary source
+     * (`return \T_ARRAY;`), so it resolves exactly as a direct fetch would. An
+     * unknown name is php's `Error: Undefined constant`.
+     */
+    /** @param \Compile\Mir\Node[] $mainStmts */
+    private function dynConstantSrc(Module $module, array $mainStmts): string
+    {
+        /** @var array<string, bool> $names */
+        $names = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->body !== null) { $this->collectConstLits($fn->body, $names); }
+        }
+        foreach ($mainStmts as $ms) { $this->collectConstLits($ms, $names); }
+        $arms = '';
+        $defs = '';
+        foreach ($names as $n => $_) {
+            $expr = '';
+            $dc = \strpos($n, '::');
+            if ($dc !== false && $dc > 0) {
+                // collectConstLits admitted only `Name::CONST` / `Name` shapes.
+                $cls = \substr($n, 0, $dc);
+                $cn = \substr($n, $dc + 2);
+                if ($this->findClassConst($cls, $cn) !== null) { $expr = '\\' . $cls . '::' . $cn; }
+            } else {
+                if ($this->predefinedConstant($n) !== null || isset($this->userConstants[$n])) { $expr = '\\' . $n; }
+            }
+            if ($expr === '') { continue; }
+            $q = $this->dqBody($n);
+            $arms .= "  if (\$n === \"" . $q . "\") { return " . $expr . "; }\n";
+            $defs .= "  if (\$n === \"" . $q . "\") { return true; }\n";
+        }
+        return "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $arms
+            . "  throw new \\Error('Undefined constant \"' . \$n . '\"');\n}\n"
+            . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $defs
+            . "  return false;\n}\n";
+    }
+
+    /** @param array<string, bool> $out */
+    private function collectConstLits(\Compile\Mir\Node $n, array &$out): void
+    {
+        if ($n->kind === \Compile\Mir\Node::KIND_STRING_CONST && $n instanceof \Compile\Mir\StringConst) {
+            $v = \ltrim($n->value, '\\');
+            // A constant NAME only: never a numeric string, which would land as
+            // an INT key in this string-keyed set.
+            if (\strlen($v) < 128 && \preg_match('/^[A-Za-z_][A-Za-z0-9_\\\\]*(::[A-Za-z_][A-Za-z0-9_]*)?$/D', $v) === 1) { $out[$v] = true; }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectConstLits($c, $out); }
+    }
+
     private function collectReflFnNames(Module $module): void
     {
+        $this->reflFnDynamic = false;
         foreach ($module->functions as $fn) {
             if ($fn->body === null) { continue; }
-            $this->scanReflFn($fn->body, $module);
+            $this->scanReflFn($fn->body, $module, false);
+        }
+        // A `new ReflectionFunction($name)` whose name is computed can still
+        // only name a function the program SPELLS somewhere — php-cs-fixer
+        // reflects each entry of a literal map (`'alternativeName' =>
+        // 'mb_str_split'`) to learn whether it is internal. Register every user
+        // function named in a string literal, the rule the by-name call arms
+        // already follow.
+        if ($this->reflFnDynamic) {
+            foreach ($module->functions as $fn) {
+                if ($fn->body === null) { continue; }
+                $this->scanReflFn($fn->body, $module, true);
+            }
         }
     }
 
-    private function scanReflFn(\Compile\Mir\Node $n, Module $module): void
+    private bool $reflFnDynamic = false;
+
+    private function scanReflFn(\Compile\Mir\Node $n, Module $module, bool $literals): void
     {
-        if ($n instanceof \Compile\Mir\NewObj
+        if ($literals) {
+            if ($n->kind === \Compile\Mir\Node::KIND_STRING_CONST && $n instanceof \Compile\Mir\StringConst) {
+                $this->registerReflFn(\ltrim($n->value, '\\'), $module);
+                return;
+            }
+        } elseif ($n instanceof \Compile\Mir\NewObj
             && \ltrim($n->class, '\\') === 'ReflectionFunction'
-            && \count($n->args) >= 1
-            && $n->args[0] instanceof \Compile\Mir\StringConst) {
-            $fn = \ltrim($n->args[0]->value, '\\');
-            if (!isset($module->reflFnMeta[$fn])) {
-                $decl = $this->fnDecls[$fn] ?? null;
-                if ($decl !== null) {
-                    $module->reflFnMeta[$fn] = $this->fnMethodMeta($fn, $decl);
-                }
+            && \count($n->args) >= 1) {
+            // Through a LOCAL: `instanceof` on an element does not narrow it, and
+            // `->value` then read as the base Node's (an int).
+            $a0 = $n->args[0];
+            if ($a0 instanceof \Compile\Mir\StringConst) {
+                $this->registerReflFn(\ltrim($a0->value, '\\'), $module);
+            } else {
+                $this->reflFnDynamic = true;
             }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
-            $this->scanReflFn($c, $module);
+            $this->scanReflFn($c, $module, $literals);
+        }
+    }
+
+    private function registerReflFn(string $fn, Module $module): void
+    {
+        if ($fn === '' || isset($module->reflFnMeta[$fn])) { return; }
+        $decl = $this->fnDecls[$fn] ?? null;
+        if ($decl !== null) {
+            $module->reflFnMeta[$fn] = $this->fnMethodMeta($fn, $decl);
         }
     }
 
@@ -5009,7 +5143,7 @@ final class LowerFromAst implements Pass
             $out = [];
             $i = 0;
             foreach ($astArgs as $a) {
-                $conv = $i < $np ? $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
+                $conv = $i < $np ? $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
                 $out[] = $conv !== null ? $conv : $this->lowerExpr($a);
                 $i = $i + 1;
             }

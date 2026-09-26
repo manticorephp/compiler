@@ -94,7 +94,7 @@ function sha1_file(string $filename, bool $binary = false): string|false
 
 /**
  * hash($algo, $data, $binary). Supports the EVP digests plus crc32b (== crc32())
- * and crc32 (the MSB-first variant). Returns false on an unknown algo.
+ * crc32 (the MSB-first variant) and xxh128 (Xxhash.php). Throws on an unknown algo.
  */
 function hash(string $algo, string $data, bool $binary = false): string
 {
@@ -108,6 +108,10 @@ function hash(string $algo, string $data, bool $binary = false): string
         // emitted LITTLE-endian — unlike crc32b, which is big-endian.
         $v = \__mc_crc32_msb($data);
         return $binary ? \__mc_u32le($v) : \bin2hex(\__mc_u32le($v));
+    }
+    if ($a === 'xxh128') {
+        $raw = \__mc_xxh128_raw($data);
+        return $binary ? $raw : \bin2hex($raw);
     }
     $id = \__mc_algo_id($algo);
     if ($id < 0) {
@@ -163,7 +167,7 @@ function hash_hmac_file(string $algo, string $filename, string $key, bool $binar
 /** @return string[] */
 function hash_algos(): array
 {
-    return ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'crc32', 'crc32b'];
+    return ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'crc32', 'crc32b', 'xxh128'];
 }
 
 /** php's crc32() — the reflected CRC-32 (IEEE 802.3), same as hash('crc32b'). */

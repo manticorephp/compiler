@@ -1,0 +1,15 @@
+array(3) {
+  ["this"]=>
+  string(5) "$this"
+  ["@this"]=>
+  string(4) "self"
+  ["$self"]=>
+  string(4) "self"
+}
+array(2) {
+  ["this"]=>
+  string(5) "$this"
+  ["@this"]=>
+  string(5) "$this"
+}
+Unknown key "string#x"

@@ -1293,3 +1293,36 @@ class SplObjectStorage implements Countable, SeekableIterator, ArrayAccess
         $this->detach($object);
     }
 }
+
+/**
+ * `yield from $src` normalised to ONE generator, whatever `$src` is: the same
+ * generator when it is one, else a wrapper walking the array / Iterator /
+ * IteratorAggregate. The desugared `foreach` over the result is then statically
+ * a Generator loop, so its yielding body is emitted once — an erased source
+ * (a closure call, an `iterable`) otherwise took the array-only walk and a
+ * generator behind it yielded nothing (symfony Finder's LazyIterator).
+ */
+function __mc_yf_gen(mixed $src): \Generator
+{
+    if ($src instanceof \Generator) { return $src; }
+    return __mc_yf_wrap($src);
+}
+
+function __mc_yf_wrap(mixed $src): \Generator
+{
+    if (\is_array($src)) {
+        foreach ($src as $k => $v) { yield $k => $v; }
+        return;
+    }
+    if ($src instanceof \IteratorAggregate) {
+        foreach (__mc_yf_gen($src->getIterator()) as $k => $v) { yield $k => $v; }
+        return;
+    }
+    if ($src instanceof \Iterator) {
+        $src->rewind();
+        while ($src->valid()) {
+            yield $src->key() => $src->current();
+            $src->next();
+        }
+    }
+}

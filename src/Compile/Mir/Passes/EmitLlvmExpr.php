@@ -2674,7 +2674,144 @@ trait EmitLlvmExpr
 
     private function emitInstanceof(Instanceof_ $n): string
     {
-        return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class));
+        $low = \strtolower($n->class);
+        if ($low === 'closure') {
+            return $this->emitClosureTest($n->operand);
+        }
+        // A Generator is a frame, not a class instance: no class id to match.
+        // Statically one → non-null; erased → the frame probe. Iterator and
+        // Traversable, which every generator is, add the probe to the class test
+        // (an erased generator in `yield from`'s normaliser answered false).
+        if ($low === 'generator') {
+            $gt = $n->operand->type;
+            if ($this->isGeneratorType($gt)) {
+                $out = $this->emitNode($n->operand);
+                $out .= $this->coerceToI64();
+                $nz = $this->ssa->allocReg();
+                $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+                $z = $this->ssa->allocReg();
+                $out .= '  ' . $z . ' = zext i1 ' . $nz . " to i64\n";
+                $this->lastValue = $z;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            return $this->emitClassIdTest($n->operand, [], true);
+        }
+        $genToo = $low === 'iterator' || $low === 'traversable';
+        return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class), $genToo);
+    }
+
+    /**
+     * `$x instanceof Closure` → i64 0/1. A closure is no class instance: its
+     * env's slot 0 is the code pointer, so the class-id test read a descriptor
+     * out of machine code and answered false for every closure (symfony
+     * OptionsResolver took each allowed-value callback for a literal). Every
+     * closure env carries CLOSURE_TAG_MAGIC at `hash@-32` behind a plain rc at
+     * -8; an object/array/struct/enum/ref instead has a 0x7E66 magic at -8, so
+     * -32 is read only when -8 is not one, and a string's -32 is its hash.
+     */
+    private function emitClosureTest(Node $operand): string
+    {
+        $out = $this->emitNode($operand);
+        $out .= $this->coerceToI64();
+        $v = $this->lastValue;
+        $k = $operand->type->kind;
+        $cls = $operand->type->class ?? '';
+        $this->lastValueType = 'i64';
+        // A literal closure's own type: an instance unless null. A call-site
+        // shim of a callable LITERAL (`cb('strlen')`) is a string/array in php.
+        if ($k === Type::KIND_OBJ && \str_starts_with($cls, '__closure_')) {
+            if (isset($this->callableShims[$cls])) {
+                $this->lastValue = '0';
+                return $out;
+            }
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp ne i64 ' . $v . ", 0\n";
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = zext i1 ' . $nz . " to i64\n";
+            $this->lastValue = $z;
+            return $out;
+        }
+        // `closure` is also what a `callable` hint lowers to, and that slot
+        // holds an invokable object raw — so it is tested like an erased one.
+        $erased = $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN || $k === Type::KIND_CLOSURE
+            || ($k === Type::KIND_OBJ && \strtolower($cls) === 'closure');
+        if (!$erased) {
+            $this->lastValue = '0';
+            return $out;
+        }
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $slot . "\n";
+        $pay = $this->ssa->allocReg();
+        $out .= '  ' . $pay . " = alloca i64\n";
+        $out .= '  store i64 0, ptr ' . $pay . "\n";
+        $isBox = $this->ssa->allocReg();
+        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $boxL = $this->ssa->allocLabel('ic.box');
+        $rawL = $this->ssa->allocLabel('ic.raw');
+        $rawOkL = $this->ssa->allocLabel('ic.rawok');
+        $chkL = $this->ssa->allocLabel('ic.chk');
+        $envL = $this->ssa->allocLabel('ic.env');
+        $doneL = $this->ssa->allocLabel('ic.done');
+        $out .= '  br i1 ' . $isBox . ', label %' . $boxL . ', label %' . $rawL . "\n";
+        $out .= $boxL . ":\n";
+        $out .= $this->cellTagIr($v);
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        $bp = $this->ssa->allocReg();
+        $out .= '  ' . $bp . ' = and i64 ' . $v . ", 281474976710655\n";
+        $bs = $this->ssa->allocReg();
+        $out .= '  ' . $bs . ' = select i1 ' . $isObj . ', i64 ' . $bp . ", i64 0\n";
+        $out .= '  store i64 ' . $bs . ', ptr ' . $pay . "\n";
+        $out .= '  br label %' . $chkL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($v);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $rawOkL . ', label %' . $chkL . "\n";
+        $out .= $rawOkL . ":\n";
+        $out .= '  store i64 ' . $v . ', ptr ' . $pay . "\n";
+        $out .= '  br label %' . $chkL . "\n";
+        $out .= $chkL . ":\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = load i64, ptr ' . $pay . "\n";
+        $pz = $this->ssa->allocReg();
+        $out .= '  ' . $pz . ' = icmp eq i64 ' . $p . ", 0\n";
+        $hdrL = $this->ssa->allocLabel('ic.hdr');
+        $out .= '  br i1 ' . $pz . ', label %' . $doneL . ', label %' . $hdrL . "\n";
+        $out .= $hdrL . ":\n";
+        $pp = $this->ssa->allocReg();
+        $out .= '  ' . $pp . ' = inttoptr i64 ' . $p . " to ptr\n";
+        $m8p = $this->ssa->allocReg();
+        $out .= '  ' . $m8p . ' = getelementptr inbounds i8, ptr ' . $pp . ", i64 -8\n";
+        $m8 = $this->ssa->allocReg();
+        $out .= '  ' . $m8 . ' = load i64, ptr ' . $m8p . "\n";
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = lshr i64 ' . $m8 . ", 48\n";
+        $isMagic = $this->ssa->allocReg();
+        $out .= '  ' . $isMagic . ' = icmp eq i64 ' . $hi . ', '
+              . (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC >> 48) . "\n";
+        $out .= '  br i1 ' . $isMagic . ', label %' . $doneL . ', label %' . $envL . "\n";
+        $out .= $envL . ":\n";
+        $m32p = $this->ssa->allocReg();
+        $out .= '  ' . $m32p . ' = getelementptr inbounds i8, ptr ' . $pp . ', i64 '
+              . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $m32 = $this->ssa->allocReg();
+        $out .= '  ' . $m32 . ' = load i64, ptr ' . $m32p . "\n";
+        $m32m = $this->ssa->allocReg();
+        $out .= '  ' . $m32m . ' = and i64 ' . $m32 . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+        $isCl = $this->ssa->allocReg();
+        $out .= '  ' . $isCl . ' = icmp eq i64 ' . $m32m . ', '
+              . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        $ce = $this->ssa->allocReg();
+        $out .= '  ' . $ce . ' = zext i1 ' . $isCl . " to i64\n";
+        $out .= '  store i64 ' . $ce . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**
@@ -2687,11 +2824,43 @@ trait EmitLlvmExpr
      * @param int[] $ids the target's is-a id set ({@see instanceofMatchIds}),
      *                   already narrowed for `is_subclass_of`'s strictness
      */
-    private function emitClassIdTest(Node $operand, array $ids): string
+    private function emitClassIdTest(Node $operand, array $ids, bool $genToo = false): string
     {
         $out = $this->emitNode($operand);
         $out .= $this->coerceToI64();
         $obj = $this->lastValue;
+        $opk0 = $operand->type->kind;
+        if ($genToo && ($opk0 === Type::KIND_CELL || $opk0 === Type::KIND_UNKNOWN)) {
+            $out .= $this->untagCarrierIr($obj);
+            $out .= $this->genFrameProbeIr($this->lastValue);
+            $gen = $this->genFrameReg;
+            if ($ids === []) {
+                $gz = $this->ssa->allocReg();
+                $out .= '  ' . $gz . ' = zext i1 ' . $gen . " to i64\n";
+                $this->lastValue = $gz;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+            $out .= $this->classIdTestTail($operand, $ids, $obj);
+            $cr = $this->lastValue;
+            $ci = $this->ssa->allocReg();
+            $out .= '  ' . $ci . ' = icmp ne i64 ' . $cr . ", 0\n";
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $ci . ', ' . $gen . "\n";
+            $oz = $this->ssa->allocReg();
+            $out .= '  ' . $oz . ' = zext i1 ' . $or . " to i64\n";
+            $this->lastValue = $oz;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $out . $this->classIdTestTail($operand, $ids, $obj);
+    }
+
+    /** {@see emitClassIdTest} past the operand's evaluation: `$obj` is its i64 word.
+     *  @param int[] $ids */
+    private function classIdTestTail(Node $operand, array $ids, string $obj): string
+    {
+        $out = '';
         if ($ids === []) {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
@@ -3349,20 +3518,36 @@ trait EmitLlvmExpr
     private function emitIncDec(IncDec $n): string
     {
         $d = $n;
-        // `$s++` on a string local (typed CELL by inferIncDec): the value rides a
-        // cell — delegate to the stdlib Perl/numeric increment, which returns the
-        // next value (int/float/string) as a cell. Post returns the old cell.
-        if ($d->type->kind === Type::KIND_CELL && $d->op === '+'
-            && isset($this->locals->slots[$d->name])) {
-            $slot = $this->locals->slots[$d->name];
-            $old = $this->ssa->allocReg();
-            $out = '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
-            $new = $this->ssa->allocReg();
-            $out .= '  ' . $new . ' = call i64 @manticore___mir_str_increment(i64 ' . $old . ")\n";
-            $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
-            $this->lastValue = $d->prefix ? $new : $old;
-            $this->lastValueType = 'i64';
-            return $out;
+        // A CELL local (typed so by inferIncDec: a `++`'d string, or a `?int` /
+        // mixed value): the kind is only known at run time — delegate to the
+        // stdlib inc/dec, which returns the next value (int/float/string/null)
+        // as a cell. A raw `sub` on the tagged word decremented the TAG
+        // (php-cs-fixer's `$tokens[--$previousTokenIndex]` on a ?int index).
+        // Post returns the old cell.
+        if ($d->type->kind === Type::KIND_CELL) {
+            $out = '';
+            $ptr = '';
+            if (isset($this->locals->globalBacked[$d->name])) {
+                $ptr = $this->locals->globalBacked[$d->name];
+            } elseif (isset($this->locals->refLocals[$d->name]) && isset($this->locals->slots[$d->name])) {
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$d->name] . "\n";
+                $ptr = $this->ssa->allocReg();
+                $out .= '  ' . $ptr . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            } elseif (isset($this->locals->slots[$d->name])) {
+                $ptr = $this->locals->slots[$d->name];
+            }
+            if ($ptr !== '') {
+                $fn = $d->op === '+' ? '@manticore___mir_str_increment' : '@manticore___mir_str_decrement';
+                $old = $this->ssa->allocReg();
+                $out .= '  ' . $old . ' = load i64, ptr ' . $ptr . "\n";
+                $new = $this->ssa->allocReg();
+                $out .= '  ' . $new . ' = call i64 ' . $fn . '(i64 ' . $old . ")\n";
+                $out .= '  store i64 ' . $new . ', ptr ' . $ptr . "\n";
+                $this->lastValue = $d->prefix ? $new : $old;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
         }
         $instr = $d->op === '+' ? 'add' : 'sub';
         // Static locals (backed by a global cell) and by-ref params / captures
@@ -5029,6 +5214,20 @@ trait EmitLlvmExpr
         // hint. The carriers were compared as pointers — php-cs-fixer's
         // `$this->configuration['include'] !== $defaults` was true for equal
         // arrays and every fixer refused its own default configuration.
+        // An ERASED side against an array (a bare `array` param is KIND_UNKNOWN)
+        // is tagged by probing its word — an array carrier becomes an array cell
+        // — and then compares by value like a cell does. The pointers were
+        // compared: `$value !== array_unique($value)` was true for every list
+        // (php-cs-fixer ordered_attributes refused its own `order` default).
+        if (($isEq || $isNe) && $lk === Type::KIND_UNKNOWN && $rk === Type::KIND_ARRAY) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $chunks[] = $this->boxUnknownShallowIr();
+            $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
+        } elseif (($isEq || $isNe) && $rk === Type::KIND_UNKNOWN && $lk === Type::KIND_ARRAY) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $chunks[] = $this->boxUnknownShallowIr();
+            $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
+        }
         if (($isEq || $isNe) && $lk === Type::KIND_CELL && $rk === Type::KIND_ARRAY) {
             $this->lastValue = $r; $this->lastValueType = $rt;
             $chunks[] = $this->shallowBoxToCell($c->right->type);
@@ -5347,6 +5546,17 @@ trait EmitLlvmExpr
      *
      * @param array<int, bool> $ahmask
      */
+    /** The string {@see unboxCellArg} rendered from a scalar arg, or ''. */
+    private string $scalarStrArgTemp = '';
+
+    /** Hand the caller the rendered-scalar temp to free after the call. */
+    private function takeScalarStrArgTemp(): bool
+    {
+        $t = $this->scalarStrArgTemp !== '';
+        $this->scalarStrArgTemp = '';
+        return $t;
+    }
+
     private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
         $ak = $a->type->kind;
@@ -5388,6 +5598,28 @@ trait EmitLlvmExpr
         if ($pt !== null && $ak === Type::KIND_UNKNOWN
             && ($pt->kind === Type::KIND_STRING || $pt->isArray())) {
             return $this->unboxCellToType($pt) . $this->coerceToI64();
+        }
+        // A SCALAR bound to a string param is rendered, as php does in coercive
+        // mode (`str_pad($bar->getProgress(), …)`, `strtoupper(5)`): the raw
+        // integer crossed as a string POINTER. The fresh text is the caller's
+        // to free after the call ({@see takeScalarStrArgTemp}).
+        // Only a DIRECT call to a known PHP function renders ({@see
+        // $argsRenderScalars}): a method / invoke site argues against the
+        // FALLBACK's params, not the callee's, and an FFI binding's `string`
+        // param takes a raw ADDRESS the stdlib holds as an int.
+        if ($pt !== null && $pt->kind === Type::KIND_STRING && $this->argsRenderScalars
+            && ($ak === Type::KIND_INT || $ak === Type::KIND_FLOAT || $ak === Type::KIND_BOOL)) {
+            $out = '';
+            if ($ak === Type::KIND_FLOAT && $this->lastValueType === 'i64') {
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+                $this->lastValue = $d;
+                $this->lastValueType = 'double';
+            }
+            $out .= $this->coerceToStr($a, false);
+            $out .= $this->coerceToI64();
+            $this->scalarStrArgTemp = $this->lastValue;
+            return $out;
         }
         if ($ak !== Type::KIND_CELL) { return ''; }
         if ($pt === null) { return ''; }
@@ -5525,7 +5757,7 @@ trait EmitLlvmExpr
      */
     private function conformToClaim(Type $pt, string $word): string
     {
-        if (!$pt->isVec() && !$pt->isAssoc()) { return ''; }
+        if ((!$pt->isVec() && !$pt->isAssoc()) || $pt->isShape()) { return ''; }
         $el = $pt->element;
         if ($el === null) { return ''; }
         $code = $this->elementHintCodeForType($el);

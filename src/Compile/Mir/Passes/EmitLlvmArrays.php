@@ -133,10 +133,13 @@ trait EmitLlvmArrays
      * ref-slot helper is int-only; string / cell keys and string-char indexing
      * (`$s[0]`) fall back to a value copy.
      */
-    private function arrayElemAddressable(ArrayAccess_ $aa): bool
+    private function arrayElemAddressable(ArrayAccess_ $aa, bool $append = false): bool
     {
-        if (!$this->arrayElemKeyKind($aa->index)) { return false; }
+        if (!$append && !$this->arrayElemKeyKind($aa->index)) { return false; }
         if (!$this->containerAddressable($aa->array)) { return false; }
+        // A nested container is opened into a raw scratch word whatever its
+        // static type ({@see containerCellPtr}).
+        if ($aa->array->kind === Node::KIND_ARRAY_ACCESS) { return true; }
         // Base must be a genuine (raw-pointer) array container. A bare-array
         // property read can infer UNKNOWN, so consult the declared prop type.
         if ($aa->array->type->isArray()) { return true; }
@@ -492,11 +495,56 @@ trait EmitLlvmArrays
      *
      * Leaves the value word in {@see elemValReg}.
      */
-    private function emitArrayLitValue(Node $value, bool $cellVals): string
+    /**
+     * Whether an array of type `$t` reads back exactly through its element HINT
+     * alone, all the way down — scalars, strings, plain objects, cells. An enum
+     * element is an ORDINAL that only the deep box turns back into its case, so
+     * an array holding one (at any depth) must be rebuilt, not tagged.
+     */
+    private function hintDecodesExactly(Type $t): bool
+    {
+        if ($t->fields !== null) {
+            foreach ($t->fields as $f) {
+                if (!$this->hintDecodesExactly($f)) { return false; }
+            }
+            return true;
+        }
+        if ($t->isArray()) { return $t->element === null || $this->hintDecodesExactly($t->element); }
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) { return !$this->isEnumType($t); }
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
+            || $k === Type::KIND_STRING || $k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN
+            || $k === Type::KIND_NULL;
+    }
+
+    private function emitArrayLitValue(Node $value, bool $cellVals, bool $inShape = false): string
     {
         $out = $this->emitNode($value);
-        if ($cellVals) { $out .= $this->retainCellPayload($value); }
-        $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
+        $shallow = $cellVals && $inShape && $value->type->isArray()
+            && $this->hintDecodesExactly($value->type);
+        if ($shallow) {
+            // The tag shares the array rather than rebuilding it, so a
+            // BORROWED one (a local) needs the co-owner +1 a rebuild never
+            // did; an owned producer's +1 transfers ({@see rcRetainByType}).
+            $sv = $this->lastValue;
+            $st = $this->lastValueType;
+            $out .= $this->coerceToI64();
+            $out .= $this->rcRetainByType($value, $this->lastValue, null, 2);
+            $this->lastValue = $sv;
+            $this->lastValueType = $st;
+        } elseif ($cellVals) {
+            $out .= $this->retainCellPayload($value);
+        }
+        // A SHAPE field's reader decodes the field word and then takes the
+        // field's DECLARED type — `counts: int[]` reads raw ints. The deep box
+        // rebuilt the nested array as cells, and `implode($s['counts'])`
+        // printed the tagged words. Tag the pointer; the array keeps its repr
+        // (and its hint, for an erased reader).
+        if ($shallow) {
+            $out .= $this->boxToCellShallow($value->type);
+        } else {
+            $out .= $cellVals ? $this->boxToCell($value->type, $value) : $this->coerceToI64();
+        }
         $val = $this->lastValue;
         $ret = '';
         if (!$cellVals) { $ret = $this->rcRetainByType($value, $val, null, 2); $out .= $ret; }
@@ -607,15 +655,30 @@ trait EmitLlvmArrays
             if ($el->key !== null) {
                 $keyIsString = $el->key->type->kind === Type::KIND_STRING
                     || $el->key->kind === Node::KIND_STRING_CONST;
+                // A CELL key (`[key($a) => …]`, a `int|string` value) is
+                // classified at run time, as `$a[$k] = …` does: set_int took
+                // the tagged word itself as the integer key.
+                $keyIsCell = !$keyIsString && $el->key->type->kind === Type::KIND_CELL;
                 $out .= $this->emitNode($el->key);
                 $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                 $keyReg = $this->lastValue;
-                $out .= $this->emitArrayLitValue($el->value, $cellVals);
+                $out .= $this->emitArrayLitValue($el->value, $cellVals, $al->type->isShape());
                 $val = $this->elemValReg;
                 $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
                 $next = $this->ssa->allocReg();
-                if ($keyIsString) {
+                if ($keyIsCell) {
+                    $this->rt->needsCellKey = true;
+                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $keyReg . ', i64 ' . $val . ")\n";
+                    $ik = $el->key->kind;
+                    if ($ik === Node::KIND_CALL || $ik === Node::KIND_METHOD_CALL
+                        || $ik === Node::KIND_STATIC_CALL || $ik === Node::KIND_INVOKE
+                        || $ik === Node::KIND_CONCAT || \Compile\Mir\BitOp::mintsFresh($el->key)) {
+                        $this->rt->needsRc = true;
+                        $this->rt->needsStrRc = true;
+                        $out .= '  call void @__mir_cell_drop(i64 ' . $keyReg . ")\n";
+                    }
+                } elseif ($keyIsString) {
                     $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $cur . ', ptr ' . $keyReg . ', i64 ' . $val . $this->litKeyHashArgs($el->key) . ")\n";
                     // Release our +1 on a fresh key temp — set_str retained its own
                     // (see the StoreElement path); a literal / local key is untouched.
@@ -625,7 +688,7 @@ trait EmitLlvmArrays
                 }
                 $out .= '  store ptr ' . $next . ', ptr ' . $slot . "\n";
             } else {
-                $out .= $this->emitArrayLitValue($el->value, $cellVals);
+                $out .= $this->emitArrayLitValue($el->value, $cellVals, $al->type->isShape());
                 $val = $this->elemValReg;
                 $cur = $this->ssa->allocReg();
                 $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
@@ -706,7 +769,18 @@ trait EmitLlvmArrays
         $hdr = \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
         $arr = $this->ssa->allocReg();
         $out  = '  ' . $arr . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
+        $table = $cellVals || $count < self::LIT_TABLE_MIN ? '' : $this->litConstTable($al, $shape);
+        if ($table !== '') {
+            $bytes = $count * ($shape === 'packed' ? \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE
+                                                   : \Compile\MemoryAbi::ARRAY_ENTRY_SIZE);
+            $dst = $this->ssa->allocReg();
+            $out .= '  ' . $dst . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . (string)$hdr . "\n";
+            $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+            $cp = $this->ssa->allocReg();
+            $out .= '  ' . $cp . ' = call ptr @memcpy(ptr ' . $dst . ', ptr ' . $table . ', i64 ' . (string)$bytes . ")\n";
+        }
         foreach ($al->elements as $i => $el) {
+            if ($table !== '') { break; }
             // NOT `$keyReg = null` then a string: a null-union local infers
             // unsoundly under the native self-build (the slot carries a raw
             // payload, and the concat below then prints a POINTER instead of the
@@ -717,7 +791,7 @@ trait EmitLlvmArrays
                 $out .= $this->coerceToPtr();
                 $keyReg = $this->lastValue;
             }
-            $out .= $this->emitArrayLitValue($el->value, $cellVals);
+            $out .= $this->emitArrayLitValue($el->value, $cellVals, $al->type->isShape());
             $val = $this->elemValReg;
             if ($shape === 'packed') {
                 $off = $hdr + $i * \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
@@ -768,6 +842,61 @@ trait EmitLlvmArrays
         $this->lastValue = $arr;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /** From this many elements a constant literal is a data table, not code. */
+    private const LIT_TABLE_MIN = 16;
+
+    /**
+     * A known-shape literal whose every key and value is an int or string
+     * CONSTANT, as one `private constant` laid out exactly like the buffer's
+     * entries — the symbol, or '' when some element is not a constant word.
+     *
+     * Emitted element by element, a lookup table is 3 stores and a key retain
+     * per entry, straight-line: polyfill-mbstring and symfony/string put 16k of
+     * them into php-cs-fixer's `main` (8.6 MB of IR, 17.5 s of `clang -O2` on
+     * that one function, and the function the whole-module optimizer never
+     * finished). A table is a `memcpy`. The words need no counts: a string
+     * literal is immortal (rc -1), so the retain the element path pays on each
+     * key and value is a no-op at run time.
+     */
+    private function litConstTable(ArrayLit $al, string $shape): string
+    {
+        $et = $al->type->element;
+        if ($et === null || ($et->kind !== Type::KIND_INT && $et->kind !== Type::KIND_STRING)) { return ''; }
+        $ew = \intdiv($shape === 'packed' ? \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE
+                                          : \Compile\MemoryAbi::ARRAY_ENTRY_SIZE, 8);
+        $kindW = \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_KIND_OFFSET, 8);
+        $keyW = \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_KEY_OFFSET, 8);
+        $valW = $shape === 'packed' ? 0 : \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET, 8);
+        $words = [];
+        foreach ($al->elements as $el) {
+            $v = $el->value;
+            $vw = '';
+            if ($v instanceof IntConst && $et->kind === Type::KIND_INT && $v->type->kind === Type::KIND_INT) {
+                $vw = (string)$v->value;
+            } elseif ($v instanceof StringConst && $et->kind === Type::KIND_STRING
+                      && $v->type->kind === Type::KIND_STRING) {
+                $vw = 'ptrtoint (ptr ' . $this->litStr($v->value) . ' to i64)';
+            } else {
+                return '';
+            }
+            /** @var string[] $entry */
+            $entry = \array_fill(0, $ew, '0');
+            $entry[$valW] = $vw;
+            if ($shape === 'hashed') {
+                $k = $el->key;
+                if (!($k instanceof StringConst)) { return ''; }
+                $entry[$kindW] = (string)\Compile\MemoryAbi::ARRAY_KIND_STRING;
+                $entry[$keyW] = 'ptrtoint (ptr ' . $this->litStr($k->value) . ' to i64)';
+            }
+            foreach ($entry as $w) { $words[] = 'i64 ' . $w; }
+        }
+        $sym = '@.lit.' . (string)$this->litTableCount;
+        $this->litTableCount = $this->litTableCount + 1;
+        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
+            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
+        return $sym;
     }
 
     /**
@@ -1140,7 +1269,7 @@ trait EmitLlvmArrays
         // it was promised a raw word, inventing a representation. A ref deref
         // only ever REMOVES one — `$refs[0]` in php IS the referenced value, and
         // there is no rvalue spelling for the binding itself.
-        if ($this->rt->needsRefCells) {
+        if ($this->rt->needsRefCells && $this->elemSlotMayHoldRef($aa->array->type)) {
             $this->rt->needsTagged = true;
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $reg . ")\n";
@@ -1769,6 +1898,19 @@ trait EmitLlvmArrays
     }
 
     /**
+     * Whether an element of an array typed `$t` can hold a REFERENCE box
+     * (`cell(REF, box)` after `$r = &$a[$k]`): only a slot that holds CELLS —
+     * the promotion retypes the base to cell elements. A raw `int[]` word that
+     * merely LOOKS like a REF tag (xxh128's accumulators are arbitrary 64-bit
+     * values) was dereferenced as a box and faulted.
+     */
+    private function elemSlotMayHoldRef(Type $t): bool
+    {
+        if (!$t->isArray() || $t->isShape()) { return true; }
+        $e = $t->element;
+        return $e === null || $e->kind === Type::KIND_CELL || $e->kind === Type::KIND_UNKNOWN;
+    }
+    /**
      * Write THROUGH a reference already sitting in the element slot.
      *
      * `$refs = [&$a]; $refs[0] = 10;` assigns to `$a` — the element holds a
@@ -2020,7 +2162,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
             }
-            if ($this->rt->needsRefCells && !$rebinds) {
+            if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -2052,7 +2194,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
             }
-            if ($this->rt->needsRefCells && !$rebinds) {
+            if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }
@@ -2075,7 +2217,7 @@ trait EmitLlvmArrays
                 $curE = $this->ssa->allocReg();
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
             }
-            if ($this->rt->needsRefCells && !$rebinds) {
+            if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
                 $out .= $this->emitElemWriteThrough($curE, $val);
                 $val = $this->elemValReg;
             }

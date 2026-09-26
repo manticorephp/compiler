@@ -599,6 +599,8 @@ function __mir_str_increment(mixed $v): mixed
 {
     if (\is_int($v)) { return $v + 1; }
     if (\is_float($v)) { return $v + 1; }
+    if ($v === null) { return 1; }
+    if (\is_bool($v)) { return $v; }
     // Unboxing a cell hands back the CALLER's buffer, BORROWED — the `+1`
     // convention retains only what a callee keeps. This function mutates
     // (`$s[$i] = …`), and `__mir_str_set_char` writes in place when it is the sole
@@ -629,4 +631,24 @@ function __mir_str_increment(mixed $v): mixed
     if ($first === "a") { return "a" . $s; }
     if ($first === "A") { return "A" . $s; }
     return $s;
+}
+
+/** The `--` operator on a value whose kind is only known at run time: null
+ *  stays null, a bool is untouched, a numeric string decrements NUMERICALLY,
+ *  "" becomes -1, and any other string is left as it is (php has no Perl-style
+ *  decrement). */
+function __mir_str_decrement(mixed $v): mixed
+{
+    if (\is_int($v)) { return $v - 1; }
+    if (\is_float($v)) { return $v - 1; }
+    if ($v === null || \is_bool($v)) { return $v; }
+    $s = (string)$v;
+    if ($s === "") { return -1; }
+    if (\is_numeric($s)) {
+        if (\strpos($s, ".") !== false || \strpos($s, "e") !== false || \strpos($s, "E") !== false) {
+            return ((float)$s) - 1.0;
+        }
+        return ((int)$s) - 1;
+    }
+    return $v;
 }

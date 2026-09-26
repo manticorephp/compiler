@@ -1,0 +1,10 @@
+string(8) "M1:color"
+string(8) "M1:known"
+int(5)
+int(5)
+string(2) "m3"
+string(2) "m3"
+string(3) "red"
+int(1)
+M1.color=blue,M1.known=9|M2.color=blue|M3.color=blue,M3.known=9
+9 blue 9

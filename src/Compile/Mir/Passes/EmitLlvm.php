@@ -213,6 +213,13 @@ final class EmitLlvm implements EmitVisitor
      *  the one thing a hot path must not do. */
     private int $resolveMethodClassEntries = 0;
 
+    /** {@see EmitLlvmObjects::methodHolders}: method => [class => resolved holder].
+     *  @var array<string, array<string, string>> */
+    private array $methodHoldersIdx = [];
+
+    /** Class-table size the index was built against; a change drops it. */
+    private int $methodHoldersClassCount = -1;
+
     /** The window {@see EmitLlvmObjects::resolveMethodClass} keeps. Sized so the
      *  memo cannot outgrow the module it describes: ~256k entries is more than
      *  any single class-by-class sweep asks for, and two orders of magnitude
@@ -313,6 +320,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** Compiler-owned lightweight method tables for erased dynamic calls. */
     private bool $dynamicMethodMeta = false;
+    /** @var array<string, bool> {@see Module::$callableArrayMethods} */
+    private array $callableArrayMethods = [];
 
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
@@ -394,6 +403,8 @@ final class EmitLlvm implements EmitVisitor
     private array $builtinTwinReq = [];
     /** @var array<string, int> */
     private array $builtinTwinTot = [];
+    /** @var array<string, bool> */
+    private array $callableShims = [];
     /** @var array<string, string> */
     private array $builtinTwinRet = [];
 
@@ -468,6 +479,11 @@ final class EmitLlvm implements EmitVisitor
     private array $rtExterns = [];
     /** @var array<string, bool> mangled module-fn name → defined (for extern detection) */
     private array $definedFns = [];
+    /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
+    private array $ffiFnNames = [];
+    /** The call being argued is a direct call to a PHP (non-FFI) function
+     *  whose declared params are its own ({@see unboxCellArg}). */
+    private bool $argsRenderScalars = false;
     /**
      * Library build (prebuilt stdlib.o): suppress the `@main` entry point so
      * the object links cleanly alongside a user program's own `@main`. Set by
@@ -643,6 +659,8 @@ final class EmitLlvm implements EmitVisitor
         $this->classes = $module->classes;
         $this->resolveMethodClassCache = [];
         $this->resolveMethodClassEntries = 0;
+        $this->methodHoldersIdx = [];
+        $this->methodHoldersClassCount = -1;
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
@@ -657,11 +675,13 @@ final class EmitLlvm implements EmitVisitor
         $this->reflectAll = $module->reflectAll;
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
+        $this->callableArrayMethods = $module->callableArrayMethods;
         $this->enums = $module->enums;
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
+        $this->interfaceAncestors = $module->interfaceAncestors;
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
         $this->deprecatedFns = $module->deprecatedFns;
@@ -697,6 +717,7 @@ final class EmitLlvm implements EmitVisitor
                 $this->builtinTwinTot[$tn] = $module->builtinTwinTot[$tn];
             }
         }
+        $this->callableShims = $module->callableShims;
         $this->knownFnNames = $module->knownFnNames;
         if (\count($module->knownFnNames) > 0) { $this->rt->needsFnExists = true; }
         $this->rt->needsBacktrace = $module->needsBacktrace;
@@ -751,6 +772,7 @@ final class EmitLlvm implements EmitVisitor
             // emitted once, here, before any body is.
             if ($fn->usesFuncArgs) { $this->rt->needsFuncArgs = true; }
             $this->definedFns[$this->mangle($fn->name)] = true;
+            if ($fn->ffiSymbol !== null) { $this->ffiFnNames[$fn->name] = true; }
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
             // The demand-gated fiber prelude is present iff the program uses
             // \Fiber ⇒ settle needsFibers BEFORE the preamble emits its module
@@ -810,6 +832,11 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfThunks = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
+        $this->litTableBodies = '';
+        $this->litTableCount = 0;
+        $this->dynScopeRelTables = [];
+        $this->newDynTableCache = null;
+        $this->classlessCandidatesMemo = [];
         $this->dynfLookupEmitted = false;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
@@ -967,7 +994,8 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_bytes($bodyPath, "\n\n")) {
                         throw new \RuntimeException('EmitLlvm: cannot append sink separator');
                     }
-                    \Manticore\system('rm -f ' . $rawBodyPath . ' ' . $hoistedPath);
+                    \Manticore\sys_unlink($rawBodyPath);
+                    \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $rawBodyBytes;
                 } elseif ($rawBodyBytes < $fileHoistThreshold) {
                     // Small functions do not justify a filesystem round-trip. Keep
@@ -1011,7 +1039,8 @@ final class EmitLlvm implements EmitVisitor
                     if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                         throw new \RuntimeException('EmitLlvm: cannot append staged hoisted body ' . $hoistedPath);
                     }
-                    \Manticore\system('rm -f ' . $fnPath . ' ' . $hoistedPath);
+                    \Manticore\sys_unlink($fnPath);
+                    \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $nBody;
                 }
             } else {
@@ -1130,6 +1159,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->dynmExtraBodies;
         $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
+        $extraBodies .= $this->litTableBodies;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1162,7 +1192,8 @@ final class EmitLlvm implements EmitVisitor
                 if (!\Manticore\append_file_path($hoistedPath, $bodyPath)) {
                     throw new \RuntimeException('EmitLlvm: cannot append helper body ' . $label);
                 }
-                \Manticore\system('rm -f ' . $rawPath . ' ' . $hoistedPath);
+                \Manticore\sys_unlink($rawPath);
+                \Manticore\sys_unlink($hoistedPath);
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
@@ -1213,7 +1244,7 @@ final class EmitLlvm implements EmitVisitor
                     "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n")) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
             }
-            \Manticore\system('rm -f ' . $bodyPath);
+            \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
             $stagedBytes = \strlen($preamble) + $bodyBytes;
             // PruneIr used to be unreachable from here: this branch returns the
@@ -1231,7 +1262,7 @@ final class EmitLlvm implements EmitVisitor
                     throw new \RuntimeException('EmitLlvm: cannot prune staged IR ' . $this->streamIrPath);
                 }
                 if ($prune->dropped > 0) {
-                    \Manticore\system('mv -f ' . $prunedPath . ' ' . $this->streamIrPath);
+                    \Manticore\sys_rename($prunedPath, $this->streamIrPath);
                     $stagedBytes = $stagedBytes - $prune->droppedBytes;
                 }
                 \Compile\Stats::step('  prune staged IR', $statT, $prune->kept, $prune->dropped);
@@ -2048,10 +2079,7 @@ final class EmitLlvm implements EmitVisitor
             $cls = $this->resolveMethodClass($static, $n->method);
             if ($cls === '') { $cls = $static; }
             if ($cls === '' || !isset($this->classes[$cls])) {
-                foreach ($this->classes as $cd) {
-                    $r = $this->resolveMethodClass($cd->name, $n->method);
-                    if ($r !== '') { $cls = $r; break; }
-                }
+                foreach ($this->methodHolders($n->method) as $r) { $cls = $r; break; }
             }
             $sig = $cls . '__' . $n->method;
             $off = 1;
@@ -2271,6 +2299,23 @@ final class EmitLlvm implements EmitVisitor
 
     /** Thunk bodies + row globals for the table path, flushed with the others. */
     private string $dynfExtraBodies = '';
+
+    /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
+    private string $litTableBodies = '';
+
+    /** {@see EmitLlvmObjects::dynScopeRelated}: scope class => [symbol, n].
+     *  @var array<string, array{string, int}> */
+    private array $dynScopeRelTables = [];
+
+    /** {@see EmitLlvmObjects::newDynTable}, per module.
+     *  @var array{string, int, array<string, bool>}|null */
+    private ?array $newDynTableCache = null;
+
+    /** {@see EmitLlvmObjects::classlessMethodCandidates} per argc, per module.
+     *  @var array<int, array<string, Type>> */
+    private array $classlessCandidatesMemo = [];
+
+    private int $litTableCount = 0;
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
@@ -3197,6 +3242,9 @@ final class EmitLlvm implements EmitVisitor
      * Built-in interfaces (Iterator, ArrayAccess, …) aren't in `$classes`;
      * they're matched by name as declared on `implements`.
      */
+    /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
+    private array $interfaceAncestors = [];
+
     private function classImplements(string $class, string $iface): bool
     {
         $key = $class . '|' . $iface;
@@ -3214,7 +3262,10 @@ final class EmitLlvm implements EmitVisitor
                 return true;
             }
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
+            if ($cd === null) {
+                foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
+                continue;
+            }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }
@@ -4782,6 +4833,12 @@ final class EmitLlvm implements EmitVisitor
             $cls = $base->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
+        // A NESTED container (`$a['k']` of `&$a['k'][$j]`): its element slot
+        // is itself addressable, and {@see containerCellPtr} opens it.
+        if ($base->kind === Node::KIND_ARRAY_ACCESS) {
+            return $this->arrayElemKeyKind($base->index) !== null
+                && $this->containerAddressable($base->array);
+        }
         return false;
     }
 
@@ -4792,6 +4849,10 @@ final class EmitLlvm implements EmitVisitor
      * cell. Used to feed `__mir_array_ref_slot` so a COW / relocation is stored
      * back where the array lives.
      */
+    /** IR a caller of {@see containerCellPtr} appends after its ref-slot call
+     *  (a nested container's write-back); '' otherwise. Taken and cleared. */
+    private string $containerCloseIr = '';
+
     private function containerCellPtr(Node $base): ?string
     {
         if ($base->kind === Node::KIND_LOAD_LOCAL) {
@@ -4815,6 +4876,77 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValue = $this->locals->slots[$name];
             $this->lastValueType = 'ptr';
             return '';
+        }
+        if ($base->kind === Node::KIND_ARRAY_ACCESS) {
+            // A nested container: the ELEMENT slot of the outer array holds the
+            // inner one — as a tagged array cell on a cell channel, a raw
+            // pointer on a raw one, or nothing yet. The ref-slot helpers work
+            // on a raw pointer cell, so the inner array is OPENED into a scratch
+            // word (unboxed, or vivified to a fresh empty array — php creates
+            // it) and {@see $containerCloseIr} writes it back, re-boxed on a
+            // cell channel, once the caller's helper has COW-separated or grown
+            // it. Without this `$r = &$a['k'][$j]` degraded to a value copy and
+            // every write through it was lost.
+            $out = $this->byRefAddrOf($base);
+            if ($out === null) { return null; }
+            $this->rt->needsTagged = true;
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+            $w = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = load i64, ptr ' . $ep . "\n";
+            $tg = $this->ssa->allocReg();
+            $out .= '  ' . $tg . ' = icmp ugt i64 ' . $w . ', ' . '-4503599627370496' . "\n";
+            $sh = $this->ssa->allocReg();
+            $out .= '  ' . $sh . ' = lshr i64 ' . $w . ", 48\n";
+            $nb = $this->ssa->allocReg();
+            $out .= '  ' . $nb . ' = and i64 ' . $sh . ", 15\n";
+            $isA = $this->ssa->allocReg();
+            $out .= '  ' . $isA . ' = icmp eq i64 ' . $nb . ", 7\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $w . ", 281474976710655\n";
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = select i1 ' . $isA . ', i64 ' . $pm . ", i64 0\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = select i1 ' . $tg . ', i64 ' . $tp . ', i64 ' . $w . "\n";
+            $scr = $this->ssa->allocReg();
+            $out .= '  ' . $scr . " = alloca i64\n";
+            $out .= '  store i64 ' . $p . ', ptr ' . $scr . "\n";
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = icmp eq i64 ' . $p . ", 0\n";
+            $mkL = $this->ssa->allocLabel('rc.mk');
+            $okL = $this->ssa->allocLabel('rc.ok');
+            $out .= '  br i1 ' . $z . ', label %' . $mkL . ', label %' . $okL . "\n";
+            $out .= $mkL . ":\n";
+            $na = $this->ssa->allocReg();
+            $out .= '  ' . $na . " = call ptr @__mir_array_alloc(i64 0)\n";
+            $out .= '  store ptr ' . $na . ', ptr ' . $scr . "\n";
+            $out .= '  br label %' . $okL . "\n";
+            $out .= $okL . ":\n";
+            // Written back in the slot's OWN representation: tagged if it was
+            // tagged, raw if it was raw. A slot that held nothing takes the
+            // outer array's static channel: raw only on a statically ARRAY
+            // element, tagged (self-describing) otherwise — an unstamped raw
+            // pointer in an erased buffer reads back as a double.
+            // (Choosing by the node's type re-boxed a raw inner array in an
+            // `unknown`-element property, and its release walked a tagged word.)
+            $oel = $base->array->type->element ?? null;
+            $staticRaw = $oel !== null && $oel->isArray();
+            $bf = $tg;
+            if (!$staticRaw) {
+                $bf = $this->ssa->allocReg();
+                $out .= '  ' . $bf . ' = or i1 ' . $tg . ', ' . $z . "\n";
+            }
+            $cp = $this->ssa->allocReg();
+            $close = '  ' . $cp . ' = load i64, ptr ' . $scr . "\n";
+            $cb = $this->ssa->allocReg();
+            $close .= '  ' . $cb . ' = or i64 ' . $cp . ", -2533274790395904\n";
+            $cf = $this->ssa->allocReg();
+            $close .= '  ' . $cf . ' = select i1 ' . $bf . ', i64 ' . $cb . ', i64 ' . $cp . "\n";
+            $close .= '  store i64 ' . $cf . ', ptr ' . $ep . "\n";
+            $this->containerCloseIr = $close;
+            $this->lastValue = $scr;
+            $this->lastValueType = 'ptr';
+            return $out;
         }
         if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
             // The property field IS the cell holding the array pointer.

@@ -666,6 +666,9 @@ trait InferScans
     private function scanParamElements(FunctionDef $fn): void
     {
         // Candidate params: array-ish with no known element type.
+        // Never a closure's: it is invoked through the erased closure ABI, so no
+        // call site can ever refute a body-usage guess about its elements.
+        if (\str_starts_with($fn->name, '__closure_')) { return; }
         $cand = [];                       // param name → index
         foreach ($fn->params as $idx => $p) {
             if ($p->variadic) { continue; }
@@ -719,6 +722,9 @@ trait InferScans
         $refined = [];                   // "fn#idx" → true (heuristic vec[scalar])
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
+            // A closure is reached through the erased invoke, never a Call this
+            // scan can read — its param has no observable call sites.
+            if (\str_starts_with($fn->name, '__closure_')) { continue; }
             $idx = 0;
             foreach ($fn->params as $p) {
                 // A prelude BY-REF array param must not be refined here — the
@@ -782,8 +788,34 @@ trait InferScans
         $shape = [];                     // "fn#idx" → 'v' (vec) | 'a' (assoc)
         $sawCell = [];                   // "fn#idx" → true (a vec[cell] arg seen)
         $erasedArg = [];                 // "fn#idx" → true (an UNOBSERVABLE arg seen)
+        $this->callArgForward = [];
         foreach ($module->functions as $fn) {
+            $this->callArgScanFn = $fn->name;
+            $this->callArgScanParams = [];
+            $pi = 0;
+            foreach ($fn->params as $fp) { $this->callArgScanParams[$fp->name] = $pi; $pi = $pi + 1; }
             $this->collectCallArgElems($fn->body, $cand, $observed, $conflict, $assocKey, $shape, $sawCell, $erasedArg);
+        }
+        // A site that forwards its caller's still-erased candidate param says
+        // what that param will say: nothing, if it resolves to no observation or
+        // a conflict. Then the site is an erased one — `array_map` fed an
+        // erased `?array` param was refined to vec[string] off a sibling call
+        // and read that site's closures as strings.
+        $fwdChanged = true;
+        while ($fwdChanged) {
+            $fwdChanged = false;
+            foreach ($this->callArgForward as $fk => $srcs) {
+                if (isset($conflict[$fk])) { continue; }
+                foreach ($srcs as $sk) {
+                    if (isset($conflict[$sk]) || !isset($observed[$sk])) {
+                        $conflict[$fk] = true;
+                        $erasedArg[$fk] = true;
+                        unset($observed[$fk]);
+                        $fwdChanged = true;
+                        break;
+                    }
+                }
+            }
         }
         $changed = false;
         foreach ($module->functions as $fn) {

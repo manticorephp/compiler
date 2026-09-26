@@ -650,9 +650,24 @@ trait LowerFns
             if ($cls !== null) {
                 return $this->synthStaticClosure($cls, $m, $cls);
             }
-            return $this->synthMethodClosure($this->lowerExpr($recvE), $m);
+            // A receiver whose class is unknown here leaves the arity unknown
+            // too, and a one-param shim dropped every later argument. Keep the
+            // ARRAY: an invoke of the `callable` slot dispatches it by name
+            // ({@see EmitLlvmCalls::emitErasedInvoke}).
+            $recvN = $this->lowerExpr($recvE);
+            $rcls = $recvN->type->class ?? '';
+            if ($rcls === '' || $this->resolveMethodParams($rcls, $m) === null) { return null; }
+            return $this->synthMethodClosure($recvN, $m);
         }
         return null;
+    }
+
+    /** {@see coerceCallableArg} for an ARGUMENT: the closure stands in for the literal. */
+    private function coerceCallableShim(?Type $pt, \Parser\Ast\Expr $arg): ?Node
+    {
+        $conv = $this->coerceCallableArg($pt, $arg);
+        if ($conv instanceof Closure_) { $this->module->callableShims[$conv->type->class ?? ''] = true; }
+        return $conv;
     }
 
     private function lowerInvoke(\Parser\Ast\Invoke $expr): Node
@@ -895,7 +910,7 @@ trait LowerFns
     private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
     {
         if ($p !== null) {
-            $conv = $this->coerceCallableArg($this->lowerParamType($this->paramTypeHint($p)), $a);
+            $conv = $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($p)), $a);
             if ($conv !== null) { return $conv; }
         }
         return $this->lowerExpr($a);

@@ -33,6 +33,11 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, string[]> interface → every interface it extends,
+     *  transitively: `foreach` over an `Aware extends \Iterator` slot must know
+     *  it is Traversable (it walked the object as an array) */
+    public array $interfaceAncestors = [];
+
     /** @var array<string, true> declared trait names (compile-time
      *  `trait_exists` fold). */
     public array $traitNames = [];
@@ -50,6 +55,11 @@ final class Module
      *  Empty unless the program actually asks dynamically.
      *  @var string[] */
     public array $knownFnNames = [];
+
+    /** @var array<string, bool> closure fn name → a callable LITERAL (`'strlen'`,
+     *  `[$o, 'm']`) wrapped for a `callable` param: php holds a string/array
+     *  there, so `instanceof Closure` must answer false for it */
+    public array $callableShims = [];
 
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
@@ -170,6 +180,9 @@ final class Module
     /** Dynamic method calls need compiler-owned class metadata and uniform
      *  method trampolines, even when the program never mentions Reflection. */
     public bool $needsDynamicMethodMeta = false;
+
+    /** @var array<string, bool> method names `[$obj, 'name']` literals spell */
+    public array $callableArrayMethods = [];
 
     /** Method FunctionDef name ("Class__method") → backtrace frame display
      *  ("Class->method" / "Class::method"). Built at lowering (stable string

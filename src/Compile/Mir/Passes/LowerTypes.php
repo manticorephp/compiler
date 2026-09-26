@@ -465,6 +465,32 @@ trait LowerTypes
             || \strncmp($low, 'non-empty-list{', 15) === 0) {
             return $this->lowerArrayShape(\ltrim($hint, '?\\'));
         }
+        // `list<T>` / `non-empty-list<T>` are `T[]`, `non-empty-array<K, V>` is
+        // `array<K, V>`. Unrecognised they read as a generic CLASS nobody
+        // declares — erased — and the body-usage guess then retyped
+        // sebastian/diff's `non-empty-list<array{0: mixed, 1: int}> $diff` from
+        // a `substr($diff[$n][0], -1)` as vec[vec[string]]: `$entry[1]` read
+        // the int 0 as a null string pointer.
+        if (\strncmp($low, 'list<', 5) === 0 || \strncmp($low, 'non-empty-list<', 15) === 0) {
+            $base = \ltrim($hint, '?\\');
+            $lt = \strpos($base, '<');
+            return Type::vec($this->lowerTypeHint(\trim(\substr($base, $lt + 1, \strlen($base) - $lt - 2))));
+        }
+        // `int<0, max>` / `int<min, -1>` — phpstan's integer range is an int,
+        // and its refined scalars are their base type.
+        if (\strncmp($low, 'int<', 4) === 0) { return Type::int_(); }
+        if ($low === 'positive-int' || $low === 'negative-int' || $low === 'non-negative-int'
+            || $low === 'non-positive-int' || $low === 'non-zero-int') {
+            return $nullable ? Type::numericCell() : Type::int_();
+        }
+        if ($low === 'non-empty-string' || $low === 'numeric-string' || $low === 'class-string'
+            || $low === 'literal-string' || $low === 'lowercase-string' || $low === 'non-falsy-string'
+            || $low === 'truthy-string' || \strncmp($low, 'class-string<', 13) === 0) {
+            return Type::string_();
+        }
+        if (\strncmp($low, 'non-empty-array<', 16) === 0) {
+            return $this->lowerTypeHint('array' . \substr(\ltrim($hint, '?\\'), 15));
+        }
         if (\strncmp($low, 'array<', 6) === 0) {
             $base = \ltrim($hint, '?\\');
             $lt = \strpos($base, '<');
@@ -852,7 +878,19 @@ trait LowerTypes
         // in an object array and the next read took offset 16 of a tag → SIGSEGV.
         // A type parameter (`@param T`) is the same case: `T` cannot be written in
         // PHP syntax at all, so the docblock is its only source.
+        // A docblock naming nothing this program declares (a `@phpstan-type`
+        // alias, `non-empty-string`, a missing class) is NOT that type: it
+        // lowered to `unknown`, an erased raw word, where the missing hint means
+        // `mixed` — so a caller passed a string raw, and `is_string($x)` in the
+        // body could not tell it from an array (php-cs-fixer's
+        // `@param _PhpTokenPrototype $token` on Token::__construct).
         if ($hint === null && $docType !== null && $docType !== '') {
+            if ($this->lowerTypeHint($docType)->kind === Type::KIND_UNKNOWN
+                && !$this->isBareArrayHint($docType)
+                && !$this->looksLikeArrayElemType($docType)
+                && !$this->looksLikeArrayShapeType($docType)) {
+                return null;
+            }
             return $docType;
         }
         // `Box $b` + `@param Box<float> $b` — the SAME class, and the docblock
@@ -881,6 +919,11 @@ trait LowerTypes
         // stored a cell into a slot read raw (php-cs-fixer FixerOptionSorter).
         $low = \strtolower($base);
         if ($low === 'iterable' || $low === 'callable' || $low === 'object' || $low === 'mixed') { return false; }
+        // `int $n` + `@var int<0, max>` is a RANGE, not a class binding: taken,
+        // it lowered the property to `unknown` and a cell stored into it stayed
+        // tagged (sebastian/diff's `$contextLines`).
+        if ($low === 'int' || $low === 'integer' || $low === 'float' || $low === 'string'
+            || $low === 'bool' || $low === 'array') { return false; }
         return $base !== '' && $base === \ltrim($hint, '?\\');
     }
 
@@ -899,8 +942,9 @@ trait LowerTypes
     {
         $n = \strlen($t);
         if ($n > 2 && \substr($t, $n - 2) === '[]') { return true; }
-        if (\strncmp(\strtolower(\ltrim($t, '?\\')), 'array<', 6) === 0) { return true; }
-        return false;
+        $low = \strtolower(\ltrim($t, '?\\'));
+        return \strncmp($low, 'array<', 6) === 0 || \strncmp($low, 'list<', 5) === 0
+            || \strncmp($low, 'non-empty-list<', 15) === 0 || \strncmp($low, 'non-empty-array<', 16) === 0;
     }
 
     /** True for a docblock array SHAPE (`array{…}`, `list{…}`,
@@ -1148,7 +1192,33 @@ trait LowerTypes
         return Type::closureOf($ret, $params);
     }
 
+    /**
+     * A FUNCTION's own `@template T` (`@param T $new` / `@return T`) is not a
+     * class type parameter: nothing binds it per call, so it names the value's
+     * type only as "whatever came in". Spelled literally, `T` resolved as a
+     * class nobody declares — an erased RAW word, and a string default that
+     * crossed into a `mixed` slot was boxed as an INT (php-cs-fixer's
+     * `Future::getV4OrV3('always_last', 'always_first')`). It lowers to its
+     * bound (`of X`), else `mixed`. Class templates live in the class
+     * docblock, which never reaches here through these tags.
+     */
     private function docTagType(?string $doc, string $tag, string $varName): ?string
+    {
+        $t = $this->docTagTypeRaw($doc, $tag, $varName);
+        if ($t === null || $doc === null) { return $t; }
+        if ($tag !== '@param' && $tag !== '@param-out' && $tag !== '@return') { return $t; }
+        if (!\str_contains($doc, '@template')) { return $t; }
+        $m = [];
+        if (\preg_match_all('/@template\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+of\s+([^\s*]+))?/', $doc, $m) < 1) { return $t; }
+        foreach ($m[1] as $i => $name) {
+            $bound = $m[2][$i] ?? '';
+            $sub = $bound !== '' ? $bound : 'mixed';
+            $t = \preg_replace('/(?<![A-Za-z0-9_\\\\$])' . $name . '(?![A-Za-z0-9_\\\\])/', $sub, $t) ?? $t;
+        }
+        return $t;
+    }
+
+    private function docTagTypeRaw(?string $doc, string $tag, string $varName): ?string
     {
         if ($doc === null) { return null; }
         $n = \strlen($doc);

@@ -87,6 +87,18 @@ trait InferNarrow
             $io = $cond;
             if ($io->operand->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $io->operand->name;
+                // Narrowing never WIDENS: a local already typed as a class that
+                // is-a the tested type keeps its class. `$this instanceof
+                // WhitespacesAwareFixerInterface` in AbstractFixer's constructor,
+                // re-lowered for each of php-cs-fixer's ~250 fixers, retyped
+                // `$this` to the INTERFACE, and `$this->whitespacesConfig = …`
+                // became a store dispatched over every class in the program —
+                // DOMNode's and SimpleXMLElement's __set arms included.
+                $cur = $this->localTypes[$name] ?? null;
+                if ($cur !== null && $cur->kind === Type::KIND_OBJ && ($cur->class ?? '') !== ''
+                    && $this->classImplementsT((string)$cur->class, $io->class)) {
+                    return;
+                }
                 $this->localTypes[$name] = Type::obj($io->class);
             } else {
                 // `$obj->prop instanceof C` → narrow the property PATH within the

@@ -144,6 +144,20 @@ function array_is_list(array $a): bool
 }
 
 /**
+ * The bootstrap twin of the `__mc_array_reindex` codegen builtin (the sort
+ * family's renumbering of a non-list array); a compiler that knows the
+ * builtin never calls it.
+ *
+ * @param mixed[] $arr
+ */
+function __mc_array_reindex(array &$arr): void
+{
+    if (!\array_is_list($arr)) {
+        $arr = \array_values($arr);
+    }
+}
+
+/**
  * Return the values of `$a` in reverse order, reindexed from 0 (1:1 with
  * PHP `array_reverse` for a positional list).
  *

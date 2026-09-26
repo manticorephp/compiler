@@ -441,6 +441,8 @@ trait InferCalls
         // first/last value or key as a tagged cell, null on empty (codegen
         // builtin {@see EmitLlvmBuiltins::biArrayEndpoint}). A cell result lets
         // the key variants carry the full int|string|null union.
+        if ($n === 'array_is_list' && \count($args) === 1) { return Type::bool_(); }
+        if ($n === '__mc_array_reindex' && \count($args) === 1) { return Type::void(); }
         if (($n === 'array_first' || $n === 'array_last'
             || $n === 'array_key_first' || $n === 'array_key_last')
             && \count($args) === 1) {
@@ -625,6 +627,10 @@ trait InferCalls
         // callee type obj<__closure_N> → that fn's return type.
         if ($ct->class !== null && isset($this->sigs[$ct->class])) {
             $node->type = $this->sigs[$ct->class];
+        } elseif ($ct->kind === Type::KIND_OBJ && $ct->class === 'Closure') {
+            // Narrowed by `instanceof Closure`: which closure is unknown, and the
+            // uniform ABI hands back a tagged cell.
+            $node->type = Type::cell();
         } elseif ($ct->kind === Type::KIND_CLOSURE) {
             // A `callable(int): string` states its return type, so the invoke can
             // be typed concretely — the value still ARRIVES as a tagged cell under
@@ -804,7 +810,7 @@ trait InferCalls
         // Closure methods on a closure receiver: `->bindTo()` yields a (rebound)
         // closure; `->call()` invokes it and returns a tagged cell (uniform ABI).
         $recvCls = $objType->class ?? '';
-        if ($objType->kind === Type::KIND_CLOSURE || \str_starts_with($recvCls, '__closure_')) {
+        if ($objType->kind === Type::KIND_CLOSURE || $recvCls === 'Closure' || \str_starts_with($recvCls, '__closure_')) {
             if ($node->method === 'bindTo') { $node->type = Type::closure(); return $node->type; }
             if ($node->method === 'call')   { $node->type = Type::cell();    return $node->type; }
         }
@@ -866,17 +872,14 @@ trait InferCalls
                     \Compile\Stats::bump('inferCalls.iface_scan_sites', 1);
                     \Compile\Stats::bump('inferCalls.iface_scan_classes', \count($this->classes));
                 }
-                foreach ($this->classes as $cd) {
-                    if (!isset($cd->methodNames[$node->method])) { continue; }
-                    if ($this->classImplementsT($cd->name, $recvIface)) { $cls = $cd->name; break; }
+                foreach ($this->declarersOf($node->method) as $cn) {
+                    if ($this->classImplementsT($cn, $recvIface)) { $cls = $cn; break; }
                 }
             }
             // No implementing class in this module (a cross-module interface, or
             // a built-in like \Throwable) — fall back to the old name-only match.
             if ($cls === '') {
-                foreach ($this->classes as $cd) {
-                    if (isset($cd->methodNames[$node->method])) { $cls = $cd->name; break; }
-                }
+                foreach ($this->declarersOf($node->method) as $cn) { $cls = $cn; break; }
             }
             if ($cls !== '') {
                 $mangled = $cls . '__' . $node->method;
