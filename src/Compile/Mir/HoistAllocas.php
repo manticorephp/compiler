@@ -38,6 +38,25 @@ final class HoistAllocas
     /** Allocas moved by the last {@see run} — for MANTICORE_STATS. */
     public int $moved = 0;
 
+    /**
+     * A `define … {` header with the `#0` frame-pointer group when
+     * MANTICORE_FRAME_POINTERS is on, else the line unchanged.
+     *
+     * Every function body — streamed, file-hoisted or in memory, user code or a
+     * lazy helper — passes through this class, which is why the tag lives here:
+     * applied only to the streamed PREAMBLE, it left every PHP function without
+     * a frame record, and `sample` could name a hot runtime helper but never the
+     * pass that called it (stacks stopped at the first compiled frame).
+     */
+    public static function withFrameRecord(string $line): string
+    {
+        if (!\Compile\Debug::$framePointers) { return $line; }
+        $nl = \substr($line, -1) === "\n" ? "\n" : '';
+        $core = $nl === '' ? $line : \substr($line, 0, -1);
+        if (\substr($core, -2) !== ' {' || \str_contains($core, '#0')) { return $line; }
+        return \substr($core, 0, -1) . '#0 {' . $nl;
+    }
+
     public function run(string $ir): string
     {
         $lines = \explode("\n", $ir);
@@ -61,7 +80,7 @@ final class HoistAllocas
                 if (\rtrim($lines[$i]) === '}') { $i = $i + 1; break; }
                 $i = $i + 1;
             }
-            $out[] = $line;
+            $out[] = self::withFrameRecord($line);
             $this->emitBody($body, $out);
         }
         return \implode("\n", $out);
@@ -138,6 +157,8 @@ final class HoistAllocas
             }
             // Write the define header and the first body line unchanged. All
             // static allocas are collected only from the remaining body lines.
+            $line = self::withFrameRecord($line);
+            $n = \strlen($line);
             if (\Manticore\fwrite($line, 1, $n, $out) !== $n) { $ok = false; break; }
             $p = \Manticore\fgets($buf, $cap, $in);
             if ($p === 0) { $ok = false; break; }
