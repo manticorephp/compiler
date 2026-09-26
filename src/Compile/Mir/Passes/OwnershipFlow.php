@@ -115,6 +115,9 @@ final class OwnershipFlow implements Pass
     private array $erasedPropNames = [];
     /** @var array<string, bool> array locals released buffer-only ({@see Ownership::elementSharedArgs}) */
     private array $shared = [];
+    /** @var array<string, bool> locals every non-null store of which is an erased-array call
+     *  ({@see Ownership::erasedArrayCall}): they own at the `erasedarr` class */
+    private array $erasedNames = [];
 
     /** @var array<string, int> "name#class" → release class id */
     private array $keyId = [];
@@ -250,6 +253,7 @@ final class OwnershipFlow implements Pass
             if ($p->byRef) { $this->excluded[$p->name] = true; }
         }
         $this->collectExcluded($fn->body);
+        $this->erasedNames = $this->erasedArrayLocals($fn);
 
         $lat = new OwnLattice();
         $this->scan($fn->body, $lat);
@@ -510,6 +514,56 @@ final class OwnershipFlow implements Pass
         return $ks;
     }
 
+    /**
+     * The locals that own an erased-array call result ({@see Ownership::erasedArrayCall}):
+     * every store to the name is such a call or `null`, and nothing else binds
+     * it (a param, a foreach, a catch). Any other store leaves the name to
+     * its type — an erased word of unknown origin is never dropped.
+     *
+     * @return array<string, bool>
+     */
+    private function erasedArrayLocals(FunctionDef $fn): array
+    {
+        /** @var array<string, bool> $cand */
+        $cand = [];
+        /** @var array<string, bool> $veto */
+        $veto = [];
+        foreach ($fn->params as $p) { $veto[$p->name] = true; }
+        $this->scanErased($fn->body, $cand, $veto);
+        $out = [];
+        foreach ($cand as $name => $unused) {
+            if (!isset($veto[$name]) && !isset($this->excluded[$name])) { $out[$name] = true; }
+        }
+        return $out;
+    }
+
+    /**
+     * @param array<string, bool> $cand
+     * @param array<string, bool> $veto
+     */
+    private function scanErased(Node $n, array &$cand, array &$veto): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_STORE_LOCAL) {
+            $sl = self::asStoreLocal($n);
+            $v = $sl->value;
+            if ($this->own->erasedArrayCall($v)) {
+                $cand[$sl->name] = true;
+            } elseif ($v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL) {
+                $veto[$sl->name] = true;
+            }
+        } elseif ($k === Node::KIND_FOREACH) {
+            $fe = self::asForeach($n);
+            $veto[$fe->valueVar] = true;
+            if ($fe->keyVar !== null) { $veto[$fe->keyVar] = true; }
+        } elseif ($k === Node::KIND_TRY_CATCH) {
+            foreach (self::asTryCatch($n)->catches as $c) {
+                if ($c->var !== null) { $veto[$c->var] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanErased($c, $cand, $veto); }
+    }
+
     private function collectShared(Node $n): void
     {
         foreach ($this->own->elementSharedArgs($n) as $name) { $this->shared[$name] = true; }
@@ -676,6 +730,15 @@ final class OwnershipFlow implements Pass
         if ($slotT->kind === Type::KIND_UNKNOWN && $this->own->erasedArrayPropRead($v)) {
             $slotT = Type::vec(Type::unknown());
             $this->erasedPropNames[$name] = true;
+        }
+        if (isset($this->erasedNames[$name]) && $this->own->erasedArrayCall($v)) {
+            $key = $this->intern($name, Ownership::ERASED_ARR, Type::unknown());
+            $lat->storeName[$id] = $name;
+            $lat->storeKey[$id] = $key;
+            $lat->storeState[$id] = $key;
+            $lat->storeMode[$id] = OwnLattice::PLAIN;
+            $this->noteOwnKey($name, $key);
+            return;
         }
         $ks = $this->keyString($slotT);
         $isMixed = isset($this->mixedHere[$name]);
@@ -1129,6 +1192,8 @@ final class OwnershipFlow implements Pass
         $body = $fn->body;
         $bodyId = \spl_object_id($body);
         $rel = $this->releases;
+        $closureAbi = isset($this->closureFns[$fn->name]) || TrampolineSynth::isSynthReturn($fn->name);
+        $erasedArray = Ownership::erasedArrayReturn($fn, $closureAbi);
 
         // Stores: drop what an overwrite takes off an OWNED slot; a borrowed
         // accumulator takes its own +1 before the in-place append consumes it;
@@ -1224,6 +1289,9 @@ final class OwnershipFlow implements Pass
                 }
             }
             $r->ownDrops = $drops;
+            $v0 = $r->value;
+            $r->ownArms = $v0 === null ? [] : $this->own->returnArmLocals($v0, $fn->returnType, $closureAbi,
+                $erasedArray, $fn->isGenerator);
             // Only an OWNED returned local moves; any other state — a borrow,
             // a raw word, a mixed slot — takes the +1 a borrowed return owes.
             $v = $r->value;

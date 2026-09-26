@@ -556,7 +556,7 @@ final class Monomorphize implements Pass
         $declaredRet = $mod !== null
             ? ($mod->declaredReturnTypes[$fn->name] ?? $fn->returnType)
             : $fn->returnType;
-        return new FunctionDef(
+        $clone = new FunctionDef(
             $specName,
             $newParams,
             $declaredRet,
@@ -564,6 +564,8 @@ final class Monomorphize implements Pass
             $fn->returnsByRef,
             $fn->isPrelude,
         );
+        $clone->returnArrayHinted = $fn->returnArrayHinted;
+        return $clone;
     }
 
     /**

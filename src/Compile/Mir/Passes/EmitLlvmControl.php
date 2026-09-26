@@ -780,7 +780,7 @@ trait EmitLlvmControl
     private function armRetainPostBox(Node $res, Node $arm, string $i64reg): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
-        $flavor = $this->condFlavor($res->type);
+        $flavor = $this->condResFlavor($res);
         if ($flavor === '' || $flavor === 'cell') { return ''; }
         if ($this->armIsFresh($arm, $flavor)) { return ''; }
         return $this->rcRetainReg($i64reg, $flavor);
@@ -794,7 +794,7 @@ trait EmitLlvmControl
     private function armRetainLast(Node $res, Node $arm): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
-        $flavor = $this->condFlavor($res->type);
+        $flavor = $this->condResFlavor($res);
         if ($flavor === '') { return ''; }
         if ($flavor === 'cell') { return $this->armRetainPreBox($res, $arm); }
         if ($this->armIsFresh($arm, $flavor)) { return ''; }
@@ -816,7 +816,7 @@ trait EmitLlvmControl
     private function armRetainPreBox(Node $res, Node $arm): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
-        if ($this->condFlavor($res->type) !== 'cell') { return ''; }
+        if ($this->condResFlavor($res) !== 'cell') { return ''; }
         if ($this->armIsFresh($arm, 'cell')) { return ''; }
         return $this->retainCellPayload($arm);
     }

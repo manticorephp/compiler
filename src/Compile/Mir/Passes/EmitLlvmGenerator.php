@@ -259,6 +259,8 @@ trait EmitLlvmGenerator
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
+        $this->frame->erasedArrayReturn = false;
+        $this->frame->erasedCond = null;
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
         foreach ($locals as $name => $idx) {

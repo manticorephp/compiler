@@ -460,6 +460,11 @@ final class Return_ extends Node
     /** The returned local is OWNED on this path: its reference moves to the
      *  caller. Otherwise the return takes the +1 a borrow owes. */
     public bool $ownMove = false;
+    /** @var array<string, bool> the locals among {@see $ownDrops} whose drop
+     *  waits for the returned WORD: the value is a conditional the return takes
+     *  no +1 on ({@see Ownership::returnArmLocals}), so the arm that ran moves to
+     *  the caller and only the others drop — decided by identity at run time. */
+    public array $ownArms = [];
 
     public function accept(EmitVisitor $v): string
     {

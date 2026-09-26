@@ -32,6 +32,12 @@ final class FunctionEmitFrame
      *  closure for the RETURN: a scalar result must be boxed to a tagged cell,
      *  else the indirect caller reads a raw int as a cell. */
     public bool $isTrampoline = false;
+    /** Every `return` hands back an erased array at +1
+     *  ({@see \Compile\Mir\Ownership::erasedArrayReturn}). */
+    public bool $erasedArrayReturn = false;
+    /** The conditional a return of such a function is emitting: its arms are
+     *  each normalized to +1 of an erased array ({@see EmitLlvm::condOwnsResult}). */
+    public ?Node $erasedCond = null;
     /** The fn opened an arena scope: every `ret` must `@__mir_arena_leave` first. */
     public bool $hasArena = false;
     /** @var array<string, bool> param names — a param arrives holding the

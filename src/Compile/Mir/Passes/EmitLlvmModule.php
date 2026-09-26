@@ -972,6 +972,9 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
+        $this->frame->erasedArrayReturn = \Compile\Mir\Ownership::erasedArrayReturn($fn,
+            $isClosure || $this->frame->isTrampoline);
+        $this->frame->erasedCond = null;
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -2122,21 +2125,13 @@ trait EmitLlvmModule
     }
 
     /**
-     * A return's leave sequence: `$leave` as the default path built it, behind
-     * the {@see OwnershipFlow} drops when the flag is on. The drops wait for the
-     * returned word `$val`: a conditional ({@see returnedLocalNames}) this
-     * return took no +1 on (`$retained`) hands back one arm's reference as it
-     * stands — an erased arm names no rc kind to retain by — so the owned local
-     * that arm read moves and the others drop, decided by identity at run time.
+     * A return's leave sequence: {@see OwnershipFlow}'s drops ({@see
+     * ownReturnIr}), then `$leave`. The pass decided every drop; the ones in
+     * {@see Return_::$ownArms} wait for the returned word `$val`, compared here.
      */
-    private function retLeave(Return_ $r, ?Node $v, string $moved, bool $retained, string $val, string $leave): string
+    private function retLeave(Return_ $r, string $moved, string $val, string $leave): string
     {
-        /** @var array<string,bool> $arms */
-        $arms = [];
-        if (!$retained && $v !== null && \Compile\Mir\CondOwn::isConditional($v)) {
-            $arms = $this->returnedLocalNames($v);
-        }
-        return $this->ownReturnIr($r, $moved, $arms, $val) . $leave;
+        return $this->ownReturnIr($r, $moved, $r->ownArms, $val) . $leave;
     }
 
 
@@ -2254,8 +2249,8 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
-            $out .= $this->retLeave($r, $v, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
-                ? $this->asLoadLocalNode($v)->name : '', false, $v !== null ? $this->lastValue : '', '');
+            $out .= $this->retLeave($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
+                ? $this->asLoadLocalNode($v)->name : '', $v !== null ? $this->lastValue : '', '');
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             // Same slot hand-back as {@see finishReturn} — this branch exits
@@ -2266,28 +2261,14 @@ trait EmitLlvmModule
             $out .= $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
-        // Drop every owned RcHeap obj local on this return path, except
-        // the one being returned (ownership transfers to the caller). The
-        // trailing fall-through release covers paths with no `return`.
-        //
-        // RELEASES FIRST, arena_leave AFTER — the order the fall-through
-        // cleanup already uses. A local that was arena-allocated still carries
-        // a release here; before the bulk free its header reads as arena and
-        // the release is a no-op, but AFTER the bulk free the header is freed
-        // memory, so the release read garbage and handed libmalloc a pointer it
-        // never allocated ("pointer being freed was not allocated", abort). It
-        // took a function with both an arena-confined string local and an early
-        // `return` — sprintf() with a non-literal format was one.
-        // Drop every owned RcHeap obj local on this return path, except the one
-        // being returned (ownership transfers to the caller). The trailing
-        // fall-through release covers paths with no `return`. The exempt SET
-        // drives the cleanup; `$returnedLocal` answers a different question
-        // ("is this a bare passthrough of a borrowed obj local?") and stays
-        // restricted to a direct `return $x;`.
+        // OwnershipFlow's drops run after the value ({@see retLeave}), and
+        // RELEASES FIRST, arena_leave AFTER — the order the fall-through cleanup
+        // uses: after the bulk free an arena-confined local's header is freed
+        // memory, and a release then handed libmalloc a pointer it never
+        // allocated. `$returnedLocal` is the local that MOVES to the caller (the
+        // flow owns it here); any other returned value is retained below.
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
             ? $this->asLoadLocalNode($v)->name : null;
-        // OwnershipFlow: a local moves only where the flow owns it; any other
-        // state returns as a borrow, retained below.
         if (!$r->ownMove) { $returnedLocal = null; }
         // A REBUILT return hands back a fresh cell array, not the local — so the
         // "ownership transfers to the caller" exemption does not apply and the
@@ -2295,10 +2276,7 @@ trait EmitLlvmModule
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
-        // OwnershipFlow's drops are emitted once the value is ({@see retLeave}):
-        // an arm a conditional hands back as it stands is dropped by identity.
         $ownMoved = ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '';
-        $retained = false;
         $leave = $this->emitOwnedBoxReleases($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
@@ -2310,7 +2288,7 @@ trait EmitLlvmModule
         // allocated.
         $leave .= $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         if ($v === null) {
-            return $this->finishReturn('', $this->implicitReturnValue(), $this->retLeave($r, $v, $ownMoved, false, '', $leave));
+            return $this->finishReturn('', $this->implicitReturnValue(), $this->retLeave($r, $ownMoved, '', $leave));
         }
         // By-ref return: yield the *address* of the returned lvalue as i64.
         // `return $n` (a by-ref param forwards its held address, a plain local
@@ -2319,8 +2297,14 @@ trait EmitLlvmModule
         if ($this->frame->returnsByRef) {
             $addrIr = $this->byRefAddrOf($v);
             if ($addrIr !== null) {
-                return $this->finishReturn($addrIr, $this->lastValue, $this->retLeave($r, $v, $ownMoved, false, $this->lastValue, $leave));
+                return $this->finishReturn($addrIr, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
             }
+        }
+        // An erased-array return normalizes every arm of a conditional it hands
+        // back to +1 ({@see condOwnsResult}); the pass drops every owned local.
+        if ($this->frame->erasedArrayReturn && \Compile\Mir\CondOwn::isConditional($v)
+            && !$this->own->condOwnedTemp($v)) {
+            $this->frame->erasedCond = $v;
         }
         $out = $this->emitNode($v);
         // Uniform closure ABI: a closure returns a scalar as a tagged cell, so a
@@ -2336,7 +2320,6 @@ trait EmitLlvmModule
             // — the next `.=` on the property wrote into freed memory.
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $ri = $this->retainCellPayload($v);
-                $retained = $ri !== '';
                 $out .= $ri;
             } elseif ($v->type->kind === Type::KIND_CELL && $this->isBorrowedCellReturn($v, $returnedLocal)) {
                 // …and a borrowed CELL (`return $this->mixed;`), by tag.
@@ -2344,10 +2327,9 @@ trait EmitLlvmModule
                 $this->rt->needsStrRc = true;
                 $out .= $this->coerceToI64();
                 $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
-                $retained = true;
             }
             $out .= $this->boxToCell($v->type, $v);
-            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
         // integer-arithmetic-on-cells path (`$x * 2` where $x is a plain cell
@@ -2365,7 +2347,7 @@ trait EmitLlvmModule
             $this->rt->needsTagged = true;
             $out .= ($this->lastValueType === 'double' || $this->lastValueType === 'ptr')
                 ? $this->boxLastByRepr() : $this->boxUnknownShallowIr();
-            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
         }
         // The declared return is a CELL-element array but this arm still holds a
         // CONCRETE-element one: the arms disagreed (`return [false,'loc']` beside
@@ -2380,7 +2362,7 @@ trait EmitLlvmModule
             // returns a uniform i64, so it rides the carrier like every other
             // pointer return.
             $out .= $this->coerceToI64();
-            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
         }
         // A `mixed` / union (cell) return boxes the value to a tagged
         // cell unless it already is one.
@@ -2397,7 +2379,6 @@ trait EmitLlvmModule
             // producers (call/new/concat/owned-local) keep their fresh +1.
             if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
                 $ri = $this->retainCellPayload($v);
-                $retained = $ri !== '';
                 $out .= $ri;
             }
             // An UNKNOWN value may ALREADY be a tagged cell (an element read out
@@ -2412,7 +2393,6 @@ trait EmitLlvmModule
                     $this->rt->needsStrRc = true;
                     $out .= $this->coerceToI64();
                     $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
-                    $retained = true;
                 }
                 $out .= $this->boxUnknownIfRaw();
             } else {
@@ -2435,7 +2415,6 @@ trait EmitLlvmModule
                 $this->rt->needsStrRc = true;
                 $out .= $this->coerceToI64();
                 $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
-                $retained = true;
             }
             // A cell value returned where the declared type is concrete
             // (`return $mixed[$i]` from a `: int` fn) must be unboxed — else the
@@ -2492,14 +2471,16 @@ trait EmitLlvmModule
             if ($this->callHandsBorrow($v)) {
                 // rcRetainByType reads every call as a +1 transfer.
                 $out .= $this->rcRetainReg($this->lastValue, 'obj');
-                $retained = true;
             } elseif ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $ri = $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
-                $retained = $ri !== '';
-                $out .= $ri;
+                $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
+            } elseif ($this->frame->erasedArrayReturn && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+                // An erased array handed back as it stands — a raw buffer or a
+                // tagged cell — takes its +1 by tag: the caller owns what it stores.
+                $out .= $this->rcRetainReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
             }
         }
-        return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $v, $ownMoved, $retained, $this->lastValue, $leave));
+        $this->frame->erasedCond = null;
+        return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
     }
 
     /**

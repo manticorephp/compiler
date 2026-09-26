@@ -1,7 +1,8 @@
 <?php
 // A conditional return whose result type is erased (a bare `array` arm): the
-// arm that is returned moves to the caller, the arm that is not is dropped at
-// the return — the __destruct lines show both, typed and bare declared return.
+// function hands back +1 on every path — the Own arm moves, the Borrow arm is
+// retained — so the caller's local owns the result and `unset()` releases it.
+// The __destruct lines show both, typed and bare declared return, both arms.
 final class D
 {
     public function __construct(public string $n) {}
@@ -33,29 +34,35 @@ function typedOwn(bool $c): array
     $y = mk('ty');
     return $c ? $x : $y;
 }
+function bareParam(array $src): array
+{
+    return $src;
+}
 
 $src = ['k' => new D('src')];
 foreach ([true, false] as $c) {
-    // Only the untaken-owned-arm half here: a caller holding a bare-array
-    // result in an erased local never releases it (pre-existing, both modes).
-    if ($c) {
-        echo "-- bareMix src\n";
-        $r = bareMix($src, $c);
-        echo "got ", $r['k']->n, "\n";
-        unset($r);
-    }
+    echo "-- bareMix ", $c ? 'src' : 'base', "\n";
+    $rb = bareMix($src, $c);
+    echo "got ", $rb['k']->n, "\n";
+    unset($rb);
     echo "-- typedMix ", $c ? 'src' : 'base', "\n";
     $r = typedMix($src, $c);
     echo "got ", $r['k']->n, "\n";
     unset($r);
     echo "-- bareOwn ", $c ? 'x' : 'y', "\n";
-    $r = bareOwn($c);
-    echo "got ", $r['k']->n, "\n";
-    unset($r);
+    $ro = bareOwn($c);
+    echo "got ", $ro['k']->n, "\n";
+    unset($ro);
     echo "-- typedOwn ", $c ? 'x' : 'y', "\n";
     $r = typedOwn($c);
     echo "got ", $r['k']->n, "\n";
     unset($r);
+}
+echo "-- bareParam\n";
+for ($i = 0; $i < 3; $i++) {
+    $rp = bareParam($src);
+    echo "got ", $rp['k']->n, "\n";
+    unset($rp);
 }
 echo "-- end\n";
 unset($src);

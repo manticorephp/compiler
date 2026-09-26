@@ -922,6 +922,103 @@ final class Ownership
         return '';
     }
 
+    // ── the return convention ──────────────────────────────────────────────
+
+    /** The release class of an ERASED array word — raw buffer or tagged cell,
+     *  split by tag at every retain and drop. */
+    public const ERASED_ARR = 'erasedarr';
+
+    /**
+     * Does `$fn` hand back an erased array (a bare `array` / `?array` hint whose
+     * return stayed KIND_UNKNOWN) at +1 on EVERY path? A borrowed value is
+     * retained by its tag, a conditional's arms are each normalized to +1 — so
+     * a caller may own what it stores ({@see erasedArrayCall}). A closure or a
+     * trampoline rides the uniform cell ABI, a generator stashes its value in
+     * the frame and a by-ref return hands out an address: none of them.
+     */
+    public static function erasedArrayReturn(FunctionDef $fn, bool $closureAbi): bool
+    {
+        return $fn->returnArrayHinted && $fn->returnType->kind === Type::KIND_UNKNOWN
+            && !$closureAbi && !$fn->isGenerator && !$fn->returnsByRef && $fn->ffiSymbol === null;
+    }
+
+    /** A call to a function of this module that returns an erased array at +1
+     *  ({@see erasedArrayReturn}). */
+    public function erasedArrayCall(Node $v): bool
+    {
+        if ($v->kind !== Node::KIND_CALL || $v->type->kind !== Type::KIND_UNKNOWN) { return false; }
+        $fn = self::asCall($v)->function;
+        if (!isset($this->ctx->erasedArrayFns[$fn])) { return false; }
+        return !\in_array(\ltrim($fn, '\\'), $this->ctx->borrowingBuiltins, true);
+    }
+
+    /**
+     * The locals a `return <$v>` must NOT drop unconditionally: the arms of a
+     * conditional the return takes no +1 on, so the arm that ran is the word
+     * handed back as it stands. The drop of each waits for the returned word
+     * (identity at run time); every other owned local drops.
+     *
+     * The return takes its +1 ({@see Passes\EmitLlvmModule::emitReturn}) — and
+     * this answers [] — for a conditional the contract covers ({@see
+     * condOwnedTemp}), for one an erased-array return normalizes
+     * (`$erasedArray`), and for a value of a concrete rc type, which the
+     * borrowed-return retain always takes (an erased value: by the concrete
+     * rc type the function declares). An erased value under an erased or cell
+     * return, and a cell outside a cell-boxing return, are not proven: their
+     * arms wait for the word — a leak at worst, never a free of the value
+     * handed back.
+     * `$noRetain` is a return that takes no +1 at all (a generator's).
+     *
+     * @return array<string, bool>
+     */
+    public function returnArmLocals(Node $v, ?Type $retType, bool $closureAbi, bool $erasedArray, bool $noRetain): array
+    {
+        if (!CondOwn::isConditional($v)) { return []; }
+        if ($this->condOwnedTemp($v)) { return []; }
+        if (!$noRetain) {
+            if ($erasedArray) { return []; }
+            if ($this->returnRetainsValue($v->type, $retType, $closureAbi)) { return []; }
+        }
+        /** @var array<string, bool> $out */
+        $out = [];
+        $this->armLocals($v, $out);
+        return $out;
+    }
+
+    /** @param array<string, bool> $out */
+    private function armLocals(Node $v, array &$out): void
+    {
+        if ($v->kind === Node::KIND_LOAD_LOCAL) {
+            $out[self::asLoadLocal($v)->name] = true;
+            return;
+        }
+        if (!CondOwn::isConditional($v) || $this->condOwnedTemp($v)) { return; }
+        foreach (CondOwn::arms($v) as $arm) { $this->armLocals($arm, $out); }
+    }
+
+    /** Does the borrowed-return retain surely fire for a value of type `$t`? */
+    private function returnRetainsValue(Type $t, ?Type $retType, bool $closureAbi): bool
+    {
+        $k = $t->kind;
+        // An erased value under a concrete rc return is retained by the
+        // DECLARED type (the one the caller assumes).
+        if ($k === Type::KIND_UNKNOWN) {
+            if ($closureAbi || $retType === null) { return false; }
+            $rk = $retType->kind;
+            if ($rk === Type::KIND_UNKNOWN || $rk === Type::KIND_CELL) { return false; }
+            return $this->returnRetainsValue($retType, $retType, false);
+        }
+        if ($k === Type::KIND_CELL) {
+            return $closureAbi || ($retType !== null && $retType->kind === Type::KIND_CELL);
+        }
+        if ($k === Type::KIND_STRING || $k === Type::KIND_CLOSURE) { return true; }
+        if ($t->isVec() || $t->isAssoc()) { return true; }
+        if ($k !== Type::KIND_OBJ) { return false; }
+        $cls = $t->class ?? '';
+        if ($cls === 'Ffi\\Ptr' || $this->isEnumClass($cls)) { return false; }
+        return !($cls !== '' && isset($this->ctx->classes[$cls]) && $this->ctx->classes[$cls]->isStruct);
+    }
+
     // ── container stores ───────────────────────────────────────────────────
 
     /**

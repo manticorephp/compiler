@@ -12,6 +12,9 @@ got x
 ~ty
 got tx
 ~tx
+-- bareMix base
+got base
+~base
 -- typedMix base
 got tbase
 ~tbase
@@ -23,6 +26,10 @@ got y
 ~tx
 got ty
 ~ty
+-- bareParam
+got src
+got src
+got src
 -- end
 ~src
 done

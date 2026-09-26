@@ -654,6 +654,19 @@ trait EmitLlvmMemory
             $this->rt->needsStrRc = true;
             return '  call void @__mir_cell_retain(i64 ' . $i64reg . ")\n";
         }
+        if ($flavor === \Compile\Mir\Ownership::ERASED_ARR) {
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            $tagged = $this->ssa->allocReg();
+            $cw = $this->ssa->allocReg();
+            $rw = $this->ssa->allocReg();
+            $out = '  ' . $tagged . ' = icmp ugt i64 ' . $i64reg . ', '
+                . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+            $out .= '  ' . $cw . ' = select i1 ' . $tagged . ', i64 ' . $i64reg . ", i64 0\n";
+            $out .= '  ' . $rw . ' = select i1 ' . $tagged . ', i64 0, i64 ' . $i64reg . "\n";
+            $out .= '  call void @__mir_cell_retain(i64 ' . $cw . ")\n";
+            return $out . $this->rcRetainReg($rw, 'vec');
+        }
         $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_retain'; }
@@ -779,6 +792,10 @@ trait EmitLlvmMemory
         }
         if (\str_starts_with($flavor, 'mix')) {
             return $this->mixedReleaseIr($i64reg, \substr($flavor, 3), '');
+        }
+        // An erased array word: a raw buffer or a tagged cell, split by tag.
+        if ($flavor === \Compile\Mir\Ownership::ERASED_ARR) {
+            return $this->mixedReleaseIr($i64reg, 'vec', '');
         }
         $fn = '@__mir_array_release';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }

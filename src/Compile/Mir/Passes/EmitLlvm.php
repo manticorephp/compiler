@@ -3818,8 +3818,22 @@ final class EmitLlvm implements EmitVisitor
 
     private function condFlavor(Type $t): string { return $this->own->condFlavor($t); }
 
-    /** {@see \Compile\Mir\Ownership::condOwnedTemp} */
-    private function condOwnsResult(Node $n): bool { return $this->own->condOwnedTemp($n); }
+    /** {@see \Compile\Mir\Ownership::condOwnedTemp}, plus the conditional an
+     *  erased-array return is emitting ({@see FunctionEmitFrame::$erasedCond}). */
+    private function condOwnsResult(Node $n): bool
+    {
+        if ($this->frame->erasedCond !== null && $n === $this->frame->erasedCond) { return true; }
+        return $this->own->condOwnedTemp($n);
+    }
+
+    /** The flavor every arm of an owned conditional is normalized to. */
+    private function condResFlavor(Node $res): string
+    {
+        if ($this->frame->erasedCond !== null && $res === $this->frame->erasedCond) {
+            return \Compile\Mir\Ownership::ERASED_ARR;
+        }
+        return $this->condFlavor($res->type);
+    }
 
     private function elemObjFlavor(Type $el): string { return $this->own->elemObjFlavor($el); }
 
