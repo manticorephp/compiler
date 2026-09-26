@@ -142,8 +142,6 @@ final class EmitLlvm implements EmitVisitor
     private function compactEmissionCaches(): void
     {
         if (!\Compile\Debug::$compactCaches) { return; }
-        $this->resolveMethodClassCache = [];
-        $this->resolveMethodClassEntries = 0;
         $this->mangleCache = [];
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
@@ -157,7 +155,7 @@ final class EmitLlvm implements EmitVisitor
     private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false, int $stagedBytes = 0): void
     {
         if (!\Compile\Debug::$rootTrace) { return; }
-        $cacheEntries = \count($this->resolveMethodClassCache)
+        $cacheEntries = \count($this->methodHoldersIdx)
             + \count($this->mangleCache)
             + \count($this->classImplementsCache)
             + \count($this->classImplementsIfaceCache)
@@ -179,7 +177,7 @@ final class EmitLlvm implements EmitVisitor
             . ' emitter_classes=' . (string)\count($this->classes)
             . ' defined_fns=' . (string)\count($this->definedFns)
             . ' caches=' . (string)$cacheEntries
-            . ' resolve=' . (string)\count($this->resolveMethodClassCache)
+            . ' resolve=' . (string)\count($this->methodHoldersIdx)
             . ' mangle=' . (string)\count($this->mangleCache)
             . ' impl=' . (string)\count($this->classImplementsCache)
             . ' iface=' . (string)\count($this->classImplementsIfaceCache)
@@ -204,15 +202,6 @@ final class EmitLlvm implements EmitVisitor
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
 
-    /** Resolution caches are rebuilt for each module emission. T6 megamorphic
-     * dispatch repeatedly asks the same closed-world metadata questions. */
-    /** @var array<string, string> */
-    private array $resolveMethodClassCache = [];
-
-    /** Live entries in {@see $resolveMethodClassCache}; `count()` per insert is
-     *  the one thing a hot path must not do. */
-    private int $resolveMethodClassEntries = 0;
-
     /** {@see EmitLlvmObjects::methodHolders}: method => [class => resolved holder].
      *  @var array<string, array<string, string>> */
     private array $methodHoldersIdx = [];
@@ -220,11 +209,6 @@ final class EmitLlvm implements EmitVisitor
     /** Class-table size the index was built against; a change drops it. */
     private int $methodHoldersClassCount = -1;
 
-    /** The window {@see EmitLlvmObjects::resolveMethodClass} keeps. Sized so the
-     *  memo cannot outgrow the module it describes: ~256k entries is more than
-     *  any single class-by-class sweep asks for, and two orders of magnitude
-     *  below the cross product that took the emitter to 13 million. */
-    private const RESOLVE_CACHE_MAX = 262144;
     /** @var array<string, string> deterministic PHP-name → LLVM-name cache */
     private array $mangleCache = [];
     /** @var array<string, bool> */
@@ -654,8 +638,6 @@ final class EmitLlvm implements EmitVisitor
         $this->locals = new LocalSlots();
         $this->lib = new RuntimeLibrary();
         $this->classes = $module->classes;
-        $this->resolveMethodClassCache = [];
-        $this->resolveMethodClassEntries = 0;
         $this->methodHoldersIdx = [];
         $this->methodHoldersClassCount = -1;
         $this->classImplementsCache = [];
