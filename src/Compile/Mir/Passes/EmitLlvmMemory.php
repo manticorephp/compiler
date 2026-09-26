@@ -101,174 +101,42 @@ use Codegen\Llvm\Module as LlvmModule;
 trait EmitLlvmMemory
 {
     /**
-     * Register the owned RcHeap obj locals (the plan's rc_release ops)
-     * for the current function and null-init their slots, so a release on
-     * a path where the local was never assigned is a no-op rather than a
-     * read of garbage.
+     * Register {@see OwnershipFlow}'s managed locals for the current function
+     * and null-init their slots, so a drop on a path where the local was never
+     * assigned is a no-op rather than a read of garbage. A param keeps the
+     * value it arrived with: it enters BORROWED, and any +1 the frame needs is
+     * an `own_retain` the pass placed. A MIXED local gets its representation
+     * flag slot ({@see mixedReleaseIr}).
      *
      * @param array<string, bool> $paramNames param name => is-a-param (a SET)
-     * @param array<string, bool> $copiedParams params the prologue already COPIED
-     *        into a private +1 ({@see \Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry})
      */
-    private function initRcObjSlots(Node $body, array $paramNames = [], array $copiedParams = []): string
+    private function initOwnSlots(Node $body, array $paramNames = []): string
     {
-        $this->frame->rcObjLocals = [];
+        $this->frame->ownLocals = [];
         $this->frame->ownBorrowed = [];
-        $this->collectRcObjLocals($body);
+        $this->collectOwnLocals($body);
         $this->frame->paramNames = $paramNames;
-        $this->frame->transferredLocals = [];
-        $this->collectTransferredLocals($body);
-        $this->frame->elementSharedLocals = [];
-        $this->collectElementSharedLocals($body);
-        // LAST: its gate reads paramNames, transferredLocals, elementSharedLocals
-        // and rcObjLocals, and asks rcReleaseFlavor with the flag map still empty.
+        // LAST: its gate reads paramNames and ownLocals, and asks
+        // rcReleaseFlavor with the flag map still empty.
         $this->frame->ownElemLocals = [];
         $this->collectOwnElemLocals($body);
         $out = '';
         $this->frame->mixedFlagSlots = [];
         $this->frame->mixedFlagBySlot = [];
-        foreach ($this->frame->rcObjLocals as $name => $mo) {
-            if (\str_starts_with($mo->flavor, 'mix') && !isset($paramNames[$name])
-                && isset($this->locals->slots[$name])) {
+        foreach ($this->frame->ownLocals as $name => $mo) {
+            if (isset($paramNames[$name])) { continue; }
+            if (\str_starts_with($mo->flavor, 'mix') && isset($this->locals->slots[$name])) {
                 $flag = $this->ssa->allocReg();
                 $out .= $this->localSlotAlloca($flag);
                 $out .= '  store i64 0, ptr ' . $flag . "\n";
                 $this->frame->mixedFlagSlots[$name] = $flag;
                 $this->frame->mixedFlagBySlot[$this->locals->slots[$name]] = $flag;
             }
-            // A reassigned obj/str/vec/assoc PARAM holds the caller's
-            // incoming (borrowed) value. The first `$p = ...` reassignment
-            // emits a release-before-overwrite of that old value, and a
-            // no-return path releases it at scope exit — both would
-            // over-release the caller's reference (a double-free, e.g.
-            // `$fqn = ltrim($fqn)` in parseUseDecl). Retain it once on
-            // entry so the frame co-owns the slot; the matching release
-            // then cancels cleanly. (Slot already holds the incoming arg.)
-            if (isset($paramNames[$name])) {
-                // OwnershipFlow: a param enters BORROWED; any +1 the frame needs
-                // is an `own_retain` op the pass placed.
-                if (\Compile\Debug::$ownFlow) { continue; }
-                // A BY-REF param's slot holds the caller's ADDRESS, not the
-                // value. Retaining it rc-bumps whatever sits at (addr-8) — the
-                // caller's stack — and the paired scope-exit release then frees
-                // it: `emit(string &$o) { $o = $o . $s; }` double-released, a
-                // corruption that stayed silent only because the bytes it hit
-                // happened to be harmless. The caller owns the value; the
-                // callee co-owns nothing.
-                if (isset($this->locals->refLocals[$name])) { continue; }
-                // The entry copy is already the frame's own reference; a retain
-                // on top of it is the one the scope-exit release never balances.
-                if (isset($copiedParams[$name])) { continue; }
-                if (isset($this->locals->slots[$name])) {
-                    $out .= $this->rcRetainSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
-                }
-                continue;
-            }
             if (isset($this->locals->slots[$name])) {
                 $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
             }
         }
         return $out;
-    }
-
-    /**
-     * B2 escape pre-pass: find owned rcObj locals whose value flows into a
-     * BORROWING container store and record them in {@see $transferredLocals}.
-     * A "borrowing" store is one where {@see containerStoreRetains} is false —
-     * the value's type is erased and the container offers no usable element /
-     * property fallback, so the store writes a borrowed reference WITHOUT a
-     * retain. Releasing such a local at scope exit over-releases (the
-     * container still references it) — the enum/arena heisenbug. Suppressing
-     * the release moves ownership to the container instead (leak-safe).
-     */
-    private function collectTransferredLocals(Node $n): void
-    {
-        $k = $n->kind;
-        if ($k === Node::KIND_STORE_ELEMENT) {
-            // The DESTINATION's element type decides whether the store retains —
-            // for a vec exactly as for an assoc, and ONLY for a raw-repr value
-            // ({@see storeRetainFallback}): a CELL value is NaN-boxed, and its
-            // co-ownership is boxToCell's business, not the element type's.
-            $fallback = $this->storeRetainFallback($n);
-            $this->maybeTransfer($n->value, $fallback, $this->storeElemBoxesValue($n));
-        } elseif ($k === Node::KIND_STORE_PROPERTY) {
-            // Same destination type the emitter's retain uses — one owner, or
-            // the two drift into a leak / double free ({@see
-            // EmitLlvmObjects::propStoreRetainType}).
-            $this->maybeTransfer($n->value, $this->propStoreRetainType($n));
-        } elseif ($k === Node::KIND_ARRAY_LIT) {
-            $fallback = $n->type->element ?? null;
-            $boxed = $this->litBoxesValues($n);
-            foreach ($n->elements as $el) { $this->maybeTransfer($el->value, $fallback, $boxed); }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectTransferredLocals($c); }
-    }
-
-    /**
-     * Escape pre-pass for element-drop suppression: find owned vec/assoc
-     * locals whose buffer is passed BY VALUE to a FACTORY — a call that
-     * returns an object (or a `new`) — so the constructed node stores and
-     * co-owns the buffer plus its retained element refs (the +1 each
-     * `array_append` adds). The local's scope-exit release must then drop the
-     * buffer only — see {@see $elementSharedLocals}. This is the parser
-     * `$args = parseArgList(); return Expr::call(..., $args, ...)` shape.
-     *
-     * Gated on an OBJECT result on purpose: a scalar/array-returning callee
-     * (`count`, `implode`, `array_map`) READS the buffer without keeping it,
-     * so a sole-owned confined vec passed there must keep its element-drop
-     * (else its elements leak). A false positive here only leaks (the safe
-     * direction); element-drop on a genuinely co-owned buffer would UAF.
-     */
-    /** The emitted symbol of `$class`'s constructor, or '' when there is none to
-     *  speak for (no class, no declared `__construct`). '' keeps the veto. */
-    private function ctorSymbolFor(string $class): string
-    {
-        if ($class === '' || !isset($this->classes[$class])) { return ''; }
-        $decl = $this->resolveMethodClass($class, '__construct');
-        if ($decl === '') { return ''; }
-        return $this->lsbTarget($decl, '__construct', $class);
-    }
-
-    /** The emitted symbol of `$class::$method` as this site would call it, or
-     *  '' when there is nothing to speak for. The method twin of
-     *  {@see ctorSymbolFor}. */
-    private function methodSymbolFor(string $class, string $method): string
-    {
-        if ($class === '' || $method === '' || !isset($this->classes[$class])) { return ''; }
-        $decl = $this->resolveMethodClass($class, $method);
-        if ($decl === '') { return ''; }
-        return $this->lsbTarget($decl, $method, $class);
-    }
-
-    private function collectElementSharedLocals(Node $n): void
-    {
-        $k = $n->kind;
-        if ($k === Node::KIND_NEW_OBJ) {
-            // The constructor is resolvable from the class, so its parameters'
-            // retain discipline is knowable — which is what lets
-            // {@see EmitLlvm::shareCallArgs} keep the caller's element release
-            // instead of vetoing it blind. `new Parser($toks)` is the shape.
-            $this->shareCallArgs($n->args, $this->ctorSymbolFor($n->class ?? ''));
-        } elseif ($n->type->kind === Type::KIND_OBJ) {
-            if ($k === Node::KIND_CALL) {
-                $this->shareCallArgs($n->args, $n->function);
-            } elseif ($k === Node::KIND_METHOD_CALL) {
-                // A method is resolvable too, on the same terms as the ctor above:
-                // the question shareCallArgs asks of the symbol is only whether
-                // position N is a BY-VALUE parameter, and php fixes that across
-                // overrides (a signature may not flip by-ref). Passing no symbol
-                // made the veto unconditional, so every array of objects or
-                // strings handed to a method had its elements stranded.
-                $this->shareCallArgs($n->args,
-                    $this->methodSymbolFor($n->object->type->class ?? '', $n->method));
-            } elseif ($k === Node::KIND_STATIC_CALL) {
-                $this->shareCallArgs($n->args,
-                    $this->methodSymbolFor($n->class, $n->method));
-            } elseif ($k === Node::KIND_INVOKE) {
-                $this->shareCallArgs($n->args);
-            }
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectElementSharedLocals($c); }
     }
 
     /**
@@ -295,10 +163,10 @@ trait EmitLlvmMemory
      *   2. The retain's flavor ({@see arrayRetainFlavor}, the emitter's own) and
      *      the release's ({@see rcReleaseFlavor}) are EQUAL and element-bearing.
      *      Anything else is vetoed, never "fixed".
-     *   3. A PARAM is excluded (its slot arrives holding the caller's value, and
-     *      {@see initRcObjSlots} balances that with an entry retain of its own),
-     *      as are a transferred local (release suppressed) and an element-shared
-     *      one (deliberately buffer-only — the parser `$args` UAF).
+     *   3. A PARAM is excluded (its slot arrives holding the caller's value), as
+     *      is a name some source of which BORROWS (`own_local_b`). An
+     *      element-shared local is buffer-only by its flavor
+     *      ({@see \Compile\Mir\Ownership::elementSharedArgs}), so rule 2 vetoes it.
      *
      * ⚠ A conservative gate fails SILENTLY — `MANTICORE_OWNEL_TRACE=1` prints
      * each accepted / rejected name, so a gate that matches 3 sites cannot pass
@@ -317,11 +185,9 @@ trait EmitLlvmMemory
             if (isset($veto[$name])) { $why = 'mixed store'; }
             elseif (isset($this->frame->paramNames[$name])) { $why = 'param'; }
             elseif (isset($this->frame->ownBorrowed[$name])) { $why = 'borrowed source'; }
-            elseif (isset($this->frame->transferredLocals[$name])) { $why = 'transferred'; }
-            elseif (isset($this->frame->elementSharedLocals[$name])) { $why = 'element-shared'; }
-            elseif (!isset($this->frame->rcObjLocals[$name])) { $why = 'no release'; }
-            elseif ($this->rcReleaseFlavor($this->frame->rcObjLocals[$name]) !== $flavor) {
-                $why = 'flavor ' . $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]) . ' != ' . $flavor;
+            elseif (!isset($this->frame->ownLocals[$name])) { $why = 'no release'; }
+            elseif ($this->rcReleaseFlavor($this->frame->ownLocals[$name]) !== $flavor) {
+                $why = 'flavor ' . $this->rcReleaseFlavor($this->frame->ownLocals[$name]) . ' != ' . $flavor;
             }
             if ($why !== '') {
                 if ($dbg) { \error_log('OWNEL? $' . $name . ' no: ' . $why); }
@@ -367,9 +233,8 @@ trait EmitLlvmMemory
      *     is the shape: the property store retains (+1 per element) and the
      *     local's own release must give back the ref it holds, or every element
      *     leaks exactly once per iteration — `noread` in the probe, no snapshot
-     *     anywhere. InsertMemoryOps only plants a release for an OWNED value
-     *     (a borrowed alias blocks the name outright), so reaching here with a
-     *     release at all is the ownership proof.
+     *     anywhere. A name some source of which borrows is `own_local_b` and
+     *     vetoed, so reaching here is the ownership proof.
      *
      * Element-bearing flavors only: `vec` / `assoc` (repr mode) read ownership
      * off the BUFFER's own repr bits, which no per-reference pairing can speak
@@ -401,7 +266,7 @@ trait EmitLlvmMemory
         // the Doctrine tier. InsertMemoryOps has already refined the local's
         // release type from the LOADS — use it rather than the literal's.
         if (\Compile\Debug::$rcElemType && $store->kind === Node::KIND_STORE_LOCAL) {
-            $mo = $this->frame->rcObjLocals[$store->name] ?? null;
+            $mo = $this->frame->ownLocals[$store->name] ?? null;
             $known = $mo === null ? null : $mo->target->type;
             if ($known !== null && $known->isArray() && $value->type->isArray()
                 && ($value->type->element === null
@@ -530,12 +395,6 @@ trait EmitLlvmMemory
     private function rcReleaseFlavor(\Compile\Mir\MemoryOp_ $mo): string
     {
         $t = $mo->target;
-        // A shared buffer (passed by value as a call arg) is co-owned by the
-        // callee along with its retained element refs — drop the buffer only,
-        // never the elements (element-drop would double-free the shared refs:
-        // the parser `$args` UAF). See {@see $elementSharedLocals}.
-        $shared = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
-            && isset($this->frame->elementSharedLocals[$t->name]);
         // This reference OWNS its element refs (it took them in its own retain)
         // ⇒ it drops them on every release, not only at rc → 0. Only the
         // element-bearing flavors below can carry the suffix, and the gate that
@@ -545,11 +404,11 @@ trait EmitLlvmMemory
         // routes the release through the slot's representation flag.
         if (\str_starts_with($mo->flavor, 'mix')) {
             $rawMo = new MemoryOp_($mo->op, \substr($mo->flavor, 3), $t, Type::void());
-            return 'mix' . $this->rcReleaseFlavorPlain($rawMo, $shared);
+            return 'mix' . $this->rcReleaseFlavorPlain($rawMo);
         }
         $ownEl = $t !== null && $t->kind === Node::KIND_LOAD_LOCAL
             && isset($this->frame->ownElemLocals[$t->name]);
-        $f = $this->rcReleaseFlavorPlain($mo, $shared);
+        $f = $this->rcReleaseFlavorPlain($mo);
         return $ownEl && $this->isOwnElemFlavor($f) ? $f . 'own' : $f;
     }
 
@@ -589,15 +448,14 @@ trait EmitLlvmMemory
         return $prefix . 'arr';
     }
 
-    /** {@see rcReleaseFlavor}'s answer before the ownership suffix. */
-    private function rcReleaseFlavorPlain(\Compile\Mir\MemoryOp_ $mo, bool $shared): string
+    /** {@see rcReleaseFlavor}'s answer before the ownership suffix. A buffer an
+     *  unproven callee may keep with its element refs arrives as `vecbuf` /
+     *  `assocbuf` already ({@see \Compile\Mir\Ownership::elementSharedArgs}). */
+    private function rcReleaseFlavorPlain(\Compile\Mir\MemoryOp_ $mo): string
     {
         $t = $mo->target;
         if ($mo->flavor === 'vec') {
-            // A shared buffer (passed by value to a callee that co-owns and
-            // drops the element refs) releases BUFFER-ONLY — ignore the repr
-            // bits, or the elements are double-dropped (the parser $args UAF).
-            if ($t === null || $shared) { return 'vecbuf'; }
+            if ($t === null) { return 'vecbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'vecobj'; }
@@ -605,9 +463,9 @@ trait EmitLlvmMemory
             // A NESTED array element — the member the flavor family was
             // missing, so this fell through to the plain repr walk and
             // `$a = [f(), g()]` freed the outer buffer and stranded both inner
-            // arrays. ONLY here, on a LOCAL SLOT drop: this path already knows
-            // the slot is not `$shared` (not handed to a callee by value), and
-            // it is the one place the claim is the buffer's sole owner's.
+            // arrays. ONLY here, on a LOCAL SLOT drop: the slot is not a buffer
+            // handed to an unproven callee (that one is `vecbuf`), and it is the
+            // one place the claim is the buffer's sole owner's.
             // `discardReleaseFlavor` answers for PROPERTIES, call arguments and
             // the erased repr path too, where the same claim over-releases —
             // 20 array_ cases and a gen-3 abort.
@@ -616,7 +474,7 @@ trait EmitLlvmMemory
             return 'vec';
         }
         if ($mo->flavor === 'assoc') {
-            if ($t === null || $shared) { return 'assocbuf'; }
+            if ($t === null) { return 'assocbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'assocobj'; }
@@ -645,20 +503,15 @@ trait EmitLlvmMemory
 
     /**
      * The slot an {@see OwnershipFlow} op acts on, or '' where the emitter keeps
-     * the name out of rc tracking: not registered (a reference or a
-     * global-backed binding), and — `$vetoTransfer`, for a DROP only — a local
-     * whose value moved into a borrowing container ({@see
-     * collectTransferredLocals}). A retain is never vetoed: the +1 an in-place
-     * append or a copy-on-write needs is not optional, and one no drop gives
-     * back is a leak, never a free.
+     * the name out of rc tracking: not registered, a reference, or a
+     * global-backed binding.
      */
-    private function ownOpSlot(\Compile\Mir\MemoryOp_ $mo, bool $vetoTransfer): string
+    private function ownOpSlot(\Compile\Mir\MemoryOp_ $mo): string
     {
         $t = $mo->target;
         if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { return ''; }
         $name = $t->name;
-        if (!isset($this->frame->rcObjLocals[$name])) { return ''; }
-        if ($vetoTransfer && isset($this->frame->transferredLocals[$name])) { return ''; }
+        if (!isset($this->frame->ownLocals[$name])) { return ''; }
         if (isset($this->locals->refLocals[$name]) || isset($this->locals->globalBacked[$name])) { return ''; }
         return $this->locals->slots[$name] ?? '';
     }

@@ -442,14 +442,9 @@ final class Debug
      *  builds instead of by hypothesis. */
     public static string $feOnly = '';
 
-    /** `MANTICORE_OWNFLOW=1`: local ownership is decided per program point by
-     *  {@see Mir\Passes\OwnershipFlow}, whose explicit ops the emitter executes;
-     *  InsertMemoryOps keeps only its arena track. */
-    public static bool $ownFlow = false;
-
     /** BISECT ONLY: `MANTICORE_OWNFLOW_ONLY=a,b` — OwnershipFlow manages only the
      *  functions whose name contains one of the substrings; `!a,b` manages all
-     *  but those. Unmanaged functions get no ops at all (they leak, never free). */
+     *  but those. Unmanaged functions keep every retain and get no drop (they leak, never free). */
     public static string $ownFlowOnly = '';
 
 
@@ -688,7 +683,6 @@ final class Debug
         if ($env !== false && $env !== '') { self::$tombRatio = (int)$env; }
         $env = \getenv('MANTICORE_FE_ONLY');
         if ($env !== false && $env !== '') { self::$feOnly = $env; }
-        self::$ownFlow = \getenv('MANTICORE_OWNFLOW') === '1';
         $env = \getenv('MANTICORE_OWNFLOW_ONLY');
         if ($env !== false && $env !== '') { self::$ownFlowOnly = $env; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');

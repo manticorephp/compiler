@@ -3351,166 +3351,29 @@ final class EmitLlvm implements EmitVisitor
         return false;
     }
 
-    private function collectRcObjLocals(Node $n): void
+    /**
+     * Collect {@see OwnershipFlow}'s registrations (`own_local`; `own_local_b`
+     * when some source of the name borrows) into {@see FunctionEmitFrame::$ownLocals}.
+     * A by-ref param (its slot holds the caller's ADDRESS) and a global-backed
+     * name (its storage is a module cell that outlives the call) stay out: a
+     * drop of either releases what this frame does not own.
+     */
+    private function collectOwnLocals(Node $n): void
     {
         if ($n->kind === Node::KIND_MEMORY_OP) {
             $mo = $n;
-            // `own_local` / `own_local_b` are OwnershipFlow's registration of the
-            // same set (`_b`: some source of it borrows); the pass's
-            // `drop` / `own_retain` ops are not registrations.
-            if (($mo->op === 'rc_release' || $mo->op === 'own_local' || $mo->op === 'own_local_b')
+            if (($mo->op === 'own_local' || $mo->op === 'own_local_b')
                 && $mo->target !== null && $mo->target->kind === Node::KIND_LOAD_LOCAL) {
-                // A BY-REF param's slot holds the caller's ADDRESS, not the
-                // value — the caller owns the lifetime, the callee co-owns
-                // nothing. Registering it as an owned rc local emits a
-                // scope-exit release that runs `rc_release(load slot)` =
-                // release of the ADDRESS, which decrements the word at
-                // (addr-8) — the caller's ADJACENT stack slot. Concretely
-                // `f(string &$a, int &$p){ $p=N; $a=g(); }` came back with
-                // $p == N-1: the string store to `$a` released `&$a`, and
-                // `&$a - 8` was `&$p`. initRcObjSlots already skips the
-                // paired retain-on-entry for the same reason; excluding the
-                // param here kills the release too, keeping them balanced.
                 if (isset($this->locals->refLocals[$mo->target->name])) { return; }
-                // A GLOBAL-BACKED name (`static $x;` / `global $g`) does not live
-                // in this frame: its storage is a module cell and its value
-                // outlives the call. There is no entry retain to balance, so a
-                // scope-exit release is a pure over-release — `static $out; …
-                // return $out = \STDOUT;` released the cached resource once per
-                // call and the teardown drop then trapped. The cell owns it.
                 if (isset($this->locals->globalBacked[$mo->target->name])) { return; }
-                // Store the MemoryOp node, not its flavor string — the
-                // self-host backend corrupts a short string round-tripped
-                // through an assoc value (a `'str'` read back mis-compares),
-                // but a node handle survives. Flavor is re-derived per use.
-                $this->frame->rcObjLocals[$mo->target->name] = $mo;
+                // The MemoryOp node, not its flavor string: a node handle
+                // survives the self-host where a short assoc string once did not.
+                $this->frame->ownLocals[$mo->target->name] = $mo;
                 if ($mo->op === 'own_local_b') { $this->frame->ownBorrowed[$mo->target->name] = true; }
             }
             return;
         }
-        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectRcObjLocals($c); }
-    }
-
-    /**
-     * Mark `$valueNode`'s source local as transferred iff it is an owned
-     * rcObj local stored through a borrowing container store. Params are
-     * excluded (retained-on-entry, so suppressing their release unbalances
-     * the entry retain). Only the no-retain case transfers — a retaining
-     * store keeps the local's release (it is balanced by the container drop).
-     */
-    private function maybeTransfer(Node $valueNode, ?Type $fallback, bool $boxed = false): void
-    {
-        if ($valueNode->kind !== Node::KIND_LOAD_LOCAL) { return; }
-        $name = $valueNode->name;
-        if (!isset($this->frame->rcObjLocals[$name])) { return; }
-        if (isset($this->frame->paramNames[$name])) { return; }
-        if ($this->containerStoreRetains($valueNode, $fallback, $boxed)) { return; }
-        $this->frame->transferredLocals[$name] = true;
-    }
-
-    /**
-     * Mark array locals handed to a callee as element-SHARED, so their release
-     * gives back the buffer and not the elements.
-     *
-     * ⚠ The veto is real: where the callee CONSUMES the caller's element refs,
-     * giving them back too is the parser `$args` double-free. But it is not
-     * universal, and keyed at "any argument" it was costing the compiler its
-     * largest live population. A by-VALUE array parameter of a KNOWN callee
-     * takes an ENTRY RETAIN ({@see EmitLlvmMemory::initRcObjSlots}) at exactly
-     * element depth — the callee co-owns, it does not consume — so the caller
-     * must keep its own release or the reference is stranded forever.
-     *
-     * That is the `Lexer::tokenize()` → `new Parser($toks)` chain: three
-     * references (the append's base, the borrowed-return retain, the property
-     * store's retain) against two releases, leaking one ref per token — 168 411
-     * live `Lexer\Token` from ONE compiled file, 64% of the compiler's live
-     * objects, none ever freed.
-     *
-     * Narrowed, never removed. The veto stands wherever the discipline is not
-     * PROVEN: an unknown or builtin callee, a by-REF parameter (whose callee
-     * "co-owns nothing"), a variadic tail, or an argument past the signature.
-     *
-     * @param Node[] $args
-     */
-    private function shareCallArgs(array $args, string $sym = ''): void
-    {
-        $callee = $sym !== '' ? ($this->sigs->paramTypes[$sym] ?? null) : null;
-        $refs = $sym !== '' ? ($this->sigs->refParams[$sym] ?? []) : [];
-        $i = 0;
-        foreach ($args as $a) {
-            $pos = $i;
-            $i = $i + 1;
-            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-            $t = $a->type;
-            if (!$t->isVec() && !$t->isAssoc()) { continue; }
-            $el = $t->element;
-            // ARRAY belongs here with obj and string: a `vec[vec[string]]`
-            // handed to a callee is co-owned by it exactly the same way, and
-            // once the release walk reaches the nested elements' own
-            // elements ({@see EmitLlvmMemory::nestedArrFlavor}) the missing
-            // kind is a DOUBLE DROP of the inner strings, not a leak.
-            if ($el === null
-                || ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING
-                    && $el->kind !== Type::KIND_ARRAY)) {
-                continue;
-            }
-            // Proven co-owning: the callee is known, this position is a real
-            // by-value parameter of it, and its slot is retained on entry.
-            if ($callee !== null && isset($callee[$pos])
-                && !($refs[$pos] ?? false)) {
-                if (\getenv('MANTICORE_OWNEL_TRACE') !== false) {
-                    \error_log('SHARE? $' . $a->name . ' kept (co-owning param ' . (string)$pos . ' of ' . $sym . ')');
-                }
-                continue;
-            }
-            $this->frame->elementSharedLocals[$a->name] = true;
-        }
-    }
-
-    /**
-     * Mirror of {@see rcRetainByType}'s gate for a borrow (LoadLocal) value:
-     * whether the container co-owns it with a retain. True iff the value's
-     * effective type (own type, or the container fallback when erased) is a
-     * non-struct, non-closure rc kind. When false the store borrows (no
-     * retain) and ownership must transfer to avoid the over-release.
-     *
-     * `$boxed` says the destination NaN-boxes the value into the slot
-     * ({@see EmitLlvmArrays::storeElemBoxesValue} / `::litBoxesValues`). That arm
-     * does NOT go through rcRetainByType at all — it co-owns via
-     * {@see retainCellPayload}, which tag-dispatches an already-boxed CELL and
-     * retains it for any borrowed producer. The element-type fallback plays no
-     * part there, so a CELL value answers TRUE outright. Reading the non-boxed
-     * gate for it was the json_decode leak: `$arr[] = $val;` with a `mixed`
-     * `$val` emitted `__mir_cell_retain` while this said "borrowed", which
-     * marked $val transferred and deleted BOTH its reassignment drop and its
-     * scope-exit drop — +1 with no −1, one leaked value per element.
-     */
-    private function containerStoreRetains(Node $valueNode, ?Type $fallback, bool $boxed = false): bool
-    {
-        $tk = $valueNode->type->kind;
-        $cls = $valueNode->type->class ?? '';
-        if ($boxed && $tk === Type::KIND_CELL) { return true; }
-        // rcRetainByType's closure arm co-owns every borrowed closure (the
-        // helper self-guards on the env magic). Answering "borrowed" here
-        // marked the local transferred as well, so a stored closure local
-        // kept one count nobody gave back.
-        if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && $this->isClosureClass($cls))) { return true; }
-        if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
-            $fk = $fallback->kind;
-            if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY
-                || $fk === Type::KIND_STRING) {
-                $tk = $fk;
-                $cls = $fallback->class ?? '';
-            }
-        }
-        if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY
-            && $tk !== Type::KIND_STRING) { return false; }
-        if ($tk === Type::KIND_OBJ) {
-            if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
-            if ($this->isClosureClass($cls)) { return false; }
-            if ($this->isEnumClass($cls)) { return false; }
-        }
-        return true;
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectOwnLocals($c); }
     }
 
     /** Mark the array local under an `$a[$k]` element as mutated (its element may
@@ -3919,9 +3782,9 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
-     * Emit a MemoryOp from the plan (#5). Arena scope enter/leave map
-     * to real runtime calls; rc release/retain stay no-ops until the rc
-     * runtime lands.
+     * Emit a MemoryOp from the plan: the arena scope's enter / leave, and
+     * {@see OwnershipFlow}'s `drop` (release + zero the slot) and `own_retain`.
+     * Registrations and the arena track's per-local `release` emit nothing.
      */
     private function emitMemoryOp(\Compile\Mir\MemoryOp_ $n): string
     {
@@ -3940,31 +3803,13 @@ final class EmitLlvm implements EmitVisitor
             return "  call void @__mir_arena_leave()\n";
         }
         if ($mo->op === 'drop' || $mo->op === 'own_retain') {
-            $slot = $this->ownOpSlot($mo, $mo->op === 'drop');
+            $slot = $this->ownOpSlot($mo);
             if ($slot === '') { return ''; }
             if ($mo->op === 'drop') {
                 return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo))
                     . '  store i64 0, ptr ' . $slot . "\n";
             }
             return $this->ownRetainSlot($slot, $mo);
-        }
-        if ($mo->op === 'rc_release') {
-            // Scope-exit drop of an owned RcHeap vec / obj local.
-            $t = $mo->target;
-            if ($t !== null && $t->kind === Node::KIND_LOAD_LOCAL) {
-                $name = $t->name;
-                // A BY-REF param's slot holds an ADDRESS — releasing it frees
-                // the caller's slot, not a value we own. The counterpart of the
-                // suppressed entry retain ({@see initRcObjSlots}).
-                if (isset($this->locals->refLocals[$name])) { return ''; }
-                // Transferred (escaped into a borrowing container): ownership
-                // moved to the container, so skip the scope-exit release.
-                if (isset($this->frame->transferredLocals[$name])) { return ''; }
-                if (isset($this->locals->slots[$name])) {
-                    return $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
-                }
-            }
-            return '';
         }
         return '';
     }
@@ -4234,8 +4079,9 @@ final class EmitLlvm implements EmitVisitor
      * element. Releasing it with the plain flavor gives that back only at
      * rc → 0 — and a callee that stored the value into a property has already
      * taken rc to 2, so the plain release returns nothing and every element is
-     * stranded. A by-VALUE parameter of a known callee is retained on entry
-     * ({@see EmitLlvmMemory::initRcObjSlots}), which is exactly that proof.
+     * stranded. A by-VALUE parameter of a known callee enters BORROWED and takes
+     * its own element-depth reference for whatever it keeps (a store or a
+     * return retains at the destination's depth), which is exactly that proof.
      *
      * Unproven cases keep the plain flavor: an unknown signature, a by-REF
      * parameter (the callee "co-owns nothing"), or a position past the

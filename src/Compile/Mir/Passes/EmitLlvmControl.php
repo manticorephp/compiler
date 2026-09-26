@@ -158,7 +158,6 @@ trait EmitLlvmControl
         $stepLabel = $this->ssa->allocLabel('feg.step');
         $endLabel  = $this->ssa->allocLabel('feg.end');
 
-        $out .= $this->foreachOwnedSlotReset($fe);
         // rewind: resume once if not yet started (state == 0).
         $out .= $this->genFieldLoad($g, 8);
         $st0 = $this->lastValue;
@@ -643,8 +642,7 @@ trait EmitLlvmControl
         string $iterName, \Compile\Mir\Type $iterType, bool $dyn): string
     {
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
-        $out = $this->foreachOwnedSlotReset($fe);
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
+        $out = $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -961,29 +959,6 @@ trait EmitLlvmControl
         return $base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name;
     }
 
-    /**
-     * Before an ITERATOR loop that co-owns its value: drop what the slot holds
-     * (an earlier loop's last value over the same name is still +1) and zero
-     * it, so the first iteration's drop is a no-op — the array loop's rule.
-     */
-    private function foreachOwnedSlotReset(Foreach_ $fe): string
-    {
-        if (!$this->foreachValueOwns($fe)) { return ''; }
-        $slot = $this->locals->slots[$fe->valueVar];
-        if (\Compile\Debug::$ownFlow) {
-            // The pass drops what the slot holds at each binding, the first one
-            // included; the slot keeps its value when the loop never binds.
-            return '';
-        }
-        $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
-        $out = '';
-        if ($fl !== '') {
-            $stale = $this->ssa->allocReg();
-            $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
-            $out .= $this->rcReleaseReg($stale, $fl);
-        }
-        return $out . '  store i64 0, ptr ' . $slot . "\n";
-    }
 
     /**
      * A co-owning iterator loop binding `$cur`: take its +1 when the step
@@ -992,13 +967,10 @@ trait EmitLlvmControl
      */
     private function foreachOwnedRebind(Foreach_ $fe, string $cur, bool $retain): string
     {
-        $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
+        $fl = $this->rcReleaseFlavor($this->frame->ownLocals[$fe->valueVar]);
         if ($fl === '') { return ''; }
         $out = $retain ? $this->rcRetainReg($cur, $fl) : '';
-        if (\Compile\Debug::$ownFlow) { return $out . $this->foreachPrevDrop($fe, false); }
-        $prev = $this->ssa->allocReg();
-        $out .= '  ' . $prev . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
-        return $out . $this->rcReleaseReg($prev, $fl);
+        return $out . $this->foreachPrevDrop($fe, false);
     }
 
     /**
@@ -1011,10 +983,10 @@ trait EmitLlvmControl
         if (\Compile\Debug::$feOnly !== ''
             && !\str_contains($this->frame->name, \Compile\Debug::$feOnly)) { return false; }
         if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums, $this->classes)) { return false; }
-        // ★★★ THE PASS DECIDES; THE EMITTER OBEYS. `rcObjLocals` IS that
-        // decision, already transported through the IR and collected per
-        // function ({@see EmitLlvmMemory::initRcObjSlots}) — so the retain here
-        // and the scope-exit release there cannot disagree about a name.
+        // ★★★ THE PASS DECIDES; THE EMITTER OBEYS. `ownCoOwn` + `ownLocals` ARE
+        // that decision, already transported through the IR and collected per
+        // function ({@see EmitLlvmMemory::initOwnSlots}) — so the retain here
+        // and the pass's drops cannot disagree about a name.
         //
         // This used to RE-DERIVE the answer from `frame->body`, cached on that
         // body's identity. `EmitLlvmModule` NULLS `frame->body` at five points
@@ -1025,21 +997,20 @@ trait EmitLlvmControl
         // rc underflow to catch it. Every `InferTypes` method family reproduced
         // it independently, which is what a per-function bookkeeping bug looks
         // like and what a per-site one never does.
-        if (\Compile\Debug::$ownFlow && !$fe->ownCoOwn) { return false; }
-        return isset($this->frame->rcObjLocals[$fe->valueVar]);
+        if (!$fe->ownCoOwn) { return false; }
+        return isset($this->frame->ownLocals[$fe->valueVar]);
     }
 
     /**
      * {@see OwnershipFlow}'s drop of what the value (`$key` false) or key slot
      * still holds at a binding — present only where the flow owns it at the
-     * loop head. '' without the flag.
+     * loop head.
      */
     private function foreachPrevDrop(Foreach_ $fe, bool $key): string
     {
-        if (!\Compile\Debug::$ownFlow) { return ''; }
         $mo = $key ? $fe->ownDropKey : $fe->ownDropValue;
         if ($mo === null) { return ''; }
-        $slot = $this->ownOpSlot($mo, true);
+        $slot = $this->ownOpSlot($mo);
         return $slot === '' ? '' : $this->ownDropIr($slot, $mo);
     }
 
@@ -1217,29 +1188,6 @@ trait EmitLlvmControl
         $reset = !$fe->byRef && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
-        // The co-owning loop drops the slot's PREVIOUS word on every iteration,
-        // and on the first one that word is whatever the frame happened to hold
-        // — an uninitialised `alloca`, or a value from an outer use of the same
-        // name that this loop is about to overwrite anyway. Zero it here, where
-        // the store dominates the body: the drop then no-ops on iteration one,
-        // and php's rule that `$v` survives the loop is untouched (the slot is
-        // written before the body ever reads it).
-        if ($this->foreachValueOwns($fe) && !\Compile\Debug::$ownFlow) {
-            // RELEASE, then zero. A second loop over the same NAME arrives here
-            // with the first loop's last element still held at +1 (the
-            // per-iteration drop only ever gives back the PREVIOUS one), and
-            // zeroing alone stranded it — one leaked ref per loop, which is
-            // exactly what `InferScans::scanByRefCaptureNode`'s two `$c` loops
-            // do on every node of every function.
-            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
-            $slot = $this->locals->slots[$fe->valueVar];
-            if ($fvFlavor !== '') {
-                $stale = $this->ssa->allocReg();
-                $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
-                $out .= $this->rcReleaseReg($stale, $fvFlavor);
-            }
-            $out .= '  store i64 0, ptr ' . $slot . "\n";
-        }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -1340,16 +1288,10 @@ trait EmitLlvmControl
             // inner buffers on every call — and a plain retain paired with that
             // release freed the inner arrays under the caller's literal
             // (`foreach ($others as $o)` over `[['a' => [3]]]`).
-            $fvFlavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
+            $fvFlavor = $this->rcReleaseFlavor($this->frame->ownLocals[$fe->valueVar]);
             if ($fvFlavor !== '') {
                 $out .= $this->rcRetainReg($ev, $fvFlavor);
-                if (\Compile\Debug::$ownFlow) {
-                    $out .= $this->foreachPrevDrop($fe, false);
-                } else {
-                    $prev = $this->ssa->allocReg();
-                    $out .= '  ' . $prev . ' = load i64, ptr ' . $valSlot . "\n";
-                    $out .= $this->rcReleaseReg($prev, $fvFlavor);
-                }
+                $out .= $this->foreachPrevDrop($fe, false);
             }
         } else {
             $out .= $this->foreachPrevDrop($fe, false);

@@ -134,7 +134,7 @@ trait EmitLlvmGenerator
             $genParamNames[$p->name] = true;
             if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
         }
-        $this->initRcObjSlots($fn->body, $genParamNames);
+        $this->initOwnSlots($fn->body, $genParamNames);
 
         // ── creator ──
         // A generator CLOSURE composes two frame mechanisms: it is invoked with
@@ -217,7 +217,6 @@ trait EmitLlvmGenerator
                       . (string)($capIndex[$name] + 1) . "\n";
                 $cv = $this->ssa->allocReg();
                 $out .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
-                $out .= $this->genParamCoOwn($name, $cv);
                 $out .= $this->genStoreAt($fr, $off, $cv);
             } elseif (isset($paramNames[$name])) {
                 // A CLOSURE generator's caller (emitInvoke) boxed every scalar
@@ -232,10 +231,8 @@ trait EmitLlvmGenerator
                     $out .= $this->unboxCellToType($pt);
                     $out .= $this->coerceToI64();
                     $pv = $this->lastValue;
-                    $out .= $this->genParamCoOwn($name, $pv);
                     $out .= $this->genStoreAt($fr, $off, $pv);
                 } else {
-                    $out .= $this->genParamCoOwn($name, '%arg.' . $name);
                     $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
                     // The frame outlives this call and reads the param later, so
                     // it must co-own it: `(new D(5))->it()` freed the receiver
@@ -366,23 +363,6 @@ trait EmitLlvmGenerator
             || $vk === Node::KIND_CLOSURE || \Compile\Mir\BitOp::mintsFresh($v);
     }
 
-    /**
-     * A param (or capture) the body owns — reassigned, or released at the end
-     * — holds the caller's BORROWED value, so the frame takes its own +1 as it
-     * seeds the slot: the entry retain {@see initRcObjSlots} gives an ordinary
-     * function, placed in the creator because the resume entry runs on every
-     * resume.
-     */
-    private function genParamCoOwn(string $name, string $val): string
-    {
-        if (isset($this->locals->refLocals[$name])) { return ''; }
-        // OwnershipFlow: a param enters borrowed; the pass places any +1.
-        if (\Compile\Debug::$ownFlow) { return ''; }
-        $mo = $this->frame->rcObjLocals[$name] ?? null;
-        if ($mo === null) { return ''; }
-        $fl = $this->rcReleaseFlavor($mo);
-        return $fl === '' ? '' : $this->rcRetainReg($val, $fl);
-    }
 
     /** `store i64 <val>, ptr (base + off)` — a frame header/local write. */
     private function genStoreAt(string $base, int $off, string $val): string

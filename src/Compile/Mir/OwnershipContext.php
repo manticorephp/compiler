@@ -26,6 +26,10 @@ final class OwnershipContext
     /** @var array<string, bool> fn name → returns by reference */
     public array $returnsByRef = [];
 
+    /** @var array<string, bool[]> fn name → per-param by-ref mask: a callee
+     *  whose signature is KNOWN (a body in this module) */
+    public array $paramByRef = [];
+
     /** @var string[] builtins whose result is a BORROW ({@see AliasOwn::borrowingBuiltins}) */
     public array $borrowingBuiltins = [];
 
@@ -37,6 +41,9 @@ final class OwnershipContext
         foreach ($module->functions as $fn) {
             $c->moduleFns[$fn->name] = true;
             $c->returnsByRef[$fn->name] = $fn->returnsByRef;
+            $mask = [];
+            foreach ($fn->params as $p) { $mask[] = $p->byRef; }
+            $c->paramByRef[$fn->name] = $mask;
             if ($fn->ffiSymbol !== null) { $c->externFns[$fn->name] = true; }
         }
         $c->borrowingBuiltins = AliasOwn::borrowingBuiltins();

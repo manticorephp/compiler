@@ -4709,16 +4709,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Compile\Stats::step('SpillFreshBases', $statT, -1, -1);
         if (CompileArgs::$stopBeforeMemoryOps) { return $module; }
         $statT = \Compile\Stats::now();
-        $memOps = new \Compile\Mir\Passes\InsertMemoryOps();
-        $memOps->rcTrack = !\Compile\Debug::$ownFlow;
-        $module = $memOps->run($module);
+        $module = (new \Compile\Mir\Passes\InsertMemoryOps())->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
-        if (\Compile\Debug::$ownFlow) {
-            $statT = \Compile\Stats::now();
-            $module = (new \Compile\Mir\Passes\OwnershipFlow($memOps->mixedVerdict))->run($module);
-            \Compile\Stats::step('OwnershipFlow', $statT, -1, -1);
-        }
-        $memOps = null;
+        $statT = \Compile\Stats::now();
+        $module = (new \Compile\Mir\Passes\OwnershipFlow())->run($module);
+        \Compile\Stats::step('OwnershipFlow', $statT, -1, -1);
         \Manticore\Allocator::release('after-memory-ops');
         $statT = \Compile\Stats::now();
         $verify = new \Compile\Mir\Passes\Verify();

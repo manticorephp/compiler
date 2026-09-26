@@ -34,37 +34,17 @@ final class FunctionEmitFrame
     public bool $isTrampoline = false;
     /** The fn opened an arena scope: every `ret` must `@__mir_arena_leave` first. */
     public bool $hasArena = false;
-    /** @var array<string, bool> param names — transfer skips params, which are
-     *  retained-on-entry by initRcObjSlots (suppressing their release would
-     *  unbalance that entry retain). */
+    /** @var array<string, bool> param names — a param arrives holding the
+     *  caller's value, so it never pairs element refs of its own. */
     public array $paramNames = [];
-    /** @var array<string, MemoryOp_> owned RcHeap obj/vec/str locals → their
-     *  rc_release MemoryOp node (the flavor is re-derived per use via
-     *  rcReleaseFlavor; storing the flavor string here corrupts under the
-     *  self-host backend). Released before every `ret` except the returned one
-     *  (transfer); slots null-inited. */
-    public array $rcObjLocals = [];
+    /** @var array<string, MemoryOp_> {@see \Compile\Mir\Passes\OwnershipFlow}'s
+     *  managed locals → their `own_local` registration (the flavor is re-derived
+     *  per use via rcReleaseFlavor; storing the flavor string here corrupts
+     *  under the self-host backend). Slots null-inited. */
+    public array $ownLocals = [];
     /** @var array<string, bool> vec locals mutated in this fn (append / element
      *  store) — drive copy-on-assign value semantics. */
     public array $mutatedVecLocals = [];
-    /** @var array<string, bool> owned rcObj locals whose value flows into a
-     *  BORROWING container store (a vec/assoc/property/array-lit store that does
-     *  NOT retain it — erased element type, no usable fallback). Ownership
-     *  transfers to the container, so the local's scope-exit / pre-return /
-     *  reassign release is SUPPRESSED. This is B2 escape-driven ownership: it
-     *  kills the over-release UAF (the enum/arena heisenbug) by moving instead of
-     *  adding a retain (adding retains pushed the binary toward the corruption
-     *  boundary). Worst case is a leak (the safe direction), never a double-free. */
-    public array $transferredLocals = [];
-    /** @var array<string, bool> owned vec/assoc locals whose BUFFER is shared
-     *  with an outliving owner: passed as a (by-value) call argument, so the
-     *  callee co-owns the buffer AND its retained element refs (the +1 each
-     *  `array_append` adds). Their scope-exit release must drop the BUFFER ONLY
-     *  (plain `array_release`), never element-drop: `array_release_obj/_str`
-     *  walks and -1's every element, which on a co-owned buffer double-frees the
-     *  shared elements. Element-drop stays valid only for a SOLE-owner confined
-     *  vec (built and discarded, never shared). */
-    public array $elementSharedLocals = [];
     /** @var array<string, bool> locals whose value was acquired BY RETAIN — the
      *  `$saved = $this->map` property snapshot, the one read shape that takes a
      *  reference — and whose retain and release name the SAME flavor. Their

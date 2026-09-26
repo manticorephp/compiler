@@ -5588,21 +5588,11 @@ trait EmitLlvmObjects
         foreach ($n->targets as $t) {
             if ($t->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $t->name;
-                // Release the held rc value first (drops to rc 0 → __destruct),
-                // THEN zero the slot — a later scope-exit release re-loads 0 and
-                // no-ops, so no double free.
-                //
-                // Only a local that OWNS its value may be released here. The
-                // owned set is the one InsertMemoryOps built — every name it
-                // gave a scope-exit `rc_release` ({@see EmitLlvm::collectRcObjLocals},
-                // which is also what pays the entry retain for a param). A
-                // BORROWED local releases a reference it never took: `$sel =
-                // $bag->one; unset($sel);` ran Node_::__destruct while the bag
-                // still held the object, and `$bag->one->name` then read freed
-                // memory. It stayed hidden because `$c ? $bag->one : …` pays the
-                // conditional contract's +1 — until a compile-time condition
-                // folded the ternary away ({@see LowerFromAst::lowerTernary}) and
-                // left the release with nothing to balance it.
+                // A local's own value is released by the `drop` OwnershipFlow put
+                // ahead of this unset wherever the slot OWNS it (a borrowed local
+                // releases nothing: `$sel = $bag->one; unset($sel);` must not run
+                // the destructor while the bag still holds the object); the slot
+                // is zeroed below.
                 // `unset($ref)` where `$ref = &$x` breaks THAT BINDING and
                 // nothing else — php leaves `$x` untouched. Here the alias
                 // shares `$x`'s slot ({@see emitRefAlias}), so zeroing it wiped
@@ -5694,21 +5684,8 @@ trait EmitLlvmObjects
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($cell, $flavor); }
                     $out .= '  store i64 0, ptr ' . $cell . "\n";
                 } elseif (isset($this->locals->slots[$name])) {
-                    // An owned closure local drops its env like an object does.
-                    if ($flavor === '' && isset($this->frame->rcObjLocals[$name])
-                        && $this->isClosureValueType($t->type)) {
-                        $flavor = 'closure';
-                    }
-                    // A MIXED slot releases by its representation flag.
-                    if (isset($this->frame->mixedFlagSlots[$name])) {
-                        $flavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]);
-                    }
                     // OwnershipFlow put a `drop` ahead of this unset where the
                     // slot is owned; the zeroing below is all that is left.
-                    if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])
-                        && !\Compile\Debug::$ownFlow) {
-                        $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
-                    }
                     $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
                 }
             }
@@ -8373,16 +8350,7 @@ trait EmitLlvmObjects
      * The same walk `propertyOffset` does — the width of a slot and the offset of
      * a slot must never be read from different classes.
      */
-    private function slotHolder(Node $objExpr, string $prop): ?ClassDef
-    {
-        $cls = $objExpr->type->class ?? '';
-        if ($cls === '' || !isset($this->classes[$cls])) { return null; }
-        if ($this->classes[$cls]->propertyOffset($prop) >= 0) {
-            return $this->classes[$cls];
-        }
-        $sub = $this->subclassPropHolder($cls, $prop);
-        return $sub;
-    }
+    private function slotHolder(Node $objExpr, string $prop): ?ClassDef { return $this->own->propHolder($objExpr, $prop); }
 
     /**
      * Whether the slot behind `$objExpr->$prop` holds a RAW array pointer.
@@ -8402,7 +8370,7 @@ trait EmitLlvmObjects
      *
      * ⚠ The ONE owner of that question, for the same reason
      * {@see EmitLlvmArrays::storeElemBoxesValue} is: {@see emitStoreProperty}
-     * reads it to emit the retain and {@see EmitLlvmMemory::collectTransferredLocals}
+     * reads it to emit the retain and {@see \Compile\Mir\Ownership::containerStoreRetains}
      * reads it to decide the source local's scope-exit release. Two copies drift,
      * and a drift here is a leak (pass says borrowed, emitter retains) or a
      * double free.
@@ -8414,18 +8382,7 @@ trait EmitLlvmObjects
      * reference, and the object held a BORROWED buffer that the caller's
      * scope-exit release freed. The same store written as a method retains.
      */
-    private function propStoreRetainType(\Compile\Mir\StoreProperty $n): ?Type
-    {
-        $pcls = $n->object->type->class ?? '';
-        $propType = ($pcls !== '' && isset($this->classes[$pcls]))
-            ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
-            : null;
-        if (($propType === null || !$propType->isArray())
-            && $this->slotIsArrayHinted($n->object, $n->property, $propType)) {
-            return Type::vec(Type::unknown());
-        }
-        return $propType;
-    }
+    private function propStoreRetainType(\Compile\Mir\StoreProperty $n): ?Type { return $this->own->propStoreRetainType($n); }
 
     /**
      * The release flavor for the value a property store OVERWRITES, or '' when
@@ -8667,29 +8624,8 @@ trait EmitLlvmObjects
         return -1;
     }
 
-    /** The subclass whose layout `subclassPropOffset` borrows — same walk, so the
-     *  slot's WIDTH is read from the very class its OFFSET came from. */
-    private function subclassPropHolder(string $base, string $prop): ?ClassDef
-    {
-        foreach ($this->classes as $cd) {
-            if ($cd->name === $base) { continue; }
-            if (!$this->classExtends($cd->name, $base)) { continue; }
-            if ($cd->propertyOffset($prop) >= 0) { return $cd; }
-        }
-        return null;
-    }
-
     /** Whether class `$name` transitively extends `$base`. */
-    private function classExtends(string $name, string $base): bool
-    {
-        $cur = $name;
-        while ($cur !== '' && isset($this->classes[$cur])) {
-            $p = $this->classes[$cur]->parent;
-            if ($p === $base) { return true; }
-            $cur = $p;
-        }
-        return false;
-    }
+    private function classExtends(string $name, string $base): bool { return $this->own->classExtends($name, $base); }
     /** @param array<int,string> $cases */
     private function emitAdaptiveClassIdBranch(string $cid, array $cases, string $default): string
     {

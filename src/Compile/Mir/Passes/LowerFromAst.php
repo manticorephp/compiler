@@ -632,8 +632,7 @@ final class LowerFromAst implements Pass
     }
 
     /** Name prefix of a hoisted foreach subject — the one owner of the
-     *  convention. {@see LowerStmts::hoistForeachSubject} makes them;
-     *  {@see EmitLlvmMemory::collectElementSharedLocals} reads them. */
+     *  convention. {@see LowerStmts::hoistForeachSubject} makes them. */
     public const FE_SUBJ_PREFIX = '__fe_subj_';
 
     private ?Module $module = null;

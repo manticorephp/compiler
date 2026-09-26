@@ -88,7 +88,7 @@ trait EmitLlvmBuiltins
      * A user call has both halves of the ownership contract: `emitCall`
      * releases a fresh rc arg temp after the call ({@see
      * EmitLlvm::freshRcArgFlavor}) and the callee retains what it keeps
-     * ({@see EmitLlvmMemory::initRcObjSlots}). A CODEGEN BUILTIN has neither.
+     * (a store or a return of a param retains). A CODEGEN BUILTIN has neither.
      * It reads the buffer inline and returns, so `count(explode($d, $s))`
      * stranded the exploded vec on every call — and the ones that looked fine
      * (`implode`, `in_array`) were only saved by a cellify rebuild whose

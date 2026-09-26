@@ -8,6 +8,7 @@ use Compile\Mir\CondOwn;
 use Compile\Mir\Continue_;
 use Compile\Mir\DoWhile_;
 use Compile\Mir\Flow\Forward;
+use Compile\Mir\Flow\MixedSlots;
 use Compile\Mir\Flow\OwnLattice;
 use Compile\Mir\For_;
 use Compile\Mir\Foreach_;
@@ -31,7 +32,8 @@ use Compile\Mir\VecCopyOnAssign;
 use Compile\Mir\Walk;
 
 /**
- * Ownership of rc LOCALS per program point (`MANTICORE_OWNFLOW=1`).
+ * Ownership of rc LOCALS per program point — the one decider of when a local
+ * holds a count ({@see InsertMemoryOps} keeps only the arena track).
  *
  * A {@see Forward} walk over {@see OwnLattice}: every managed local is Empty,
  * Borrow(k), Scalar, MixDead or Own(k) at each point — k a release class (the
@@ -50,6 +52,13 @@ use Compile\Mir\Walk;
  *  - `own_retain` before a self-append of a borrowed string (the append
  *    consumes the old reference) and after an array alias of another local (a
  *    borrow of a buffer its owner may drop first);
+ *  - a local handed to a container that takes NO count of it (an element /
+ *    property store or array literal {@see Ownership::containerStoreRetains}
+ *    refuses) MOVES there: the local holds a borrow of the container's
+ *    reference from then on ({@see Ownership::containerMoves});
+ *  - an array local handed to an object-producing call whose callee may keep
+ *    it with its element refs is released buffer-only
+ *    ({@see Ownership::elementSharedArgs}: its class is `vecbuf` / `assocbuf`);
  *  - where two representations meet at a join (a loop re-binding a name at
  *    another element kind), the name is MixDead past it — nothing may read it —
  *    and each owned side is dropped on its edge; a read of it, or an edge with
@@ -64,8 +73,8 @@ use Compile\Mir\Walk;
  * PHP locals are function-scoped, so a break / continue / goto edge needs only
  * compensation; the previous value is dropped at the next overwrite or exit.
  * Names reachable through a reference (`&`, `static`, a by-ref capture or
- * foreach) are left to their storage; a MIXED slot keeps InsertMemoryOps'
- * verdict and releases through its representation flag.
+ * foreach) are left to their storage; a MIXED slot ({@see MixedSlots})
+ * releases through its representation flag.
  */
 final class OwnershipFlow implements Pass
 {
@@ -85,8 +94,7 @@ final class OwnershipFlow implements Pass
     /** @var string[] */
     private array $errors = [];
 
-    /** @var array<string, array<string, Type>> fn → MIXED name → its raw slot type */
-    private array $mixed = [];
+    private ?MixedSlots $mixedSlots = null;
 
     // ── per function ───────────────────────────────────────────────
     private string $fnName = '';
@@ -105,6 +113,8 @@ final class OwnershipFlow implements Pass
     private array $mutatedVecs = [];
     /** @var array<string, bool> */
     private array $erasedPropNames = [];
+    /** @var array<string, bool> array locals released buffer-only ({@see Ownership::elementSharedArgs}) */
+    private array $shared = [];
 
     /** @var array<string, int> "name#class" → release class id */
     private array $keyId = [];
@@ -157,12 +167,6 @@ final class OwnershipFlow implements Pass
     /** @var array<int, bool> array local-to-local alias stores that take a +1 */
     private array $aliasRetain = [];
 
-    /** @param array<string, array<string, Type>> $mixed {@see InsertMemoryOps::$mixedVerdict} */
-    public function __construct(array $mixed = [])
-    {
-        $this->mixed = $mixed;
-    }
-
     public function run(Module $module): Module
     {
         $this->classes = $module->classes;
@@ -171,6 +175,20 @@ final class OwnershipFlow implements Pass
         foreach ($module->closureCaptures as $name => $unused) { $this->closureFns[$name] = true; }
         $this->own = new Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $this->errors = [];
+        $refMasks = [];
+        $refVariadic = [];
+        foreach ($module->functions as $fn) {
+            $mask = [];
+            $tail = false;
+            foreach ($fn->params as $p) {
+                $mask[] = $p->byRef;
+                $tail = $p->variadic && $p->byRef;
+            }
+            $refMasks[$fn->name] = $mask;
+            $refVariadic[$fn->name] = $tail;
+        }
+        $this->mixedSlots = new MixedSlots($this->own, $this->enums, $this->classes, $refMasks,
+            $refVariadic, $module->closureCaptures);
         $want = \getenv('MANTICORE_OWN_TRACE');
         $this->traceWant = $want === false ? '' : $want;
         foreach ($module->functions as $fn) {
@@ -201,7 +219,9 @@ final class OwnershipFlow implements Pass
         $this->releases = self::bisectAdmits($fn->name);
         $this->trace = $this->traceWant !== '' && \str_contains($fn->name, $this->traceWant);
         $this->excluded = [];
-        $this->mixedHere = $this->mixed[$fn->name] ?? [];
+        $this->mixedHere = $this->mixedSlots->verdict($fn);
+        $this->shared = [];
+        $this->collectShared($fn->body);
         $this->mutatedVecs = VecCopyOnAssign::mutatedLocals($fn->body);
         $this->erasedPropNames = [];
         $this->keyId = [];
@@ -452,6 +472,7 @@ final class OwnershipFlow implements Pass
         $l->catchName = $p->catchName;
         $l->catchKey = $p->catchKey;
         $l->loadName = $p->loadName;
+        $l->moveName = $p->moveName;
         foreach ($this->keyClass as $k => $cls) {
             if ($cls === 'cell' || $cls === 'mix') { $l->cellish[$k] = true; }
         }
@@ -480,10 +501,19 @@ final class OwnershipFlow implements Pass
         return Ownership::flavorName($c);
     }
 
-    private function flavorFor(string $ks, Type $t): string
+    private function flavorFor(string $name, string $ks, Type $t): string
     {
-        if (\str_starts_with($ks, 'arr')) { return $t->isAssoc() ? 'assoc' : 'vec'; }
+        if (\str_starts_with($ks, 'arr')) {
+            if (isset($this->shared[$name])) { return $t->isAssoc() ? 'assocbuf' : 'vecbuf'; }
+            return $t->isAssoc() ? 'assoc' : 'vec';
+        }
         return $ks;
+    }
+
+    private function collectShared(Node $n): void
+    {
+        foreach ($this->own->elementSharedArgs($n) as $name) { $this->shared[$name] = true; }
+        foreach (Walk::children($n) as $c) { $this->collectShared($c); }
     }
 
     private function intern(string $name, string $ks, Type $t): int
@@ -499,7 +529,7 @@ final class OwnershipFlow implements Pass
             if ($ks !== 'mix' && !isset($this->erasedPropNames[$name])
                 && $this->refinesElement($this->keyType[$k], $t)) {
                 $this->keyType[$k] = $t;
-                $this->keyFlavor[$k] = $this->flavorFor($ks, $t);
+                $this->keyFlavor[$k] = $this->flavorFor($name, $ks, $t);
             }
             return $k;
         }
@@ -507,9 +537,9 @@ final class OwnershipFlow implements Pass
         $this->keyId[$key] = $k;
         if ($ks === 'mix') {
             $rawKs = $this->keyString($t);
-            $this->keyFlavor[$k] = 'mix' . $this->flavorFor($rawKs, $t);
+            $this->keyFlavor[$k] = 'mix' . $this->flavorFor($name, $rawKs, $t);
         } else {
-            $this->keyFlavor[$k] = $this->flavorFor($ks, $t);
+            $this->keyFlavor[$k] = $this->flavorFor($name, $ks, $t);
         }
         $this->keyType[$k] = $t;
         $this->keyOwner[$k] = $name;
@@ -614,6 +644,10 @@ final class OwnershipFlow implements Pass
                 if (!isset($this->excluded[$nm])) { $names[] = $nm; }
             }
             if (\count($names) > 0) { $lat->unsetNames[\spl_object_id($n)] = $names; }
+        } elseif ($k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_ARRAY_LIT) {
+            foreach ($this->own->containerMoves($n) as $ll) {
+                if (!isset($this->excluded[$ll->name])) { $lat->moveName[\spl_object_id($ll)] = $ll->name; }
+            }
         } elseif ($k === Node::KIND_TRY_CATCH) {
             foreach (self::asTryCatch($n)->catches as $c) {
                 $v = $c->var;
@@ -795,7 +829,7 @@ final class OwnershipFlow implements Pass
                     $k = $this->keyId[$name . '#' . $ks];
                     if ($this->refinesElement($this->keyType[$k], $n->type)) {
                         $this->keyType[$k] = $n->type;
-                        $this->keyFlavor[$k] = $this->flavorFor($ks, $n->type);
+                        $this->keyFlavor[$k] = $this->flavorFor($name, $ks, $n->type);
                     }
                 }
             }
@@ -1252,6 +1286,8 @@ final class OwnershipFlow implements Pass
             \Compile\Stats::bump('own.flow.managed', \count($this->regKey));
             \Compile\Stats::bump('own.flow.forced', \count($force));
             \Compile\Stats::bump('own.flow.compensations', \count($this->inserted));
+            \Compile\Stats::bump('own.flow.moves', \count($l->moveName));
+            \Compile\Stats::bump('own.flow.shared', \count($this->shared));
         }
     }
 

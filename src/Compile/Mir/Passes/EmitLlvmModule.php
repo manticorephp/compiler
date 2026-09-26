@@ -972,8 +972,6 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
-        /** @var array<string, bool> $copiedParams */
-        $copiedParams = [];
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -1056,7 +1054,6 @@ trait EmitLlvmModule
                     // tagged word, and the body's COW dereferenced the tag bits.
                     $bodySink->write($this->arrayHintedEntryMask($pp, $slot));
                     if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $pp, true)) {
-                        $copiedParams[$cn] = true;
                         $bodySink->write($this->paramEntryCopyIr($pp, $slot));
                     }
                 }
@@ -1113,7 +1110,6 @@ trait EmitLlvmModule
                 // keeps aliasing the caller. The copy is the frame's own +1,
                 // released at scope exit ({@see VecCopyOnAssign::paramCopiedOnEntry}).
                 if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, false)) {
-                    $copiedParams[$p->name] = true;
                     $bodySink->write($this->paramEntryCopyIr($p, $slot));
                 }
             }
@@ -1122,7 +1118,7 @@ trait EmitLlvmModule
         $paramTypes = [];
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypes[$p->name] = $p->type; }
         $bodySink->write($this->preallocateLocals($fn->body));
-        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames, $copiedParams));
+        $bodySink->write($this->initOwnSlots($fn->body, $paramNames));
         // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
         // code is a function like any other to the language and unlike any other
         // to this file, and a prologue step added to only one of the two is
@@ -2029,7 +2025,7 @@ trait EmitLlvmModule
             $header .= '  store ptr ' . $tf . ", ptr @__mir_cc_trace_fn\n";
         }
         $body = $this->preallocateLocals($fn->body);
-        $body .= $this->initRcObjSlots($fn->body);
+        $body .= $this->initOwnSlots($fn->body);
         // Top-level code takes references too — `$refs = [&$a];` at file scope
         // is the shape the corpus actually hits first. See the note at the
         // matching line in the ordinary function emitter.
@@ -2086,7 +2082,7 @@ trait EmitLlvmModule
             if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $name = $this->asLoadLocalNode($t)->name;
             if ($name === $moved) { continue; }
-            $slot = $this->ownOpSlot($d, true);
+            $slot = $this->ownOpSlot($d);
             if ($slot === '') { continue; }
             if (!isset($arms[$name]) || $val === '') {
                 $out .= $this->ownDropIr($slot, $d);
@@ -2135,7 +2131,6 @@ trait EmitLlvmModule
      */
     private function retLeave(Return_ $r, ?Node $v, string $moved, bool $retained, string $val, string $leave): string
     {
-        if (!\Compile\Debug::$ownFlow) { return $leave; }
         /** @var array<string,bool> $arms */
         $arms = [];
         if (!$retained && $v !== null && \Compile\Mir\CondOwn::isConditional($v)) {
@@ -2144,29 +2139,6 @@ trait EmitLlvmModule
         return $this->ownReturnIr($r, $moved, $arms, $val) . $leave;
     }
 
-    /**
-     * Release every owned RcHeap obj local of the current function except the ones the
-     * returned VALUE may alias (their ownership transfers to the caller). Slots are
-     * null-inited, so releasing an unassigned one is a no-op.
-     *
-     * @param array<string,bool> $exempt {@see returnedLocalNames()}
-     */
-    private function emitRcReturnCleanup(array $exempt): string
-    {
-        $out = '';
-        foreach ($this->frame->rcObjLocals as $name => $mo) {
-            if (isset($exempt[$name])) { continue; }
-            if (isset($this->frame->transferredLocals[$name])) { continue; }
-            // A boxed local's slot holds the BOX, registered here before the
-            // prologue boxed it. Its value goes with the box's last holder
-            // ({@see emitOwnedBoxReleases}); releasing the slot handed the box
-            // address to the string release, which decremented malloc's header.
-            if (isset($this->locals->refLocals[$name])) { continue; }
-            if (!isset($this->locals->slots[$name])) { continue; }
-            $out .= $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
-        }
-        return $out . $this->emitOwnedBoxReleases($exempt);
-    }
 
     /**
      * The i64 a value-less return yields. A closure/trampoline hands back a BOXED
@@ -2282,10 +2254,8 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
-            if (\Compile\Debug::$ownFlow) {
-                $out .= $this->retLeave($r, $v, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
-                    ? $this->asLoadLocalNode($v)->name : '', false, $v !== null ? $this->lastValue : '', '');
-            }
+            $out .= $this->retLeave($r, $v, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
+                ? $this->asLoadLocalNode($v)->name : '', false, $v !== null ? $this->lastValue : '', '');
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             // Same slot hand-back as {@see finishReturn} — this branch exits
@@ -2318,7 +2288,7 @@ trait EmitLlvmModule
             ? $this->asLoadLocalNode($v)->name : null;
         // OwnershipFlow: a local moves only where the flow owns it; any other
         // state returns as a borrow, retained below.
-        if (\Compile\Debug::$ownFlow && !$r->ownMove) { $returnedLocal = null; }
+        if (!$r->ownMove) { $returnedLocal = null; }
         // A REBUILT return hands back a fresh cell array, not the local — so the
         // "ownership transfers to the caller" exemption does not apply and the
         // local must be dropped like any other. `function mk(): mixed { $v = [];
@@ -2329,9 +2299,7 @@ trait EmitLlvmModule
         // an arm a conditional hands back as it stands is dropped by identity.
         $ownMoved = ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '';
         $retained = false;
-        $leave = \Compile\Debug::$ownFlow
-            ? $this->emitOwnedBoxReleases($exempt)
-            : $this->emitRcReturnCleanup($exempt);
+        $leave = $this->emitOwnedBoxReleases($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
         // arena_leave only covers fall-through). The return value is
@@ -2649,7 +2617,7 @@ trait EmitLlvmModule
         // `(object)$v` is owned on every path ({@see EmitLlvmExpr::emitCast}).
         if ($v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
         if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->frame->rcObjLocals[$returnedLocal])) {
+            && isset($this->frame->ownLocals[$returnedLocal])) {
             return false; // transfer of an owned local
         }
         // A normalized conditional is +1 from whichever arm ran — the same
@@ -2723,7 +2691,7 @@ trait EmitLlvmModule
                 || $ok === Type::KIND_CELL) { return false; }
         }
         if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->frame->rcObjLocals[$returnedLocal])) {
+            && isset($this->frame->ownLocals[$returnedLocal])) {
             return false; // transfer of an owned local
         }
         return true; // param / alias / property / array read — borrow

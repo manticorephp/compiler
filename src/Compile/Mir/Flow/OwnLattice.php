@@ -83,6 +83,9 @@ final class OwnLattice implements Lattice
     /** @var array<int, string> rc-typed LoadLocal id → name (Unset_ targets and
      *  the pass's own op targets excluded) */
     public array $loadName = [];
+    /** @var array<int, string> LoadLocal id → name, for a local a container
+     *  store takes without a count of its own: Own(k) becomes Borrow(k) there */
+    public array $moveName = [];
     /** @var array<string, int> name → line of an rc read past a mismatch */
     public array $deadRead = [];
 
@@ -287,7 +290,9 @@ final class OwnLattice implements Lattice
         }
         if (isset($this->loadName[$id])) {
             $n = $this->loadName[$id];
-            if (($in[$n] ?? self::EMPTY) === self::MIXDEAD) { $this->deadRead[$n] = $stmt->line; }
+            $x = $in[$n] ?? self::EMPTY;
+            if ($x === self::MIXDEAD) { $this->deadRead[$n] = $stmt->line; }
+            if ($x > 0 && isset($this->moveName[$id])) { return $this->with($in, $n, self::borrow($x)); }
             return $in;
         }
         if (isset($this->opName[$id])) {

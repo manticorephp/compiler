@@ -540,13 +540,13 @@ trait EmitLlvmLocals
     /**
      * The {@see OwnershipFlow} op on a store's OLD value: `drop` releases what
      * the slot holds (the new value is already computed, not yet stored);
-     * `own_retain` takes the +1 a self-append consumes. '' without the flag.
+     * `own_retain` takes the +1 a self-append consumes.
      */
     private function ownOldIr(StoreLocal $sl): string
     {
         $mo = $sl->ownOld;
         if ($mo === null) { return ''; }
-        $slot = $this->ownOpSlot($mo, $mo->op === 'drop');
+        $slot = $this->ownOpSlot($mo);
         if ($slot === '') { return ''; }
         if ($mo->op === 'own_retain') { return $this->ownRetainSlot($slot, $mo); }
         return $this->ownDropIr($slot, $mo);
@@ -558,7 +558,7 @@ trait EmitLlvmLocals
     {
         $mo = $sl->ownNew;
         if ($mo === null) { return ''; }
-        $slot = $this->ownOpSlot($mo, false);
+        $slot = $this->ownOpSlot($mo);
         return $slot === '' ? '' : $this->ownRetainSlot($slot, $mo);
     }
 
@@ -647,8 +647,7 @@ trait EmitLlvmLocals
             $selfBox = $v0->kind === Node::KIND_LOAD_LOCAL && $v0->name === $sl->name;
             $rebind = !$selfBox
                 && !isset($this->locals->globalBacked[$sl->name])
-                && isset($this->frame->rcObjLocals[$sl->name])
-                && !isset($this->frame->transferredLocals[$sl->name]);
+                && isset($this->frame->ownLocals[$sl->name]);
             if ($rebind && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
                 $out .= $this->coerceToI64();
                 $rawV = $this->lastValue;
@@ -681,14 +680,9 @@ trait EmitLlvmLocals
                 $out .= '  ' . $moved . ' = icmp eq i64 ' . $pay . ', ' . $oldRaw . "\n";
                 $out .= '  ' . $gone . ' = select i1 ' . $moved . ', i64 0, i64 ' . $oldRaw . "\n";
                 $out .= $this->rcReleaseReg($gone, \substr(
-                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]), 3));
+                    $this->rcReleaseFlavor($this->frame->ownLocals[$sl->name]), 3));
             }
-            if (\Compile\Debug::$ownFlow) {
-                if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownOldIr($sl); }
-            } elseif ($rebind) {
-                $out .= $this->rcReleaseSlot($cellDest,
-                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
-            }
+            if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownOldIr($sl); }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownNewIr($sl); }
             $this->lastValue = $boxed;
@@ -875,9 +869,9 @@ trait EmitLlvmLocals
         // alias arm below is the OTHER road to the same ownership, and it must
         // not fire on a store that already took the copy road.
         $copiedVecLocal = false;
-        // OwnershipFlow: `$x = $x` of one raw type is a re-label InferTypes
-        // plants, not an assignment — no copy, no +1 (the pass drops nothing).
-        $selfCopy = \Compile\Debug::$ownFlow && $v->kind === Node::KIND_LOAD_LOCAL
+        // `$x = $x` of one raw type is a re-label InferTypes plants, not an
+        // assignment — no copy, no +1 (OwnershipFlow drops nothing for it).
+        $selfCopy = $v->kind === Node::KIND_LOAD_LOCAL
             && $this->asLoadLocalNode($v)->name === $sl->name && $sl->type->kind !== Type::KIND_CELL;
         if (!$selfCopy && \Compile\Mir\VecCopyOnAssign::copies($v, $sl->name, $this->frame->mutatedVecLocals)) {
             $out .= $this->coerceToPtr();
@@ -1071,17 +1065,8 @@ trait EmitLlvmLocals
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
-            // Release-before-overwrite: rebinding an owned RcHeap obj/vec
-            // local drops its previous value (the slot is null-inited, so
-            // the first store releases null = no-op). Frees the per-
-            // iteration value in `for (...) { $x = new Foo(); }`.
-            if (\Compile\Debug::$ownFlow) {
-                $out .= $this->ownOldIr($sl);
-            } elseif (isset($this->frame->rcObjLocals[$sl->name])
-                && !isset($this->frame->transferredLocals[$sl->name])) {
-                $out .= $this->rcReleaseSlot($this->locals->slots[$sl->name],
-                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
-            }
+            // Release-before-overwrite, where OwnershipFlow owns the old value.
+            $out .= $this->ownOldIr($sl);
             $out .= '  store i64 ' . $val . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             $out .= $this->ownNewIr($sl);
         }
@@ -1139,7 +1124,7 @@ trait EmitLlvmLocals
 
     /**
      * A module cell — a superglobal or a `static` local — OWNS what it holds:
-     * {@see EmitLlvm::collectRcObjLocals} drops the frame's scope-exit release
+     * {@see EmitLlvm::collectOwnLocals} keeps the name out of the frame's drops
      * for exactly that reason, a return of the name is retained as a borrow, and
      * `unset()` releases the cell. The store had neither half of that contract:
      * a borrow went in uncounted and the value already held was never released,

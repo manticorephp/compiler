@@ -921,4 +921,327 @@ final class Ownership
         }
         return '';
     }
+
+    // ── container stores ───────────────────────────────────────────────────
+
+    /**
+     * The element type a raw-repr value stored by `$se` is retained by, when its
+     * own type names no rc kind: the destination's concrete element. Null for a
+     * cell value (its co-ownership is the boxing path's) and for an erased
+     * destination.
+     */
+    public static function storeRetainFallback(StoreElement $se): ?Type
+    {
+        if ($se->value->type->kind === Type::KIND_CELL) { return null; }
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
+        $el = $at->element;
+        if ($el !== null && ($el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN)) {
+            return null;
+        }
+        return $el;
+    }
+
+    /**
+     * The element type a CELL value is UNBOXED to before it lands in a
+     * CONCRETE-element array — the per-element de-cellify: the raw payload is
+     * then retained per THIS type. Null for a non-cell value or a cell / unknown
+     * destination element (which stores the value boxed).
+     */
+    public static function storeElemDeCellifyType(StoreElement $se): ?Type
+    {
+        if ($se->value->type->kind !== Type::KIND_CELL) { return null; }
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
+        $el = $at->element;
+        if ($el === null) { return null; }
+        $ek = $el->kind;
+        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { return null; }
+        return $el;
+    }
+
+    /** Both ends of this element store are erased: the value carries a cell /
+     *  unknown and the destination's element channel names no type either. Such
+     *  a store copies a WORD whose ownership nobody static can speak for, so the
+     *  emitter retains it by its runtime tag. */
+    public static function erasedElemCopy(StoreElement $se): bool
+    {
+        $vk = $se->value->type->kind;
+        if ($vk !== Type::KIND_CELL && $vk !== Type::KIND_UNKNOWN) { return false; }
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return true; }
+        $el = $at->element;
+        return $el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
+    }
+
+    /**
+     * Does a StoreElement NaN-box its value into the slot? A cell BASE (a
+     * `mixed` property / param holding the array) or a cell ELEMENT type both
+     * store boxed, and that path co-owns the payload through
+     * {@see Passes\EmitLlvm::retainCellPayload} instead of the typed retain.
+     *
+     * ⚠ The ONE owner of that question: the emitter reads it to pick the store
+     * arm, and {@see containerStoreRetains} to pick the matching retain
+     * predicate for {@see Passes\OwnershipFlow}'s move. Two copies drift, and a
+     * drift here is a leak or a double free.
+     *
+     * ⚠ KNOWN GAP, deliberately NOT widened to KIND_UNKNOWN: the container's
+     * repr nibble is fixed at allocation, so boxed values in a raw-repr vec make
+     * the release path free tagged words (tests/aot/cases/array_erased_elem_repr_gap.php;
+     * the parked element-repr epic).
+     */
+    public static function storeElemBoxesValue(StoreElement $se): bool
+    {
+        $at = $se->array->type;
+        if ($at->kind === Type::KIND_CELL) { return true; }
+        $et = $at->element;
+        if ($et !== null && $et->kind === Type::KIND_CELL) { return true; }
+        if ($se->value->type->kind === Type::KIND_CELL && ($et === null || $et->kind === Type::KIND_UNKNOWN)) { return true; }
+        if ($se->value instanceof Call) {
+            $fn = $se->value->function;
+            $p = \strrpos($fn, \chr(92));
+            $bare = $p === false ? $fn : \substr($fn, $p + 1);
+            if ($bare === 'key' || $bare === 'current' || $bare === 'pos') { return true; }
+        }
+        return false;
+    }
+
+    /** As {@see storeElemBoxesValue} for an array LITERAL — its boxed values. */
+    public static function litBoxesValues(ArrayLit $al): bool
+    {
+        $el = $al->type->element;
+        return $el !== null && $el->kind === Type::KIND_CELL;
+    }
+
+    /**
+     * The ClassDef whose layout an `$obj->prop` access resolves against, or
+     * null: the static class when it declares the slot, else the first subclass
+     * that does.
+     */
+    public function propHolder(Node $objExpr, string $prop): ?ClassDef
+    {
+        $cls = $objExpr->type->class ?? '';
+        if ($cls === '' || !isset($this->ctx->classes[$cls])) { return null; }
+        if ($this->ctx->classes[$cls]->propertyOffset($prop) >= 0) {
+            return $this->ctx->classes[$cls];
+        }
+        foreach ($this->ctx->classes as $cd) {
+            if ($cd->name === $cls) { continue; }
+            if (!$this->classExtends($cd->name, $cls)) { continue; }
+            if ($cd->propertyOffset($prop) >= 0) { return $cd; }
+        }
+        return null;
+    }
+
+    /** Whether class `$name` transitively extends `$base`. */
+    public function classExtends(string $name, string $base): bool
+    {
+        $cur = $name;
+        while ($cur !== '' && isset($this->ctx->classes[$cur])) {
+            $p = $this->ctx->classes[$cur]->parent;
+            if ($p === $base) { return true; }
+            $cur = $p;
+        }
+        return false;
+    }
+
+    /**
+     * The destination type a property store's OWNERSHIP is decided by — the
+     * declared property type, except that an array-hinted slot whose hint
+     * erased to KIND_UNKNOWN answers `vec[unknown]`, so it still reads as
+     * rc-managed. The ONE owner, read by the emitter's retain and by
+     * {@see containerStoreRetains}.
+     */
+    public function propStoreRetainType(StoreProperty $n): ?Type
+    {
+        $pcls = $n->object->type->class ?? '';
+        $propType = ($pcls !== '' && isset($this->ctx->classes[$pcls]))
+            ? ($this->ctx->classes[$pcls]->propertyTypes[$n->property] ?? null)
+            : null;
+        if ($propType === null || !$propType->isArray()) {
+            $cd = $this->propHolder($n->object, $n->property);
+            if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
+                return Type::vec(Type::unknown());
+            }
+        }
+        return $propType;
+    }
+
+    /**
+     * Does a container store of `$valueNode` take its own +1 — the mirror of
+     * the emitter's typed retain for a borrowed (LoadLocal) value? True iff the
+     * value's effective type (its own, or the container's `$fallback` when
+     * erased) is a non-struct, non-enum rc kind; a boxed CELL value and a
+     * closure always co-own. When false the container holds the word WITHOUT a
+     * count, so the local's reference is what keeps it: the store MOVES it
+     * ({@see Passes\OwnershipFlow}).
+     */
+    public function containerStoreRetains(Node $valueNode, ?Type $fallback, bool $boxed = false): bool
+    {
+        $tk = $valueNode->type->kind;
+        $cls = $valueNode->type->class ?? '';
+        if ($boxed && ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN)) { return true; }
+        if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && self::isClosureClass($cls))) { return true; }
+        if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
+            $fk = $fallback->kind;
+            if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY || $fk === Type::KIND_STRING) {
+                $tk = $fk;
+                $cls = $fallback->class ?? '';
+            }
+        }
+        if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY && $tk !== Type::KIND_STRING) { return false; }
+        if ($tk === Type::KIND_OBJ) {
+            if ($cls !== '' && isset($this->ctx->classes[$cls]) && $this->ctx->classes[$cls]->isStruct) { return false; }
+            if (self::isClosureClass($cls)) { return false; }
+            if ($this->isEnumClass($cls)) { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * The local values a container store hands over WITHOUT a retain — an
+     * element / property store or an array literal whose value is a bare
+     * local read the container does not co-own ({@see containerStoreRetains}).
+     *
+     * @return LoadLocal[]
+     */
+    public function containerMoves(Node $n): array
+    {
+        $k = $n->kind;
+        /** @var LoadLocal[] $out */
+        $out = [];
+        if ($k === Node::KIND_STORE_ELEMENT) {
+            $se = self::asStoreElement($n);
+            $v = $se->value;
+            if ($v->kind === Node::KIND_LOAD_LOCAL) {
+                $boxed = self::storeElemBoxesValue($se);
+                $fallback = self::storeElemDeCellifyType($se) ?? self::storeRetainFallback($se);
+                $tagRetain = !$boxed && $fallback === null && self::erasedElemCopy($se);
+                if (!$tagRetain && !$this->containerStoreRetains($v, $fallback, $boxed)) {
+                    $out[] = self::asLoadLocal($v);
+                }
+            }
+        } elseif ($k === Node::KIND_STORE_PROPERTY) {
+            $sp = self::asStoreProperty($n);
+            $v = $sp->value;
+            $pcls = $sp->object->type->class ?? '';
+            $declared = ($pcls !== '' && isset($this->ctx->classes[$pcls]))
+                ? ($this->ctx->classes[$pcls]->propertyTypes[$sp->property] ?? null) : null;
+            $boxed = $declared !== null && $declared->kind === Type::KIND_CELL;
+            if ($v->kind === Node::KIND_LOAD_LOCAL
+                && !$this->containerStoreRetains($v, $boxed ? $declared : $this->propStoreRetainType($sp), $boxed)) {
+                $out[] = self::asLoadLocal($v);
+            }
+        } elseif ($k === Node::KIND_ARRAY_LIT) {
+            // A literal element retains by the VALUE's own type (no element
+            // fallback), or by its tag when the literal boxes.
+            $al = self::asArrayLit($n);
+            $boxed = self::litBoxesValues($al);
+            foreach ($al->elements as $el) {
+                $v = $el->value;
+                if ($v->kind === Node::KIND_LOAD_LOCAL && !$this->containerStoreRetains($v, null, $boxed)) {
+                    $out[] = self::asLoadLocal($v);
+                }
+            }
+        }
+        return $out;
+    }
+
+    // ── arguments a callee co-owns only as a buffer ─────────────────────────
+
+    /**
+     * The array locals an object-producing call hands a callee whose element
+     * discipline is not PROVEN: a `new`, or an obj-typed call / method / static
+     * call / invoke, receiving a vec / assoc of objects, strings or arrays at a
+     * position that is not a by-value parameter of a known callee. Such a callee
+     * may keep the buffer with the element refs it already holds, so the local's
+     * own release gives back the buffer only (the parser `$args` UAF).
+     *
+     * A by-value array parameter of a KNOWN callee co-owns at element depth, so
+     * the caller keeps its full release — `Lexer::tokenize()` → `new
+     * Parser($toks)` leaked one ref per token until that was narrowed.
+     *
+     * @return string[]
+     */
+    public function elementSharedArgs(Node $n): array
+    {
+        $k = $n->kind;
+        $sym = '';
+        $args = [];
+        if ($k === Node::KIND_NEW_OBJ) {
+            $no = self::asNewObj($n);
+            $sym = $this->methodSymbol($no->class, '__construct');
+            $args = $no->args;
+        } elseif ($n->type->kind === Type::KIND_OBJ) {
+            if ($k === Node::KIND_CALL) {
+                $c = self::asCall($n);
+                $sym = $c->function;
+                $args = $c->args;
+            } elseif ($k === Node::KIND_METHOD_CALL) {
+                $mc = self::asMethodCall($n);
+                $sym = $this->methodSymbol($mc->object->type->class ?? '', $mc->method);
+                $args = $mc->args;
+            } elseif ($k === Node::KIND_STATIC_CALL) {
+                $sc = self::asStaticCall($n);
+                $sym = $this->methodSymbol($sc->class, $sc->method);
+                $args = $sc->args;
+            } elseif ($k === Node::KIND_INVOKE) {
+                $args = self::asInvoke($n)->args;
+            } else {
+                return [];
+            }
+        } else {
+            return [];
+        }
+        $refs = $sym !== '' ? ($this->ctx->paramByRef[$sym] ?? null) : null;
+        $out = [];
+        $pos = 0;
+        foreach ($args as $a) {
+            $i = $pos;
+            $pos = $pos + 1;
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $t = $a->type;
+            if (!$t->isVec() && !$t->isAssoc()) { continue; }
+            $el = $t->element;
+            if ($el === null
+                || ($el->kind !== Type::KIND_OBJ && $el->kind !== Type::KIND_STRING
+                    && $el->kind !== Type::KIND_ARRAY)) {
+                continue;
+            }
+            if ($refs !== null && $i < \count($refs) && !$refs[$i]) { continue; }
+            $out[] = self::asLoadLocal($a)->name;
+        }
+        return $out;
+    }
+
+    /** The emitted symbol of `$class::$method` as a direct call names it, or ''
+     *  when the class declares no body for it. */
+    private function methodSymbol(string $class, string $method): string
+    {
+        if ($class === '' || $method === '' || !isset($this->ctx->classes[$class])) { return ''; }
+        $c = $class;
+        $owner = '';
+        while ($c !== '') {
+            $cd = $this->ctx->classes[$c] ?? null;
+            if ($cd === null) { return ''; }
+            if (isset($cd->methodNames[$method])) { $owner = $c; break; }
+            $c = $cd->parent;
+        }
+        if ($owner === '') { return ''; }
+        $base = $owner . '__' . $method;
+        if ($class !== $owner && isset($this->ctx->paramByRef[$base . '__lsb' . $class])) {
+            return $base . '__lsb' . $class;
+        }
+        return $base;
+    }
+
+    private static function asStoreElement(Node $n): StoreElement { return $n; }
+    private static function asStoreProperty(Node $n): StoreProperty { return $n; }
+    private static function asArrayLit(Node $n): ArrayLit { return $n; }
+    private static function asLoadLocal(Node $n): LoadLocal { return $n; }
+    private static function asNewObj(Node $n): NewObj { return $n; }
+    private static function asCall(Node $n): Call { return $n; }
+    private static function asMethodCall(Node $n): MethodCall_ { return $n; }
+    private static function asStaticCall(Node $n): StaticCall_ { return $n; }
+    private static function asInvoke(Node $n): Invoke_ { return $n; }
 }
