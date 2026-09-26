@@ -167,6 +167,7 @@ final class SplitModule
         // coalesced global defines it, every later part declares it.
         /** @var array<string, bool> */
         $owned = [];
+        $lineTable = $this->lineTableGlobals($globalOrder, $owned);
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -192,7 +193,47 @@ final class SplitModule
             $out[] = $partHeader . "\n" . $declText . "\n"
                    . $plan->gtext . $plan->dtext . $plan->usedText . $body;
         }
+        if ($lineTable !== []) {
+            $out[] = $this->lineTablePart($headerText, $lineTable, $globals);
+        }
         return $out;
+    }
+
+    /**
+     * The `@.btl.<fn>` base-line globals (EmitLlvm::btPush), claimed up front so
+     * no ordinary part owns one: every part declares them `external`, and one
+     * extra part — globals only — defines them all.
+     *
+     * A base line moves whenever a line is inserted above its function; owned
+     * by the function's own part it would still rewrite that part, and an edit
+     * to one file would still dirty every part holding a later function of it.
+     * Here the edit dirties its own function's part and this table, which is
+     * cheap to recompile, so the object cache keeps the rest.
+     *
+     * @param string[]            $globalOrder
+     * @param array<string, bool> $owned
+     * @return string[]
+     */
+    private function lineTableGlobals(array $globalOrder, array &$owned): array
+    {
+        $out = [];
+        foreach ($globalOrder as $g) {
+            if (!\str_starts_with($g, '.btl.')) { continue; }
+            $owned[$g] = true;
+            $out[] = $g;
+        }
+        return $out;
+    }
+
+    /**
+     * @param string[]              $lineTable
+     * @param array<string, string> $globals
+     */
+    private function lineTablePart(string $headerText, array $lineTable, array $globals): string
+    {
+        $text = (string)\preg_replace('/^module asm .*\n?/m', '', $headerText) . "\n";
+        foreach ($lineTable as $g) { $text .= $this->pinGlobal($globals[$g]) . "\n"; }
+        return $text;
     }
 
     /**
@@ -717,6 +758,7 @@ final class SplitModule
         // coalesced global defines it, every later part declares it.
         /** @var array<string, bool> */
         $owned = [];
+        $lineTable = $this->lineTableGlobals($globalOrder, $owned);
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -757,6 +799,15 @@ final class SplitModule
                 }
             }
             \Manticore\fclose($o);
+            $out[] = $path;
+        }
+        if ($lineTable !== []) {
+            $path = $outBase . '.p' . (string)$parts . '.ll';
+            if (!\Manticore\write_file($path, $this->lineTablePart($headerText, $lineTable, $globals))) {
+                \Manticore\free($buf);
+                \Manticore\fclose($in);
+                return [];
+            }
             $out[] = $path;
         }
         \Manticore\free($buf);

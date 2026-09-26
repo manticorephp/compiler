@@ -812,6 +812,7 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
         $this->litTableCount = 0;
+        $this->btBaseLine = [];
         $this->dynScopeRelTables = [];
         $this->newDynTableCache = null;
         $this->classlessCandidatesMemo = [];
@@ -2280,6 +2281,10 @@ final class EmitLlvm implements EmitVisitor
 
     /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
     private string $litTableBodies = '';
+
+    /** {@see btPush}: function => the base line its `@.btl.` global holds.
+     *  @var array<string, int> */
+    private array $btBaseLine = [];
 
     /** {@see EmitLlvmObjects::dynScopeRelated}: scope class => [symbol, n].
      *  @var array<string, array{string, int}> */
@@ -4914,8 +4919,23 @@ final class EmitLlvm implements EmitVisitor
     private function btPush(string $display, int $line): string
     {
         if (!$this->rt->needsBacktrace) { return ''; }
-        return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
-             . ', i64 ' . (string)$line . ")\n";
+        $fn = $this->frame->name;
+        if ($fn === '') {
+            return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
+                 . ', i64 ' . (string)$line . ")\n";
+        }
+        // Relative to the function's first traced line, which lives in ONE
+        // global per function: a line inserted above a function moves that
+        // global and nothing in the function's body. With the absolute line in
+        // every call, one edit rewrote every later function of the file — every
+        // split part, so the object cache never hit.
+        if (!isset($this->btBaseLine[$fn])) {
+            $this->btBaseLine[$fn] = $line;
+            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 '
+                . (string)$line . "\n";
+        }
+        return '  call void @__mir_bt_push_rel(ptr ' . $this->strLitId($this->pool->intern($display))
+             . ', ptr @.btl.' . $this->mangle($fn) . ', i64 ' . (string)($line - $this->btBaseLine[$fn]) . ")\n";
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */

@@ -3612,7 +3612,7 @@ trait EmitLlvmBuiltins
      */
     private function strLitId(int $id): string
     {
-        return $this->strSymBytes('@.str.' . (string)$id);
+        return $this->strSymBytes($this->pool->sym($id));
     }
 
     /** Data ptr (`global + STRING_HEADER_SIZE`) for any headered string-literal symbol. */

@@ -306,7 +306,7 @@ trait EmitLlvmModule
         // multi-hundred-MiB preamble string at peak codegen memory.
         if (!$this->deferStringGlobals) {
             foreach ($this->pool->all() as $id => $value) {
-                $out .= $this->strGlobalDef('@.str.' . (string)$id, $value, $this->pool->isEmpty($id));
+                $out .= $this->strGlobalDef($this->pool->sym((int)$id), $value, $this->pool->isEmpty($id));
         }
         }
         $out .= $globalCells;
@@ -343,6 +343,14 @@ trait EmitLlvmModule
             $out .= "inc:\n";
             $out .= "  %d1 = add i64 %d, 1\n";
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
+            $out .= "  ret void\n}\n";
+            // The call site's line as an offset from its function's base line,
+            // which lives in `@.btl.<fn>` ({@see EmitLlvm::btPush}).
+            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta) {\n";
+            $out .= "entry:\n";
+            $out .= "  %b = load i64, ptr %base\n";
+            $out .= "  %line = add i64 %b, %delta\n";
+            $out .= "  call void @__mir_bt_push(ptr %name, i64 %line)\n";
             $out .= "  ret void\n}\n";
             // The name of the frame on TOP of that stack, as a `%s` operand.
             //
