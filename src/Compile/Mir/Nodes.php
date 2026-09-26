@@ -130,7 +130,8 @@ final class NullConst extends Node
 
 final class LoadLocal extends Node
 {
-    public function __construct(public readonly string $name, Type $type)
+    // Not readonly: {@see Passes\NarrowScalarGuards} renames a guarded read.
+    public function __construct(public string $name, Type $type)
     {
         parent::__construct(Node::KIND_LOAD_LOCAL, $type);
     }

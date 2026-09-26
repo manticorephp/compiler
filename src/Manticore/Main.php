@@ -4489,6 +4489,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // top-level statement came from.
         $module->includeSlots = $includeSlots;
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
+        // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
+        $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);
         if ($collect !== null) {
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
         }

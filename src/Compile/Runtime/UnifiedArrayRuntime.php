@@ -1286,7 +1286,7 @@ final class UnifiedArrayRuntime
 
         // live_len compacts tombstones out of BOTH sides first, so the walk sees
         // a clean 0..len range and the copy carries no holes.
-        $go->call('__mir_array_live_len', Type::i64(), [$a]);
+        $na = $go->call('__mir_array_live_len', Type::i64(), [$a]);
         $res0 = $go->call('__mir_array_copy', Type::ptr(), [$a]);
         $resSlot = $go->alloca(Type::ptr(), 'res');
         $go->store($res0, $resSlot);
@@ -1315,6 +1315,20 @@ final class UnifiedArrayRuntime
             $prep->and_($prep->icmp('ne', $ha, $hb), $prep->icmp('ne', $ha, $zero)),
             $prep->icmp('ne', $hb, $zero));
         $prep->store($prep->zext($prep->and_($mixed, $prep->icmp('ne', $hb, $cell)), Type::i64()), $boxSlot);
+        // An EMPTY `$a` describes nothing: the result is `$b`'s words verbatim,
+        // so it takes `$b`'s hint and ownership repr with them. Left unstamped
+        // (hint 0) it held `$b`'s cells under a claim of raw words, and a
+        // concrete-element reader took each box for a pointer — php-cs-fixer's
+        // `$elements += $newElements` in TokensAnalyzer::getClassyElements.
+        $adopt = $fn->block('adopt');
+        $afterAdopt = $fn->block('after_adopt');
+        $prep->brIf($prep->and_($prep->icmp('eq', $na, $zero), $prep->icmp('ne', $hb, $zero)), $adopt, $afterAdopt);
+        $adm = Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK);
+        $rfp = $this->hdr($adopt, $res0, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $rfl = $adopt->load(Type::i64(), $rfp);
+        $adopt->store($adopt->or_($adopt->and_($rfl, Value::int(Type::i64(), ~(MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK))), $adopt->and_($bflags, $adm)), $rfp);
+        $adopt->br($head);
+        $prep = $afterAdopt;
         $prep->brIf($prep->and_($mixed, $prep->icmp('ne', $ha, $cell)), $cellify, $head);
         $cellify->call('__mir_array_cellify_inplace', Type::void(), [$res0, $ha]);
         $cellify->br($head);
