@@ -2,6 +2,7 @@
 
 namespace Manticore;
 
+use Compile\MemoryAbi;
 use Ffi\CType;
 use Ffi\Library;
 use Ffi\Symbol;
@@ -3267,7 +3268,12 @@ function cmd_dump_llvm(array $args): int {
 }
 
 function cmd_version(array $args): int {
-    puts("manticore 0.11.0");
+    $version = 'Manticore v0.11.0';
+    $description = 'The PHP AOT Compiler';
+
+    puts(sprintf('%s - %s', $version, $description));
+    puts('PHP Version: 8.5.11');
+
     return 0;
 }
 
