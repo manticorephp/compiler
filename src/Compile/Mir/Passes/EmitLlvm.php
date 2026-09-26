@@ -6,6 +6,7 @@ use Compile\Mir\Add;
 use Compile\Mir\Block;
 use Compile\Mir\ArrayAccess_;
 use Compile\Mir\ArrayLit;
+use Compile\Mir\MethodMeta;
 use Compile\Mir\Spread_;
 use Compile\Mir\BoolConst;
 use Compile\Mir\MethodCall_;
