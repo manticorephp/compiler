@@ -606,13 +606,36 @@ function with_frame_pointers(string $ir): string {
  * clang already produced from exactly these bytes with exactly these flags. That
  * is what makes it safe to leave on across branches and worktrees.
  *
- * Off by default while it earns trust. It pays only in proportion to how STABLE
- * the split is — {@see \Compile\Mir\SplitModule::$stable}, because the default
- * partitioner balances by size and re-shuffles every part when one body grows.
+ * ON by default for a SPLIT assembly — the parts of a large module — and off
+ * for a single translation unit unless asked (`MANTICORE_OBJ_CACHE=1`), so the
+ * thousands of tiny one-unit compiles of a test run do not churn it; `=0` turns
+ * it off everywhere. It pays in proportion to how STABLE the parts are
+ * ({@see \Compile\Mir\SplitModule::$stable}): literals are content-named and a
+ * backtrace line is relative to its function, so a one-line edit to the
+ * compiler's own source recompiles 5 of 17 parts. Bounded by
+ * {@see obj_cache_prune}.
  */
-function obj_cache_enabled(): bool {
+function obj_cache_enabled(bool $split = false): bool {
     $e = \getenv('MANTICORE_OBJ_CACHE');
-    return $e !== false && $e !== '' && $e !== '0' && $e !== 'off';
+    if ($e === false || $e === '') { return $split; }
+    return $e !== '0' && $e !== 'off';
+}
+
+/**
+ * Drop the least recently used objects until the cache fits its budget,
+ * `MANTICORE_OBJ_CACHE_MAX_MB` (default 2048) — a hit touches its object, so
+ * age is last USE, not creation. One `ls -lt` + `rm` per build, after the
+ * objects were stored: disk is the scarce resource here, not time.
+ */
+function obj_cache_prune(): void {
+    $dir = obj_cache_dir();
+    if (!\is_dir($dir)) { return; }
+    $e = \getenv('MANTICORE_OBJ_CACHE_MAX_MB');
+    $mb = ($e === false || $e === '') ? 2048 : (int)$e;
+    if ($mb < 1) { $mb = 1; }
+    $cap = $mb * 1048576;
+    system('cd ' . $dir . ' && ls -lt | awk -v cap=' . (string)$cap
+        . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f");
 }
 
 function obj_cache_dir(): string {
@@ -644,6 +667,8 @@ function obj_cache_get(string $key, string $dest): bool {
     if ($key === '') { return false; }
     $p = obj_cache_dir() . '/' . $key . '.o';
     if (!\file_exists($p)) { return false; }
+    // Last use is what the pruner ages by.
+    \touch($p);
     return \copy($p, $dest);
 }
 
@@ -752,7 +777,7 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
     $splitter = new \Compile\Mir\SplitModule();
     // A cache over a load-balanced split hits nothing: one body growing moves
     // every part. Turn the cache on and the partition becomes hash-stable.
-    $splitter->stable = obj_cache_enabled() || \getenv("MANTICORE_SPLIT_STABLE") === "1";
+    $splitter->stable = obj_cache_enabled(true) || \getenv("MANTICORE_SPLIT_STABLE") === "1";
     $parts = $splitter->run($ir, $jobs);
     \Compile\Stats::step('  split module (' . (string)$jobs . ' parts)', $statT,
         $splitter->sharedDefs, $splitter->internalDefs);
@@ -770,7 +795,7 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         if (!write_file($pll, with_frame_pointers($partIr))) { dprint("assemble: cannot write " . $pll); return []; }
         $objs[] = $pobj;
         $flags = "-O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags;
-        $key = obj_cache_enabled() ? obj_cache_key($pll, $flags) : '';
+        $key = obj_cache_enabled(true) ? obj_cache_key($pll, $flags) : '';
         // The stale-object sweep below cannot run over a part restored from the
         // cache, so a hit is placed AFTER it — see the loop that follows.
         if ($key !== '') { $putKeys[$i] = $key; }
@@ -780,7 +805,7 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
     }
     // Remove stale objects first: existence is what decides success below, so a
     // leftover from an earlier run must not read as a part that built.
-    foreach ($objs as $o) { system("rm -f " . $o); }
+    foreach ($objs as $o) { sys_unlink($o); }
     // Now serve what the cache already has, and rebuild the command from the
     // misses only. Order matters: the sweep above would delete a served object.
     if ($putKeys !== []) {
@@ -807,6 +832,7 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         $pobj = $base . ".p" . (string)$i . ".o";
         obj_cache_put($key, $pobj);
     }
+    if ($putKeys !== []) { obj_cache_prune(); }
     foreach ($objs as $i => $o) {
         if (!\file_exists($o)) {
             dprint("assemble: part " . (string)$i . " failed to build; IR at " . $base . ".p" . (string)$i . ".ll");
@@ -855,7 +881,7 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
                                 int $irBytes, int $jobs): array {
     $statT = \Compile\Stats::now();
     $splitter = new \Compile\Mir\SplitModule();
-    $splitter->stable = obj_cache_enabled() || \getenv('MANTICORE_SPLIT_STABLE') === '1';
+    $splitter->stable = obj_cache_enabled(true) || \getenv('MANTICORE_SPLIT_STABLE') === '1';
     $parts = $splitter->runFile($llPath, $jobs, $base);
     if ($parts === []) { dprint('assemble: staged split produced no parts'); return []; }
     \Compile\Stats::step('  split staged module (' . (string)\count($parts) . ' parts, '
@@ -871,7 +897,7 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
         $pobj = $base . '.p' . (string)$i . '.o';
         $objs[] = $pobj;
         $flags = '-O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags;
-        if (obj_cache_enabled()) {
+        if (obj_cache_enabled(true)) {
             $k = obj_cache_key($partPath, $flags);
             if ($k !== '') { $putKeys[$i] = $k; }
         }
@@ -880,13 +906,13 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     }
     // Existence is what decides success below, so a leftover from an earlier run
     // must not read as a part that built.
-    foreach ($objs as $o) { system('rm -f ' . $o); }
+    foreach ($objs as $o) { sys_unlink($o); }
     // Serve the hits AFTER that sweep, and drop their commands: a part restored
     // from the cache is a part clang never has to see again.
     foreach ($putKeys as $i => $k) {
         if (obj_cache_get($k, $objs[$i])) { unset($cmds[$i]); unset($putKeys[$i]); $hits = $hits + 1; }
     }
-    if (obj_cache_enabled()) {
+    if (obj_cache_enabled(true)) {
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
     $cmds = \array_values($cmds);
@@ -942,6 +968,7 @@ function assemble_ir_file_split(string $llPath, string $base, string $cflags,
     \Compile\Stats::step('  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
         . ($lto === '' ? '' : ' (thinlto)'), $statT, -1, -1);
     foreach ($putKeys as $i => $k) { obj_cache_put($k, $objs[$i]); }
+    if ($putKeys !== []) { obj_cache_prune(); }
     // Count the objects. A "parallel build" that finished suspiciously fast has
     // simply failed to build most of its parts.
     foreach ($objs as $i => $o) {
