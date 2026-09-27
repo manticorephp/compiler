@@ -819,7 +819,7 @@ final class InferTypes implements Pass
         $this->scanAssocProps($module);
         // Module pre-scan: a getter `M(): T { return $this->prop[$i]; }`
         // reveals that `prop` is a vec[T]. Without the element type the
-        // borrowed-element return isn't +1-retained (isBorrowedObjReturn
+        // borrowed-element return isn't +1-retained (Ownership::returnBorrowsObj
         // sees `unknown`), so the caller over-releases the shared element —
         // e.g. peek() freeing the Parser token vec out from under itself.
         // Module pre-scan: an array property that ever receives a MIXED/cell

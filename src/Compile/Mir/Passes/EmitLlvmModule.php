@@ -2388,7 +2388,7 @@ trait EmitLlvmModule
             // retainCellPayload}). Without this a `: mixed`/union fn returning a
             // string PARAM (`__mc_ini_value` → `$v`) hands back a cell over a
             // buffer the caller's arg temp then frees → the assoc scramble /
-            // borrowed-buffer UAF. Gated by isBorrowedObjReturn so owned
+            // borrowed-buffer UAF. Gated by Ownership::returnBorrowsObj so owned
             // producers (call/new/concat/owned-local) keep their fresh +1.
             if ($retKind === \Compile\Mir\Ownership::RET_CELL_PAYLOAD) {
                 $out .= $this->retainCellPayload($v);
@@ -2415,7 +2415,7 @@ trait EmitLlvmModule
             // A BORROWED cell handed back from a `: mixed` fn — `return
             // self::$stack[$n-1]` off a `/** @var array<int,mixed> */` static
             // prop. The value is already a cell so the boxing branch above never
-            // ran, and isBorrowedObjReturn names no rc kind for a cell, so
+            // ran, and Ownership::returnBorrowsObj names no rc kind for a cell, so
             // nothing retained it: the caller's `__mir_cell_drop` of a DISCARDED
             // result then freed an element still in the array (use-after-free on
             // the next read). Retain by runtime tag — a no-op for a scalar cell.
@@ -2476,7 +2476,7 @@ trait EmitLlvmModule
             // reference. Owned producers (`new`, call return) and
             // owned-local transfers are already +1. The declared return type
             // is the fallback: it is what the CALLER assumes ({@see
-            // ownershipReturnType}).
+            // Ownership::returnOwnershipType}).
             if ($retKind === \Compile\Mir\Ownership::RET_OBJ) {
                 // rcRetainByType reads every call as a +1 transfer.
                 $out .= $this->rcRetainReg($this->lastValue, 'obj');
