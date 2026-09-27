@@ -415,6 +415,24 @@ final class InferTypes implements Pass
     }
 
     /**
+     * A LIGHT round after {@see NarrowReturns} narrowed `$narrowed`: re-infer
+     * the bodies that observe those returns, with the tables and scan state of
+     * this instance's last {@see run}, and follow the change only as far as
+     * types keep moving. No module scan runs — the caller closes on a full run.
+     * @param array<string, bool> $narrowed
+     */
+    public function reinferAfterNarrow(Module $module, array $narrowed): void
+    {
+        $seed = [];
+        foreach ($module->functions as $fn) {
+            if (!isset($narrowed[$fn->name])) { continue; }
+            $this->sigs[$fn->name] = $fn->returnType;
+            foreach ($this->depGraph($module)->neighbors($fn->name) as $nb => $unused) { $seed[$nb] = true; }
+        }
+        $this->inferPropagating($module, 'narrow_light', $seed);
+    }
+
+    /**
      * Every node type of every function in `$names`, as one string: equal
      * digests mean a re-inference moved nothing there. By Type INSTANCE: one id
      * is one type, and two equal types that are separate objects only cost

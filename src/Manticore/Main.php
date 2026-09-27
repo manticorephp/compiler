@@ -4564,17 +4564,23 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
         $statT = \Compile\Stats::now();
-        $module = (new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on'))->run($module);
+        $narrowConcrete = new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on');
+        $module = $narrowConcrete->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
-        $statT = \Compile\Stats::now();
-        $infer2 = new \Compile\Mir\Passes\InferTypes(
-            ($analysisContext !== null && $worklistMode === 'on')
-                ? $analysisContext->scope() : null,
-            $analysisContext
-        );
-        $module = $infer2->run($module);
-        \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
-        $infer2 = null;
+        // A narrowing pass that closed on a full inference leaves nothing for a
+        // second one to move: the module is the one that run just typed.
+        if (!$narrowConcrete->endedOnFullInfer) {
+            $statT = \Compile\Stats::now();
+            $infer2 = new \Compile\Mir\Passes\InferTypes(
+                ($analysisContext !== null && $worklistMode === 'on')
+                    ? $analysisContext->scope() : null,
+                $analysisContext
+            );
+            $module = $infer2->run($module);
+            \Compile\Stats::step('InferTypes #2', $statT, \count($module->functions), -1);
+            $infer2 = null;
+        }
+        $narrowConcrete = null;
         \Manticore\Allocator::release('after-infer-2');
         // Eliminate the boxed-cell closure ABI where it's avoidable: inline
         // captureless single-expr arrow closures at known invoke sites, and
