@@ -2268,7 +2268,10 @@ trait EmitLlvmCalls
         }
         $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . " = alloca i64\n";
-        if ($scalar) { $this->byRefScalarTmps[$tmp] = $pt; }
+        // Written for EVERY scratch, scalar or not: the key is an SSA register
+        // name, which the next function reuses. A stale scalar entry re-boxed
+        // parse_str's nested array as an INT (`int(4387692744)`).
+        $this->byRefScalarTmps[$tmp] = $scalar ? $pt : null;
         $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
         $taddr = $this->ssa->allocReg();
         $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
@@ -2808,7 +2811,7 @@ trait EmitLlvmCalls
             || $pk === Type::KIND_STRING || $this->isByRefScalarParam($pt);
     }
 
-    /** @var array<string, Type> scratch alloca → the scalar param type it re-boxes by */
+    /** @var array<string, ?Type> scratch alloca → the scalar param type it re-boxes by */
     private array $byRefScalarTmps = [];
 
     /** A raw scalar by-ref param a cell lvalue must be decoded for. */

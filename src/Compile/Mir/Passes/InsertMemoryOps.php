@@ -108,6 +108,12 @@ final class InsertMemoryOps implements Pass
      *  ({@see EmitLlvmMemory::mixedReleaseIr}). */
     private array $rcObjMixed = [];
 
+    /** @var array<string, bool> owned rc locals whose owned RAW stores disagree
+     *  about the rc flavor (`$t = token_get_all(); … $t = Tokens::fromCode()`).
+     *  Sound only as a MIXED slot, whose flag then names the raw flavor each
+     *  store left ({@see EmitLlvmMemory::mixedReleaseIr}); blocked otherwise. */
+    private array $rcObjRawAlt = [];
+
     /** @var array<string, bool> names a foreach binds (its own ownership path). */
     private array $rcObjForeachVar = [];
 
@@ -215,6 +221,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjRawType = [];
         $this->rcObjCellSeen = [];
         $this->rcObjMixed = [];
+        $this->rcObjRawAlt = [];
         $this->rcObjForeachVar = [];
         $this->rcObjRawScalar = [];
         $this->rcObjRefName = [];
@@ -1253,6 +1260,11 @@ final class InsertMemoryOps implements Pass
             $this->rcObjBlocked[$name] = true;
             $this->noteBlock($name, "repr", $rawT);
         }
+        foreach ($this->rcObjRawAlt as $name => $ignored) {
+            if (isset($this->rcObjMixed[$name])) { continue; }
+            $this->rcObjBlocked[$name] = true;
+            $this->noteBlock($name, "flavor", $this->rcObjType[$name] ?? null);
+        }
         foreach ($this->rcObjRawScalar as $name => $ignored) {
             if (isset($this->rcObjMixed[$name])) { continue; }
             $this->rcObjBlocked[$name] = true;
@@ -1630,8 +1642,12 @@ final class InsertMemoryOps implements Pass
                 } elseif (!isset($this->rcObjRawType[$name])) {
                     $this->rcObjRawType[$name] = $slotType;
                 } elseif ($this->rcSlotFlavor($this->rcObjRawType[$name]) !== $this->rcSlotFlavor($slotType)) {
-                    $this->rcObjBlocked[$name] = true;
-                    $this->noteBlock($name, "flavor", $slotType);
+                    if ($this->mixableRaw($this->rcObjRawType[$name]) && $this->mixableRaw($slotType)) {
+                        $this->rcObjRawAlt[$name] = true;
+                    } else {
+                        $this->rcObjBlocked[$name] = true;
+                        $this->noteBlock($name, "flavor", $slotType);
+                    }
                 }
                 $this->rcObjSlotBoxed[$name] = $boxedSlot;
                 // …and two stores that disagree about the slot's rc FLAVOR are
@@ -1656,7 +1672,9 @@ final class InsertMemoryOps implements Pass
                     ? $this->rcSlotFlavor($this->rcObjType[$name]) : '';
                 $nowFlavor = $this->rcSlotFlavor($slotType);
                 if ($prevFlavor !== '' && $nowFlavor !== '' && $prevFlavor !== $nowFlavor
-                    && $prevFlavor !== 'cell' && $nowFlavor !== 'cell') {
+                    && $prevFlavor !== 'cell' && $nowFlavor !== 'cell'
+                    && !($boxedSlot === false && isset($this->rcObjRawAlt[$name])
+                        && $this->mixableRaw($slotType) && $this->mixableRaw($this->rcObjType[$name]))) {
                     $this->rcObjBlocked[$name] = true;
                     $this->noteBlock($name, "flavor", $slotType);
                 }

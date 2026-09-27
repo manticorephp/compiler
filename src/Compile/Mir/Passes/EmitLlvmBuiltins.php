@@ -905,6 +905,16 @@ trait EmitLlvmBuiltins
                  . '  ' . $p . ' = inttoptr i64 ' . $raw . " to ptr\n"
                  . '  call void @__mir_rc_release_str(ptr ' . $p . ")\n";
         }
+        // …and so does an OBJECT box: the same pointer under the object tag. A
+        // fresh one (`new`, a call's +1) handed to a `mixed` parameter had no
+        // owner but this site — `$fixed->offsetSet($i, new Token($t))` kept
+        // every token of every file php-cs-fixer ever tokenized.
+        if ($t->kind === Type::KIND_OBJ) {
+            if ($src === null || $this->isClosureValueType($t) || $this->freshRcArgFlavor($src) !== 'obj') { return ''; }
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
+        }
         if (!$t->isVec() && !$t->isAssoc()) { return ''; }
         $el = $t->element;
         if ($el === null || $el->kind === Type::KIND_CELL

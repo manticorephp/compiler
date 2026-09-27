@@ -683,8 +683,7 @@ trait EmitLlvmLocals
                     . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
                 $out .= '  ' . $moved . ' = icmp eq i64 ' . $pay . ', ' . $oldRaw . "\n";
                 $out .= '  ' . $gone . ' = select i1 ' . $moved . ', i64 0, i64 ' . $oldRaw . "\n";
-                $out .= $this->rcReleaseReg($gone, \substr(
-                    $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]), 3));
+                $out .= $this->rcReleaseReg($gone, $this->mixedRawFlavorOf($sl->name, $v0->type));
             }
             if ($rebind) {
                 $out .= $this->rcReleaseSlot($cellDest,

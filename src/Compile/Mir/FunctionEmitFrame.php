@@ -96,4 +96,9 @@ final class FunctionEmitFrame
     /** @var array<string, bool> the locals the return being emitted hands back
      *  ({@see EmitLlvmModule::returnedLocalNames}) */
     public array $retExempt = [];
+    /** @var array<string, string[]> a MIXED local's flag alloca → the release
+     *  flavors of the RAW representations its stores leave, index 0 the plan's
+     *  own. The flag holds 1 for a cell, 0 for raw [0], i + 1 for raw [i].
+     *  Appended at the END. */
+    public array $mixedRawByFlag = [];
 }

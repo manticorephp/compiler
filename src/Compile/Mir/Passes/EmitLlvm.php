@@ -4368,16 +4368,17 @@ final class EmitLlvm implements EmitVisitor
      *    no element type we may trust);
      *  - an UNKNOWN element — the erased channel is not self-describing, and
      *    the repr nibble it does carry is stamped only by the stores that erase;
-     *  - a CELL element — `cell` is a static CLAIM, not a runtime guarantee, so
-     *    `__mir_cell_drop` would dispatch on bits that may be a bare address
-     *    (the same refusal the property slot drop makes). EXCEPT on a
-     *    SUPERGLOBAL base (`$cellElemOwned`): its cell is filled by the seeding
-     *    in `prelude/sapi.php` (element stores, each retaining what it boxes),
-     *    by `contextSwitch`'s restore (an element read, co-owned at the cell
-     *    flavor) and by the CLI seed, so every word it holds is a cell the
-     *    buffer owns — or a raw word from a whole-array store, on which
-     *    `__mir_cell_drop` is a no-op. Refusing it left every `$_SERVER[$k] =
-     *    $v` of the per-request merge holding the previous request's value.
+     *
+     * A CELL element drops too. It was refused while `cell` was a static claim
+     * rather than a runtime guarantee; the value channel is verified since
+     * (W4), every cell store retains what it boxes, and the buffer's own
+     * release already drops every element it holds — so refusing the
+     * overwrite only stranded the displaced value: `$this->__data[$i] = $v`
+     * in SplFixedArray::offsetSet kept every token php-cs-fixer replaced. The
+     * word is decoded by the buffer's hint first ({@see elemSlotReleaseIr}),
+     * so a raw word in a raw-hinted buffer is never read as a cell.
+     * (`$cellElemOwned` — a superglobal base — predates this and is kept for
+     * its callers.)
      */
     private function elemSlotDropFlavor(Type $arrType, bool $cellElemOwned = false): string
     {
@@ -4387,7 +4388,7 @@ final class EmitLlvm implements EmitVisitor
         if ($el === null) { return ''; }
         $k = $el->kind;
         if ($k === Type::KIND_UNKNOWN) { return ''; }
-        if ($k === Type::KIND_CELL) { return $cellElemOwned ? 'cell' : ''; }
+        if ($k === Type::KIND_CELL) { return 'cell'; }
         // A closure slot drops through the buffer's own ownership record
         // (`__mir_array_clo_drop`, {@see \Compile\MemoryAbi::ARRAY_REPR_CLO}):
         // the static type cannot say whether this buffer counted its closure
