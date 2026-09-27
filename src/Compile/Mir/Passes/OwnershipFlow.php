@@ -230,7 +230,6 @@ final class OwnershipFlow implements Pass
         $this->excluded = [];
         $this->mixedHere = $this->mixedSlots->verdict($fn);
         $this->shared = [];
-        $this->collectShared($fn->body);
         $this->mutatedVecs = VecCopyOnAssign::mutatedLocals($fn->body);
         $this->erasedPropNames = [];
         $this->keyId = [];
@@ -259,8 +258,22 @@ final class OwnershipFlow implements Pass
         foreach ($fn->params as $p) {
             if ($p->byRef) { $this->excluded[$p->name] = true; }
         }
-        $this->collectExcluded($fn->body);
-        $this->erasedNames = $this->erasedArrayLocals($fn);
+        // One walk for the per-node facts that need nothing but the node:
+        // element-shared args, reference-reachable names, erased-array stores,
+        // statement-list membership.
+        $this->inList = [];
+        $this->erasedParams = [];
+        $this->erasedCand = [];
+        $this->erasedVeto = [];
+        $this->erasedAliasOf = [];
+        foreach ($fn->params as $p) {
+            $this->erasedVeto[$p->name] = true;
+            if (!$p->byRef && !$p->variadic && $p->arrayHinted && $p->type->kind === Type::KIND_UNKNOWN) {
+                $this->erasedParams[$p->name] = true;
+            }
+        }
+        $this->prescan($fn->body);
+        $this->erasedNames = $this->erasedArrayLocals();
 
         $lat = new OwnLattice();
         $this->scan($fn->body, $lat);
@@ -314,8 +327,6 @@ final class OwnershipFlow implements Pass
         }
 
         $body = $fn->body;
-        $this->inList = [];
-        $this->indexLists($body);
 
         /** @var array<string, bool> $force */
         $force = [];
@@ -536,22 +547,11 @@ final class OwnershipFlow implements Pass
      *
      * @return array<string, bool>
      */
-    private function erasedArrayLocals(FunctionDef $fn): array
+    private function erasedArrayLocals(): array
     {
-        /** @var array<string, bool> $cand */
-        $cand = [];
-        /** @var array<string, bool> $veto */
-        $veto = [];
-        /** @var array<string, string[]> $aliasOf name → the locals it aliases */
-        $aliasOf = [];
-        $this->erasedParams = [];
-        foreach ($fn->params as $p) {
-            $veto[$p->name] = true;
-            if (!$p->byRef && !$p->variadic && $p->arrayHinted && $p->type->kind === Type::KIND_UNKNOWN) {
-                $this->erasedParams[$p->name] = true;
-            }
-        }
-        $this->scanErased($fn->body, $cand, $veto, $aliasOf);
+        $cand = $this->erasedCand;
+        $veto = $this->erasedVeto;
+        $aliasOf = $this->erasedAliasOf;
         $changed = true;
         while ($changed) {
             $changed = false;
@@ -575,6 +575,12 @@ final class OwnershipFlow implements Pass
 
     /** @var array<string, bool> by-value bare-`array` params of the function */
     private array $erasedParams = [];
+    /** @var array<string, bool> {@see scanErased}: names an erased-array call stores */
+    private array $erasedCand = [];
+    /** @var array<string, bool> {@see scanErased}: names an erased word of unknown origin binds */
+    private array $erasedVeto = [];
+    /** @var array<string, string[]> {@see scanErased}: name → the locals it aliases */
+    private array $erasedAliasOf = [];
 
     /** The erased array local `$v` aliases for an erased-array local, or '' when
      *  `$v` is no such alias. */
@@ -586,37 +592,31 @@ final class OwnershipFlow implements Pass
         return (isset($this->erasedParams[$src]) || isset($this->erasedNames[$src])) ? $src : '';
     }
 
-    /**
-     * @param array<string, bool> $cand
-     * @param array<string, bool> $veto
-     * @param array<string, string[]> $aliasOf
-     */
-    private function scanErased(Node $n, array &$cand, array &$veto, array &$aliasOf): void
+    private function scanErased(Node $n): void
     {
         $k = $n->kind;
         if ($k === Node::KIND_STORE_LOCAL) {
             $sl = self::asStoreLocal($n);
             $v = $sl->value;
             if ($this->own->erasedArrayCall($v)) {
-                $cand[$sl->name] = true;
+                $this->erasedCand[$sl->name] = true;
             } elseif ($v->kind === Node::KIND_LOAD_LOCAL && $v->type->kind === Type::KIND_UNKNOWN
                 && self::asLoadLocal($v)->name !== $sl->name) {
-                $aliasOf[$sl->name][] = self::asLoadLocal($v)->name;
+                $this->erasedAliasOf[$sl->name][] = self::asLoadLocal($v)->name;
             } elseif (InsertMemoryOps::slotStoredType($sl)->kind === Type::KIND_UNKNOWN
                 && $v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL) {
                 // An erased word of unknown origin: never owned.
-                $veto[$sl->name] = true;
+                $this->erasedVeto[$sl->name] = true;
             }
         } elseif ($k === Node::KIND_FOREACH) {
             $fe = self::asForeach($n);
-            $veto[$fe->valueVar] = true;
-            if ($fe->keyVar !== null) { $veto[$fe->keyVar] = true; }
+            $this->erasedVeto[$fe->valueVar] = true;
+            if ($fe->keyVar !== null) { $this->erasedVeto[$fe->keyVar] = true; }
         } elseif ($k === Node::KIND_TRY_CATCH) {
             foreach (self::asTryCatch($n)->catches as $c) {
-                if ($c->var !== null) { $veto[$c->var] = true; }
+                if ($c->var !== null) { $this->erasedVeto[$c->var] = true; }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanErased($c, $cand, $veto, $aliasOf); }
     }
 
     /**
@@ -661,10 +661,13 @@ final class OwnershipFlow implements Pass
         foreach (Walk::children($n) as $c) { $this->locateMoves($c, $inner ? $loop + 1 : $loop, $lat); }
     }
 
-    private function collectShared(Node $n): void
+    private function prescan(Node $n): void
     {
         foreach ($this->own->elementSharedArgs($n) as $name) { $this->shared[$name] = true; }
-        foreach (Walk::children($n) as $c) { $this->collectShared($c); }
+        $this->collectExcluded($n);
+        $this->scanErased($n);
+        $this->indexLists($n);
+        foreach (Walk::children($n) as $c) { $this->prescan($c); }
     }
 
     private function intern(string $name, string $ks, Type $t): int
@@ -757,7 +760,6 @@ final class OwnershipFlow implements Pass
         } elseif ($k === Node::KIND_INCDEC) {
             $this->excluded[self::asIncDec($n)->name] = true;
         }
-        foreach (Walk::children($n) as $c) { $this->collectExcluded($c); }
     }
 
     private function scan(Node $n, OwnLattice $lat): void
@@ -1071,7 +1073,6 @@ final class OwnershipFlow implements Pass
                 foreach ($arm->body as $s) { $this->inList[\spl_object_id($s)] = true; }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->indexLists($c); }
     }
 
     private function compOp(string $op, string $name, int $k): MemoryOp_
