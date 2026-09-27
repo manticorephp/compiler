@@ -251,6 +251,8 @@ trait EmitLlvmArrays
         if ($aa->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
+            $fast = $this->emitFixedArrayGet($aa, $mc);
+            if ($fast !== null) { return $fast; }
             return $this->emitMethodCall($mc);
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
@@ -272,6 +274,101 @@ trait EmitLlvmArrays
             return $this->emitErasedIndexGet($n, $aa);
         }
         return $this->emitArrayAccessUnified($n, $aa);
+    }
+
+    /**
+     * `$fixed[$i]` on a SplFixedArray whose `offsetGet` is the prelude's own,
+     * with an INT index: read `__data[$i]` in place when `0 <= $i < __size`,
+     * else call `offsetGet` (which throws php's error). The fast arm hands back
+     * exactly what `offsetGet` does — the element decoded to a cell and
+     * retained, a +1 the caller owns — so nothing downstream can tell the
+     * difference. php-cs-fixer's `Tokens` is a SplFixedArray and `$tokens[$i]`
+     * is its hottest expression; in Zend it is C.
+     * null when the shape does not apply.
+     */
+    private function emitFixedArrayGet(ArrayAccess_ $aa, \Compile\Mir\MethodCall_ $mc): ?string
+    {
+        $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
+        if ($cls === '' || !$this->classIsA($cls, 'SplFixedArray')) { return null; }
+        // Every class the receiver can be must read through the prelude's own
+        // offsetGet: a subclass override owns the semantics.
+        if (!isset($this->fixedArrayPlain[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classIsA($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayPlain[$cls] = $plain;
+        }
+        if (!$this->fixedArrayPlain[$cls]) { return null; }
+        if ($aa->index->type->kind !== Type::KIND_INT) { return null; }
+        $cd = $this->classes[$cls] ?? null;
+        if ($cd === null) { return null; }
+        $dataOff = $cd->propertyOffset('__data');
+        $sizeOff = $cd->propertyOffset('__size');
+        if ($dataOff < 0 || $sizeOff < 0) { return null; }
+        // The receiver is read twice (the test, the slow call): a plain local only.
+        if ($aa->array->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($aa->index)) { return null; }
+        $out = $this->emitNode($aa->array);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($aa->index);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$sizeOff . "\n";
+        $size = $this->ssa->allocReg();
+        $out .= '  ' . $size . ' = load i64, ptr ' . $sp . "\n";
+        $inb = $this->ssa->allocReg();
+        $out .= '  ' . $inb . ' = icmp ult i64 ' . $idx . ', ' . $size . "\n";
+        $fastL = $this->ssa->allocLabel('sfa.fast');
+        $slowL = $this->ssa->allocLabel('sfa.slow');
+        $endL = $this->ssa->allocLabel('sfa.end');
+        $out .= '  br i1 ' . $inb . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $dp = $this->ssa->allocReg();
+        $out .= '  ' . $dp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$dataOff . "\n";
+        $di = $this->ssa->allocReg();
+        $out .= '  ' . $di . ' = load i64, ptr ' . $dp . "\n";
+        $data = $this->ssa->allocReg();
+        $out .= '  ' . $data . ' = inttoptr i64 ' . $di . " to ptr\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = call i64 @__mir_array_get_int(ptr ' . $data . ', i64 ' . $idx . ")\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = call i64 @__mir_elem_decode(ptr ' . $data . ', i64 ' . $w . ")\n";
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
+        $out .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $this->emitMethodCall($mc);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /** A local, a constant, or `+`/`-` over them: safe to evaluate twice. */
+    private function pureIntExpr(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_INT_CONST) { return true; }
+        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if (!$this->pureIntExpr($c)) { return false; }
+            }
+            return true;
+        }
+        return false;
     }
 
     /** Set by `??` around its presence test on a string base; read and cleared

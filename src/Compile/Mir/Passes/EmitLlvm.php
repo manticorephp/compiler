@@ -487,6 +487,9 @@ final class EmitLlvm implements EmitVisitor
     /** A mixed slot is boxing its own raw value: the box takes over the
      *  slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}). */
     private bool $boxSelfMove = false;
+    /** @var array<string, bool> class → every class below it reads through
+     *  SplFixedArray::offsetGet ({@see EmitLlvmArrays::emitFixedArrayGet}) */
+    private array $fixedArrayPlain = [];
     /** @var array<string, bool> …and whether the body emitted such a store */
     private array $feCellFlagSet = [];
     /**

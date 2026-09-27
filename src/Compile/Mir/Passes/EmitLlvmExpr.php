@@ -1659,7 +1659,13 @@ trait EmitLlvmExpr
         $out .= "  %req = icmp eq i64 %a, %b\n  %rz = zext i1 %req to i64\n  ret i64 %rz\n}\n";
 
         // __manticore_tagged_strict_eq(a,b) -> i64 (0/1)
-        $out .= "define i64 @__manticore_tagged_strict_eq(i64 %a, i64 %b) {\nentry:\n";
+        // The inlined front: two int-tagged words are equal exactly when the
+        // words are (php-cs-fixer compares token ids this way millions of times).
+        $out .= "define i64 @__manticore_tagged_strict_eq(i64 %a, i64 %b) alwaysinline {\nentry:\n";
+        $out .= "  %ha = lshr i64 %a, 48\n  %hb = lshr i64 %b, 48\n  %ia = icmp eq i64 %ha, 65521\n  %ib = icmp eq i64 %hb, 65521\n  %ii = and i1 %ia, %ib\n";
+        $out .= "  br i1 %ii, label %fast, label %slow\nfast:\n  %fe = icmp eq i64 %a, %b\n  %fz = zext i1 %fe to i64\n  ret i64 %fz\n";
+        $out .= "slow:\n  %sr = call i64 @__manticore_tagged_strict_eq_slow(i64 %a, i64 %b)\n  ret i64 %sr\n}\n";
+        $out .= "define i64 @__manticore_tagged_strict_eq_slow(i64 %a, i64 %b) noinline {\nentry:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n  %tb = call i64 @__manticore_tag(i64 %b)\n";
         $out .= "  %same = icmp eq i64 %ta, %tb\n";
         $out .= "  br i1 %same, label %chk, label %ne\n";

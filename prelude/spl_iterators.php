@@ -1027,7 +1027,7 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
         }
         if ($i < 0 || $i >= $this->__size) {
             if (!$strict) { return -1; }
-            throw new RuntimeException('Index invalid or out of range');
+            throw new OutOfBoundsException('Index invalid or out of range');
         }
         return $i;
     }
