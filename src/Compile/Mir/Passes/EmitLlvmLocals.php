@@ -522,6 +522,17 @@ trait EmitLlvmLocals
     {
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
+        if (InsertMemoryOps::cellElemReadCoOwns($v)) {
+            $sv = $this->lastValue;
+            $st = $this->lastValueType;
+            $out = $this->coerceToI64();
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $sv;
+            $this->lastValueType = $st;
+            return $out;
+        }
         // The SAME predicate the pass half decides on — one condition, two halves.
         if (!InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes)) { return ''; }
         $sv = $this->lastValue;
@@ -1049,9 +1060,10 @@ trait EmitLlvmLocals
             $val = $reg;
         }
         if (isset($this->locals->globalBacked[$sl->name])) {
-            $elemOwned = \Compile\Debug::$rcElemReadOwns
+            $elemOwned = (\Compile\Debug::$rcElemReadOwns
                 && $v->kind === Node::KIND_ARRAY_ACCESS
-                && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes);
+                && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes))
+                || InsertMemoryOps::cellElemReadCoOwns($v);
             $out .= $this->globalCellOwnIr($sl, $val,
                 $copiedVecLocal || $copiedVecProp || $aliasObjStr || $aliasArrayProp
                 || $aliasArrayLocal || $aliasStrProp || $elemOwned);

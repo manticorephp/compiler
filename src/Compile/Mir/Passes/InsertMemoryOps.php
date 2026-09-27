@@ -649,6 +649,24 @@ final class InsertMemoryOps implements Pass
         return $t->kind === Type::KIND_OBJ && ($c === 'Closure' || \str_starts_with($c, '__closure_'));
     }
 
+    /**
+     * A CELL read out of a container's element into a local co-owns what it
+     * holds, as a string / array / object element read does: the emitter takes
+     * `__mir_cell_retain` ({@see EmitLlvmLocals::elemReadCoOwn}) and the local
+     * releases at the `cell` flavor. It was a bare borrow, safe only while no
+     * cell element slot ever dropped what it held; now an overwrite or an unset
+     * does, and `$y = $a[0]; $a[0] = 5; $y->n` read freed memory. Separate from
+     * {@see elemReadCoOwns}, which the foreach binding also answers by.
+     */
+    public static function cellElemReadCoOwns(Node $v): bool
+    {
+        if (!\Compile\Debug::$rcElemReadOwns) { return false; }
+        if (!($v instanceof \Compile\Mir\ArrayAccess_) || $v->probe) { return false; }
+        if ($v->type->kind !== Type::KIND_CELL) { return false; }
+        $bk = $v->array->type->kind;
+        return $v->array->type->isVec() || $v->array->type->isAssoc() || $bk === Type::KIND_OBJ;
+    }
+
     public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
     {
         if ($t === null) { return false; }
@@ -947,6 +965,7 @@ final class InsertMemoryOps implements Pass
             && self::elemReadCoOwns($value->type, $this->enums, $this->classes)) {
             return true;
         }
+        if (self::cellElemReadCoOwns($value)) { return true; }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
         // allocation — the one producer this pass could not see, because it gates
         // on `effects->alloc`. {@see EmitLlvmLocals::emitStoreLocal}'s snapshot
@@ -1630,7 +1649,8 @@ final class InsertMemoryOps implements Pass
                 && self::arrayAliasCoOwns($value->type, $sl->type, $this->enums, $this->classes)) {
                 $ownedCopy = true;
             }
-            if (($this->isOwnedObj($value) || $ownedCopy) && !($ownedByRetain && $boxedSlot)) {
+            if (($this->isOwnedObj($value) || $ownedCopy)
+                && !($ownedByRetain && $boxedSlot && !self::cellElemReadCoOwns($value))) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit
                 // release reads the slot, not the producer. Block: a leak, never a
