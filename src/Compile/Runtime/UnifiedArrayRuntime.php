@@ -4010,8 +4010,19 @@ final class UnifiedArrayRuntime
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
         $chk = $fn->block('va_chk');
-        $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
+        $in = $fn->block('va_in');
+        $out = $fn->block('va_out');
+        // Past the allocation answers 0. The spread-argument paths read slot k
+        // speculatively and select the default when the pack is shorter; on a
+        // heap buffer that read was merely wasted, on an immortal literal (a
+        // global, {@see EmitLlvmArrays::immortalLitPtr}) it is a load past the
+        // object, which the optimizer is entitled to treat as unreachable — it
+        // deleted the rest of the caller.
+        $cap = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $e->brIf($e->icmp('ult', $i, $cap), $in, $out);
+        $out->ret(Value::int(Type::i64(), 0));
+        $flags = $in->load(Type::i64(), $this->hdr($in, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $in->brIf($in->icmp('ne', $this->hashedBit($in, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $pv = $packed->load(Type::i64(), $this->packedSlot($packed, $arr, $i));
         $packed->br($chk);
         $hv = $hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));

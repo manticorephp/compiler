@@ -484,6 +484,9 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, string> by-ref foreach value var → alloca holding 1
      *  when its latest store in the body left a CELL ({@see foreachWriteBackEncode}) */
     private array $feCellFlags = [];
+    /** A mixed slot is boxing its own raw value: the box takes over the
+     *  slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}). */
+    private bool $boxSelfMove = false;
     /** @var array<string, bool> …and whether the body emitted such a store */
     private array $feCellFlagSet = [];
     /**

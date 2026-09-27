@@ -3916,6 +3916,18 @@ trait EmitLlvmExpr
             $this->lastValueType = 'ptr';
             return '';
         }
+        // bool → "1" / "" (the int path rendered false as "0").
+        if ($operand->type->kind === Type::KIND_BOOL) {
+            $out = $this->coerceToI64();
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = select i1 ' . $nz . ', ptr ' . $this->litStr('1')
+                  . ', ptr ' . $this->strSymBytes('@.cstr.empty') . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         // A tagged cell (mixed) → dispatch on its tag at runtime. A FRESH
         // cell temp keeps its tagged word parked by the result ptr, so the
         // concat's release ({@see EmitLlvm::concatTempRelease}) can drop the
