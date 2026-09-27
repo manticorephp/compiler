@@ -261,6 +261,9 @@ final class OwnLattice implements Lattice
                 if ($x === self::SCALAR) { $v = self::EMPTY; }
             } elseif ($mode === self::SELF_COPY) {
                 if ($x > 0 && isset($this->cellish[$x])) { $v = $this->storeKey[$id]; }
+                // A cell self-copy stores `__mir_cell_own_alias`'s answer, a
+                // value the slot owns: a borrowed cell leaves it owned.
+                if (self::isBorrow($x) && isset($this->cellish[self::borrowKey($x)])) { $v = $this->storeKey[$id]; }
             } elseif ($mode === self::SELF_APPEND) {
                 $v = $this->storeKey[$id];
             } else {

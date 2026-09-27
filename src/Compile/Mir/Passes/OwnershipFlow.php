@@ -958,7 +958,13 @@ final class OwnershipFlow implements Pass
                 if (!isset($this->feKeyOf[$val])) { $this->feKeyOf[$val] = $k; }
                 $this->noteOwnKey($val, $k);
             } else {
-                $this->bindBorrow($lat, $id, $val, $fe->array->type->element ?? Type::unknown(), true);
+                $et = $fe->array->type->element ?? Type::unknown();
+                // An erased element bound to a name the body keeps a CELL (a
+                // merge box-back re-tags it there): the slot holds that borrowed
+                // word as a cell, and the owned cell another path leaves meets
+                // it as a Borrow of the same class, not as a scalar.
+                if ($et->kind === Type::KIND_UNKNOWN && self::storesCell($fe->body, $val)) { $et = Type::cell(); }
+                $this->bindBorrow($lat, $id, $val, $et, true);
             }
         }
         $key = $fe->keyVar;
@@ -968,6 +974,17 @@ final class OwnershipFlow implements Pass
             if ($kt->kind === Type::KIND_UNKNOWN) { $kt = Type::cell(); }
             $this->bindBorrow($lat, $id, $key, $kt, false);
         }
+    }
+
+    /** Does a store under `$n` put a cell into local `$name`? */
+    private static function storesCell(Node $n, string $name): bool
+    {
+        if ($n instanceof StoreLocal && $n->name === $name
+            && InsertMemoryOps::slotStoredType($n)->kind === Type::KIND_CELL) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if (self::storesCell($c, $name)) { return true; }
+        }
+        return false;
     }
 
     private function bindBorrow(OwnLattice $lat, int $id, string $name, Type $t, bool $value): void
