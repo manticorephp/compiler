@@ -992,7 +992,8 @@ final class Ownership
     private function methodReturnsErasedArray(string $class, string $method): bool
     {
         $lm = \strtolower($method);
-        if ($class === '' || isset($this->ctx->byRefMethodNames[$lm])) { return false; }
+        if ($class === '') { return false; }
+        if (isset($this->ctx->byRefMethodNames[$lm]) && $this->familyReturnsByRef(\ltrim($class, '\\'), $method, $lm)) { return false; }
         $sym = $this->methodSymbol($class, $method);
         if ($sym !== '' && isset($this->ctx->erasedArrayFns[$sym])) { return true; }
         if (\count($this->ctx->bareArrayMethods) === 0) { return false; }
@@ -1005,6 +1006,65 @@ final class Ownership
             if ($c === '' || isset($seen[$c])) { continue; }
             $seen[$c] = true;
             if (isset($this->ctx->bareArrayMethods[$c . '::' . $lm])) { return true; }
+            foreach ($this->ctx->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = \ltrim($ia, '\\'); }
+            $cd = $this->ctx->classes[$c] ?? null;
+            if ($cd === null) { continue; }
+            $stack[] = \ltrim($cd->parent, '\\');
+            foreach ($cd->interfaces as $in) { $stack[] = \ltrim($in, '\\'); }
+        }
+        return false;
+    }
+
+    /**
+     * Does any body a call on a `$class` receiver can dispatch to declare
+     * `$method` returning BY REFERENCE? The receiver's ancestors and
+     * interfaces, and every class of this module that extends or implements
+     * it (closed world): that override hands back an address, not an owned
+     * array, so the call is not claimed. An unrelated class's `&m()` is not
+     * in the family.
+     */
+    private function familyReturnsByRef(string $class, string $method, string $lm): bool
+    {
+        /** @var string[] $stack */
+        $stack = [$class];
+        /** @var array<string, bool> $up */
+        $up = [];
+        while (\count($stack) > 0) {
+            $c = (string)\array_pop($stack);
+            if ($c === '' || isset($up[$c])) { continue; }
+            $up[$c] = true;
+            if ($this->declaresByRef($c, $method, $lm)) { return true; }
+            foreach ($this->ctx->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = \ltrim($ia, '\\'); }
+            $cd = $this->ctx->classes[$c] ?? null;
+            if ($cd === null) { continue; }
+            $stack[] = \ltrim($cd->parent, '\\');
+            foreach ($cd->interfaces as $in) { $stack[] = \ltrim($in, '\\'); }
+        }
+        foreach ($this->ctx->classes as $cn => $cd) {
+            if (isset($up[$cn]) || !$this->declaresByRef($cn, $method, $lm)) { continue; }
+            if ($this->isSubtypeOf($cn, $class)) { return true; }
+        }
+        return false;
+    }
+
+    private function declaresByRef(string $c, string $method, string $lm): bool
+    {
+        if (isset($this->ctx->byRefBodiless[$c . '::' . $lm])) { return true; }
+        return $this->ctx->returnsByRef[$c . '__' . $method] ?? false;
+    }
+
+    /** `$name` extends or implements `$base`, transitively. */
+    private function isSubtypeOf(string $name, string $base): bool
+    {
+        /** @var string[] $stack */
+        $stack = [$name];
+        /** @var array<string, bool> $seen */
+        $seen = [];
+        while (\count($stack) > 0) {
+            $c = (string)\array_pop($stack);
+            if ($c === '' || isset($seen[$c])) { continue; }
+            if ($c === $base) { return true; }
+            $seen[$c] = true;
             foreach ($this->ctx->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = \ltrim($ia, '\\'); }
             $cd = $this->ctx->classes[$c] ?? null;
             if ($cd === null) { continue; }

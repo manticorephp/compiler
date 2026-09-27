@@ -48,6 +48,10 @@ final class Module
      *  owned as an erased-array result */
     public array $byRefMethodNames = [];
 
+    /** @var array<string, bool> `Class::method` (lower-cased) → a BODILESS
+     *  (interface / abstract) declaration returning by reference */
+    public array $byRefBodiless = [];
+
     /** @var array<string, true> declared trait names (compile-time
      *  `trait_exists` fold). */
     public array $traitNames = [];

@@ -40,6 +40,9 @@ final class OwnershipContext
     /** @var array<string, bool> {@see Module::$byRefMethodNames} */
     public array $byRefMethodNames = [];
 
+    /** @var array<string, bool> {@see Module::$byRefBodiless} */
+    public array $byRefBodiless = [];
+
     /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
     public array $interfaceAncestors = [];
 
@@ -62,6 +65,7 @@ final class OwnershipContext
         }
         $c->bareArrayMethods = $module->bareArrayMethods;
         $c->byRefMethodNames = $module->byRefMethodNames;
+        $c->byRefBodiless = $module->byRefBodiless;
         $c->interfaceAncestors = $module->interfaceAncestors;
         $c->borrowingBuiltins = AliasOwn::borrowingBuiltins();
         return $c;

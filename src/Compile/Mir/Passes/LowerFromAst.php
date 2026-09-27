@@ -5502,7 +5502,11 @@ final class LowerFromAst implements Pass
             $cn = \ltrim((string)$cname, '\\');
             foreach ($this->classDeclMethods($cd) as $m) {
                 $mn = \strtolower($this->methodDeclName($m));
-                if ($this->methodDeclByRef($m)) { $module->byRefMethodNames[$mn] = true; continue; }
+                if ($this->methodDeclByRef($m)) {
+                    $module->byRefMethodNames[$mn] = true;
+                    if ($this->methodDeclBodiless($m)) { $module->byRefBodiless[$cn . '::' . $mn] = true; }
+                    continue;
+                }
                 if ($this->methodDeclBodiless($m) && $this->isBareArrayReturnHint($this->methodDeclReturnType($m))) {
                     $module->bareArrayMethods[$cn . '::' . $mn] = true;
                 }
