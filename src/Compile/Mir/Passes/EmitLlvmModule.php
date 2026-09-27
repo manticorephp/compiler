@@ -541,6 +541,9 @@ trait EmitLlvmModule
             // tagged_compare stringifies a number to compare it against a
             // NON-numeric string (PHP's `5 < "abc"`).
             $this->rt->needsTaggedToStr   = true;
+            // …and releases the string it made ({@see taggedCompareRuntime}).
+            $this->rt->needsRc            = true;
+            $this->rt->needsStrRc         = true;
             $this->rt->needsStrcmp        = true;
             $this->rt->needsStrtod        = true;
         }

@@ -1427,6 +1427,16 @@ trait EmitLlvmExpr
         $out .= "  %ppa = call ptr @__manticore_tagged_to_str(i64 %a)\n";
         $out .= "  %ppb = call ptr @__manticore_tagged_to_str(i64 %b)\n";
         $out .= "  %sc = call i64 @__mir_str_cmp(ptr %ppa, ptr %ppb)\n";
+        // tagged_to_str hands back a string cell's own payload (a borrow) and a
+        // FRESH buffer for anything else — the number side of `5 < "abc"`, once
+        // per comparison, i.e. per sort step. Release what it made.
+        $out .= "  %pla = and i64 %a, 281474976710655\n  %plap = inttoptr i64 %pla to ptr\n";
+        $out .= "  %fra = icmp ne ptr %ppa, %plap\n  br i1 %fra, label %rela, label %chkrelb\n";
+        $out .= "rela:\n  call void @__mir_rc_release_str(ptr %ppa)\n  br label %chkrelb\n";
+        $out .= "chkrelb:\n  %plb = and i64 %b, 281474976710655\n  %plbp = inttoptr i64 %plb to ptr\n";
+        $out .= "  %frb = icmp ne ptr %ppb, %plbp\n  br i1 %frb, label %relb, label %scdone\n";
+        $out .= "relb:\n  call void @__mir_rc_release_str(ptr %ppb)\n  br label %scdone\n";
+        $out .= "scdone:\n";
         // str_cmp hands back the raw byte difference; this function's contract is
         // -1/0/+1 (a `<=>` result is returned verbatim now, not merely tested
         // against 0), so normalize the sign.
@@ -1670,6 +1680,17 @@ trait EmitLlvmExpr
         $out .= "  %same = icmp eq i64 %ta, %tb\n";
         $out .= "  br i1 %same, label %chk, label %ne\n";
         $out .= "chk:\n";
+        // Two INTS compare by value: an int that does not fit the 48-bit inline
+        // form rides a heap box ({@see boxIntRuntime}), a fresh one per boxing, so
+        // two equal big ints are two different words. A pointer-sized id —
+        // spl_object_id on a heap above bit 47 (Linux arm64) — is exactly that.
+        $out .= "  %isint = icmp eq i64 %ta, 1\n";
+        $out .= "  br i1 %isint, label %ints, label %chkarr\n";
+        $out .= "ints:\n";
+        $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
+        $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
+        $out .= "  %ie = icmp eq i64 %ua, %ub\n  %iz = zext i1 %ie to i64\n  ret i64 %iz\n";
+        $out .= "chkarr:\n";
         // Same tag: an ARRAY needs the recursive by-value `===` (same pairs, in
         // order); an OBJECT stays raw-bit identity, which is what PHP's `===`
         // means for objects.
