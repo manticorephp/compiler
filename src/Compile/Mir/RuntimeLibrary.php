@@ -1260,6 +1260,25 @@ final class RuntimeLibrary
         $out .= "  %c = call i32 @memcmp(ptr %a, ptr %b, i64 %la)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  ret i1 %eq\n}\n";
+        // `===` over two string CARRIERS, either of which may be a `?string`'s
+        // null (0): the same word is equal, a null beside a string is not, and
+        // anything else compares bytes. It used to be three blocks and a phi at
+        // every comparison site — 8 493 of them in the compiler's own module.
+        $out .= "\ndefine i1 @__mir_str_eq_ns(i64 %a, i64 %b) {\nentry:\n";
+        $out .= "  %same = icmp eq i64 %a, %b\n";
+        $out .= "  br i1 %same, label %yes, label %nz\n";
+        $out .= "yes:\n  ret i1 1\n";
+        $out .= "nz:\n";
+        $out .= "  %an = icmp eq i64 %a, 0\n";
+        $out .= "  %bn = icmp eq i64 %b, 0\n";
+        $out .= "  %nul = or i1 %an, %bn\n";
+        $out .= "  br i1 %nul, label %no, label %cmp\n";
+        $out .= "no:\n  ret i1 0\n";
+        $out .= "cmp:\n";
+        $out .= "  %pa = inttoptr i64 %a to ptr\n";
+        $out .= "  %pb = inttoptr i64 %b to ptr\n";
+        $out .= "  %r = call i1 @__mir_str_eq(ptr %pa, ptr %pb)\n";
+        $out .= "  ret i1 %r\n}\n";
 
         // ── The 256 single-byte strings, interned ───────────────────────────
         //

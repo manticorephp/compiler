@@ -5174,7 +5174,35 @@ final class EmitLlvm implements EmitVisitor
      * lastValue ← the vec ptr as i64. Shared by the backtrace builtin and the
      * Throwable trace capture.
      */
+    /**
+     * The active frames of `$global` (`@__mir_bt_name` / `@__mir_bt_line`) as a
+     * fresh packed vec, innermost first — ONE body per global, called: the copy
+     * loop used to be inlined twice at every Throwable construction.
+     */
     private function emitBtVec(string $global): string
+    {
+        $key = '__mc_btvec_' . \ltrim($global, '@');
+        $sym = '@manticore_' . $key;
+        if (!isset($this->propertyReadHelpers[$key])) {
+            $oldSsa = $this->ssa;
+            $oldLast = $this->lastValue;
+            $oldLastType = $this->lastValueType;
+            $this->ssa = new \Compile\Mir\SsaBuilder();
+            $this->ssa->reset();
+            $body = $this->btVecLoopIr($global);
+            $this->propertyReadHelpers[$key] = 'define linkonce_odr i64 ' . $sym . "() {\nentry:\n"
+                . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+            $this->ssa = $oldSsa;
+            $this->lastValue = $oldLast;
+            $this->lastValueType = $oldLastType;
+        }
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $r . ' = call i64 ' . $sym . "()\n";
+    }
+
+    private function btVecLoopIr(string $global): string
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";

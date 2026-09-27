@@ -4950,6 +4950,23 @@ trait EmitLlvmExpr
             // address 0 — guard it: strcmp only when both carriers are
             // non-null; otherwise the result is the i64-carrier identity
             // (both null → equal, one null → unequal).
+            $bothKnownStr = $lk === Type::KIND_STRING && $rk === Type::KIND_STRING;
+            if (($isEq || $isNe) && ($strictEq || !$bothKnownStr)) {
+                $eqr = $this->ssa->allocReg();
+                $chunks[] = '  ' . $eqr . ' = call i1 @__mir_str_eq_ns(i64 ' . $li . ', i64 ' . $ri . ")\n";
+                $res = $eqr;
+                if ($isNe) {
+                    $res = $this->ssa->allocReg();
+                    $chunks[] = '  ' . $res . ' = xor i1 ' . $eqr . ", true\n";
+                }
+                $chunks[] = $this->freeStrTemp($c->left, $lp);
+                $chunks[] = $this->freeStrTemp($c->right, $rp);
+                $extReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $res . " to i64\n";
+                $this->lastValue = $extReg;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
+            }
             if ($isEq || $isNe) {
                 $lnz = $this->ssa->allocReg();
                 $chunks[] = '  ' . $lnz . ' = icmp ne i64 ' . $li . ", 0\n";
