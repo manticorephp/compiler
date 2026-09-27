@@ -114,6 +114,7 @@ trait InferScans
         // [[selfhost_array_ref_nesting]].
         $this->assocFound = [];
         foreach ($module->functions as $fn) {
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_PROPERTY_ACCESS)) { continue; }
             // Reuse $this->localTypes (well-typed array<string,Type>) for
             // param lookups so isStringKey / scanObjClass resolve element
             // types under self-host (a bare local map would not).
@@ -155,6 +156,7 @@ trait InferScans
         $this->ctorPropChanged = false;
         $this->ctorParamNamesCache = [];
         foreach ($module->functions as $fn) {
+            if (!$this->bodyHas($fn, Node::KIND_NEW_OBJ)) { continue; }
             $this->scanCtorPropNode($fn->body, $module);
         }
         return $this->ctorPropChanged;
@@ -477,6 +479,8 @@ trait InferScans
             // fill another object's property (`$b->xs[] = "a"`) — the collector
             // resolves those from the receiver's type, so scan it too. `$cls`
             // stays '' and only gates the `$this->` arm.
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_PROPERTY_ACCESS)
+                && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $this->collectPropElemStores($fn->body, $cls, $observed, $unusable);
         }
         $changed = false;
@@ -525,6 +529,7 @@ trait InferScans
         $observed = [];   // global cell symbol → element Type (cell when mixed)
         $unusable = [];   // global cell symbol → true
         foreach ($module->functions as $fn) {
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)) { continue; }
             $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
         }
         /** @var array<string, Type> $targets */
@@ -543,6 +548,7 @@ trait InferScans
         // times the static properties that have stores.
         $changed = false;
         foreach ($module->functions as $fn) {
+            if (!$this->bodyHas($fn, Node::KIND_STATIC_PROP)) { continue; }
             if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; }
         }
         if ($changed && $this->ctx !== null) {
@@ -1146,6 +1152,13 @@ trait InferScans
             // narrow to — the param stays a cell and the callers' slots follow
             // it ({@see scanRefCellArgWiden}). An element or property store
             // through the param leaves the word itself alone and narrows fine.
+            $anyRef = false;
+            foreach ($fn->params as $p) {
+                if ($p->byRef && !$p->variadic
+                    && ($p->type->kind === Type::KIND_CELL
+                        || $p->type->kind === Type::KIND_UNKNOWN)) { $anyRef = true; }
+            }
+            if (!$anyRef) { continue; }
             $whole = [];
             $this->collectWholeStores($fn->body, $whole);
             $idx = 0;
@@ -1163,7 +1176,14 @@ trait InferScans
         /** @var array<string, Type> */
         $observed = [];                  // "fn#idx" → Type
         $conflict = [];                  // "fn#idx" → true
+        /** @var array<string, bool> $candCallees */
+        $candCallees = [];
+        foreach ($cand as $ck => $unused) {
+            $cut = \strrpos($ck, '#');
+            if ($cut !== false) { $candCallees['callf:' . \substr($ck, 0, $cut)] = true; }
+        }
         foreach ($module->functions as $fn) {
+            if (!$this->bodyHasAnyOf($fn, $candCallees)) { continue; }
             $this->collectRefArgTypes($fn->body, $cand, $observed, $conflict);
         }
         $changed = false;
@@ -1228,6 +1248,7 @@ trait InferScans
             $active = [];
             /** @var array<string,string> $cells */
             $cells = [];
+            if (!$this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) { continue; }
             /** @var array<string,string> $initKinds */
             $initKinds = [];
             $this->collectPlainStaticLocals($fn->body, $active, $cells, $initKinds);
@@ -1449,6 +1470,7 @@ trait InferScans
             // A prelude body is linkonce_odr and shared across modules — never
             // specialize one from this module's capture sites.
             if ($fn->isPrelude) { continue; }
+            if (!$this->bodyHas($fn, Node::KIND_CLOSURE)) { continue; }
             $sites = [];
             $this->scanByRefCaptureNode($fn->body, $sites);
             foreach ($sites as $site => $unused) {
@@ -1630,6 +1652,9 @@ trait InferScans
             // retroactively make them cells. Forcing vec[cell] on one made the
             // rc walkers drop raw string elements as cells (libmalloc abort in
             // stat_functions). Only a locally-CONSTRUCTED `[]` is ours to retype.
+            if (!$this->bodyHas($fn, Node::KIND_ARRAY_LIT)) { continue; }
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_LOAD_LOCAL)
+                && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $found = [];
             $this->scanLocalElemNode($fn->body, $found);
             // The same erasure with two CONCRETE stores instead of a cell one:
@@ -1725,6 +1750,7 @@ trait InferScans
             // an imported body is not ours to retype.
             if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
             if ($fn->isExtern) { continue; }
+            if (!$this->bodyHas($fn, 'call:array_unshift')) { continue; }
             $skip = [];
             foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
             $lits = [];
@@ -1820,6 +1846,15 @@ trait InferScans
         $this->rescanTouched = [];
         $foreign = $this->buildForeignElemMap($module);
         if (\count($foreign) === 0) { return false; }
+        // Keyed `callee#argIndex`: a body that calls none of these callees (and
+        // holds no closure, whose by-ref captures key as `__closure_N#i`) has
+        // no argument for {@see collectByRefWidenArgs} to find.
+        /** @var array<string, bool> $foreignCallees */
+        $foreignCallees = [];
+        foreach ($foreign as $fk => $unused) {
+            $cut = \strrpos($fk, '#');
+            if ($cut !== false) { $foreignCallees['callf:' . \substr($fk, 0, $cut)] = true; }
+        }
         $changed = false;
         foreach ($module->functions as $fn) {
             // A prelude body is linkonce_odr and shared across modules — never
@@ -1827,6 +1862,7 @@ trait InferScans
             if ($fn->isPrelude) { continue; }
             // Nor an imported one, whose body lives in a dependency's `.o`.
             if ($fn->isExtern) { continue; }
+            if (!$this->bodyHas($fn, Node::KIND_CLOSURE) && !$this->bodyHasAnyOf($fn, $foreignCallees)) { continue; }
             // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
             // caller's array and its elements already have a representation.
             $found = [];
@@ -1871,6 +1907,11 @@ trait InferScans
     private function buildForeignElemMap(Module $module): array
     {
         $map = [];
+        // The origin flow of a body depends on neither the param nor the map, so
+        // it is computed once per function here rather than once per by-ref
+        // param per fixpoint round.
+        /** @var array<string, array<string, string>> $origins */
+        $origins = [];
         $guard = 0;
         $changed = true;
         while ($changed && $guard < 4) {
@@ -1883,7 +1924,8 @@ trait InferScans
                     $idx = $idx + 1;
                     if (!$p->byRef || $p->variadic) { continue; }
                     $key = $fn->name . '#' . (string)$idx;
-                    $tok = $this->foreignElemTokens($fn, $p->name, $map);
+                    if (!isset($origins[$fn->name])) { $origins[$fn->name] = $this->elemOrigins($fn); }
+                    $tok = $this->foreignElemTokens($fn, $p->name, $map, $origins[$fn->name]);
                     if (\count($tok) === 0) { continue; }
                     if (\count($tok) !== \count($map[$key] ?? [])) { $changed = true; }
                     $map[$key] = $tok;
@@ -1901,13 +1943,11 @@ trait InferScans
      * family stays off the widening path.
      *
      * @param array<string, array<string,bool>> $map
+     * @param array<string, string> $origin {@see elemOrigins}
      * @return array<string,bool>
      */
-    private function foreignElemTokens(FunctionDef $fn, string $pname, array $map): array
+    private function foreignElemTokens(FunctionDef $fn, string $pname, array $map, array $origin): array
     {
-        // local name → "<param name>|<0|1 through an element read>"
-        $origin = [];
-        foreach ($fn->params as $prm) { $origin[$prm->name] = $prm->name . '|0'; }
         $paramIdx = [];
         $paramVariadic = [];
         $i = -1;
@@ -1916,11 +1956,22 @@ trait InferScans
             $paramIdx[$prm->name] = $i;
             $paramVariadic[$prm->name] = $prm->variadic;
         }
-        $guard = 0;
-        while ($guard < 3 && $this->spreadElemOrigin($fn->body, $origin)) { $guard = $guard + 1; }
         $tokens = [];
         $this->collectForeignTokens($fn->body, $pname, $origin, $paramIdx, $paramVariadic, $map, $tokens);
         return $tokens;
+    }
+
+    /**
+     * local name → "<param name>|<0|1 through an element read>" for one body.
+     * @return array<string, string>
+     */
+    private function elemOrigins(FunctionDef $fn): array
+    {
+        $origin = [];
+        foreach ($fn->params as $prm) { $origin[$prm->name] = $prm->name . '|0'; }
+        $guard = 0;
+        while ($guard < 3 && $this->spreadElemOrigin($fn->body, $origin)) { $guard = $guard + 1; }
+        return $origin;
     }
 
     /** One round of origin flow: a local filled out of a param-derived array (or

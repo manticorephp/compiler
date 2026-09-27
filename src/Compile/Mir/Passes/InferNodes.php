@@ -238,16 +238,20 @@ trait InferNodes
         // undone by `$a = 1` on the next round and the fixpoint never carries it.
         // The two readers below consult this set directly.
         $this->refCellLocalsCur = [];
-        $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        if ($this->bodyHas($fn, Node::KIND_REF_CELL)) {
+            $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        }
         $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
         // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
         // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
         // box — a cell — whatever it is later assigned.
-        $this->collectElemRefTargetsInfer($fn->body);
+        if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectElemRefTargetsInfer($fn->body); }
         // A `static $x;` whose stores are scalar rides a CELL for the same
         // reason a ref-taken slot does: its null start must stay observable
         // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
-        $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
+        if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
+            $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
+        }
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
@@ -403,7 +407,7 @@ trait InferNodes
         // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
         // a raw string pointer.
         $this->refElemBases = [];
-        $this->collectRefElemBases($fn->body);
+        if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectRefElemBases($fn->body); }
         foreach ($this->refElemBases as $name => $unused) {
             unset($this->recordLocals[$name]);
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }

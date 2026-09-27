@@ -215,6 +215,56 @@ final class InferTypes implements Pass
         foreach (Walk::children($n) as $c) { $this->fpCallTypes($c, $acc); }
     }
 
+    /**
+     * fn name → the node kinds its body holds, plus `call:<short name>` for every
+     * direct call. One walk per function per run, so a scan that looks for a RARE
+     * node (a reference, a `static` local, a closure capture, `array_unshift`,
+     * an element store by what it stores INTO — `se:<base kind>`)
+     * skips the bodies that cannot hold it instead of walking every body on
+     * every pass. Sound within a run: inference itself only mints StoreLocal /
+     * LoadLocal / Block / IntConst nodes ({@see boxBackStore}), never a kind a
+     * scan is gated on.
+     * @var array<string, array<string, bool>>
+     */
+    private array $bodyKinds = [];
+
+    private function bodyHas(FunctionDef $fn, string $kind): bool
+    {
+        $set = $this->bodyKinds[$fn->name] ?? null;
+        if ($set === null) {
+            $set = [];
+            $this->collectBodyKinds($fn->body, $set);
+            $this->bodyKinds[$fn->name] = $set;
+        }
+        return isset($set[$kind]);
+    }
+
+    /** @param array<string, bool> $keys */
+    private function bodyHasAnyOf(FunctionDef $fn, array $keys): bool
+    {
+        $this->bodyHas($fn, Node::KIND_BLOCK);
+        foreach ($this->bodyKinds[$fn->name] as $k => $unused) {
+            if (isset($keys[$k])) { return true; }
+        }
+        return false;
+    }
+
+    /** @param array<string, bool> $set */
+    private function collectBodyKinds(Node $n, array &$set): void
+    {
+        $set[$n->kind] = true;
+        if ($n->kind === Node::KIND_CALL) {
+            $fname = $n->function;
+            $bs = \strrpos($fname, '\\');
+            if ($bs !== false) { $fname = \substr($fname, $bs + 1); }
+            $set['call:' . $fname] = true;
+            $set['callf:' . $n->function] = true;
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $set['se:' . $n->array->kind] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->collectBodyKinds($c, $set); }
+    }
+
     /** @return FunctionDef[] */
     private function functionsForScope(Module $module): array
     {
@@ -753,6 +803,7 @@ final class InferTypes implements Pass
         $this->sigs = [];
         $this->callGraph = null;
         $this->rescanTouched = [];
+        $this->bodyKinds = [];
         $this->classes = $module->classes;
         $this->declarersIdx = [];
         $this->enums = $module->enums;
@@ -1853,6 +1904,7 @@ final class InferTypes implements Pass
     {
         $out = [];
         foreach ($this->functionsForScope($module) as $fn) {
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_LOAD_LOCAL)) { continue; }
             if ($this->bodyHasUntypedAssocKeyStore($fn->body)) {
                 $out[$fn->name] = true;
             }
