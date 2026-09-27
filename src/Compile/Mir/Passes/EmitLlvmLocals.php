@@ -667,8 +667,11 @@ trait EmitLlvmLocals
                 $oldRaw = $this->lastValue;
             }
             // Boxing its own raw value MOVES it: a flat box keeps the pointer
-            // and the slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}).
-            $this->boxSelfMove = $mixSelf;
+            // and the slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}) —
+            // the SELF_MOVE {@see OwnershipFlow} plans for every plain slot, mixed
+            // or not. A module cell keeps its retain: its predecessor release
+            // ({@see globalCellOwnIr}) gives the same count back.
+            $this->boxSelfMove = $selfBox && !isset($this->locals->globalBacked[$sl->name]);
             $out .= $this->boxToCell($sl->value->type, $sl->value);
             $this->boxSelfMove = false;
             $boxed = $this->lastValue;
