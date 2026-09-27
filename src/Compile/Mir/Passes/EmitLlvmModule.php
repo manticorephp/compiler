@@ -972,8 +972,7 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
-        $this->frame->erasedArrayReturn = \Compile\Mir\Ownership::erasedArrayReturn($fn,
-            $isClosure || $this->frame->isTrampoline);
+        $this->frame->erasedArrayReturn = \Compile\Mir\Ownership::erasedArrayReturn($fn);
         $this->frame->erasedCond = null;
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
@@ -2302,26 +2301,30 @@ trait EmitLlvmModule
         }
         // An erased-array return normalizes every arm of a conditional it hands
         // back to +1 ({@see condOwnsResult}); the pass drops every owned local.
-        if ($this->frame->erasedArrayReturn && \Compile\Mir\CondOwn::isConditional($v)
-            && !$this->own->condOwnedTemp($v)) {
+        if ($this->own->returnCondNormalized($v, $this->frame->erasedArrayReturn) && !$this->own->condOwnedTemp($v)) {
             $this->frame->erasedCond = $v;
         }
+        // The +1 this return takes — ONE decision, the pass reads the same one
+        // ({@see \Compile\Mir\Ownership::returnRetain}); the branches below execute it.
+        $retKind = $this->own->returnRetain($v, $this->frame->returnType,
+            $this->frame->isClosure || $this->frame->isTrampoline, $this->frame->erasedArrayReturn,
+            $returnedLocal !== null && isset($this->frame->ownLocals[$returnedLocal]));
         $out = $this->emitNode($v);
+        $this->frame->erasedCond = null;
         // Uniform closure ABI: a closure returns a scalar as a tagged cell, so a
         // dynamic `callable` caller reads it by tag and a known caller unboxes to
         // the sig's concrete type ({@see emitInvoke}). Arrays/objects ride raw
         // (boxToCell would rebuild an array) — they fall through to the normal
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
-        if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
+        if (($this->frame->isClosure || $this->frame->isTrampoline) && \Compile\Mir\Ownership::cellBoxableKind($v->type)) {
             // The same +1 the `: mixed` path below takes: a BORROWED string
             // (`return $o->n;`) boxed as-is handed the caller a cell over a
             // buffer the object still owned, and the caller's release freed it
             // — the next `.=` on the property wrote into freed memory.
-            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $ri = $this->retainCellPayload($v);
-                $out .= $ri;
-            } elseif ($v->type->kind === Type::KIND_CELL && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+            if ($retKind === \Compile\Mir\Ownership::RET_CELL_PAYLOAD) {
+                $out .= $this->retainCellPayload($v);
+            } elseif ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
                 // …and a borrowed CELL (`return $this->mixed;`), by tag.
                 $this->rt->needsRc = true;
                 $this->rt->needsStrRc = true;
@@ -2345,6 +2348,16 @@ trait EmitLlvmModule
         // raw int and leaves a tagged word alone.
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
+            if ($retKind === \Compile\Mir\Ownership::RET_ERASED) {
+                // A borrowed erased array of an erased-array closure takes its +1
+                // by tag before it is boxed.
+                $sv = $this->lastValue;
+                $st = $this->lastValueType;
+                $out .= $this->coerceToI64();
+                $out .= $this->rcRetainReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
+                $this->lastValue = $sv;
+                $this->lastValueType = $st;
+            }
             $out .= ($this->lastValueType === 'double' || $this->lastValueType === 'ptr')
                 ? $this->boxLastByRepr() : $this->boxUnknownShallowIr();
             return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
@@ -2355,7 +2368,7 @@ trait EmitLlvmModule
         // `vec[cell]` and every arm must actually BE cell-element — otherwise the
         // reader unboxes this arm's raw string pointers by tag. Rebuild it with
         // each element boxed, left raw (an array slot travels raw).
-        if ($this->needsCellify($this->frame->returnType, $v->type)) {
+        if (\Compile\Mir\Ownership::needsCellify($this->frame->returnType, $v->type)) {
             $out .= $this->emitCellifyArrayRaw($v->type->element, $this->cellifySourceFlavor($v));
             // The rebuild is a FRESH array (+1, owned by the caller — no retain,
             // unlike a borrowed passthrough), but it leaves a raw `ptr`: the ABI
@@ -2377,9 +2390,8 @@ trait EmitLlvmModule
             // buffer the caller's arg temp then frees → the assoc scramble /
             // borrowed-buffer UAF. Gated by isBorrowedObjReturn so owned
             // producers (call/new/concat/owned-local) keep their fresh +1.
-            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
-                $ri = $this->retainCellPayload($v);
-                $out .= $ri;
+            if ($retKind === \Compile\Mir\Ownership::RET_CELL_PAYLOAD) {
+                $out .= $this->retainCellPayload($v);
             }
             // An UNKNOWN value may ALREADY be a tagged cell (an element read out
             // of a bare-`array` slot). boxToCell would int-box it a second time.
@@ -2388,7 +2400,7 @@ trait EmitLlvmModule
                 // discarded result would free a payload this function only
                 // BORROWED. retainCellPayload can't see it (an unknown names no
                 // rc kind), so retain by runtime tag — a no-op for a scalar cell.
-                if ($this->isBorrowedCellReturn($v, $returnedLocal)) {
+                if ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
                     $this->rt->needsRc = true;
                     $this->rt->needsStrRc = true;
                     $out .= $this->coerceToI64();
@@ -2407,10 +2419,7 @@ trait EmitLlvmModule
             // nothing retained it: the caller's `__mir_cell_drop` of a DISCARDED
             // result then freed an element still in the array (use-after-free on
             // the next read). Retain by runtime tag — a no-op for a scalar cell.
-            if ($this->frame->returnType !== null
-                && $this->frame->returnType->kind === Type::KIND_CELL
-                && $v->type->kind === Type::KIND_CELL
-                && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+            if ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
                 $this->rt->needsRc = true;
                 $this->rt->needsStrRc = true;
                 $out .= $this->coerceToI64();
@@ -2468,18 +2477,17 @@ trait EmitLlvmModule
             // owned-local transfers are already +1. The declared return type
             // is the fallback: it is what the CALLER assumes ({@see
             // ownershipReturnType}).
-            if ($this->callHandsBorrow($v)) {
+            if ($retKind === \Compile\Mir\Ownership::RET_OBJ) {
                 // rcRetainByType reads every call as a +1 transfer.
                 $out .= $this->rcRetainReg($this->lastValue, 'obj');
-            } elseif ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+            } elseif ($retKind === \Compile\Mir\Ownership::RET_TYPED) {
                 $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
-            } elseif ($this->frame->erasedArrayReturn && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+            } elseif ($retKind === \Compile\Mir\Ownership::RET_ERASED) {
                 // An erased array handed back as it stands — a raw buffer or a
                 // tagged cell — takes its +1 by tag: the caller owns what it stores.
                 $out .= $this->rcRetainReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
             }
         }
-        $this->frame->erasedCond = null;
         return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
     }
 
@@ -2511,37 +2519,7 @@ trait EmitLlvmModule
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 
-    /**
-     * The type the CALLER will assume for the returned value.
-     *
-     * A read out of an element-type-erased array (`return $a[$i]` where `$a` is
-     * a bare-`array` param) types the expression UNKNOWN/CELL, but the caller
-     * takes ownership per the fn's DECLARED return type. Deciding the +1 from
-     * the erased expression type makes the two sides disagree: the callee skips
-     * the retain while the caller still releases, freeing an object the array
-     * still owns (double-free → SIGTRAP). So ownership follows the declared type
-     * whenever the expression's own type carries none.
-     */
-    private function ownershipReturnType(Node $v): Type
-    {
-        $tk = $v->type->kind;
-        if ($tk !== Type::KIND_UNKNOWN && $tk !== Type::KIND_CELL) { return $v->type; }
-        if ($this->frame->returnType === null) { return $v->type; }
-        return $this->frame->returnType;
-    }
 
-    /**
-     * A CELL-element array slot receiving a CONCRETE-element array value — the
-     * cellify boundary ({@see EmitLlvmBuiltins::emitCellifyArrayRaw}). The exact
-     * mirror of the de-cellify direction {@see EmitLlvmBuiltins::needsDeCellify}
-     * plants at a store.
-     *
-     * Both sides must be arrays of the SAME shape (vec/vec, assoc/assoc): the
-     * rebuild walks keys, so a vec↔assoc pair is not a repr change but a shape
-     * change, which no arm of a return join produces. An `unknown` element is
-     * NOT cellified — nothing is known to box, and an erased array must stay raw
-     * (the `cow2` carve-out).
-     */
     /**
      * Does {@see emitReturn} REBUILD the returned array into a fresh cell array?
      * True for every arm below that reaches
@@ -2558,125 +2536,13 @@ trait EmitLlvmModule
         $el = $t->element;
         if ($el === null || $el->kind === Type::KIND_CELL
             || $el->kind === Type::KIND_UNKNOWN) { return false; }
-        if ($this->needsCellify($this->frame->returnType, $t)) { return true; }
+        if (\Compile\Mir\Ownership::needsCellify($this->frame->returnType, $t)) { return true; }
         $rt = $this->frame->returnType;
         if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
         return ($this->frame->isClosure || $this->frame->isTrampoline)
-            && $this->isCellBoxableArg($t);
+            && \Compile\Mir\Ownership::cellBoxableKind($t);
     }
 
-    private function needsCellify(?Type $slot, ?Type $val): bool
-    {
-        if ($slot === null || $val === null) { return false; }
-        if (!$slot->isArray() || !$val->isArray()) { return false; }
-        if ($slot->isAssoc() !== $val->isAssoc()) { return false; }
-        $se = $slot->element;
-        $ve = $val->element;
-        if ($se === null || $ve === null) { return false; }
-        if ($se->kind !== Type::KIND_CELL) { return false; }
-        return $ve->kind !== Type::KIND_CELL && $ve->kind !== Type::KIND_UNKNOWN;
-    }
-
-    /** Whether an obj/vec return value is a borrowed reference (needs +1). */
-    /**
-     * Whether an UNKNOWN-typed value returned as a cell is BORROWED — the same
-     * producer test {@see isBorrowedObjReturn} applies, minus the type test it
-     * cannot make (an `unknown` names no rc kind, so that predicate always said
-     * "not borrowed" and the caller's cell_drop freed a live array element).
-     */
-    private function isBorrowedCellReturn(Node $v, ?string $returnedLocal): bool
-    {
-        $k = $v->kind;
-        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
-            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
-            || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
-            || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST
-            || \Compile\Mir\BitOp::mintsFresh($v)) {
-            return false; // owned producer (+1 already) or immortal
-        }
-        // `(object)$v` is owned on every path ({@see EmitLlvmExpr::emitCast}).
-        if ($v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
-        if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->frame->ownLocals[$returnedLocal])) {
-            return false; // transfer of an owned local
-        }
-        // A normalized conditional is +1 from whichever arm ran — the same
-        // sentence {@see isBorrowedObjReturn} has always carried, and the cell
-        // half was missing it. `: string|false` returning `$c ? substr(…) : false`
-        // is THE union idiom, and every call of one leaked its whole payload:
-        // the arm's fresh +1, plus this retain, against the caller's single
-        // drop. 12.3 → 43.8 MB over 200k→800k calls, flat once the retain goes.
-        if ($this->condOwnsResult($v)) { return false; }
-        return true;
-    }
-
-    /**
-     * The one call that is NOT a +1: `__mir_fiber_current()` reads the running
-     * fiber out of a global the fiber's owner holds ({@see
-     * InsertMemoryOps::isOwnedObj} refuses to own it for that reason). Returned
-     * as it stood, `Fiber::getCurrent()` handed its caller a borrow under the
-     * +1 convention, so a caller that owns the result — a local, a spilled
-     * `Fiber::getCurrent() !== null` operand — freed the live fiber.
-     */
-    private function callHandsBorrow(Node $v): bool
-    {
-        return $v instanceof \Compile\Mir\Call && \Compile\Mir\AliasOwn::builtinHandsBorrow($v->function);
-    }
-
-    private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
-    {
-        $t = $this->ownershipReturnType($v);
-        $tk = $t->kind;
-        // vec AND assoc: both are one rc'd buffer. Testing only isVec() (an
-        // array that is NOT string-keyed) left a borrowed ASSOC return at +0
-        // while every caller assumed +1 — `$t = $p->all(); count($t)` read a
-        // buffer the object still owned and had already freed.
-        $isArr = $t->isVec() || $t->isAssoc();
-        if ($tk !== Type::KIND_OBJ && !$isArr
-            && $tk !== Type::KIND_STRING && $tk !== Type::KIND_CLOSURE) { return false; }
-        // A closure is NOT excluded: its env is counted, and the caller owns
-        // what a call returns ({@see InsertMemoryOps::isOwnedObj}), so a
-        // borrowed one (`return $this->handler;`) is retained like an object.
-        if ($tk === Type::KIND_OBJ && $this->objTypeIsStruct($t)) { return false; }
-        $k = $v->kind;
-        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
-            || \Compile\Mir\BitOp::mintsFresh($v)) {
-            return false; // owned producer — already +1
-        }
-        // A normalized conditional is +1 from whichever arm ran; a second retain
-        // here would hand the caller two references and free none.
-        if ($this->condOwnsResult($v)) { return false; }
-        if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
-        // A fresh stdClass from `(object)$arr` is +1 like a `new`.
-        if ($tk === Type::KIND_OBJ && $v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
-        if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
-        // A concat is an owned +1; a literal is immortal — neither needs a
-        // borrow retain. (rcRetainByType also no-ops these, but short-
-        // circuit here so the convention reads clearly.)
-        if ($tk === Type::KIND_STRING
-            && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return false; }
-        // …and so is a `(string)` cast of an int or a float: __mir_int_to_str /
-        // __mir_float_to_str mint a fresh rc=1 buffer. Judged a BORROW, the
-        // return took a second retain and the caller's single release left it at
-        // rc 1 — `return (string)$v;` leaked EVERY string it ever produced, which
-        // is `__mc_json_enc`'s int arm and 100% of that walker's scalar output.
-        // Third of the three predicates that have to agree about a cast:
-        // {@see Passes\InsertMemoryOps::isOwnedObj} schedules the local's
-        // release, {@see EmitLlvm::isFreshStringTemp} frees a fresh argument,
-        // and this one decides the RETURN convention.
-        if ($tk === Type::KIND_STRING && $k === Node::KIND_CAST) {
-            $ok = $v->operand->type->kind;
-            if ($ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
-                || $ok === Type::KIND_CELL) { return false; }
-        }
-        if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->frame->ownLocals[$returnedLocal])) {
-            return false; // transfer of an owned local
-        }
-        return true; // param / alias / property / array read — borrow
-    }
 
     /**
      * Strip a NaN tag off a by-value bare-`array` param on entry: its slot is

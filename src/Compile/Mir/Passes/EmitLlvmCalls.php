@@ -1580,6 +1580,7 @@ trait EmitLlvmCalls
         // expanded into multiple positional slots.
         $pi = 0;
         $padDrops = '';
+        $erasedArgDrops = '';
         $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
@@ -1662,6 +1663,16 @@ trait EmitLlvmCalls
             if ($packNode !== null && $a === $packNode && $packTarget !== null) {
                 $out .= $this->emitCellArrayToTyped($packTarget);
             }
+            // An erased array a declared-`array` callee handed back is a +1 temp:
+            // given back once the closure returns.
+            if ($this->freshRcArgFlavor($a) === \Compile\Mir\Ownership::ERASED_ARR) {
+                $sv = $this->lastValue;
+                $st = $this->lastValueType;
+                $out .= $this->coerceToI64();
+                $erasedArgDrops .= $this->rcReleaseReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
+                $this->lastValue = $sv;
+                $this->lastValueType = $st;
+            }
             $pt = $calleeParams[$capCnt + $pi] ?? null;
             // Cellify only for a KNOWN callee whose param is provably erased
             // (a cell; {@see closureArgRepr}). A dynamic callee (`callable`) can't be gated — its
@@ -1724,6 +1735,7 @@ trait EmitLlvmCalls
         }
         $out .= $this->faPop();
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
+        $out .= $erasedArgDrops;
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // A by-REFERENCE closure returns the ADDRESS of an lvalue rather than a
@@ -2960,6 +2972,10 @@ trait EmitLlvmCalls
         if ($this->condOwnsResult($s)) {
             $cf = $this->condFlavor($s->type);
             return $cf === '' ? '' : $this->rcReleaseReg($this->lastValue, $cf);
+        }
+        // A declared-`array` callee hands back its erased array at +1.
+        if (!($this->lastCallWasBuiltin && $k === Node::KIND_CALL) && $this->own->erasedArrayCall($s)) {
+            return $this->rcReleaseReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
         }
         if ($k === Node::KIND_CALL) {
             // Free-function call: only a USER function reliably +1-owns its

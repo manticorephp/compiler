@@ -161,7 +161,7 @@ final class StoreLocal extends Node
         parent::__construct(Node::KIND_STORE_LOCAL, $type);
     }
 
-    /** Set by {@see Passes\OwnershipFlow} (MANTICORE_OWNFLOW=1): the slot's OLD
+    /** Set by {@see Passes\OwnershipFlow}: the slot's OLD
      *  value — `drop` releases it after the new value is computed, `own_retain`
      *  takes a +1 on it before a self-append consumes it. Not a child. */
     public ?MemoryOp_ $ownOld = null;

@@ -30,8 +30,8 @@ final class OwnershipContext
      *  whose signature is KNOWN (a body in this module) */
     public array $paramByRef = [];
 
-    /** @var array<string, bool> fn names that return an erased array at +1 on
-     *  every path ({@see Ownership::erasedArrayReturn}) */
+    /** @var array<string, bool> fn names (this module's and imported) that
+     *  declare a bare `array` return: +1 on every path ({@see Ownership::erasedArrayReturn}) */
     public array $erasedArrayFns = [];
 
     /** @var string[] builtins whose result is a BORROW ({@see AliasOwn::borrowingBuiltins}) */
@@ -48,9 +48,7 @@ final class OwnershipContext
             $mask = [];
             foreach ($fn->params as $p) { $mask[] = $p->byRef; }
             $c->paramByRef[$fn->name] = $mask;
-            $closureAbi = isset($module->closureCaptures[$fn->name])
-                || Passes\TrampolineSynth::isSynthReturn($fn->name);
-            if (Ownership::erasedArrayReturn($fn, $closureAbi)) { $c->erasedArrayFns[$fn->name] = true; }
+            if (Ownership::erasedArrayReturn($fn)) { $c->erasedArrayFns[$fn->name] = true; }
             if ($fn->ffiSymbol !== null) { $c->externFns[$fn->name] = true; }
         }
         $c->borrowingBuiltins = AliasOwn::borrowingBuiltins();

@@ -2521,6 +2521,7 @@ final class LowerFromAst implements Pass
         );
         $mfn->isGenerator = $isGen;
         $mfn->usesFuncArgs = $usesFuncArgs;
+        $mfn->returnArrayHinted = $this->isBareArrayHint($m->returnType);
         return $mfn;
     }
 

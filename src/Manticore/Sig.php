@@ -356,7 +356,7 @@ final class Sig
                 . ",\"symbol\":" . self::jsonStr('manticore_' . self::mangle($sym))
                 . ",\"static\":" . self::jsonBool($isStatic)
                 . ",\"params\":[" . self::emitParams($fn, $isStatic) . "]"
-                . ",\"ret\":" . self::jsonStr(self::encodeType($fn->returnType))
+                . ",\"ret\":" . self::jsonStr(self::encodeReturn($fn))
                 . "}";
         }
         // `__mc_defaults` is not a method name — it is the property-default
@@ -730,6 +730,15 @@ final class Sig
         return true;
     }
 
+    /** A declared bare `array` return that stayed erased crosses as `array`, so
+     *  the importer knows the callee hands it back at +1
+     *  ({@see \Compile\Mir\Ownership::erasedArrayReturn}). */
+    private static function encodeReturn(FunctionDef $fn): string
+    {
+        if ($fn->returnArrayHinted && $fn->returnType->kind === Type::KIND_UNKNOWN) { return 'array'; }
+        return self::encodeType($fn->returnType);
+    }
+
     private static function emitFunction(FunctionDef $fn): string
     {
         $out = "{\"name\":" . self::jsonStr($fn->name)
@@ -741,7 +750,7 @@ final class Sig
             $first = false;
             $out = $out . self::emitParam($p);
         }
-        $out = $out . "],\"ret\":" . self::jsonStr(self::encodeType($fn->returnType));
+        $out = $out . "],\"ret\":" . self::jsonStr(self::encodeReturn($fn));
         if ($fn->overloadOf !== "") { $out = $out . ",\"overload\":" . self::jsonStr($fn->overloadOf); }
         return $out . "}";
     }

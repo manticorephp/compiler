@@ -3458,13 +3458,7 @@ final class EmitLlvm implements EmitVisitor
      *  at a scalar return). Includes cell (no-op box). Arrays/objects/closures
      *  travel raw — their masked heap ptr is identity, and boxToCell would
      *  rebuild an array's elements. */
-    private function isCellBoxableArg(Type $t): bool
-    {
-        $k = $t->kind;
-        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_BOOL || $k === Type::KIND_STRING
-            || $k === Type::KIND_NULL || $k === Type::KIND_CELL;
-    }
+    private function isCellBoxableArg(Type $t): bool { return \Compile\Mir\Ownership::cellBoxableKind($t); }
 
     /** True when `$t` is an array whose element is a concrete scalar
      *  (int/float/bool/string) — stored RAW, so it must be cellified when the
@@ -3802,7 +3796,8 @@ final class EmitLlvm implements EmitVisitor
             $this->rt->needsArena = true;
             return "  call void @__mir_arena_leave()\n";
         }
-        if ($mo->op === 'drop' || $mo->op === 'own_retain') {
+        // `own_share`: the +1 a container takes of an owned local it stores.
+        if ($mo->op === 'drop' || $mo->op === 'own_retain' || $mo->op === 'own_share') {
             $slot = $this->ownOpSlot($mo);
             if ($slot === '') { return ''; }
             if ($mo->op === 'drop') {

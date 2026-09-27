@@ -86,6 +86,11 @@ final class OwnLattice implements Lattice
     /** @var array<int, string> LoadLocal id → name, for a local a container
      *  store takes without a count of its own: Own(k) becomes Borrow(k) there */
     public array $moveName = [];
+    /** @var array<int, string> LoadLocal id → name, for a container store the
+     *  local stays live past: the container takes its own +1 of the Own value */
+    public array $shareName = [];
+    /** @var array<int, int> share LoadLocal id → the class the local owns there */
+    public array $shareKey = [];
     /** @var array<string, int> name → line of an rc read past a mismatch */
     public array $deadRead = [];
 
@@ -293,6 +298,7 @@ final class OwnLattice implements Lattice
             $x = $in[$n] ?? self::EMPTY;
             if ($x === self::MIXDEAD) { $this->deadRead[$n] = $stmt->line; }
             if ($x > 0 && isset($this->moveName[$id])) { return $this->with($in, $n, self::borrow($x)); }
+            if ($x > 0 && isset($this->shareName[$id])) { $this->shareKey[$id] = $x; }
             return $in;
         }
         if (isset($this->opName[$id])) {

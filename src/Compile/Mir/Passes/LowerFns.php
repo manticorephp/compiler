@@ -291,7 +291,7 @@ trait LowerFns
             $fnp->cellArg = $this->paramCellArg($p) || isset($cellArgNames[$p->name]);
             $params[] = $fnp;
         }
-        return new FunctionDef(
+        $ext = new FunctionDef(
             name: $decl->name,
             params: $params,
             returnType: $this->lowerTypeHint($this->effectiveHint(
@@ -301,6 +301,8 @@ trait LowerFns
             body: new Block([], Type::void()),
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
+        $ext->returnArrayHinted = $this->isBareArrayHint($decl->returnType);
+        return $ext;
     }
 
     /**
@@ -562,6 +564,7 @@ trait LowerFns
         );
         $clFn->isGenerator = $isGenerator;
         $clFn->usesFuncArgs = $usesFuncArgs;
+        $clFn->returnArrayHinted = $this->isBareArrayHint($retHint);
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/

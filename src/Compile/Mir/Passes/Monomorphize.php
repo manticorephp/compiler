@@ -854,6 +854,7 @@ final class Monomorphize implements Pass
             $newParams[] = $np;
         }
         $clFn = new FunctionDef($newName, $newParams, $orig->returnType, $clBody, $orig->returnsByRef, $orig->isPrelude);
+        $clFn->returnArrayHinted = $orig->returnArrayHinted;
 
         $m = $this->module;
         $m->closureCaptures[$newName] = $m->closureCaptures[$oldName] ?? \count($node->captures);
