@@ -732,7 +732,7 @@ trait EmitLlvmExpr
     private function taggedToIntRuntime(): string
     {
         $this->rt->needsStrtol = true;
-        $out  = "\ndefine i64 @__manticore_tagged_to_int(i64 %v) {\n";
+        $out  = "\ndefine i64 @__manticore_tagged_to_int_slow(i64 %v) noinline {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
         $out .= "  %ts = lshr i64 %v, 48\n";
@@ -770,6 +770,11 @@ trait EmitLlvmExpr
         $out .= "  %az = zext i1 %ane to i64\n";
         $out .= "  ret i64 %az\n";
         $out .= "}\n";
+        // The inline int case: a 0xFFF1-tagged word is its sign-extended payload.
+        $out .= "\ndefine i64 @__manticore_tagged_to_int(i64 %v) alwaysinline {\n";
+        $out .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %fast, label %slow\n";
+        $out .= "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n";
+        $out .= "slow:\n  %x = call i64 @__manticore_tagged_to_int_slow(i64 %v)\n  ret i64 %x\n}\n";
         return $out;
     }
 
@@ -783,7 +788,7 @@ trait EmitLlvmExpr
      */
     private function cellToIntArgRuntime(): string
     {
-        $out  = "\ndefine i64 @__manticore_cell_to_int_arg(i64 %v) {\n";
+        $out  = "\ndefine i64 @__manticore_cell_to_int_arg_slow(i64 %v) noinline {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
         $out .= "  br i1 %istag, label %tagged, label %plain\n";
@@ -806,6 +811,11 @@ trait EmitLlvmExpr
         $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  ret i64 %i\n";
         $out .= "}\n";
+        // The inline int case: a 0xFFF1-tagged word is its sign-extended payload.
+        $out .= "\ndefine i64 @__manticore_cell_to_int_arg(i64 %v) alwaysinline {\n";
+        $out .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %fast, label %slow\n";
+        $out .= "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n";
+        $out .= "slow:\n  %x = call i64 @__manticore_cell_to_int_arg_slow(i64 %v)\n  ret i64 %x\n}\n";
         return $out;
     }
 

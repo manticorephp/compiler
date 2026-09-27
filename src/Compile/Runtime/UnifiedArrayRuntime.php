@@ -132,6 +132,7 @@ final class UnifiedArrayRuntime
         $this->emitShift();
         $this->emitBoxByRepr();
         $this->emitElemDecode();
+        $this->emitElemDecodeFast();
         $this->emitCellifyInplace();
         $this->emitElemEncode();
         $this->emitCellToBag();
@@ -1866,6 +1867,8 @@ final class UnifiedArrayRuntime
     {
         $this->emitCellDrop();
         $this->emitCellRetain();
+        $this->emitCellRcFast('__mir_cell_drop');
+        $this->emitCellRcFast('__mir_cell_retain');
         $this->emitDropByRepr();
         $this->emitRetainByRepr();
         $this->emitElemAutoOps();
@@ -1933,7 +1936,8 @@ final class UnifiedArrayRuntime
      */
     private function emitCellDrop(): void
     {
-        $fn = $this->module->func('__mir_cell_drop', Type::void());
+        $fn = $this->module->func('__mir_cell_drop_slow', Type::void());
+        $fn->attrs = 'noinline';
         $v = $fn->param(Type::i64(), 'v');
         $entry = $fn->block('entry');
         $tagged = $fn->block('tagged');
@@ -2334,7 +2338,8 @@ final class UnifiedArrayRuntime
      */
     private function emitCellRetain(): void
     {
-        $fn = $this->module->func('__mir_cell_retain', Type::void());
+        $fn = $this->module->func('__mir_cell_retain_slow', Type::void());
+        $fn->attrs = 'noinline';
         $v = $fn->param(Type::i64(), 'v');
         $entry = $fn->block('entry');
         $tagged = $fn->block('tagged');
@@ -4592,7 +4597,8 @@ final class UnifiedArrayRuntime
      */
     private function emitElemDecode(): void
     {
-        $fn = $this->module->func('__mir_elem_decode', Type::i64());
+        $fn = $this->module->func('__mir_elem_decode_slow', Type::i64());
+        $fn->attrs = 'noinline';
         $arr = $fn->param(Type::ptr(), 'arr');
         $v = $fn->param(Type::i64(), 'v');
         $e = $fn->block('entry');
@@ -4605,6 +4611,62 @@ final class UnifiedArrayRuntime
         $asis->ret($asis->call('__mir_deref_cell', Type::i64(), [$v]));
         $bd = $dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->decodeHint($dec, $arr)]);
         $dec->ret($dec->call('__mir_deref_cell', Type::i64(), [$bd]));
+    }
+
+    /**
+     * The inlined front of `__mir_elem_decode`: a CELL-hinted buffer already
+     * holds the cell, so the word is the answer unless it is a reference box;
+     * everything else (a raw hint to box by, a null base, a REF) takes the
+     * out-of-line body. Most erased reads are this case, and the call was a
+     * measurable share of php-cs-fixer (every `$this->__data[$i]`).
+     */
+    private function emitElemDecodeFast(): void
+    {
+        $fn = $this->module->func('__mir_elem_decode', Type::i64());
+        $fn->attrs = 'alwaysinline';
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $cellp = $fn->block('cellp');
+        $asis = $fn->block('asis');
+        $slow = $fn->block('slow');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $slow, $chk);
+        $hint = $chk->and_($chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $chk->brIf($chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $cellp, $slow);
+        $istag = $cellp->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $cellp->and_($cellp->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isRef = $cellp->and_($istag, $cellp->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)));
+        $cellp->brIf($isRef, $slow, $asis);
+        $asis->ret($v);
+        $slow->ret($slow->call('__mir_elem_decode_slow', Type::i64(), [$arr, $v]));
+    }
+
+    /**
+     * The inlined front of `__mir_cell_retain` / `__mir_cell_drop`: only a
+     * cell carrying a POINTER (string 4, array 7, object 8, reference 9) has a
+     * count to touch; an int, a bool, null or a raw double is done here, and
+     * those are most of the cells a program moves. The tag dispatch and its
+     * guards stay out of line in the `_slow` body.
+     */
+    private function emitCellRcFast(string $name): void
+    {
+        $fn = $this->module->func($name, Type::void());
+        $fn->attrs = 'alwaysinline';
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $slow = $fn->block('slow');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496)), $chk, $done);
+        $nib = $chk->and_($chk->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        // bits 4, 7, 8, 9 of 0x390: the pointer-carrying tags.
+        $bit = $chk->and_($chk->lshr(Value::int(Type::i64(), 0x390), $nib), Value::int(Type::i64(), 1));
+        $chk->brIf($chk->icmp('ne', $bit, Value::int(Type::i64(), 0)), $slow, $done);
+        $slow->call($name . '_slow', Type::void(), [$v]);
+        $slow->br($done);
+        $done->retVoid();
     }
 
     /**
