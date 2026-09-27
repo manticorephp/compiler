@@ -301,7 +301,8 @@ trait EmitLlvmArrays
             $this->fixedArrayPlain[$cls] = $plain;
         }
         if (!$this->fixedArrayPlain[$cls]) { return null; }
-        if ($aa->index->type->kind !== Type::KIND_INT) { return null; }
+        $ik = $aa->index->type->kind;
+        if ($ik !== Type::KIND_INT && $ik !== Type::KIND_CELL) { return null; }
         $cd = $this->classes[$cls] ?? null;
         if ($cd === null) { return null; }
         $dataOff = $cd->propertyOffset('__data');
@@ -315,6 +316,22 @@ trait EmitLlvmArrays
         $out .= $this->emitNode($aa->index);
         $out .= $this->coerceToI64();
         $idx = $this->lastValue;
+        // A cell index (`?int` from getNextMeaningfulToken) takes the fast arm
+        // only when it IS an int: anything else fails the range test below by
+        // being mapped to -1, and the offsetGet call applies php's rule.
+        if ($ik === Type::KIND_CELL) {
+            $hi = $this->ssa->allocReg();
+            $out .= '  ' . $hi . ' = lshr i64 ' . $idx . ", 48\n";
+            $isInt = $this->ssa->allocReg();
+            $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ", 65521\n";
+            $sh = $this->ssa->allocReg();
+            $out .= '  ' . $sh . ' = shl i64 ' . $idx . ", 16\n";
+            $iv = $this->ssa->allocReg();
+            $out .= '  ' . $iv . ' = ashr i64 ' . $sh . ", 16\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $isInt . ', i64 ' . $iv . ", i64 -1\n";
+            $idx = $sel;
+        }
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $sp = $this->ssa->allocReg();

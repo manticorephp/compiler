@@ -14,3 +14,8 @@ $o = new Toks(2); $o[0] = new ArrayObject([1, 2]); $o[1] = 'str' . mt_rand(1, 1)
 function keep(Toks $a): array { $r = []; for ($i = 0; $i < 2; $i++) { $r[] = $a[$i]; } return $r; }
 $k = keep($o); unset($o);
 echo count($k[0]), ' ', $k[1], "\n";
+function nxt(int $i): ?int { return $i < 3 ? $i + 1 : null; }
+function walk(Toks $a): string { $o = ''; $i = 0; while (null !== ($i = nxt($i))) { $o .= $a[$i] . ','; } return $o; }
+echo walk($t), "\n";
+function mixedIdx(Toks $a, mixed $k): string { try { return (string)$a[$k]; } catch (Throwable $e) { return get_class($e); } }
+echo mixedIdx($t, 2), ' ', mixedIdx($t, '1'), ' ', mixedIdx($t, 7), ' ', mixedIdx($t, 'x'), "\n";

@@ -4,3 +4,5 @@ OutOfBoundsException: Index invalid or out of range
 OutOfBoundsException: Index invalid or out of range
 loud:b
 2 str1
+10,20,30,
+20 10 OutOfBoundsException TypeError
