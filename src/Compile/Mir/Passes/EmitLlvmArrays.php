@@ -549,7 +549,10 @@ trait EmitLlvmArrays
             $base = $this->ssa->allocReg();
             $out .= '  ' . $base . ' = inttoptr i64 ' . $bp . " to ptr\n";
             $out .= $this->emitNode($se->index);
-            $out .= $this->coerceToI64();
+            // A CELL index (`$s[$i + $j]` over erased locals) is a tagged word;
+            // read raw it was a vast offset and the write fell off the string
+            // (symfony's Normalizer::decompose then looped forever).
+            $out .= $this->coerceStrOffset($se->index, 'read');
             $idx = $this->lastValue;
             $out .= $this->emitNode($se->value);
             if ($se->value->type->kind === Type::KIND_CELL) {

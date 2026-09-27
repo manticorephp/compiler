@@ -554,7 +554,16 @@ trait EmitLlvmLocals
             && isset($this->locals->slots[$sl->name])
             && !isset($this->locals->refLocals[$sl->name])
             && !isset($this->locals->globalBacked[$sl->name])
-            && !isset($this->frame->mixedFlagSlots[$sl->name])) {
+            && !isset($this->frame->mixedFlagSlots[$sl->name])
+            // Only where the plan OWNS the slot: there the alias path is a
+            // retain plus a drop of the same word. An untracked local's stores
+            // are borrows, and that retain is what kept an aliased string alive
+            // (Normalizer::recompose's $lastUchr = $uchr) — a leak standing in
+            // for the missing ownership, not a no-op. A PARAMETER's value is the
+            // caller's, alive for the whole call, so its reconcile is a no-op too
+            // (Token::equals cloned its array $other on every call and never
+            // freed the clone).
+            && (isset($this->frame->rcObjLocals[$sl->name]) || isset($this->frame->paramNames[$sl->name]))) {
             $r = $this->ssa->allocReg();
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
