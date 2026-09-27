@@ -458,6 +458,19 @@ function generic_link_flags(string $name): string
 }
 
 /**
+ * A program exports nothing but its entry point. ld64 otherwise exports every
+ * linkonce_odr definition as a WEAK EXTERNAL (31k of them in php-cs-fixer), and a
+ * call to an exported weak symbol binds through a dyld stub — an indirect call
+ * on every runtime helper (__mir_cell_retain, __manticore_tagged_compare, …),
+ * 9% of php-cs-fixer's samples. Unexported, the coalesced definition is called
+ * directly. GNU ld exports nothing from an executable without -rdynamic.
+ */
+function darwin_export_flags(): string
+{
+    return " -Wl,-exported_symbol,_main";
+}
+
+/**
  * Darwin's allowance for weak-undefined symbols, derived from what the module
  * actually declared `extern_weak` rather than hand-maintained beside the
  * bindings. ld64 errors on a weak-undefined unless `-U <sym>` permits it; the
@@ -2016,7 +2029,7 @@ function cmd_compile(array $args): int {
     // binary, while Alpine's and Ubuntu's gcc switch it on at the head — two
     // different links from one command. It leads the line now, on every Linux.
     $gc = is_darwin()
-        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak)
+        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak) . darwin_export_flags()
         : " -Wl,--gc-sections -lm";
     $asNeeded = is_darwin() ? "" : " -Wl,--as-needed";
     $rc2 = system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
@@ -2794,7 +2807,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // Darwin's weak-undefined allowance, derived exactly as in cmd_compile.
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
-    if (is_darwin()) { $linkExtra = $linkExtra . weak_undef_flags($weak); }
+    if (is_darwin()) { $linkExtra = $linkExtra . weak_undef_flags($weak) . darwin_export_flags(); }
     // Drop what nothing reaches, as cmd_compile does. A split module pins its
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
     // them across parts, so without this the originals all stayed: the compiler
@@ -3992,6 +4005,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
     $opensslSrc = prelude_src_or_empty("openssl_x509.php");
+    $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
@@ -4284,6 +4298,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
         || $demand->mentions('OpenSSLAsymmetricKey');
+    // WeakMap / WeakReference: two global class names php owns outright.
+    $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
@@ -4472,6 +4488,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
+        $lower->weakSrc = $useWeak ? $weakSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
         $lower->arrayClassesSrc = $arrayClassesSrc;
@@ -4505,6 +4522,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // top-level statement came from.
         $module->includeSlots = $includeSlots;
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
+        // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
+        $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);
         if ($collect !== null) {
             foreach ($lower->attrErrors as $ae) { $collect->lines[] = $ae; }
         }
@@ -4907,7 +4926,7 @@ function analyze_prelude_files(): array {
         // The Buffer\ and Http\ class trees, same reasoning as the demand-gated
         // trees above: closed-world analysis must know every prelude class a
         // user program can name.
-        "buffer.php", "http.php", "websocket.php",
+        "buffer.php", "http.php", "websocket.php", "weak.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the
         // same reason as Buffer\/Http\.

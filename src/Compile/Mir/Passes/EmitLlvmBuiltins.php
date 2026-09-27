@@ -163,6 +163,16 @@ trait EmitLlvmBuiltins
                 $out .= $this->rcReleaseReg($reg, $flavor);
                 continue;
             }
+            // A fresh cell behind an {@see emitPtrArg} payload: dropped by its
+            // tagged word, unless the builtin already did ({@see freeStrTemp}).
+            if ($flavor === 'cellptr') {
+                $cw = $this->ptrArgCellByReg[$reg] ?? '';
+                if ($cw !== '') {
+                    unset($this->ptrArgCellByReg[$reg]);
+                    $out .= $this->rcReleaseReg($cw, 'cell');
+                }
+                continue;
+            }
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = ptrtoint ptr ' . $reg . " to i64\n";
             $out .= $this->rcReleaseReg($r, $flavor);
@@ -413,6 +423,8 @@ trait EmitLlvmBuiltins
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
+        if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
+        if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
         if ($name === 'current' && \count($args) === 1) { return $this->biArrayCursor($args, 'current'); }
         if ($name === 'pos' && \count($args) === 1)     { return $this->biArrayCursor($args, 'current'); }
@@ -856,6 +868,73 @@ trait EmitLlvmBuiltins
         return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
     }
 
+    /**
+     * Box a concrete-element array WITHOUT rebuilding it: the same buffer under
+     * the array tag, described by its element HINT so every cell reader decodes
+     * its raw words ({@see UnifiedArrayRuntime} W4 channel) and the last
+     * owner's `__mir_cell_drop` releases them by hint. The rebuild — a fresh
+     * cell array with every element boxed — was the cost of every array handed
+     * to a `mixed` parameter (php-cs-fixer's `Token::isGivenKind($kinds)`: 30 ns
+     * a call, six times the call itself). The cell owns one count exactly as the
+     * rebuilt copy did: a FRESH source hands over its own, a borrowed one is
+     * retained. The hint is stamped only on an unstamped, non-empty buffer — a
+     * set hint is already the truth, and the empty singleton stays pristine.
+     * null when the element kind has no hint (enum, closure, struct): those
+     * still rebuild.
+     */
+    private function boxArrayShallow(Type $elem, string $srcFlavor): ?string
+    {
+        // Flat elements only. A BOOL hint decodes as an int, an enum case is an
+        // ordinal only a rebuild turns into its singleton, and a NESTED array
+        // carries its own raw words that no hint on this buffer describes —
+        // the rebuild recurses, a tag does not.
+        $ek = $elem->kind;
+        if ($ek !== Type::KIND_STRING && $ek !== Type::KIND_INT && $ek !== Type::KIND_FLOAT
+            && $ek !== Type::KIND_OBJ) { return null; }
+        if ($this->isEnumType($elem)) { return null; }
+        $code = $this->elementHintCodeForType($elem);
+        if ($code === null) { return null; }
+        $this->rt->needsRc = true;
+        $out = $this->coerceToPtr();
+        $p = $this->lastValue;
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $p . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq ptr ' . $p . ", null\n";
+        $chkL = $this->ssa->allocLabel('bsh.chk');
+        $stL = $this->ssa->allocLabel('bsh.stamp');
+        $endL = $this->ssa->allocLabel('bsh.end');
+        $out .= '  br i1 ' . $isNull . ', label %' . $endL . ', label %' . $chkL . "\n";
+        $out .= $chkL . ":\n";
+        $fl = $this->ssa->allocReg();
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $fp . "\n";
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+        $len = $this->ssa->allocReg();
+        $out .= '  ' . $len . ' = load i64, ptr ' . $p . "\n";
+        $h0 = $this->ssa->allocReg();
+        $out .= '  ' . $h0 . ' = icmp eq i64 ' . $h . ", 0\n";
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp sgt i64 ' . $len . ", 0\n";
+        $do = $this->ssa->allocReg();
+        $out .= '  ' . $do . ' = and i1 ' . $h0 . ', ' . $nz . "\n";
+        $out .= '  br i1 ' . $do . ', label %' . $stL . ', label %' . $endL . "\n";
+        $out .= $stL . ":\n";
+        $nf = $this->ssa->allocReg();
+        $out .= '  ' . $nf . ' = or i64 ' . $fl . ', ' . (string)$code . "\n";
+        $out .= '  store i64 ' . $nf . ', ptr ' . $fp . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        if ($srcFlavor === '' && !$this->boxSelfMove) {
+            $out .= '  call void @__mir_array_retain(ptr ' . $p . ")\n";
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $p . ")\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
+    }
+
     private function boxToCell(Type $t, ?Node $src = null): string
     {
         $this->rt->needsTagged = true;
@@ -900,6 +979,8 @@ trait EmitLlvmBuiltins
             // recursive consumers (var_dump / json_encode) see tagged cells.
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
+                $sh = $this->boxArrayShallow($elem, $srcFlavor);
+                if ($sh !== null) { return $sh; }
                 $ret = $this->emitVecToCellArray($elem, $srcFlavor);
                 $this->markCellBoxed($this->lastValue);
                 return $ret;
@@ -921,6 +1002,8 @@ trait EmitLlvmBuiltins
             // (mirrors the vec branch above).
             if ($elem !== null && $elem->kind !== Type::KIND_CELL
                 && $elem->kind !== Type::KIND_UNKNOWN) {
+                $sh = $this->boxArrayShallow($elem, $srcFlavor);
+                if ($sh !== null) { return $sh; }
                 $ret = $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
                 $this->markCellBoxed($this->lastValue);
                 return $ret;
@@ -1562,7 +1645,24 @@ trait EmitLlvmBuiltins
         $safe = $this->ssa->allocReg();
         $out .= '  ' . $safe . ' = select i1 ' . $isNull
               . ', ptr ' . $this->strSymBytes('@.cstr.empty') . ', ptr ' . $ptr . "\n";
-        if ($cellTemp !== '') { $this->ptrArgCellByReg[$safe] = $cellTemp; }
+        if ($cellTemp !== '') {
+            // A string builtin gives the cell back itself ({@see freeStrTemp});
+            // every other consumer left it stranded. The deferred entry drops
+            // it after the builtin unless that already happened.
+            $this->ptrArgCellByReg[$safe] = $cellTemp;
+            $this->arrArgTempRegs[] = $safe;
+            $this->arrArgTempFlavors[] = 'cellptr';
+        }
+        // An OWNED object temp (`get_class(mk())`, `spl_object_id(self::key($o))`)
+        // is given back after the builtin, like an array temp ({@see
+        // emitArrPtrArg}): a builtin reads an object argument, and one that
+        // keeps it retains it. Every one of them stranded the object — WeakMap's
+        // offsetExists kept each key alive.
+        if ($arg->type->kind === Type::KIND_OBJ && \str_starts_with($ptr, '%')
+            && $this->freshRcArgFlavor($arg) === 'obj') {
+            $this->arrArgTempRegs[] = $ptr;
+            $this->arrArgTempFlavors[] = 'obj';
+        }
         $this->lastValue = $safe;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2565,6 +2665,41 @@ trait EmitLlvmBuiltins
         $this->lastValueType = 'i64';
         return $out;
     }
+
+    /**
+     * `__mc_weak_arm()` — point the free path's death hook
+     * ({@see dropRuntimeBody}) at the prelude's `__mc_weak_forget`. Emitted
+     * only from prelude/weak.php, the module that defines the target. The
+     * stdlib no-op is the bootstrap twin.
+     */
+    private function biWeakArm(): string
+    {
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return '  store ptr @manticore_' . $this->mangle('__mc_weak_forget') . ", ptr @__mc_weak_hook\n";
+    }
+
+    /**
+     * `__mc_obj_from_addr($a)` — the live object at address `$a` (an
+     * `spl_object_id`), retained and boxed: the one way back from the
+     * unretained address a WeakMap / WeakReference keeps. The caller vouches
+     * the object is alive (the registry forgets it on the free path).
+     * @param Node[] $args
+     */
+    private function biObjFromAddr(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $out = $this->emitIntArg($args[0]);
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $out .= '  call void @__mir_rc_retain(ptr ' . $p . ")\n";
+        $bx = $this->ssa->allocReg();
+        $out .= '  ' . $bx . ' = call i64 @__manticore_box_object(ptr ' . $p . ")\n";
+        $this->lastValue = $bx;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($bx);
+        return $out;
+    }
     /**
      * `array_is_list($a)` — a key walk in the runtime ({@see
      * UnifiedArrayRuntime::emitArrayIsList}); class A ({@see emitArrPtrArg}):
@@ -3234,6 +3369,21 @@ trait EmitLlvmBuiltins
      */
     private function coerceIntArg(Node $arg): string
     {
+        // An `int` parameter takes a CELL by php's coercive rules — a float
+        // truncates, a numeric string parses. `__manticore_unbox_int` reads an
+        // int payload only, so `str_repeat('-', max(0, 27.0))` repeated zero
+        // times (symfony's ProgressBar drew an empty bar).
+        if ($arg->type->kind === Type::KIND_CELL) {
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsStrtol = true;
+            $out = $this->coerceToI64();
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_to_int(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         return $this->coerceArithOperand($arg, false);
     }
 
@@ -6793,7 +6943,7 @@ trait EmitLlvmBuiltins
         $cls = $this->reflClassName($args[0]);
         $m = $this->reflLitStr($args[1]);
         if ($cls !== '' && $m !== '') {
-            $found = $this->resolveMethodClass($cls, $m) !== '';
+            $found = $this->classHasMethodCI($cls, $m);
             // An object's STATIC class is a lower bound: `method_exists($this,
             // 'processToken')` in an abstract parent asks about the runtime
             // subclass (php-cs-fixer's AbstractTransformer). Fold `false` only
@@ -6802,8 +6952,60 @@ trait EmitLlvmBuiltins
                 || !$this->subclassDeclaresMethod($cls, $m)) {
                 return $this->biConstBool($this->reflEvalArgs($args), $found);
             }
+            if ($args[0]->type->kind === Type::KIND_OBJ) {
+                return $this->biMethodExistsByClassId($args, $cls, $m);
+            }
         }
         return $this->biMethodExistsDynamic($args);
+    }
+
+    /**
+     * `method_exists($obj, 'm')` whose answer depends only on WHICH subclass of
+     * the static class `$obj` is: a class-id membership test over the classes
+     * below `$cls` that have `m`. The runtime scan compared the name against
+     * every (class, method) row with strcasecmp — php-cs-fixer's
+     * AbstractTransformer::process asks it for every transformer of every file,
+     * 4% of the whole run.
+     * @param Node[] $args
+     */
+    private function biMethodExistsByClassId(array $args, string $cls, string $m): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitLoadClassId($obj);
+        $cid = $this->classIdReg;
+        $acc = 'false';
+        foreach ($this->classes as $cd) {
+            if (!$this->classIsA($cd->name, $cls) || !$this->classHasMethodCI($cd->name, $m)) { continue; }
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $cid . ', ' . (string)$cd->classId . "\n";
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $eq . "\n";
+            $acc = $or;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $acc . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Does `$cls` or an ancestor declare `$m`? Method names are
+     *  case-insensitive in php. */
+    private function classHasMethodCI(string $cls, string $m): bool
+    {
+        if ($this->resolveMethodClass($cls, $m) !== '') { return true; }
+        $c = $cls;
+        while ($c !== '') {
+            $cd = $this->classes[$c] ?? null;
+            if ($cd === null) { return false; }
+            foreach ($cd->methodNames as $name => $_) {
+                if (\strcasecmp((string)$name, $m) === 0) { return true; }
+            }
+            $c = $cd->parent;
+        }
+        return false;
     }
 
     /** Whether a class that is-a `$cls` (other than itself) declares `$m`. */
@@ -6811,7 +7013,7 @@ trait EmitLlvmBuiltins
     {
         foreach ($this->classes as $cd) {
             $nm = $cd->name;
-            if ($nm !== $cls && isset($cd->methodNames[$m]) && $this->classIsA($nm, $cls)) {
+            if ($nm !== $cls && $this->classIsA($nm, $cls) && $this->classHasMethodCI($nm, $m)) {
                 return true;
             }
         }

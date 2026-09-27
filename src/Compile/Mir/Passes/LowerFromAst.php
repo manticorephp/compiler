@@ -459,6 +459,9 @@ final class LowerFromAst implements Pass
     /** ext/openssl, the certificate-reading half — DEMAND-GATED. Pure DER, no
      *  libcrypto; carries OpenSSLAsymmetricKey, so closed-world analysis wants it. */
     public string $opensslSrc = '';
+    /** WeakMap + WeakReference (prelude/weak.php) — DEMAND-GATED on either
+     *  name. Global namespace; implements spl_arrays.php's interfaces. */
+    public string $weakSrc = '';
     /** True while the class-registration loop is inside the prelude window —
      *  {@see LowerClasses} reads it so a prelude class's static-prop cell is
      *  emitted linkonce_odr (the prelude lands in EVERY module, so external

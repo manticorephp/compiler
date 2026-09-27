@@ -2,62 +2,24 @@
 
 namespace Manticore\Tests;
 
-use Manticore\Attr\Struct;
-
 use function Async\async;
 use function Async\delay;
 use function Async\mapConcurrent;
 use function Async\spawn;
 use function Process\workers;
 
-const ROW_RESET = "\033[0m";
-const TEXT_BOLD = "\033[1m";
-const COLOR_DIM = "\033[2m";
-const COLOR_GRAY = "\033[90m";
-const COLOR_GREEN = "\033[32m";
-const COLOR_RED = "\033[31m";
-const COLOR_YELLOW = "\033[33m";
-const COLOR_CYAN = "\033[36m";
+
+const ROW_RESET   = "\033[0m";
+const COLOR_BOLD    = "\033[1m";
+const COLOR_DIM     = "\033[2m";
+const COLOR_GRAY    = "\033[90m";
+const COLOR_GREEN   = "\033[32m";
+const COLOR_RED     = "\033[31m";
+const COLOR_YELLOW  = "\033[33m";
+const COLOR_CYAN    = "\033[36m";
 const COLOR_MAGENTA = "\033[35m";
-const BG_GREEN = "\033[42;30;1m";
-const BG_RED = "\033[41;37;1m";
-
-#[Struct]
-class Arguments
-{
-    public function __construct(
-        public string $filter = '',
-        public string $opt = '2',
-        public ?int $customWorkers = null,
-    ) {
-    }
-}
-
-#[Struct]
-class Result implements \JsonSerializable
-{
-    public function __construct(
-        public string $file,
-        public bool $ok,
-        public ?string $error = null,
-        public bool $skipped = false,
-        public float $time = 0.0,
-        public int $idx = 0,
-    ) {
-    }
-
-    public function jsonSerialize(): array
-    {
-        return [
-            'file' => $this->file,
-            'ok' => $this->ok,
-            'error' => $this->error,
-            'skipped' => $this->skipped,
-            'time' => $this->time,
-            'idx' => $this->idx,
-        ];
-    }
-}
+const BG_GREEN      = "\033[42;30;1m";
+const BG_RED        = "\033[41;37;1m";
 
 function getCpuCount(): int
 {
@@ -69,6 +31,7 @@ function getGridColumns(): int
 {
     $termCols = (int)@exec('tput cols 2>/dev/null');
     if ($termCols >= 50) {
+        // Reserve 20 chars for trailing progress info ` [ 450/450] (100%)`
         return min(max($termCols - 22, 20), 60);
     }
     return 50;
@@ -96,10 +59,7 @@ function renderProgressBar(int $completed, int $total, int $barWidth = 36): stri
     $empty = $barWidth - $filled;
 
     if ($filled > 0 && $filled < $barWidth) {
-        $bar = COLOR_GREEN . str_repeat('=', $filled - 1) . '>' . ROW_RESET . COLOR_GRAY . str_repeat(
-                '-',
-                $empty
-            ) . ROW_RESET;
+        $bar = COLOR_GREEN . str_repeat('=', $filled - 1) . '>' . ROW_RESET . COLOR_GRAY . str_repeat('-', $empty) . ROW_RESET;
     } elseif ($filled === $barWidth) {
         $bar = COLOR_GREEN . str_repeat('=', $filled) . ROW_RESET;
     } else {
@@ -137,7 +97,7 @@ function renderTui(
 
     // 1. Dedicated Progress Bar
     $progressBar = renderProgressBar($completed, $total, 40);
-    $out .= TEXT_BOLD . "Progress: " . ROW_RESET . $progressBar . "\n";
+    $out .= COLOR_BOLD . "Progress: " . ROW_RESET . $progressBar . "\n";
     $totalLines = 1;
 
     // 2. Live Statistics
@@ -150,17 +110,13 @@ function renderTui(
         COLOR_CYAN . "Time:" . ROW_RESET . " %.1fs | " .
         COLOR_MAGENTA . "Rate:" . ROW_RESET . " %.1f tests/s | " .
         COLOR_DIM . "Workers: %d" . ROW_RESET . "\n",
-        $passed,
-        $failed,
-        $elapsed,
-        $rate,
-        $numWorkers
+        $passed, $failed, $elapsed, $rate, $numWorkers
     );
     $totalLines++;
 
     // 3. Live Failures Section (shows immediate failure notices below progress)
     if (!empty($failures)) {
-        $out .= "\n" . COLOR_RED . TEXT_BOLD . "--- Live Failures (" . count($failures) . ") ---" . ROW_RESET . "\n";
+        $out .= "\n" . COLOR_RED . COLOR_BOLD . "--- Live Failures (" . count($failures) . ") ---" . ROW_RESET . "\n";
         $totalLines += 2;
         $recentFailures = array_slice($failures, -8);
         foreach ($recentFailures as $f) {
@@ -195,9 +151,11 @@ function execute(): int
     $compiler = $rootDir . '/bin/manticore';
     $preludeDir = $rootDir . '/prelude';
 
-    $arguments = new Arguments();
+    $filter = '';
+    $opt = '2';
+    $customWorkers = null;
 
-    $argv = (array)($_SERVER['argv'] ?? ($GLOBALS['argv'] ?? []));
+    $argv = $_SERVER['argv'] ?? ($GLOBALS['argv'] ?? []);
     if (is_array($argv)) {
         $argc = count($argv);
         $i = 1;
@@ -205,21 +163,21 @@ function execute(): int
             $arg = (string)$argv[$i];
             if ($arg === '-k' || $arg === '--filter') {
                 $i = $i + 1;
-                $arguments->filter = (string)($argv[$i] ?? '');
+                $filter = (string)($argv[$i] ?? '');
             } elseif ($arg === '-O' || $arg === '--opt') {
                 $i = $i + 1;
-                $arguments->opt = (string)($argv[$i] ?? '2');
+                $opt = (string)($argv[$i] ?? '2');
             } elseif ($arg === '-j' || $arg === '--jobs') {
                 $i = $i + 1;
-                $arguments->customWorkers = (int)($argv[$i] ?? 0);
+                $customWorkers = (int)($argv[$i] ?? 0);
             } elseif (str_starts_with($arg, '-k')) {
-                $arguments->filter = substr($arg, 2);
+                $filter = substr($arg, 2);
             } elseif (str_starts_with($arg, '-O')) {
-                $arguments->opt = substr($arg, 2);
+                $opt = substr($arg, 2);
             } elseif (str_starts_with($arg, '-j')) {
-                $arguments->customWorkers = (int)substr($arg, 2);
+                $customWorkers = (int)substr($arg, 2);
             } elseif (!str_starts_with($arg, '-')) {
-                $arguments->filter = $arg;
+                $filter = $arg;
             }
             $i = $i + 1;
         }
@@ -251,8 +209,8 @@ function execute(): int
     }
 
     // Apply filter if specified
-    if ($arguments->filter !== '') {
-        $cases = array_values(array_filter($cases, fn(array $c) => str_contains($c['name'], $arguments->filter)));
+    if ($filter !== '') {
+        $cases = array_values(array_filter($cases, fn(array $c) => str_contains($c['name'], $filter)));
     }
 
     $totalFiles = count($cases);
@@ -262,10 +220,7 @@ function execute(): int
     }
 
     $cpuCount = getCpuCount();
-    $numWorkers = $arguments->customWorkers !== null && $arguments->customWorkers > 0 ? $arguments->customWorkers : min(
-        $cpuCount,
-        $totalFiles
-    );
+    $numWorkers = $customWorkers !== null && $customWorkers > 0 ? $customWorkers : min($cpuCount, $totalFiles);
     $cols = getGridColumns();
     $startTime = microtime(true);
     $isTty = isInteractiveTty();
@@ -301,60 +256,37 @@ function execute(): int
             }
         }
 
-        async(
-            function () use (
-                $myCases,
-                $writeSock,
-                $casesDir,
-                $expectedDir,
-                $preludeDir,
-                $compiler,
-                $workDir,
-                $arguments
-            ) {
-                mapConcurrent(
-                    $myCases,
-                    function (array $item) use (
-                        $writeSock,
-                        $casesDir,
-                        $expectedDir,
-                        $preludeDir,
-                        $compiler,
-                        $workDir,
-                        $arguments
-                    ) {
-                        $testStart = microtime(true);
-                        $res = runTest(
-                            $item['case']['name'],
-                            $item['case']['src'],
-                            $casesDir,
-                            $expectedDir,
-                            $preludeDir,
-                            $compiler,
-                            $workDir,
-                            $arguments->opt
-                        );
-                        $duration = round((microtime(true) - $testStart) * 1000, 1);
-                        $res->time = $duration;
-                        $res->idx = $item['idx'];
-
-                        $msg = json_encode($res, JSON_UNESCAPED_SLASHES) . "\n";
-                        @fwrite($writeSock, $msg);
-                        @fflush($writeSock);
-
-                        return $res;
-                    },
-                    4
+        async(function () use ($myCases, $writeSock, $casesDir, $expectedDir, $preludeDir, $compiler, $workDir, $opt) {
+            mapConcurrent($myCases, function (array $item) use ($writeSock, $casesDir, $expectedDir, $preludeDir, $compiler, $workDir, $opt) {
+                $testStart = microtime(true);
+                $res = runTest(
+                    $item['case']['name'],
+                    $item['case']['src'],
+                    $casesDir,
+                    $expectedDir,
+                    $preludeDir,
+                    $compiler,
+                    $workDir,
+                    $opt
                 );
-            }
-        );
+                $duration = round((microtime(true) - $testStart) * 1000, 1);
+                $res['time'] = $duration;
+                $res['idx'] = $item['idx'];
+
+                $msg = json_encode($res, JSON_UNESCAPED_SLASHES) . "\n";
+                @fwrite($writeSock, $msg);
+                @fflush($writeSock);
+
+                return $res;
+            }, 4);
+        });
 
         fclose($writeSock);
         exit(0);
     }
 
     // Coordinator (Worker 0): manages UI, receives IPC events, and runs its own slice
-    echo TEXT_BOLD . "Manticore AOT Test Suite" . ROW_RESET . " ({$totalFiles} tests, {$numWorkers} workers, -O{$arguments->opt})\n\n";
+    echo COLOR_BOLD . "Manticore AOT Test Suite" . ROW_RESET . " ({$totalFiles} tests, {$numWorkers} workers, -O{$opt})\n\n";
     fflush(STDOUT);
     $readSocks = [];
     for ($i = 1; $i < $numWorkers; $i++) {
@@ -379,17 +311,7 @@ function execute(): int
 
     // Initial render of the dashboard if interactive TTY
     if ($isTty) {
-        renderTui(
-            $completed,
-            $passed,
-            $failures,
-            $totalFiles,
-            $startTime,
-            $renderedLines,
-            $lastRender,
-            $numWorkers,
-            true
-        );
+        renderTui($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, true);
     }
 
     $onResult = function (array $res) use (
@@ -423,27 +345,17 @@ function execute(): int
                     }
                 }
                 $failures[] = [
-                    'id' => count($failures) + 1,
-                    'file' => $res['file'],
+                    'id'     => count($failures) + 1,
+                    'file'   => $res['file'],
                     'reason' => $reason,
-                    'error' => $res['error'] ?? null,
+                    'error'  => $res['error'] ?? null,
                 ];
             } else {
                 $passed++;
             }
 
             if ($isTty) {
-                renderTui(
-                    $completed,
-                    $passed,
-                    $failures,
-                    $totalFiles,
-                    $startTime,
-                    $renderedLines,
-                    $lastRender,
-                    $numWorkers,
-                    $isFail
-                );
+                renderTui($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, $isFail);
             } else {
                 $nonTtyDotCount++;
                 echo $isFail ? COLOR_RED . 'F' . ROW_RESET : COLOR_GREEN . '.' . ROW_RESET;
@@ -457,103 +369,67 @@ function execute(): int
         }
     };
 
-    async(
-        function () use (
-            $myCases,
-            &$readSocks,
-            $onResult,
-            $totalFiles,
-            $casesDir,
-            $expectedDir,
-            $preludeDir,
-            $compiler,
-            $workDir,
-            $arguments,
-            &$completed
-        ) {
-            // Task A: Background IPC Stream Listener
-            $listener = spawn(function () use (&$readSocks, $onResult, $totalFiles, &$completed) {
-                $buffers = array_fill_keys(array_keys($readSocks), '');
+    async(function () use ($myCases, &$readSocks, $onResult, $totalFiles, $casesDir, $expectedDir, $preludeDir, $compiler, $workDir, $opt, &$completed) {
+        // Task A: Background IPC Stream Listener
+        $listener = spawn(function () use (&$readSocks, $onResult, $totalFiles, &$completed) {
+            $buffers = array_fill_keys(array_keys($readSocks), '');
 
-                while (!empty($readSocks) && $completed < $totalFiles) {
-                    $active = false;
-                    foreach ($readSocks as $workerKey => $sock) {
-                        $chunk = @fread($sock, 8192);
-                        if ($chunk !== false && strlen($chunk) > 0) {
-                            $active = true;
-                            $buffers[$workerKey] .= $chunk;
-                            while (($pos = strpos($buffers[$workerKey], "\n")) !== false) {
-                                $line = substr($buffers[$workerKey], 0, $pos);
-                                $buffers[$workerKey] = substr($buffers[$workerKey], $pos + 1);
-                                if (trim($line) !== '') {
-                                    $decoded = json_decode($line, true);
-                                    if (is_array($decoded)) {
-                                        $onResult($decoded);
-                                    }
+            while (!empty($readSocks) && $completed < $totalFiles) {
+                $active = false;
+                foreach ($readSocks as $workerKey => $sock) {
+                    $chunk = @fread($sock, 8192);
+                    if ($chunk !== false && strlen($chunk) > 0) {
+                        $active = true;
+                        $buffers[$workerKey] .= $chunk;
+                        while (($pos = strpos($buffers[$workerKey], "\n")) !== false) {
+                            $line = substr($buffers[$workerKey], 0, $pos);
+                            $buffers[$workerKey] = substr($buffers[$workerKey], $pos + 1);
+                            if (trim($line) !== '') {
+                                $decoded = json_decode($line, true);
+                                if (is_array($decoded)) {
+                                    $onResult($decoded);
                                 }
                             }
-                        } elseif (feof($sock)) {
-                            fclose($sock);
-                            unset($readSocks[$workerKey]);
                         }
-                    }
-
-                    if (!$active) {
-                        delay(0.005);
+                    } elseif (feof($sock)) {
+                        fclose($sock);
+                        unset($readSocks[$workerKey]);
                     }
                 }
-            });
 
-            // Task B: Coordinator's own partition of tests
-            mapConcurrent(
-                $myCases,
-                function (array $item) use (
-                    $onResult,
-                    $casesDir,
-                    $expectedDir,
-                    $preludeDir,
-                    $compiler,
-                    $workDir,
-                    $arguments
-                ) {
-                    $testStart = microtime(true);
-                    $res = runTest(
-                        $item['case']['name'],
-                        $item['case']['src'],
-                        $casesDir,
-                        $expectedDir,
-                        $preludeDir,
-                        $compiler,
-                        $workDir,
-                        $arguments->opt,
-                    );
-                    $duration = round((microtime(true) - $testStart) * 1000, 1);
-                    $res['time'] = $duration;
-                    $res['idx'] = $item['idx'];
+                if (!$active) {
+                    delay(0.005);
+                }
+            }
+        });
 
-                    $onResult($res);
-                    return $res;
-                },
-                4
+        // Task B: Coordinator's own partition of tests
+        mapConcurrent($myCases, function (array $item) use ($onResult, $casesDir, $expectedDir, $preludeDir, $compiler, $workDir, $opt) {
+            $testStart = microtime(true);
+            $res = runTest(
+                $item['case']['name'],
+                $item['case']['src'],
+                $casesDir,
+                $expectedDir,
+                $preludeDir,
+                $compiler,
+                $workDir,
+                $opt
             );
+            $duration = round((microtime(true) - $testStart) * 1000, 1);
+            $res['time'] = $duration;
+            $res['idx'] = $item['idx'];
 
-            $listener->await();
-        }
-    );
+            $onResult($res);
+            return $res;
+        }, 4);
+
+        $listener->await();
+    });
 
     // Ensure final TUI state is cleanly rendered
     if ($isTty) {
-        renderTui(
-            $completed,
-            $passed,
-            $failures,
-            $totalFiles,
-            $startTime,
-            $renderedLines,
-            $lastRender,
-            $numWorkers,
-            true
-        );
+        renderTui($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, true);
     }
 
     // Worker 0 waits for child processes to finish cleanly
@@ -569,7 +445,7 @@ function execute(): int
 
     // 5. Final Detailed Failure Report
     if (!empty($failures)) {
-        echo "\n" . COLOR_RED . TEXT_BOLD . "Failures (" . count($failures) . "):\n\n" . ROW_RESET;
+        echo "\n" . COLOR_RED . COLOR_BOLD . "Failures (" . count($failures) . "):\n\n" . ROW_RESET;
         foreach ($failures as $failure) {
             echo COLOR_RED . "{$failure['id']}) " . $failure['file'] . ROW_RESET . "\n";
             echo ($failure['error'] ?? 'Unknown error') . "\n\n";
@@ -616,6 +492,9 @@ function normalizeOutput(string $output, ?string $sedFile, string $workDir, stri
     return $output;
 }
 
+/**
+ * @return array{file: string, ok: bool, error: ?string, skipped?: bool}
+ */
 function runTest(
     string $caseName,
     string $srcPath,
@@ -625,7 +504,7 @@ function runTest(
     string $compiler,
     string $workDir,
     string $opt = '2'
-): Result {
+): array {
     $safeName = preg_replace('/[^A-Za-z0-9_]/', '_', $caseName);
     $uniqueSuffix = bin2hex(random_bytes(4)) . '_' . getmypid();
     $tmpBinary = $workDir . '/' . $safeName . '_' . $uniqueSuffix . '.bin';
@@ -642,23 +521,19 @@ function runTest(
     }
 
     $expectedPath = match (true) {
-        $isMusl && file_exists(
-            $expectedDir . '/' . $caseName . '.musl.out'
-        ) => $expectedDir . '/' . $caseName . '.musl.out',
-        file_exists(
-            $expectedDir . '/' . $caseName . '.' . $os . '.out'
-        ) => $expectedDir . '/' . $caseName . '.' . $os . '.out',
-        file_exists($expectedDir . '/' . $caseName . '.out') => $expectedDir . '/' . $caseName . '.out',
+        $isMusl && file_exists($expectedDir . '/' . $caseName . '.musl.out') => $expectedDir . '/' . $caseName . '.musl.out',
+        file_exists($expectedDir . '/' . $caseName . '.' . $os . '.out')    => $expectedDir . '/' . $caseName . '.' . $os . '.out',
+        file_exists($expectedDir . '/' . $caseName . '.out')               => $expectedDir . '/' . $caseName . '.out',
         default => null,
     };
 
     if ($expectedPath === null) {
-        return new Result(
-            file: $caseName,
-            ok: true,
-            error: null,
-            skipped: true,
-        );
+        return [
+            'file'    => $caseName,
+            'ok'      => true,
+            'skipped' => true,
+            'error'   => null,
+        ];
     }
 
     // 1. Compile test case
@@ -678,11 +553,11 @@ function runTest(
 
     if ($compileRc !== 0 || !file_exists($tmpBinary)) {
         @unlink($tmpBinary);
-        return new Result(
-            file: $caseName,
-            ok: false,
-            error: "Compilation error (rc={$compileRc}):\n" . ($compileOutput ?: 'No compiler output'),
-        );
+        return [
+            'file'  => $caseName,
+            'ok'    => false,
+            'error' => "Compilation error (rc={$compileRc}):\n" . ($compileOutput ?: 'No compiler output'),
+        ];
     }
 
     // 2. Execute compiled binary (STDOUT strictly isolated from STDERR)
@@ -697,11 +572,11 @@ function runTest(
     @unlink($tmpErr);
 
     if ($runRc !== 0) {
-        return new Result(
-            file: $caseName,
-            ok: false,
-            error: "Runtime error (rc={$runRc}):\n" . ($stderrRaw ?: $actualRaw),
-        );
+        return [
+            'file'  => $caseName,
+            'ok'    => false,
+            'error' => "Runtime error (rc={$runRc}):\n" . ($stderrRaw ?: $actualRaw),
+        ];
     }
 
     // 3. Normalize and verify output matches expected
@@ -710,18 +585,18 @@ function runTest(
     $actualNorm = normalizeOutput($actualRaw, file_exists($sedFile) ? $sedFile : null, $workDir, $safeName, 'act');
 
     if ($actualNorm !== $expectedNorm) {
-        return new Result(
-            file: $caseName,
-            ok: false,
-            error: "Output mismatch:\n--- Expected ---\n$expectedNorm\n--- Actual ---\n$actualNorm",
-        );
+        return [
+            'file'  => $caseName,
+            'ok'    => false,
+            'error' => "Output mismatch:\n--- Expected ---\n$expectedNorm\n--- Actual ---\n$actualNorm",
+        ];
     }
 
-    return new Result(
-        file: $caseName,
-        ok: true,
-        error: null,
-    );
+    return [
+        'file'  => $caseName,
+        'ok'    => true,
+        'error' => null,
+    ];
 }
 
 exit(execute());

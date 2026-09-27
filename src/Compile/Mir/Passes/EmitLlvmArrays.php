@@ -251,6 +251,8 @@ trait EmitLlvmArrays
         if ($aa->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
+            $fast = $this->emitFixedArrayGet($aa, $mc);
+            if ($fast !== null) { return $fast; }
             return $this->emitMethodCall($mc);
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
@@ -272,6 +274,118 @@ trait EmitLlvmArrays
             return $this->emitErasedIndexGet($n, $aa);
         }
         return $this->emitArrayAccessUnified($n, $aa);
+    }
+
+    /**
+     * `$fixed[$i]` on a SplFixedArray whose `offsetGet` is the prelude's own,
+     * with an INT index: read `__data[$i]` in place when `0 <= $i < __size`,
+     * else call `offsetGet` (which throws php's error). The fast arm hands back
+     * exactly what `offsetGet` does — the element decoded to a cell and
+     * retained, a +1 the caller owns — so nothing downstream can tell the
+     * difference. php-cs-fixer's `Tokens` is a SplFixedArray and `$tokens[$i]`
+     * is its hottest expression; in Zend it is C.
+     * null when the shape does not apply.
+     */
+    private function emitFixedArrayGet(ArrayAccess_ $aa, \Compile\Mir\MethodCall_ $mc): ?string
+    {
+        $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
+        if ($cls === '' || !$this->classIsA($cls, 'SplFixedArray')) { return null; }
+        // Every class the receiver can be must read through the prelude's own
+        // offsetGet: a subclass override owns the semantics.
+        if (!isset($this->fixedArrayPlain[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classIsA($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayPlain[$cls] = $plain;
+        }
+        if (!$this->fixedArrayPlain[$cls]) { return null; }
+        $ik = $aa->index->type->kind;
+        if ($ik !== Type::KIND_INT && $ik !== Type::KIND_CELL) { return null; }
+        $cd = $this->classes[$cls] ?? null;
+        if ($cd === null) { return null; }
+        $dataOff = $cd->propertyOffset('__data');
+        $sizeOff = $cd->propertyOffset('__size');
+        if ($dataOff < 0 || $sizeOff < 0) { return null; }
+        // The receiver is read twice (the test, the slow call): a plain local only.
+        if ($aa->array->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($aa->index)) { return null; }
+        $out = $this->emitNode($aa->array);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($aa->index);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        // A cell index (`?int` from getNextMeaningfulToken) takes the fast arm
+        // only when it IS an int: anything else fails the range test below by
+        // being mapped to -1, and the offsetGet call applies php's rule.
+        if ($ik === Type::KIND_CELL) {
+            $hi = $this->ssa->allocReg();
+            $out .= '  ' . $hi . ' = lshr i64 ' . $idx . ", 48\n";
+            $isInt = $this->ssa->allocReg();
+            $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ", 65521\n";
+            $sh = $this->ssa->allocReg();
+            $out .= '  ' . $sh . ' = shl i64 ' . $idx . ", 16\n";
+            $iv = $this->ssa->allocReg();
+            $out .= '  ' . $iv . ' = ashr i64 ' . $sh . ", 16\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $isInt . ', i64 ' . $iv . ", i64 -1\n";
+            $idx = $sel;
+        }
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$sizeOff . "\n";
+        $size = $this->ssa->allocReg();
+        $out .= '  ' . $size . ' = load i64, ptr ' . $sp . "\n";
+        $inb = $this->ssa->allocReg();
+        $out .= '  ' . $inb . ' = icmp ult i64 ' . $idx . ', ' . $size . "\n";
+        $fastL = $this->ssa->allocLabel('sfa.fast');
+        $slowL = $this->ssa->allocLabel('sfa.slow');
+        $endL = $this->ssa->allocLabel('sfa.end');
+        $out .= '  br i1 ' . $inb . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $dp = $this->ssa->allocReg();
+        $out .= '  ' . $dp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$dataOff . "\n";
+        $di = $this->ssa->allocReg();
+        $out .= '  ' . $di . ' = load i64, ptr ' . $dp . "\n";
+        $data = $this->ssa->allocReg();
+        $out .= '  ' . $data . ' = inttoptr i64 ' . $di . " to ptr\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = call i64 @__mir_array_get_int(ptr ' . $data . ', i64 ' . $idx . ")\n";
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = call i64 @__mir_elem_decode(ptr ' . $data . ', i64 ' . $w . ")\n";
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
+        $out .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $this->emitMethodCall($mc);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /** A local, a constant, or `+`/`-` over them: safe to evaluate twice. */
+    private function pureIntExpr(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_INT_CONST) { return true; }
+        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if (!$this->pureIntExpr($c)) { return false; }
+            }
+            return true;
+        }
+        return false;
     }
 
     /** Set by `??` around its presence test on a string base; read and cleared
@@ -620,6 +734,15 @@ trait EmitLlvmArrays
             $this->lastValueType = 'ptr';
             return '';
         }
+        if (!$arena && !$cellVals && $count > 0 && \Compile\Debug::$emptyArraySingleton) {
+            $ishape = $this->litDirectShape($al);
+            $imm = $ishape === null ? '' : $this->immortalLitPtr($al, $ishape);
+            if ($imm !== '') {
+                $this->lastValue = $imm;
+                $this->lastValueType = 'ptr';
+                return '';
+            }
+        }
         $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
         if ($arena) { $this->rt->needsArena = true; $this->arena->vecAllocated = true; }
         // A literal that carries a string key is hashed the moment its first
@@ -862,8 +985,25 @@ trait EmitLlvmArrays
      */
     private function litConstTable(ArrayLit $al, string $shape): string
     {
+        $words = $this->litConstWords($al, $shape);
+        if ($words === null) { return ''; }
+        $sym = '@.lit.' . (string)$this->litTableCount;
+        $this->litTableCount = $this->litTableCount + 1;
+        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
+            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
+        return $sym;
+    }
+
+    /**
+     * The entry words (`i64 …`) of a known-shape literal whose every key and
+     * value is an int or string CONSTANT, laid out as the buffer stores them;
+     * null when some element is not a constant word.
+     * @return string[]|null
+     */
+    private function litConstWords(ArrayLit $al, string $shape): ?array
+    {
         $et = $al->type->element;
-        if ($et === null || ($et->kind !== Type::KIND_INT && $et->kind !== Type::KIND_STRING)) { return ''; }
+        if ($et === null || ($et->kind !== Type::KIND_INT && $et->kind !== Type::KIND_STRING)) { return null; }
         $ew = \intdiv($shape === 'packed' ? \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE
                                           : \Compile\MemoryAbi::ARRAY_ENTRY_SIZE, 8);
         $kindW = \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_KIND_OFFSET, 8);
@@ -879,24 +1019,57 @@ trait EmitLlvmArrays
                       && $v->type->kind === Type::KIND_STRING) {
                 $vw = 'ptrtoint (ptr ' . $this->litStr($v->value) . ' to i64)';
             } else {
-                return '';
+                return null;
             }
             /** @var string[] $entry */
             $entry = \array_fill(0, $ew, '0');
             $entry[$valW] = $vw;
             if ($shape === 'hashed') {
                 $k = $el->key;
-                if (!($k instanceof StringConst)) { return ''; }
+                if (!($k instanceof StringConst)) { return null; }
                 $entry[$kindW] = (string)\Compile\MemoryAbi::ARRAY_KIND_STRING;
                 $entry[$keyW] = 'ptrtoint (ptr ' . $this->litStr($k->value) . ' to i64)';
             }
             foreach ($entry as $w) { $words[] = 'i64 ' . $w; }
         }
-        $sym = '@.lit.' . (string)$this->litTableCount;
+        return $words;
+    }
+
+    /**
+     * A constant literal as an IMMORTAL array: a writable global laid out as a
+     * heap buffer (tag, header, entries) with rc {@see \Compile\MemoryAbi::IMMORTAL_ARRAY_RC},
+     * handed out by address — no allocation, no element stores, no free. It is
+     * what php does with a literal of constants (an immutable array), and
+     * php-cs-fixer builds `[T_COMMENT, T_DOC_COMMENT]` and its kin millions of
+     * times: every `$token->isComment()` was a malloc and a free. The rc never
+     * reaches 1, so every writer copies first (COW / deimmortal) and every
+     * release is a decrement. '' when the literal is not all constants.
+     */
+    private function immortalLitPtr(ArrayLit $al, string $shape): string
+    {
+        $words = $this->litConstWords($al, $shape);
+        if ($words === null) { return ''; }
+        $n = \count($al->elements);
+        $flags = $this->elementHintCodeForType($al->type->element) ?? 0;
+        if ($shape === 'hashed') { $flags = $flags | \Compile\MemoryAbi::ARRAY_FLAG_HASHED; }
+        $hdr = [
+            (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            (string)$n,                                     // len
+            (string)$n,                                     // cap
+            $shape === 'packed' ? (string)$n : '0',       // next int key
+            (string)\Compile\MemoryAbi::IMMORTAL_ARRAY_RC,
+            (string)$flags,
+            '0',                                            // nbuckets
+            '0',                                            // buckets
+        ];
+        $all = [];
+        foreach ($hdr as $h) { $all[] = 'i64 ' . $h; }
+        foreach ($words as $w) { $all[] = $w; }
+        $sym = '@.ilit.' . (string)$this->litTableCount;
         $this->litTableCount = $this->litTableCount + 1;
-        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
-            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
-        return $sym;
+        $this->litTableBodies .= $sym . ' = internal global [' . (string)\count($all)
+            . ' x i64] [' . \implode(', ', $all) . "], align 8\n";
+        return 'getelementptr inbounds (i8, ptr ' . $sym . ', i64 8)';
     }
 
     /**

@@ -443,6 +443,10 @@ trait InferCalls
         // the key variants carry the full int|string|null union.
         if ($n === 'array_is_list' && \count($args) === 1) { return Type::bool_(); }
         if ($n === '__mc_array_reindex' && \count($args) === 1) { return Type::void(); }
+        // prelude/weak.php: arm the free-path death hook; an address back to
+        // the object it names, retained and boxed.
+        if ($n === '__mc_weak_arm' && $args === []) { return Type::void(); }
+        if ($n === '__mc_obj_from_addr' && \count($args) === 1) { return Type::cell(); }
         if (($n === 'array_first' || $n === 'array_last'
             || $n === 'array_key_first' || $n === 'array_key_last')
             && \count($args) === 1) {

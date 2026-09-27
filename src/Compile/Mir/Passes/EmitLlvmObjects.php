@@ -609,6 +609,21 @@ trait EmitLlvmObjects
         // array pointer and eventually crashing in __mir_array_cow_str.
         $className = \ltrim($n->class, '\\');
         $cd = $this->classes[$className] ?? $this->classes[$n->class] ?? null;
+        // No class of that name exists anywhere in the program: php's
+        // `Error: Class "X" not found`, raised when reached. This allocated a
+        // bare 16-byte header and ran on — `new \WeakMap()` then took array
+        // paths over an object and SIGSEGV'd (symfony's ProgressBar).
+        if ($cd === null) {
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst('Class "' . $className . '" not found', Type::string_())],
+                Type::cell(),
+            );
+            $out = $this->emitBuiltin($thr) ?? '';
+            $this->lastValue = 'null';
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $out = $this->emitObjAllocInit($cd);
         $obj = $this->lastValue;
         // ctor call — resolve through the parent chain (a subclass
@@ -6059,6 +6074,18 @@ trait EmitLlvmObjects
         if ($box) {
             $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;
+        }
+        // Release-before-overwrite, AFTER the retain (a self-assignment goes
+        // 1 → 2 → 1), as an instance property and a global cell do: the slot
+        // owns what it holds, and nothing gave the previous value back —
+        // php-cs-fixer's `Tokens::clearCache()` (`self::$cache = []`) kept every
+        // file's token collection alive, ~1 MB a file.
+        $drop = $box ? 'cell' : ($n->declared !== null && $dk !== Type::KIND_UNKNOWN
+            ? $this->discardReleaseFlavor($n->declared) : '');
+        if ($drop !== '') {
+            $old = $this->ssa->allocReg();
+            $out .= '  ' . $old . ' = load i64, ptr ' . $n->global . "\n";
+            $out .= $this->rcReleaseReg($old, $drop);
         }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
         $this->noteCellSinkStored($val);
