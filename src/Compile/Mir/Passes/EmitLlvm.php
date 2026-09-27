@@ -4814,6 +4814,10 @@ final class EmitLlvm implements EmitVisitor
             $sv = $this->lastValue;
             $st = $this->lastValueType;
             $o = $this->coerceToI64();
+            // An erased word may be a RAW container the boxer is about to wrap
+            // ({@see EmitLlvmBuiltins::boxUnknownShallowIr}); the tag retain
+            // no-ops on the raw word, so retain what the slot will hold.
+            if ($k === Type::KIND_UNKNOWN) { $o .= $this->boxUnknownShallowIr(); }
             $o .= $this->rcRetainReg($this->lastValue, 'cell');
             $this->lastValue = $sv;
             $this->lastValueType = $st;
