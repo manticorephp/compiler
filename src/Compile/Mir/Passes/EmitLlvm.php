@@ -3571,11 +3571,33 @@ final class EmitLlvm implements EmitVisitor
         $this->censusBytes[$key] = ($this->censusBytes[$key] ?? 0) + $len - $kids;
         $this->censusCount[$key] = ($this->censusCount[$key] ?? 0) + 1;
         $self = $len - $kids;
+        if ($n instanceof \Compile\Mir\Foreach_) {
+            $bk = $this->censusForeachBaseKind($n);
+            $tk = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) ? 'foreach.erased(total)' : 'foreach.typed(total)';
+            $this->censusBytes[$tk] = ($this->censusBytes[$tk] ?? 0) + $len;
+            $this->censusCount[$tk] = ($this->censusCount[$tk] ?? 0) + 1;
+            if ($tk === 'foreach.erased(total)') {
+                $bn = 'fe.erased.base ' . $this->censusForeachBaseNode($n) . ' in ' . $this->frame->name;
+                $this->censusBytes[$bn] = ($this->censusBytes[$bn] ?? 0) + $len;
+                $this->censusCount[$bn] = ($this->censusCount[$bn] ?? 0) + 1;
+            }
+        }
         if ($self > ($this->censusMax[$key] ?? 0)) { $this->censusMax[$key] = $self; $this->censusMaxFn[$key] = $this->frame->name; }
         if ($self > 2000) { $this->censusBig[$key] = ($this->censusBig[$key] ?? 0) + $self; }
         $d = \count($this->censusChild);
         if ($d > 0) { $this->censusChild[$d - 1] = $this->censusChild[$d - 1] + $len; }
         return $out;
+    }
+
+    private function censusForeachBaseKind(\Compile\Mir\Foreach_ $f): string { return $f->array->type->kind; }
+    private function censusForeachBaseNode(\Compile\Mir\Foreach_ $f): string
+    {
+        $a = $f->array;
+        $d = $a->kind;
+        if ($a instanceof \Compile\Mir\LoadLocal) { $d .= ':' . $a->name; }
+        if ($a instanceof \Compile\Mir\PropertyAccess_) { $d .= ':' . $a->property; }
+        if ($a instanceof \Compile\Mir\Call) { $d .= ':' . $a->function; }
+        return $d;
     }
 
     private function censusCallee(\Compile\Mir\Call $c): string { return $c->function; }
@@ -3598,7 +3620,7 @@ final class EmitLlvm implements EmitVisitor
                 . '  | >2KB ' . (string)($this->censusBig[$k] ?? 0)
                 . ' | max ' . (string)($this->censusMax[$k] ?? 0) . ' in ' . ($this->censusMaxFn[$k] ?? ''));
             $i = $i + 1;
-            if ($i >= 80) { break; }
+            if ($i >= 400) { break; }
         }
     }
 
