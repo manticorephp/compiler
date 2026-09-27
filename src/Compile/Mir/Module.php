@@ -38,6 +38,16 @@ final class Module
      *  it is Traversable (it walked the object as an array) */
     public array $interfaceAncestors = [];
 
+    /** @var array<string, bool> `Class::method` (method lower-cased) → a BODILESS
+     *  declaration (interface / abstract) that declares a bare `array` return by
+     *  value: every implementation returns +1 ({@see Ownership::erasedArrayReturn}) */
+    public array $bareArrayMethods = [];
+
+    /** @var array<string, bool> lower-cased method names some class, interface or
+     *  trait declares returning BY REFERENCE: a call by that name is never
+     *  owned as an erased-array result */
+    public array $byRefMethodNames = [];
+
     /** @var array<string, true> declared trait names (compile-time
      *  `trait_exists` fold). */
     public array $traitNames = [];

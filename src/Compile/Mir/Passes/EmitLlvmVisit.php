@@ -139,7 +139,19 @@ trait EmitLlvmVisit
 
     public function visitLoadLocal(LoadLocal $n): string
     {
-        return $this->emitLoadLocal($n);
+        $out = $this->emitLoadLocal($n);
+        // A container store takes this word without a count while the local
+        // stays live: its +1, taken on the slot that still holds the word read.
+        $mo = $n->ownShare;
+        if ($mo === null) { return $out; }
+        $slot = $this->ownOpSlot($mo);
+        if ($slot === '') { return $out; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out .= $this->ownRetainSlot($slot, $mo);
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
     }
 
     public function visitStoreLocal(StoreLocal $n): string

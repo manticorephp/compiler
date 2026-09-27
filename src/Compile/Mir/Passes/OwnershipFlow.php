@@ -169,10 +169,8 @@ final class OwnershipFlow implements Pass
     private bool $dynNames = false;
     /** @var array<int, bool> array local-to-local alias stores that take a +1 */
     private array $aliasRetain = [];
-    /** @var array<int, int> container-store LoadLocal id → the statement a share retain goes before */
-    private array $shareStmt = [];
-    /** @var array<int, int> container-store LoadLocal id → the enclosing statement (-1: none) */
-    private array $moveStmt = [];
+    /** @var array<int, LoadLocal> container-store LoadLocal id → the node */
+    private array $moveLoad = [];
     /** @var array<int, bool> container-store LoadLocal id → it sits in a loop */
     private array $moveLoop = [];
     /** The function jumps by `goto` (a label may be re-reached). */
@@ -249,6 +247,7 @@ final class OwnershipFlow implements Pass
         $this->catchById = [];
         $this->regKey = [];
         $this->aliasRetain = [];
+        $this->moveLoad = [];
         $this->dynNames = false;
         $this->inserted = [];
         $this->insName = [];
@@ -526,8 +525,8 @@ final class OwnershipFlow implements Pass
 
     /**
      * The locals that own an erased-array call result ({@see Ownership::erasedArrayCall}):
-     * every store to the name is such a call, `null`, or an alias of another
-     * erased array — a by-value bare-`array` param or another such local, which
+     * every store to the name is such a call, `null`, a concrete array (it
+     * joins the same release class), or an alias of another erased array — a by-value bare-`array` param or another such local, which
      * then takes its own +1 ({@see erasedAliasSource}). Nothing else binds it (a
      * param, a foreach, a catch). Any other store leaves the name to its type —
      * an erased word of unknown origin is never dropped.
@@ -600,7 +599,8 @@ final class OwnershipFlow implements Pass
             } elseif ($v->kind === Node::KIND_LOAD_LOCAL && $v->type->kind === Type::KIND_UNKNOWN
                 && self::asLoadLocal($v)->name !== $sl->name) {
                 $aliasOf[$sl->name][] = self::asLoadLocal($v)->name;
-            } elseif ($v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL) {
+            } elseif ($v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL
+                && !InsertMemoryOps::slotStoredType($sl)->isArray()) {
                 $veto[$sl->name] = true;
             }
         } elseif ($k === Node::KIND_FOREACH) {
@@ -620,20 +620,17 @@ final class OwnershipFlow implements Pass
      * MOVES there only when nothing reads the name afterwards: no other read of
      * it at all, not in a loop (the store is re-reached), no `goto`, no
      * symbol-table reader. Otherwise the container takes its own +1 — an
-     * `own_share` before the statement — and the local stays Own: php's
-     * `$a[] = $x; unset($a); echo $x->p;` must still read a live object. A
-     * store with no statement of its own (a loop header) or whose statement
-     * also rebinds the name keeps the move (census `own.flow.shareUnplaced`).
+     * `own_share` taken on the very read the store consumes
+     * ({@see LoadLocal::$ownShare}), valid in a loop header and under a rebind
+     * alike — and the local stays Own: php's `$a[] = $x; unset($a); echo $x->p;`
+     * must still read a live object.
      */
     private function decideMoves(Block $body, OwnLattice $lat): void
     {
-        $this->shareStmt = [];
-        $this->moveStmt = [];
         $this->moveLoop = [];
-        $this->stmtById = [];
         $this->hasGoto = false;
         if (\count($lat->moveName) === 0) { return; }
-        $this->locateMoves($body, -1, null, 0, $lat);
+        $this->locateMoves($body, 0, $lat);
         /** @var array<string, int> $reads */
         $reads = [];
         foreach ($lat->loadName as $nm) { $reads[$nm] = ($reads[$nm] ?? 0) + 1; }
@@ -641,72 +638,23 @@ final class OwnershipFlow implements Pass
             $dead = !$this->dynNames && !$this->hasGoto && ($reads[$nm] ?? 0) <= 1
                 && !($this->moveLoop[$id] ?? true);
             if ($dead) { continue; }
-            $sid = $this->moveStmt[$id] ?? -1;
-            $stmt = $this->stmtById[$sid] ?? null;
-            if ($stmt === null || $this->storesName($stmt, $nm)) {
-                if (\Compile\Stats::$on) { \Compile\Stats::bump('own.flow.shareUnplaced', 1); }
-                continue;
-            }
             unset($lat->moveName[$id]);
             $lat->shareName[$id] = $nm;
-            $this->shareStmt[$id] = $sid;
         }
     }
 
-    /** @var array<int, Node> statement id → statement, for {@see decideMoves} */
-    private array $stmtById = [];
-
-    private function locateMoves(Node $n, int $stmt, ?Node $stmtNode, int $loop, OwnLattice $lat): void
+    private function locateMoves(Node $n, int $loop, OwnLattice $lat): void
     {
         $k = $n->kind;
         if ($k === Node::KIND_GOTO) { $this->hasGoto = true; }
         if ($k === Node::KIND_LOAD_LOCAL) {
             $id = \spl_object_id($n);
-            if (isset($lat->moveName[$id])) {
-                $this->moveStmt[$id] = $stmt;
-                $this->moveLoop[$id] = $loop > 0;
-                if ($stmtNode !== null) { $this->stmtById[$stmt] = $stmtNode; }
-            }
+            if (isset($lat->moveName[$id])) { $this->moveLoop[$id] = $loop > 0; }
             return;
         }
-        if ($k === Node::KIND_BLOCK) {
-            foreach (self::asBlock($n)->stmts as $s) { $this->locateMoves($s, \spl_object_id($s), $s, $loop, $lat); }
-            return;
-        }
-        if ($k === Node::KIND_TRY_CATCH) {
-            $tc = self::asTryCatch($n);
-            foreach ($tc->tryBody as $s) { $this->locateMoves($s, \spl_object_id($s), $s, $loop, $lat); }
-            foreach ($tc->catches as $c) {
-                foreach ($c->body as $s) { $this->locateMoves($s, \spl_object_id($s), $s, $loop, $lat); }
-            }
-            foreach ($tc->finallyBody as $s) { $this->locateMoves($s, \spl_object_id($s), $s, $loop, $lat); }
-            return;
-        }
-        if ($k === Node::KIND_SWITCH) {
-            $sw = self::asSwitch($n);
-            foreach (Walk::children($n) as $c) {
-                if ($c->kind !== Node::KIND_BLOCK) { $this->locateMoves($c, $stmt, $stmtNode, $loop, $lat); }
-            }
-            foreach ($sw->arms as $arm) {
-                foreach ($arm->body as $s) { $this->locateMoves($s, \spl_object_id($s), $s, $loop, $lat); }
-            }
-            return;
-        }
-        if ($k === Node::KIND_WHILE || $k === Node::KIND_FOR || $k === Node::KIND_DOWHILE || $k === Node::KIND_FOREACH) {
-            $body = null;
-            if ($k === Node::KIND_WHILE) { $body = self::asWhile($n)->body; }
-            elseif ($k === Node::KIND_FOR) { $body = self::asFor($n)->body; }
-            elseif ($k === Node::KIND_DOWHILE) { $body = self::asDoWhile($n)->body; }
-            else { $body = self::asForeach($n)->body; }
-            foreach (Walk::children($n) as $c) {
-                if ($c === $body) { continue; }
-                // A loop header runs once per iteration: no statement to precede.
-                $this->locateMoves($c, -1, null, $loop + 1, $lat);
-            }
-            $this->locateMoves($body, $stmt, $stmtNode, $loop + 1, $lat);
-            return;
-        }
-        foreach (Walk::children($n) as $c) { $this->locateMoves($c, $stmt, $stmtNode, $loop, $lat); }
+        $inner = $k === Node::KIND_WHILE || $k === Node::KIND_FOR || $k === Node::KIND_DOWHILE
+            || $k === Node::KIND_FOREACH;
+        foreach (Walk::children($n) as $c) { $this->locateMoves($c, $inner ? $loop + 1 : $loop, $lat); }
     }
 
     private function collectShared(Node $n): void
@@ -845,7 +793,9 @@ final class OwnershipFlow implements Pass
             if (\count($names) > 0) { $lat->unsetNames[\spl_object_id($n)] = $names; }
         } elseif ($k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_STORE_PROPERTY || $k === Node::KIND_ARRAY_LIT) {
             foreach ($this->own->containerMoves($n) as $ll) {
-                if (!isset($this->excluded[$ll->name])) { $lat->moveName[\spl_object_id($ll)] = $ll->name; }
+                if (isset($this->excluded[$ll->name])) { continue; }
+                $lat->moveName[\spl_object_id($ll)] = $ll->name;
+                $this->moveLoad[\spl_object_id($ll)] = $ll;
             }
         } elseif ($k === Node::KIND_TRY_CATCH) {
             foreach (self::asTryCatch($n)->catches as $c) {
@@ -889,6 +839,12 @@ final class OwnershipFlow implements Pass
             return;
         }
         $ks = $this->keyString($slotT);
+        // A concrete array bound to a name that also owns erased-array results
+        // shares their release class: one slot, one raw array word, split by tag.
+        if (isset($this->erasedNames[$name]) && \str_starts_with($ks, 'arr')) {
+            $ks = Ownership::ERASED_ARR;
+            $slotT = Type::unknown();
+        }
         $isMixed = isset($this->mixedHere[$name]);
         if ($ks === '') {
             $nullish = $v->kind === Node::KIND_NULL_CONST || $v->type->kind === Type::KIND_NULL
@@ -953,7 +909,8 @@ final class OwnershipFlow implements Pass
         // destination takes its own count — retained after the store at the
         // depth its drop gives back.
         if ($c === Ownership::BORROW && !$boxed && $v->kind === Node::KIND_LOAD_LOCAL
-            && self::asLoadLocal($v)->name !== $name && \str_starts_with($ks, 'arr')) {
+            && self::asLoadLocal($v)->name !== $name
+            && (\str_starts_with($ks, 'arr') || $ks === Ownership::ERASED_ARR)) {
             $lat->storeState[$id] = $key;
             $this->aliasRetain[$id] = true;
             $this->noteOwnKey($name, $key);
@@ -1371,15 +1328,14 @@ final class OwnershipFlow implements Pass
             $this->say($sl->line, $name, $x, 'store');
         }
 
-        // A container store the local stays live past takes its own +1 for
-        // the container, right before the statement that stores it.
+        // A container store the local stays live past takes its own +1 for the
+        // container, on the read it consumes.
         foreach ($l->shareKey as $id => $k) {
-            $sid = $this->shareStmt[$id] ?? -1;
-            if ($sid < 0) { continue; }
-            $nm = $l->shareName[$id];
-            $this->insBefore[$sid][] = new MemoryOp_('own_share', $this->keyFlavor[$k],
-                new LoadLocal($nm, $this->keyType[$k]), Type::void());
-            $this->say(0, $nm, $k, 'shared with a container');
+            $ll = $this->moveLoad[$id] ?? null;
+            if ($ll === null) { continue; }
+            $ll->ownShare = new MemoryOp_('own_share', $this->keyFlavor[$k],
+                new LoadLocal($ll->name, $this->keyType[$k]), Type::void());
+            $this->say($ll->line, $ll->name, $k, 'shared with a container');
         }
 
         foreach ($l->unsetIn as $id => $in) {
@@ -1514,6 +1470,7 @@ final class OwnershipFlow implements Pass
             \Compile\Stats::bump('own.flow.forced', \count($force));
             \Compile\Stats::bump('own.flow.compensations', \count($this->inserted));
             \Compile\Stats::bump('own.flow.moves', \count($l->moveName));
+            \Compile\Stats::bump('own.flow.containerShares', \count($l->shareKey));
             \Compile\Stats::bump('own.flow.shared', \count($this->shared));
         }
     }

@@ -34,6 +34,15 @@ final class OwnershipContext
      *  declare a bare `array` return: +1 on every path ({@see Ownership::erasedArrayReturn}) */
     public array $erasedArrayFns = [];
 
+    /** @var array<string, bool> {@see Module::$bareArrayMethods} */
+    public array $bareArrayMethods = [];
+
+    /** @var array<string, bool> {@see Module::$byRefMethodNames} */
+    public array $byRefMethodNames = [];
+
+    /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
+    public array $interfaceAncestors = [];
+
     /** @var string[] builtins whose result is a BORROW ({@see AliasOwn::borrowingBuiltins}) */
     public array $borrowingBuiltins = [];
 
@@ -51,6 +60,9 @@ final class OwnershipContext
             if (Ownership::erasedArrayReturn($fn)) { $c->erasedArrayFns[$fn->name] = true; }
             if ($fn->ffiSymbol !== null) { $c->externFns[$fn->name] = true; }
         }
+        $c->bareArrayMethods = $module->bareArrayMethods;
+        $c->byRefMethodNames = $module->byRefMethodNames;
+        $c->interfaceAncestors = $module->interfaceAncestors;
         $c->borrowingBuiltins = AliasOwn::borrowingBuiltins();
         return $c;
     }

@@ -1,0 +1,16 @@
+i q
+b sub-q
+~sub-q
+m q
+fcc qqinst
+~inst
+--
+i q
+b sub-q
+~sub-q
+m q
+fcc qqinst
+~inst
+--
+~q
+done

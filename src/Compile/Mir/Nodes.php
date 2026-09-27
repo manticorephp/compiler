@@ -135,6 +135,11 @@ final class LoadLocal extends Node
         parent::__construct(Node::KIND_LOAD_LOCAL, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: this read is the value a container
+     *  store takes without a count of its own while the local stays live — the
+     *  `own_share` +1 is taken right here, on the word just read. Not a child. */
+    public ?MemoryOp_ $ownShare = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitLoadLocal($this);
@@ -538,16 +543,17 @@ final class Block extends Node
 }
 
 /**
- * Explicit memory operation, inserted by {@see Passes\InsertMemoryOps}
- * from the allocation-kind verdict — the MemoryOps layer (contract
- * step #5). EmitLlvm *consumes* these; it never invents retain/release
- * from its feature handlers.
+ * Explicit memory operation. EmitLlvm *consumes* these; it never invents
+ * retain / release for a local from its feature handlers.
  *
- * `op`     — 'retain' | 'release' | 'cow' | 'root' | 'arena_enter' | 'arena_leave'
- * `flavor` — heap family the runtime helper dispatches on:
- *            'string' | 'vec' | 'assoc' | 'obj' | 'cell' (empty for arena scope)
- * `target` — the value the op acts on (a `LoadLocal` for scope-exit
- *            releases; null for whole-frame arena enter / leave).
+ * `op` — `arena_enter` / `arena_leave` ({@see Passes\InsertMemoryOps}: the
+ *        frame's arena scope); `drop`, `own_retain` and the registrations
+ *        `own_local` / `own_local_b` ({@see Passes\OwnershipFlow}); `own_share`
+ *        rides on a {@see LoadLocal}, never in a statement list.
+ * `flavor` — the release class the runtime helper dispatches on (the
+ *        {@see Passes\EmitLlvmMemory::rcReleaseFlavor} vocabulary; empty for
+ *        the arena scope).
+ * `target` — the local the op acts on (a `LoadLocal`; null for the arena scope).
  */
 final class MemoryOp_ extends Node
 {

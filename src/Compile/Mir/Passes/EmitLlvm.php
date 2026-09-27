@@ -2535,7 +2535,7 @@ final class EmitLlvm implements EmitVisitor
             // reference: the value of a StoreLocal is retained by
             // rcRetainByType (an array-access is not an owned producer, so it
             // is not skipped), and a returned one is retained by
-            // isBorrowedObjReturn. Those two own what they read, so they cannot
+            // Ownership::returnBorrowsObj. Those two own what they read, so they cannot
             // strand anything, and vetoing the whole DECLARING CLASS for them
             // is what leaks every element of the slot — 9,236,608 Lexer\\Token
             // on the Doctrine tier, against ~0 reclaims.
@@ -2611,7 +2611,7 @@ final class EmitLlvm implements EmitVisitor
             return;
         }
         // A RETURN already TAKES the reference. emitReturn gates on
-        // isBorrowedObjReturn and retains a borrowed property read before
+        // Ownership::returnBorrowsObj and retains a borrowed property read before
         // handing it back, so the caller owns a reference of its own and the
         // slot may drop what it overwrites without stranding that borrow.
         // `return $this->p;` is the shape every getter has, and the default
@@ -2695,8 +2695,8 @@ final class EmitLlvm implements EmitVisitor
     /**
      * Does `emitReturn` retain this borrowed property read on the way out?
      *
-     * Mirrors {@see EmitLlvmModule::isBorrowedObjReturn}'s type test, with
-     * {@see EmitLlvmModule::ownershipReturnType}'s fallback spelled against the
+     * Mirrors {@see \Compile\Mir\Ownership::returnBorrowsObj}'s type test, with
+     * {@see \Compile\Mir\Ownership::returnOwnershipType}'s fallback spelled against the
      * scan's own copy of the declared return type (the emit frame does not
      * exist yet during a module-wide scan).
      *
@@ -2720,7 +2720,7 @@ final class EmitLlvm implements EmitVisitor
         }
         if ($tk === Type::KIND_STRING) { return true; }
         // ⚠ ARRAY too, and its absence was the whole `Lexer\Token` leak.
-        // {@see EmitLlvmModule::isBorrowedObjReturn} — the code that actually
+        // {@see \Compile\Mir\Ownership::returnBorrowsObj} — the code that actually
         // emits the retain — covers OBJ, STRING and ARRAY alike (`$isArr =
         // isVec() || isAssoc()`), so `return $this->tokens;` DOES hand the
         // caller a reference of its own. Answering `false` here made this scan
@@ -2730,11 +2730,11 @@ final class EmitLlvm implements EmitVisitor
         // stranded every token: 9.2M of them on the Doctrine tier.
         if ($t->isVec() || $t->isAssoc()) { return true; }
         // A closure env is counted and a borrowed one is retained on return
-        // like an object ({@see EmitLlvmModule::isBorrowedObjReturn}).
+        // like an object ({@see \Compile\Mir\Ownership::returnBorrowsObj}).
         if ($tk === Type::KIND_CLOSURE) { return true; }
         // A borrowed CELL handed back from a cell-returning function is
         // retained by tag (emitReturn's cell arms, {@see
-        // EmitLlvmModule::isBorrowedCellReturn}).
+        // \Compile\Mir\Ownership::returnBorrowsCell}).
         if ($tk === Type::KIND_CELL && $v->type->kind === Type::KIND_CELL) { return true; }
         if ($tk !== Type::KIND_OBJ) { return false; }
         // A struct has no rc header; emitReturn refuses it, so it is not
@@ -2753,7 +2753,7 @@ final class EmitLlvm implements EmitVisitor
      * emitter rather than assumed here: the value of a StoreLocal (retained by
      * {@see EmitLlvmMemory::rcRetainByType} — an array access is not an owned
      * producer, so it is not skipped) and the value of a Return (retained by
-     * {@see EmitLlvmModule::isBorrowedObjReturn}).
+     * {@see \Compile\Mir\Ownership::returnBorrowsObj}).
      *
      * Narrowed to OBJ and STRING elements deliberately: an ARRAY element is
      * retained to a DEPTH chosen from the destination type, and matching that
@@ -3796,8 +3796,7 @@ final class EmitLlvm implements EmitVisitor
             $this->rt->needsArena = true;
             return "  call void @__mir_arena_leave()\n";
         }
-        // `own_share`: the +1 a container takes of an owned local it stores.
-        if ($mo->op === 'drop' || $mo->op === 'own_retain' || $mo->op === 'own_share') {
+        if ($mo->op === 'drop' || $mo->op === 'own_retain') {
             $slot = $this->ownOpSlot($mo);
             if ($slot === '') { return ''; }
             if ($mo->op === 'drop') {

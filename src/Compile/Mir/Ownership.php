@@ -274,7 +274,7 @@ final class Ownership
             // ({@see Passes\EmitLlvmCalls::emitClosure}), and a call hands one back
             // under the same +1 return convention an object rides: the callee
             // retains a borrowed closure it returns
-            // ({@see Passes\EmitLlvmModule::isBorrowedObjReturn}), a returned owned
+            // ({@see returnBorrowsObj}), a returned owned
             // local transfers. So a call / invoke producer is owned; any other
             // (an alias, a property read) stays a borrow; an element read co-owns. Refusing
             // them all meant a closure that left the frame that built it —
@@ -804,7 +804,7 @@ final class Ownership
             return $this->releaseFlavor($a->type);
         }
         // An ASSOC result used to be exempted here, on the reading that
-        // isBorrowedObjReturn covered only obj/vec/string. It has covered
+        // the borrowed-return test covered only obj/vec/string. It has covered
         // assoc since — "vec AND assoc: both are one rc'd buffer" — so the
         // exemption outlived its reason and made every assoc-returning
         // builtin body leak its whole result: `count(array_flip($t))` and
@@ -971,14 +971,47 @@ final class Ownership
             if (\in_array(\ltrim($sym, '\\'), $this->ctx->borrowingBuiltins, true)) { return false; }
         } elseif ($k === Node::KIND_METHOD_CALL) {
             $mc = self::asMethodCall($v);
-            $sym = $this->methodSymbol($mc->object->type->class ?? '', $mc->method);
+            return $this->methodReturnsErasedArray($mc->object->type->class ?? '', $mc->method);
         } elseif ($k === Node::KIND_STATIC_CALL) {
             $sc = self::asStaticCall($v);
-            $sym = $this->methodSymbol($sc->class, $sc->method);
+            return $this->methodReturnsErasedArray($sc->class, $sc->method);
         } elseif ($k === Node::KIND_INVOKE) {
             $sym = self::asInvoke($v)->callee->type->class ?? '';
         }
         return $sym !== '' && isset($this->ctx->erasedArrayFns[$sym]);
+    }
+
+    /**
+     * Does `$class::$method` hand back an erased array at +1 whatever body the
+     * call dispatches to? The body the class resolves to declares it, or a
+     * bodiless (interface / abstract) declaration up its hierarchy does — php's
+     * variance makes every override declare `array` too. A name some
+     * declaration returns BY REFERENCE is never claimed: that override hands
+     * back an address.
+     */
+    private function methodReturnsErasedArray(string $class, string $method): bool
+    {
+        $lm = \strtolower($method);
+        if ($class === '' || isset($this->ctx->byRefMethodNames[$lm])) { return false; }
+        $sym = $this->methodSymbol($class, $method);
+        if ($sym !== '' && isset($this->ctx->erasedArrayFns[$sym])) { return true; }
+        if (\count($this->ctx->bareArrayMethods) === 0) { return false; }
+        /** @var string[] $stack */
+        $stack = [\ltrim($class, '\\')];
+        /** @var array<string, bool> $seen */
+        $seen = [];
+        while (\count($stack) > 0) {
+            $c = (string)\array_pop($stack);
+            if ($c === '' || isset($seen[$c])) { continue; }
+            $seen[$c] = true;
+            if (isset($this->ctx->bareArrayMethods[$c . '::' . $lm])) { return true; }
+            foreach ($this->ctx->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = \ltrim($ia, '\\'); }
+            $cd = $this->ctx->classes[$c] ?? null;
+            if ($cd === null) { continue; }
+            $stack[] = \ltrim($cd->parent, '\\');
+            foreach ($cd->interfaces as $in) { $stack[] = \ltrim($in, '\\'); }
+        }
+        return false;
     }
 
     /** A return value that crosses the uniform closure ABI as a tagged cell. */
