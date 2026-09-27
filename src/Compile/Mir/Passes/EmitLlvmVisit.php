@@ -150,10 +150,10 @@ trait EmitLlvmVisit
         // slotStoredType}), so every later release drops what is really there.
         $flag = $this->frame->mixedFlagSlots[$n->name] ?? '';
         if ($flag !== '') {
-            // 0 = a raw rc pointer; 1 = anything else (a cell, a raw scalar).
-            $sk = InsertMemoryOps::slotStoredType($n)->kind;
-            $raw = $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
-            $out .= '  store i64 ' . ($raw ? '0' : '1') . ', ptr ' . $flag . "\n";
+            // 1 = anything but a raw rc pointer (a cell, a raw scalar); 0 / i + 1
+            // = a raw pointer of the slot's raw flavor [0] / [i].
+            $out .= '  store i64 ' . $this->mixedFlagCode($n->name, InsertMemoryOps::slotStoredType($n))
+                . ', ptr ' . $flag . "\n";
         }
         $ff = $this->feCellFlags[$n->name] ?? '';
         if ($ff !== '') {

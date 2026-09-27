@@ -87,4 +87,9 @@ final class FunctionEmitFrame
     /** @var array<string, string> the same flags keyed by the local's SLOT, for
      *  the release helpers that only see the slot. Appended at the END. */
     public array $mixedFlagBySlot = [];
+    /** @var array<string, string[]> a MIXED local's flag alloca → the release
+     *  flavors of the RAW representations its stores leave, index 0 the plan's
+     *  own. The flag holds 1 for a cell, 0 for raw [0], i + 1 for raw [i].
+     *  Appended at the END. */
+    public array $mixedRawByFlag = [];
 }

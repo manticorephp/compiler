@@ -2199,6 +2199,13 @@ trait EmitLlvmArrays
             $this->rt->needsClosureRc = true;
             return '  call void @__mir_array_clo_drop(ptr ' . $arr . ', i64 ' . $word . ")\n";
         }
+        if ($flavor === 'cell') {
+            // The slot's word as the buffer's HINT describes it: a raw-hinted
+            // buffer holds untagged payloads a cell drop would misread.
+            $dec = $this->ssa->allocReg();
+            return '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arr . ', i64 ' . $word . ")\n"
+                . $this->rcReleaseReg($dec, 'cell');
+        }
         return $this->rcReleaseReg($word, $flavor);
     }
 
