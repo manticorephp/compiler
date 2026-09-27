@@ -2891,8 +2891,8 @@ final class UnifiedArrayRuntime
      * (rc saturated to {@see MemoryAbi::IMMORTAL_ARRAY_RC}) is never malloc'd, so
      * any in-place mutator that frees / reallocs / promotes it would corrupt a
      * value shared by every empty `[]` in the program (or abort in libmalloc).
-     * The singleton is the ONLY immortal array and is ALWAYS empty, so
-     * "separating" it is just a fresh `alloc(0)`. Called at the entry of every
+     * The singleton is always empty, so "separating" it is just a fresh
+     * `alloc(0)`; a constant literal (also immortal) is copied. Called at the entry of every
      * in-place mutator ({@see emitSetInt} / {@see emitSetStr} / {@see emitUnshift})
      * so their result — which the caller stores back into the slot — is a private
      * rc=1 buffer while the singleton stays pristine. Real arrays (rc far below
@@ -2914,11 +2914,17 @@ final class UnifiedArrayRuntime
         $keep = $fn->block('keep');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $fresh, $chk);
         $rc = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+        $imm = $fn->block('imm');
+        $dup = $fn->block('dup');
         $chk->brIf(
             $chk->icmp('sgt', $rc, Value::int(Type::i64(), 1 << 61)),
-            $fresh,
+            $imm,
             $keep,
         );
+        // A CONSTANT literal is immortal too ({@see EmitLlvmArrays::immortalLitPtr})
+        // and not empty: separating it is a copy, not a fresh empty buffer.
+        $imm->brIf($imm->icmp('eq', $imm->load(Type::i64(), $arr), Value::int(Type::i64(), 0)), $fresh, $dup);
+        $dup->ret($dup->call('__mir_array_copy', Type::ptr(), [$arr]));
         $fresh->ret($fresh->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]));
         $keep->ret($arr);
     }

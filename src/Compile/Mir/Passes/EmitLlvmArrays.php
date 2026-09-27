@@ -620,6 +620,15 @@ trait EmitLlvmArrays
             $this->lastValueType = 'ptr';
             return '';
         }
+        if (!$arena && !$cellVals && $count > 0 && \Compile\Debug::$emptyArraySingleton) {
+            $ishape = $this->litDirectShape($al);
+            $imm = $ishape === null ? '' : $this->immortalLitPtr($al, $ishape);
+            if ($imm !== '') {
+                $this->lastValue = $imm;
+                $this->lastValueType = 'ptr';
+                return '';
+            }
+        }
         $allocFn = $arena ? '__mir_array_alloc_arena' : '__mir_array_alloc';
         if ($arena) { $this->rt->needsArena = true; $this->arena->vecAllocated = true; }
         // A literal that carries a string key is hashed the moment its first
@@ -862,8 +871,25 @@ trait EmitLlvmArrays
      */
     private function litConstTable(ArrayLit $al, string $shape): string
     {
+        $words = $this->litConstWords($al, $shape);
+        if ($words === null) { return ''; }
+        $sym = '@.lit.' . (string)$this->litTableCount;
+        $this->litTableCount = $this->litTableCount + 1;
+        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
+            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
+        return $sym;
+    }
+
+    /**
+     * The entry words (`i64 …`) of a known-shape literal whose every key and
+     * value is an int or string CONSTANT, laid out as the buffer stores them;
+     * null when some element is not a constant word.
+     * @return string[]|null
+     */
+    private function litConstWords(ArrayLit $al, string $shape): ?array
+    {
         $et = $al->type->element;
-        if ($et === null || ($et->kind !== Type::KIND_INT && $et->kind !== Type::KIND_STRING)) { return ''; }
+        if ($et === null || ($et->kind !== Type::KIND_INT && $et->kind !== Type::KIND_STRING)) { return null; }
         $ew = \intdiv($shape === 'packed' ? \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE
                                           : \Compile\MemoryAbi::ARRAY_ENTRY_SIZE, 8);
         $kindW = \intdiv(\Compile\MemoryAbi::ARRAY_ENTRY_KIND_OFFSET, 8);
@@ -879,24 +905,57 @@ trait EmitLlvmArrays
                       && $v->type->kind === Type::KIND_STRING) {
                 $vw = 'ptrtoint (ptr ' . $this->litStr($v->value) . ' to i64)';
             } else {
-                return '';
+                return null;
             }
             /** @var string[] $entry */
             $entry = \array_fill(0, $ew, '0');
             $entry[$valW] = $vw;
             if ($shape === 'hashed') {
                 $k = $el->key;
-                if (!($k instanceof StringConst)) { return ''; }
+                if (!($k instanceof StringConst)) { return null; }
                 $entry[$kindW] = (string)\Compile\MemoryAbi::ARRAY_KIND_STRING;
                 $entry[$keyW] = 'ptrtoint (ptr ' . $this->litStr($k->value) . ' to i64)';
             }
             foreach ($entry as $w) { $words[] = 'i64 ' . $w; }
         }
-        $sym = '@.lit.' . (string)$this->litTableCount;
+        return $words;
+    }
+
+    /**
+     * A constant literal as an IMMORTAL array: a writable global laid out as a
+     * heap buffer (tag, header, entries) with rc {@see \Compile\MemoryAbi::IMMORTAL_ARRAY_RC},
+     * handed out by address — no allocation, no element stores, no free. It is
+     * what php does with a literal of constants (an immutable array), and
+     * php-cs-fixer builds `[T_COMMENT, T_DOC_COMMENT]` and its kin millions of
+     * times: every `$token->isComment()` was a malloc and a free. The rc never
+     * reaches 1, so every writer copies first (COW / deimmortal) and every
+     * release is a decrement. '' when the literal is not all constants.
+     */
+    private function immortalLitPtr(ArrayLit $al, string $shape): string
+    {
+        $words = $this->litConstWords($al, $shape);
+        if ($words === null) { return ''; }
+        $n = \count($al->elements);
+        $flags = $this->elementHintCodeForType($al->type->element) ?? 0;
+        if ($shape === 'hashed') { $flags = $flags | \Compile\MemoryAbi::ARRAY_FLAG_HASHED; }
+        $hdr = [
+            (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            (string)$n,                                     // len
+            (string)$n,                                     // cap
+            $shape === 'packed' ? (string)$n : '0',       // next int key
+            (string)\Compile\MemoryAbi::IMMORTAL_ARRAY_RC,
+            (string)$flags,
+            '0',                                            // nbuckets
+            '0',                                            // buckets
+        ];
+        $all = [];
+        foreach ($hdr as $h) { $all[] = 'i64 ' . $h; }
+        foreach ($words as $w) { $all[] = $w; }
+        $sym = '@.ilit.' . (string)$this->litTableCount;
         $this->litTableCount = $this->litTableCount + 1;
-        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
-            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
-        return $sym;
+        $this->litTableBodies .= $sym . ' = internal global [' . (string)\count($all)
+            . ' x i64] [' . \implode(', ', $all) . "], align 8\n";
+        return 'getelementptr inbounds (i8, ptr ' . $sym . ', i64 8)';
     }
 
     /**
