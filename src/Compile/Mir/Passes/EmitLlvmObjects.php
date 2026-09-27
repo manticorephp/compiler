@@ -63,6 +63,19 @@ trait EmitLlvmObjects
             $ix = $this->classCensusIndex();
             if (isset($ix[$cd->name])) { $out .= $this->profClass((string)$ix[$cd->name]); }
         }
+        // Header + every default slot from ONE constant template: a store pair per
+        // property at every `new` site was 17.8 KB of IR for `new EmitLlvm()`
+        // alone. Only word-wide layouts qualify; a narrow `#[TypeDef]` slot keeps
+        // the per-slot stores below.
+        $tmpl = $isStruct ? '' : $this->objInitTemplate($cd);
+        if ($tmpl !== '' && $cd !== null) {
+            $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+            $out .= '  call ptr @memcpy(ptr ' . $obj . ', ptr ' . $tmpl
+                  . ', i64 ' . (string)$size . ")\n";
+            $this->lastValue = $obj;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         if ($isStruct) {
             // A struct has NO header — property slot 0 sits at +0 and there is
             // no rc at +8. Leaving the allocator's RC_TAG_MAGIC at ptr-8 would
@@ -123,6 +136,44 @@ trait EmitLlvmObjects
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * The constant image of a fresh instance of `$cd` — descriptor, rc 1 and
+     * every property default at its offset, the bag and any alignment gap 0 —
+     * or '' when the layout has a narrow slot or too few properties to pay.
+     * One `private` global per class, named by the class so the part a split
+     * puts it in stays byte-stable across unrelated edits.
+     */
+    private function objInitTemplate(?\Compile\Mir\ClassDef $cd): string
+    {
+        if ($cd === null || $cd->isStruct || \count($cd->propertyNames) < 2) { return ''; }
+        $sym = $this->objTemplates[$cd->name] ?? null;
+        if ($sym !== null) { return $sym; }
+        if ($this->litTablesFlushed) { return ''; }
+        $size = $cd->instanceSize();
+        $ok = $size % 8 === 0;
+        foreach ($cd->propertyNames as $pname) {
+            if ($cd->propertyWidth($pname) !== 8 || $cd->propertyOffset($pname) % 8 !== 0) { $ok = false; }
+        }
+        if (!$ok) { $this->objTemplates[$cd->name] = ''; return ''; }
+        /** @var string[] $words */
+        $words = \array_fill(0, \intdiv($size, 8), '0');
+        $words[0] = $this->lib->descSlotValue($cd);
+        $words[1] = '1';
+        foreach ($cd->propertyNames as $pname) {
+            $ptype = $cd->propertyTypes[$pname] ?? null;
+            if ($this->cellPropBoxed($ptype, $cd->name, $pname)) {
+                $words[\intdiv($cd->propertyOffset($pname), 8)] = '-3659174697238528';
+            }
+        }
+        $sym = '@.otmpl.' . $this->mangle($cd->name);
+        $parts = [];
+        foreach ($words as $w) { $parts[] = 'i64 ' . $w; }
+        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
+            . ' x i64] [' . \implode(', ', $parts) . "], align 8\n";
+        $this->objTemplates[$cd->name] = $sym;
+        return $sym;
     }
 
     /**

@@ -1043,6 +1043,72 @@ trait EmitLlvmBuiltins
         $this->rt->needsCellKey = true;
         $out = $this->coerceToPtr();
         $rawSrc = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = call ptr ' . $this->cellifyHelper($elem) . '(ptr ' . $rawSrc . ")\n";
+        // The walk is over and every element the rebuild keeps is co-owned, so an
+        // OWNED-TEMP source dies here — the helper read it until its last entry.
+        if ($srcFlavor !== '') {
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $rawSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $srcFlavor);
+        }
+        if ($raw) {
+            // The cell-element array itself, unboxed: a `vec[cell]` slot is
+            // KIND_ARRAY and travels RAW, so a return/store boundary wants this
+            // pointer, not a cell wrapping it. {@see emitCellifyArrayRaw}
+            $this->lastValue = $res;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $res . ")\n";
+        // Every element was boxed to a cell by the rebuild, and this boxes the
+        // ARRAY ITSELF — boxed by construction on every path into $r.
+        $this->markCellBoxed($r);
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * The cellify rebuild as ONE body per element type, called: inline it was a
+     * ~45-line loop at every boundary — 2 650 copies in the compiler's own
+     * module, ~6% of its instructions. Nothing in the loop depends on the site
+     * but the element type, so the body is keyed by its own text.
+     */
+    private function cellifyHelper(Type $elem): string
+    {
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $body = $this->cellifyLoopIr($elem, '%src');
+        $res = $this->lastValue;
+        $key = '__mc_cellify_' . \dechex(\crc32($body)) . '_' . (string)\strlen($body);
+        $sym = '@manticore_' . $key;
+        if (!isset($this->propertyReadHelpers[$key])) {
+            $this->propertyReadHelpers[$key] = 'define linkonce_odr ptr ' . $sym . "(ptr %src) {\nentry:\n"
+                . $body . '  ret ptr ' . $res . "\n}\n\n";
+        }
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        return $sym;
+    }
+
+    /** The rebuild loop over the array at `$rawSrc`; the result pointer (null
+     *  for a null source) is left in lastValue. */
+    private function cellifyLoopIr(Type $elem, string $rawSrc): string
+    {
+        $out = '';
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0.
         $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
@@ -1232,30 +1298,9 @@ trait EmitLlvmBuiltins
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = select i1 ' . $isNull
               . ', ptr null, ptr ' . $dst . "\n";
-        // The walk is over and every element the rebuild keeps is co-owned, so an
-        // OWNED-TEMP source dies here. Emitted after the loop and after $dst is
-        // loaded — the source is read until the last iteration.
-        if ($srcFlavor !== '') {
-            $si = $this->ssa->allocReg();
-            $out .= '  ' . $si . ' = ptrtoint ptr ' . $rawSrc . " to i64\n";
-            $out .= $this->rcReleaseReg($si, $srcFlavor);
-        }
-        if ($raw) {
-            // The cell-element array itself, unboxed: a `vec[cell]` slot is
-            // KIND_ARRAY and travels RAW, so a return/store boundary wants this
-            // pointer, not a cell wrapping it. {@see emitCellifyArrayRaw}
-            $this->lastValue = $res;
-            $this->lastValueType = 'ptr';
-            return $out;
-        }
-        $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $res . ")\n";
-        // The whole point of this rebuild: every element above was already
-        // boxed to a cell, and this final call boxes the ARRAY ITSELF —
-        // boxed by construction on every path into $r (the $isNull select
-        // just picks the source pointer this same call then boxes either way).
-        $this->markCellBoxed($r);
-        return $this->finishI64($out, $r);
+        $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /**

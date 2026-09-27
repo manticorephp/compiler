@@ -633,6 +633,10 @@ final class EmitLlvm implements EmitVisitor
         $this->cf = new ControlFlow();
         $this->frame = new FunctionEmitFrame();
         $this->readCellGuardFlags();
+        $this->irCensus = \getenv('MANTICORE_IR_CENSUS') === '1';
+        $this->censusBytes = [];
+        $this->censusCount = [];
+        $this->censusChild = [];
         $this->resetCellGuardFrame();
         $this->sigs = new FunctionSignatures();
         $this->arena = new ArenaContext();
@@ -813,6 +817,8 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
         $this->litTableCount = 0;
+        $this->objTemplates = [];
+        $this->litTablesFlushed = false;
         $this->btBaseLine = [];
         $this->dynScopeRelTables = [];
         $this->newDynTableCache = null;
@@ -1140,6 +1146,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
         $extraBodies .= $this->litTableBodies;
+        $this->litTablesFlushed = true;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1187,6 +1194,7 @@ final class EmitLlvm implements EmitVisitor
             $this->drainLazyHelpers($appendStreamedBody);
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
+            $this->reportIrCensus($bodyBytes);
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
                 . (string)$fileHoistThreshold . ')');
@@ -1212,6 +1220,13 @@ final class EmitLlvm implements EmitVisitor
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
         $statT = \Compile\Stats::now();
         $preamble = $this->linkonceRuntime($this->emitPreamble());
+        // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
+        // cellifying an array property), after both drains above ran. Drained
+        // entries are blanked, so this only picks up the late ones.
+        $late = '';
+        $this->drainLazyHelpers(function (string $body, string $label) use (&$late): void { $late .= $body; });
+        $preamble .= $late;
+        unset($late);
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
@@ -2300,6 +2315,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classlessCandidatesMemo = [];
 
     private int $litTableCount = 0;
+    /** @var array<string, string> class name => its instance template symbol, '' = none ({@see EmitLlvmObjects::objInitTemplate}) */
+    private array $objTemplates = [];
+    /** `litTableBodies` is already in the output: a template minted now would never be defined. */
+    private bool $litTablesFlushed = false;
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
@@ -3513,9 +3532,74 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitNode(Node $n): string
     {
+        if ($this->irCensus) { return $this->emitNodeCensus($n); }
         $out = $n->accept($this);
         if ($this->cellGuard) { $this->markCellCalleeResult($n); }
         return $out;
+    }
+
+    /**
+     * `MANTICORE_IR_CENSUS=1` (with MANTICORE_STATS=1): the IR bytes each MIR
+     * construct emits ITSELF — its whole output minus what its children emitted —
+     * summed over the module, a direct call split by callee (an inlined builtin
+     * is a call). Answers which constructs the IR volume comes from, which the
+     * finished `.ll` cannot: by then every construct is instructions.
+     */
+    private bool $irCensus = false;
+    /** @var array<string, int> */
+    private array $censusBytes = [];
+    /** @var array<string, int> */
+    private array $censusCount = [];
+    /** @var int[] */
+    private array $censusChild = [];
+    /** @var array<string, int> */
+    private array $censusMax = [];
+    /** @var array<string, string> */
+    private array $censusMaxFn = [];
+    /** @var array<string, int> bytes in instances over 2 KB */
+    private array $censusBig = [];
+
+    private function emitNodeCensus(Node $n): string
+    {
+        $this->censusChild[] = 0;
+        $out = $n->accept($this);
+        if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        $kids = (int)\array_pop($this->censusChild);
+        $len = \strlen($out);
+        $key = $n->kind;
+        if ($n instanceof \Compile\Mir\Call) { $key = 'call:' . $this->censusCallee($n); }
+        $this->censusBytes[$key] = ($this->censusBytes[$key] ?? 0) + $len - $kids;
+        $this->censusCount[$key] = ($this->censusCount[$key] ?? 0) + 1;
+        $self = $len - $kids;
+        if ($self > ($this->censusMax[$key] ?? 0)) { $this->censusMax[$key] = $self; $this->censusMaxFn[$key] = $this->frame->name; }
+        if ($self > 2000) { $this->censusBig[$key] = ($this->censusBig[$key] ?? 0) + $self; }
+        $d = \count($this->censusChild);
+        if ($d > 0) { $this->censusChild[$d - 1] = $this->censusChild[$d - 1] + $len; }
+        return $out;
+    }
+
+    private function censusCallee(\Compile\Mir\Call $c): string { return $c->function; }
+
+    private function reportIrCensus(int $bodyBytes): void
+    {
+        if (!$this->irCensus) { return; }
+        $bytes = $this->censusBytes;
+        \arsort($bytes);
+        $sum = 0;
+        foreach ($bytes as $b) { $sum = $sum + $b; }
+        \Compile\Stats::line('census: node-attributed ' . (string)$sum . ' of ' . (string)$bodyBytes
+            . ' body bytes (rest = prologues/epilogues/helpers)');
+        $i = 0;
+        foreach ($bytes as $k => $b) {
+            $c = $this->censusCount[$k] ?? 1;
+            \Compile\Stats::line('census: ' . \str_pad((string)$b, 10, ' ', \STR_PAD_LEFT)
+                . ' B ' . \str_pad((string)$c, 8, ' ', \STR_PAD_LEFT) . ' x '
+                . \str_pad((string)\intdiv($b, $c > 0 ? $c : 1), 7, ' ', \STR_PAD_LEFT) . ' B/each  ' . (string)$k
+                . '  | >2KB ' . (string)($this->censusBig[$k] ?? 0)
+                . ' | max ' . (string)($this->censusMax[$k] ?? 0) . ' in ' . ($this->censusMaxFn[$k] ?? ''));
+            $i = $i + 1;
+            if ($i >= 80) { break; }
+        }
     }
 
     /** `$left <op> $right` where the result is a numeric (int|float) cell: box
