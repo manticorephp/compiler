@@ -87,4 +87,13 @@ final class FunctionEmitFrame
     /** @var array<string, string> the same flags keyed by the local's SLOT, for
      *  the release helpers that only see the slot. Appended at the END. */
     public array $mixedFlagBySlot = [];
+    /** The shared return epilogue ({@see EmitLlvmModule::finishReturn}): its
+     *  label ('' = no return took it yet), the slot the returns store their value
+     *  into, and whether it closes the frame arena. Appended at the END. */
+    public string $retExitLabel = '';
+    public string $retExitSlot = '';
+    public bool $retExitArena = false;
+    /** @var array<string, bool> the locals the return being emitted hands back
+     *  ({@see EmitLlvmModule::returnedLocalNames}) */
+    public array $retExempt = [];
 }

@@ -913,6 +913,9 @@ trait EmitLlvmModule
         $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;
+        $this->frame->retExitLabel = '';
+        $this->frame->retExitSlot = '';
+        $this->frame->retExempt = [];
         $this->arena->vecAllocated = false;
         $this->arena->vecLocals = [];
         $this->locals->slots = [];
@@ -1208,7 +1211,8 @@ trait EmitLlvmModule
         // caller reads the result by tag, so raw 0 decoded as float and
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
         $bodySink->write($this->emitOwnedBoxReleases([]));
-        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n}");
+        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n");
+        $bodySink->write($this->emitSharedReturnExit() . '}');
         $body = $bodySink->finish() . "\n\n";
         // Do not keep the per-invocation chunk array alive through the return
         // boundary. Doctrine emits tens of thousands of functions; explicit
@@ -2247,6 +2251,7 @@ trait EmitLlvmModule
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        $this->frame->retExempt = $exempt;
         $leave = $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
@@ -2464,8 +2469,64 @@ trait EmitLlvmModule
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);
-        return $out . $leave . $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot())
+        $jmp = $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
+        if ($jmp === '' && $this->sharedReturnOk()) {
+            if ($this->frame->retExitLabel === '') {
+                $this->frame->retExitLabel = $this->ssa->allocLabel('ret.exit');
+                $this->frame->retExitSlot = $this->ssa->allocReg();
+                $this->frame->retExitArena = $this->frame->hasArena;
+                $out .= $this->localSlotAlloca($this->frame->retExitSlot);
+            }
+            if ($this->frame->retExitArena === $this->frame->hasArena) {
+                return $out . $this->nullReturnedSlots($this->frame->retExempt)
+                    . '  store i64 ' . $valReg . ', ptr ' . $this->frame->retExitSlot . "\n"
+                    . '  br label %' . $this->frame->retExitLabel . "\n" . $this->emitDeadLabel();
+            }
+        }
+        return $out . $leave . $jmp
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
+    }
+
+    /**
+     * Every `return` of a function used to carry its own copy of the scope-exit
+     * cleanup — one release per owned local — so a function with 29 returns and
+     * 100 string locals emitted 2 900 releases (8% of the compiler's own IR). A
+     * return outside every `try` instead stores its value and branches to ONE
+     * epilogue ({@see emitSharedReturnExit}). The locals it hands back are
+     * nulled first, which is exactly the exemption: their slots were null-inited
+     * or retained on entry, and a release of 0 is a no-op in every flavor.
+     * Frames with reference boxes keep the per-return cleanup: theirs depends on
+     * the exemption in ways a nulled slot does not express.
+     */
+    private function sharedReturnOk(): bool
+    {
+        return !$this->frame->isMain && !$this->gen->inGenerator && !$this->frame->returnsByRef
+            && !$this->locals->sjljPinAll
+            && $this->locals->ownedBoxes === [] && $this->locals->elemRefBoxes === [];
+    }
+
+    /** @param array<string, bool> $exempt */
+    private function nullReturnedSlots(array $exempt): string
+    {
+        $out = '';
+        foreach ($exempt as $name => $unused) {
+            if (!isset($this->frame->rcObjLocals[$name])) { continue; }
+            if (isset($this->frame->transferredLocals[$name])) { continue; }
+            if (isset($this->locals->refLocals[$name])) { continue; }
+            if (!isset($this->locals->slots[$name])) { continue; }
+            $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
+        }
+        return $out;
+    }
+
+    private function emitSharedReturnExit(): string
+    {
+        if ($this->frame->retExitLabel === '') { return ''; }
+        $out = $this->frame->retExitLabel . ":\n" . $this->emitRcReturnCleanup([]);
+        if ($this->frame->retExitArena) { $out .= "  call void @__mir_arena_leave()\n"; }
+        $v = $this->ssa->allocReg();
+        return $out . '  ' . $v . ' = load i64, ptr ' . $this->frame->retExitSlot . "\n"
+            . '  ret i64 ' . $v . "\n";
     }
 
     /**
