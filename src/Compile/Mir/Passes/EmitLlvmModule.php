@@ -2401,10 +2401,16 @@ trait EmitLlvmModule
                 // BORROWED. retainCellPayload can't see it (an unknown names no
                 // rc kind), so retain by runtime tag — a no-op for a scalar cell.
                 if ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
+                    // By a probe-boxed copy: the erased word may be a raw buffer,
+                    // which the tag retain alone leaves uncounted.
                     $this->rt->needsRc = true;
                     $this->rt->needsStrRc = true;
                     $out .= $this->coerceToI64();
+                    $sv = $this->lastValue;
+                    $out .= $this->boxUnknownShallowIr();
                     $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                    $this->lastValue = $sv;
+                    $this->lastValueType = 'i64';
                 }
                 $out .= $this->boxUnknownIfRaw();
             } else {

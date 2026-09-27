@@ -4208,6 +4208,11 @@ final class EmitLlvm implements EmitVisitor
             $sv = $this->lastValue;
             $st = $this->lastValueType;
             $o = $this->coerceToI64();
+            // An ERASED word may still be RAW (a bare-`array` local, a conditional
+            // over one), and the tag retain is a no-op on an untagged word — the
+            // container then held it with no count and freed it under the local.
+            // Retain through a probe-boxed copy: raw buffer, raw object or cell alike.
+            if ($k === Type::KIND_UNKNOWN) { $o .= $this->boxUnknownShallowIr(); }
             $o .= $this->rcRetainReg($this->lastValue, 'cell');
             $this->lastValue = $sv;
             $this->lastValueType = $st;

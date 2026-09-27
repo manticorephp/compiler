@@ -1352,9 +1352,9 @@ final class Ownership
     {
         $tk = $valueNode->type->kind;
         $cls = $valueNode->type->class ?? '';
-        // A tagged word co-owns by its tag; a RAW erased word carries none, so
-        // the tag retain boxing does is a no-op on it — that store takes no count.
-        if ($boxed && $tk === Type::KIND_CELL) { return true; }
+        // A boxed store co-owns a cell or an erased word by retaining through its
+        // tag ({@see Passes\EmitLlvm::retainCellPayload} probe-boxes a raw one).
+        if ($boxed && ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN)) { return true; }
         if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && self::isClosureClass($cls))) { return true; }
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
@@ -1390,8 +1390,7 @@ final class Ownership
             if ($v->kind === Node::KIND_LOAD_LOCAL) {
                 $boxed = self::storeElemBoxesValue($se);
                 $fallback = self::storeElemDeCellifyType($se) ?? self::storeRetainFallback($se);
-                $tagRetain = !$boxed && $fallback === null && self::erasedElemCopy($se)
-                    && $v->type->kind === Type::KIND_CELL;
+                $tagRetain = !$boxed && $fallback === null && self::erasedElemCopy($se);
                 if (!$tagRetain && !$this->containerStoreRetains($v, $fallback, $boxed)) {
                     $out[] = self::asLoadLocal($v);
                 }
