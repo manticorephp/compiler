@@ -167,6 +167,13 @@ trait EmitLlvmVisit
             $raw = $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
             $out .= '  store i64 ' . ($raw ? '0' : '1') . ', ptr ' . $flag . "\n";
         }
+        $ff = $this->feCellFlags[$n->name] ?? '';
+        if ($ff !== '') {
+            $fk = InsertMemoryOps::slotStoredType($n)->kind;
+            $isCell = $fk === Type::KIND_CELL || $fk === Type::KIND_UNKNOWN;
+            if ($isCell) { $this->feCellFlagSet[$n->name] = true; }
+            $out .= '  store i64 ' . ($isCell ? '1' : '0') . ', ptr ' . $ff . "\n";
+        }
         $this->checkCellSink('store_local', $n->type, $n, $n->value);
         return $out;
     }

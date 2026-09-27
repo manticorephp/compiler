@@ -1141,6 +1141,31 @@ trait EmitLlvmControl
         $out .= '  ' . $arrSafe . ' = select i1 ' . $nz
               . ', ptr @__mir_zero_word, ptr ' . $arr . "\n";
         $arr = $arrSafe;
+        // A by-ref foreach over a base it can store through walks the LIVE
+        // array, as php's does: the base is separated once up front, re-read
+        // after every body, and the element found again BY KEY before $v is
+        // written back. Walking the buffer captured at loop start wrote $v into
+        // freed memory as soon as the body unset an element (an unset on a
+        // packed buffer promotes and relocates) — symfony's
+        // EventDispatcher::removeListener did exactly that on every run.
+        $live = $fe->byRef && $fe->genSlotBase < 0 && $this->unsetBaseIsWritable($fe->array);
+        $liveSlot = '';
+        $liveKey = '';
+        if ($live) {
+            $out .= $this->emitSeparatedArray($fe->array, $bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN);
+            $sep = $this->lastValue;
+            $snz = $this->ssa->allocReg();
+            $out .= '  ' . $snz . ' = icmp eq ptr ' . $sep . ", null\n";
+            $arr = $this->ssa->allocReg();
+            $out .= '  ' . $arr . ' = select i1 ' . $snz . ', ptr @__mir_zero_word, ptr ' . $sep . "\n";
+            $liveSlot = $this->ssa->allocReg();
+            $out .= '  ' . $liveSlot . " = alloca ptr\n";
+            $out .= '  store ptr ' . $arr . ', ptr ' . $liveSlot . "\n";
+            $liveKey = $this->ssa->allocReg();
+            $out .= '  ' . $liveKey . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $liveKey . "\n";
+            $this->rt->needsCellKey = true;
+        }
 
         // Inside a generator the iterator state (cursor + array ptr) must
         // survive a `yield` in the body, so it lives in two heap-frame slots
@@ -1197,6 +1222,12 @@ trait EmitLlvmControl
             $len = $this->ssa->allocReg();
             $out .= '  ' . $len . ' = load i64, ptr ' . $arr . "\n";
         }
+        if ($live) {
+            $arr = $this->ssa->allocReg();
+            $out .= '  ' . $arr . ' = load ptr, ptr ' . $liveSlot . "\n";
+            $len = $this->ssa->allocReg();
+            $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $arr . ")\n";
+        }
         $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
         $c = $this->ssa->allocReg();
@@ -1205,6 +1236,16 @@ trait EmitLlvmControl
 
         $out .= $bodyLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
+        if ($live) {
+            $arr = $this->ssa->allocReg();
+            $out .= '  ' . $arr . ' = load ptr, ptr ' . $liveSlot . "\n";
+            $lk = $this->ssa->allocReg();
+            $out .= '  ' . $lk . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
+            // Held across the body: unsetting the element releases its stored
+            // string key, and the lookup after the body still needs it.
+            $out .= '  call void @__mir_cell_retain(i64 ' . $lk . ")\n";
+            $out .= '  store i64 ' . $lk . ', ptr ' . $liveKey . "\n";
+        }
         // element address + key
         $out .= $this->foreachElemAddrUnified($arr, $i);
         $valAddr = $this->feAddr;
@@ -1359,25 +1400,90 @@ trait EmitLlvmControl
             $out .= $this->foreachVarStore($fe->keyVar, $kp,
                 $keyIsCell ? Type::cell() : $fe->array->type->key);
         }
+        // A by-ref loop writes $v back: record whether the body left it a CELL.
+        $feFlag = '';
+        $feFlagUsed = false;
+        $fePrev = $this->feCellFlags[$fe->valueVar] ?? null;
+        $fePrevSet = isset($this->feCellFlagSet[$fe->valueVar]);
+        if ($fe->byRef && $fe->genSlotBase < 0 && !isset($this->locals->refLocals[$fe->valueVar])) {
+            $feFlag = $this->ssa->allocReg();
+            $out .= '  ' . $feFlag . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $feFlag . "\n";
+            $this->feCellFlags[$fe->valueVar] = $feFlag;
+            unset($this->feCellFlagSet[$fe->valueVar]);
+        }
         $out .= $this->emitNode($fe->body);
+        if ($feFlag !== '') {
+            $feFlagUsed = isset($this->feCellFlagSet[$fe->valueVar]);
+            if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
+            else { $this->feCellFlags[$fe->valueVar] = $fePrev; }
+            if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
+            else { unset($this->feCellFlagSet[$fe->valueVar]); }
+        }
         $out .= '  br label %' . $stepLabel . "\n";
 
         $out .= $stepLabel . ":\n";
         if ($framed && $fe->byRef) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
         $si = $this->ssa->allocReg();
         $out .= '  ' . $si . ' = load i64, ptr ' . $iSlot . "\n";
-        if ($fe->byRef) {
-            $out .= $this->foreachElemAddrUnified($arr, $si);
-            $wAddr = $this->feAddr;
+        if ($live) {
+            $out .= $this->emitNode($fe->array);
+            if ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
+                $out .= $this->coerceToI64();
+                $out .= $this->arrayPtrOrEmptyIr($this->lastValue);
+                $na = $this->arrayPtrReg;
+            } else {
+                $out .= $this->coerceToPtr();
+                $na = $this->lastValue;
+            }
+            $nnz = $this->ssa->allocReg();
+            $out .= '  ' . $nnz . ' = icmp eq ptr ' . $na . ", null\n";
+            $na2 = $this->ssa->allocReg();
+            $out .= '  ' . $na2 . ' = select i1 ' . $nnz . ', ptr @__mir_zero_word, ptr ' . $na . "\n";
+            $out .= '  store ptr ' . $na2 . ', ptr ' . $liveSlot . "\n";
+            $lk = $this->ssa->allocReg();
+            $out .= '  ' . $lk . ' = load i64, ptr ' . $liveKey . "\n";
+            $pos = $this->ssa->allocReg();
+            $out .= '  ' . $pos . ' = call i64 @__mir_array_pos_cell(ptr ' . $na2 . ', i64 ' . $lk . ")\n";
+            $out .= '  call void @__mir_cell_drop(i64 ' . $lk . ")\n";
+            $out .= '  store i64 0, ptr ' . $liveKey . "\n";
+            $has = $this->ssa->allocReg();
+            $out .= '  ' . $has . ' = icmp sge i64 ' . $pos . ", 0\n";
+            $wbL = $this->ssa->allocLabel('fe.wb');
+            // Gone: the tail slid down onto the current position, which is
+            // therefore the next one to visit.
+            $out .= '  br i1 ' . $has . ', label %' . $wbL . ', label %' . $condLabel . "\n";
+            $out .= $wbL . ":\n";
+            $out .= $this->foreachElemAddrUnified($na2, $pos);
             $wv = $this->ssa->allocReg();
             $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
-            $out .= '  store i64 ' . $wv . ', ptr ' . $wAddr . "\n";
+            $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->feAddr . "\n";
+            $np = $this->ssa->allocReg();
+            $out .= '  ' . $np . ' = add i64 ' . $pos . ", 1\n";
+            $out .= '  store i64 ' . $np . ', ptr ' . $iSlot . "\n";
+            $out .= '  br label %' . $condLabel . "\n";
+        } else {
+            if ($fe->byRef) {
+                $out .= $this->foreachElemAddrUnified($arr, $si);
+                $wAddr = $this->feAddr;
+                $wv = $this->ssa->allocReg();
+                $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+                $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $arr, $wv, $fe->array->type->element);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $wAddr . "\n";
+            }
+            $si2 = $this->ssa->allocReg();
+            $out .= '  ' . $si2 . ' = add i64 ' . $si . ", 1\n";
+            $out .= '  store i64 ' . $si2 . ', ptr ' . $iSlot . "\n";
+            $out .= '  br label %' . $condLabel . "\n";
         }
-        $si2 = $this->ssa->allocReg();
-        $out .= '  ' . $si2 . ' = add i64 ' . $si . ", 1\n";
-        $out .= '  store i64 ' . $si2 . ', ptr ' . $iSlot . "\n";
-        $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
+        if ($live) {
+            // A `break` leaves the body's key still held.
+            $lk = $this->ssa->allocReg();
+            $out .= '  ' . $lk . ' = load i64, ptr ' . $liveKey . "\n";
+            $out .= '  call void @__mir_cell_drop(i64 ' . $lk . ")\n";
+        }
 
         $this->cf->leave();
         // Rejoin the generator arm of the erased-base classify above.
@@ -1387,6 +1493,51 @@ trait EmitLlvmControl
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
         }
+        return $out;
+    }
+
+    /**
+     * The word a by-ref foreach writes back into its element. The body may
+     * have left $v a CELL (the name's merged type is cell when it is reused
+     * across loops of different element kinds, and a compound assignment
+     * stores the cell) while the loop itself stored the raw element: `$flag`
+     * says which, at run time. A cell goes back in the element's own
+     * representation — unboxed to a concrete static element type (a raw int
+     * buffer read by int-typed code must not turn into cells), encoded by the
+     * buffer's hint for a cell or erased one. Leaves the word in lastValue.
+     */
+    private function foreachWriteBackEncode(string $flag, string $arr, string $word, ?Type $elT): string
+    {
+        $this->lastValue = $word;
+        $this->lastValueType = 'i64';
+        if ($flag === '') { return ''; }
+        $t = $this->ssa->allocReg();
+        $out = '  ' . $t . " = alloca i64\n";
+        $out .= '  store i64 ' . $word . ', ptr ' . $t . "\n";
+        $f = $this->ssa->allocReg();
+        $out .= '  ' . $f . ' = load i64, ptr ' . $flag . "\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp ne i64 ' . $f . ", 0\n";
+        $encL = $this->ssa->allocLabel('fe.enc');
+        $joinL = $this->ssa->allocLabel('fe.encj');
+        $out .= '  br i1 ' . $c . ', label %' . $encL . ', label %' . $joinL . "\n";
+        $out .= $encL . ":\n";
+        if ($elT === null || $elT->kind === Type::KIND_CELL || $elT->kind === Type::KIND_UNKNOWN) {
+            $e = $this->ssa->allocReg();
+            $out .= '  ' . $e . ' = call i64 @__mir_elem_encode(ptr ' . $arr . ', i64 ' . $word . ")\n";
+        } else {
+            $this->lastValue = $word;
+            $this->lastValueType = 'i64';
+            $out .= $this->unboxCellToType($elT);
+            $out .= $this->coerceToI64();
+            $e = $this->lastValue;
+        }
+        $out .= '  store i64 ' . $e . ', ptr ' . $t . "\n";
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $joinL . ":\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $t . "\n";
+        $this->lastValue = $w;
         return $out;
     }
 

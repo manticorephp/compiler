@@ -2223,7 +2223,21 @@ trait EmitLlvmRuntime
             $dynRuntime = \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
         }
         $out = $dynRuntime . $descs . $defs;
+        // The weak-reference death hook (prelude/weak.php): null until a
+        // WeakMap / WeakReference first enrolls an object, then the prelude's
+        // `__mc_weak_forget(addr)`. Every free — rc zero or the cycle
+        // collector — passes here, in every module, so the pointer is the one
+        // shared word and no module names the prelude function itself.
+        $out .= "@__mc_weak_hook = linkonce_odr global ptr null\n";
         $out .= "define void @__mir_drop_dispatch(ptr %p) {\nentry:\n";
+        $out .= "  %wh = load ptr, ptr @__mc_weak_hook\n";
+        $out .= "  %whz = icmp eq ptr %wh, null\n";
+        $out .= "  br i1 %whz, label %drop, label %weak\n";
+        $out .= "weak:\n";
+        $out .= "  %wa = ptrtoint ptr %p to i64\n";
+        $out .= "  %wr = call i64 %wh(i64 %wa)\n";
+        $out .= "  br label %drop\n";
+        $out .= "drop:\n";
         $out .= "  %descI = load i64, ptr %p\n";
         $out .= "  %dz = icmp eq i64 %descI, 0\n";
         $out .= "  br i1 %dz, label %end, label %have\n";

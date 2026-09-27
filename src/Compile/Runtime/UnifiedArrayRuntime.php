@@ -132,6 +132,7 @@ final class UnifiedArrayRuntime
         $this->emitShift();
         $this->emitBoxByRepr();
         $this->emitElemDecode();
+        $this->emitElemDecodeFast();
         $this->emitCellifyInplace();
         $this->emitElemEncode();
         $this->emitCellToBag();
@@ -154,6 +155,8 @@ final class UnifiedArrayRuntime
         $this->emitImplodeInt();
         $this->emitIssetInt();
         $this->emitIssetStr();
+        $this->emitPosInt();
+        $this->emitPosStr();
         $this->emitUnsetStr();
         $this->emitUnsetInt();
         $this->emitUnsetAt();
@@ -1284,7 +1287,7 @@ final class UnifiedArrayRuntime
 
         // live_len compacts tombstones out of BOTH sides first, so the walk sees
         // a clean 0..len range and the copy carries no holes.
-        $go->call('__mir_array_live_len', Type::i64(), [$a]);
+        $na = $go->call('__mir_array_live_len', Type::i64(), [$a]);
         $res0 = $go->call('__mir_array_copy', Type::ptr(), [$a]);
         $resSlot = $go->alloca(Type::ptr(), 'res');
         $go->store($res0, $resSlot);
@@ -1313,6 +1316,20 @@ final class UnifiedArrayRuntime
             $prep->and_($prep->icmp('ne', $ha, $hb), $prep->icmp('ne', $ha, $zero)),
             $prep->icmp('ne', $hb, $zero));
         $prep->store($prep->zext($prep->and_($mixed, $prep->icmp('ne', $hb, $cell)), Type::i64()), $boxSlot);
+        // An EMPTY `$a` describes nothing: the result is `$b`'s words verbatim,
+        // so it takes `$b`'s hint and ownership repr with them. Left unstamped
+        // (hint 0) it held `$b`'s cells under a claim of raw words, and a
+        // concrete-element reader took each box for a pointer — php-cs-fixer's
+        // `$elements += $newElements` in TokensAnalyzer::getClassyElements.
+        $adopt = $fn->block('adopt');
+        $afterAdopt = $fn->block('after_adopt');
+        $prep->brIf($prep->and_($prep->icmp('eq', $na, $zero), $prep->icmp('ne', $hb, $zero)), $adopt, $afterAdopt);
+        $adm = Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK);
+        $rfp = $this->hdr($adopt, $res0, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $rfl = $adopt->load(Type::i64(), $rfp);
+        $adopt->store($adopt->or_($adopt->and_($rfl, Value::int(Type::i64(), ~(MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK))), $adopt->and_($bflags, $adm)), $rfp);
+        $adopt->br($head);
+        $prep = $afterAdopt;
         $prep->brIf($prep->and_($mixed, $prep->icmp('ne', $ha, $cell)), $cellify, $head);
         $cellify->call('__mir_array_cellify_inplace', Type::void(), [$res0, $ha]);
         $cellify->br($head);
@@ -1850,6 +1867,8 @@ final class UnifiedArrayRuntime
     {
         $this->emitCellDrop();
         $this->emitCellRetain();
+        $this->emitCellRcFast('__mir_cell_drop');
+        $this->emitCellRcFast('__mir_cell_retain');
         $this->emitDropByRepr();
         $this->emitRetainByRepr();
         $this->emitElemAutoOps();
@@ -1918,7 +1937,8 @@ final class UnifiedArrayRuntime
      */
     private function emitCellDrop(): void
     {
-        $fn = $this->module->func('__mir_cell_drop', Type::void());
+        $fn = $this->module->func('__mir_cell_drop_slow', Type::void());
+        $fn->attrs = 'noinline';
         $v = $fn->param(Type::i64(), 'v');
         $entry = $fn->block('entry');
         $tagged = $fn->block('tagged');
@@ -2319,7 +2339,8 @@ final class UnifiedArrayRuntime
      */
     private function emitCellRetain(): void
     {
-        $fn = $this->module->func('__mir_cell_retain', Type::void());
+        $fn = $this->module->func('__mir_cell_retain_slow', Type::void());
+        $fn->attrs = 'noinline';
         $v = $fn->param(Type::i64(), 'v');
         $entry = $fn->block('entry');
         $tagged = $fn->block('tagged');
@@ -2876,8 +2897,8 @@ final class UnifiedArrayRuntime
      * (rc saturated to {@see MemoryAbi::IMMORTAL_ARRAY_RC}) is never malloc'd, so
      * any in-place mutator that frees / reallocs / promotes it would corrupt a
      * value shared by every empty `[]` in the program (or abort in libmalloc).
-     * The singleton is the ONLY immortal array and is ALWAYS empty, so
-     * "separating" it is just a fresh `alloc(0)`. Called at the entry of every
+     * The singleton is always empty, so "separating" it is just a fresh
+     * `alloc(0)`; a constant literal (also immortal) is copied. Called at the entry of every
      * in-place mutator ({@see emitSetInt} / {@see emitSetStr} / {@see emitUnshift})
      * so their result — which the caller stores back into the slot — is a private
      * rc=1 buffer while the singleton stays pristine. Real arrays (rc far below
@@ -2899,11 +2920,17 @@ final class UnifiedArrayRuntime
         $keep = $fn->block('keep');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $fresh, $chk);
         $rc = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+        $imm = $fn->block('imm');
+        $dup = $fn->block('dup');
         $chk->brIf(
             $chk->icmp('sgt', $rc, Value::int(Type::i64(), 1 << 61)),
-            $fresh,
+            $imm,
             $keep,
         );
+        // A CONSTANT literal is immortal too ({@see EmitLlvmArrays::immortalLitPtr})
+        // and not empty: separating it is a copy, not a fresh empty buffer.
+        $imm->brIf($imm->icmp('eq', $imm->load(Type::i64(), $arr), Value::int(Type::i64(), 0)), $fresh, $dup);
+        $dup->ret($dup->call('__mir_array_copy', Type::ptr(), [$arr]));
         $fresh->ret($fresh->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]));
         $keep->ret($arr);
     }
@@ -3989,8 +4016,19 @@ final class UnifiedArrayRuntime
         $packed = $fn->block('packed');
         $hashed = $fn->block('hashed');
         $chk = $fn->block('va_chk');
-        $flags = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $e->brIf($e->icmp('ne', $this->hashedBit($e, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
+        $in = $fn->block('va_in');
+        $out = $fn->block('va_out');
+        // Past the allocation answers 0. The spread-argument paths read slot k
+        // speculatively and select the default when the pack is shorter; on a
+        // heap buffer that read was merely wasted, on an immortal literal (a
+        // global, {@see EmitLlvmArrays::immortalLitPtr}) it is a load past the
+        // object, which the optimizer is entitled to treat as unreachable — it
+        // deleted the rest of the caller.
+        $cap = $e->load(Type::i64(), $this->hdr($e, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $e->brIf($e->icmp('ult', $i, $cap), $in, $out);
+        $out->ret(Value::int(Type::i64(), 0));
+        $flags = $in->load(Type::i64(), $this->hdr($in, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $in->brIf($in->icmp('ne', $this->hashedBit($in, $flags), Value::int(Type::i64(), 0)), $hashed, $packed);
         $pv = $packed->load(Type::i64(), $this->packedSlot($packed, $arr, $i));
         $packed->br($chk);
         $hv = $hashed->load(Type::i64(), $this->entryAddr($hashed, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
@@ -4560,7 +4598,8 @@ final class UnifiedArrayRuntime
      */
     private function emitElemDecode(): void
     {
-        $fn = $this->module->func('__mir_elem_decode', Type::i64());
+        $fn = $this->module->func('__mir_elem_decode_slow', Type::i64());
+        $fn->attrs = 'noinline';
         $arr = $fn->param(Type::ptr(), 'arr');
         $v = $fn->param(Type::i64(), 'v');
         $e = $fn->block('entry');
@@ -4573,6 +4612,62 @@ final class UnifiedArrayRuntime
         $asis->ret($asis->call('__mir_deref_cell', Type::i64(), [$v]));
         $bd = $dec->call('__mir_box_by_repr', Type::i64(), [$v, $this->decodeHint($dec, $arr)]);
         $dec->ret($dec->call('__mir_deref_cell', Type::i64(), [$bd]));
+    }
+
+    /**
+     * The inlined front of `__mir_elem_decode`: a CELL-hinted buffer already
+     * holds the cell, so the word is the answer unless it is a reference box;
+     * everything else (a raw hint to box by, a null base, a REF) takes the
+     * out-of-line body. Most erased reads are this case, and the call was a
+     * measurable share of php-cs-fixer (every `$this->__data[$i]`).
+     */
+    private function emitElemDecodeFast(): void
+    {
+        $fn = $this->module->func('__mir_elem_decode', Type::i64());
+        $fn->attrs = 'alwaysinline';
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $cellp = $fn->block('cellp');
+        $asis = $fn->block('asis');
+        $slow = $fn->block('slow');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $slow, $chk);
+        $hint = $chk->and_($chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $chk->brIf($chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $cellp, $slow);
+        $istag = $cellp->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496));
+        $nib = $cellp->and_($cellp->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isRef = $cellp->and_($istag, $cellp->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)));
+        $cellp->brIf($isRef, $slow, $asis);
+        $asis->ret($v);
+        $slow->ret($slow->call('__mir_elem_decode_slow', Type::i64(), [$arr, $v]));
+    }
+
+    /**
+     * The inlined front of `__mir_cell_retain` / `__mir_cell_drop`: only a
+     * cell carrying a POINTER (string 4, array 7, object 8, reference 9) has a
+     * count to touch; an int, a bool, null or a raw double is done here, and
+     * those are most of the cells a program moves. The tag dispatch and its
+     * guards stay out of line in the `_slow` body.
+     */
+    private function emitCellRcFast(string $name): void
+    {
+        $fn = $this->module->func($name, Type::void());
+        $fn->attrs = 'alwaysinline';
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $slow = $fn->block('slow');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496)), $chk, $done);
+        $nib = $chk->and_($chk->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        // bits 4, 7, 8, 9 of 0x390: the pointer-carrying tags.
+        $bit = $chk->and_($chk->lshr(Value::int(Type::i64(), 0x390), $nib), Value::int(Type::i64(), 1));
+        $chk->brIf($chk->icmp('ne', $bit, Value::int(Type::i64(), 0)), $slow, $done);
+        $slow->call($name . '_slow', Type::void(), [$v]);
+        $slow->br($done);
+        $done->retVoid();
     }
 
     /**
@@ -5565,6 +5660,115 @@ final class UnifiedArrayRuntime
         $next->br($head);
         $hit->ret(Value::int(Type::i64(), 1));
         $z->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_array_pos_int(arr, idx) -> i64` — the POSITION of int key `idx`
+     * (what foreach walks: PACKED slot, HASHED entry index), -1 when absent.
+     * A live by-ref foreach finds its element again after the body.
+     */
+    private function emitPosInt(): void
+    {
+        $fn = $this->module->func('__mir_array_pos_int', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $idx = $fn->param(Type::i64(), 'idx');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $packed = $fn->block('packed');
+        $doidx = $fn->block('doidx');
+        $classify = $fn->block('classify');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $iSlot = $chk->alloca(Type::i64(), 'i');
+        $rSlot = $chk->alloca(Type::i64(), 'r');
+        $chk->store(Value::int(Type::i64(), 0), $iSlot);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $doidx, $packed);
+        $ok = $packed->and_(
+            $packed->icmp('sge', $idx, Value::int(Type::i64(), 0)),
+            $packed->icmp('slt', $idx, $len),
+        );
+        $pin = $fn->block('pin');
+        $packed->brIf($ok, $pin, $z);
+        $pin->ret($idx);
+        // HASHED index fast path: -2 → linear, -1 → absent, else present.
+        $rf = $doidx->call('__mir_array_index_find', Type::i64(),
+            [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT), Value::null(), $idx, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $doidx->store($rf, $rSlot);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $head, $classify);
+        $classify->ret($classify->load(Type::i64(), $rSlot));
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $z, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $next, $kok);
+        $k = $kok->load(Type::i64(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->icmp('eq', $k, $idx), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($hit->load(Type::i64(), $iSlot));
+        $z->ret(Value::int(Type::i64(), -1));
+    }
+
+    /**
+     * `__mir_array_pos_str(arr, key, hash, haveHash) -> i64` — the position
+     * of string key `key`, -1 when absent. PACKED has no string keys.
+     */
+    private function emitPosStr(): void
+    {
+        $fn = $this->module->func('__mir_array_pos_str', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $key = $fn->param(Type::ptr(), 'key');
+        $hash = $fn->param(Type::i64(), 'hash');
+        $haveHash = $fn->param(Type::i64(), 'haveHash');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $gate = $fn->block('gate');
+        $doidx = $fn->block('doidx');
+        $classify = $fn->block('classify');
+        $preh = $fn->block('preh');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $hpre = $fn->block('hpre');
+        $cmp = $fn->block('cmp');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $iSlot = $chk->alloca(Type::i64(), 'i');
+        $rSlot = $chk->alloca(Type::i64(), 'r');
+        $effSlot = $chk->alloca(Type::i64(), 'effh');
+        $chk->store(Value::int(Type::i64(), 0), $iSlot);
+        $chk->brIf($chk->icmp('eq', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $z, $gate);
+        // A null key never matches; else index fast path (-2 → linear).
+        $gate->brIf($gate->icmp('eq', $key, Value::null()), $z, $doidx);
+        $rf = $doidx->call('__mir_array_index_find', Type::i64(),
+            [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key, Value::int(Type::i64(), 0), $hash, $haveHash]);
+        $doidx->store($rf, $rSlot);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $preh, $classify);
+        $classify->ret($classify->load(Type::i64(), $rSlot));
+        $preh->store($this->scanProbeHash($preh, $key, $hash, $haveHash), $effSlot);
+        $preh->br($head);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $z, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
+        $tk = $kok->load(Type::ptr(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $hpre);
+        $this->hashPrefilter($hpre, $tk, $effSlot, $cmp, $next);
+        $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$tk, $key]), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($hit->load(Type::i64(), $iSlot));
+        $z->ret(Value::int(Type::i64(), -1));
     }
 
     /**

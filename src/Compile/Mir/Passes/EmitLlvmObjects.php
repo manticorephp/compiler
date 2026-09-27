@@ -558,6 +558,21 @@ trait EmitLlvmObjects
         // array pointer and eventually crashing in __mir_array_cow_str.
         $className = \ltrim($n->class, '\\');
         $cd = $this->classes[$className] ?? $this->classes[$n->class] ?? null;
+        // No class of that name exists anywhere in the program: php's
+        // `Error: Class "X" not found`, raised when reached. This allocated a
+        // bare 16-byte header and ran on — `new \WeakMap()` then took array
+        // paths over an object and SIGSEGV'd (symfony's ProgressBar).
+        if ($cd === null) {
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst('Class "' . $className . '" not found', Type::string_())],
+                Type::cell(),
+            );
+            $out = $this->emitBuiltin($thr) ?? '';
+            $this->lastValue = 'null';
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $out = $this->emitObjAllocInit($cd);
         $obj = $this->lastValue;
         // ctor call — resolve through the parent chain (a subclass
@@ -5989,6 +6004,18 @@ trait EmitLlvmObjects
             $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;
         }
+        // Release-before-overwrite, AFTER the retain (a self-assignment goes
+        // 1 → 2 → 1), as an instance property and a global cell do: the slot
+        // owns what it holds, and nothing gave the previous value back —
+        // php-cs-fixer's `Tokens::clearCache()` (`self::$cache = []`) kept every
+        // file's token collection alive, ~1 MB a file.
+        $drop = $box ? 'cell' : ($n->declared !== null && $dk !== Type::KIND_UNKNOWN
+            ? $this->discardReleaseFlavor($n->declared) : '');
+        if ($drop !== '') {
+            $old = $this->ssa->allocReg();
+            $out .= '  ' . $old . ' = load i64, ptr ' . $n->global . "\n";
+            $out .= $this->rcReleaseReg($old, $drop);
+        }
         $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
         $this->noteCellSinkStored($val);
         $this->lastValue = $res;
@@ -7162,43 +7189,8 @@ trait EmitLlvmObjects
 
     private function resolveMethodClass(string $class, string $method): string
     {
-        $key = $class . '|' . $method;
-        if (isset($this->resolveMethodClassCache[$key])) {
-            return $this->resolveMethodClassCache[$key];
-        }
-        // ⚠ BOUNDED, and the bound is the point. The memo is keyed on the PAIR
-        // while every caller that matters iterates all classes for ONE method —
-        // building a holder set, a candidate list, a descendant walk — so the
-        // entries are a cross product that is written once and read never. On
-        // symfony-demo T5 it reached 13,090,427 entries (2,144 classes x ~6,000
-        // method names), which is where the emitter's memory went: the one batch
-        // that crossed the knee took 66 s against half a second for its
-        // neighbours, and the next took 312 s.
-        //
-        // The lookup it replaces is a handful of `isset`s up the parent chain,
-        // so a miss costs MORE than the walk (a key concatenation and an insert).
-        // Keeping a bounded window preserves the only reuse that exists —
-        // repeated queries close together — and gives the rest back.
-        if ($this->resolveMethodClassEntries >= self::RESOLVE_CACHE_MAX) {
-            $this->resolveMethodClassCache = [];
-            $this->resolveMethodClassEntries = 0;
-        }
-        $this->resolveMethodClassEntries = $this->resolveMethodClassEntries + 1;
-        $c = $class;
-        while ($c !== '') {
-            $cd = $this->classes[$c] ?? null;
-            if ($cd === null) {
-                $this->resolveMethodClassCache[$key] = '';
-                return '';
-            }
-            if (isset($cd->methodNames[$method])) {
-                $this->resolveMethodClassCache[$key] = $c;
-                return $c;
-            }
-            $c = $cd->parent;
-        }
-        $this->resolveMethodClassCache[$key] = '';
-        return '';
+        $this->ensureMethodIndex();
+        return $this->methodHoldersIdx[$method][$class] ?? '';
     }
 
     /**
@@ -7208,32 +7200,52 @@ trait EmitLlvmObjects
      * The emitter asks "which classes answer `m`?" per CALL SITE — interface
      * dispatch, erased receivers, dynamic names, magic holders — and each asker
      * walked the whole class table: classes × sites parent-chain walks, 12 s of
-     * php-cs-fixer's EmitLlvm in `__mir_array_index_find`. The answer depends on
-     * the method only, so it is built once per method and holds HITS only (the
-     * pair memo above is bounded because it held the misses of a cross product).
-     * A class added after a build (a closure class) invalidates the whole index.
+     * php-cs-fixer's EmitLlvm in `__mir_array_index_find`.
      *
      * @return array<string, string>
      */
     private function methodHolders(string $method): array
     {
-        $n = \count($this->classes);
-        if ($n !== $this->methodHoldersClassCount) {
-            $this->methodHoldersIdx = [];
-            $this->methodHoldersClassCount = $n;
-        }
-        if (isset($this->methodHoldersIdx[$method])) {
-            return $this->methodHoldersIdx[$method];
-        }
-        $holders = [];
-        foreach ($this->classes as $cd) {
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl !== '') { $holders[$cd->name] = $decl; }
-        }
-        $this->methodHoldersIdx[$method] = $holders;
-        return $holders;
+        $this->ensureMethodIndex();
+        return $this->methodHoldersIdx[$method] ?? [];
     }
 
+    /**
+     * method => [class => the class whose body it resolves to], for every class
+     * and every method it declares or inherits — one walk up each class's
+     * parent chain, built when the class table changes (a closure class added).
+     *
+     * It replaces a per-METHOD build that walked every class for each method
+     * asked about (methods × classes resolveMethodClass calls, the top emitter
+     * cost in a php-cs-fixer profile once stacks unwound) and the bounded pair
+     * memo in front of resolveMethodClass, whose cross product of misses was the
+     * memory problem that bound existed for: this index holds hits only, about
+     * classes × methods-per-class entries.
+     */
+    private function ensureMethodIndex(): void
+    {
+        $n = \count($this->classes);
+        if ($n === $this->methodHoldersClassCount) { return; }
+        /** @var array<string, array<string, string>> $idx */
+        $idx = [];
+        foreach ($this->classes as $cd) {
+            /** @var array<string, bool> $seen */
+            $seen = [];
+            $c = $cd->name;
+            while ($c !== '') {
+                $pc = $this->classes[$c] ?? null;
+                if ($pc === null) { break; }
+                foreach ($pc->methodNames as $m => $_) {
+                    if (isset($seen[$m])) { continue; }
+                    $seen[$m] = true;
+                    $idx[(string)$m][$cd->name] = $c;
+                }
+                $c = $pc->parent;
+            }
+        }
+        $this->methodHoldersIdx = $idx;
+        $this->methodHoldersClassCount = $n;
+    }
     /**
      * The Generator iterator protocol as method calls on a frame ptr:
      * current()/key()/getReturn() read a frame slot; next()/rewind() drive

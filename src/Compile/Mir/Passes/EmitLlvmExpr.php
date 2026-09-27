@@ -521,6 +521,21 @@ trait EmitLlvmExpr
         $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret ptr %arr\n";
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r = call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)\n  ret ptr %r\n}\n";
+
+        // Where a live by-ref foreach's element went after the body
+        // ({@see EmitLlvmControl::emitForeach}): the position of the key the
+        // walk captured (`__mir_array_key_cell_at`), -1 when the body removed it.
+        $out .= "define i64 @__mir_array_pos_cell(ptr %arr, i64 %k) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
+        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
+        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
+        $out .= "  br i1 %isstr, label %s, label %i\n";
+        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
+        $out .= "  %r1 = call i64 @__mir_array_pos_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
+        $out .= "  %r2 = call i64 @__mir_array_pos_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
         return $out;
     }
 
@@ -717,7 +732,7 @@ trait EmitLlvmExpr
     private function taggedToIntRuntime(): string
     {
         $this->rt->needsStrtol = true;
-        $out  = "\ndefine i64 @__manticore_tagged_to_int(i64 %v) {\n";
+        $out  = "\ndefine i64 @__manticore_tagged_to_int_slow(i64 %v) noinline {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
         $out .= "  %ts = lshr i64 %v, 48\n";
@@ -755,6 +770,11 @@ trait EmitLlvmExpr
         $out .= "  %az = zext i1 %ane to i64\n";
         $out .= "  ret i64 %az\n";
         $out .= "}\n";
+        // The inline int case: a 0xFFF1-tagged word is its sign-extended payload.
+        $out .= "\ndefine i64 @__manticore_tagged_to_int(i64 %v) alwaysinline {\n";
+        $out .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %fast, label %slow\n";
+        $out .= "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n";
+        $out .= "slow:\n  %x = call i64 @__manticore_tagged_to_int_slow(i64 %v)\n  ret i64 %x\n}\n";
         return $out;
     }
 
@@ -768,7 +788,7 @@ trait EmitLlvmExpr
      */
     private function cellToIntArgRuntime(): string
     {
-        $out  = "\ndefine i64 @__manticore_cell_to_int_arg(i64 %v) {\n";
+        $out  = "\ndefine i64 @__manticore_cell_to_int_arg_slow(i64 %v) noinline {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
         $out .= "  br i1 %istag, label %tagged, label %plain\n";
@@ -791,6 +811,11 @@ trait EmitLlvmExpr
         $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  ret i64 %i\n";
         $out .= "}\n";
+        // The inline int case: a 0xFFF1-tagged word is its sign-extended payload.
+        $out .= "\ndefine i64 @__manticore_cell_to_int_arg(i64 %v) alwaysinline {\n";
+        $out .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %fast, label %slow\n";
+        $out .= "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n";
+        $out .= "slow:\n  %x = call i64 @__manticore_cell_to_int_arg_slow(i64 %v)\n  ret i64 %x\n}\n";
         return $out;
     }
 
@@ -1634,7 +1659,13 @@ trait EmitLlvmExpr
         $out .= "  %req = icmp eq i64 %a, %b\n  %rz = zext i1 %req to i64\n  ret i64 %rz\n}\n";
 
         // __manticore_tagged_strict_eq(a,b) -> i64 (0/1)
-        $out .= "define i64 @__manticore_tagged_strict_eq(i64 %a, i64 %b) {\nentry:\n";
+        // The inlined front: two int-tagged words are equal exactly when the
+        // words are (php-cs-fixer compares token ids this way millions of times).
+        $out .= "define i64 @__manticore_tagged_strict_eq(i64 %a, i64 %b) alwaysinline {\nentry:\n";
+        $out .= "  %ha = lshr i64 %a, 48\n  %hb = lshr i64 %b, 48\n  %ia = icmp eq i64 %ha, 65521\n  %ib = icmp eq i64 %hb, 65521\n  %ii = and i1 %ia, %ib\n";
+        $out .= "  br i1 %ii, label %fast, label %slow\nfast:\n  %fe = icmp eq i64 %a, %b\n  %fz = zext i1 %fe to i64\n  ret i64 %fz\n";
+        $out .= "slow:\n  %sr = call i64 @__manticore_tagged_strict_eq_slow(i64 %a, i64 %b)\n  ret i64 %sr\n}\n";
+        $out .= "define i64 @__manticore_tagged_strict_eq_slow(i64 %a, i64 %b) noinline {\nentry:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n  %tb = call i64 @__manticore_tag(i64 %b)\n";
         $out .= "  %same = icmp eq i64 %ta, %tb\n";
         $out .= "  br i1 %same, label %chk, label %ne\n";
@@ -3864,6 +3895,18 @@ trait EmitLlvmExpr
             $this->lastValue = $this->strSymBytes('@.cstr.empty');
             $this->lastValueType = 'ptr';
             return '';
+        }
+        // bool → "1" / "" (the int path rendered false as "0").
+        if ($operand->type->kind === Type::KIND_BOOL) {
+            $out = $this->coerceToI64();
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = select i1 ' . $nz . ', ptr ' . $this->litStr('1')
+                  . ', ptr ' . $this->strSymBytes('@.cstr.empty') . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
         }
         // A tagged cell (mixed) → dispatch on its tag at runtime. A FRESH
         // cell temp keeps its tagged word parked by the result ptr, so the

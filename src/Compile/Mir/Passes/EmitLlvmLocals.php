@@ -666,7 +666,11 @@ trait EmitLlvmLocals
                 $out .= $this->coerceToI64();
                 $oldRaw = $this->lastValue;
             }
+            // Boxing its own raw value MOVES it: a flat box keeps the pointer
+            // and the slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}).
+            $this->boxSelfMove = $mixSelf;
             $out .= $this->boxToCell($sl->value->type, $sl->value);
+            $this->boxSelfMove = false;
             $boxed = $this->lastValue;
             if ($ownsCell) {
                 $out .= $this->globalCellOwnIr($sl, $boxed, true);

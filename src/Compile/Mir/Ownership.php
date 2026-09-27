@@ -681,6 +681,9 @@ final class Ownership
         // the caller's to drop, which is what lets the rebuilt argument array
         // be freed ({@see Passes\EmitLlvmBuiltins::biMinMax}).
         if ($fn === 'max' || $fn === 'min') { return true; }
+        // The weak registry's way back to an object retains what it boxes
+        // ({@see Passes\EmitLlvmBuiltins::biObjFromAddr}).
+        if ($fn === '__mc_obj_from_addr') { return true; }
         // The CLASS C builtins ({@see Passes\EmitLlvmBuiltins::emitArrPtrArg}): the
         // result IS an element or a key of the argument, and the emitter now
         // retains it ({@see Passes\EmitLlvmBuiltins::cellEndpointRetain}) so the

@@ -6,6 +6,7 @@ use Compile\Mir\Add;
 use Compile\Mir\Block;
 use Compile\Mir\ArrayAccess_;
 use Compile\Mir\ArrayLit;
+use Compile\Mir\MethodMeta;
 use Compile\Mir\Spread_;
 use Compile\Mir\BoolConst;
 use Compile\Mir\MethodCall_;
@@ -142,8 +143,6 @@ final class EmitLlvm implements EmitVisitor
     private function compactEmissionCaches(): void
     {
         if (!\Compile\Debug::$compactCaches) { return; }
-        $this->resolveMethodClassCache = [];
-        $this->resolveMethodClassEntries = 0;
         $this->mangleCache = [];
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
@@ -157,7 +156,7 @@ final class EmitLlvm implements EmitVisitor
     private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false, int $stagedBytes = 0): void
     {
         if (!\Compile\Debug::$rootTrace) { return; }
-        $cacheEntries = \count($this->resolveMethodClassCache)
+        $cacheEntries = \count($this->methodHoldersIdx)
             + \count($this->mangleCache)
             + \count($this->classImplementsCache)
             + \count($this->classImplementsIfaceCache)
@@ -179,7 +178,7 @@ final class EmitLlvm implements EmitVisitor
             . ' emitter_classes=' . (string)\count($this->classes)
             . ' defined_fns=' . (string)\count($this->definedFns)
             . ' caches=' . (string)$cacheEntries
-            . ' resolve=' . (string)\count($this->resolveMethodClassCache)
+            . ' resolve=' . (string)\count($this->methodHoldersIdx)
             . ' mangle=' . (string)\count($this->mangleCache)
             . ' impl=' . (string)\count($this->classImplementsCache)
             . ' iface=' . (string)\count($this->classImplementsIfaceCache)
@@ -204,15 +203,6 @@ final class EmitLlvm implements EmitVisitor
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
 
-    /** Resolution caches are rebuilt for each module emission. T6 megamorphic
-     * dispatch repeatedly asks the same closed-world metadata questions. */
-    /** @var array<string, string> */
-    private array $resolveMethodClassCache = [];
-
-    /** Live entries in {@see $resolveMethodClassCache}; `count()` per insert is
-     *  the one thing a hot path must not do. */
-    private int $resolveMethodClassEntries = 0;
-
     /** {@see EmitLlvmObjects::methodHolders}: method => [class => resolved holder].
      *  @var array<string, array<string, string>> */
     private array $methodHoldersIdx = [];
@@ -220,11 +210,6 @@ final class EmitLlvm implements EmitVisitor
     /** Class-table size the index was built against; a change drops it. */
     private int $methodHoldersClassCount = -1;
 
-    /** The window {@see EmitLlvmObjects::resolveMethodClass} keeps. Sized so the
-     *  memo cannot outgrow the module it describes: ~256k entries is more than
-     *  any single class-by-class sweep asks for, and two orders of magnitude
-     *  below the cross product that took the emitter to 13 million. */
-    private const RESOLVE_CACHE_MAX = 262144;
     /** @var array<string, string> deterministic PHP-name → LLVM-name cache */
     private array $mangleCache = [];
     /** @var array<string, bool> */
@@ -484,6 +469,17 @@ final class EmitLlvm implements EmitVisitor
     /** The call being argued is a direct call to a PHP (non-FFI) function
      *  whose declared params are its own ({@see unboxCellArg}). */
     private bool $argsRenderScalars = false;
+    /** @var array<string, string> by-ref foreach value var → alloca holding 1
+     *  when its latest store in the body left a CELL ({@see foreachWriteBackEncode}) */
+    private array $feCellFlags = [];
+    /** A mixed slot is boxing its own raw value: the box takes over the
+     *  slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}). */
+    private bool $boxSelfMove = false;
+    /** @var array<string, bool> class → every class below it reads through
+     *  SplFixedArray::offsetGet ({@see EmitLlvmArrays::emitFixedArrayGet}) */
+    private array $fixedArrayPlain = [];
+    /** @var array<string, bool> …and whether the body emitted such a store */
+    private array $feCellFlagSet = [];
     /**
      * Library build (prebuilt stdlib.o): suppress the `@main` entry point so
      * the object links cleanly alongside a user program's own `@main`. Set by
@@ -657,8 +653,6 @@ final class EmitLlvm implements EmitVisitor
         $this->locals = new LocalSlots();
         $this->lib = new RuntimeLibrary();
         $this->classes = $module->classes;
-        $this->resolveMethodClassCache = [];
-        $this->resolveMethodClassEntries = 0;
         $this->methodHoldersIdx = [];
         $this->methodHoldersClassCount = -1;
         $this->classImplementsCache = [];
@@ -834,6 +828,7 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
         $this->litTableCount = 0;
+        $this->btBaseLine = [];
         $this->dynScopeRelTables = [];
         $this->newDynTableCache = null;
         $this->classlessCandidatesMemo = [];
@@ -2303,6 +2298,10 @@ final class EmitLlvm implements EmitVisitor
     /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
     private string $litTableBodies = '';
 
+    /** {@see btPush}: function => the base line its `@.btl.` global holds.
+     *  @var array<string, int> */
+    private array $btBaseLine = [];
+
     /** {@see EmitLlvmObjects::dynScopeRelated}: scope class => [symbol, n].
      *  @var array<string, array{string, int}> */
     private array $dynScopeRelTables = [];
@@ -3431,17 +3430,13 @@ final class EmitLlvm implements EmitVisitor
     /**
      * Emit `$a` as a plain i64 for a builtin arg that expects an integer
      * (substr offset/length, …). A tagged-cell operand — e.g. a `strpos`
-     * result carried as `int|false` — is unboxed; the builtin handlers
+     * result carried as `int|false`, a float, a numeric string — coerces as php
+     * does ({@see coerceIntArg}); the builtin handlers
      * emit args directly, bypassing the call loop's {@see unboxCellArg}.
      */
     private function emitIntArg(Node $a): string
     {
-        $out = $this->emitNode($a);
-        $out .= $this->coerceToI64();
-        if ($a->type->kind === Type::KIND_CELL) {
-            $out .= $this->unboxCellInt($this->lastValue);
-        }
-        return $out;
+        return $this->emitNode($a) . $this->coerceIntArg($a);
     }
 
     /** A concrete scalar param the uniform closure ABI passes as a cell — the
@@ -4450,8 +4445,23 @@ final class EmitLlvm implements EmitVisitor
     private function btPush(string $display, int $line): string
     {
         if (!$this->rt->needsBacktrace) { return ''; }
-        return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
-             . ', i64 ' . (string)$line . ")\n";
+        $fn = $this->frame->name;
+        if ($fn === '') {
+            return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
+                 . ', i64 ' . (string)$line . ")\n";
+        }
+        // Relative to the function's first traced line, which lives in ONE
+        // global per function: a line inserted above a function moves that
+        // global and nothing in the function's body. With the absolute line in
+        // every call, one edit rewrote every later function of the file — every
+        // split part, so the object cache never hit.
+        if (!isset($this->btBaseLine[$fn])) {
+            $this->btBaseLine[$fn] = $line;
+            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 '
+                . (string)$line . "\n";
+        }
+        return '  call void @__mir_bt_push_rel(ptr ' . $this->strLitId($this->pool->intern($display))
+             . ', ptr @.btl.' . $this->mangle($fn) . ', i64 ' . (string)($line - $this->btBaseLine[$fn]) . ")\n";
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */

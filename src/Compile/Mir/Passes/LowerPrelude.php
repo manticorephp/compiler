@@ -230,6 +230,11 @@ trait LowerPrelude
             // no dependency on any other prelude fragment.
             $src .= $this->opensslSrc;
         }
+        if ($this->weakSrc !== '') {
+            // WeakMap / WeakReference. After spl_arrays.php: WeakMap implements
+            // ArrayAccess, Countable and IteratorAggregate.
+            $src .= $this->weakSrc;
+        }
         // Belt and braces: the concatenation ALREADY starts with the Throwable
         // prelude's own `<?php`, so this leading tag is redundant today and the
         // parser skips the duplicate. It is here so that the invariant — this
@@ -1151,7 +1156,7 @@ trait LowerPrelude
             'UPLOAD_ERR_PARTIAL' => 3, 'UPLOAD_ERR_NO_FILE' => 4, 'UPLOAD_ERR_NO_TMP_DIR' => 6,
             'UPLOAD_ERR_CANT_WRITE' => 7, 'UPLOAD_ERR_EXTENSION' => 8,
             // php core ints
-            'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80508, 'PHP_MAJOR_VERSION' => 8,
+            'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80511, 'PHP_MAJOR_VERSION' => 8,
             'PHP_MINOR_VERSION' => 5, 'PHP_RELEASE_VERSION' => 8, 'PHP_FLOAT_DIG' => 15,
             'PHP_ZTS' => 0, 'PHP_DEBUG' => 0, 'PHP_MAXPATHLEN' => 1024,
             // json flags
@@ -1319,7 +1324,7 @@ trait LowerPrelude
 
         $strs = [
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.8', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.1', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references

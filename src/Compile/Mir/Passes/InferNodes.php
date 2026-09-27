@@ -1511,6 +1511,7 @@ trait InferNodes
      */
     private function inferWhile(While_ $node): Type
     {
+        $pre = $this->localTypes;
         $this->inferNode($node->cond);
         $saved = $this->localTypes;
         // The body runs with the loop condition holding — narrow from it (e.g.
@@ -1524,6 +1525,22 @@ trait InferNodes
         if ($this->localTypesWidened($saved, $merged)) {
             $this->resetJumpFrame();
             $this->localTypes = $merged;
+            $this->narrowFromCond($node->cond);
+            $this->inferNode($node->body);
+            $this->joinContinues();
+            $merged = $this->loopMerge($saved, $this->localTypes);
+        }
+        // The back edge re-enters the CONDITION, so a store the condition makes
+        // itself — `while (null !== ($i = next($i)))` — reaches its own reads
+        // on the next pass. Inferred once against the pre-loop map, the read
+        // stayed `int` while the slot held the `?int` cell, and the loop never
+        // ended.
+        $head = $this->loopMerge($pre, $merged);
+        if ($this->localTypesWidened($pre, $head)) {
+            $this->resetJumpFrame();
+            $this->localTypes = $head;
+            $this->inferNode($node->cond);
+            $saved = $this->localTypes;
             $this->narrowFromCond($node->cond);
             $this->inferNode($node->body);
             $this->joinContinues();
@@ -2021,6 +2038,7 @@ trait InferNodes
     private function inferFor(For_ $node): Type
     {
         if ($node->init !== null) { $this->inferNode($node->init); }
+        $pre = $this->localTypes;
         if ($node->cond !== null) { $this->inferNode($node->cond); }
         $saved = $this->localTypes;
         $this->pushJumpFrame(false);
@@ -2028,9 +2046,12 @@ trait InferNodes
         $this->joinContinues();
         if ($node->step !== null) { $this->inferNode($node->step); }
         $merged = $this->loopMerge($saved, $this->localTypes);
-        if ($this->localTypesWidened($saved, $merged)) {
+        // The back edge re-enters the condition too ({@see inferWhile}).
+        if ($this->localTypesWidened($saved, $merged) || $this->localTypesWidened($pre, $this->loopMerge($pre, $merged))) {
             $this->resetJumpFrame();
-            $this->localTypes = $merged;
+            $this->localTypes = $this->loopMerge($pre, $merged);
+            if ($node->cond !== null) { $this->inferNode($node->cond); }
+            $saved = $this->loopMerge($saved, $this->localTypes);
             $this->inferNode($node->body);
             $this->joinContinues();
             if ($node->step !== null) { $this->inferNode($node->step); }

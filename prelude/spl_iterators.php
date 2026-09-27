@@ -963,19 +963,33 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
         return $out;
     }
 
+    // Each accessor tries an in-range INT index first: the guard reads an
+    // unboxed copy of it (NarrowScalarGuards), so the common `$tokens[$i]`
+    // is two int compares and a load instead of the full offset rule in
+    // __index. Anything else takes the rule.
+
     public function offsetExists(mixed $index): bool
     {
+        if (\is_int($index)) {
+            if ($index >= 0 && $index < $this->__size) { return $this->__data[$index] !== null; }
+        }
         $i = $this->__index($index, false);
         return $i >= 0 && $this->__data[$i] !== null;
     }
 
     public function offsetGet(mixed $index): mixed
     {
+        if (\is_int($index)) {
+            if ($index >= 0 && $index < $this->__size) { return $this->__data[$index]; }
+        }
         return $this->__data[$this->__index($index, true)];
     }
 
     public function offsetSet(mixed $index, mixed $value): void
     {
+        if (\is_int($index)) {
+            if ($index >= 0 && $index < $this->__size) { $this->__data[$index] = $value; return; }
+        }
         if ($index === null) {
             throw new RuntimeException('[] operator not supported for SplFixedArray');
         }
@@ -1013,7 +1027,7 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
         }
         if ($i < 0 || $i >= $this->__size) {
             if (!$strict) { return -1; }
-            throw new RuntimeException('Index invalid or out of range');
+            throw new OutOfBoundsException('Index invalid or out of range');
         }
         return $i;
     }
