@@ -110,9 +110,7 @@ final readonly class Terminal
 
         // 3. Live Failures Section (shows immediate failure notices below progress)
         if (!empty($failures)) {
-            $out .= "\n" . Text::COLOR_RED . Text::COLOR_BOLD . "--- Live Failures (" . count(
-                    $failures
-                ) . ") ---" . Text::ROW_RESET . "\n";
+            $out .= "\n" . Text::COLOR_RED . Text::COLOR_BOLD . "--- Live Failures (" . count($failures) . ") ---" . Text::ROW_RESET . "\n";
             $totalLines += 2;
             $recentFailures = array_slice($failures, -8);
             foreach ($recentFailures as $f) {

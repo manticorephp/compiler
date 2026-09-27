@@ -43,9 +43,14 @@ final class Runner
         if ($entries === false) {
             fwrite(
                 STDERR,
-                sprintf('%sFailed to read cases directory: %s%s', Text::COLOR_RED, $this->casesDir. "\n", Text::ROW_RESET)
+                sprintf(
+                    '%sFailed to read cases directory: %s%s',
+                    Text::COLOR_RED,
+                    $this->casesDir . "\n",
+                    Text::ROW_RESET
+                )
             );
-            
+
             return 1;
         }
 
@@ -58,7 +63,10 @@ final class Runner
         }
 
         $cpuCount = $this->terminal->getCpuCount();
-        $numWorkers = $args->customWorkers !== null && $args->customWorkers > 0 ? $args->customWorkers : min($cpuCount, $totalFiles);
+        $numWorkers = $args->customWorkers !== null && $args->customWorkers > 0 ? $args->customWorkers : min(
+            $cpuCount,
+            $totalFiles
+        );
         $cols = $this->terminal->getGridColumns();
         $startTime = microtime(true);
         $isTty = $this->terminal->isInteractiveTty();
@@ -107,7 +115,7 @@ final class Runner
                         $this->workDir,
                         $args->opt,
                     );
-                    
+
                     $duration = round((microtime(true) - $testStart) * 1000, 1);
                     $res->time = $duration;
                     $res->idx = $item['idx'];
@@ -126,7 +134,7 @@ final class Runner
 
         // Coordinator (Worker 0): manages UI, receives IPC events, and runs its own slice
         echo Text::COLOR_BOLD . "Manticore AOT Test Suite" . Text::ROW_RESET . " ({$totalFiles} tests, {$numWorkers} workers, -O{$args->opt})\n\n";
-        
+
         fflush(STDOUT);
         $readSocks = [];
         for ($i = 1; $i < $numWorkers; $i++) {
@@ -152,63 +160,34 @@ final class Runner
 
         // Initial render of the dashboard if interactive TTY
         if ($isTty) {
-            $this->terminal->render($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, true);
+            $this->terminal->render(
+                $completed,
+                $passed,
+                $failures,
+                $totalFiles,
+                $startTime,
+                $renderedLines,
+                $lastRender,
+                $numWorkers,
+                true
+            );
         }
 
-        $onResult = function (Result $res) use (
-            &$completed,
-            &$passed,
-            &$failures,
-            &$allResults,
+        $onResult = fn(Result $result) => $this->onResult(
+            $result,
+            $completed,
+            $passed,
+            $failures,
+            $allResults,
             $totalFiles,
             $cols,
             $startTime,
-            &$renderedLines,
-            &$lastRender,
+            $renderedLines,
+            $lastRender,
             $numWorkers,
             $isTty,
-            &$nonTtyDotCount
-        ) {
-            $idx = $res->idx ?? null;
-            if ($idx !== null) {
-                $completed++;
-                $allResults[$idx] = $res;
-                $isFail = !$res->ok;
-                if ($isFail) {
-                    $reason = 'Failed';
-                    if (!empty($res->error)) {
-                        if (str_contains($res->error, 'Compilation error')) {
-                            $reason = 'Compilation error';
-                        } elseif (str_contains($res->error, 'Output mismatch')) {
-                            $reason = 'Output mismatch';
-                        } elseif (str_contains($res->error, 'Runtime error')) {
-                            $reason = 'Runtime error';
-                        }
-                    }
-                    $failures[] = [
-                        'id'     => count($failures) + 1,
-                        'file'   => $res->file,
-                        'reason' => $reason,
-                        'error'  => $res->error ?? null,
-                    ];
-                } else {
-                    $passed++;
-                }
-
-                if ($isTty) {
-                    $this->terminal->render($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, $isFail);
-                } else {
-                    $nonTtyDotCount++;
-                    echo $isFail ? Text::COLOR_RED . 'F' . Text::ROW_RESET : Text::COLOR_GREEN . '.' . Text::ROW_RESET;
-                    if ($nonTtyDotCount % $cols === 0 || $nonTtyDotCount === $totalFiles) {
-                        $padLen = strlen((string)$totalFiles);
-                        $pct = (int)round(($nonTtyDotCount / $totalFiles) * 100);
-                        echo sprintf(" [%{$padLen}d/%d] (%3d%%)\n", $nonTtyDotCount, $totalFiles, $pct);
-                    }
-                    fflush(STDOUT);
-                }
-            }
-        };
+            $nonTtyDotCount
+        );
 
         async(function () use ($myCases, &$readSocks, $onResult, $totalFiles, $args, &$completed) {
             // Task A: Background IPC Stream Listener
@@ -228,7 +207,15 @@ final class Runner
                                 if (trim($line) !== '') {
                                     $decoded = json_decode($line, true);
                                     if (is_array($decoded)) {
-                                        $onResult($decoded);
+                                        /** @var array{file: string, ok: bool, error: ?string, skipped: bool, time: float, idx: int|null} $decoded */
+                                        $onResult(new Result(
+                                            file: $decoded['file'],
+                                            ok: $decoded['ok'],
+                                            error: $decoded['error'],
+                                            skipped: $decoded['skipped'],
+                                            time: $decoded['time'],
+                                            idx: $decoded['idx'],
+                                        ));
                                     }
                                 }
                             }
@@ -270,7 +257,17 @@ final class Runner
 
         // Ensure final TUI state is cleanly rendered
         if ($isTty) {
-            $this->terminal->render($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, true);
+            $this->terminal->render(
+                $completed,
+                $passed,
+                $failures,
+                $totalFiles,
+                $startTime,
+                $renderedLines,
+                $lastRender,
+                $numWorkers,
+                true
+            );
         }
 
         // Worker 0 waits for child processes to finish cleanly
@@ -286,7 +283,9 @@ final class Runner
 
         // 5. Final Detailed Failure Report
         if (!empty($failures)) {
-            echo "\n" . Text::COLOR_RED . Text::COLOR_BOLD . "Failures (" . count($failures) . "):\n\n" . Text::ROW_RESET;
+            echo "\n" . Text::COLOR_RED . Text::COLOR_BOLD . "Failures (" . count(
+                    $failures
+                ) . "):\n\n" . Text::ROW_RESET;
             foreach ($failures as $failure) {
                 echo Text::COLOR_RED . "{$failure['id']}) " . $failure['file'] . Text::ROW_RESET . "\n";
                 echo ($failure['error'] ?? 'Unknown error') . "\n\n";
@@ -305,7 +304,7 @@ final class Runner
 
         return $failed > 0 ? 1 : 0;
     }
-    
+
     private function runTest(
         string $caseName,
         string $srcPath,
@@ -332,8 +331,12 @@ final class Runner
         }
 
         $expectedPath = match (true) {
-            $isMusl && file_exists($expectedDir . '/' . $caseName . '.musl.out') => $expectedDir . '/' . $caseName . '.musl.out',
-            file_exists($expectedDir . '/' . $caseName . '.' . $os . '.out') => $expectedDir . '/' . $caseName . '.' . $os . '.out',
+            $isMusl && file_exists(
+                $expectedDir . '/' . $caseName . '.musl.out'
+            ) => $expectedDir . '/' . $caseName . '.musl.out',
+            file_exists(
+                $expectedDir . '/' . $caseName . '.' . $os . '.out'
+            ) => $expectedDir . '/' . $caseName . '.' . $os . '.out',
             file_exists($expectedDir . '/' . $caseName . '.out') => $expectedDir . '/' . $caseName . '.out',
             default => null,
         };
@@ -364,7 +367,7 @@ final class Runner
 
         if ($compileRc !== 0 || !file_exists($tmpBinary)) {
             @unlink($tmpBinary);
-            
+
             return new Result(
                 file: $caseName,
                 ok: false,
@@ -374,7 +377,12 @@ final class Runner
         }
 
         // 2. Execute compiled binary (STDOUT strictly isolated from STDERR)
-        $runCmd = sprintf('%s > %s 2> %s', escapeshellarg($tmpBinary), escapeshellarg($tmpOut), escapeshellarg($tmpErr));
+        $runCmd = sprintf(
+            '%s > %s 2> %s',
+            escapeshellarg($tmpBinary),
+            escapeshellarg($tmpOut),
+            escapeshellarg($tmpErr)
+        );
         system($runCmd, $runRc);
 
         $actualRaw = file_exists($tmpOut) ? (string)file_get_contents($tmpOut) : '';
@@ -385,7 +393,6 @@ final class Runner
         @unlink($tmpErr);
 
         if ($runRc !== 0) {
-
             return new Result(
                 file: $caseName,
                 ok: false,
@@ -396,8 +403,20 @@ final class Runner
 
         // 3. Normalize and verify output matches expected
         $expectedRaw = (string)file_get_contents($expectedPath);
-        $expectedNorm = $this->terminal->normalizeOutput($expectedRaw, file_exists($sedFile) ? $sedFile : null, $workDir, $safeName, 'exp');
-        $actualNorm = $this->terminal->normalizeOutput($actualRaw, file_exists($sedFile) ? $sedFile : null, $workDir, $safeName, 'act');
+        $expectedNorm = $this->terminal->normalizeOutput(
+            $expectedRaw,
+            file_exists($sedFile) ? $sedFile : null,
+            $workDir,
+            $safeName,
+            'exp'
+        );
+        $actualNorm = $this->terminal->normalizeOutput(
+            $actualRaw,
+            file_exists($sedFile) ? $sedFile : null,
+            $workDir,
+            $safeName,
+            'act'
+        );
 
         if ($actualNorm !== $expectedNorm) {
             return new Result(
@@ -407,7 +426,7 @@ final class Runner
                 skipped: false,
             );
         }
-        
+
         return new Result(
             file: $caseName,
             ok: true,
@@ -419,7 +438,7 @@ final class Runner
     private function parseArguments(): Arguments
     {
         $arguments = new Arguments();
-        
+
         $argv = $_SERVER['argv'] ?? ($GLOBALS['argv'] ?? []);
         if (is_array($argv)) {
             $argc = count($argv);
@@ -447,7 +466,7 @@ final class Runner
                 ++$i;
             }
         }
-        
+
         return $arguments;
     }
 
@@ -472,5 +491,74 @@ final class Runner
             $cases = array_values(array_filter($cases, fn(array $c) => str_contains($c['name'], $args->filter)));
         }
         return $cases;
+    }
+
+    /**
+     * @param list<Result> $allResults
+     */
+    private function onResult(
+        Result $res,
+        int &$completed,
+        int &$passed,
+        array &$failures,
+        array &$allResults,
+        int $totalFiles,
+        int $cols,
+        float $startTime,
+        int &$renderedLines,
+        float &$lastRender,
+        int $numWorkers,
+        bool $isTty,
+        int &$nonTtyDotCount
+    ): void {
+        $idx = $res->idx ?? null;
+        if ($idx !== null) {
+            $completed++;
+            $allResults[$idx] = $res;
+            $isFail = !$res->ok;
+            if ($isFail) {
+                $reason = 'Failed';
+                if (!empty($res->error)) {
+                    if (str_contains($res->error, 'Compilation error')) {
+                        $reason = 'Compilation error';
+                    } elseif (str_contains($res->error, 'Output mismatch')) {
+                        $reason = 'Output mismatch';
+                    } elseif (str_contains($res->error, 'Runtime error')) {
+                        $reason = 'Runtime error';
+                    }
+                }
+                $failures[] = [
+                    'id' => count($failures) + 1,
+                    'file' => $res->file,
+                    'reason' => $reason,
+                    'error' => $res->error ?? null,
+                ];
+            } else {
+                $passed++;
+            }
+
+            if ($isTty) {
+                $this->terminal->render(
+                    $completed,
+                    $passed,
+                    $failures,
+                    $totalFiles,
+                    $startTime,
+                    $renderedLines,
+                    $lastRender,
+                    $numWorkers,
+                    $isFail
+                );
+            } else {
+                $nonTtyDotCount++;
+                echo $isFail ? Text::COLOR_RED . 'F' . Text::ROW_RESET : Text::COLOR_GREEN . '.' . Text::ROW_RESET;
+                if ($nonTtyDotCount % $cols === 0 || $nonTtyDotCount === $totalFiles) {
+                    $padLen = strlen((string)$totalFiles);
+                    $pct = (int)round(($nonTtyDotCount / $totalFiles) * 100);
+                    echo sprintf(" [%{$padLen}d/%d] (%3d%%)\n", $nonTtyDotCount, $totalFiles, $pct);
+                }
+                fflush(STDOUT);
+            }
+        }
     }
 }
