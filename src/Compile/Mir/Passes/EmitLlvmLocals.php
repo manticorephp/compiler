@@ -545,6 +545,22 @@ trait EmitLlvmLocals
         // O(n²) concat. The helper owns the old value's lifetime, so this
         // path deliberately skips the standard release-before-overwrite.
         $sv = $sl->value;
+        // `$x = $x` on one CELL slot moves nothing. The join after an
+        // `instanceof` narrowing reconciles its local this way, and the alias
+        // path below COPIES an array payload (own_alias) and drops the original
+        // — a whole-array clone on every call of php-cs-fixer's Token::equals.
+        if ($sv instanceof LoadLocal && $sv->name === $sl->name
+            && $sv->type->kind === Type::KIND_CELL && $sl->type->kind === Type::KIND_CELL
+            && isset($this->locals->slots[$sl->name])
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && !isset($this->frame->mixedFlagSlots[$sl->name])) {
+            $r = $this->ssa->allocReg();
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            $this->markCellOpaque($r);
+            return '  ' . $r . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
+        }
         // NB: no ARENA gate here — a `$s = $s . …` accumulator ESCAPES across a
         // loop back-edge, so even if InferAllocKind confined the concat, it must
         // become a heap str_append: str_append converts the (immortal-rc) arena
