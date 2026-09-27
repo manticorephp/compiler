@@ -253,6 +253,7 @@ trait EmitLlvmArrays
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
             if ($fast !== null) { return $fast; }
+            if ($this->fixedArrayIsPlain($aa)) { return $this->emitFixedArrayCallBorrow($mc); }
             return $this->emitMethodCall($mc);
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
@@ -279,28 +280,21 @@ trait EmitLlvmArrays
     /**
      * `$fixed[$i]` on a SplFixedArray whose `offsetGet` is the prelude's own,
      * with an INT index: read `__data[$i]` in place when `0 <= $i < __size`,
-     * else call `offsetGet` (which throws php's error). The fast arm hands back
-     * exactly what `offsetGet` does — the element decoded to a cell and
-     * retained, a +1 the caller owns — so nothing downstream can tell the
-     * difference. php-cs-fixer's `Tokens` is a SplFixedArray and `$tokens[$i]`
-     * is its hottest expression; in Zend it is C.
+     * else call `offsetGet` (which throws php's error). php-cs-fixer's `Tokens`
+     * is a SplFixedArray and `$tokens[$i]` is its hottest expression; in Zend
+     * it is C.
+     *
+     * The result is a BORROW, as every element read is: the node is an
+     * ArrayAccess_, and every consumer — the ownership plan, argument and
+     * receiver temps, returns — reads it as one. `__data` keeps the word alive,
+     * so the call arm gives its +1 straight back. Handing out the call's +1
+     * instead leaked every token each `$tokens[$i]->…` touched.
      * null when the shape does not apply.
      */
     private function emitFixedArrayGet(ArrayAccess_ $aa, \Compile\Mir\MethodCall_ $mc): ?string
     {
+        if (!$this->fixedArrayIsPlain($aa)) { return null; }
         $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
-        if ($cls === '' || !$this->classIsA($cls, 'SplFixedArray')) { return null; }
-        // Every class the receiver can be must read through the prelude's own
-        // offsetGet: a subclass override owns the semantics.
-        if (!isset($this->fixedArrayPlain[$cls])) {
-            $plain = true;
-            foreach ($this->classes as $sub) {
-                if ($this->classIsA($sub->name, $cls)
-                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
-            }
-            $this->fixedArrayPlain[$cls] = $plain;
-        }
-        if (!$this->fixedArrayPlain[$cls]) { return null; }
         $ik = $aa->index->type->kind;
         if ($ik !== Type::KIND_INT && $ik !== Type::KIND_CELL) { return null; }
         $cd = $this->classes[$cls] ?? null;
@@ -357,12 +351,10 @@ trait EmitLlvmArrays
         $out .= '  ' . $cv . ' = call i64 @__mir_elem_decode(ptr ' . $data . ', i64 ' . $w . ")\n";
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
-        $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
         $out .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
-        $out .= $this->emitMethodCall($mc);
-        $out .= $this->coerceToI64();
+        $out .= $this->emitFixedArrayCallBorrow($mc);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -371,6 +363,37 @@ trait EmitLlvmArrays
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /** Whether every class `$aa`'s receiver can be reads through the
+     *  prelude SplFixedArray::offsetGet (a subclass override owns its own
+     *  semantics, and its own return convention). */
+    private function fixedArrayIsPlain(ArrayAccess_ $aa): bool
+    {
+        $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
+        if ($cls === '' || !$this->classIsA($cls, 'SplFixedArray')) { return false; }
+        if (!isset($this->fixedArrayPlain[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classIsA($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayPlain[$cls] = $plain;
+        }
+        return $this->fixedArrayPlain[$cls];
+    }
+
+    /** `offsetGet` on a plain SplFixedArray as the BORROW an element read is:
+     *  its +1 dropped at once — `__data` still holds the word
+     *  ({@see emitFixedArrayGet}). */
+    private function emitFixedArrayCallBorrow(\Compile\Mir\MethodCall_ $mc): string
+    {
+        $out = $this->emitMethodCall($mc);
+        $out .= $this->coerceToI64();
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_drop(i64 ' . $this->lastValue . ")\n";
         return $out;
     }
 
