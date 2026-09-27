@@ -654,6 +654,26 @@ trait EmitLlvmBuiltins
         return $ret;
     }
 
+    /**
+     * A RAW container word the probe just wrapped into an array / object cell:
+     * the erased slot says nothing about who owns it (a foreach value is a
+     * borrow), and the new cell is dropped by its receiver. Take the +1 that
+     * drop gives back — at worst one leaked reference, never a stolen one.
+     * An already-tagged word or a scalar comes back unchanged or reference-free.
+     */
+    private function retainIfProbeBoxed(string $raw, string $boxed): string
+    {
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $c = $this->ssa->allocReg();
+        $yes = $this->ssa->allocLabel('bxr.own');
+        $end = $this->ssa->allocLabel('bxr.end');
+        return '  ' . $c . ' = icmp ne i64 ' . $boxed . ', ' . $raw . "\n"
+            . '  br i1 ' . $c . ', label %' . $yes . ', label %' . $end . "\n"
+            . $yes . ":\n  call void @__mir_cell_retain(i64 " . $boxed . ")\n"
+            . '  br label %' . $end . "\n" . $end . ":\n";
+    }
+
     /** The one shared body {@see boxUnknownShallowIr} calls. */
     private function emitBoxUnknownFn(): string
     {
@@ -691,8 +711,23 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $v . ")\n";
         $intB = $this->ssa->allocReg();
         $out .= '  ' . $intB . ' = select i1 ' . $isInt . ', i64 ' . $bi . ', i64 ' . $v . "\n";
+        // "Already a cell" = the NaN header AND a tag nibble the ABI assigns
+        // (1..8): a raw negative int carries the header too (nibble 15) and
+        // must still take the integer arm.
+        $hdr = $this->ssa->allocReg();
+        $out .= '  ' . $hdr . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $v . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $lo = $this->ssa->allocReg();
+        $out .= '  ' . $lo . ' = icmp uge i64 ' . $nib . ", 1\n";
+        $hiN = $this->ssa->allocReg();
+        $out .= '  ' . $hiN . ' = icmp ule i64 ' . $nib . ", 8\n";
+        $rng = $this->ssa->allocReg();
+        $out .= '  ' . $rng . ' = and i1 ' . $lo . ', ' . $hiN . "\n";
         $isBox = $this->ssa->allocReg();
-        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $out .= '  ' . $isBox . ' = and i1 ' . $hdr . ', ' . $rng . "\n";
         $out .= '  br i1 ' . $isBox . ', label %' . $endL . ', label %' . $rawL . "\n";
         $out .= $rawL . ":\n";
         $out .= '  store i64 ' . $intB . ', ptr ' . $slot . "\n";
@@ -4864,7 +4899,7 @@ trait EmitLlvmBuiltins
                 // bare-`array` answers a boxed NULL on empty); box_int would
                 // re-box it and print the carrier as an integer.
                 $out .= $a->type->kind === Type::KIND_UNKNOWN
-                    ? $this->boxUnknownIfRaw()
+                    ? $this->boxUnknownShallowIr()
                     : $this->boxToCell($a->type);
                 $bv = $this->lastValue;
                 $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $bv . ', i64 0)' . "\n";

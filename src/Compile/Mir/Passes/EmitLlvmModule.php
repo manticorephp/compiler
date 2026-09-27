@@ -2364,7 +2364,10 @@ trait EmitLlvmModule
                     $out .= $this->coerceToI64();
                     $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
                 }
-                $out .= $this->boxUnknownIfRaw();
+                $out .= $this->coerceToI64();
+                $raw = $this->lastValue;
+                $out .= $this->boxUnknownShallowIr();
+                $out .= $this->retainIfProbeBoxed($raw, $this->lastValue);
             } else {
                 // `$v` so a rebuilt concrete-element array releases its source.
                 $out .= $this->boxToCell($v->type, $v);
