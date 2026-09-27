@@ -516,6 +516,7 @@ final class OwnershipFlow implements Pass
 
     private function flavorFor(string $name, string $ks, Type $t): string
     {
+        if ($ks === Ownership::ERASED_ARR && isset($this->shared[$name])) { return Ownership::ERASED_BUF; }
         if (\str_starts_with($ks, 'arr')) {
             if (isset($this->shared[$name])) { return $t->isAssoc() ? 'assocbuf' : 'vecbuf'; }
             return $t->isAssoc() ? 'assoc' : 'vec';

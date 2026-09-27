@@ -654,7 +654,7 @@ trait EmitLlvmMemory
             $this->rt->needsStrRc = true;
             return '  call void @__mir_cell_retain(i64 ' . $i64reg . ")\n";
         }
-        if ($flavor === \Compile\Mir\Ownership::ERASED_ARR) {
+        if ($flavor === \Compile\Mir\Ownership::ERASED_ARR || $flavor === \Compile\Mir\Ownership::ERASED_BUF) {
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             $tagged = $this->ssa->allocReg();
@@ -665,7 +665,7 @@ trait EmitLlvmMemory
             $out .= '  ' . $cw . ' = select i1 ' . $tagged . ', i64 ' . $i64reg . ", i64 0\n";
             $out .= '  ' . $rw . ' = select i1 ' . $tagged . ', i64 0, i64 ' . $i64reg . "\n";
             $out .= '  call void @__mir_cell_retain(i64 ' . $cw . ")\n";
-            return $out . $this->rcRetainReg($rw, 'vec');
+            return $out . $this->rcRetainReg($rw, $flavor === \Compile\Mir\Ownership::ERASED_BUF ? 'vecbuf' : 'vec');
         }
         $fn = '@__mir_array_retain';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_retain_str'; }
@@ -796,6 +796,9 @@ trait EmitLlvmMemory
         // An erased array word: a raw buffer or a tagged cell, split by tag.
         if ($flavor === \Compile\Mir\Ownership::ERASED_ARR) {
             return $this->mixedReleaseIr($i64reg, 'vec', '');
+        }
+        if ($flavor === \Compile\Mir\Ownership::ERASED_BUF) {
+            return $this->mixedReleaseIr($i64reg, 'vecbuf', '');
         }
         $fn = '@__mir_array_release';
         if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }

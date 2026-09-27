@@ -930,6 +930,9 @@ final class Ownership
     /** The release class of an ERASED array word — raw buffer or tagged cell,
      *  split by tag at every retain and drop. */
     public const ERASED_ARR = 'erasedarr';
+    /** {@see ERASED_ARR} released buffer-only on its raw half — an array an
+     *  unproven callee may keep with its element refs ({@see elementSharedArgs}). */
+    public const ERASED_BUF = 'erasedbuf';
 
     /** What a `return` does to take the caller's +1 ({@see returnRetain}). */
     public const RET_NONE = 0;
