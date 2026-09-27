@@ -622,9 +622,33 @@ trait EmitLlvmControl
         // An interface-typed iterator may be a Generator at runtime, so each
         // protocol step classifies and branches. The body is still emitted
         // exactly once.
-        return $out . $this->emitIterProtocolLoop(
-            $fe, $iterSlot, $iterName, $iterType,
-            $this->iterNeedsRuntimeClass($fe->iterClass));
+        $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
+        $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
+        // The iterator `getIterator()` handed back is the loop's own (+1): give
+        // it back when the loop ends — it held the subject, and with it every
+        // element (a SplFixedArray's). Only a concrete, non-Generator class: an
+        // interface-typed one may be a Generator at run time, whose frame is
+        // released through another header.
+        if ($fe->iterAggregate && $fe->iterClass !== 'Generator'
+            && ($dyn || isset($this->classes[$fe->iterClass]))) {
+            $it = $this->ssa->allocReg();
+            $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
+            if ($dyn) {
+                // `getIterator(): Iterator` (SplFixedArray's own) may still be a
+                // Generator frame at run time: release only an object, by the
+                // same probe every protocol step takes.
+                $out .= $this->genFrameProbeIr($it);
+                $obj = $this->ssa->allocReg();
+                $out .= '  ' . $obj . ' = select i1 ' . $this->genFrameReg . ', i64 0, i64 ' . $it . "\n";
+                $out .= $this->rcReleaseReg($obj, 'obj');
+            } else {
+                $out .= $this->rcReleaseReg($it, 'obj');
+            }
+            $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+        }
+        return $out;
     }
 
     /**
