@@ -8,7 +8,8 @@ use function Async\mapConcurrent;
 use function Async\spawn;
 use function Process\workers;
 
-const COLOR_RESET   = "\033[0m";
+
+const ROW_RESET   = "\033[0m";
 const COLOR_BOLD    = "\033[1m";
 const COLOR_DIM     = "\033[2m";
 const COLOR_GRAY    = "\033[90m";
@@ -58,11 +59,11 @@ function renderProgressBar(int $completed, int $total, int $barWidth = 36): stri
     $empty = $barWidth - $filled;
 
     if ($filled > 0 && $filled < $barWidth) {
-        $bar = COLOR_GREEN . str_repeat('=', $filled - 1) . '>' . COLOR_RESET . COLOR_GRAY . str_repeat('-', $empty) . COLOR_RESET;
+        $bar = COLOR_GREEN . str_repeat('=', $filled - 1) . '>' . ROW_RESET . COLOR_GRAY . str_repeat('-', $empty) . ROW_RESET;
     } elseif ($filled === $barWidth) {
-        $bar = COLOR_GREEN . str_repeat('=', $filled) . COLOR_RESET;
+        $bar = COLOR_GREEN . str_repeat('=', $filled) . ROW_RESET;
     } else {
-        $bar = COLOR_GRAY . str_repeat('-', $empty) . COLOR_RESET;
+        $bar = COLOR_GRAY . str_repeat('-', $empty) . ROW_RESET;
     }
 
     $padLen = strlen((string)$total);
@@ -96,7 +97,7 @@ function renderTui(
 
     // 1. Dedicated Progress Bar
     $progressBar = renderProgressBar($completed, $total, 40);
-    $out .= COLOR_BOLD . "Progress: " . COLOR_RESET . $progressBar . "\n";
+    $out .= COLOR_BOLD . "Progress: " . ROW_RESET . $progressBar . "\n";
     $totalLines = 1;
 
     // 2. Live Statistics
@@ -104,24 +105,24 @@ function renderTui(
     $rate = $elapsed > 0 ? round($completed / $elapsed, 1) : 0.0;
 
     $out .= sprintf(
-        COLOR_GREEN . "Passed:" . COLOR_RESET . " %d | " .
-        COLOR_RED . "Failed:" . COLOR_RESET . " %d | " .
-        COLOR_CYAN . "Time:" . COLOR_RESET . " %.1fs | " .
-        COLOR_MAGENTA . "Rate:" . COLOR_RESET . " %.1f tests/s | " .
-        COLOR_DIM . "Workers: %d" . COLOR_RESET . "\n",
+        COLOR_GREEN . "Passed:" . ROW_RESET . " %d | " .
+        COLOR_RED . "Failed:" . ROW_RESET . " %d | " .
+        COLOR_CYAN . "Time:" . ROW_RESET . " %.1fs | " .
+        COLOR_MAGENTA . "Rate:" . ROW_RESET . " %.1f tests/s | " .
+        COLOR_DIM . "Workers: %d" . ROW_RESET . "\n",
         $passed, $failed, $elapsed, $rate, $numWorkers
     );
     $totalLines++;
 
     // 3. Live Failures Section (shows immediate failure notices below progress)
     if (!empty($failures)) {
-        $out .= "\n" . COLOR_RED . COLOR_BOLD . "--- Live Failures (" . count($failures) . ") ---" . COLOR_RESET . "\n";
+        $out .= "\n" . COLOR_RED . COLOR_BOLD . "--- Live Failures (" . count($failures) . ") ---" . ROW_RESET . "\n";
         $totalLines += 2;
         $recentFailures = array_slice($failures, -8);
         foreach ($recentFailures as $f) {
             $reason = $f['reason'] ?? 'Failed';
             $out .= sprintf(
-                COLOR_RED . "[FAIL #%d]" . COLOR_RESET . " %-42s " . COLOR_GRAY . "(%s)" . COLOR_RESET . "\n",
+                COLOR_RED . "[FAIL #%d]" . ROW_RESET . " %-42s " . COLOR_GRAY . "(%s)" . ROW_RESET . "\n",
                 $f['id'],
                 $f['file'],
                 $reason
@@ -129,7 +130,7 @@ function renderTui(
             $totalLines++;
         }
     } else {
-        $out .= "\n" . COLOR_GRAY . "No failures detected so far." . COLOR_RESET . "\n";
+        $out .= "\n" . COLOR_GRAY . "No failures detected so far." . ROW_RESET . "\n";
         $totalLines += 2;
     }
 
@@ -188,7 +189,7 @@ function execute(): int
 
     $entries = scandir($casesDir);
     if ($entries === false) {
-        fwrite(STDERR, COLOR_RED . "Failed to read cases directory: $casesDir\n" . COLOR_RESET);
+        fwrite(STDERR, COLOR_RED . "Failed to read cases directory: $casesDir\n" . ROW_RESET);
         return 1;
     }
 
@@ -214,7 +215,7 @@ function execute(): int
 
     $totalFiles = count($cases);
     if ($totalFiles === 0) {
-        echo COLOR_YELLOW . "No test cases match the given filter.\n" . COLOR_RESET;
+        echo COLOR_YELLOW . "No test cases match the given filter.\n" . ROW_RESET;
         return 0;
     }
 
@@ -285,7 +286,7 @@ function execute(): int
     }
 
     // Coordinator (Worker 0): manages UI, receives IPC events, and runs its own slice
-    echo COLOR_BOLD . "Manticore AOT Test Suite" . COLOR_RESET . " ({$totalFiles} tests, {$numWorkers} workers, -O{$opt})\n\n";
+    echo COLOR_BOLD . "Manticore AOT Test Suite" . ROW_RESET . " ({$totalFiles} tests, {$numWorkers} workers, -O{$opt})\n\n";
     fflush(STDOUT);
     $readSocks = [];
     for ($i = 1; $i < $numWorkers; $i++) {
@@ -357,7 +358,7 @@ function execute(): int
                 renderTui($completed, $passed, $failures, $totalFiles, $startTime, $renderedLines, $lastRender, $numWorkers, $isFail);
             } else {
                 $nonTtyDotCount++;
-                echo $isFail ? COLOR_RED . 'F' . COLOR_RESET : COLOR_GREEN . '.' . COLOR_RESET;
+                echo $isFail ? COLOR_RED . 'F' . ROW_RESET : COLOR_GREEN . '.' . ROW_RESET;
                 if ($nonTtyDotCount % $cols === 0 || $nonTtyDotCount === $totalFiles) {
                     $padLen = strlen((string)$totalFiles);
                     $pct = (int)round(($nonTtyDotCount / $totalFiles) * 100);
@@ -444,9 +445,9 @@ function execute(): int
 
     // 5. Final Detailed Failure Report
     if (!empty($failures)) {
-        echo "\n" . COLOR_RED . COLOR_BOLD . "Failures (" . count($failures) . "):\n\n" . COLOR_RESET;
+        echo "\n" . COLOR_RED . COLOR_BOLD . "Failures (" . count($failures) . "):\n\n" . ROW_RESET;
         foreach ($failures as $failure) {
-            echo COLOR_RED . "{$failure['id']}) " . $failure['file'] . COLOR_RESET . "\n";
+            echo COLOR_RED . "{$failure['id']}) " . $failure['file'] . ROW_RESET . "\n";
             echo ($failure['error'] ?? 'Unknown error') . "\n\n";
         }
     }
@@ -455,10 +456,10 @@ function execute(): int
     echo "Time: {$elapsed}s, Workers: {$numWorkers}\n\n";
 
     if ($failed === 0) {
-        echo BG_GREEN . " OK " . COLOR_RESET . COLOR_GREEN . " ({$passed} tests, {$passed} assertions passed)" . COLOR_RESET . "\n";
+        echo BG_GREEN . " OK " . ROW_RESET . COLOR_GREEN . " ({$passed} tests, {$passed} assertions passed)" . ROW_RESET . "\n";
     } else {
-        echo BG_RED . " FAILURES! " . COLOR_RESET . "\n";
-        echo COLOR_RED . "Tests: {$totalFiles}, Passed: {$passed}, Failures: {$failed}" . COLOR_RESET . "\n";
+        echo BG_RED . " FAILURES! " . ROW_RESET . "\n";
+        echo COLOR_RED . "Tests: {$totalFiles}, Passed: {$passed}, Failures: {$failed}" . ROW_RESET . "\n";
     }
 
     return $failed > 0 ? 1 : 0;
