@@ -710,6 +710,11 @@ final class InferTypes implements Pass
      *  ({@see InferScans::scanRefPinnedNode}). */
     private array $refPinnedLocals = [];
 
+    /** @var array<string,bool> the current function's names whose slot is a word
+     *  another frame writes too: a by-ref param, a by-ref capture param, a local
+     *  a closure here captures by reference ({@see collectSharedWordLocals}). */
+    private array $sharedWordLocals = [];
+
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
      *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
@@ -2095,7 +2100,7 @@ final class InferTypes implements Pass
             // in the next foreach; `'abc'` vs `[1,2]` printed a pointer. Box both
             // arms so the slot is uniformly tagged. Two arms of one kind (two
             // arrays, two objects) agree on the raw repr and stay raw.
-            if (!$this->joinDisagrees($tT, $oT)) { continue; }
+            if (!$this->joinDisagrees($tT, $oT) || $this->sharedWordErased($name, $tT, $oT)) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             // A static / global-backed slot has ONE repr, its decl's (the join of
             // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
@@ -2632,7 +2637,7 @@ final class InferTypes implements Pass
             // 0 is an int 0 ({@see joinDisagrees}). The name is a cell.
             if ($bt->kind === Type::KIND_UNKNOWN && isset($this->nullLoopLocals[$name])
                 && $this->nullLoopLocals[$name]->kind === Type::KIND_UNKNOWN
-                && !isset($this->refPinnedLocals[$name])) {
+                && !isset($this->refPinnedLocals[$name]) && !isset($this->sharedWordLocals[$name])) {
                 unset($this->nullLoopLocals[$name]);
                 $out[$name] = Type::cell();
                 $this->cellLoopLocals[$name] = true;
@@ -2686,7 +2691,7 @@ final class InferTypes implements Pass
             // an array entry the body leaves a cell (the if/else box-back inside
             // the body produces exactly that), a string the body turns into an
             // array, an object into an int.
-            if (!$this->joinDisagrees($st, $bt)) { continue; }
+            if (!$this->joinDisagrees($st, $bt) || $this->sharedWordErased($name, $st, $bt)) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
@@ -2763,7 +2768,7 @@ final class InferTypes implements Pass
      *  representations with no raw word in common ({@see joinDisagrees}). */
     private function pinDisagreeing(string $name, Type $a, Type $b): bool
     {
-        if (!$this->joinDisagrees($a, $b)) { return false; }
+        if (!$this->joinDisagrees($a, $b) || $this->sharedWordErased($name, $a, $b)) { return false; }
         if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
             || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { return false; }
         if (!isset($this->cellLoopLocals[$name])) {
@@ -2883,6 +2888,48 @@ final class InferTypes implements Pass
             }
             $this->joinLocals([$name => $frame[$name]], [$name => $t]);
         }
+    }
+
+    /** An ERASED side of a join on a word another frame shares is that frame's
+     *  raw write, not an erased value: the word's representation is what the
+     *  two frames agree on ({@see InferScans::scanByRefCaptureWiden}), and one
+     *  frame boxing it alone hands the other a tagged word it reads raw. */
+    private function sharedWordErased(string $name, Type $a, Type $b): bool
+    {
+        return isset($this->sharedWordLocals[$name])
+            && ($a->kind === Type::KIND_UNKNOWN || $b->kind === Type::KIND_UNKNOWN);
+    }
+
+    private function collectSharedWordLocals(FunctionDef $fn): void
+    {
+        $this->sharedWordLocals = [];
+        foreach ($fn->params as $p) {
+            if ($p->byRef) { $this->sharedWordLocals[$p->name] = true; }
+        }
+        $cl = $this->closureNodeByName[$fn->name] ?? null;
+        if ($cl !== null) {
+            $n = \count($cl->captures);
+            for ($i = 0; $i < $n; $i++) {
+                if (!($cl->captureByRef[$i] ?? false)) { continue; }
+                $pn = $this->paramNameAt($fn, $i);
+                if ($pn !== '') { $this->sharedWordLocals[$pn] = true; }
+            }
+        }
+        $this->collectRefCapturedLocals($fn->body);
+    }
+
+    private function collectRefCapturedLocals(Node $n): void
+    {
+        if ($n instanceof Closure_) {
+            $i = 0;
+            foreach ($n->captures as $c) {
+                if (($n->captureByRef[$i] ?? false) && $c instanceof LoadLocal) {
+                    $this->sharedWordLocals[$c->name] = true;
+                }
+                $i = $i + 1;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefCapturedLocals($c); }
     }
 
     /** Two reprs of one slot with no raw word in common — the pairs

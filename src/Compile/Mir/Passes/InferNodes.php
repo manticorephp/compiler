@@ -87,6 +87,7 @@ trait InferNodes
     private function inferFunction(FunctionDef $fn): void
     {
         $this->inferFnBody = $fn->body;
+        $this->collectSharedWordLocals($fn);
         $this->cellLoopLocals = [];
         $this->tryStoreFrames = [];
         $this->floatLoopLocals = [];
