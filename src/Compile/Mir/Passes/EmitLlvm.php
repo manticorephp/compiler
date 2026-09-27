@@ -4792,9 +4792,7 @@ final class EmitLlvm implements EmitVisitor
         // silently skipped the retain that `mymerge` emitted — every element of a
         // merged array was freed while the result still pointed at it
         // (`is_array($r[0])` true, `count($r[0])` 0, every symfony Table cell
-        // blank). Retaining by tag is safe in the erased case: the helper
-        // dispatches on the tag and no-ops on a raw / non-pointer payload, so it
-        // can only ever under-retain, never over-retain.
+        // blank).
         if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
             // `__mir_to_cell($x)` is pure BOXING ({@see EmitLlvmBuiltins::biToCell}
             // = emit the arg, then boxToCell), so ownership follows its ARGUMENT.
@@ -4817,10 +4815,15 @@ final class EmitLlvm implements EmitVisitor
             $sv = $this->lastValue;
             $st = $this->lastValueType;
             $o = $this->coerceToI64();
-            // An erased word may be a RAW container the boxer is about to wrap
-            // ({@see EmitLlvmBuiltins::boxUnknownShallowIr}); the tag retain
-            // no-ops on the raw word, so retain what the slot will hold.
-            if ($k === Type::KIND_UNKNOWN) { $o .= $this->boxUnknownShallowIr(); }
+            // An ERASED word may be a RAW pointer that the box after this call
+            // tags: retained raw it was a no-op, then the container dropped the
+            // tagged box — one release too many. symfony's EventDispatcher
+            // packed `object $event` (a raw object pointer) into a callable-array
+            // invoke's argument list and freed the event under the caller.
+            // Classify first, exactly as the box will, and retain that.
+            if ($k === Type::KIND_UNKNOWN) {
+                $o .= $this->boxUnknownShallowIr();
+            }
             $o .= $this->rcRetainReg($this->lastValue, 'cell');
             $this->lastValue = $sv;
             $this->lastValueType = $st;
