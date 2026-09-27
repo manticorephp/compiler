@@ -46,11 +46,25 @@ function __preg_close_delim(string $open): string
  * Compile a PHP-delimited pattern to a cached pcre2_code* (raw address), or 0
  * on a compile error.
  */
+/**
+ * The regex caches as TYPED properties. A `static $cache = []` is a cell slot, so
+ * every read boxed the stored handle into a cell on the way out — and a PCRE2
+ * handle is a heap address, above bit 47 on Linux arm64, which does not fit
+ * the inline int form: each lookup allocated an immortal 8-byte int box, two
+ * per preg_match.
+ */
+final class __McPcreCache
+{
+    /** @var array<string, int> pattern => compiled code */
+    public static array $code = [];
+    /** @var array<int, int> code => its idle match block ({@see __preg_md}) */
+    public static array $idle = [];
+}
+
 function __preg_compile(string $pattern): int
 {
-    static $cache = [];
-    if (isset($cache[$pattern])) {
-        return $cache[$pattern];
+    if (isset(__McPcreCache::$code[$pattern])) {
+        return __McPcreCache::$code[$pattern];
     }
     $close = \__preg_close_delim($pattern[0]);
     $endPos = \strrpos($pattern, $close);
@@ -74,7 +88,7 @@ function __preg_compile(string $pattern): int
     if ($code === 0) {
         return 0;
     }
-    $cache[$pattern] = $code;
+    __McPcreCache::$code[$pattern] = $code;
     return $code;
 }
 
@@ -91,18 +105,16 @@ function __preg_compile(string $pattern): int
  */
 function __preg_md(int $code, int $give): int
 {
-    /** @var array<int, int> $idle */
-    static $idle = [];
     if ($give === 0) {
-        $md = $idle[$code] ?? 0;
+        $md = isset(__McPcreCache::$idle[$code]) ? __McPcreCache::$idle[$code] : 0;
         if ($md !== 0) {
-            $idle[$code] = 0;
+            __McPcreCache::$idle[$code] = 0;
             return $md;
         }
         return \Runtime\Pcre\matchDataCreate($code, 0);
     }
-    if (($idle[$code] ?? 0) === 0) {
-        $idle[$code] = $give;
+    if (!isset(__McPcreCache::$idle[$code]) || __McPcreCache::$idle[$code] === 0) {
+        __McPcreCache::$idle[$code] = $give;
     } else {
         \Runtime\Pcre\matchDataFree($give);
     }
