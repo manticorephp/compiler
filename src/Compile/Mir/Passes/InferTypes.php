@@ -3297,6 +3297,14 @@ final class InferTypes implements Pass
                 if (isset($this->cellMergeLocals[$name])) {
                     // int|float merge → a numeric cell (arith-able past the if).
                     $out[$name] = $this->unifyToCell($type, $b[$name]);
+                } elseif ($type->kind === Type::KIND_NULL && $b[$name]->isArray()) {
+                    // A null beside an array rides the array slot as ptr 0 — the
+                    // loop's null-seeded array ({@see loopMerge}) and a `?array`
+                    // return already type it so, and every null test reads it.
+                    // The union would erase it, and an erased 0 is an int 0.
+                    $out[$name] = $b[$name];
+                } elseif ($b[$name]->kind === Type::KIND_NULL && $type->isArray()) {
+                    $out[$name] = $type;
                 } else {
                     $out[$name] = $this->unionTypes($type, $b[$name]);
                 }

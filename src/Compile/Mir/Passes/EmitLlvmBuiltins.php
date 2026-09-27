@@ -3755,9 +3755,14 @@ trait EmitLlvmBuiltins
         // ternary null arm keeps the obj type (`$c ? new P() : null`), so both
         // is_null and is_object must runtime-check the pointer instead of
         // short-circuiting on the static obj type (which would answer null=never,
-        // object=always). is_null → ptr==0; is_object → ptr!=0.
-        if (($a->type->kind === Type::KIND_OBJ && ($kind === Type::KIND_NULL || $kind === Type::KIND_OBJ))
-            || ($a->type->kind === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
+        // object=always). is_null → ptr==0; is_object → ptr!=0. An ARRAY and a
+        // STRING are the same kind of carrier: their null rides the slot as ptr
+        // 0 (a `?array` return, `null ∪ string`, a null-seeded loop array), and
+        // `=== null` already answers it that way.
+        $ak = $a->type->kind;
+        if ((($ak === Type::KIND_OBJ || $ak === Type::KIND_ARRAY || $ak === Type::KIND_STRING)
+                && ($kind === Type::KIND_NULL || $kind === $ak))
+            || ($ak === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
@@ -3917,6 +3922,19 @@ trait EmitLlvmBuiltins
             return $out;
         }
         $k = $a->type->kind;
+        // A string or an array slot holds its null as ptr 0 ({@see biIsType}).
+        if ($k === Type::KIND_STRING || $k === Type::KIND_ARRAY) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $isN = $this->ssa->allocReg();
+            $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $isN . ', ptr ' . $this->strRef($nNull) . ', ptr '
+                  . $this->strRef($k === Type::KIND_STRING ? $nStr : $nArr) . "\n";
+            $this->lastValue = $sel;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $name = $nUnk;
         if ($k === Type::KIND_INT) { $name = $nInt; }
         elseif ($k === Type::KIND_STRING) { $name = $nStr; }
