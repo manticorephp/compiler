@@ -655,14 +655,16 @@ trait EmitLlvmLocals
                 $this->lastValue = $rawV;
                 $this->lastValueType = 'i64';
             }
-            // A MIXED slot boxing its own raw value: a string or object keeps
-            // its pointer under the tag, but an array may be REBUILT as a fresh
-            // cell array that co-owns every element — then the raw predecessor
-            // is this slot's reference to give back.
-            $mixSelf = $selfBox && $v0->type->kind === Type::KIND_ARRAY
-                && isset($this->frame->mixedFlagSlots[$sl->name]);
+            // A slot boxing its own OWNED raw array ({@see OwnershipFlow}'s
+            // SELF_MOVE drop): a string or object keeps its pointer under the
+            // tag, but an array may be REBUILT as a fresh cell array that
+            // co-owns every element — then the raw predecessor is this slot's
+            // reference to give back. A shallow box keeps the pointer: moved.
+            $selfDrop = $selfBox && $v0->type->kind === Type::KIND_ARRAY
+                && !isset($this->locals->globalBacked[$sl->name]) && $sl->ownOld !== null
+                && $this->ownOpSlot($sl->ownOld) !== '';
             $oldRaw = '';
-            if ($mixSelf) {
+            if ($selfDrop) {
                 $out .= $this->coerceToI64();
                 $oldRaw = $this->lastValue;
             }
@@ -678,7 +680,9 @@ trait EmitLlvmLocals
             if ($ownsCell) {
                 $out .= $this->globalCellOwnIr($sl, $boxed, true);
             }
-            if ($mixSelf) {
+            if ($selfDrop) {
+                $fl = $this->rcReleaseFlavor($sl->ownOld);
+                if (\str_starts_with($fl, 'mix')) { $fl = \substr($fl, 3); }
                 $pay = $this->ssa->allocReg();
                 $moved = $this->ssa->allocReg();
                 $gone = $this->ssa->allocReg();
@@ -686,10 +690,9 @@ trait EmitLlvmLocals
                     . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
                 $out .= '  ' . $moved . ' = icmp eq i64 ' . $pay . ', ' . $oldRaw . "\n";
                 $out .= '  ' . $gone . ' = select i1 ' . $moved . ', i64 0, i64 ' . $oldRaw . "\n";
-                $out .= $this->rcReleaseReg($gone, \substr(
-                    $this->rcReleaseFlavor($this->frame->ownLocals[$sl->name]), 3));
+                $out .= $this->rcReleaseReg($gone, $fl);
             }
-            if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownOldIr($sl); }
+            if (!$selfBox && !isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownOldIr($sl); }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             if (!isset($this->locals->globalBacked[$sl->name])) { $out .= $this->ownNewIr($sl); }
             $this->lastValue = $boxed;

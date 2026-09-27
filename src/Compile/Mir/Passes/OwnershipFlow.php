@@ -1342,7 +1342,15 @@ final class OwnershipFlow implements Pass
                 $this->say($sl->line, $name, $x, 'self-append');
                 continue;
             }
-            if ($mode === OwnLattice::SELF_MOVE) { continue; }
+            // A box of an OWNED array may rebuild it into a fresh cell array:
+            // the copy takes the slot's count and the old buffer is released —
+            // the emitter runs this drop only when the payload moved.
+            if ($mode === OwnLattice::SELF_MOVE) {
+                if ($x > 0 && $rel && $sl->value->type->kind === Type::KIND_ARRAY) {
+                    $sl->ownOld = $this->dropOp($name, $x);
+                }
+                continue;
+            }
             if ($mode === OwnLattice::SELF_COPY) {
                 if ($x > 0 && $rel && isset($l->cellish[$x])) { $sl->ownOld = $this->dropOp($name, $x); }
                 $this->say($sl->line, $name, $x, 'self-copy');
