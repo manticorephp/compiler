@@ -217,7 +217,7 @@ foreach ($fnNames as $fnName) {
     $params = [];
     foreach ($fn->params as $p) { $params[$p->name] = 1; }
     $lat = new DefinedLattice($params, $diverge);
-    $flow = new Forward($lat);
+    $flow = new Forward($lat, true);
     echo "function {$fn->name}\n";
     try {
         $flow->run($fn->body);

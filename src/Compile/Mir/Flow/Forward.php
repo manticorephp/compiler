@@ -38,7 +38,7 @@ use Compile\Mir\While_;
  * -4222124650659839).
  *
  * - `stateBefore()` answers, per `spl_object_id`, the state at entry of every
- *   node the walk evaluated: statements AND expression nodes.
+ *   node the walk evaluated: statements AND expression nodes (when recording).
  * - A catch arm enters with the join over the try entry and every point inside
  *   the try body (entry and throw point of each node).
  * - A `finally` enters with the join over the try exit, every catch exit, every
@@ -152,7 +152,9 @@ final class Forward
     /** @var array<string, array<string, int>> */
     private array $edgeJoined = [];
 
-    public function __construct(private Lattice $lattice) {}
+    /** `$record`: keep {@see stateBefore} — a copy of the state per node, which
+     *  only a dump reads; the lattice client gets everything through its callbacks. */
+    public function __construct(private Lattice $lattice, private bool $record = false) {}
 
     public function run(Block $body): void
     {
@@ -261,7 +263,7 @@ final class Forward
     /** @param array<string, int> $s */
     private function note(Node $n, array $s): void
     {
-        $this->before[\spl_object_id($n)] = $s;
+        if ($this->record) { $this->before[\spl_object_id($n)] = $s; }
         $this->mayThrow($s);
     }
 
