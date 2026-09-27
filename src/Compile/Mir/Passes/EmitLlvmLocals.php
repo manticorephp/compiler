@@ -518,10 +518,19 @@ trait EmitLlvmLocals
      * ride {@see \Compile\Debug::$rcElemReadOwns}, and shipping one alone is
      * a leak or a double free.
      */
-    private function elemReadCoOwn(Node $v, ?Type $slotType = null): string
+    private function elemReadCoOwn(Node $v, ?Type $slotType = null, string $dest = ''): string
     {
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
+        // THE PASS DECIDES: a plain local the plan does not own releases
+        // nothing, so a retain here is one nobody gives back — php-cs-fixer's
+        // UseTransformer rebinds its `Token $token` PARAM from `$tokens[++$i]`
+        // (a cell into an object slot, which the plan refuses) and kept every
+        // token of every file. A global-backed or reference slot owns what it
+        // is handed by its own contract and keeps the retain.
+        if ($dest !== '' && !isset($this->frame->rcObjLocals[$dest])
+            && !isset($this->locals->globalBacked[$dest])
+            && !isset($this->locals->refLocals[$dest])) { return ''; }
         if (InsertMemoryOps::cellElemReadCoOwns($v)) {
             $sv = $this->lastValue;
             $st = $this->lastValueType;
@@ -640,7 +649,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->refLocals[$sl->name])
             && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
-            $coOwn = $this->elemReadCoOwn($sl->value, $sl->type);
+            $coOwn = $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $coOwn;
             $ownsCell = isset($this->locals->globalBacked[$sl->name])
                 && !$this->isGlobalsViewName($sl->name);
@@ -716,7 +725,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->unboxCellToType($sl->type);
             // A float unboxes to a `double`; the slot is an i64, so put the bits
             // back the way the float-slot plant below does.
@@ -745,7 +754,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->coerceToI64();
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
@@ -766,7 +775,7 @@ trait EmitLlvmLocals
         if ($this->needsDeCellify($sl->type, $sl->value->type)
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
             if (isset($this->locals->globalBacked[$sl->name])) {
@@ -817,7 +826,7 @@ trait EmitLlvmLocals
             && $sl->value->type->kind !== Type::KIND_CELL
             && $this->viewSlotBoxes($sl->value->type)) {
             $out = $this->emitNode($sl->value);
-            $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+            $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             // An array goes in FLAT and an object by pointer, as into every other
             // cell slot ({@see boxForViewSlot}): the caller's cell reads the
             // elements through the buffer's hint. `$v = [$v]` through `mixed &$v`
@@ -849,7 +858,7 @@ trait EmitLlvmLocals
             && ($this->needsRefOutCellify($sl->value->type)
                 || $this->refStoreNeedsCellify($sl->name, $sl->value->type))) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
             $out .= $this->coerceToI64();
             $dv = $this->lastValue;
@@ -865,7 +874,7 @@ trait EmitLlvmLocals
         }
         $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
         // The value just emitted an arena vec → this local owns it, so
         // its `$x[] =` appends must realloc through the arena.
         if ($this->arena->vecAllocated) {
