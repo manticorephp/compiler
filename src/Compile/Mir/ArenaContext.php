@@ -65,9 +65,14 @@ final class ArenaContext
         // arena loop optimization inside generators.
         if ($inGenerator) { return false; }
         $this->resetScan();
-        if ($cond !== null) { $this->scan($cond); }
-        $this->scan($body);
-        if ($step !== null) { $this->scan($step); }
+        // To a fixpoint: a local that copies an arena-bound local (`$prev = $name`)
+        // holds the same arena value, whichever order the stores come in.
+        do {
+            $bound = \count($this->boundLocals);
+            if ($cond !== null) { $this->scan($cond); }
+            $this->scan($body);
+            if ($step !== null) { $this->scan($step); }
+        } while (\count($this->boundLocals) > $bound);
         if (!$this->hasAlloc || $this->bindsNonLocal) { return false; }
         foreach ($this->boundLocals as $name => $ignored) {
             // (B) read outside the loop? Reads within the loop are cond+body+step;
@@ -102,9 +107,15 @@ final class ArenaContext
         foreach (Walk::children($n) as $c) { $this->scan($c); }
     }
 
-    /** Count LOAD_LOCAL reads of `$name` in the subtree. */
+    /** Count LOAD_LOCAL reads of `$name` in the subtree. An `own_local` /
+     *  `own_local_b` registration ({@see Passes\OwnershipFlow}) names the local
+     *  for the emitter and executes nothing: not a read. */
     private function countLocalReads(string $name, Node $n): int
     {
+        if ($n->kind === Node::KIND_MEMORY_OP) {
+            $op = self::asMemoryOp($n)->op;
+            if ($op === 'own_local' || $op === 'own_local_b') { return 0; }
+        }
         $c = 0;
         if ($n->kind === Node::KIND_LOAD_LOCAL && $n->name === $name) {
             $c = 1;
@@ -165,10 +176,12 @@ final class ArenaContext
         return false;
     }
 
-    /** Whether the value bound by a store is (or yields) an Arena alloc. */
+    /** Whether the value bound by a store is (or yields) an Arena alloc — a
+     *  read of a local this loop binds to one included. */
     private function bindsArenaValue(Node $v): bool
     {
         if ($v->allocKind === AllocationKind::ARENA) { return true; }
+        if ($v->kind === Node::KIND_LOAD_LOCAL && isset($this->boundLocals[$v->name])) { return true; }
         if ($v->kind === Node::KIND_TERNARY) {
             $t = $v;
             if ($t->then !== null && $this->bindsArenaValue($t->then)) { return true; }
@@ -192,4 +205,6 @@ final class ArenaContext
         if ($k === Node::KIND_STORE_DYN_PROP) { return $n->value; }
         return null;
     }
+
+    private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }
 }
