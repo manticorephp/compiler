@@ -4,8 +4,6 @@ namespace Compile\Mir\Passes;
 
 use Compile\Mir\AllocationKind;
 use Compile\Mir\Effects;
-use Compile\Mir\FunctionDef;
-use Compile\Mir\LoadLocal;
 use Compile\Mir\MemoryOp_;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
@@ -15,21 +13,18 @@ use Compile\Mir\Type;
 use Compile\Mir\Walk;
 
 /**
- * The ARENA track of the memory plan: turns the allocation-kind verdict into
- * explicit {@see MemoryOp_} nodes, so EmitLlvm consumes a plan instead of
- * inventing one.
+ * The ARENA scope of the memory plan: a function with at least one Arena
+ * allocation (the `hybrid` default confines non-escaping allocations there,
+ * `--memory=arena` confines more) gets one whole-frame scope — `arena_enter`
+ * at body entry, `arena_leave` at every exit (bulk free, O(1), no per-object
+ * rc). A loop-confined allocation lives until the frame's arena leaves: a
+ * bounded in-frame leak, never a UAF. A NoRefcount (`--memory=rc`) allocation
+ * is released like any rc value — by {@see OwnershipFlow}, which owns every rc
+ * local per program point.
  *
- *  - Arena allocations → one whole-frame arena scope: `arena_enter` at body
- *    entry, `arena_leave` at exit (bulk free, O(1), no per-object RC). Scope
- *    is per function: a loop-confined allocation lives until the frame's
- *    arena leaves — a bounded in-frame leak, never a UAF.
- *  - NoRefcount allocations → a per-local `release` at scope exit, for a
- *    local EVERY store of which assigns such an allocation.
- *
- * rc locals are NOT this pass's: their ownership is decided per program point
- * by {@see OwnershipFlow}. The static predicates below are the shared halves
- * of the foreach / element-read / array-alias co-ownership contracts that pass
- * and the emitter both ask.
+ * The static predicates below are the shared halves of the foreach /
+ * element-read / array-alias co-ownership contracts that pass and the emitter
+ * both ask.
  */
 final class InsertMemoryOps implements Pass
 {
@@ -39,125 +34,28 @@ final class InsertMemoryOps implements Pass
 
     public function requires(): array { return [InferAllocKind::NAME]; }
 
-    /** @var array<string, string> owned local name → heap flavor */
-    private array $ownedFlavor = [];
-
-    /** @var array<string, bool> locals disqualified by a non-owning store */
-    private array $blocked = [];
-
-    /** @var string[] owned locals in first-seen order (stable dump) */
-    private array $ownedOrder = [];
-
-    /** @var array<string, Type> owned local name → value type for the release target */
-    private array $ownedType = [];
-
-    /** Set when the function has at least one Arena allocation. */
-    private bool $hasArena = false;
-
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
-            $this->lowerFunction($fn);
+            if (!self::hasArenaAlloc($fn->body)) { continue; }
+            $stmts = [new MemoryOp_('arena_enter', '', null, Type::void())];
+            foreach ($fn->body->stmts as $s) { $stmts[] = $s; }
+            // Fall-through exit; a `return` leaves the arena itself.
+            $stmts[] = new MemoryOp_('arena_leave', '', null, Type::void());
+            $fn->body->stmts = $stmts;
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('own.arena.scopes', 1); }
         }
         $module->markPassApplied(self::NAME);
         return $module;
     }
 
-    private function lowerFunction(FunctionDef $fn): void
+    private static function hasArenaAlloc(Node $n): bool
     {
-        $this->ownedFlavor = [];
-        $this->blocked = [];
-        $this->ownedOrder = [];
-        $this->ownedType = [];
-        $this->hasArena = false;
-        $this->scanStores($fn->body);
-        foreach ($fn->params as $p) { $this->blocked[$p->name] = true; }
-
-        $releases = [];
-        foreach ($this->ownedOrder as $name) {
-            if (isset($this->blocked[$name])) { continue; }
-            $releases[] = new MemoryOp_('release', $this->ownedFlavor[$name],
-                new LoadLocal($name, $this->ownedType[$name]), Type::void());
+        if (($n->effects & Effects::ALLOC) !== 0 && $n->allocKind === AllocationKind::ARENA) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if (self::hasArenaAlloc($c)) { return true; }
         }
-        if (\Compile\Stats::$on) {
-            \Compile\Stats::bump('own.arena.released', \count($releases));
-            foreach ($this->ownedOrder as $name) {
-                if (isset($this->blocked[$name])) { \Compile\Stats::bump('own.arena.blocked', 1); }
-            }
-        }
-        if (!$this->hasArena && \count($releases) === 0) { return; }
-
-        $stmts = $fn->body->stmts;
-        if ($this->hasArena) {
-            $prefixed = [new MemoryOp_('arena_enter', '', null, Type::void())];
-            foreach ($stmts as $s) { $prefixed[] = $s; }
-            $stmts = $prefixed;
-        }
-        // Scope-exit cleanup. Return paths exit before reaching this, so it only
-        // fires on fall-through.
-        foreach ($releases as $r) { $stmts[] = $r; }
-        if ($this->hasArena) {
-            $stmts[] = new MemoryOp_('arena_leave', '', null, Type::void());
-        }
-        $fn->body->stmts = $stmts;
-    }
-
-    /**
-     * Flag any Arena allocation (drives the frame arena scope) and collect the
-     * NoRefcount owned locals (drive the per-local releases). A foreach binding
-     * and a box-back `$x = box($x)` are never an allocation of this frame.
-     */
-    private function scanStores(Node $n): void
-    {
-        if (($n->effects & Effects::ALLOC) !== 0 && $n->allocKind === AllocationKind::ARENA) {
-            $this->hasArena = true;
-        }
-        if ($n->kind === Node::KIND_FOREACH) {
-            $fe = self::asForeachNode($n);
-            $this->blocked[$fe->valueVar] = true;
-            if ($fe->keyVar !== null) { $this->blocked[$fe->keyVar] = true; }
-        }
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $sl = self::asStoreLocalNode($n);
-            $name = $sl->name;
-            $value = $sl->value;
-            if (self::slotStoredType($sl)->kind === Type::KIND_CELL && $value->kind === Node::KIND_LOAD_LOCAL
-                && self::asLoadLocalNode($value)->name === $name && $value->type->kind !== Type::KIND_CELL) {
-                $this->blocked[$name] = true;
-                return;
-            }
-            $flavor = $this->allocFlavor($value);
-            if ($flavor === null) {
-                $this->blocked[$name] = true;
-            } elseif (!isset($this->ownedFlavor[$name])) {
-                $this->ownedOrder[] = $name;
-                $this->ownedFlavor[$name] = $flavor;
-                $this->ownedType[$name] = $value->type;
-            }
-            $this->scanStores($value);
-            return;
-        }
-        foreach (Walk::children($n) as $c) { $this->scanStores($c); }
-    }
-
-    /**
-     * Heap flavor of `$value` iff it is a NoRefcount allocation — the
-     * per-local release case. Null otherwise (not an alloc, arena, escapes,
-     * or non-heap type).
-     */
-    private function allocFlavor(Node $value): ?string
-    {
-        if (($value->effects & Effects::ALLOC) === 0) { return null; }
-        if ($value->allocKind !== AllocationKind::NO_REFCOUNT) { return null; }
-        $t = $value->type;
-        $k = $t->kind;
-        if ($k === Type::KIND_STRING) { return 'string'; }
-        if ($t->isVec()) { return 'vec'; }
-        if ($t->isAssoc()) { return 'assoc'; }
-        if (\Compile\Mir\Ownership::isClosureValueType($t)) { return 'closure'; }
-        if ($k === Type::KIND_OBJ) { return 'obj'; }
-        if ($k === Type::KIND_CELL) { return 'cell'; }
-        return null;
+        return false;
     }
 
     /**
@@ -337,9 +235,4 @@ final class InsertMemoryOps implements Pass
         }
         return $sl->value->type;
     }
-
-
-    private static function asForeachNode(Node $n): \Compile\Mir\Foreach_ { return $n; }
-    private static function asStoreLocalNode(Node $n): StoreLocal { return $n; }
-    private static function asLoadLocalNode(Node $n): LoadLocal { return $n; }
 }
