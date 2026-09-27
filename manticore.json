@@ -10,7 +10,7 @@
     "name": "compiler",
     "src": "src",
     "output": "bin/manticore",
-    "entry": "src/zzz_entry.php",
+    "entry": "src/main.php",
     "stdlib": false
   }]
 }

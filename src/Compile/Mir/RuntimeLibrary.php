@@ -1021,6 +1021,12 @@ final class RuntimeLibrary
         $out .= "  %isPub = icmp eq i64 %vis, " . (string)\Compile\MemoryAbi::DYN_METHOD_VIS_PUBLIC . "\n";
         $out .= "  br i1 %isPub, label %visible, label %notPub\n";
         $out .= "notPub:\n";
+        // nrel < 0 checks nothing: a callable ARRAY is invoked wherever it was
+        // handed (usort, array_map — prelude PHP here), and php judges it from
+        // the scope that handed it over, which that call site does not know.
+        $out .= "  %anyScope = icmp slt i64 %nrel, 0\n";
+        $out .= "  br i1 %anyScope, label %visible, label %scoped\n";
+        $out .= "scoped:\n";
         $out .= "  %sc = call i32 @strcmp(ptr %scope, ptr %decl)\n";
         $out .= "  %same = icmp eq i32 %sc, 0\n";
         $out .= "  br i1 %same, label %visible, label %notSame\n";

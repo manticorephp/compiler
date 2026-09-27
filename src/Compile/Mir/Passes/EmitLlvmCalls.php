@@ -1393,27 +1393,51 @@ trait EmitLlvmCalls
             $sL = $this->ssa->allocLabel('erinv.arrname');
             $out .= '  br i1 ' . $isS . ', label %' . $sL . ', label %' . $endL . "\n";
             $out .= $sL . ":\n";
-            $mm = $this->ssa->allocReg();
-            $out .= '  ' . $mm . ' = and i64 ' . $mw . ", 281474976710655\n";
-            $mp = $this->ssa->allocReg();
-            $out .= '  ' . $mp . ' = inttoptr i64 ' . $mm . " to ptr\n";
-            $this->rt->needsStrcmp = true;
-            foreach ($this->callableArrayMethods as $cm => $_) {
-                $hitL = $this->ssa->allocLabel('erinv.arrhit');
-                $nextL = $this->ssa->allocLabel('erinv.arrnext');
-                $cr = $this->ssa->allocReg();
-                $out .= '  ' . $cr . ' = call i32 @strcmp(ptr ' . $mp . ', ptr ' . $this->litStr((string)$cm) . ")\n";
-                $ce = $this->ssa->allocReg();
-                $out .= '  ' . $ce . ' = icmp eq i32 ' . $cr . ", 0\n";
-                $out .= '  br i1 ' . $ce . ', label %' . $hitL . ', label %' . $nextL . "\n";
-                $out .= $hitL . ":\n";
-                $recv = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
-                    new \Compile\Mir\IntConst(0, Type::int_()), Type::cell());
-                $out .= $this->emitNode(new \Compile\Mir\MethodCall_($recv, (string)$cm, $n->args, Type::cell()));
-                $out .= $this->coerceToI64();
+            // `$c[0]->{$c[1]}(...)` through the method table when the module has
+            // one: a name chain here spliced one arm per `[$x, 'name']` literal of
+            // the program into every erased invoke (62 645 strcmp arms, +128 MB
+            // of IR, in php-cs-fixer).
+            $viaTable = null;
+            if ($this->dynamicMethodMeta) {
+                $dpc = new \Compile\Mir\DynProp_(
+                    new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                        new \Compile\Mir\IntConst(0, Type::int_()), Type::cell()),
+                    new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                        new \Compile\Mir\IntConst(1, Type::int_()), Type::cell()),
+                    Type::cell());
+                $dpc->scope = \Compile\Mir\DynProp_::ANY_SCOPE;
+                $ivc = new \Compile\Mir\Invoke_($dpc, $n->args, Type::cell());
+                /** @var array<string, Type> $cams */
+                $cams = [];
+                foreach ($this->callableArrayMethods as $cm => $_) { $cams[(string)$cm] = Type::cell(); }
+                $viaTable = $this->emitDynMethodDispatch($dpc, $ivc, $cams);
+            }
+            if ($viaTable !== null) {
+                $out .= $viaTable;
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-                $out .= '  br label %' . $endL . "\n";
-                $out .= $nextL . ":\n";
+            } else {
+                $mm = $this->ssa->allocReg();
+                $out .= '  ' . $mm . ' = and i64 ' . $mw . ", 281474976710655\n";
+                $mp = $this->ssa->allocReg();
+                $out .= '  ' . $mp . ' = inttoptr i64 ' . $mm . " to ptr\n";
+                $this->rt->needsStrcmp = true;
+                foreach ($this->callableArrayMethods as $cm => $_) {
+                    $hitL = $this->ssa->allocLabel('erinv.arrhit');
+                    $nextL = $this->ssa->allocLabel('erinv.arrnext');
+                    $cr = $this->ssa->allocReg();
+                    $out .= '  ' . $cr . ' = call i32 @strcmp(ptr ' . $mp . ', ptr ' . $this->litStr((string)$cm) . ")\n";
+                    $ce = $this->ssa->allocReg();
+                    $out .= '  ' . $ce . ' = icmp eq i32 ' . $cr . ", 0\n";
+                    $out .= '  br i1 ' . $ce . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                    $out .= $hitL . ":\n";
+                    $recv = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                        new \Compile\Mir\IntConst(0, Type::int_()), Type::cell());
+                    $out .= $this->emitNode(new \Compile\Mir\MethodCall_($recv, (string)$cm, $n->args, Type::cell()));
+                    $out .= $this->coerceToI64();
+                    $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                    $out .= '  br label %' . $endL . "\n";
+                    $out .= $nextL . ":\n";
+                }
             }
             $out .= '  br label %' . $endL . "\n";
             $out .= $noArrL . ":\n";

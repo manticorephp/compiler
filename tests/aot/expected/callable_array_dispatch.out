@@ -1,0 +1,11 @@
+a bb ccc
+X Y
+P Q
+CUF
+magic:anything(1,2)
+Error: Call to undefined method Sorter::nope()
+DYN
+20 3
+30,10
+bool(false)
+bool(true)

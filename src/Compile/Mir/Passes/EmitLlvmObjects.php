@@ -169,6 +169,9 @@ trait EmitLlvmObjects
         $out .= '  ' . $namePtr . ' = inttoptr i64 ' . $nameI . " to ptr\n";
         $this->rt->needsStrcmp = true;
 
+        $viaTable = $this->emitNewDynByTable($n, $namePtr);
+        if ($viaTable !== null) { return $out . $viaTable; }
+
         $argRegs = [];
         $argKinds = [];
         $fixedArgs = [];
@@ -282,6 +285,7 @@ trait EmitLlvmObjects
      * @param string[] $argRegs
      * @param string[] $argKinds
      * @param Node[]   $fixedArgs
+     * @param array<string, bool> $skip classes the caller already served from its table
      */
     private function newDynChainIr(
         string $namePtr,
@@ -292,6 +296,7 @@ trait EmitLlvmObjects
         bool $boxResult,
         string $spreadArr,
         ?Type $spreadElem,
+        array $skip = [],
     ): string {
         $out = '';
         $argc = \count($fixedArgs);
@@ -301,6 +306,7 @@ trait EmitLlvmObjects
 
         foreach ($this->classes as $cd) {
             if ($cd->isStruct) { continue; }
+            if (isset($skip[$cd->name])) { continue; }
             $ctorClass = $this->resolveMethodClass($cd->name, '__construct');
             $ptypes = [];
             $tmask = [];
@@ -412,6 +418,133 @@ trait EmitLlvmObjects
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * `new $cls(args)` through a module table of `{ class name, ctor trampoline }`
+     * instead of one strcmp arm per class of the program at every site (1 154 in
+     * php-cs-fixer's PDOStatement::makeObject, PDO::makeStatement and
+     * ConsoleBundle::addCompilerPassIfExists, plus the shared per-shape chains).
+     *
+     * Only where the trampolines already exist — they are the same
+     * `__mc_rtramp_C____construct` bodies the dynamic-method table and
+     * reflection synthesize — so no new call site feeds inference. A class the
+     * table does not carry (prelude, abstract, a by-ref / variadic constructor)
+     * keeps its arm in the chain behind the lookup, which reads the same packed
+     * arguments. Null = not this shape.
+     */
+    private function emitNewDynByTable(\Compile\Mir\NewDynObj $n, string $namePtr): ?string
+    {
+        [$rows, $count, $inTable] = $this->newDynTable();
+        if ($count === 0) { return null; }
+        $pack = null;
+        $packElem = null;
+        foreach ($n->args as $a) {
+            if ($a->kind !== Node::KIND_SPREAD) { continue; }
+            if (\count($n->args) !== 1) { return null; }
+            $op = $this->asSpreadNode($a)->operand;
+            $pt = $op->type;
+            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { return null; }
+            $el = $pt->element;
+            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+                $packElem = $el;
+            }
+            $pack = $op;
+        }
+        $out = '';
+        $fresh = $pack === null || $packElem !== null;
+        if ($pack !== null) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToPtr();
+            if ($packElem !== null) {
+                $out .= $this->emitVecToCellArray($packElem);
+                $out .= $this->cellToPtr();
+            }
+        } else {
+            $elems = [];
+            foreach ($n->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell())));
+            $out .= $this->coerceToPtr();
+        }
+        $argsP = $this->lastValue;
+        $this->dynfExtraBodies .= $this->dynfLookupFn();
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = call ptr @__mc_dynf_lookup(ptr ' . $namePtr . ', ptr ' . $rows
+              . ', i64 ' . (string)$count . ")\n";
+        $hit = $this->ssa->allocReg();
+        $out .= '  ' . $hit . ' = icmp ne ptr ' . $fp . ", null\n";
+        $tabL = $this->ssa->allocLabel('newdyn.tab');
+        $chainL = $this->ssa->allocLabel('newdyn.rest');
+        $endL = $this->ssa->allocLabel('newdyn.done');
+        $out .= '  br i1 ' . $hit . ', label %' . $tabL . ', label %' . $chainL . "\n";
+        $out .= $tabL . ":\n";
+        $ai = $this->ssa->allocReg();
+        $out .= '  ' . $ai . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $fp . '(i64 0, i64 ' . $ai . ")\n";
+        $boxResult = $n->type->kind === Type::KIND_CELL;
+        if ($boxResult) {
+            $out .= '  store i64 ' . $r . ', ptr ' . $slot . "\n";
+        } else {
+            $raw = $this->ssa->allocReg();
+            $out .= '  ' . $raw . ' = and i64 ' . $r . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $out .= '  store i64 ' . $raw . ', ptr ' . $slot . "\n";
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $chainL . ":\n";
+        $out .= $this->newDynChainIr($namePtr, [], [], [], $n->srcArgc, $boxResult,
+                                     $argsP, Type::cell(), $inTable);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        if ($fresh) {
+            $ri = $this->ssa->allocReg();
+            $out .= '  ' . $ri . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+            $out .= $this->rcReleaseReg($ri, 'veccell');
+        }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The module's `[n x { ptr name, ptr ctor trampoline }]` for {@see
+     * emitNewDynByTable}: every class whose trampoline was synthesized and whose
+     * constructor takes plain by-value arguments. Built once per module.
+     *
+     * @return array{string, int, array<string, bool>} [symbol, rows, class names in it]
+     */
+    private function newDynTable(): array
+    {
+        if ($this->newDynTableCache !== null) { return $this->newDynTableCache; }
+        $rows = [];
+        $in = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct || $cd->isAbstract || $cd->isPreludeClass) { continue; }
+            $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($cd->name, '__construct');
+            if (!isset($this->sigs->paramTypes[$tramp])) { continue; }
+            $ctorCls = $this->resolveMethodClass($cd->name, '__construct');
+            if ($ctorCls !== '') {
+                $mm = $this->classes[$ctorCls]->methodMeta['__construct'] ?? null;
+                if ($mm === null || !\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) { continue; }
+            }
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->strLitId($this->pool->intern($cd->name))
+                    . ', ptr @manticore_' . $this->mangle($tramp) . ' }';
+            $in[$cd->name] = true;
+        }
+        if ($rows === []) {
+            $this->newDynTableCache = ['', 0, []];
+            return $this->newDynTableCache;
+        }
+        $sym = '@.newdyn.rows';
+        $this->dynfExtraBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($rows)
+            . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n";
+        $this->newDynTableCache = [$sym, \count($rows), $in];
+        return $this->newDynTableCache;
     }
 
     private function emitNewObj(\Compile\Mir\NewObj $n): string
@@ -3559,6 +3692,9 @@ trait EmitLlvmObjects
      *  when the result is cell), so the merged value is a uniform cell. */
     private function classlessMethodCandidates(int $argc): array
     {
+        // Every erased dynamic call site asked this — classes x methods walks
+        // per site — and the answer depends on the argument count alone.
+        if (isset($this->classlessCandidatesMemo[$argc])) { return $this->classlessCandidatesMemo[$argc]; }
         $out = [];
         foreach ($this->classes as $cd) {
             foreach ($cd->methodNames as $m => $_) {
@@ -3571,6 +3707,7 @@ trait EmitLlvmObjects
                 elseif ($out[$m]->kind !== $rt->kind) { $out[$m] = Type::cell(); }
             }
         }
+        $this->classlessCandidatesMemo[$argc] = $out;
         return $out;
     }
 
@@ -4581,6 +4718,7 @@ trait EmitLlvmObjects
         $rk = $recv->type->kind;
         if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN
             && $rk !== Type::KIND_UNION && $rk !== Type::KIND_OBJ) {
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.recv_kind', 1); }
             return null;
         }
         $argc = \count($iv->args);
@@ -4590,27 +4728,39 @@ trait EmitLlvmObjects
         $packElem = null;
         foreach ($iv->args as $i => $a) {
             if ($a->kind !== Node::KIND_SPREAD) { continue; }
-            if ($argc !== 1) { return null; }
+            if ($argc !== 1) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.multi_spread', 1); } return null; }
             $op = $this->asSpreadNode($a)->operand;
             // `...[a, b]` is the argument list `a, b`.
             if ($op instanceof \Compile\Mir\ArrayLit) {
                 $fixedArgs = [];
                 foreach ($op->elements as $e) {
-                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { return null; }
+                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.keyed_spread', 1); } return null; }
                     $fixedArgs[] = $e->value;
                 }
                 continue;
             }
             $pt = $op->type;
-            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { return null; }
+            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
             $el = $pt->element;
             if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
                 $packElem = $el;
             }
             $pack = $op;
         }
-        $inline = $this->dynInlineOnlyNames($methods);
-        if ($inline !== [] && !$this->dynOperandsPlain($dp, $iv)) { return null; }
+        $needsNodes = false;
+        $inline = $this->dynInlineOnlyNames($methods, $needsNodes);
+        // A by-ref / variadic arm binds the caller's own argument EXPRESSIONS, so
+        // those must be safe to emit a second time. Every other arm (a prelude
+        // class's by-value method) reads the arguments back out of the packed
+        // array, so only the receiver and the name are re-read.
+        if ($inline !== []) {
+            if ($needsNodes ? !$this->dynOperandsPlain($dp, $iv)
+                            : !($this->dynPureRead($dp->object)
+                                && ($dp->name->kind === Node::KIND_STRING_CONST || $this->dynPureRead($dp->name)))) {
+                if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
+                return null;
+            }
+        }
 
         $out = $this->emitObjPtrOf($recv);
         $out .= $this->coerceToI64();
@@ -4634,30 +4784,54 @@ trait EmitLlvmObjects
             $out .= $this->coerceToPtr();
         }
         $argsP = $this->lastValue;
-        [$relSym, $relN] = $this->dynScopeRelated($dp->scope);
+        $anyScope = $dp->scope === \Compile\Mir\DynProp_::ANY_SCOPE;
+        [$relSym, $relN] = $anyScope ? ['null', -1] : $this->dynScopeRelated($dp->scope);
+        $scopeArg = $this->litStr($anyScope ? '' : $dp->scope);
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $this->rt->needsStrcmp = true;
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = call i1 @__mc_dyn_method_dispatch(i64 ' . $recvArg . ', ptr ' . $keyP
-              . ', ptr ' . $argsP . ', ptr ' . $this->litStr($dp->scope) . ', ptr ' . $relSym
+              . ', ptr ' . $argsP . ', ptr ' . $scopeArg . ', ptr ' . $relSym
               . ', i64 ' . (string)$relN . ', ptr ' . $res . ")\n";
-        if ($fresh) {
-            $ai = $this->ssa->allocReg();
-            $out .= '  ' . $ai . ' = ptrtoint ptr ' . $argsP . " to i64\n";
-            $out .= $this->rcReleaseReg($ai, 'veccell');
-        }
         $endL = $this->ssa->allocLabel('dynd.end');
         $inlL = $this->ssa->allocLabel('dynd.inline');
         $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
         $out .= $inlL . ":\n";
         if ($inline !== []) {
-            $out .= $this->emitDynMethodInlineFallback($dp, $iv, $inline);
+            $ivArms = $iv;
+            if (!$needsNodes) {
+                $argsName = '__dynd_args' . \substr($this->ssa->allocReg(), 2);
+                $argsSlot = $this->ssa->allocReg();
+                $out .= '  ' . $argsSlot . " = alloca i64\n";
+                $asI = $this->ssa->allocReg();
+                $out .= '  ' . $asI . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+                $out .= '  store i64 ' . $asI . ', ptr ' . $argsSlot . "\n";
+                $this->locals->slots[$argsName] = $argsSlot;
+                $vecT = Type::vec(Type::cell());
+                $armArgs = [];
+                if ($pack !== null) {
+                    $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal($argsName, $vecT), Type::cell());
+                } else {
+                    foreach ($fixedArgs as $i => $_a) {
+                        $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($argsName, $vecT),
+                            new \Compile\Mir\IntConst((int)$i, Type::int_()), Type::cell());
+                    }
+                }
+                $ivArms = new \Compile\Mir\Invoke_($dp, $armArgs, $iv->type);
+            }
+            $out .= $this->emitDynMethodInlineFallback($dp, $ivArms, $inline);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
+        // After the arms: a by-value arm reads its arguments out of this array.
+        if ($fresh) {
+            $ai = $this->ssa->allocReg();
+            $out .= '  ' . $ai . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+            $out .= $this->rcReleaseReg($ai, 'veccell');
+        }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
@@ -4674,32 +4848,35 @@ trait EmitLlvmObjects
      * @param array<string, Type> $methods
      * @return array<string, Type>
      */
-    private function dynInlineOnlyNames(array $methods): array
+    private function dynInlineOnlyNames(array $methods, bool &$needsNodes): array
     {
         $out = [];
+        $needsNodes = false;
         foreach ($methods as $m => $rt) {
             foreach ($this->methodHolders((string)$m) as $cn => $decl) {
                 $cd = $this->classes[$cn];
-                if ($cd->isStruct || $cd->isPreludeClass) {
-                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.no_table', 1); }
-                    $out[$m] = $rt;
-                    break;
-                }
                 $mm = $this->classes[$decl]->methodMeta[(string)$m] ?? null;
                 // An abstract row belongs to a class that is never the receiver:
                 // the concrete class in hand has its own row.
                 if ($mm !== null && $mm->isAbstract) { continue; }
-                if ($mm === null || !\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) {
-                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.signature', 1); }
-                    $out[$m] = $rt;
-                    break;
+                $sigOk = $mm !== null && \Compile\Mir\Passes\TrampolineSynth::invokable($mm);
+                $inTable = !$cd->isStruct && !$cd->isPreludeClass;
+                $trampOk = $inTable && isset($this->sigs->paramTypes[
+                    \Compile\Mir\Passes\TrampolineSynth::symBase($decl, (string)$m)]);
+                if ($sigOk && $trampOk) { continue; }
+                if (\Compile\Stats::$on) {
+                    \Compile\Stats::bump(!$sigOk ? 'dynd.inline.signature'
+                        : (!$inTable ? 'dynd.inline.no_table' : 'dynd.inline.no_tramp'), 1);
                 }
-                $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, (string)$m);
-                if (!isset($this->sigs->paramTypes[$tramp])) {
-                    if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.inline.no_tramp', 1); }
-                    $out[$m] = $rt;
-                    break;
-                }
+                $out[$m] = $rt;
+                // Only a by-ref / variadic signature (or one we cannot see) needs
+                // the caller's argument expressions; a table-less class's
+                // by-value method takes them from the packed array.
+                // A method a prelude class declares has no trampoline even when a
+                // user class inherits it (Exception::__toString in every user
+                // exception) — by-value all the same.
+                $declPrelude = $this->classes[$decl]->isPreludeClass;
+                if (!$sigOk || ($inTable && !$declPrelude)) { $needsNodes = true; }
             }
         }
         return $out;
@@ -4708,17 +4885,22 @@ trait EmitLlvmObjects
     /** Receiver, name and every argument can be emitted twice: plain locals/literals. */
     private function dynOperandsPlain(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): bool
     {
-        if ($dp->object->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        if (!$this->dynPureRead($dp->object)) { return false; }
         $nk = $dp->name->kind;
-        if ($nk !== Node::KIND_LOAD_LOCAL && $nk !== Node::KIND_STRING_CONST) { return false; }
+        if ($nk !== Node::KIND_STRING_CONST && !$this->dynPureRead($dp->name)) { return false; }
         foreach ($iv->args as $a) {
             $x = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
-            if ($x->kind !== Node::KIND_LOAD_LOCAL && $x->kind !== Node::KIND_STRING_CONST
-                && $x->kind !== Node::KIND_INT_CONST) {
-                return false;
-            }
+            // A read with no side effect — `$a[$i]` in usort's `$cmp($a[$i], $a[$j])` —
+            // is safe to emit again; a by-ref arm binds the same element.
+            if (!$this->dynHoistableRead($x)) { return false; }
         }
         return true;
+    }
+
+    /** A side-effect-free read — a local, `$cb[0]` / `$cb[1]` of a callable array, a plain property chain. */
+    private function dynPureRead(Node $n): bool
+    {
+        return $this->dynHoistableRead($n);
     }
 
     /**
@@ -7027,43 +7209,8 @@ trait EmitLlvmObjects
 
     private function resolveMethodClass(string $class, string $method): string
     {
-        $key = $class . '|' . $method;
-        if (isset($this->resolveMethodClassCache[$key])) {
-            return $this->resolveMethodClassCache[$key];
-        }
-        // ⚠ BOUNDED, and the bound is the point. The memo is keyed on the PAIR
-        // while every caller that matters iterates all classes for ONE method —
-        // building a holder set, a candidate list, a descendant walk — so the
-        // entries are a cross product that is written once and read never. On
-        // symfony-demo T5 it reached 13,090,427 entries (2,144 classes x ~6,000
-        // method names), which is where the emitter's memory went: the one batch
-        // that crossed the knee took 66 s against half a second for its
-        // neighbours, and the next took 312 s.
-        //
-        // The lookup it replaces is a handful of `isset`s up the parent chain,
-        // so a miss costs MORE than the walk (a key concatenation and an insert).
-        // Keeping a bounded window preserves the only reuse that exists —
-        // repeated queries close together — and gives the rest back.
-        if ($this->resolveMethodClassEntries >= self::RESOLVE_CACHE_MAX) {
-            $this->resolveMethodClassCache = [];
-            $this->resolveMethodClassEntries = 0;
-        }
-        $this->resolveMethodClassEntries = $this->resolveMethodClassEntries + 1;
-        $c = $class;
-        while ($c !== '') {
-            $cd = $this->classes[$c] ?? null;
-            if ($cd === null) {
-                $this->resolveMethodClassCache[$key] = '';
-                return '';
-            }
-            if (isset($cd->methodNames[$method])) {
-                $this->resolveMethodClassCache[$key] = $c;
-                return $c;
-            }
-            $c = $cd->parent;
-        }
-        $this->resolveMethodClassCache[$key] = '';
-        return '';
+        $this->ensureMethodIndex();
+        return $this->methodHoldersIdx[$method][$class] ?? '';
     }
 
     /**
@@ -7073,32 +7220,52 @@ trait EmitLlvmObjects
      * The emitter asks "which classes answer `m`?" per CALL SITE — interface
      * dispatch, erased receivers, dynamic names, magic holders — and each asker
      * walked the whole class table: classes × sites parent-chain walks, 12 s of
-     * php-cs-fixer's EmitLlvm in `__mir_array_index_find`. The answer depends on
-     * the method only, so it is built once per method and holds HITS only (the
-     * pair memo above is bounded because it held the misses of a cross product).
-     * A class added after a build (a closure class) invalidates the whole index.
+     * php-cs-fixer's EmitLlvm in `__mir_array_index_find`.
      *
      * @return array<string, string>
      */
     private function methodHolders(string $method): array
     {
-        $n = \count($this->classes);
-        if ($n !== $this->methodHoldersClassCount) {
-            $this->methodHoldersIdx = [];
-            $this->methodHoldersClassCount = $n;
-        }
-        if (isset($this->methodHoldersIdx[$method])) {
-            return $this->methodHoldersIdx[$method];
-        }
-        $holders = [];
-        foreach ($this->classes as $cd) {
-            $decl = $this->resolveMethodClass($cd->name, $method);
-            if ($decl !== '') { $holders[$cd->name] = $decl; }
-        }
-        $this->methodHoldersIdx[$method] = $holders;
-        return $holders;
+        $this->ensureMethodIndex();
+        return $this->methodHoldersIdx[$method] ?? [];
     }
 
+    /**
+     * method => [class => the class whose body it resolves to], for every class
+     * and every method it declares or inherits — one walk up each class's
+     * parent chain, built when the class table changes (a closure class added).
+     *
+     * It replaces a per-METHOD build that walked every class for each method
+     * asked about (methods × classes resolveMethodClass calls, the top emitter
+     * cost in a php-cs-fixer profile once stacks unwound) and the bounded pair
+     * memo in front of resolveMethodClass, whose cross product of misses was the
+     * memory problem that bound existed for: this index holds hits only, about
+     * classes × methods-per-class entries.
+     */
+    private function ensureMethodIndex(): void
+    {
+        $n = \count($this->classes);
+        if ($n === $this->methodHoldersClassCount) { return; }
+        /** @var array<string, array<string, string>> $idx */
+        $idx = [];
+        foreach ($this->classes as $cd) {
+            /** @var array<string, bool> $seen */
+            $seen = [];
+            $c = $cd->name;
+            while ($c !== '') {
+                $pc = $this->classes[$c] ?? null;
+                if ($pc === null) { break; }
+                foreach ($pc->methodNames as $m => $_) {
+                    if (isset($seen[$m])) { continue; }
+                    $seen[$m] = true;
+                    $idx[(string)$m][$cd->name] = $c;
+                }
+                $c = $pc->parent;
+            }
+        }
+        $this->methodHoldersIdx = $idx;
+        $this->methodHoldersClassCount = $n;
+    }
     /**
      * The Generator iterator protocol as method calls on a frame ptr:
      * current()/key()/getReturn() read a frame slot; next()/rewind() drive
@@ -8535,9 +8702,22 @@ trait EmitLlvmObjects
     /** @param array<int,string> $cases */
     private function emitAdaptiveClassIdBranch(string $cid, array $cases, string $default): string
     {
+        // The ids nearly always arrive ascending (class-table order), so check
+        // before sorting: a usort here — a PHP merge sort whose comparator reads
+        // two erased arrays per step — was ~4 s of php-cs-fixer's EmitLlvm.
+        /** @var int[] $ids */
+        $ids = [];
+        $ascending = true;
+        $prev = \PHP_INT_MIN;
+        foreach ($cases as $id => $_l) {
+            $iv = (int)$id;
+            if ($iv < $prev) { $ascending = false; }
+            $prev = $iv;
+            $ids[] = $iv;
+        }
+        if (!$ascending) { \sort($ids); }
         $pairs = [];
-        foreach ($cases as $id => $label) { $pairs[] = [(int)$id, $label]; }
-        usort($pairs, static function (array $a, array $b): int { return $a[0] <=> $b[0]; });
+        foreach ($ids as $id) { $pairs[] = [$id, $cases[$id]]; }
         return $this->emitAdaptiveClassIdNode($cid, $pairs, $default);
     }
 
