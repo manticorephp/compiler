@@ -1813,6 +1813,7 @@ trait InferNodes
                 $kd = isset($this->classes[$ic]) ? $keyT : Type::unknown();
                 $keyT = $this->iterMethodReturn($ic, 'key', $kd);
             }
+            $node->iterValueType = $node->iterClass !== '' ? $elem : null;
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an
         // auto-incrementing int — so the key rides a tagged cell, boxed at the

@@ -772,6 +772,16 @@ final class InsertMemoryOps implements Pass
         }
         $ic = $fe->iterClass;
         if ($ic === 'Generator' || ($ic !== '' && !isset($classes[$ic]))) { return Type::cell(); }
+        // A concrete Iterator CLASS: `current()` is a method, so its answer is
+        // a +1 under the return convention whatever it read — the prelude's
+        // SplFixedArray iterator hands out a retained element, and a borrowed
+        // loop variable stranded one per iteration (php-cs-fixer's
+        // `foreach ($tokens as $index => $token)` in every transformer).
+        $vt = $fe->iterValueType;
+        if ($ic !== '' && $vt !== null) {
+            if ($vt->kind === Type::KIND_CELL) { return $vt; }
+            return self::elemReadCoOwns($vt, $enums, $classes) ? $vt : null;
+        }
         return null;
     }
 

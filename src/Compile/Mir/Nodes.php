@@ -1331,6 +1331,10 @@ final class Foreach_ extends Node
      *  {@see EmitLlvmLocals::preallocateLocals} so its slot alloca lands in the
      *  ENTRY block. Emitted lazily (and unhoisted) when still ''. */
     public string $iterName = '';
+    /** Object-iterator path: the type `current()` of {@see $iterClass}
+     *  answers — a method return, so a +1 the loop variable may co-own
+     *  ({@see Passes\InsertMemoryOps::foreachValueSlotType}). Set by InferTypes. */
+    public ?Type $iterValueType = null;
 
     public function accept(EmitVisitor $v): string
     {

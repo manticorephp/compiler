@@ -1,0 +1,11 @@
+01
+dtor a0
+dtor a1
+-
+b0b1
+dtor b0
+dtor b1
+-
+0
+dtor c0
+end
