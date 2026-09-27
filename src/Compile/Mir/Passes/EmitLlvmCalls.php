@@ -3089,8 +3089,7 @@ trait EmitLlvmCalls
                     $out .= $this->arrayCountFromPtrIr($arrReg);
                     $cnt = $this->lastValue;
                 }
-                $out .= $this->emitNode($def);
-                $out .= $this->coerceToI64();
+                $out .= $this->emitParamDefault($def, $pt, $tmask[$k] ?? false);
                 $dv = $this->lastValue;
                 $has = $this->ssa->allocReg();
                 $out .= '  ' . $has . ' = icmp ugt i64 ' . $cnt . ', '
@@ -3120,6 +3119,26 @@ trait EmitLlvmCalls
      * caller's arg list is already non-empty (so the suffix needs a leading
      * comma); false for a zero-arg call whose first pad value opens the list.
      */
+    /**
+     * An OMITTED argument's default, in the representation its PARAMETER
+     * takes: boxed when the callee reads it as a cell (a `?int`/`mixed` param,
+     * or a tagged one). Emitted bare, `?int $end = null` reached the callee as
+     * a raw `0` — the float 0.0 of a cell, never null — once a call that
+     * lowering had not already padded took this path (`[$o, 'm']()`, a method
+     * table): php-cs-fixer's Tokens::findGivenKind then scanned nothing.
+     */
+    private function emitParamDefault(Node $def, ?Type $pt, bool $tagged): string
+    {
+        $out = $this->emitNode($def);
+        $dk = $def->type->kind;
+        if (($tagged || ($pt !== null && $pt->kind === Type::KIND_CELL))
+            && $dk !== Type::KIND_CELL && $dk !== Type::KIND_UNKNOWN) {
+            $out .= $this->boxToCell($def->type);
+        }
+        $out .= $this->coerceToI64();
+        return $out;
+    }
+
     private function emitDefaultArgPad(string $fnKey, int $firstMissingIdx, bool $haveArgs): string
     {
         $this->lastPadArgs = '';
@@ -3129,6 +3148,7 @@ trait EmitLlvmCalls
         if ($firstMissingIdx >= $pcount) { return ''; }
         $pdefs = $this->sigs->paramDefaults[$fnKey] ?? [];
         $refs = $this->sigs->refParams[$fnKey] ?? [];
+        $tmask = $this->sigs->taggedParams[$fnKey] ?? [];
         $out = '';
         $pi = $firstMissingIdx;
         while ($pi < $pcount) {
@@ -3145,8 +3165,7 @@ trait EmitLlvmCalls
                 $tmp = $this->ssa->allocReg();
                 $out .= '  ' . $tmp . " = alloca i64\n";
                 if ($def !== null) {
-                    $out .= $this->emitNode($def);
-                    $out .= $this->coerceToI64();
+                    $out .= $this->emitParamDefault($def, $ptypes[$pi], $tmask[$pi] ?? false);
                     $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
                 } else {
                     $out .= '  store i64 0, ptr ' . $tmp . "\n";
@@ -3159,8 +3178,7 @@ trait EmitLlvmCalls
                 continue;
             }
             if ($def !== null) {
-                $out .= $this->emitNode($def);
-                $out .= $this->coerceToI64();
+                $out .= $this->emitParamDefault($def, $ptypes[$pi], $tmask[$pi] ?? false);
                 $this->lastPadArgs .= $sep . 'i64 ' . $this->lastValue;
             } else {
                 $this->lastPadArgs .= $sep . 'i64 0';
