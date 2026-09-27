@@ -1015,6 +1015,80 @@ trait EmitLlvmControl
         return isset($this->frame->rcObjLocals[$fe->valueVar]);
     }
 
+    /**
+     * A bare `array` parameter read as the foreach subject, in a body that never
+     * rebinds it: php checked the hint at the call, so it IS an array (or the
+     * null of `?array`), whatever its erased static type says. The generator and
+     * Traversable arms of an erased foreach — each a full copy of the body —
+     * are dead for it. Every prelude `array_*` walker was exactly this shape.
+     */
+    private function isSettledArrayParam(Node $base): bool
+    {
+        if (!($base instanceof \Compile\Mir\LoadLocal)) { return false; }
+        $name = $base->name;
+        // The hint set is filled by the ordinary function emitter only; main and
+        // a generator body are emitted elsewhere and would read a stale one.
+        if ($this->writtenNamesFn !== $this->frame->name) { return false; }
+        if (!isset($this->arrayHintedParams[$name])) { return false; }
+        if (isset($this->locals->globalBacked[$name])) { return false; }
+        return !isset($this->writtenNames[$name]);
+    }
+
+    /** @var array<string, bool> locals the current body may rebind ({@see collectWrittenNames}),
+     *  collected at function entry — emission detaches statements as it goes */
+    private array $writtenNames = [];
+    /** The function {@see $writtenNames} and the hint set were collected for. */
+    private string $writtenNamesFn = '';
+
+    /**
+     * Every local name the body may REBIND — conservative by design: a store, a
+     * foreach variable, anything a reference or a by-ref closure capture
+     * reaches, and any local handed directly to a call that is not a known free
+     * function taking that argument by value.
+     */
+    private function collectWrittenNames(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\StoreLocal) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof Foreach_) {
+            $this->writtenNames[$n->valueVar] = true;
+            if ($n->keyVar !== null) { $this->writtenNames[$n->keyVar] = true; }
+        } elseif ($n instanceof \Compile\Mir\StaticLocalDecl_) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof \Compile\Mir\RefAlias_ || $n instanceof \Compile\Mir\RefBind_
+            || $n instanceof \Compile\Mir\RefAddr_ || $n instanceof \Compile\Mir\RefCell_) {
+            $this->markLocalsWritten($n);
+        } elseif ($n instanceof \Compile\Mir\Closure_) {
+            $i = 0;
+            foreach ($n->captures as $cap) {
+                if (($n->captureByRef[$i] ?? false) && $cap instanceof \Compile\Mir\LoadLocal) {
+                    $this->writtenNames[$cap->name] = true;
+                }
+                $i = $i + 1;
+            }
+        } elseif ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_INVOKE) {
+            $refs = null;
+            if ($n instanceof \Compile\Mir\Call && isset($this->sigs->paramTypes[$n->function])) {
+                $refs = $this->sigs->refParams[$n->function] ?? [];
+            }
+            $args = $n instanceof \Compile\Mir\Call ? $n->args : \Compile\Mir\Walk::children($n);
+            foreach ($args as $i => $c) {
+                if ($c instanceof \Compile\Mir\LoadLocal && ($refs === null || ($refs[$i] ?? false))) {
+                    $this->writtenNames[$c->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectWrittenNames($c); }
+    }
+
+    private function markLocalsWritten(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\LoadLocal) { $this->writtenNames[$n->name] = true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markLocalsWritten($c); }
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
@@ -1044,7 +1118,8 @@ trait EmitLlvmControl
         $bk = $fe->array->type->kind;
         $dynEnd = '';
         $dynGen = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN)
-            && !$this->foreachBodyYields($fe->body);
+            && !$this->foreachBodyYields($fe->body)
+            && !$this->isSettledArrayParam($fe->array);
         if ($dynGen) {
             $out .= $this->coerceToI64();
             $word = $this->lastValue;

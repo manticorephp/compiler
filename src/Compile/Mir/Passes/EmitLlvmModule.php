@@ -927,6 +927,9 @@ trait EmitLlvmModule
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
         }
+        $this->writtenNames = [];
+        $this->writtenNamesFn = $fn->name;
+        if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
         $this->locals->collectSjljPins($fn->body);
