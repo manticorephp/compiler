@@ -1,0 +1,19 @@
+~if
+if s
+if a
+~if
+loop a
+~loop
+loop i
+after i
+~sw1
+sw s
+~sw2
+sw i
+sw a
+~sw3
+~tc
+tc s
+tc a
+~tc
+done

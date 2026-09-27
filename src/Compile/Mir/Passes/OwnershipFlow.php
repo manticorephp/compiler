@@ -524,12 +524,14 @@ final class OwnershipFlow implements Pass
     }
 
     /**
-     * The locals that own an erased-array call result ({@see Ownership::erasedArrayCall}):
-     * every store to the name is such a call, `null`, a concrete array (it
-     * joins the same release class), or an alias of another erased array — a by-value bare-`array` param or another such local, which
-     * then takes its own +1 ({@see erasedAliasSource}). Nothing else binds it (a
-     * param, a foreach, a catch). Any other store leaves the name to its type —
-     * an erased word of unknown origin is never dropped.
+     * The locals that own an erased-array call result ({@see Ownership::erasedArrayCall}).
+     * Every ERASED store to the name is such a call, `null`, or an alias of
+     * another erased array — a by-value bare-`array` param or another such
+     * local, which then takes its own +1 ({@see erasedAliasSource}). A concrete
+     * array store joins the same release class; any other typed store (a
+     * string, a cell box-back) keeps its own. Nothing else binds the name (a
+     * param, a foreach, a catch), and an erased word of unknown origin vetoes
+     * it: that is never dropped.
      *
      * @return array<string, bool>
      */
@@ -599,8 +601,9 @@ final class OwnershipFlow implements Pass
             } elseif ($v->kind === Node::KIND_LOAD_LOCAL && $v->type->kind === Type::KIND_UNKNOWN
                 && self::asLoadLocal($v)->name !== $sl->name) {
                 $aliasOf[$sl->name][] = self::asLoadLocal($v)->name;
-            } elseif ($v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL
-                && !InsertMemoryOps::slotStoredType($sl)->isArray()) {
+            } elseif (InsertMemoryOps::slotStoredType($sl)->kind === Type::KIND_UNKNOWN
+                && $v->kind !== Node::KIND_NULL_CONST && $v->type->kind !== Type::KIND_NULL) {
+                // An erased word of unknown origin: never owned.
                 $veto[$sl->name] = true;
             }
         } elseif ($k === Node::KIND_FOREACH) {
@@ -826,7 +829,7 @@ final class OwnershipFlow implements Pass
             $slotT = Type::vec(Type::unknown());
             $this->erasedPropNames[$name] = true;
         }
-        if (isset($this->erasedNames[$name])
+        if (isset($this->erasedNames[$name]) && $slotT->kind === Type::KIND_UNKNOWN
             && ($this->own->erasedArrayCall($v) || $this->erasedAliasSource($v, $name) !== '')) {
             $key = $this->intern($name, Ownership::ERASED_ARR, Type::unknown());
             $lat->storeName[$id] = $name;
@@ -881,6 +884,13 @@ final class OwnershipFlow implements Pass
             return;
         }
         $lat->storeMode[$id] = OwnLattice::PLAIN;
+        // An erased-array call result boxed into a cell slot: the box tags the
+        // same buffer, so the call's +1 is the cell's.
+        if ($boxed && $this->own->erasedArrayCall($v)) {
+            $lat->storeState[$id] = $key;
+            $this->noteOwnKey($name, $key);
+            return;
+        }
         $c = $this->own->classifyStored($v);
         // TWIN-DRIFT (empty-class union conditional): the store side says
         // owned, but the emitter's arm retain follows the TEMP side — own only

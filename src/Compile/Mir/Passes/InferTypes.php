@@ -2095,10 +2095,7 @@ final class InferTypes implements Pass
             // in the next foreach; `'abc'` vs `[1,2]` printed a pointer. Box both
             // arms so the slot is uniformly tagged. Two arms of one kind (two
             // arrays, two objects) agree on the raw repr and stay raw.
-            $tOk = $this->cellCarries($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
-            $oOk = $this->cellCarries($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
-            if (!$tOk || !$oOk) { continue; }
-            if ($tT->kind === $oT->kind) { continue; }
+            if (!$this->joinDisagrees($tT, $oT)) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             // A static / global-backed slot has ONE repr, its decl's (the join of
             // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
@@ -2832,6 +2829,15 @@ final class InferTypes implements Pass
     private function joinDisagrees(Type $a, Type $b): bool
     {
         if ($a->kind === $b->kind) { return false; }
+        // An ERASED value (a bare-`array` result, an unknown receiver's return)
+        // beside a scalar, a string, an object or a cell shares no raw word with
+        // it either — the join typed `unknown` read a string as an array. The
+        // erased side boxes by its runtime repr. Beside another ARRAY it rides
+        // the same raw buffer word and stays raw.
+        if ($a->kind === Type::KIND_UNKNOWN || $b->kind === Type::KIND_UNKNOWN) {
+            $o = $a->kind === Type::KIND_UNKNOWN ? $b : $a;
+            return $this->cellCarries($o) && !$o->isArray();
+        }
         if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
         if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
         return $this->cellCarries($a) && $this->cellCarries($b);
