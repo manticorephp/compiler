@@ -4666,11 +4666,9 @@ trait EmitLlvmBuiltins
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
-                // bare-`array` answers a boxed NULL on empty); box_int would
-                // re-box it and print the carrier as an integer.
-                $out .= $a->type->kind === Type::KIND_UNKNOWN
-                    ? $this->boxUnknownIfRaw()
-                    : $this->boxToCell($a->type);
+                // bare-`array` answers a boxed NULL on empty), or a raw buffer:
+                // boxToCell probes it rather than int-box either.
+                $out .= $this->boxToCell($a->type);
                 $bv = $this->lastValue;
                 $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $bv . ', i64 0)' . "\n";
             }

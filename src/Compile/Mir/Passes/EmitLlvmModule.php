@@ -2412,7 +2412,9 @@ trait EmitLlvmModule
                     $this->lastValue = $sv;
                     $this->lastValueType = 'i64';
                 }
-                $out .= $this->boxUnknownIfRaw();
+                // The probe, as for every other erased word crossing into a
+                // cell: a raw buffer int-boxed read back as an integer.
+                $out .= $this->boxUnknownShallowIr();
             } else {
                 // `$v` so a rebuilt concrete-element array releases its source.
                 $out .= $this->boxToCell($v->type, $v);

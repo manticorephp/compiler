@@ -1400,6 +1400,7 @@ trait InferNodes
                 // inferTernary/inferMatch.
                 if ($merged->kind === Type::KIND_UNKNOWN
                     && ($this->fnReturnUnion->kind === Type::KIND_CELL
+                        || $this->erasedJoinBoxes($this->fnReturnUnion, $rt)
                         || $rt->kind === Type::KIND_CELL
                         || ($this->isValueKind($this->fnReturnUnion) && $this->isValueKind($rt)))) {
                     // All-numeric returns (int|float) → a numeric cell so the
@@ -1670,6 +1671,10 @@ trait InferNodes
         if ($node->else_->kind === Node::KIND_THROW) {
             $node->type = $t;
             return $t;
+        }
+        if ($this->erasedJoinBoxes($t, $e)) {
+            $node->type = Type::cell();
+            return $node->type;
         }
         // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value
         // branch as a NULLABLE cell so the null case renders as NULL (not the
@@ -1988,6 +1993,7 @@ trait InferNodes
                 // numeric (int|float) match stays a numeric cell (arith-able).
                 $result = $this->unifyToCell($result, $bt);
             }
+            elseif ($this->erasedJoinBoxes($result, $bt)) { $result = Type::cell(); }
             // A `null` arm beside a value arm (`0 => null, 1 => "7"`): a nullable
             // cell, as a ternary pairs them — `unknown` returned every arm as a
             // raw word through a `mixed` return.

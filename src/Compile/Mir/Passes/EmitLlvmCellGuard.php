@@ -11,7 +11,7 @@ namespace Compile\Mir\Passes;
  *   - `opaque` — it was loaded from a slot already typed `cell`, or returned
  *                by a callee whose signature says `cell`
  *   - `probed` — it came out of a RUNTIME bit-pattern probe
- *                (`__mir_box_unknown`, `boxUnknownIfRaw`'s `select istag`):
+ *                (`__mir_box_unknown`):
  *                tag-valid by construction, VALUE unproven — a raw word whose
  *                bits happen to spell a tag passes through such a probe
  *                unchanged. Counted in its own bucket; never a violation,

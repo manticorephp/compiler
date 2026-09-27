@@ -2626,6 +2626,19 @@ final class InferTypes implements Pass
                 }
                 continue;
             }
+            // A `null` seed the body still assigns an ERASED value once the
+            // re-run typed the slot from it: nothing made the body concrete, so
+            // the value is erased for real, and its null is no raw 0 — an erased
+            // 0 is an int 0 ({@see joinDisagrees}). The name is a cell.
+            if ($bt->kind === Type::KIND_UNKNOWN && isset($this->nullLoopLocals[$name])
+                && $this->nullLoopLocals[$name]->kind === Type::KIND_UNKNOWN
+                && !isset($this->refPinnedLocals[$name])) {
+                unset($this->nullLoopLocals[$name]);
+                $out[$name] = Type::cell();
+                $this->cellLoopLocals[$name] = true;
+                $this->loopPromoGrew = true;
+                continue;
+            }
             // A NON-numeric kind change across the back-edge (`$x = 0;` then
             // `$x = getenv(…)` in the body) has no raw i64 repr that both sides
             // agree on: unionWith collapses it to `unknown`, which reads back as
@@ -2882,13 +2895,27 @@ final class InferTypes implements Pass
         // it either — the join typed `unknown` read a string as an array. The
         // erased side boxes by its runtime repr. Beside another ARRAY it rides
         // the same raw buffer word and stays raw.
+        // A NULL beside it is no exception: an erased word of 0 is an int 0,
+        // so the null has to be a tagged null for `is_null` to answer it.
         if ($a->kind === Type::KIND_UNKNOWN || $b->kind === Type::KIND_UNKNOWN) {
             $o = $a->kind === Type::KIND_UNKNOWN ? $b : $a;
-            return $this->cellCarries($o) && !$o->isArray();
+            return $o->kind === Type::KIND_NULL || ($this->cellCarries($o) && !$o->isArray());
         }
         if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
         if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
         return $this->cellCarries($a) && $this->cellCarries($b);
+    }
+
+    /** A VALUE join (ternary arms, match arms, returns) of an ERASED value with
+     *  a sibling it shares no raw word with ({@see joinDisagrees}): a null, a
+     *  scalar, a string, a cell. The result is a cell; the erased arm boxes by
+     *  its runtime repr. An object sibling is not one: there the UNKNOWN arm is
+     *  the not-yet-inferred bottom the arm-deference rules resolve. */
+    private function erasedJoinBoxes(Type $a, Type $b): bool
+    {
+        if ($a->kind !== Type::KIND_UNKNOWN && $b->kind !== Type::KIND_UNKNOWN) { return false; }
+        $o = $a->kind === Type::KIND_UNKNOWN ? $b : $a;
+        return $o->kind !== Type::KIND_OBJ && $this->joinDisagrees($a, $b);
     }
 
     /** A kind a cell carries by its tag: a scalar, a string, an array, an
