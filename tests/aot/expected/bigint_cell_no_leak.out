@@ -1,0 +1,8 @@
+mixed pass: sum=45001849000 growth ok
+array slot: sum=45001849000 growth ok
+keyed: sum=45001849000 growth ok
+bool(true)
+bool(true)
+int(1125899906842625)
+int(2)
+int(24)

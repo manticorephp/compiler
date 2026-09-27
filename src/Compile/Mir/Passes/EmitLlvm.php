@@ -3655,11 +3655,34 @@ final class EmitLlvm implements EmitVisitor
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_' . $op
               . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        $out .= $this->dropOperandCell($left, $l);
+        $out .= $this->dropOperandCell($right, $r);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // The helper re-boxes on every path (int cell, float cell, promoted).
         $this->markCellBoxed($reg);
         return $out;
+    }
+
+    /**
+     * The cell an operand became for a runtime helper that only READS it: a
+     * fresh cell producer's +1, or the box an INT was just wrapped in (past the
+     * 48-bit inline form that box is a counted heap block,
+     * {@see \Compile\MemoryAbi::CELL_TAG_BIGINT}), is dead after the read. A
+     * string / object / array boxed by pointer is a borrow and stays.
+     */
+    private function dropOperandCell(Node $n, string $cell): string
+    {
+        if ($this->isFreshCellTemp($n) || $n->type->kind === Type::KIND_INT) {
+            return $this->rcReleaseReg($cell, 'cell');
+        }
+        // An element READ used right here is a one-use temp that may be the
+        // owner-less box the read minted. Only the read itself: a LOCAL may hold a
+        // borrowed box it reads again (a foreach value is a borrow).
+        if ($n->type->kind === Type::KIND_CELL && $n->kind === Node::KIND_ARRAY_ACCESS) {
+            return '  call void @__mir_cell_float_free(i64 ' . $cell . ")\n";
+        }
+        return '';
     }
 
     /**
@@ -4070,6 +4093,10 @@ final class EmitLlvm implements EmitVisitor
         if (\Compile\Mir\CondOwn::isConditional($n)) { return $this->condOwnsResult($n); }
         $k = $n->kind;
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        // `+ - *` over a numeric cell run {@see emitTaggedArith}: the helper boxes
+        // a NEW cell on every path, a counted heap box past the inline int form.
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
+            && $n->type->isNumericCell()) { return true; }
         if (\Compile\Mir\BitOp::mintsFresh($n)) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }
         $fn = $n->function;

@@ -19,7 +19,7 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      */
-    public const VERSION = 13;
+    public const VERSION = 14;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -187,6 +187,21 @@ final class MemoryAbi
      * EmitLlvmExpr::cellTagIr}. 9 is the first free one.
      */
     public const CELL_TAG_REF = 9;
+
+    /**
+     * BIGINT (tag 5): an int past the signed-48 inline form lives in a heap box
+     * `[rc@0 | value@8]`, and the cell's payload points at the VALUE, so every
+     * reader is a plain load. The box is COUNTED like any payload a cell
+     * carries (`__mir_cell_retain` / `__mir_cell_drop`): it used to be immortal,
+     * which leaked one box per boxing — a pointer-sized int (an object id, a
+     * PCRE handle, a nanosecond clock) through a `mixed` slot on every call.
+     */
+    public const CELL_TAG_BIGINT = 5;
+    public const BIGINT_BOX_SIZE = 16;
+    /** The box's count, relative to the payload pointer. */
+    public const BIGINT_BOX_RC_OFFSET = -8;
+    /** The payload pointer, relative to the malloc base. */
+    public const BIGINT_BOX_VALUE_OFFSET = 8;
 
     /** A cell's 48-bit payload field, `0xFFFFFFFFFFFF`. */
     public const CELL_PAYLOAD_MASK = 281474976710655;

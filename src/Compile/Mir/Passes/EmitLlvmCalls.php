@@ -1580,6 +1580,8 @@ trait EmitLlvmCalls
         // expanded into multiple positional slots.
         $pi = 0;
         $padDrops = '';
+        /** @var string[] $intArgBoxes */
+        $intArgBoxes = [];
         $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
@@ -1671,6 +1673,11 @@ trait EmitLlvmCalls
             // — a `usort($x, fn($a,$b)=>$cmp($a["k"],$b["k"]))` with an int-arith
             // `$cmp` — is still open, pending a representation discriminator.
             $out .= $this->closureArgRepr($a->type, $known ? $pt : null);
+            // The box an INT arg became is this call site's own ({@see
+            // EmitLlvmBuiltins::cellBoxTempDrop}): given back once the callee ran.
+            if ($a->type->kind === Type::KIND_INT && $this->isCellBoxableArg($a->type)) {
+                $intArgBoxes[] = $this->lastValue;
+            }
             $argList .= ', i64 ' . $this->lastValue;
             $argTypes .= ', i64';
             $pi = $pi + 1;
@@ -1723,6 +1730,7 @@ trait EmitLlvmCalls
             $out .= $padDrops;
         }
         $out .= $this->faPop();
+        foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';

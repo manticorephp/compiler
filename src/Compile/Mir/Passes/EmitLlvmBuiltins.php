@@ -873,6 +873,10 @@ trait EmitLlvmBuiltins
     private function cellBoxTempDrop(Type $t, string $cellReg, ?Node $src = null): string
     {
         if ($t->kind === Type::KIND_CELL) { return ''; }
+        // An INT box is the call site's own: inline it owns nothing, past the
+        // 48-bit form it is a counted heap block ({@see
+        // \Compile\MemoryAbi::CELL_TAG_BIGINT}) the callee co-owns if it keeps it.
+        if ($t->kind === Type::KIND_INT) { return $this->rcReleaseReg($cellReg, 'cell'); }
         // ★ A STRING box allocates NOTHING — it re-tags the same pointer — so a
         // FRESH temp handed to a cell-taking builtin has no owner but this call
         // site: `json_encode($s . $i)` / `print_r($a . $b)` leaked the whole

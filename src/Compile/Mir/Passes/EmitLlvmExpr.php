@@ -116,10 +116,10 @@ trait EmitLlvmExpr
     /**
      * `__manticore_box_int` / `__manticore_unbox_int` — int↔cell boxing. An int
      * in [-2^47, 2^47) fits the 48-bit payload (tag INT=1); a WIDER int is
-     * heap-boxed (malloc 8, store the full i64) and tagged BIGINT=5 (tagBits
-     * 0xFFF5.. = -3096224743817216), so a 64-bit int survives a cell round-trip.
-     * The 8-byte cell is immortal (ints carry no rc) — a bounded leak for the
-     * rare large-int-in-cell case. Emitted under a broad gate (boxIntRuntime is
+     * heap-boxed and tagged BIGINT=5 (tagBits 0xFFF5.. = -3096224743817216), so
+     * a 64-bit int survives a cell round-trip. The box is counted like any cell
+     * payload ({@see \Compile\MemoryAbi::CELL_TAG_BIGINT}): a fresh one carries
+     * the +1 its cell owns. Emitted under a broad gate (boxIntRuntime is
      * called by the render helpers too — they call unbox_int for the int arm).
      */
     private function boxIntRuntime(): string
@@ -135,9 +135,11 @@ trait EmitLlvmExpr
         $out .= "  %b = or i64 %m, -4222124650659840\n";
         $out .= "  ret i64 %b\n";
         $out .= "heap:\n";
-        $out .= "  %p = call ptr @malloc(i64 8)\n";
-        $out .= "  store i64 %v, ptr %p\n";
-        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %p = call ptr @malloc(i64 " . (string)\Compile\MemoryAbi::BIGINT_BOX_SIZE . ")\n";
+        $out .= "  store i64 1, ptr %p\n";
+        $out .= "  %vp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::BIGINT_BOX_VALUE_OFFSET . "\n";
+        $out .= "  store i64 %v, ptr %vp\n";
+        $out .= "  %pi = ptrtoint ptr %vp to i64\n";
         $out .= "  %pm = and i64 %pi, 281474976710655\n";
         $out .= "  %pb = or i64 %pm, -3096224743817216\n";
         $out .= "  ret i64 %pb\n";

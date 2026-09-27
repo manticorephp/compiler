@@ -2397,7 +2397,22 @@ trait EmitLlvmModule
             // tagged bits flow back as the result (a boxed int read as a raw
             // i64). Mirrors the cell→param unboxing.
             if ($v->type->kind === Type::KIND_CELL && $this->frame->returnType !== null) {
+                $out .= $this->coerceToI64();
+                $retCell = $this->lastValue;
                 $out .= $this->unboxCellToType($this->frame->returnType);
+                // A SCALAR unbox copies the value out; a fresh cell (a call or
+                // a numeric op's +1 — a counted box past the inline int form) is
+                // dead from here. A string / array unbox hands the payload itself
+                // back, which the cell's count is what keeps alive.
+                $rk = $this->frame->returnType->kind;
+                if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
+                    && $this->isFreshCellTemp($v)) {
+                    $unboxed = $this->lastValue;
+                    $unboxedType = $this->lastValueType;
+                    $out .= $this->rcReleaseReg($retCell, 'cell');
+                    $this->lastValue = $unboxed;
+                    $this->lastValueType = $unboxedType;
+                }
             }
             // …and an ERASED value into a STRING / ARRAY return, on the terms
             // {@see unboxCellArg} gives the call-argument sink: those unboxes are
@@ -2635,6 +2650,9 @@ trait EmitLlvmModule
         // the arm's fresh +1, plus this retain, against the caller's single
         // drop. 12.3 → 43.8 MB over 200k→800k calls, flat once the retain goes.
         if ($this->condOwnsResult($v)) { return false; }
+        // A numeric op's cell is minted by its helper ({@see EmitLlvm::isFreshCellTemp}).
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
+            && $v->type->isNumericCell()) { return false; }
         return true;
     }
 
