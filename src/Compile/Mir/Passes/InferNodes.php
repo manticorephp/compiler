@@ -1565,7 +1565,11 @@ trait InferNodes
         if ($node->left->kind === Node::KIND_ARRAY_ACCESS && $node->left->shapeCheck === 1) {
             $node->left->shapeCheck = 2;
         }
+        // The fallback runs only on a null left: its bindings meet the path
+        // that skipped it.
+        $skip = $this->localTypes;
         $rt = $this->inferNode($node->right);
+        $this->localTypes = $this->joinArmLocals($skip, $skip, $skip, $skip, $this->localTypes);
         // `$a ?? throw …`: the fallback diverges (never), so the result is
         // simply the left's type — never the throw's void.
         if ($node->right->kind === Node::KIND_THROW) {
@@ -1641,19 +1645,22 @@ trait InferNodes
         // Flow-typing across the arms (short-circuit): the then-arm evaluates only
         // when `cond` holds, the else-arm only when it doesn't. This also narrows
         // the second conjunct of `A && B` (lowered to `Ternary(A, !!B, false)`),
-        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The merge below
-        // unions the arms, so no narrowing leaks past the ternary.
+        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The join below
+        // meets the arms, so no narrowing leaks past the ternary.
         if ($node->then !== null) {
             $this->narrowFromCond($node->cond);
+            $thenIn = $this->localTypes;
             $t = $this->inferNode($node->then);
         } else {
+            $thenIn = $saved;
             $t = $node->cond->type;
         }
         $thenLocals = $this->localTypes;
         $this->localTypes = $saved;
         $this->narrowFromNegatedCond($node->cond);
+        $elseIn = $this->localTypes;
         $e = $this->inferNode($node->else_);
-        $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
+        $this->localTypes = $this->joinArmLocals($saved, $thenIn, $thenLocals, $elseIn, $this->localTypes);
         // A `throw`-expression arm is `never` — it yields no value, so the
         // result type is entirely the sibling arm's (`cond ? v : throw …`).
         if ($node->then !== null && $node->then->kind === Node::KIND_THROW) {

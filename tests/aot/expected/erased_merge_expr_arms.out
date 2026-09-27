@@ -1,0 +1,48 @@
+~tern
+tern s
+tern2 a
+~tern2
+~and
+and s
+or a
+~or
+~kwand
+kwand s
+kwor a
+~kwor
+~coalAssign
+coalAssign s s
+tern a
+~tern
+~tern2
+tern2 i
+and a
+~and
+~or
+or i
+kwand a
+~kwand
+~kwor
+kwor s
+coalAssign a 1
+~coalAssign
+~short0
+short s
+short a
+~short1
+~coal
+coal s
+coal a
+~coal
+~mt1
+mt s
+~mt2
+mt i
+mt a
+~mt3
+~guard
+guard 1 s
+guard 0 a
+~guard
+~o
+done

@@ -2700,16 +2700,64 @@ final class InferTypes implements Pass
     {
         $out = $this->mergeLocals($a, $b);
         foreach ($a as $name => $at) {
-            if (!isset($b[$name]) || !$this->joinDisagrees($at, $b[$name])) { continue; }
-            if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
-                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
-            $out[$name] = Type::cell();
-            if (!isset($this->cellLoopLocals[$name])) {
-                $this->cellLoopLocals[$name] = true;
-                $this->loopPromoGrew = true;
-            }
+            if (!isset($b[$name])) { continue; }
+            if ($this->pinDisagreeing($name, $at, $b[$name])) { $out[$name] = Type::cell(); }
         }
         return $out;
+    }
+
+    /**
+     * Where the alternative paths of an EXPRESSION meet — a ternary's arms
+     * (`&&`, `||`, `and`, `or` and `?:` lower to one), `??`'s fallback against
+     * the path that skips it — the {@see joinLocals} discipline: an arm has no
+     * statement tail to plant a box-back on, so a name an arm REBINDS to a
+     * representation the other path does not share is a cell for the whole
+     * function. A guard's narrowing is not a rebind: a name whose kind leaves
+     * the arm as it entered it holds the value it held before the arms.
+     *
+     * @param array<string, Type> $pre  the map before either arm, un-narrowed
+     * @param array<string, Type> $aIn
+     * @param array<string, Type> $aOut
+     * @param array<string, Type> $bIn
+     * @param array<string, Type> $bOut
+     * @return array<string, Type>
+     */
+    private function joinArmLocals(array $pre, array $aIn, array $aOut, array $bIn, array $bOut): array
+    {
+        $out = $this->mergeLocals($aOut, $bOut);
+        foreach ($aOut as $name => $at) {
+            if (!isset($bOut[$name])) { continue; }
+            $bt = $bOut[$name];
+            if ($at->kind === $bt->kind) { continue; }
+            $ea = self::armBinding($name, $pre, $aIn, $at);
+            $eb = self::armBinding($name, $pre, $bIn, $bt);
+            if ($this->pinDisagreeing($name, $ea, $eb)) { $out[$name] = Type::cell(); }
+        }
+        return $out;
+    }
+
+    /** The type `$name` reaches an expression join with from one arm: its
+     *  pre-arm type when the arm left the kind it entered with (only narrowed),
+     *  else what the arm bound.
+     *  @param array<string, Type> $pre @param array<string, Type> $in */
+    private static function armBinding(string $name, array $pre, array $in, Type $out): Type
+    {
+        if (isset($pre[$name]) && isset($in[$name]) && $in[$name]->kind === $out->kind) { return $pre[$name]; }
+        return $out;
+    }
+
+    /** Pin `$name` a cell for the whole function when two paths hold it in
+     *  representations with no raw word in common ({@see joinDisagrees}). */
+    private function pinDisagreeing(string $name, Type $a, Type $b): bool
+    {
+        if (!$this->joinDisagrees($a, $b)) { return false; }
+        if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
+            || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { return false; }
+        if (!isset($this->cellLoopLocals[$name])) {
+            $this->cellLoopLocals[$name] = true;
+            $this->loopPromoGrew = true;
+        }
+        return true;
     }
 
     private function resetJumpState(): void
