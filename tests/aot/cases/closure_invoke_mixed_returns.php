@@ -22,3 +22,8 @@ for ($i = 0; $i < 2000; $i++) { $sum += $fs[0]($i); }
 $before = memory_get_usage();
 for ($i = 0; $i < 500000; $i++) { $sum += $fs[0]($i); $o = $fs[1]($i); $sum += $o->v; }
 echo $sum, " ", memory_get_usage() - $before < 3 * 1024 * 1024 ? "growth ok" : "leak", "\n";
+// A `?Class` closure answering null returns a null POINTER under the closure ABI: the cell is
+// null, not int(0).
+$maybe = [fn(int $n): ?Box => $n > 0 ? new Box($n) : null, fn(int $n): int => $n];
+foreach ([2, 0] as $n) { $r = $maybe[0]($n); var_dump($r === null, $r instanceof Box, gettype($r)); }
+var_dump($maybe[1](0));

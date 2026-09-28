@@ -1835,7 +1835,7 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'double';
             }
             if ($n->type->kind === Type::KIND_CELL) {
-                $out .= $this->boxUnknownShallowIr();
+                $out .= $this->boxInvokeResultIr();
                 $this->markCellOpaque($this->lastValue);
             }
             return $out;
@@ -1852,9 +1852,30 @@ trait EmitLlvmCalls
         // a double: box it by its allocator magic. The closure's +1 moves into
         // the cell. A tagged scalar passes through.
         if ($n->type->kind === Type::KIND_CELL) {
-            $out .= $this->boxUnknownShallowIr();
+            $out .= $this->boxInvokeResultIr();
             $this->markCellOpaque($this->lastValue);
         }
+        return $out;
+    }
+
+    /**
+     * The cell of a closure call's result (lastValue). Under the uniform ABI a
+     * scalar comes back already tagged and an array / object / closure RAW, so
+     * a raw word is a container — boxed by its allocator magic — or a null
+     * pointer, which is a `?Class` returning null, not the integer 0.
+     */
+    private function boxInvokeResultIr(): string
+    {
+        $out = $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->boxUnknownShallowIr();
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $raw . ", 0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
+            . ', i64 ' . $this->lastValue . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
         return $out;
     }
 

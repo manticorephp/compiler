@@ -8,3 +8,10 @@ boolean false
 box Box 3
 none NULL -
 250002001000 growth ok
+bool(false)
+bool(true)
+string(6) "object"
+bool(true)
+bool(false)
+string(4) "NULL"
+int(0)
