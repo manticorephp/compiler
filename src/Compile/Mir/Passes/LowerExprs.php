@@ -450,6 +450,12 @@ trait LowerExprs
                 $this->sawDynFnExists = true;
                 return new Call('__mir_fn_exists', [$this->lowerExpr($a0)], Type::bool_());
             }
+            // The function set is closed at compile time: a literal, built once
+            // every declaration is known ({@see definedFunctionsSource}).
+            if ($fnBare === 'get_defined_functions') {
+                $this->sawGetDefinedFns = true;
+                return new Call('__mc_defined_functions', [], Type::assoc(Type::string_(), Type::vec(Type::string_())));
+            }
             // `var_dump($a, $b, …)` stays a `var_dump` call — EmitLlvm's biVarDump
             // dumps each arg by its static type (a typed FLOAT goes straight to a
             // shortest-round-trip format instead of through the lossy cell box;
