@@ -320,9 +320,10 @@ Order:
    near-free (Zend calls the same ICU):
    - ✅ `Normalizer`, `grapheme_*` (break iterator + usearch), `Collator` (three sort modes,
      sort keys), `NumberFormatter` (all styles/types, currency, parse offsets, attributes,
-     symbols, patterns), the intl error state (`intl_get_error_*`, `intl_error_name`).
-   - Next: `Locale`, `Transliterator` (symfony/string's slugger), `IntlChar`,
-     `IntlDateFormatter` + `IntlCalendar` / `IntlTimeZone`, `MessageFormatter`,
+     symbols, patterns), the intl error state (`intl_get_error_*`, `intl_error_name`),
+     `Transliterator` (symfony/string's slugger), `Locale` + `locale_*` (subtags, display
+     names, keywords, compose/parse, lookup, acceptFromHttp, likely subtags).
+   - Next: `IntlChar`, `IntlDateFormatter` + `IntlCalendar` / `IntlTimeZone`, `MessageFormatter`,
      `ResourceBundle`, `Spoofchecker`, `IntlBreakIterator`, `UConverter`, `idn_to_*`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
