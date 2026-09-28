@@ -6177,6 +6177,12 @@ trait EmitLlvmBuiltins
     private function biGetClass(array $args, string $nullName = ''): string
     {
         $t = $args[0]->type;
+        if ($t->kind === Type::KIND_CLOSURE || ($t->kind === Type::KIND_OBJ && $this->isClosureClass($t->class ?? ''))) {
+            $out = $this->emitNode($args[0]);
+            $this->lastValue = $this->strLitId($this->pool->intern('Closure'));
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $erased = $this->getClassReceiverIsErased($t);
         $cls = $erased ? '' : ($t->class ?? '');
         // Candidate runtime classes = every class that IS-A $cls — extends AND
@@ -6290,6 +6296,39 @@ trait EmitLlvmBuiltins
             $out .= '  store ptr ' . $this->strRef($nullName) . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $liveL . ":\n";
+        }
+        if ($erased) {
+            // A closure env carries no class id: a plain rc at -8 (no allocator
+            // tag) and CLOSURE_TAG_MAGIC at -32, read only when -8 is untagged.
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $objp . ", i64 -8\n";
+            $tw = $this->ssa->allocReg();
+            $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+            $hi = $this->ssa->allocReg();
+            $out .= '  ' . $hi . ' = lshr i64 ' . $tw . ", 48\n";
+            $tagged = $this->ssa->allocReg();
+            $out .= '  ' . $tagged . ' = icmp eq i64 ' . $hi . ', '
+                  . (string)(\Compile\MemoryAbi::RC_TAG_MAGIC >> 48) . "\n";
+            $cloChk = $this->ssa->allocLabel('gc.clochk');
+            $cloL = $this->ssa->allocLabel('gc.clo');
+            $clsL = $this->ssa->allocLabel('gc.cls');
+            $out .= '  br i1 ' . $tagged . ', label %' . $clsL . ', label %' . $cloChk . "\n";
+            $out .= $cloChk . ":\n";
+            $cp = $this->ssa->allocReg();
+            $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 '
+                  . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+            $cw = $this->ssa->allocReg();
+            $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+            $cwm = $this->ssa->allocReg();
+            $out .= '  ' . $cwm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+            $isClo = $this->ssa->allocReg();
+            $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cwm . ', '
+                  . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+            $out .= '  br i1 ' . $isClo . ', label %' . $cloL . ', label %' . $clsL . "\n";
+            $out .= $cloL . ":\n";
+            $out .= '  store ptr ' . $this->strLitId($this->pool->intern('Closure')) . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $clsL . ":\n";
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;

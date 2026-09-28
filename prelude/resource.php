@@ -85,21 +85,10 @@ function __mir_obj_type_name(mixed $v, bool $debug): string
         }
         return 'resource';
     }
-    // get_debug_type() of an object is its class name. A statically-typed object
-    // gets the name folded in biGettype, but a Socket/AddressInfo arriving as a
-    // CELL (the `socket_create(): \Socket|false` union) has no static class here,
-    // and get_class() on a mixed value reads the STATIC type (empty) — so the
-    // runtime class must be recovered by an instanceof probe, the same way
-    // \Resource is above. (A fully general cell→class-name needs a runtime
-    // class-id→name table the runtime does not carry; that is a pre-existing gap
-    // for any object in a union, not specific to sockets.)
+    // get_debug_type() of an object is its RUNTIME class: get_class() reads it
+    // off the class id of a cell too.
     if ($debug) {
-        if ($v instanceof \Socket) {
-            return 'Socket';
-        }
-        if ($v instanceof \AddressInfo) {
-            return 'AddressInfo';
-        }
+        return \get_class($v);
     }
     return 'object';
 }
