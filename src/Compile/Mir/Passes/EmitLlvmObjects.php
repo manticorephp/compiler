@@ -6618,7 +6618,9 @@ trait EmitLlvmObjects
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its static type.
                 $out .= $this->emitArgCollectingLitElems($a, null, false);
+                $this->cellifyMoveBlocked = true;
                 $out .= $this->boxToCell($a->type, $a);
+                $this->cellifyMoveBlocked = false;
                 $argList .= 'i64 ' . $this->lastValue;
                 // What the box left behind is the CALLER's — a rebuilt cell
                 // array or a re-tagged string ({@see EmitLlvmCalls::emitCall},
@@ -8022,7 +8024,9 @@ trait EmitLlvmObjects
                 // free-function call path (else a `mixed $x` method param
                 // receives a raw array/string and mis-reads it).
                 $out .= $this->emitArgCollectingLitElems($a, null, false);
+                $this->cellifyMoveBlocked = true;
                 $out .= $this->boxToCell($a->type, $a);
+                $this->cellifyMoveBlocked = false;
                 $argList .= ', i64 ' . $this->lastValue;
                 $argOutTypes[$ai + 1] = Type::cell();
                 // What the box left behind is the CALLER's — a rebuilt cell
@@ -8038,9 +8042,7 @@ trait EmitLlvmObjects
                 // cannot go through Monomorphize (a method param is never
                 // specialized; the indirect trampoline call is invisible anyway).
                 $out .= $this->emitArgCollectingLitElems($a, null, false);
-                $this->cellifyMoveAllowed = true;
                 $out .= $this->boxToCell($a->type, $a);
-                $this->cellifyMoveAllowed = false;
                 // The rebuild is a fresh +1 the callee only borrows:
                 // `$this->f($lines)` with `f(array $b)` leaked the copy and one
                 // ref on every element, per call — HoistAllocas alone held

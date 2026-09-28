@@ -3591,7 +3591,9 @@ trait EmitLlvmCalls
                 // Tagged (mixed/union) param: NaN-box the arg by its
                 // static type so the callee can read its runtime tag.
                 $out .= $this->emitArgCollectingLitElems($a, null, false);
+                $this->cellifyMoveBlocked = true;
                 $out .= $this->boxToCell($a->type, $a);
+                $this->cellifyMoveBlocked = false;
                 $argList .= 'i64 ' . $this->lastValue;
                 // ★ What the box left behind is the CALLER's. A concrete-element
                 // vec/assoc is REBUILT into a fresh cell array here, and a
