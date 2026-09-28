@@ -2343,7 +2343,12 @@ trait InferScans
             // `$x = 2.5` in one if/else branch must stay an int|float numeric
             // CELL (handled by cellMergeLocals), NOT be forced to float; forcing
             // it would make the int branch read float (`g(true)` -> float(9)).
-            if ($this->valueIsFloatProducing($sl->value)
+            // A bare `$v = (float)$v` is a conversion, not an accumulator: the
+            // int the slot held before it (on a path that skips it) stays an int.
+            $vk = $sl->value->kind;
+            $arith = $vk === Node::KIND_ADD || $vk === Node::KIND_SUB || $vk === Node::KIND_MUL
+                || $vk === Node::KIND_DIV || $vk === Node::KIND_NEG;
+            if ($arith && $this->valueIsFloatProducing($sl->value)
                 && $this->valueReadsLocal($sl->value, $sl->name)) {
                 $this->floatLocals[$sl->name] = true;
             }
