@@ -4713,9 +4713,10 @@ trait EmitLlvmBuiltins
         // DocBlock::getContent is `implode('', $this->lines)` over Line objects).
         $ia = \count($args) >= 2 ? $args[1] : $args[0];
         $iel = $ia->type->element ?? null;
+        $iek = $iel === null ? Type::KIND_UNKNOWN : $iel->kind;
         if ($this->hasObjToStr && $ia->type->isArray()
-            && ($iel === null || $iel->kind === Type::KIND_OBJ || $iel->kind === Type::KIND_CELL
-                || $iel->kind === Type::KIND_UNKNOWN)) {
+            && $iek !== Type::KIND_STRING && $iek !== Type::KIND_INT && $iek !== Type::KIND_FLOAT
+            && $iek !== Type::KIND_BOOL && $iek !== Type::KIND_NULL) {
             $sepN = \count($args) >= 2 ? $args[0] : new \Compile\Mir\StringConst('', Type::string_());
             return $this->emitNode(new Call('__mir_implode_obj', [$sepN, $ia], Type::string_()));
         }
