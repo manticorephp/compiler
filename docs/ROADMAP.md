@@ -154,6 +154,8 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | A by-ref write that retypes a `foreach` value variable double-frees (found 2026-09-28) | `function f(&$x) { $x = 5; } foreach ([new stdClass] as $d) {} f($d); var_dump($d);` | SIGSEGV (a string element too) | `int(5)`. The loop variable holds a BORROW (see the foreach-borrow gap); the retyping write releases it as owned |
 | A zone written in a date string is not adopted (found 2026-09-28) | `new DateTime("2000-01-01T00:00:00Z")`, `"… UTC"`, `"… EST"`, `"… +02:30"`, `"… Europe/Paris"` | the instant is right, but `getTimezone()` is the default zone | php adopts it: type 3 for an identifier / `UTC`, type 2 for an abbreviation (`Z`, `GMT`, `EST`), type 1 for an offset — the DateTimeZone class has no type-2 form yet |
 | `print_r` of an object prints no properties | `class A { public $x = 1; } print_r(new A);` | `A Object ( )` | `[x] => 1`, visibility suffixes (`:protected`, `:A:private`) and `__debugInfo`, as var_dump's per-class arms already do |
+| An int local that a loop or one branch turns float reads float everywhere (found 2026-09-28) | `$s = 1; if ($b) { $s = $s + 1.5; }` with `$b` false; `$s = 0; foreach ([] as $x) { $s += 1.5; }` | `float(1)`, `float(0)` | `int(1)`, `int(0)`. The accumulator shape makes the whole slot a float (InferScans float slots, the loop merge's widenNumeric); php keeps int until the float store runs — needs a numeric cell there, a perf question |
+| A fresh string handed to a `mixed` parameter leaks (found 2026-09-28) | `function g(mixed $v): mixed { return $v; } $s = g("{" . $n . "}");` in a loop; `new P("x" . $n)` with `public mixed $v` promoted | 1 string (80 B) per call; the object too for the promoted-property ctor | released. Also on main; the ownership epic's territory |
 | Scope-exit destructor order | two objects dying at one `}` where one sits in a reference box | box holders are released after the frame's other locals | php destroys the frame's variables in declaration order |
 
 An ARRAY in a `$GLOBALS['x']` slot still reads back as a float: the slot is a cell channel
@@ -348,8 +350,15 @@ Order:
      fixed trampolines, as Zend does — Zend itself segfaults converting with a CLONED one).
    - ✅ `ResourceBundle` (ures_*; element reads ride ArrayAccess, so `instanceof ArrayAccess`
      and a bare isset() answer where php says false / throws).
-   - Next: `MessageFormatter` — no C API takes named arguments; plan: php's MessageFormat
-     syntax parsed in PHP over ICU's number/date/plural primitives.
+   - ✅ `MessageFormatter` + `msgfmt_*`: the pattern is scanned in PHP (MessagePattern) and
+     every argument occurrence renumbered into its own `umsg_vformat` slot through a va_list
+     built per ABI (Apple arm64 / SysV x86_64 / AAPCS64), so ICU formats everything; parse is
+     MessageFormat::parse transcribed (umsg_vparse crashes on a part-way failure). Identical
+     to Zend over 12 locales × 19 patterns × 5 value sets and a parse sweep. Known: after a
+     FAILED setPattern Zend formats from ICU's half-reset state (`{}` per argument) — not
+     reproduced; var_dump of a closure lacks php 8.5's name/file/line keys.
+   - intl is complete (every ext/intl class). Open around it: `print_r` of objects,
+     DateTime adopting a zone named in the date string.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 
