@@ -177,7 +177,7 @@ final class NodeClone
         if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; $c->srcArgc = $x->srcArgc; return $c; }
         if ($k === Node::KIND_NEW_DYN_OBJ) { $d = $n; $c = new NewDynObj(self::node($d->classExpr), self::nodes($d->args), $n->type); $c->srcArgc = $d->srcArgc; return $c; }
         if ($k === Node::KIND_PROPERTY_ACCESS) { $x = self::asPropertyAccess($n); return new PropertyAccess_(self::node($x->object), $x->property, $n->type); }
-        if ($k === Node::KIND_STORE_PROPERTY) { $x = self::asStoreProperty($n); return new StoreProperty(self::node($x->object), $x->property, self::node($x->value), $n->type); }
+        if ($k === Node::KIND_STORE_PROPERTY) { $x = self::asStoreProperty($n); return new StoreProperty(self::node($x->object), $x->property, self::node($x->value), $n->type, $x->bypassHook); }
         if ($k === Node::KIND_DYN_PROP) {
             $x = self::asDynProp($n);
             $d = new DynProp_(self::node($x->object), self::node($x->name), $n->type);

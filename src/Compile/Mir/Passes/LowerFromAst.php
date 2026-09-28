@@ -1573,7 +1573,7 @@ final class LowerFromAst implements Pass
      * Drop method-body AST nodes after their ordinary lowering owner is done.
      * Generic origins and methods queued for late-static specialisation retain
      * their bodies because a later lowering pass still needs them. Constructors
-     * also remain available to inheritedCtorDecl() for descendant setup.
+     * are kept as well.
      */
     /** Drop class-local AST metadata after its class body has been lowered. */
     private function releaseLoweredClassMetadata(\Parser\Ast\ClassDecl $decl): void
@@ -2452,8 +2452,10 @@ final class LowerFromAst implements Pass
         }
         $stmts = [];
         if ($m->name === '__construct') {
-            // Property defaults run first, then promoted-param stores.
-            foreach ($defaultStores as $ds) { $stmts[] = $ds; }
+            // Promoted-param stores first. The property defaults are NOT here: they
+            // run once, at allocation (`C____mc_defaults`), so a second
+            // `__construct()` call or a `parent::__construct()` after the child
+            // assigned a parent property does not reset it.
             foreach ($m->params as $p) {
                 if ($p->promoted !== '') {
                     $stmts[] = new StoreProperty(
@@ -4808,15 +4810,16 @@ final class LowerFromAst implements Pass
 
     /**
      * The extensions a compiled binary genuinely carries. `pcre` is linked
-     * (pcre2), `json` / `ctype` are built in, `openssl` rides the TLS stack.
-     * Everything else — mbstring, intl, pcntl, dom — is absent, and a program
-     * that asks gets the honest answer rather than a link-time surprise.
+     * (pcre2), `json` / `ctype` / `mbstring` are built in, `openssl` rides the TLS
+     * stack, `intl` links ICU on use. Everything else — pcntl, dom — is absent,
+     * and a program that asks gets the honest answer rather than a link-time
+     * surprise.
      */
     private function extensionIsBuiltIn(string $ext): bool
     {
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
-            || $ext === 'tokenizer';
+            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),

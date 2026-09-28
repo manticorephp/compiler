@@ -46,6 +46,22 @@ trait EmitLlvmObjects
      * `new C(…)` and `new $cls(…)`, which differ only in how the class is chosen.
      * Leaves the object POINTER in {@see $lastValue}.
      */
+    /**
+     * The declared property defaults of a freshly allocated `$class` object
+     * (`C____mc_defaults`, own + inherited + mixed-in), run before any
+     * constructor. '' when the class declares none.
+     */
+    private function emitPropDefaultsCall(string $class, string $objPtr): string
+    {
+        $defSym = $class . '____mc_defaults';
+        if (!isset($this->sigs->paramTypes[$defSym])) { return ''; }
+        $oi = $this->ssa->allocReg();
+        $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $dr = $this->ssa->allocReg();
+        $out .= '  ' . $dr . ' = call i64 @manticore_' . $this->mangle($defSym) . '(i64 ' . $oi . ")\n";
+        return $out;
+    }
+
     private function emitObjAllocInit(?\Compile\Mir\ClassDef $cd): string
     {
         $size = $cd === null ? 16 : $cd->instanceSize();
@@ -387,6 +403,7 @@ trait EmitLlvmObjects
             $out .= $hitL . ":\n";
             $out .= $this->emitObjAllocInit($cd);
             $objPtr = $this->lastValue;
+            $out .= $this->emitPropDefaultsCall($cd->name, $objPtr);
             $objInt = $this->ssa->allocReg();
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
             if ($ctorClass !== '') {
@@ -626,23 +643,11 @@ trait EmitLlvmObjects
         }
         $out = $this->emitObjAllocInit($cd);
         $obj = $this->lastValue;
+        // `__mc_new_uninit('C')` (unserialize, newInstanceWithoutConstructor):
+        // the defaults run, no CONSTRUCTOR BODY does — php's own split.
+        $out .= $this->emitPropDefaultsCall($n->class, $obj);
         // ctor call — resolve through the parent chain (a subclass
         // with no ctor inherits its parent's).
-        // `__mc_new_uninit('C')`: no CONSTRUCTOR BODY runs, but the declared
-        // property defaults do — that is exactly what php's unserialize does, so
-        // a property the stream omits keeps its default rather than reading 0.
-        // The defaults live in `C____mc_defaults`, emitted beside the ctor by
-        // LowerClasses when the program unserialises at all.
-        if ($n->bare) {
-            $defSym = $n->class . '____mc_defaults';
-            if (isset($this->sigs->paramTypes[$defSym])) {
-                $oi = $this->ssa->allocReg();
-                $out .= '  ' . $oi . ' = ptrtoint ptr ' . $obj . " to i64\n";
-                $dr = $this->ssa->allocReg();
-                $out .= '  ' . $dr . ' = call i64 @manticore_' . $this->mangle($defSym)
-                      . '(i64 ' . $oi . ")\n";
-            }
-        }
         $ctorClass = $n->bare ? '' : $this->resolveMethodClass($n->class, '__construct');
         if ($ctorClass !== '') {
             $objInt = $this->ssa->allocReg();
