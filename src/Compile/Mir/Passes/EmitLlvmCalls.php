@@ -3140,6 +3140,7 @@ trait EmitLlvmCalls
         if ($firstMissingIdx >= $pcount) { return ''; }
         $pdefs = $this->sigs->paramDefaults[$fnKey] ?? [];
         $refs = $this->sigs->refParams[$fnKey] ?? [];
+        $tagged = $this->sigs->taggedParams[$fnKey] ?? [];
         $out = '';
         $pi = $firstMissingIdx;
         while ($pi < $pcount) {
@@ -3171,7 +3172,14 @@ trait EmitLlvmCalls
             }
             if ($def !== null) {
                 $out .= $this->emitNode($def);
-                $out .= $this->coerceToI64();
+                // A tagged (mixed / nullable-scalar) param takes a NaN-boxed word,
+                // as a written argument gets one: a raw `null` default is word 0,
+                // which a cell reads as float(0).
+                if (($tagged[$pi] ?? false) && $def->type->kind !== Type::KIND_CELL) {
+                    $out .= $this->boxToCell($def->type, $def);
+                } else {
+                    $out .= $this->coerceToI64();
+                }
                 $this->lastPadArgs .= $sep . 'i64 ' . $this->lastValue;
             } else {
                 $this->lastPadArgs .= $sep . 'i64 0';
