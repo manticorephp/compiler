@@ -1324,7 +1324,7 @@ trait LowerPrelude
 
         $strs = [
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.1', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.11', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references
