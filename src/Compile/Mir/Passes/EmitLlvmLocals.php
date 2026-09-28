@@ -776,8 +776,18 @@ trait EmitLlvmLocals
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
+            $out .= $this->coerceToPtr();
+            $deSrc = $this->lastValue;
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
+            // The rebuild MOVES each value out of the source without a reference
+            // of its own, so an owned temp source leaves as a bare buffer — it
+            // was never freed at all (`$t = array_values(…)` into a typed slot).
+            if ($this->cellifySourceFlavor($sl->value) !== '') {
+                $si = $this->ssa->allocReg();
+                $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
+                $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
+            }
             if (isset($this->locals->globalBacked[$sl->name])) {
                 // The rebuild is a fresh +1 the cell takes outright; only the
                 // predecessor is owed ({@see globalCellOwnIr}).
@@ -791,6 +801,15 @@ trait EmitLlvmLocals
                 $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             } else {
+                // Release-before-overwrite, as the general store path does for an
+                // owned local: a reassigned array PARAM holds the caller's value
+                // under the prologue's retain, and this arm skipped the release
+                // that balances it.
+                if (isset($this->frame->rcObjLocals[$sl->name])
+                    && !isset($this->frame->transferredLocals[$sl->name])) {
+                    $out .= $this->rcReleaseSlot($this->locals->slots[$sl->name],
+                        $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
+                }
                 $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
             }
             $this->lastValue = $dv;
