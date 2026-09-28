@@ -370,12 +370,14 @@ trait EmitLlvmModule
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %ok = icmp sgt i64 %d, 0\n";
-            $out .= "  %im = sub i64 %d, 1\n";
-            $out .= "  %i = select i1 %ok, i64 %im, i64 0\n";
+            $out .= "  %im = sub i64 %d, " . (string)(1 + \Compile\Debug::$btTopSkip) . "\n";
+            $out .= "  %ok2 = icmp sge i64 %im, 0\n";
+            $out .= "  %okb = and i1 %ok, %ok2\n";
+            $out .= "  %i = select i1 %okb, i64 %im, i64 0\n";
             $out .= "  %p = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %i\n";
             $out .= "  %v = load i64, ptr %p\n";
             $out .= "  %set = icmp ne i64 %v, 0\n";
-            $out .= "  %live = and i1 %ok, %set\n";
+            $out .= "  %live = and i1 %okb, %set\n";
             $out .= "  %np = inttoptr i64 %v to ptr\n";
             $out .= "  %r = select i1 %live, ptr %np, ptr @__mir_bt_unknown\n";
             $out .= "  ret ptr %r\n}\n";

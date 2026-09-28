@@ -1,0 +1,12 @@
+dtor f
+yes
+after function
+dtor s
+yes
+after static
+dtor m
+yes
+after method
+1
+dtor kept
+end

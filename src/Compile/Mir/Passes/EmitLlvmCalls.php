@@ -3204,7 +3204,8 @@ trait EmitLlvmCalls
                 $addr = $this->ssa->allocReg();
                 $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
                 $this->lastPadArgs .= $sep . 'i64 ' . $addr;
-                $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $ptypes[$pi]);
+                $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $ptypes[$pi],
+                    ($this->sigs->arrayHintedParams[$fnKey][$pi] ?? false));
                 $pi = $pi + 1;
                 continue;
             }
@@ -3226,9 +3227,14 @@ trait EmitLlvmCalls
      * the `$matches` of every `preg_match($re, $s)` — which php discards with
      * the temporary. `$pt` is the callee's declared type: what it wrote.
      */
-    private function omittedRefSlotDrop(string $slot, Type $pt): string
+    private function omittedRefSlotDrop(string $slot, Type $pt, bool $arrayHinted = false): string
     {
         $flavor = $this->isClosureValueType($pt) ? 'closure' : $this->discardReleaseFlavor($pt);
+        // A bare `array` / `?array` parameter erases to UNKNOWN, which names no
+        // flavor, but it rides RAW: the slot holds an array pointer, the empty
+        // singleton or NULL. `Preg::match($re, $s)` — cs-fixer's wrapper —
+        // left every matches array its preg_match wrote there behind.
+        if ($flavor === '' && $arrayHinted && $pt->kind === Type::KIND_UNKNOWN) { $flavor = 'vec'; }
         if ($flavor === '') { return ''; }
         $v = $this->ssa->allocReg();
         return '  ' . $v . ' = load i64, ptr ' . $slot . "\n" . $this->rcReleaseReg($v, $flavor);
@@ -3242,7 +3248,7 @@ trait EmitLlvmCalls
      * release of that write, when the site owns it, lands in
      * {@see $lastRefSlotDrop} for the caller to emit after the call.
      */
-    private function emitRefValueSlot(Node $a, ?Type $pt, int $srcArgc, int $ai): string
+    private function emitRefValueSlot(Node $a, ?Type $pt, int $srcArgc, int $ai, bool $arrayHinted = false): string
     {
         $tmp = $this->ssa->allocReg();
         $out = '  ' . $tmp . " = alloca i64\n";
@@ -3252,7 +3258,7 @@ trait EmitLlvmCalls
         $addr = $this->ssa->allocReg();
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
         $this->lastRefSlotDrop = ($pt !== null && $this->isOmittedDefaultArg($srcArgc, $ai, $a))
-            ? $this->omittedRefSlotDrop($tmp, $pt) : '';
+            ? $this->omittedRefSlotDrop($tmp, $pt, $arrayHinted) : '';
         $this->lastValue = $addr;
         $this->lastValueType = 'i64';
         return $out;
@@ -3524,7 +3530,7 @@ trait EmitLlvmCalls
                 // filled default expr. Back it with a throwaway stack slot so
                 // the callee's write lands somewhere (PHP discards it) instead
                 // of dereferencing a null address.
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai, $ahmask[$ai] ?? false);
                 $argList .= 'i64 ' . $this->lastValue;
                 $omitRefDrops .= $this->lastRefSlotDrop;
             } elseif (($camask[$ai] ?? false)

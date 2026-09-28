@@ -456,6 +456,13 @@ final class Debug
     public static bool $arrRcTrace = false;
 
     /**
+     * `MANTICORE_BT_TOP_SKIP=N` — the `fn=` a trace line names is N frames BELOW
+     * the top of the backtrace stack: a leak attributed to a prelude/stdlib
+     * helper (`preg_match`) names the user frame that called it instead.
+     */
+    public static int $btTopSkip = 0;
+
+    /**
      * Drain the cycle-collector root buffer at a threshold, the way php does.
      * ON by default; `MANTICORE_AUTO_GC=0` (or `off`) disables it, any other
      * value sets the threshold.
@@ -686,6 +693,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_RC_BUF_ONLY');
         if ($env === '0' || $env === 'off') { self::$rcBufferOnly = false; }
+        $env = \getenv('MANTICORE_BT_TOP_SKIP');
+        if ($env !== false && \ctype_digit($env)) { self::$btTopSkip = (int)$env; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
         $env = \getenv('MANTICORE_CC_TRACE');
