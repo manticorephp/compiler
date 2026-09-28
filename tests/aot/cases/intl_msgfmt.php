@@ -76,7 +76,7 @@ foreach ([
     ['{0} and {1}', 'x and y and z'],
     ['{0,number} items cost {1,number,currency}', '1,234.5 items cost $0.99'],
     ['{0,number,integer} x {1}', '5,000,000,000 x {1}'],
-    ['{0,number} {1,number}', '-0 3.25'],
+    ['{0,number}|{1,number}', '-5|3.25'],
     ['{0,spellout} / {1,ordinal}', 'forty-two / 3rd'],
     ['{0,choice,0#none|1#one|2#two}!', 'two!'],
     ["It''s {0} '{'x'}' {1}", "It's A {x} B"],
