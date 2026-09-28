@@ -3370,6 +3370,57 @@ trait EmitLlvmCalls
         return $this->emitDiagnosticLine('Deprecated', $msg, $n->line);
     }
 
+    /**
+     * Emit a by-value ARGUMENT. A literal argument owns its ARRAY elements and
+     * its own release is buffer-only ({@see EmitLlvm::freshRcArgFlavor}), so
+     * they are collected for the same post-call release the literal gets
+     * ({@see EmitLlvmBuiltins::$litElemDropRegs}); `$paramType` is what the
+     * CALLEE declared — the element release is a transfer to it, and only a
+     * callee that CO-OWNS the elements can take one.
+     *
+     * Every call shape goes through here. Only the free-function one did, so
+     * `$tok->equalsAny([[T_STRING, 'get'], [T_STRING, 'set']])` leaked both
+     * inner arrays per call — 1750 a file in php-cs-fixer's BraceTransformer.
+     *
+     * `$collect` false is an argument BOXED to a cell: the rebuild takes the
+     * literal's element references itself ({@see litOwnsArrayElems}), and the
+     * flag must not leak in from an enclosing literal argument either.
+     */
+    private function emitArgCollectingLitElems(Node $a, ?Type $paramType, bool $collect = true): string
+    {
+        $wasCollect = $this->litElemCollect;
+        $wasCalleeElem = $this->litElemCalleeElem;
+        $this->litElemCollect = $collect && $a->kind === Node::KIND_ARRAY_LIT;
+        $this->litElemCalleeElem = ($paramType !== null && $paramType->isArray()) ? $paramType->element : null;
+        $out = $this->emitNode($a);
+        $this->litElemCollect = $wasCollect;
+        $this->litElemCalleeElem = $wasCalleeElem;
+        return $out;
+    }
+
+    /**
+     * Move the element drops collected since `$mark` onto a call's post-call
+     * release list — or discard them when the literal itself is not released
+     * there (`$released` false): its elements then stay owned by the buffer.
+     * In ELEMENT order — php destroys an array's elements first to last.
+     * @param string[] $regs
+     * @param string[] $flavs
+     */
+    private function takeLitElemDrops(int $mark, bool $released, array &$regs, array &$flavs): void
+    {
+        $n = \count($this->litElemDropRegs);
+        if ($released) {
+            for ($i = $mark; $i < $n; $i++) {
+                $regs[] = $this->litElemDropRegs[$i];
+                $flavs[] = $this->litElemDropFlavors[$i];
+            }
+        }
+        while (\count($this->litElemDropRegs) > $mark) {
+            \array_pop($this->litElemDropRegs);
+            \array_pop($this->litElemDropFlavors);
+        }
+    }
+
     private function emitCall(Call $n): string
     {
         $c = $n;
@@ -3539,7 +3590,7 @@ trait EmitLlvmCalls
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its
                 // static type so the callee can read its runtime tag.
-                $out .= $this->emitNode($a);
+                $out .= $this->emitArgCollectingLitElems($a, null, false);
                 $out .= $this->boxToCell($a->type, $a);
                 $argList .= 'i64 ' . $this->lastValue;
                 // ★ What the box left behind is the CALLER's. A concrete-element
@@ -3553,22 +3604,8 @@ trait EmitLlvmCalls
                 // cannot drift.
                 $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
-                // A literal argument owns its ARRAY elements and its own
-                // release drops none of them; collect them for the same
-                // post-call release the literal itself gets
-                // ({@see EmitLlvmBuiltins::$litElemDropRegs}).
                 $litMark = \count($this->litElemDropRegs);
-                $wasCollect = $this->litElemCollect;
-                $wasCalleeElem = $this->litElemCalleeElem;
-                $this->litElemCollect = $a->kind === Node::KIND_ARRAY_LIT;
-                // What the CALLEE declared for this parameter. The element
-                // release below is a transfer of this reference to the callee,
-                // and only a callee that CO-OWNS the elements can take it.
-                $cpt = $ptypes[$ai] ?? null;
-                $this->litElemCalleeElem = ($cpt !== null && $cpt->isArray()) ? $cpt->element : null;
-                $out .= $this->emitNode($a);
-                $this->litElemCollect = $wasCollect;
-                $this->litElemCalleeElem = $wasCalleeElem;
+                $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai] ?? null);
                 // An int/bool arg to a declared `float` param converts
                 // numerically (sitofp) — else the integer bits bitcast through
                 // the i64 ABI carrier and the callee reads a garbage double
@@ -3601,10 +3638,7 @@ trait EmitLlvmCalls
                     $rf = $this->freshRcArgFlavor($a);
                     if ($rf !== '') { $rcArgRegs[] = $this->lastValue; $rcArgFlavs[] = $rf; }
                 }
-                while (\count($this->litElemDropRegs) > $litMark) {
-                    $rcArgRegs[] = (string)\array_pop($this->litElemDropRegs);
-                    $rcArgFlavs[] = (string)\array_pop($this->litElemDropFlavors);
-                }
+                $this->takeLitElemDrops($litMark, true, $rcArgRegs, $rcArgFlavs);
             }
             $ai = $ai + 1;
         }

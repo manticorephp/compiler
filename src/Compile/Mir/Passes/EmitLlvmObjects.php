@@ -723,7 +723,8 @@ trait EmitLlvmObjects
                     $out .= $this->emitNode($a);
                     $out .= $this->boxToCell($a->type);
                 } else {
-                    $out .= $this->emitNode($a);
+                    $litMark = \count($this->litElemDropRegs);
+                    $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai + 1] ?? null);
                     // An int/bool arg to a declared `float` ctor param converts
                     // numerically (sitofp) — else the integer bits cross the i64
                     // ABI carrier and the property reads a garbage double
@@ -763,7 +764,9 @@ trait EmitLlvmObjects
                             $rcArgRegs[] = $this->lastValue;
                             $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
                         }
+                        $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
                     }
+                    $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
                 }
                 $argList .= ', i64 ' . $this->lastValue;
                 $ai = $ai + 1;
@@ -6614,7 +6617,7 @@ trait EmitLlvmObjects
                 $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its static type.
-                $out .= $this->emitNode($a);
+                $out .= $this->emitArgCollectingLitElems($a, null, false);
                 $out .= $this->boxToCell($a->type, $a);
                 $argList .= 'i64 ' . $this->lastValue;
                 // What the box left behind is the CALLER's — a rebuilt cell
@@ -6622,7 +6625,8 @@ trait EmitLlvmObjects
                 // same arm).
                 $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
-                $out .= $this->emitNode($a);
+                $litMark = \count($this->litElemDropRegs);
+                $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai] ?? null);
                 $out .= $this->coerceToI64();
                 // A fresh CELL temp is dropped by its TAGGED word ({@see
                 // EmitLlvmCalls::emitCall}, same arm).
@@ -6659,7 +6663,9 @@ trait EmitLlvmObjects
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai);
                     }
+                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
                 }
+                $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
             }
             $ai = $ai + 1;
         }
@@ -8015,7 +8021,7 @@ trait EmitLlvmObjects
                 // type so the callee reads its runtime tag — mirrors the
                 // free-function call path (else a `mixed $x` method param
                 // receives a raw array/string and mis-reads it).
-                $out .= $this->emitNode($a);
+                $out .= $this->emitArgCollectingLitElems($a, null, false);
                 $out .= $this->boxToCell($a->type, $a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $argOutTypes[$ai + 1] = Type::cell();
@@ -8031,7 +8037,7 @@ trait EmitLlvmObjects
                 // array reaches a trampoline's `vec[cell]` args param, and it
                 // cannot go through Monomorphize (a method param is never
                 // specialized; the indirect trampoline call is invisible anyway).
-                $out .= $this->emitNode($a);
+                $out .= $this->emitArgCollectingLitElems($a, null, false);
                 $out .= $this->boxToCell($a->type, $a);
                 // The rebuild is a fresh +1 the callee only borrows:
                 // `$this->f($lines)` with `f(array $b)` leaked the copy and one
@@ -8043,7 +8049,8 @@ trait EmitLlvmObjects
                       . ", 281474976710655\n";   // PAYLOAD_MASK: array cell → raw ptr
                 $argList .= ', i64 ' . $raw;
             } else {
-                $out .= $this->emitNode($a);
+                $litMark = \count($this->litElemDropRegs);
+                $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai + 1] ?? null);
                 $out .= $this->coerceToI64();
                 // A fresh CELL temp is dropped by its TAGGED word ({@see
                 // EmitLlvmCalls::emitCall}, same arm).
@@ -8100,7 +8107,9 @@ trait EmitLlvmObjects
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
                     }
+                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
                 }
+                $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
             }
             $ai = $ai + 1;
         }
