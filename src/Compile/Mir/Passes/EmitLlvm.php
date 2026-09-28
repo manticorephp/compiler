@@ -1483,11 +1483,18 @@ final class EmitLlvm implements EmitVisitor
      * non-string element vec (int/float/mixed): biImplode boxes the vec into a
      * cell-array first. Two passes (sum lengths, then copy with separators).
      */
-    private function implodeCellRuntime(): string
+    private function implodeCellRuntime(bool $withObj = false): string
     {
+        // Both variants from one body: `_obj` takes the module's own
+        // `__mir_obj_to_str` as a POINTER — the central core cannot name it, and
+        // a Stringable element joined as its address (php-cs-fixer's
+        // DocBlock::getContent). Null = no __toString class anywhere.
+        if (!$withObj) { $plain = $this->implodeCellRuntime(true); } else { $plain = ''; }
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
-        $out  = "\ndefine ptr @__mir_array_implode_cell(ptr %sep, ptr %arr) {\n";
+        $out  = $withObj
+            ? "\ndefine ptr @__mir_array_implode_cell_obj(ptr %sep, ptr %arr, ptr %objfn) {\n"
+            : $plain . "\ndefine ptr @__mir_array_implode_cell(ptr %sep, ptr %arr) {\n";
         $out .= "entry:\n";
         $out .= "  %len = call i64 @__mir_array_live_len(ptr %arr)\n";
         $out .= "  %ez = icmp sle i64 %len, 0\n";
@@ -1524,7 +1531,18 @@ final class EmitLlvm implements EmitVisitor
         $out .= "body:\n";
         $out .= "  %ev0 = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
         $out .= "  %ev = call i64 @__mir_box_by_repr(i64 %ev0, i64 %repr)\n";
-        $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
+        if ($withObj) {
+            $out .= "  %eistag = icmp ugt i64 %ev, -4503599627370496\n";
+            $out .= "  %eh = lshr i64 %ev, 48\n  %enib = and i64 %eh, 15\n";
+            $out .= "  %eisobjn = icmp eq i64 %enib, 8\n  %eisobj = and i1 %eistag, %eisobjn\n";
+            $out .= "  %ehasfn = icmp ne ptr %objfn, null\n  %euse = and i1 %eisobj, %ehasfn\n";
+            $out .= "  br i1 %euse, label %eobj, label %escal\n";
+            $out .= "eobj:\n  %eo = call ptr %objfn(i64 %ev)\n  br label %eend\n";
+            $out .= "escal:\n  %es0 = call ptr @__manticore_tagged_to_str(i64 %ev)\n  br label %eend\n";
+            $out .= "eend:\n  %es = phi ptr [ %eo, %eobj ], [ %es0, %escal ]\n";
+        } else {
+            $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
+        }
         $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
         $out .= "  %isfirst = icmp eq i64 %i, 0\n";
         $out .= "  %sepn = select i1 %isfirst, i64 0, i64 %seplen\n";

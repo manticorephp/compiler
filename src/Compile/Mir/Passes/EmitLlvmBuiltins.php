@@ -4882,19 +4882,6 @@ trait EmitLlvmBuiltins
         // `implode($array)` (separator defaults to ""). In the one-arg form the
         // array is $args[0] — reading $args[1] here dereferenced a null node and
         // SIGSEGV'd the compiler.
-        // Elements that may be OBJECTS join through the module's own
-        // `__mir_implode_obj`: the central runtime join cannot call a
-        // __toString and printed the object's address (php-cs-fixer's
-        // DocBlock::getContent is `implode('', $this->lines)` over Line objects).
-        $ia = \count($args) >= 2 ? $args[1] : $args[0];
-        $iel = $ia->type->element ?? null;
-        $iek = $iel === null ? Type::KIND_UNKNOWN : $iel->kind;
-        if ($this->hasObjToStr && $ia->type->isArray()
-            && $iek !== Type::KIND_STRING && $iek !== Type::KIND_INT && $iek !== Type::KIND_FLOAT
-            && $iek !== Type::KIND_BOOL && $iek !== Type::KIND_NULL) {
-            $sepN = \count($args) >= 2 ? $args[0] : new \Compile\Mir\StringConst('', Type::string_());
-            return $this->emitNode(new Call('__mir_implode_obj', [$sepN, $ia], Type::string_()));
-        }
         if (\count($args) >= 2) {
             $out = $this->emitPtrArg($args[0]);
             $sep = $this->lastValue;
@@ -4962,7 +4949,14 @@ trait EmitLlvmBuiltins
             $this->rt->needsTaggedToStr = true;
             $this->rt->needsImplodeCell = true;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            // A Stringable element joins as its __toString(): the module's own
+            // `__mir_obj_to_str` rides in as a pointer the central join calls.
+            if ($this->hasObjToStr) {
+                $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell_obj(ptr ' . $sep . ', ptr ' . $vec
+                    . ", ptr @manticore___mir_obj_to_str)\n";
+            } else {
+                $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            }
             // implode joins into a fresh string and keeps nothing of the walk —
             // so a REBUILT cell-array is dead here ({@see cellBoxTempDrop}).
             if ($boxed !== '') { $out .= $this->cellBoxTempDrop($arr->type, $boxed, $arr); }

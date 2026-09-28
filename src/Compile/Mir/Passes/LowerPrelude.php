@@ -328,13 +328,6 @@ trait LowerPrelude
             $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
             $arm = $arm + 1;
         }
-        // implode() over values that may be objects: the central
-        // `__mir_array_implode_cell` cannot reach this module's __toString
-        // arms, a `(string)` here can ({@see EmitLlvmBuiltins::biImplode}).
-        $body .= "/** @param mixed[] \$a */\nfunction __mir_implode_obj(string \$sep, array \$a): string {\n"
-            . "  \$out = ''; \$first = true;\n"
-            . "  foreach (\$a as \$v) { if (!\$first) { \$out .= \$sep; } \$first = false; \$out .= (string)\$v; }\n"
-            . "  return \$out;\n}\n";
         return $body . $dispatch . "  }\n"
             . "  throw new \\Error('Object of class ' . \\get_class(\$v) . ' could not be converted to string');\n}\n";
     }
