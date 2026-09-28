@@ -1719,6 +1719,9 @@ trait EmitLlvmCalls
             $fpReg = $fpi;
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
+            // The arity channel, stored LAST so no argument's own call can
+            // overwrite it ({@see EmitLlvmModule::closureArityPrologue}).
+            $out .= $this->cloArityStore($fpi, $pi);
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
             $out .= $padDrops;
         }
@@ -2002,6 +2005,18 @@ trait EmitLlvmCalls
      * released after), anything else takes the plain indirect call. The result
      * joins through a slot and is left in `lastValue`.
      */
+    /** Store the closure arity pair for a dynamic call of `$argc` arguments
+     *  through fn word `$fpi` ({@see EmitLlvmModule::closureArityPrologue}).
+     *  The module-local pad chain below still serves a caller that can name
+     *  the closures (it also drops an omitted by-ref default's slot); the
+     *  pair is what a PRELUDE caller, which may not, relies on. */
+    private function cloArityStore(string $fpi, int $argc): string
+    {
+        $this->rt->needsCloArgc = true;
+        return '  store i64 ' . (string)$argc . ", ptr @__mir_clo_argc\n"
+            . '  store i64 ' . $fpi . ", ptr @__mir_clo_fp\n";
+    }
+
     private function emitDynClosurePaddedCall(string $fpi, string $argList, string $argTypes, int $argc): string
     {
         $out = '';
@@ -2026,6 +2041,7 @@ trait EmitLlvmCalls
         }
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
+        $out .= $this->cloArityStore($fpi, $argc);
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
         $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
