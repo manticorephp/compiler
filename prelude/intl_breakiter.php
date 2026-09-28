@@ -437,7 +437,7 @@ class IntlBreakIterator implements IteratorAggregate
 
     public function getIterator(): Iterator
     {
-        return InternalIterator::__mcBoundaries($this);
+        return InternalIterator::__mcWrap(new __McBrkCursor($this));
     }
 
     public function __mcLastCodePoint(): int
@@ -661,21 +661,13 @@ class IntlPartsIterator extends IntlIterator
     }
 }
 
-/** The engine's iterator over an IteratorAggregate's boundaries (IntlBreakIterator::getIterator). */
-final class InternalIterator implements Iterator
+/** The boundary cursor behind IntlBreakIterator::getIterator (an InternalIterator). */
+final class __McBrkCursor implements Iterator
 {
-    private ?IntlBreakIterator $__mcBrk = null;
     private int $__mcPos = -1;
     private int $__mcIndex = 0;
 
-    private function __construct() {}
-
-    public static function __mcBoundaries(IntlBreakIterator $b): InternalIterator
-    {
-        $it = new InternalIterator();
-        $it->__mcBrk = $b;
-        return $it;
-    }
+    public function __construct(private IntlBreakIterator $__mcBrk) {}
 
     public function current(): mixed
     {

@@ -779,20 +779,6 @@ function __mc_tz_zone_index(string $id): int
     return $idx;
 }
 
-/** A malloc'd NUL-terminated copy of `$s`; the caller frees it. */
-function __mc_icu_cstr(string $s): \Ffi\Ptr
-{
-    $n = \strlen($s);
-    $p = \__mc_icu_malloc($n + 1);
-    $i = 0;
-    while ($i < $n) {
-        \poke_i8($p, $i, \ord($s[$i]));
-        $i = $i + 1;
-    }
-    \poke_i8($p, $n, 0);
-    return $p;
-}
-
 /** UTF-16 of `$s`, or null with the "could not convert" error set. */
 function __mc_intltz_u16(string $fn, string $s): ?__McIcuU16
 {

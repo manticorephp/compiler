@@ -4395,6 +4395,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         "intl_breakiter.php" => ['IntlBreakIterator', 'IntlRuleBasedBreakIterator', 'IntlCodePointBreakIterator', 'IntlPartsIterator'],
         "intl_spoof.php" => ['Spoofchecker'],
         "intl_ucnv.php" => ['UConverter'],
+        "intl_rb.php" => ['ResourceBundle'],
         "intl_idn.php" => ['IDNA_DEFAULT', 'IDNA_ALLOW_UNASSIGNED', 'IDNA_USE_STD3_RULES', 'IDNA_CHECK_BIDI',
             'IDNA_CHECK_CONTEXTJ', 'IDNA_NONTRANSITIONAL_TO_ASCII', 'IDNA_NONTRANSITIONAL_TO_UNICODE',
             'INTL_IDNA_VARIANT_UTS46', 'IDNA_ERROR_EMPTY_LABEL', 'IDNA_ERROR_LABEL_TOO_LONG',

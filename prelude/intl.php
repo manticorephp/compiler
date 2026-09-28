@@ -916,6 +916,63 @@ function __mc_icu_enum_strings(\Ffi\Ptr $en): array
     return $out;
 }
 
+/** A malloc'd NUL-terminated copy of `$s`; the caller frees it. */
+function __mc_icu_cstr(string $s): \Ffi\Ptr
+{
+    $n = \strlen($s);
+    $p = \__mc_icu_malloc($n + 1);
+    $i = 0;
+    while ($i < $n) {
+        \poke_i8($p, $i, \ord($s[$i]));
+        $i = $i + 1;
+    }
+    \poke_i8($p, $n, 0);
+    return $p;
+}
+
+/**
+ * The engine's iterator an internal IteratorAggregate::getIterator() answers
+ * (zend_create_internal_iterator_zval): a thin wrapper around the class's own cursor.
+ */
+final class InternalIterator implements Iterator
+{
+    private ?Iterator $__mcInner = null;
+
+    private function __construct() {}
+
+    public static function __mcWrap(Iterator $inner): InternalIterator
+    {
+        $it = new InternalIterator();
+        $it->__mcInner = $inner;
+        return $it;
+    }
+
+    public function current(): mixed
+    {
+        return $this->__mcInner->current();
+    }
+
+    public function key(): mixed
+    {
+        return $this->__mcInner->key();
+    }
+
+    public function next(): void
+    {
+        $this->__mcInner->next();
+    }
+
+    public function rewind(): void
+    {
+        $this->__mcInner->rewind();
+    }
+
+    public function valid(): bool
+    {
+        return $this->__mcInner->valid();
+    }
+}
+
 /**
  * IntlIterator over a materialized StringEnumeration. php's cursor: a rewind
  * resets and fetches the first element, next() fetches the following one,

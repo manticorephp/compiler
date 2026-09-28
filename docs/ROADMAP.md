@@ -346,7 +346,10 @@ Order:
      warning sites answer their value silently, pending the warnings → exceptions epic).
    - ✅ `UConverter` (ucnv_*; a subclass's toUCallback/fromUCallback are called back through
      fixed trampolines, as Zend does — Zend itself segfaults converting with a CLONED one).
-   - Next: `MessageFormatter`, `ResourceBundle`.
+   - ✅ `ResourceBundle` (ures_*; element reads ride ArrayAccess, so `instanceof ArrayAccess`
+     and a bare isset() answer where php says false / throws).
+   - Next: `MessageFormatter` — no C API takes named arguments; plan: php's MessageFormat
+     syntax parsed in PHP over ICU's number/date/plural primitives.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 
