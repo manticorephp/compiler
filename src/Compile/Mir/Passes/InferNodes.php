@@ -1645,8 +1645,13 @@ trait InferNodes
             $node->type = $cur;
             return $cur;
         }
-        // `$x++` reads + writes an int local; pin the slot to int.
+        // `$x++` reads + writes an int local; pin the slot to int — and the
+        // NODE: an earlier inference round may have stamped it `cell` (`$j = $i`
+        // with `$i` a key not yet narrowed), and the emitter reads the node. A
+        // stale `cell` ran the raw int slot through the cell decrement, so
+        // `for ($j = $i; $j >= 0; --$j)` stopped after one step.
         $this->localTypes[$node->name] = Type::int_();
+        $node->type = Type::int_();
         return Type::int_();
     }
 

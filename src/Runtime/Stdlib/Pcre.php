@@ -49,8 +49,11 @@ function __preg_close_delim(string $open): string
 function __preg_compile(string $pattern): int
 {
     static $cache = [];
-    if (isset($cache[$pattern])) {
-        return $cache[$pattern];
+    // ONE probe: `isset` then a read walked the map twice per call, and a
+    // php-cs-fixer pattern is a fresh multi-KB concatenation every time.
+    $hit = $cache[$pattern] ?? 0;
+    if ($hit !== 0) {
+        return $hit;
     }
     $close = \__preg_close_delim($pattern[0]);
     $endPos = \strrpos($pattern, $close);
