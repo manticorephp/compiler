@@ -3295,12 +3295,33 @@ trait EmitLlvmCalls
      * release of that write, when the site owns it, lands in
      * {@see $lastRefSlotDrop} for the caller to emit after the call.
      */
+    /**
+     * A throwaway slot backing a by-ref argument that is not an lvalue owns its
+     * seed, since the callee releases whatever it replaces
+     * ({@see EmitLlvmLocals::refParamOverwriteIr}). A fresh producer already is
+     * a +1; a BORROWED read (a property off an erased receiver) takes one here,
+     * or the callee's release would free the owner's value. `lastValue` is kept.
+     */
+    private function ownRefSeed(Node $a, string $val): string
+    {
+        if ($this->freshRcArgFlavor($a) !== '' || $this->isFreshStringTemp($a)) { return ''; }
+        $flavor = $this->discardReleaseFlavor($a->type);
+        if ($flavor === '' || $val === '0') { return ''; }
+        $keep = $this->lastValue;
+        $keepT = $this->lastValueType;
+        $out = $this->rcRetainReg($val, $flavor);
+        $this->lastValue = $keep;
+        $this->lastValueType = $keepT;
+        return $out;
+    }
+
     private function emitRefValueSlot(Node $a, ?Type $pt, int $srcArgc, int $ai, bool $arrayHinted = false): string
     {
         $tmp = $this->ssa->allocReg();
         $out = '  ' . $tmp . " = alloca i64\n";
         $out .= $this->emitNode($a);
         $out .= $this->coerceToI64();
+        $out .= $this->ownRefSeed($a, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
         $addr = $this->ssa->allocReg();
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
@@ -3367,6 +3388,7 @@ trait EmitLlvmCalls
         $out = '  ' . $tmp . " = alloca i64\n";
         $out .= $this->emitNode($a);
         $out .= $this->coerceToI64();
+        $out .= $this->ownRefSeed($a, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = ptrtoint ptr ' . $tmp . " to i64\n";

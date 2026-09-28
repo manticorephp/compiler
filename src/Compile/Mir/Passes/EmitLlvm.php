@@ -5365,6 +5365,13 @@ final class EmitLlvm implements EmitVisitor
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
             return $this->arrayElemAddressable($a);
         }
+        // A static property is an external-linkage global, and
+        // {@see EmitLlvmLocals::byRefAddrOf} hands its address over. Not listed
+        // here, `uksort(self::$defs, …)` rode the throwaway-slot path: the sort
+        // landed in a temporary and the property kept its old order.
+        if ($a->kind === Node::KIND_STATIC_PROP) {
+            return true;
+        }
         return false;
     }
 
