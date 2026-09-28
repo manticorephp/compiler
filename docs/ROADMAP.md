@@ -315,9 +315,15 @@ Order:
    the stdlib `.o`; a program that does not call them does not grow). php_unicode.c's
    context rules are transcribed — the final sigma including its 64-codepoint buffer
    look-back / look-ahead, ISO-8859-9's dotted/dotless i. Fuzz: 0 mismatches.
-5. **intl over ICU** — `Normalizer`, `grapheme_*`, `Collator`, `NumberFormatter`,
-   `IntlDateFormatter`, `Transliterator`, `IntlChar`. Parity is near-free (Zend calls the
-   same ICU) modulo ICU version.
+5. **intl over ICU** — one demand-gated prelude file per class family
+   (`prelude/intl*.php`), php-src's ext/intl transcribed call for call, so parity is
+   near-free (Zend calls the same ICU):
+   - ✅ `Normalizer`, `grapheme_*` (break iterator + usearch), `Collator` (three sort modes,
+     sort keys), `NumberFormatter` (all styles/types, currency, parse offsets, attributes,
+     symbols, patterns), the intl error state (`intl_get_error_*`, `intl_error_name`).
+   - Next: `Locale`, `Transliterator` (symfony/string's slugger), `IntlChar`,
+     `IntlDateFormatter` + `IntlCalendar` / `IntlTimeZone`, `MessageFormatter`,
+     `ResourceBundle`, `Spoofchecker`, `IntlBreakIterator`, `UConverter`, `idn_to_*`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 
