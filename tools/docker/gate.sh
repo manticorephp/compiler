@@ -75,7 +75,7 @@ echo "=== gate:  difftest=$MC_DIFFTEST fixpoint=$MC_FIXPOINT MC_JOBS=$MC_JOBS MC
 
 TREE="$MC_WORK/src-tree"
 rm -rf "$TREE"
-cp -a "$MC_REPO" "$TREE"
+cp -RP "$MC_REPO" "$TREE"
 cd "$TREE" || exit 1
 # A stale macOS bin/manticore + lib/*.o from the host tree would fake a pass (or
 # link Mach-O into an ELF build). Start from a clean slate.
@@ -121,7 +121,7 @@ restore_compiler_cache() {
 
     mkdir -p bin lib
     cp "$MC_COMPILER_CACHE/bin/manticore" bin/manticore
-    cp -a "$MC_COMPILER_CACHE/lib/." lib/
+    cp -RP "$MC_COMPILER_CACHE/lib/." lib/
     chmod u+x bin/manticore
     if ! bin/manticore version >/dev/null 2>&1; then
         echo "cache: holds a compiler that does not run here — ignoring it"
@@ -150,7 +150,7 @@ restore_published_seed() {
 
     mkdir -p bin lib
     cp "$MC_SEED_DIR/bin/manticore" bin/manticore
-    cp -a "$MC_SEED_DIR/lib/." lib/
+    cp -RP "$MC_SEED_DIR/lib/." lib/
     chmod u+x bin/manticore
     if ! bin/manticore version >/dev/null 2>&1; then
         echo "seed: $MC_SEED_DIR holds a compiler that does not run here — ignoring it"
@@ -180,7 +180,7 @@ save_compiler_cache() {
         return 0
     fi
     cp bin/manticore "$tmp/bin/manticore"
-    cp -a lib/. "$tmp/lib/"
+    cp -RP lib/. "$tmp/lib/"
     cache_id > "$tmp/id"
 
     if rm -rf "$MC_COMPILER_CACHE/bin" "$MC_COMPILER_CACHE/lib" "$MC_COMPILER_CACHE/id" 2>/dev/null \
@@ -213,9 +213,16 @@ if [ -n "$WARM" ]; then
     # tests, swaps, and only THEN lets the NEW binary build lib/. A one-pass
     # build would leave the stdlib a generation behind and overwrite the running
     # executable. A bootstrap gap exits 1 here and falls through to the seed.
-    echo "=== bin/build (self-hosted from the $WARM) ==="
-    if bin/build > "$MC_LOGDIR/compile.log" 2>&1; then
-        echo "bin/build: OK"
+    #
+    # Then a SECOND generation. The first one is this tree compiled by an older
+    # compiler, so it carries every miscompile that compiler had — the tree's
+    # fixes are only in its source, not in its code. A v0.11.0 seed built a
+    # compiler that SIGSEGV'd compiling any http program on amd64 while the same
+    # tree rebuilt by itself was clean. The suite must judge the self-built one.
+    echo "=== bin/build (self-hosted from the $WARM, then by itself) ==="
+    if bin/build > "$MC_LOGDIR/compile.log" 2>&1 \
+            && bin/build >> "$MC_LOGDIR/compile.log" 2>&1; then
+        echo "bin/build: OK (two generations)"
         tail -5 "$MC_LOGDIR/compile.log"
     else
         rc=$?
