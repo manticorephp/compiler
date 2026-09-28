@@ -1,0 +1,23 @@
+object(Plain)#1 (2) {
+  ["q"]=>
+  int(1)
+  ["name"]=>
+  string(1) "p"
+}
+object(Debugged)#1 (2) {
+  ["id"]=>
+  int(5)
+  ["tag"]=>
+  string(1) "x"
+}
+object(Bare)#1 (0) {
+}
+array(1) {
+  [0]=>
+  object(Plain)#1 (2) {
+    ["q"]=>
+    int(1)
+    ["name"]=>
+    string(1) "p"
+  }
+}

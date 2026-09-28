@@ -428,6 +428,23 @@ trait LowerPrelude
         return $body . $dispatch;
     }
 
+    /** Class names the unconditional prelude files declare, filled once.
+     *  @var array<string, bool> */
+    private array $basePreludeClasses = [];
+    private bool $basePreludeScanned = false;
+
+    private function isBasePreludeClass(string $cname): bool
+    {
+        if (!$this->basePreludeScanned) {
+            $this->basePreludeScanned = true;
+            $m = [];
+            \preg_match_all('/^\s*(?:abstract\s+|final\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)/m',
+                $this->exceptionsSrc . $this->resourceSrc . $this->backtraceSrc, $m);
+            foreach ($m[1] as $n) { $this->basePreludeClasses[$n] = true; }
+        }
+        return isset($this->basePreludeClasses[$cname]);
+    }
+
     /**
      * The class table sorted most-derived-first, with the classes that have no
      * object to walk removed (stdClass — the dynamic-bag fallback handles it;
@@ -449,7 +466,13 @@ trait LowerPrelude
             if ($cd->isStruct) { continue; }
             if ($this->isTypeDef($cname)) { continue; }
             if ($this->walkerReachabilityKnown) {
-                $keep = isset($this->walkerReachableClasses[$cname]);
+                // A prelude class is born inside a builtin (date_create(),
+                // IntlTimeZone::createTimeZone()), where no user `new` names it;
+                // without an arm the bag walk reads a declared object as a bag.
+                // The unconditional files (the Throwable tree) stay demand-rooted:
+                // an arm for each would grow every var_dump program by ~70 KB.
+                $keep = ($cd->isPreludeClass && !$this->isBasePreludeClass($cname))
+                    || isset($this->walkerReachableClasses[$cname]);
                 $cur = $cd->parent;
                 while (!$keep && $cur !== "" && isset($this->classTable[$cur])) {
                     $keep = isset($this->walkerReachableClasses[$cur]);

@@ -3838,10 +3838,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
         }
-        preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/", $source, $m1);
+        preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m1);
         preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m2);
         preg_match_all("/\\b([A-Za-z_][A-Za-z0-9_\\\\]*)::[A-Za-z_][A-Za-z0-9_]*/", $source, $m3);
         preg_match_all('/\\b(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*[\'\"]([A-Za-z_][A-Za-z0-9_\\\\]*)[\'\"]/', $source, $m4);
+        // A caught type: a builtin throws the object, so no `new` names it.
+        preg_match_all("/\\bcatch\\s*\\(\\s*([A-Za-z_\\\\|\\s]+?)\\s*(?:\\$|\\))/", $source, $m5);
+        foreach ($m5[1] as $caught) {
+            foreach (explode("|", $caught) as $ct) { $walkerRoots[ltrim(trim($ct), "\\")] = true; }
+        }
         foreach ([$m1[1], $m2[1], $m3[1], $m4[2]] as $group) {
             foreach ($group as $root) { $walkerRoots[$root] = true; }
         }
@@ -4395,7 +4400,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $useIntl = $intlPicked !== ""
         || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))
 
-        || $demand->mentionsAny(['Normalizer', 'IntlException']);
+        || $demand->mentionsAny(['Normalizer', 'IntlException', 'IntlIterator']);
     // WeakMap / WeakReference: two global class names php owns outright.
     $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
