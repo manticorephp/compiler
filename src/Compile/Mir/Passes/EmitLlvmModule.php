@@ -2105,7 +2105,7 @@ trait EmitLlvmModule
             if (!isset($this->locals->slots[$name])) { continue; }
             $out .= $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
         }
-        return $out . $this->emitOwnedBoxReleases($exempt);
+        return $this->releaseAggItersLeftBy(0) . $out . $this->emitOwnedBoxReleases($exempt);
     }
 
     /**
