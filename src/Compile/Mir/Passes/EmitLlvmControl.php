@@ -404,6 +404,11 @@ trait EmitLlvmControl
         $out .= '  ' . $iterSlot . " = alloca i64\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $iterSlot . "\n";
+        // Whether the slot holds getIterator()'s result (+1, the loop's to give
+        // back) or the subject itself (borrowed).
+        $ownSlot = $this->ssa->allocReg();
+        $out .= '  ' . $ownSlot . " = alloca i1\n";
+        $out .= '  store i1 0, ptr ' . $ownSlot . "\n";
         $aggL = $this->ssa->allocLabel('fe.agg');
         $joinL = $this->ssa->allocLabel('fe.agg.end');
         $probe = new \Compile\Mir\Instanceof_(
@@ -421,10 +426,21 @@ trait EmitLlvmControl
         $out .= $this->emitNode($gi);
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $out .= '  store i1 1, ptr ' . $ownSlot . "\n";
         $out .= '  br label %' . $joinL . "\n";
         $out .= $joinL . ":\n";
-        return $out . $this->emitIterProtocolLoop(
+        // The getIterator() result was never given back — not even at the end
+        // label — so every erased foreach over an IteratorAggregate leaked it,
+        // and with it the subject (php-cs-fixer: a Tokens and all its tokens
+        // per erased `foreach ($tokens …)`).
+        $this->cf->pushAggIter($iterSlot, true, $ownSlot);
+        $out .= $this->emitIterProtocolLoop(
             $fe, $iterSlot, $iterName, \Compile\Mir\Type::obj('Iterator'), true);
+        $this->cf->popAggIter();
+        $out .= $this->releaseAggIterSlot($iterSlot, true, $ownSlot);
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     private function genFrameProbeIr(string $iw): string
@@ -646,11 +662,27 @@ trait EmitLlvmControl
         return $out;
     }
 
-    /** Give back an aggregate foreach's iterator and clear its slot. */
-    private function releaseAggIterSlot(string $iterSlot, bool $dyn): string
+    /**
+     * Give back an aggregate foreach's iterator and clear its slot. `$flag`,
+     * when set, is an i1 slot saying whether the loop owns the iterator at all
+     * — the erased foreach drives a subject that IS an Iterator (borrowed) or
+     * one it got from getIterator() (owned) through the same slot.
+     */
+    private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = ''): string
     {
+        $out = '';
+        $skipL = '';
+        if ($flag !== '') {
+            $fv = $this->ssa->allocReg();
+            $out .= '  ' . $fv . ' = load i1, ptr ' . $flag . "\n";
+            $relL = $this->ssa->allocLabel('aggit.rel');
+            $skipL = $this->ssa->allocLabel('aggit.skip');
+            $out .= '  br i1 ' . $fv . ', label %' . $relL . ', label %' . $skipL . "\n";
+            $out .= $relL . ":\n";
+            $out .= '  store i1 0, ptr ' . $flag . "\n";
+        }
         $it = $this->ssa->allocReg();
-        $out = '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
+        $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
         if ($dyn) {
             // `getIterator(): Iterator` (SplFixedArray's own) may still be a
             // Generator frame at run time: release only an object, by the
@@ -663,6 +695,9 @@ trait EmitLlvmControl
             $out .= $this->rcReleaseReg($it, 'obj');
         }
         $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+        if ($skipL !== '') {
+            $out .= '  br label %' . $skipL . "\n" . $skipL . ":\n";
+        }
         return $out;
     }
 
@@ -671,7 +706,7 @@ trait EmitLlvmControl
     {
         $out = '';
         foreach ($this->cf->aggItersLeftBy($level) as $i) {
-            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i));
+            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i), $this->cf->aggIterFlag($i));
         }
         return $out;
     }
