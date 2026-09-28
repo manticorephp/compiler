@@ -2891,6 +2891,12 @@ final class UnifiedArrayRuntime
         // `array_reclaim`: the packed buffer is freed HERE, not by a release —
         // uncounted, every sparse-key write read as one leaked array.
         $this->profCounter($done, 26);
+        if (Debug::$arrRcTrace) {
+            $ff = $this->module->anonString("[ARC] free arr=%p fn=%s\n");
+            $fc = $done->call('__mir_bt_top', Type::ptr(), []);
+            $done->call('dprintf', Type::i32(),
+                [Value::int(Type::i32(), 2), $ff, $arr, $fc], null, '(i32, ptr, ...)');
+        }
         $this->poolFree($done, $base);
         $done->ret($nu);
     }
