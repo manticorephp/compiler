@@ -32,9 +32,6 @@ function __mc_icu_utrans_openIDs(\Ffi\Ptr $err): \Ffi\Ptr {}
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uenum_unext')]
 function __mc_icu_uenum_unext(\Ffi\Ptr $en, \Ffi\Ptr $len, \Ffi\Ptr $err): \Ffi\Ptr {}
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('uenum_close')]
-function __mc_icu_uenum_close(\Ffi\Ptr $en): void {}
-
 #[\Ffi\Library('c'), \Ffi\Symbol('memcpy')]
 function __mc_icu_memcpy(\Ffi\Ptr $dst, \Ffi\Ptr $src, #[\Ffi\CType('size_t')] int $n): \Ffi\Ptr {}
 

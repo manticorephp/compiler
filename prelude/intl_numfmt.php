@@ -88,9 +88,6 @@ function __mc_icu_unum_getLocaleByType(\Ffi\Ptr $fmt, #[\Ffi\CType('int')] int $
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getISO3Language')]
 function __mc_icu_uloc_getISO3Language(string $locale): \Ffi\Ptr {}
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_canonicalize'), \Ffi\CType('int')]
-function __mc_icu_uloc_canonicalize(string $locale, \Ffi\Ptr $out, #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $err): int { return 0; }
-
 /** php's canonicalize_locale_string: ICU-canonical form of `$locale`, or `$locale` itself when that fails. */
 function __mc_intl_canonical_locale(string $locale): string
 {
@@ -253,7 +250,7 @@ class NumberFormatter
                 return 10;
             }
         }
-        if ($locale === "") { $locale = \cstr_to_str(\__mc_icu_uloc_getDefault()); }
+        if ($locale === "") { $locale = \__mc_intl_default_locale(); }
         if (\cstr_to_str(\__mc_icu_uloc_getISO3Language($locale)) === "") {
             if ($pat !== null) { \__mc_icu_free($pat->buf); }
             throw new \ValueError($fn . "(): Argument #1 (\$locale) \"" . $locale . "\" is invalid");

@@ -54,7 +54,7 @@ class Collator
 
     public function __construct(string $locale)
     {
-        if ($locale === "") { $locale = \cstr_to_str(\__mc_icu_uloc_getDefault()); }
+        if ($locale === "") { $locale = \__mc_intl_default_locale(); }
         $e = \__mc_icu_err();
         $this->coll = \__mc_icu_ucol_open($locale, $e);
         $code = \peek_i32($e, 0);

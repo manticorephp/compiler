@@ -881,8 +881,28 @@ const ULOC_VALID_LOCALE = 1;
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getDefault')]
 function __mc_icu_uloc_getDefault(): \Ffi\Ptr {}
 
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_canonicalize'), \Ffi\CType('int')]
+function __mc_icu_uloc_canonicalize(string $locale, \Ffi\Ptr $out, #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $err): int { return 0; }
+
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('uenum_close')]
+function __mc_icu_uenum_close(\Ffi\Ptr $en): void {}
+
 /** The ICU error code of the last failed __mc_icu_uchars() call. */
 final class __McIcuStatus
 {
     public static int $code = 0;
+}
+
+/**
+ * intl_locale_get_default: the Locale::setDefault() override (php's
+ * intl.default_locale ini) or ICU's own default.
+ */
+final class __McIntlLocale
+{
+    public static string $default = "";
+}
+
+function __mc_intl_default_locale(): string
+{
+    return __McIntlLocale::$default !== "" ? __McIntlLocale::$default : \cstr_to_str(\__mc_icu_uloc_getDefault());
 }
