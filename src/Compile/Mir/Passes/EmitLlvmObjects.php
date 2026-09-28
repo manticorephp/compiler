@@ -7320,7 +7320,19 @@ trait EmitLlvmObjects
             }
             return $out;
         }
-        if ($m === 'key')     { $out .= $this->genPrimeIfFresh($g); $out .= $this->genFieldLoad($g, 24); return $this->finishI64($out, $this->lastValue); }
+        // `key`@24 is the frame's own cell, exactly as `current` is — and a
+        // method call's result is the caller's +1, so take one here too. Handed
+        // out bare, the caller's owner (IteratorIterator caching
+        // `$this->__key = $inner->key()`) released the frame's key: the
+        // generator's next step freed it again and symfony Finder's appended
+        // file came back with a dead pathname for a key.
+        if ($m === 'key') {
+            $out .= $this->genPrimeIfFresh($g);
+            $out .= $this->genFieldLoad($g, 24);
+            $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain(Type::cell(), $this->lastValue);
+            return $this->finishI64($out, $this->lastValue);
+        }
         if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
         // next()/send() on a generator nobody started run it to its first
