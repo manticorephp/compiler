@@ -475,6 +475,11 @@ function __mc_mb_iconv_name(string $enc): string
     return $found;
 }
 
+function __mc_mb_iconv_failed(int $cd): bool
+{
+    return $cd === -1 || $cd === 0 || $cd === 4294967295;
+}
+
 /** Open a descriptor for `$enc` in the given direction; throws when the host has none. */
 function __mc_mb_iconv_open(string $enc, bool $toUtf8): int
 {
@@ -482,7 +487,125 @@ function __mc_mb_iconv_open(string $enc, bool $toUtf8): int
     if ($name === "") {
         throw new \Error("mbstring: no converter for encoding \"" . $enc . "\" on this host");
     }
-    return $toUtf8 ? \Runtime\Iconv\iconv_open("UTF-8", $name) : \Runtime\Iconv\iconv_open($name, "UTF-8");
+    $cd = $toUtf8 ? \Runtime\Iconv\iconv_open("UTF-8", $name) : \Runtime\Iconv\iconv_open($name, "UTF-8");
+    if (\__mc_mb_iconv_failed($cd)) {
+        throw new \Error("mbstring: no converter for encoding \"" . $enc . "\" on this host");
+    }
+    return $cd;
+}
+
+/**
+ * Whether the host iconv can ENCODE into `$enc`. `__mc_mb_iconv_name` probes the
+ * decoding direction only, and musl decodes GB18030 / GBK / BIG5 / EUC-KR / CP949
+ * but encodes none of them.
+ */
+function __mc_mb_iconv_can_enc(string $enc): bool
+{
+    static $cache = [];
+    if (isset($cache[$enc])) { return $cache[$enc]; }
+    $name = \__mc_mb_iconv_name($enc);
+    $ok = false;
+    if ($name !== "") {
+        $cd = \Runtime\Iconv\iconv_open($name, "UTF-8");
+        if (!\__mc_mb_iconv_failed($cd)) {
+            \Runtime\Iconv\iconv_close($cd);
+            $ok = true;
+        }
+    }
+    $cache[$enc] = $ok;
+    return $ok;
+}
+
+/**
+ * Codepoint => bytes for `$enc`, built once by running the host's DECODER over
+ * every one- and two-byte sequence (and GB18030's four-byte BMP range) — the
+ * encoder a decode-only host lacks. The first (lowest) sequence of a codepoint
+ * wins, as libmbfl's tables prefer the canonical one.
+ * @return array<int,string>
+ */
+function __mc_mb_inv_table(string $enc): array
+{
+    static $tables = [];
+    if (isset($tables[$enc])) { return $tables[$enc]; }
+    $cd = \__mc_mb_iconv_open($enc, true);
+    $cap = 64;
+    $cells = \__mc_mb_iconv_cells($cap);
+    $map = [];
+    $seqs = [];
+    for ($b = 0x80; $b <= 0xFF; $b++) { $seqs[] = \chr($b); }
+    for ($l = 0x81; $l <= 0xFE; $l++) {
+        for ($t = 0x40; $t <= 0xFE; $t++) {
+            if ($t !== 0x7F) { $seqs[] = \chr($l) . \chr($t); }
+        }
+    }
+    if (\str_starts_with($enc, "GB18030")) {
+        for ($b1 = 0x81; $b1 <= 0x84; $b1++) {
+            for ($b2 = 0x30; $b2 <= 0x39; $b2++) {
+                for ($b3 = 0x81; $b3 <= 0xFE; $b3++) {
+                    for ($b4 = 0x30; $b4 <= 0x39; $b4++) { $seqs[] = \chr($b1) . \chr($b2) . \chr($b3) . \chr($b4); }
+                }
+            }
+        }
+    }
+    foreach ($seqs as $seq) {
+        $u = \__mc_mb_iconv_feed($cd, $seq, 0, $cells, $cap);
+        if ($u === "" || \peek_i64($cells[5], 0) !== \strlen($seq)) { continue; }
+        $n = \__mc_mb_u8_step($u, 0, \strlen($u));
+        if ($n !== \strlen($u)) { continue; }
+        $cp = \__mc_mb_cp(0, $u, 0, $n);
+        if ($cp >= 0x80 && !isset($map[$cp])) { $map[$cp] = $seq; }
+    }
+    \__mc_mb_iconv_free($cd, $cells);
+    $tables[$enc] = $map;
+    return $map;
+}
+
+/** GB18030's four-byte form of a supplementary codepoint — linear, no table. */
+function __mc_mb_gb18030_supp(int $cp): string
+{
+    $v = $cp - 0x10000;
+    $b4 = $v % 10; $v = \intdiv($v, 10);
+    $b3 = $v % 126; $v = \intdiv($v, 126);
+    $b2 = $v % 10; $b1 = \intdiv($v, 10);
+    return \chr(0x90 + $b1) . \chr(0x30 + $b2) . \chr(0x81 + $b3) . \chr(0x30 + $b4);
+}
+
+/**
+ * One codepoint in `$enc` through the inverted table, null when it has no spelling.
+ * @param array<int,string> $map
+ */
+function __mc_mb_inv_cp(string $enc, array $map, int $cp): ?string
+{
+    if ($cp < 0x80) { return \chr($cp); }
+    if (isset($map[$cp])) { return $map[$cp]; }
+    if ($cp >= 0x10000 && $cp <= 0x10FFFF && \str_starts_with($enc, "GB18030")) { return \__mc_mb_gb18030_supp($cp); }
+    return null;
+}
+
+/** `__mc_mb_iconv_enc8` for a host that can decode `$enc` but not encode it. */
+function __mc_mb_inv_enc8(string $enc, string $u, bool $strict): ?string
+{
+    $map = \__mc_mb_inv_table($enc);
+    $out = "";
+    foreach (\__mc_mb_units($u) as $cp) {
+        $b = $cp < 0 ? null : \__mc_mb_inv_cp($enc, $map, $cp);
+        if ($b === null) {
+            if ($strict) { return null; }
+            $b = "";
+            foreach (\__mc_mb_iconv_subst($cp) as $piece) {
+                $pb = "";
+                $ok = true;
+                foreach (\__mc_mb_units($piece) as $pc) {
+                    $x = $pc < 0 ? null : \__mc_mb_inv_cp($enc, $map, $pc);
+                    if ($x === null) { $ok = false; break; }
+                    $pb = $pb . $x;
+                }
+                if ($ok) { $b = $pb; break; }
+            }
+        }
+        $out = $out . $b;
+    }
+    return $out;
 }
 
 /**
@@ -508,7 +631,10 @@ function __mc_mb_iconv_feed(int $cd, string $in, int $from, array $cells, int $c
         $r = \Runtime\Iconv\iconv_convert($cd, $cells[0], $cells[1], $cells[2], $cells[3]);
         $written = $cap - \peek_i64($cells[3], 0);
         if ($written > 0) { $out = $out . \__mc_iconv_read($cells[4], $written); }
-        if ($r !== -1 && $r !== 4294967295) { break; }
+        if ($r !== -1 && $r !== 4294967295) {
+            if ($r > 0) { \poke_i64($cells[6], 0, \peek_i64($cells[6], 0) + $r); }
+            break;
+        }
         $left = \peek_i64($cells[1], 0);
         if ($left <= 0) { break; }
         if ($left < $before || $written > 0) { continue; }
@@ -530,6 +656,8 @@ function __mc_mb_iconv_cells(int $cap): array
     $cells[3] = \Runtime\Libc\malloc(8);
     $cells[4] = \Runtime\Libc\malloc($cap);
     $cells[5] = \Runtime\Libc\malloc(8);
+    $cells[6] = \Runtime\Libc\malloc(8);
+    \poke_i64($cells[6], 0, 0);
     return $cells;
 }
 
@@ -563,9 +691,99 @@ function __mc_mb_iconv_dec8(string $enc, string $s): string
 
 function __mc_mb_iconv_enc8(string $enc, string $u, bool $strict): ?string
 {
+    if (!\__mc_mb_iconv_can_enc($enc)) { return \__mc_mb_inv_enc8($enc, $u, $strict); }
     $cd = \__mc_mb_iconv_open($enc, false);
     $cap = 4096;
     $cells = \__mc_mb_iconv_cells($cap);
+    $out = \__mc_mb_iconv_enc8_run($cd, $cells, $cap, $u, $strict);
+    $irreversible = \peek_i64($cells[6], 0);
+    \__mc_mb_iconv_free($cd, $cells);
+    if ($out === null) { return null; }
+    // A host that substitutes instead of failing (musl writes '*' and counts it
+    // as irreversible) hides which character it could not spell: go again one
+    // character at a time so each one gets php's substitute.
+    if ($irreversible > 0) { $out = \__mc_mb_iconv_enc8_each($enc, $u, $strict); }
+    return $out === null ? null : \__mc_mb_iso2022_canon($enc, $out);
+}
+
+/**
+ * One UTF-8 character (or substitute piece) through `$cd`; null when the host
+ * could not spell all of it, exactly.
+ * @param array<int,\Ffi\Ptr> $cells
+ */
+function __mc_mb_iconv_enc_one(int $cd, string $piece, array $cells, int $cap): ?string
+{
+    \poke_i64($cells[6], 0, 0);
+    $got = \__mc_mb_iconv_feed($cd, $piece, 0, $cells, $cap);
+    if (\peek_i64($cells[5], 0) !== \strlen($piece) || \peek_i64($cells[6], 0) !== 0) { return null; }
+    return $got;
+}
+
+function __mc_mb_iconv_enc8_each(string $enc, string $u, bool $strict): ?string
+{
+    $cd = \__mc_mb_iconv_open($enc, false);
+    $cap = 4096;
+    $cells = \__mc_mb_iconv_cells($cap);
+    $out = "";
+    foreach (\__mc_mb_units($u) as $cp) {
+        $got = $cp >= 0 && $cp <= 0x10FFFF ? \__mc_mb_iconv_enc_one($cd, \__mc_mb_u8_chr($cp), $cells, $cap) : null;
+        if ($got === null) {
+            if ($strict) {
+                \__mc_mb_iconv_free($cd, $cells);
+                return null;
+            }
+            $got = "";
+            foreach (\__mc_mb_iconv_subst($cp) as $piece) {
+                if ($piece === "") { break; }
+                $p = \__mc_mb_iconv_enc_one($cd, $piece, $cells, $cap);
+                if ($p !== null) { $got = $p; break; }
+            }
+        }
+        $out = $out . $got;
+    }
+    $out = $out . \__mc_mb_iconv_feed($cd, "", 0, $cells, $cap);
+    \__mc_mb_iconv_free($cd, $cells);
+    return $out;
+}
+
+/**
+ * Drop the redundant escapes an ISO-2022 encoder may write — musl switches back
+ * to ASCII after every character — so the bytes are php's minimal form: an
+ * escape is kept only when it changes the active set before the next byte.
+ */
+function __mc_mb_iso2022_canon(string $enc, string $s): string
+{
+    if (!\str_starts_with(\__mc_mb_iconv_name($enc), "ISO-2022-JP") || !\str_contains($s, "\x1b")) { return $s; }
+    $n = \strlen($s);
+    $out = "";
+    $cur = "\x1b(B";
+    $pend = "";
+    $i = 0;
+    while ($i < $n) {
+        if ($s[$i] === "\x1b" && $i + 2 < $n) {
+            $len = $s[$i + 1] === '$' && $s[$i + 2] === '(' ? 4 : 3;
+            $pend = \substr($s, $i, $len);
+            $i = $i + $len;
+            continue;
+        }
+        if ($pend !== "") {
+            if ($pend !== $cur) { $out = $out . $pend; $cur = $pend; }
+            $pend = "";
+        }
+        $out = $out . $s[$i];
+        $i = $i + 1;
+    }
+    if ($pend !== "" && $pend !== $cur) { $out = $out . $pend; }
+    return $out;
+}
+
+/**
+ * The host-iconv encode through `$cd`; null when `$strict` met a character it
+ * cannot spell. Irreversible substitutions the host made add up in `$cells[6]`.
+ * @param array<int,\Ffi\Ptr> $cells
+ */
+function __mc_mb_iconv_enc8_run(int $cd, array $cells, int $cap, string $u, bool $strict): ?string
+{
     $n = \strlen($u);
     $out = "";
     $at = 0;
@@ -573,10 +791,7 @@ function __mc_mb_iconv_enc8(string $enc, string $u, bool $strict): ?string
         $out = $out . \__mc_mb_iconv_feed($cd, $u, $at, $cells, $cap);
         $at = \peek_i64($cells[5], 0);
         if ($at >= $n) { break; }
-        if ($strict) {
-            \__mc_mb_iconv_free($cd, $cells);
-            return null;
-        }
+        if ($strict) { return null; }
         $b = \ord($u[$at]);
         $len = $b === 0xFF || $b < 0x80 ? 1 : ($b >= 0xF0 ? 4 : ($b >= 0xE0 ? 3 : 2));
         $sub = \__mc_mb_iconv_subst($b === 0xFF ? -1 : \__mc_mb_cp(0, $u, $at, $at + $len));
@@ -590,9 +805,7 @@ function __mc_mb_iconv_enc8(string $enc, string $u, bool $strict): ?string
         }
         $at = $at + $len;
     }
-    $out = $out . \__mc_mb_iconv_feed($cd, "", 0, $cells, $cap);
-    \__mc_mb_iconv_free($cd, $cells);
-    return $out;
+    return $out . \__mc_mb_iconv_feed($cd, "", 0, $cells, $cap);
 }
 
 /**

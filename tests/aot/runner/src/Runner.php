@@ -173,21 +173,40 @@ final class Runner
             );
         }
 
-        $onResult = fn(Result $result) => $this->onResult(
-            $result,
-            $completed,
-            $passed,
-            $failures,
-            $allResults,
+        // A real closure with by-reference captures: an arrow fn captures by
+        // value, so the counters it passed on by reference were copies and the
+        // coordinator never saw a result (0 passed, and a listener waiting on
+        // `$completed` for ever).
+        $onResult = function (Result $result) use (
+            &$completed,
+            &$passed,
+            &$failures,
+            &$allResults,
             $totalFiles,
             $cols,
             $startTime,
-            $renderedLines,
-            $lastRender,
+            &$renderedLines,
+            &$lastRender,
             $numWorkers,
             $isTty,
-            $nonTtyDotCount
-        );
+            &$nonTtyDotCount
+        ): void {
+            $this->onResult(
+                $result,
+                $completed,
+                $passed,
+                $failures,
+                $allResults,
+                $totalFiles,
+                $cols,
+                $startTime,
+                $renderedLines,
+                $lastRender,
+                $numWorkers,
+                $isTty,
+                $nonTtyDotCount
+            );
+        };
 
         async(function () use ($myCases, &$readSocks, $onResult, $totalFiles, $args, &$completed) {
             // Task A: Background IPC Stream Listener

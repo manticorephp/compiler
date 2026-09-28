@@ -927,8 +927,10 @@ trait EmitLlvmModule
         $this->locals->sjljPinAll = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
+        $this->arrayHintedRefParams = [];
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
+            if ($ahp->arrayHinted && $ahp->byRef) { $this->arrayHintedRefParams[$ahp->name] = true; }
         }
         $this->writtenNames = [];
         $this->writtenNamesFn = $fn->name;

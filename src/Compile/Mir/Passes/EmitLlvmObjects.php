@@ -4570,8 +4570,10 @@ trait EmitLlvmObjects
                     $argsI = $this->ssa->allocReg();
                     $out .= '  ' . $keyI . ' = ptrtoint ptr ' . $keyP . " to i64\n";
                     $out .= '  ' . $argsI . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+                    $recvCell = $this->ssa->allocReg();
+                    $out .= '  ' . $recvCell . ' = or i64 ' . $recvArg . ', ' . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
                     $fallbackValue = $this->ssa->allocReg();
-                    $out .= '  ' . $fallbackValue . ' = call i64 @manticore___mc_dyn_spread_fallback(i64 ' . $recvArg
+                    $out .= '  ' . $fallbackValue . ' = call i64 @manticore___mc_dyn_spread_fallback(i64 ' . $recvCell
                           . ', i64 ' . $keyI . ', i64 ' . $argsI . ")\n";
                     $out .= '  store i64 ' . $fallbackValue . ', ptr ' . $res . "\n";
                     $out .= '  br label %' . $fastEnd . "\n";
@@ -4619,8 +4621,10 @@ trait EmitLlvmObjects
                     $argsI = $this->ssa->allocReg();
                     $out .= '  ' . $keyI . ' = ptrtoint ptr ' . $keyP . " to i64\n";
                     $out .= '  ' . $argsI . ' = ptrtoint ptr ' . $argsP . " to i64\n";
+                    $recvCell = $this->ssa->allocReg();
+                    $out .= '  ' . $recvCell . ' = or i64 ' . $recvArg . ', ' . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
                     $fallbackValue = $this->ssa->allocReg();
-                    $out .= '  ' . $fallbackValue . ' = call i64 @manticore___mc_dyn_spread_fallback(i64 ' . $recvArg
+                    $out .= '  ' . $fallbackValue . ' = call i64 @manticore___mc_dyn_spread_fallback(i64 ' . $recvCell
                           . ', i64 ' . $keyI . ', i64 ' . $argsI . ")\n";
                     $out .= '  store i64 ' . $fallbackValue . ', ptr ' . $res . "\n";
                     $out .= '  br label %' . $fastEnd . "\n";

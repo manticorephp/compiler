@@ -576,6 +576,9 @@ final class EmitLlvm implements EmitVisitor
      * non-null. Reset per function by emitFunction.
      */
     private array $arrayHintedParams = [];
+    /** @var array<string, bool> the by-REFERENCE `array &$x` params — truthiness only: the
+     *  word read through the reference may be a raw array pointer or a tagged cell */
+    private array $arrayHintedRefParams = [];
     /** @var string[] module global cell names (static props/locals/global) */
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */

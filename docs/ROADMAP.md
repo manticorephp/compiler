@@ -155,6 +155,7 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | `print_r` of an object prints no properties | `class A { public $x = 1; } print_r(new A);` | `A Object ( )` | `[x] => 1`, visibility suffixes (`:protected`, `:A:private`) and `__debugInfo`, as var_dump's per-class arms already do |
 | An int local that a loop or one branch turns float reads float everywhere (found 2026-09-28) | `$s = 1; if ($b) { $s = $s + 1.5; }` with `$b` false; `$s = 0; foreach ([] as $x) { $s += 1.5; }` | `float(1)`, `float(0)` | `int(1)`, `int(0)`. The accumulator shape makes the whole slot a float (InferScans float slots, the loop merge's widenNumeric); php keeps int until the float store runs — needs a numeric cell there, a perf question |
 | A fresh string handed to a `mixed` parameter leaks (found 2026-09-28) | `function g(mixed $v): mixed { return $v; } $s = g("{" . $n . "}");` in a loop; `new P("x" . $n)` with `public mixed $v` promoted | 1 string (80 B) per call; the object too for the promoted-property ctor | released. Also on main; the ownership epic's territory |
+| `#[Struct]` misuse is not diagnosed (found 2026-09-28) | `#[Struct] final class R implements JsonSerializable { … } echo json_encode(new R(…));` | SIGBUS: the value reaches `mixed`, and the walker reads a class descriptor at `+0` that a headerless record does not have (tests/aot/runner's workers died this way) | a hard compile error naming the class and the site, as `CheckTypeDefs` already does for `#[TypeDef]`: a `#[Struct]` into a `mixed` slot, `json_encode` / `var_dump` / `serialize`, `instanceof`, an interface, `extends` |
 | Scope-exit destructor order | two objects dying at one `}` where one sits in a reference box | box holders are released after the frame's other locals | php destroys the frame's variables in declaration order |
 
 An ARRAY in a `$GLOBALS['x']` slot still reads back as a float: the slot is a cell channel
@@ -404,6 +405,11 @@ of the same mechanism.
 - **Monomorphize has no `$cell` fallback.** `Monomorphize.php` calls it "future, Phase 3"; the
   "every monomorphized function keeps exactly one name-addressable `$cell` entry" invariant in
   [`design/monomorphization.md`](design/monomorphization.md) is aspirational, not upheld.
+- **A compiler built ONE generation from an older one carries its miscompiles** (found
+  2026-09-28): the v0.11.0 published seed built this tree into a compiler that SIGSEGV'd on
+  every http case on alpine-amd64, while the tree rebuilt by itself was clean. `gate.sh` now
+  builds twice on the warm path; what remains is finding the seed-side miscompile (it only
+  shows on x86_64 musl) and republishing the seed so a cold consumer of it is not exposed.
 - **CI is parked, no prebuilt binaries.** `.github/workflows/{ci,nightly}.yml` exist over
   `tools/docker/gate.sh` but run on manual dispatch only. Every install compiles from source.
 

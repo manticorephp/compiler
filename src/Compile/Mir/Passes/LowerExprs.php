@@ -101,9 +101,14 @@ trait LowerExprs
 
     private function hasNamespacedGetenv(): bool
     {
-        if ($this->hasNamespacedGetenvCache !== null) {
+        // Keyed by the declaration count: a call lowered while fnDecls is still
+        // filling (a property default, a synthesized prelude body) must not
+        // freeze the answer before the user's `ns\getenv` registers.
+        $n = \count($this->fnDecls);
+        if ($this->hasNamespacedGetenvCache !== null && $this->hasNamespacedGetenvAt === $n) {
             return $this->hasNamespacedGetenvCache;
         }
+        $this->hasNamespacedGetenvAt = $n;
         foreach ($this->fnDecls as $declName => $_decl) {
             $dp = \strrpos($declName, \chr(92));
             if ($dp !== false && \substr($declName, $dp + 1) === 'getenv') {
@@ -210,8 +215,7 @@ trait LowerExprs
             // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
             // builder; a direct call would be tree-shaken (undefined at link). The
             // single-arg `getenv($name)` stays the codegen builtin.
-            $hasNamespacedGetenv = $this->hasNamespacedGetenv();
-            if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$hasNamespacedGetenv) {
+            if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$this->hasNamespacedGetenv()) {
                 return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
             }
             if ($fnBare === 'sscanf' && \count($expr->args) > 2) {

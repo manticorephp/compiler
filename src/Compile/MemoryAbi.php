@@ -81,6 +81,11 @@ final class MemoryAbi
      */
     public const CELL_NULL = -3659174697238528;
 
+    /** `0xFFF8000000000000`: OR'd onto a raw object pointer, the OBJECT cell
+     *  that carries it — what an `object`-hinted PHP parameter expects when
+     *  emitted IR calls a PHP helper with a receiver it holds raw. */
+    public const CELL_OBJ = -2251799813685248;
+
     /** `0xFFF0000000000000`: an i64 word unsigned-GREATER than this carries a
      *  cell tag; anything at or below it is a raw double (or, in a raw slot, a
      *  pointer — every userspace address fits the 48 payload bits). */

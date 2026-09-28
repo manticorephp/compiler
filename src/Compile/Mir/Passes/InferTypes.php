@@ -1631,6 +1631,8 @@ final class InferTypes implements Pass
      * @param array<string,bool> $conflict
      * @param array<string,Type> $assocKey
      * @param array<string,string> $shape
+     * @param array<string,bool> $sawCell
+     * @param array<string,bool> $erasedArg
      */
     private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell, array &$erasedArg): void
     {

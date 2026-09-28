@@ -3628,6 +3628,11 @@ trait EmitLlvmExpr
             $this->lastValue = $r; $this->lastValueType = 'i64';
             return $out;
         }
+        // Every other kind by the same rule `if` uses: comparing the raw word
+        // with 0 answered TRUE for `[]` (a non-null singleton), "0" and ""
+        // (non-null buffers) and -0.0 (sign bit set).
+        if ($ok === Type::KIND_FLOAT) { return $out . $this->floatTruthy(); }
+        $out .= $this->truthinessOf($c->operand->type, $c->operand);
         $out .= $this->coerceToI64();
         $bit = $this->ssa->allocReg();
         $out .= '  ' . $bit . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
@@ -5953,6 +5958,27 @@ trait EmitLlvmExpr
      * Split from emitCondVal so the short-ternary (`?:`) can compute truthiness
      * WITHOUT clobbering the raw operand it reuses as its then-value.
      */
+    /** A float's truthiness as i64 0/1: -0.0 is falsy in php and its bits are
+     *  not 0. The value is a double or its bits in an i64 carrier. */
+    private function floatTruthy(): string
+    {
+        $out = '';
+        $v = $this->lastValue;
+        if ($this->lastValueType !== 'double') {
+            $out .= $this->coerceToI64();
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+            $v = $d;
+        }
+        $bit = $this->ssa->allocReg();
+        $out .= '  ' . $bit . ' = fcmp une double ' . $v . ", 0.0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $bit . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function truthinessOf(Type $t, ?Node $n = null): string
     {
         // A bare `array` param erased to KIND_UNKNOWN would fall through to the
@@ -5965,6 +5991,31 @@ trait EmitLlvmExpr
             && $n->kind === Node::KIND_LOAD_LOCAL
             && isset($this->arrayHintedParams[$n->name])) {
             return $this->truthinessOf(Type::vec(Type::unknown()));
+        }
+        // The same erasure through a REFERENCE (`array &$x`): `empty($x)` and
+        // `if (!$x)` read the non-null `[]` singleton as TRUE. The referenced
+        // slot may hold the raw pointer or a tagged cell, so box only an untagged
+        // word before the tagged length check.
+        if ($t->kind === Type::KIND_UNKNOWN && $n !== null
+            && $n->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->arrayHintedRefParams[$n->name])) {
+            $out = $this->coerceToI64();
+            $raw = $this->lastValue;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedTruthy = true;
+            $tagged = $this->ssa->allocReg();
+            $out .= '  ' . $tagged . ' = icmp ugt i64 ' . $raw . ', ' . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $raw . " to ptr\n";
+            $ba = $this->ssa->allocReg();
+            $out .= '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $p . ")\n";
+            $pick = $this->ssa->allocReg();
+            $out .= '  ' . $pick . ' = select i1 ' . $tagged . ', i64 ' . $raw . ', i64 ' . $ba . "\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $pick . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
         }
         if ($t->kind === Type::KIND_CELL) {
             $this->rt->needsTaggedTruthy = true;
@@ -5984,6 +6035,7 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
+        if ($t->kind === Type::KIND_FLOAT) { return $this->floatTruthy(); }
         // An array is falsy iff empty (len 0); a raw ptr coerce reads any
         // non-null array (incl. `[]`) as truthy. Tag the raw ptr (box_array is
         // bit-ops + a null guard, no element rebuild) and reuse tagged-truthy's

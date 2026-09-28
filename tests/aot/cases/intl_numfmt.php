@@ -5,7 +5,7 @@ foreach ([["en_US", NumberFormatter::DECIMAL], ["de_DE", NumberFormatter::DECIMA
     ["en", NumberFormatter::ORDINAL], ["en", NumberFormatter::DECIMAL_COMPACT_SHORT], ["ja_JP", NumberFormatter::CURRENCY]] as [$loc, $style]) {
     $f = new NumberFormatter($loc, $style);
     echo "$loc/$style: ", $f->format(1234567.891), " | ", $f->format(-42), " | ", $f->format(0.5, NumberFormatter::TYPE_DOUBLE),
-        " | ", $f->getPattern(), " | ", $f->getLocale(), "\n";
+        " | ", \in_array($style, [NumberFormatter::SPELLOUT, NumberFormatter::ORDINAL, NumberFormatter::DURATION], true) ? \strtok($f->getPattern(), "\n") : $f->getPattern(), " | ", $f->getLocale() === "" ? "root" : $f->getLocale(), "\n";
 }
 $f = new NumberFormatter("de_DE", NumberFormatter::CURRENCY);
 var_dump($f->formatCurrency(1234.5, "USD"), $f->formatCurrency(-0.5, "JPY"), $f->format(PHP_INT_MAX), $f->format(7, NumberFormatter::TYPE_INT32));

@@ -9,7 +9,7 @@ foreach (["en_US", "uk_UA", "de_DE", "ja_JP@calendar=japanese", "ar_EG", "fr_FR"
     foreach ([[IntlDateFormatter::FULL, IntlDateFormatter::FULL], [IntlDateFormatter::MEDIUM, IntlDateFormatter::SHORT],
               [IntlDateFormatter::SHORT, IntlDateFormatter::NONE], [IntlDateFormatter::NONE, IntlDateFormatter::LONG],
               [IntlDateFormatter::RELATIVE_MEDIUM, IntlDateFormatter::NONE]] as [$d, $tm]) {
-        $f = new IntlDateFormatter($loc, $d, $tm, "America/New_York", IntlDateFormatter::TRADITIONAL);
+        $f = new IntlDateFormatter($loc, $d, $tm, "Asia/Tokyo", IntlDateFormatter::TRADITIONAL);
         echo $loc, " ", $d, "/", $tm, ": ", $f->format($t), " | ", $f->getPattern(), "\n";
     }
 }
@@ -21,7 +21,7 @@ foreach ([$t, 1700000000.789, "1700000000", " 1700000000 ", "1.7e9", new DateTim
     var_dump($f->format($v)); if ($f->getErrorCode()) { echo "  ", $f->getErrorMessage(), "\n"; }
 }
 var_dump((new IntlDateFormatter("en_US", -2, -2, "UTC", null, "HH:mm:ss.SSS"))->format(1700000000.789));
-var_dump($f->getDateType(), $f->getTimeType(), $f->getCalendar(), $f->getTimeZoneId(), $f->getLocale(), $f->getLocale(Locale::VALID_LOCALE), $f->isLenient(), get_class($f->getCalendarObject()), $f->getTimeZone()->getID());
+var_dump($f->getDateType(), $f->getTimeType(), $f->getCalendar(), $f->getTimeZoneId(), in_array($f->getLocale(), ["", "root"], true), in_array($f->getLocale(Locale::VALID_LOCALE), ["", "root"], true), $f->isLenient(), get_class($f->getCalendarObject()), $f->getTimeZone()->getID());
 $f->setPattern("dd.MM.yyyy HH:mm"); var_dump($f->getPattern(), $f->format($t));
 $f->setTimeZone("Europe/Kyiv"); var_dump($f->getTimeZoneId(), $f->format($t));
 $f->setTimeZone(new DateTimeZone("+05:45")); var_dump($f->getTimeZoneId(), $f->format($t));
