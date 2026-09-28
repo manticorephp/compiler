@@ -1078,7 +1078,8 @@ final class RuntimeLibrary
         $out .= "  %eNameI = ptrtoint ptr %name to i64\n";
         $out .= "  %eDeclI = ptrtoint ptr %errDecl to i64\n";
         $out .= "  %eScopeI = ptrtoint ptr %scope to i64\n";
-        $out .= "  %eres = call i64 @manticore___mc_dyn_method_error(i64 %obj, i64 %eNameI, i64 %kind, i64 %eDeclI, i64 %eScopeI)\n";
+        $out .= "  %eObj = or i64 %obj, " . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
+        $out .= "  %eres = call i64 @manticore___mc_dyn_method_error(i64 %eObj,i64 %eNameI, i64 %kind, i64 %eDeclI, i64 %eScopeI)\n";
         $out .= "  store i64 %eres, ptr %outp\n";
         $out .= "  ret i1 true\n";
         $out .= "inline:\n  ret i1 false\n}\n";

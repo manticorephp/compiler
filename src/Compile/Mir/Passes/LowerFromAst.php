@@ -185,6 +185,7 @@ final class LowerFromAst implements Pass
     /** Cached trailing segments for repeatedly lowered names. */
     private array $bareNameCache = [];
     private ?bool $hasNamespacedGetenvCache = null;
+    private int $hasNamespacedGetenvAt = -1;
     /** @var array<string, array<int, \Parser\Ast\Param>|null> */
     private array $methodParamsCache = [];
     /** @var array<string, string> */
@@ -687,6 +688,7 @@ final class LowerFromAst implements Pass
         $this->methodReturnClassCache = [];
         $this->bareNameCache = [];
         $this->hasNamespacedGetenvCache = null;
+        $this->hasNamespacedGetenvAt = -1;
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
         $this->variadicMethodParamsCache = [];
