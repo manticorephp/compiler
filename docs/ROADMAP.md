@@ -296,7 +296,8 @@ Order:
      filters with a 20-byte look-back heuristic) throws an Error; `mb_convert_variables`
      waits on by-reference variadics (`mixed &...$vars`, a compiler gap); `mb_language`,
      `mb_get_info`, `mb_http_input` / `mb_http_output`, `mb_parse_str`, `mb_output_handler`,
-     `mb_send_mail`.
+     `mb_send_mail`, `mb_convert_kana`. ⚠ `extension_loaded('mbstring')` now answers true, so
+     symfony/polyfill-mbstring no longer fills these in — they are owed here.
 3. ✅ **ICU link infrastructure** (2026-09-28) — `prelude/intl.php` (demand-gated, so only a
    program using intl links libicu), `#[Library('icuuc'|'icui18n')]` resolved by
    `icu_link_flags()` (pkg-config; Homebrew's keg-only icu4c included), the version suffix
@@ -357,8 +358,10 @@ Order:
      to Zend over 12 locales × 19 patterns × 5 value sets and a parse sweep. Known: after a
      FAILED setPattern Zend formats from ICU's half-reset state (`{}` per argument) — not
      reproduced; var_dump of a closure lacks php 8.5's name/file/line keys.
-   - intl is complete (every ext/intl class). Open around it: `print_r` of objects,
-     DateTime adopting a zone named in the date string.
+   - ✅ `IntlListFormatter` (ulistfmt_*), `normalizer_get_raw_decomposition`. **ext/intl is
+     complete**; `extension_loaded('intl')` and `extension_loaded('mbstring')` answer true
+     (folded and at run time). Open around it: `print_r` of objects, DateTime adopting a
+     zone named in the date string.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 

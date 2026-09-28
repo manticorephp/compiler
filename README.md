@@ -177,8 +177,12 @@ implicit monomorphization of erased `array` / `callable` params
 ([`docs/generics.md`](docs/generics.md)).
 
 **Standard library:** the `array_*` family in full, strings (incl. the whole `preg_*`
-family over host PCRE2), type/reflection, math, `ctype_*`, JSON, `var_dump`/`print_r`,
-SPL, date/time, sockets and streams, hashing and crypto. Each function is either a
+family over host PCRE2), **mbstring** (every encoding Zend ships, case mapping,
+width, MIME/HTML-entity codecs — pure PHP; `mb_ereg*` not yet), **ext/intl** complete
+over the system ICU (`Collator`, `NumberFormatter`, `IntlDateFormatter`, `IntlCalendar`,
+`MessageFormatter`, `Transliterator`, `IntlBreakIterator`, `IntlChar`, …), type/reflection,
+math, `ctype_*`, JSON, `var_dump`/`print_r`, SPL, date/time, sockets and streams, hashing
+and crypto. `extension_loaded()` answers true for `mbstring` and `intl`. Each function is either a
 PHP-level stdlib function (`src/Runtime/Stdlib/`, compiled into
 `lib/manticore_stdlib.o` and auto-linked), an injected prelude helper, or an inlined
 codegen builtin. No imports, no registration — they are simply there. The exact
