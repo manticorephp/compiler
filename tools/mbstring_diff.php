@@ -20,17 +20,19 @@ if (!\extension_loaded('mbstring')) {
     \fwrite(STDERR, "needs php with ext/mbstring\n");
     exit(2);
 }
-$src = \file_get_contents(__DIR__ . '/../src/Runtime/Stdlib/Mbstring.php');
-$src = \str_replace(['function mb_', '\\mb_'], ['function __z_mb_', '\\__z_mb_'], $src);
-$tmp = \tempnam(\sys_get_temp_dir(), 'mbdiff');
-\file_put_contents($tmp, $src);
-require $tmp;
-\unlink($tmp);
+foreach (['MbstringTables', 'MbstringCodecs', 'Mbstring'] as $file) {
+    $src = \file_get_contents(__DIR__ . "/../src/Runtime/Stdlib/$file.php");
+    $src = \str_replace(['function mb_', '\\mb_'], ['function __z_mb_', '\\__z_mb_'], $src);
+    $tmp = \tempnam(\sys_get_temp_dir(), 'mbdiff');
+    \file_put_contents($tmp, $src);
+    require $tmp;
+    \unlink($tmp);
+}
 
 \mt_srand((int)($argv[1] ?? 1));
 $iterations = (int)($argv[2] ?? 20000);
 $alpha = ["a", "b", "x", " ", "\x80", "\xBF", "\xC3", "\xC3\xA9", "\xE4\xB8\xAD", "\xE4\xB8", "\xED\xA0\x80",
-    "\xF0\x9F\x98\x80", "\xF0\x9F", "\xF4\x90\x80\x80", "\xC0\xAF", "\xFF", "\xE2\x80\x83", "\x00", "\xE0\x80"];
+    "\xF0\x9F\x98\x80", "\xF0\x9F", "\xF4\x90\x80\x80", "\xC0\xAF", "\xFF", "\xE2\x80\x83", "\x00", "\xE0\x80", "\xD8", "\xDC", "\xFE\xFF", "\xFF\xFE", "\x00\x00", "\x11"];
 
 function rs(array $alpha, int $max): string
 {
@@ -49,14 +51,17 @@ function run(callable $f): string
     }
 }
 
-$encs = ["UTF-8", "UTF-8", "UTF-8", "ISO-8859-1", "ASCII", "8bit"];
+// Host-iconv encodings are left out: their codec is FFI, which Zend cannot run.
+$encs = ["UTF-8", "UTF-8", "UTF-8", "ISO-8859-1", "ASCII", "8bit", "Windows-1252", "KOI8-R", "ISO-8859-3", "ArmSCII-8", "7bit",
+    "UTF-16", "UTF-16LE", "UTF-16BE", "UCS-2", "UCS-2LE", "UTF-32", "UTF-32LE", "UCS-4", "UCS-4LE", "UCS-4BE", "UTF-32BE", "UCS-2BE"];
 $subs = [63, "none", 0x263A, "long"];
 $bad = 0;
 for ($it = 0; $it < $iterations && $bad < 15; $it++) {
     $sub = $subs[\mt_rand(0, 3)];
     \mb_substitute_character($sub);
     \__z_mb_substitute_character($sub);
-    $e = $encs[\mt_rand(0, 5)];
+    $e = $encs[\mt_rand(0, \count($encs) - 1)];
+    $e2 = $encs[\mt_rand(0, \count($encs) - 1)];
     $h = rs($alpha, 8);
     $n = rs($alpha, 2);
     $o = \mt_rand(-6, 6);
@@ -80,6 +85,7 @@ for ($it = 0; $it < $iterations && $bad < 15; $it++) {
         'trim' => fn($p) => $p('trim')($h, $o > 3 ? $n : null, $e),
         'ltrim' => fn($p) => $p('ltrim')($h, $o > 3 ? $n : null, $e),
         'rtrim' => fn($p) => $p('rtrim')($h, $o > 3 ? $n : null, $e),
+        'convert' => fn($p) => $p('convert_encoding')($h, $e2, $e),
     ];
     $overrun = false;
     if ($e === "UTF-8" && $o > 0) {
@@ -97,7 +103,7 @@ for ($it = 0; $it < $iterations && $bad < 15; $it++) {
         $ours = run(fn() => $t(fn($f) => "__z_mb_$f"));
         if ($zend !== $ours) {
             $bad++;
-            echo "mb_$name enc=$e sub=", \var_export($sub, true), " h=", \bin2hex($h), " n=", \bin2hex($n),
+            echo "mb_$name enc=$e to=$e2 sub=", \var_export($sub, true), " h=", \bin2hex($h), " n=", \bin2hex($n),
                 " o=$o l=", \var_export($l, true), "\n  zend: ", \substr($zend, 0, 120), "\n  ours: ", \substr($ours, 0, 120), "\n";
         }
     }
