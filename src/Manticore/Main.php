@@ -4396,6 +4396,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         "intl_spoof.php" => ['Spoofchecker'],
         "intl_ucnv.php" => ['UConverter'],
         "intl_rb.php" => ['ResourceBundle'],
+        "intl_msgfmt.php" => ['MessageFormatter'],
         "intl_idn.php" => ['IDNA_DEFAULT', 'IDNA_ALLOW_UNASSIGNED', 'IDNA_USE_STD3_RULES', 'IDNA_CHECK_BIDI',
             'IDNA_CHECK_CONTEXTJ', 'IDNA_NONTRANSITIONAL_TO_ASCII', 'IDNA_NONTRANSITIONAL_TO_UNICODE',
             'INTL_IDNA_VARIANT_UTS46', 'IDNA_ERROR_EMPTY_LABEL', 'IDNA_ERROR_LABEL_TOO_LONG',
@@ -4409,6 +4410,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $intlFamilyNeeds = [
         "intl_calendar.php" => ["intl_timezone.php"],
         "intl_datefmt.php" => ["intl_calendar.php", "intl_timezone.php"],
+        "intl_msgfmt.php" => ["intl_numfmt.php", "intl_datefmt.php", "intl_calendar.php", "intl_timezone.php"],
     ];
     // Families whose API takes or returns ext/date objects.
     $intlDateFamilies = ["intl_timezone.php" => true];
