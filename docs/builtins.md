@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **850 / 2135** · classes **148 / 327** · codegen builtins 228 · lowered 32 · stdlib globals 1007 · prelude globals 745
+Functions **850 / 2135** · classes **149 / 327** · codegen builtins 228 · lowered 32 · stdlib globals 1007 · prelude globals 809
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -44,7 +44,7 @@ Functions **850 / 2135** · classes **148 / 327** · codegen builtins 228 · low
 | [gmp](#gmp) | 0 / 51 | 0 / 1 | 0% |
 | [hash](#hash) | 9 / 20 | 1 / 1 | 48% |
 | [iconv](#iconv) | 10 / 10 | 0 / 0 | 100% |
-| [intl](#intl) | 74 / 187 | 6 / 22 | 38% |
+| [intl](#intl) | 74 / 187 | 7 / 22 | 39% |
 | [json](#json) | 5 / 5 | 2 / 2 | 100% |
 | [ldap](#ldap) | 0 / 55 | 0 / 3 | 0% |
 | [libxml](#libxml) | 6 / 8 | 1 / 1 | 78% |
@@ -155,7 +155,7 @@ Functions (37): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1110 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1174 — not user API.
 
 ## Per extension
 
@@ -429,21 +429,21 @@ Functions 10 / 10 · classes 0 / 0
 
 ### intl
 
-Functions 74 / 187 · classes 6 / 22
+Functions 74 / 187 · classes 7 / 22
 
-<details><summary>implemented (80)</summary>
+<details><summary>implemented (81)</summary>
 
 `collator_asort`<sup>p</sup> `collator_compare`<sup>p</sup> `collator_create`<sup>p</sup> `collator_get_attribute`<sup>p</sup> `collator_get_error_code`<sup>p</sup> `collator_get_error_message`<sup>p</sup> `collator_get_locale`<sup>p</sup> `collator_get_sort_key`<sup>p</sup> `collator_get_strength`<sup>p</sup> `collator_set_attribute`<sup>p</sup> `collator_set_strength`<sup>p</sup> `collator_sort`<sup>p</sup> `collator_sort_with_sort_keys`<sup>p</sup> `grapheme_extract`<sup>p</sup> `grapheme_levenshtein`<sup>p</sup> `grapheme_str_split`<sup>p</sup> `grapheme_stripos`<sup>p</sup> `grapheme_stristr`<sup>p</sup> `grapheme_strlen`<sup>p</sup> `grapheme_strpos`<sup>p</sup> `grapheme_strripos`<sup>p</sup> `grapheme_strrpos`<sup>p</sup> `grapheme_strstr`<sup>p</sup> `grapheme_substr`<sup>p</sup> `intl_error_name`<sup>p</sup> `intl_get_error_code`<sup>p</sup> `intl_get_error_message`<sup>p</sup> `intl_is_failure`<sup>p</sup> `locale_accept_from_http`<sup>p</sup> `locale_add_likely_subtags`<sup>p</sup> `locale_canonicalize`<sup>p</sup> `locale_compose`<sup>p</sup> `locale_filter_matches`<sup>p</sup> `locale_get_all_variants`<sup>p</sup> `locale_get_default`<sup>p</sup> `locale_get_display_language`<sup>p</sup> `locale_get_display_name`<sup>p</sup> `locale_get_display_region`<sup>p</sup> `locale_get_display_script`<sup>p</sup> `locale_get_display_variant`<sup>p</sup> `locale_get_keywords`<sup>p</sup> `locale_get_primary_language`<sup>p</sup> `locale_get_region`<sup>p</sup> `locale_get_script`<sup>p</sup> `locale_is_right_to_left`<sup>p</sup> `locale_lookup`<sup>p</sup> `locale_minimize_subtags`<sup>p</sup> `locale_parse`<sup>p</sup> `locale_set_default`<sup>p</sup> `normalizer_is_normalized`<sup>p</sup> `normalizer_normalize`<sup>p</sup> `numfmt_create`<sup>p</sup> `numfmt_format`<sup>p</sup> `numfmt_format_currency`<sup>p</sup> `numfmt_get_attribute`<sup>p</sup> `numfmt_get_error_code`<sup>p</sup> `numfmt_get_error_message`<sup>p</sup> `numfmt_get_locale`<sup>p</sup> `numfmt_get_pattern`<sup>p</sup> `numfmt_get_symbol`<sup>p</sup> `numfmt_get_text_attribute`<sup>p</sup> `numfmt_parse`<sup>p</sup> `numfmt_parse_currency`<sup>p</sup> `numfmt_set_attribute`<sup>p</sup> `numfmt_set_pattern`<sup>p</sup> `numfmt_set_symbol`<sup>p</sup> `numfmt_set_text_attribute`<sup>p</sup> `transliterator_create`<sup>p</sup> `transliterator_create_from_rules`<sup>p</sup> `transliterator_create_inverse`<sup>p</sup> `transliterator_get_error_code`<sup>p</sup> `transliterator_get_error_message`<sup>p</sup> `transliterator_list_ids`<sup>p</sup> `transliterator_transliterate`<sup>p</sup>
 
-Classes: `Collator` `IntlException` `Locale` `Normalizer` `NumberFormatter` `Transliterator`
+Classes: `Collator` `IntlChar` `IntlException` `Locale` `Normalizer` `NumberFormatter` `Transliterator`
 
 </details>
 
-<details><summary>missing (129)</summary>
+<details><summary>missing (128)</summary>
 
 `datefmt_create` `datefmt_format` `datefmt_format_object` `datefmt_get_calendar` `datefmt_get_calendar_object` `datefmt_get_datetype` `datefmt_get_error_code` `datefmt_get_error_message` `datefmt_get_locale` `datefmt_get_pattern` `datefmt_get_timetype` `datefmt_get_timezone` `datefmt_get_timezone_id` `datefmt_is_lenient` `datefmt_localtime` `datefmt_parse` `datefmt_set_calendar` `datefmt_set_lenient` `datefmt_set_pattern` `datefmt_set_timezone` `idn_to_ascii` `idn_to_utf8` `intlcal_add` `intlcal_after` `intlcal_before` `intlcal_clear` `intlcal_create_instance` `intlcal_equals` `intlcal_field_difference` `intlcal_from_date_time` `intlcal_get` `intlcal_get_actual_maximum` `intlcal_get_actual_minimum` `intlcal_get_available_locales` `intlcal_get_day_of_week_type` `intlcal_get_error_code` `intlcal_get_error_message` `intlcal_get_first_day_of_week` `intlcal_get_greatest_minimum` `intlcal_get_keyword_values_for_locale` `intlcal_get_least_maximum` `intlcal_get_locale` `intlcal_get_maximum` `intlcal_get_minimal_days_in_first_week` `intlcal_get_minimum` `intlcal_get_now` `intlcal_get_repeated_wall_time_option` `intlcal_get_skipped_wall_time_option` `intlcal_get_time` `intlcal_get_time_zone` `intlcal_get_type` `intlcal_get_weekend_transition` `intlcal_in_daylight_time` `intlcal_is_equivalent_to` `intlcal_is_lenient` `intlcal_is_set` `intlcal_is_weekend` `intlcal_roll` `intlcal_set` `intlcal_set_first_day_of_week` `intlcal_set_lenient` `intlcal_set_minimal_days_in_first_week` `intlcal_set_repeated_wall_time_option` `intlcal_set_skipped_wall_time_option` `intlcal_set_time` `intlcal_set_time_zone` `intlcal_to_date_time` `intlgregcal_create_instance` `intlgregcal_get_gregorian_change` `intlgregcal_is_leap_year` `intlgregcal_set_gregorian_change` `intltz_count_equivalent_ids` `intltz_create_default` `intltz_create_enumeration` `intltz_create_time_zone` `intltz_create_time_zone_id_enumeration` `intltz_from_date_time_zone` `intltz_get_canonical_id` `intltz_get_display_name` `intltz_get_dst_savings` `intltz_get_equivalent_id` `intltz_get_error_code` `intltz_get_error_message` `intltz_get_gmt` `intltz_get_iana_id` `intltz_get_id` `intltz_get_id_for_windows_id` `intltz_get_offset` `intltz_get_raw_offset` `intltz_get_region` `intltz_get_tz_data_version` `intltz_get_unknown` `intltz_get_windows_id` `intltz_has_same_rules` `intltz_to_date_time_zone` `intltz_use_daylight_time` `msgfmt_create` `msgfmt_format` `msgfmt_format_message` `msgfmt_get_error_code` `msgfmt_get_error_message` `msgfmt_get_locale` `msgfmt_get_pattern` `msgfmt_parse` `msgfmt_parse_message` `msgfmt_set_pattern` `normalizer_get_raw_decomposition` `resourcebundle_count` `resourcebundle_create` `resourcebundle_get` `resourcebundle_get_error_code` `resourcebundle_get_error_message` `resourcebundle_locales`
 
-Classes: `IntlBreakIterator` `IntlCalendar` `IntlChar` `IntlCodePointBreakIterator` `IntlDateFormatter` `IntlDatePatternGenerator` `IntlGregorianCalendar` `IntlIterator` `IntlListFormatter` `IntlPartsIterator` `IntlRuleBasedBreakIterator` `IntlTimeZone` `MessageFormatter` `ResourceBundle` `Spoofchecker` `UConverter`
+Classes: `IntlBreakIterator` `IntlCalendar` `IntlCodePointBreakIterator` `IntlDateFormatter` `IntlDatePatternGenerator` `IntlGregorianCalendar` `IntlIterator` `IntlListFormatter` `IntlPartsIterator` `IntlRuleBasedBreakIterator` `IntlTimeZone` `MessageFormatter` `ResourceBundle` `Spoofchecker` `UConverter`
 
 </details>
 
