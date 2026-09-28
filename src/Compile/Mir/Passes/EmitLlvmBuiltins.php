@@ -1635,6 +1635,25 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * Emit a `\Ffi\Ptr` argument of a raw-memory builtin (ptr_to_int, peek_*,
+     * poke_*, cstr_to_str, str_from_buffer, ptr_offset). A Ptr that crossed a
+     * cell — a `Ptr|false|null` result, a mixed slot — is boxed as an object
+     * cell, and these builtins used the tagged word as the address. Strip the
+     * tag; a null cell strips to address 0, as a null Ptr is. Not
+     * {@see emitPtrArg}: that one is the STRING pointer read (null → "").
+     */
+    private function emitFfiPtrArg(Node $arg): string
+    {
+        $out = $this->emitNode($arg);
+        $k = $arg->type->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType(Type::obj('Ffi\\Ptr'));
+        }
+        return $out;
+    }
+
+    /**
      * Emit `$arg` leaving a raw pointer in lastValue. A `mixed`/cell value
      * (NaN-boxed) used where a string/array/object pointer is expected is
      * unboxed (tag stripped) first — else a builtin like strlen derefs the
@@ -1784,7 +1803,7 @@ trait EmitLlvmBuiltins
      */
     private function biStrFromBuffer(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -1868,7 +1887,7 @@ trait EmitLlvmBuiltins
      */
     private function biPtrToInt(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToI64();
         $this->lastValueType = 'i64';
         return $out;
@@ -1986,7 +2005,7 @@ trait EmitLlvmBuiltins
 
     private function biPtrOffset(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2009,7 +2028,7 @@ trait EmitLlvmBuiltins
      */
     private function biPeek(array $args, int $bits, bool $signed): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2038,7 +2057,7 @@ trait EmitLlvmBuiltins
      */
     private function biPoke(array $args, int $bits): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2065,7 +2084,7 @@ trait EmitLlvmBuiltins
      */
     private function biCstrToStr(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $r = $this->ssa->allocReg();
