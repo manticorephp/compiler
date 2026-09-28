@@ -1192,6 +1192,7 @@ function import_stdlib_types(string $sigJson): void
         if (isset(CompileArgs::$externClassMeta[$mname])) { continue; }
         CompileArgs::$externClassMeta[$mname] = $meta;
         $taken[$meta->name] = true;
+        CompileArgs::$runtimeClassNames[\ltrim($meta->name, '\\')] = true;
     }
     foreach (Sig::classDeclsFromJson($sigJson) as $cdecl) {
         if (isset($taken[$cdecl->name])) { CompileArgs::$externClassDecls[] = $cdecl; }
@@ -1614,6 +1615,10 @@ final class CompileArgs
      * (the compiler's own source defines the stdlib) so no duplicate symbols.
      */
     public static bool $linkStdlib = false;
+
+    /** @var array<string, bool> classes imported from the RUNTIME library's
+     *  `.sig` ({@see import_stdlib_types}) — php's own for reflection. */
+    public static array $runtimeClassNames = [];
 
     /**
      * Native libraries this module's `#[Ffi\Library]` bindings need, captured
@@ -4599,6 +4604,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->emitLibrary = CompileArgs::$emitLibrary && CompileArgs::$exportTypes;
         $lower->exportRuntimeTypes = CompileArgs::$emitLibrary && !CompileArgs::$exportTypes;
         $lower->externClassDecls = CompileArgs::$externClassDecls;
+        $lower->runtimeClassNames = CompileArgs::$runtimeClassNames;
         $lower->externClassMeta = CompileArgs::$externClassMeta;
         $lower->externConstants = CompileArgs::$externConstants;
         $lower->exceptionsSrc = $coreInterfacesSrc . $exceptionsSrc;

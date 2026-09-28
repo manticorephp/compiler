@@ -301,4 +301,9 @@ final class ClassDef
         $end = $this->layoutEnd();
         return ($bag > $end ? $bag : $end) + 8;
     }
+
+    /** Zend's `internal` class: declared by the prelude or the runtime library
+     *  (php's own classes), not by the program or a user library.
+     *  {@see \Compile\MemoryAbi::RMETA_FLAG_INTERNAL}. */
+    public bool $isInternal = false;
 }

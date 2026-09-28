@@ -1,0 +1,10 @@
+U false true
+MyI false true
+UE false true
+Exception true false
+Countable true false
+stdClass true false
+SplFixedArray true false
+Traversable true false
+ArrayIterator true false
+false

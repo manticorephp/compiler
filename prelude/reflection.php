@@ -323,6 +323,18 @@ class ReflectionClass
         return (__mc_refl_flags($this->h) & 8) !== 0;
     }
 
+    /** php's own class: declared by the prelude or the runtime library, where
+     *  Zend's would be declared in C ({@see \Compile\MemoryAbi::RMETA_FLAG_INTERNAL}). */
+    public function isInternal(): bool
+    {
+        return (__mc_refl_flags($this->h) & 32) !== 0;
+    }
+
+    public function isUserDefined(): bool
+    {
+        return (__mc_refl_flags($this->h) & 32) === 0;
+    }
+
     /** Instantiable = a concrete class. Interfaces and abstracts are not. */
     public function isInstantiable(): bool
     {

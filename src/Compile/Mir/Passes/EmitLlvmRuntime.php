@@ -1453,7 +1453,8 @@ trait EmitLlvmRuntime
             $out .= $this->reflNameOnly($ename, \Compile\MemoryAbi::RMETA_FLAG_ENUM, $reflIds, $seen);
         }
         foreach ($this->interfaceNames as $iname => $_) {
-            $out .= $this->reflNameOnly($iname, \Compile\MemoryAbi::RMETA_FLAG_INTERFACE, $reflIds, $seen);
+            $out .= $this->reflNameOnly($iname, \Compile\MemoryAbi::RMETA_FLAG_INTERFACE
+                | (isset($this->internalInterfaceNames[$iname]) ? \Compile\MemoryAbi::RMETA_FLAG_INTERNAL : 0), $reflIds, $seen);
         }
         foreach ($this->traitNames as $tname => $_) {
             $out .= $this->reflNameOnly($tname, \Compile\MemoryAbi::RMETA_FLAG_TRAIT, $reflIds, $seen);
@@ -2179,6 +2180,7 @@ trait EmitLlvmRuntime
             $flags = 0;
             if ($cls->isFinal)    { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_FINAL; }
             if ($cls->isAbstract) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ABSTRACT; }
+            if ($cls->isInternal) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_INTERNAL; }
             // An enum with methods DOES get a ClassDef and lands here; one
             // without is registered separately below. php reports an enum as a
             // class (class_exists('E') is true), so the ENUM bit is additive,
