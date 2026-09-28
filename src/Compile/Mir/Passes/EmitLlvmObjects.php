@@ -647,6 +647,7 @@ trait EmitLlvmObjects
                     // raw-payload by-ref param: hand over an untagged scratch
                     // slot and re-box what the ctor left. Passing the cell slot
                     // makes the ctor dereference the tag bits.
+                    $out .= $this->ownByRefArgLocal($a);
                     $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai + 1] ?? null);
                     $reboxSlots[] = $this->refBoxSlot;
                     $reboxTmps[] = $this->refBoxTmp;
@@ -654,11 +655,13 @@ trait EmitLlvmObjects
                     && $this->isByRefAddressable($a)
                     && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
                     // The mirror: a concrete lvalue bound to a `mixed &$var`.
+                    $out .= $this->ownByRefArgLocal($a);
                     $out .= $this->emitByRefCellBox($a);
                     $cellBoxSlots[] = $this->refBoxSlot;
                     $cellBoxTmps[] = $this->refBoxTmp;
                     $cellBoxTypes[] = $a->type;
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
+                    $out .= $this->ownByRefArgLocal($a);
                     $out .= $this->emitByRefArg($a);
                 } elseif ($mask[$ai + 1] ?? false) {
                     $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai, $ahmask[$ai + 1] ?? false);
@@ -6514,6 +6517,7 @@ trait EmitLlvmObjects
             ) {
                 // Cell lvalue → raw-payload by-ref param; see
                 // emitByRefCellUnboxArg. A vivified out-variable is exactly this.
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai] ?? null);
                 $argList .= 'i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
@@ -6522,12 +6526,14 @@ trait EmitLlvmObjects
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
                 // Raw lvalue → `mixed &$var` param; see emitByRefCellBox.
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellBox($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
                 $cellBoxTypes[] = $a->type;
             } elseif ($this->argIsByRef($mask, $ai, $a)) {
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
             } elseif ($mask[$ai] ?? false) {
@@ -7887,6 +7893,7 @@ trait EmitLlvmObjects
                 // slot and re-box afterwards; passing the cell slot itself makes
                 // the callee dereference the tag bits and `$obj->fill(1, $out)`
                 // read back float(6.36E-314).
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai + 1] ?? null);
                 $argList .= ', i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
@@ -7899,12 +7906,14 @@ trait EmitLlvmObjects
                 // scratch cell and put back what the callee left. Without it
                 // `PDOStatement::bindParam(mixed &$var)` read an `int 3` as
                 // float(1.5E-323) and bound that.
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellBox($a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
                 $cellBoxTypes[] = $a->type;
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
             } elseif ($mask[$ai + 1] ?? false) {

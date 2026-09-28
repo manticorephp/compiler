@@ -799,6 +799,7 @@ trait EmitLlvmLocals
                 $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
                 $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+                $out .= $this->refParamOverwriteIr($sl->name, $p, $dv);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             } else {
                 // Release-before-overwrite, as the general store path does for an
@@ -867,6 +868,7 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $dv);
             $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $this->lastValueType = 'i64';
@@ -891,6 +893,7 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $dv);
             $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $this->lastValueType = 'i64';
@@ -1107,6 +1110,7 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $val);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite: rebinding an owned RcHeap obj/vec
@@ -1135,6 +1139,45 @@ trait EmitLlvmLocals
      * value being stored already carries its own count, taken by the same
      * conventions as a plain local's store.
      */
+    /**
+     * A whole store through a by-ref PARAMETER replaces the value the caller's
+     * storage holds, and that storage OWNS it — a local's slot (a borrowed one
+     * took a reference at the call, {@see EmitLlvmCalls::ownByRefArgLocal}), an
+     * element or property slot, or the scratch a cell caller re-boxes from
+     * without a release of its own ({@see EmitLlvmCalls::emitByRefCellRebox}).
+     * Nothing gave the old value back: `$matches = []` at the top of
+     * preg_match leaked the previous matches of every reused variable — the
+     * whole array per `Preg::match` call in php-cs-fixer — and every prelude key
+     * sort's `$arr = $new` leaked the caller's array.
+     *
+     * By the PARAMETER's declared type, the representation the caller conformed
+     * its argument to; an erased `array` names no flavor and keeps the leak. A
+     * closure's by-ref parameter is cell-typed by the ABI, not by what it points
+     * at (an array element of any representation), so it is left alone; so is a
+     * name rebound by `=&`, and a store of the word the slot already holds.
+     */
+    private function refParamOverwriteIr(string $name, string $slotPtr, string $val): string
+    {
+        if ($this->frame->isClosure || $this->frame->isTrampoline) { return ''; }
+        $pt = $this->locals->refParamTypes[$name] ?? null;
+        if ($pt === null || isset($this->locals->aliasLocals[$name])
+            || isset($this->locals->ownedBoxes[$name])) { return ''; }
+        $flavor = $this->discardReleaseFlavor($pt);
+        if ($flavor === '') { return ''; }
+        $old = $this->ssa->allocReg();
+        $out = '  ' . $old . ' = load i64, ptr ' . $slotPtr . "\n";
+        $diff = $this->ssa->allocReg();
+        $out .= '  ' . $diff . ' = icmp ne i64 ' . $old . ', ' . $val . "\n";
+        $relL = $this->ssa->allocLabel('refp.ow');
+        $contL = $this->ssa->allocLabel('refp.ow.cont');
+        $out .= '  br i1 ' . $diff . ', label %' . $relL . ', label %' . $contL . "\n";
+        $out .= $relL . ":\n";
+        $out .= $this->rcReleaseReg($old, $flavor);
+        $out .= '  br label %' . $contL . "\n";
+        $out .= $contL . ":\n";
+        return $out;
+    }
+
     private function ownedBoxOverwriteIr(string $name, string $addrI64): string
     {
         if (!isset($this->locals->ownedBoxes[$name])) { return ''; }

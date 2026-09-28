@@ -80,6 +80,43 @@ final class VecCopyOnAssign
         return self::storesInto($fn->body, $p->name);
     }
 
+    /**
+     * Per-function by-ref parameter masks of the module being compiled, keyed
+     * by the DECLARED name ({@see Passes\VivifyRefArgs} publishes them); a
+     * monomorphised callee keeps its declaration's mask.
+     * @var array<string, bool[]>
+     */
+    public static array $refMasks = [];
+
+    /** Whether the local `$name` is handed to a free function's BY-REF parameter
+     *  anywhere in `$n`. */
+    public static function passedByRef(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_CALL) {
+            $c = self::asCall($n);
+            $fname = $c->function;
+            $mp = \strpos($fname, '$mono$');
+            if ($mp !== false) { $fname = \substr($fname, 0, $mp); }
+            $mask = self::$refMasks[$fname] ?? null;
+            if ($mask !== null) {
+                $i = 0;
+                foreach ($c->args as $arg) {
+                    if (($mask[$i] ?? false) && $arg->kind === Node::KIND_LOAD_LOCAL
+                        && self::asLoadLocal($arg)->name === $name) { return true; }
+                    $i = $i + 1;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $ch) {
+            if (self::passedByRef($ch, $name)) { return true; }
+        }
+        return false;
+    }
+
+    private static function asCall(Node $n): Call { return $n; }
+
+    private static function asLoadLocal(Node $n): LoadLocal { return $n; }
+
     /** Whether the local `$name` is the base of an element store anywhere in
      *  `$n` — mutated as an array, independent of its (possibly erased) type. */
     public static function storesInto(Node $n, string $name): bool
