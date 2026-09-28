@@ -1,0 +1,9 @@
+internal,user
+anotherone,myhelper
+strlen true
+str_replace true
+array_map true
+preg_match true
+json_encode true
+sprintf true
+false

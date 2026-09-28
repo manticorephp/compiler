@@ -302,6 +302,11 @@ final class LowerFromAst implements Pass
     /** The program calls `function_exists()` with a NON-literal argument, so it
      *  needs the runtime name table rather than the compile-time fold. */
     private bool $sawDynFnExists = false;
+    /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
+    private bool $sawGetDefinedFns = false;
+    /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
+     *  get_defined_functions()['user']. */
+    private array $userFnNames = [];
 
     /** The body being lowered called one of the func-args family, so it needs
      *  the argument-count prologue. Saved/restored around every nested body the
@@ -1298,6 +1303,12 @@ final class LowerFromAst implements Pass
                 if ($measureLower) { $lowerFnNs += \Compile\Stats::now() - $lowerStart; }
                 $lowerFnCount = $lowerFnCount + 1;
                 if ($isPrelude) { $fn->isPrelude = true; }
+                elseif (!$this->exportRuntimeTypes) {
+                    $un = \ltrim($stmt->decl->name, '\\');
+                    if (\strncmp($un, '__mc_', 5) !== 0 && \strncmp($un, '__mir_', 6) !== 0) {
+                        $this->userFnNames[\strtolower($un)] = true;
+                    }
+                }
                 $module->addFunction($fn);
                 continue;
             }
@@ -1430,6 +1441,14 @@ final class LowerFromAst implements Pass
         }
         if ($this->sawDynFnExists) {
             $module->knownFnNames = $this->collectKnownFnNames();
+        }
+        if ($this->sawGetDefinedFns) {
+            $dfProg = \Parser\Parser::parseSource("<?php\n" . $this->definedFunctionsSource());
+            foreach ($dfProg->statements as $dfs) {
+                if ($dfs->kind !== 'Function') { continue; }
+                $this->fnDecls[$dfs->decl->name] = $dfs->decl;
+                $module->addFunction($this->lowerFunction($dfs->decl));
+            }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
@@ -1723,6 +1742,29 @@ final class LowerFromAst implements Pass
             $out[] = $n;
         }
         return $out;
+    }
+
+    /**
+     * `get_defined_functions()` as a function returning a LITERAL: the set of
+     * functions is closed at compile time. `internal` is every name php itself
+     * would provide that this build knows ({@see collectKnownFnNames} — the
+     * builtins, the stdlib, the prelude), `user` the program's own, lowercased
+     * as php reports them. php-cs-fixer's NativeFunctionCasingFixer reads it.
+     */
+    private function definedFunctionsSource(): string
+    {
+        $internal = [];
+        foreach ($this->collectKnownFnNames() as $fname) {
+            $lc = \strtolower($fname);
+            if (isset($this->userFnNames[$lc])) { continue; }
+            $internal[$lc] = true;
+        }
+        $iq = [];
+        foreach ($internal as $lc => $_) { $iq[] = var_export((string)$lc, true); }
+        $uq = [];
+        foreach ($this->userFnNames as $lc => $_) { $uq[] = var_export((string)$lc, true); }
+        return "/** @return array<string, string[]> */\nfunction __mc_defined_functions(): array\n{\n"
+            . "    return ['internal' => [" . \implode(', ', $iq) . "], 'user' => [" . \implode(', ', $uq) . "]];\n}\n";
     }
 
     /** Trailing segment of a possibly-namespaced name. */
