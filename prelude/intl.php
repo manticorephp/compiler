@@ -874,3 +874,15 @@ function intl_get_error_message(): string
 }
 
 class IntlException extends \Exception {}
+
+const ULOC_ACTUAL_LOCALE = 0;
+const ULOC_VALID_LOCALE = 1;
+
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getDefault')]
+function __mc_icu_uloc_getDefault(): \Ffi\Ptr {}
+
+/** The ICU error code of the last failed __mc_icu_uchars() call. */
+final class __McIcuStatus
+{
+    public static int $code = 0;
+}

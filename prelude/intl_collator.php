@@ -5,9 +5,6 @@
  * Needs prelude/intl.php (UTF-16 conversion, the intl error state).
  */
 
-const ULOC_ACTUAL_LOCALE = 0;
-const ULOC_VALID_LOCALE = 1;
-
 #[\Ffi\Library('icui18n'), \Ffi\Symbol('ucol_getStrength'), \Ffi\CType('int')]
 function __mc_icu_ucol_getStrength(\Ffi\Ptr $coll): int { return 0; }
 
@@ -23,9 +20,6 @@ function __mc_icu_ucol_getLocaleByType(\Ffi\Ptr $coll, #[\Ffi\CType('int')] int 
 #[\Ffi\Library('icui18n'), \Ffi\Symbol('ucol_getSortKey'), \Ffi\CType('int')]
 function __mc_icu_ucol_getSortKey(\Ffi\Ptr $coll, \Ffi\Ptr $src, #[\Ffi\CType('int')] int $len,
     \Ffi\Ptr $dest, #[\Ffi\CType('int')] int $cap): int { return 0; }
-
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getDefault')]
-function __mc_icu_uloc_getDefault(): \Ffi\Ptr {}
 
 class Collator
 {
