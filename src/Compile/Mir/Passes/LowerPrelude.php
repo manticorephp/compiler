@@ -290,15 +290,6 @@ trait LowerPrelude
         return $stmts;
     }
 
-    /** Whether any class in the finished table resolves a `__toString` — the
-     *  gate for generating {@see objToStrSrc}. */
-    private function anyToStringClass(): bool
-    {
-        foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            if ($this->declaresMethod($cname, '__toString')) { return true; }
-        }
-        return false;
-    }
 
     /**
      * PHP source for `__mir_obj_to_str` — `(string)` on a value whose STATIC
@@ -312,8 +303,7 @@ trait LowerPrelude
      *
      * Generated from the finished class table exactly like {@see dumpObjectSrc}:
      * most-derived first, so a subclass is matched before its base. A class with
-     * no `__toString` falls through to '' — php fatals there, and the sentinel
-     * → exception conversion is its own owed epic.
+     * no `__toString` throws php's Error — also when no class declares one.
      */
     private function objToStrSrc(): string
     {
@@ -338,10 +328,8 @@ trait LowerPrelude
             $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
             $arm = $arm + 1;
         }
-        if ($arm === 1) {
-            return $body . "function __mir_obj_to_str(mixed \$v): string { return __mir_obj_to_str_arm_0(\$v); }\n";
-        }
-        return $body . $dispatch . "  }\n  return '';\n}\n";
+        return $body . $dispatch . "  }\n"
+            . "  throw new \\Error('Object of class ' . \\get_class(\$v) . ' could not be converted to string');\n}\n";
     }
 
     /**

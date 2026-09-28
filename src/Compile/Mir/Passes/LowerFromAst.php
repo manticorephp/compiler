@@ -1033,17 +1033,15 @@ final class LowerFromAst implements Pass
         // The shared @__manticore_tagged_to_str cannot do this itself: it is one
         // external body in the central core and knows no user class, so the
         // emitter branches on the object tag at the CALL SITE and lands here.
-        if ($this->anyToStringClass()) {
-            $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
-            foreach ($tsProg->statements as $tstmt) {
-                if ($tstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
-                $tfn = $this->lowerFunction($tstmt->decl);
-                $tfn->isPrelude = true;
-                $module->addFunction($tfn);
-            }
-            $module->hasObjToStr = true;
+        $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
+        foreach ($tsProg->statements as $tstmt) {
+            if ($tstmt->kind !== 'Function') { continue; }
+            $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+            $tfn = $this->lowerFunction($tstmt->decl);
+            $tfn->isPrelude = true;
+            $module->addFunction($tfn);
         }
+        $module->hasObjToStr = true;
 
         // var_export()'s object arm — same point and pattern as
         // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
