@@ -66,14 +66,6 @@ function __mc_icu_parse_error_string(\Ffi\Ptr $pe): string
     return $any ? $out : "no parse error";
 }
 
-/** UTF-8 of a NUL-terminated UChar run of at most `$max` units at `$p`. */
-function __mc_icu_uchars_z(\Ffi\Ptr $p, int $max): string
-{
-    $n = 0;
-    while ($n < $max && \peek_u16($p, $n * 2) !== 0) { $n = $n + 1; }
-    return \__mc_icu_to8($p, $n);
-}
-
 class Transliterator
 {
     public const FORWARD = 0;

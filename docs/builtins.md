@@ -21,14 +21,14 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **944 / 2135** · classes **155 / 327** · codegen builtins 228 · lowered 32 · stdlib globals 1007 · prelude globals 1022
+Functions **944 / 2135** · classes **160 / 327** · codegen builtins 228 · lowered 32 · stdlib globals 1007 · prelude globals 1047
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
 | [bcmath](#bcmath) | 0 / 14 | 0 / 1 | 0% |
 | [bz2](#bz2) | 0 / 10 | 0 / 0 | 0% |
 | [calendar](#calendar) | 0 / 18 | 0 / 0 | 0% |
-| [Core](#core) | 45 / 62 | 31 / 40 | 75% |
+| [Core](#core) | 45 / 62 | 32 / 40 | 75% |
 | [ctype](#ctype) | 11 / 11 | 0 / 0 | 100% |
 | [curl](#curl) | 32 / 35 | 3 / 6 | 85% |
 | [date](#date) | 38 / 48 | 15 / 15 | 84% |
@@ -44,7 +44,7 @@ Functions **944 / 2135** · classes **155 / 327** · codegen builtins 228 · low
 | [gmp](#gmp) | 0 / 51 | 0 / 1 | 0% |
 | [hash](#hash) | 9 / 20 | 1 / 1 | 48% |
 | [iconv](#iconv) | 10 / 10 | 0 / 0 | 100% |
-| [intl](#intl) | 168 / 187 | 13 / 22 | 87% |
+| [intl](#intl) | 168 / 187 | 17 / 22 | 89% |
 | [json](#json) | 5 / 5 | 2 / 2 | 100% |
 | [ldap](#ldap) | 0 / 55 | 0 / 3 | 0% |
 | [libxml](#libxml) | 6 / 8 | 1 / 1 | 78% |
@@ -155,7 +155,7 @@ Functions (37): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1293 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1318 — not user API.
 
 ## Per extension
 
@@ -193,21 +193,21 @@ Functions 0 / 18 · classes 0 / 0
 
 ### Core
 
-Functions 45 / 62 · classes 31 / 40
+Functions 45 / 62 · classes 32 / 40
 
-<details><summary>implemented (76)</summary>
+<details><summary>implemented (77)</summary>
 
 `class_alias`<sup>b</sup> `class_exists`<sup>b</sup> `debug_backtrace`<sup>b</sup> `define`<sup>l</sup> `defined`<sup>l</sup> `die`<sup>b</sup> `enum_exists`<sup>b</sup> `error_reporting`<sup>p</sup> `exit`<sup>b</sup> `extension_loaded`<sup>l</sup> `func_get_arg`<sup>l</sup> `func_get_args`<sup>l</sup> `func_num_args`<sup>l</sup> `function_exists`<sup>l</sup> `gc_collect_cycles`<sup>b</sup> `gc_disable`<sup>s</sup> `gc_enable`<sup>s</sup> `gc_enabled`<sup>s</sup> `gc_mem_caches`<sup>s</sup> `get_class`<sup>b</sup> `get_class_methods`<sup>b</sup> `get_declared_classes`<sup>p</sup> `get_declared_interfaces`<sup>p</sup> `get_declared_traits`<sup>p</sup> `get_defined_constants`<sup>p</sup> `get_object_vars`<sup>b</sup> `get_parent_class`<sup>b</sup> `get_resource_id`<sup>s</sup> `get_resource_type`<sup>s</sup> `interface_exists`<sup>b</sup> `is_a`<sup>b</sup> `is_subclass_of`<sup>b</sup> `method_exists`<sup>b</sup> `property_exists`<sup>b</sup> `restore_error_handler`<sup>p</sup> `restore_exception_handler`<sup>p</sup> `set_error_handler`<sup>p</sup> `set_exception_handler`<sup>p</sup> `strcasecmp`<sup>s</sup> `strcmp`<sup>l</sup> `strlen`<sup>b</sup> `strncasecmp`<sup>s</sup> `strncmp`<sup>l</sup> `trait_exists`<sup>b</sup> `trigger_error`<sup>l</sup>
 
-Classes: `AllowDynamicProperties` `ArgumentCountError` `ArrayAccess` `Attribute` `BackedEnum`<sup>i</sup> `Closure`<sup>i</sup> `Countable` `DelayedTargetValidation` `Deprecated` `Error` `Exception` `Fiber` `FiberError` `Generator`<sup>i</sup> `Iterator` `IteratorAggregate` `NoDiscard` `Override` `ReturnTypeWillChange` `SensitiveParameter` `SensitiveParameterValue` `Serializable`<sup>i</sup> `stdClass` `Stringable` `Throwable` `Traversable` `TypeError` `UnitEnum`<sup>i</sup> `ValueError` `WeakMap` `WeakReference`
+Classes: `AllowDynamicProperties` `ArgumentCountError` `ArrayAccess` `Attribute` `BackedEnum`<sup>i</sup> `Closure`<sup>i</sup> `Countable` `DelayedTargetValidation` `Deprecated` `Error` `Exception` `Fiber` `FiberError` `Generator`<sup>i</sup> `InternalIterator` `Iterator` `IteratorAggregate` `NoDiscard` `Override` `ReturnTypeWillChange` `SensitiveParameter` `SensitiveParameterValue` `Serializable`<sup>i</sup> `stdClass` `Stringable` `Throwable` `Traversable` `TypeError` `UnitEnum`<sup>i</sup> `ValueError` `WeakMap` `WeakReference`
 
 </details>
 
-<details><summary>missing (26)</summary>
+<details><summary>missing (25)</summary>
 
 `clone` `debug_print_backtrace` `gc_status` `get_called_class` `get_class_vars` `get_defined_functions` `get_defined_vars` `get_error_handler` `get_exception_handler` `get_extension_funcs` `get_included_files` `get_loaded_extensions` `get_mangled_object_vars` `get_required_files` `get_resources` `user_error` `zend_version`
 
-Classes: `ArithmeticError` `ClosedGeneratorException` `CompileError` `DivisionByZeroError` `ErrorException` `InternalIterator` `ParseError` `RequestParseBodyException` `UnhandledMatchError`
+Classes: `ArithmeticError` `ClosedGeneratorException` `CompileError` `DivisionByZeroError` `ErrorException` `ParseError` `RequestParseBodyException` `UnhandledMatchError`
 
 </details>
 
@@ -429,21 +429,21 @@ Functions 10 / 10 · classes 0 / 0
 
 ### intl
 
-Functions 168 / 187 · classes 13 / 22
+Functions 168 / 187 · classes 17 / 22
 
-<details><summary>implemented (181)</summary>
+<details><summary>implemented (185)</summary>
 
 `collator_asort`<sup>p</sup> `collator_compare`<sup>p</sup> `collator_create`<sup>p</sup> `collator_get_attribute`<sup>p</sup> `collator_get_error_code`<sup>p</sup> `collator_get_error_message`<sup>p</sup> `collator_get_locale`<sup>p</sup> `collator_get_sort_key`<sup>p</sup> `collator_get_strength`<sup>p</sup> `collator_set_attribute`<sup>p</sup> `collator_set_strength`<sup>p</sup> `collator_sort`<sup>p</sup> `collator_sort_with_sort_keys`<sup>p</sup> `datefmt_create`<sup>p</sup> `datefmt_format`<sup>p</sup> `datefmt_format_object`<sup>p</sup> `datefmt_get_calendar`<sup>p</sup> `datefmt_get_calendar_object`<sup>p</sup> `datefmt_get_datetype`<sup>p</sup> `datefmt_get_error_code`<sup>p</sup> `datefmt_get_error_message`<sup>p</sup> `datefmt_get_locale`<sup>p</sup> `datefmt_get_pattern`<sup>p</sup> `datefmt_get_timetype`<sup>p</sup> `datefmt_get_timezone`<sup>p</sup> `datefmt_get_timezone_id`<sup>p</sup> `datefmt_is_lenient`<sup>p</sup> `datefmt_localtime`<sup>p</sup> `datefmt_parse`<sup>p</sup> `datefmt_set_calendar`<sup>p</sup> `datefmt_set_lenient`<sup>p</sup> `datefmt_set_pattern`<sup>p</sup> `datefmt_set_timezone`<sup>p</sup> `grapheme_extract`<sup>p</sup> `grapheme_levenshtein`<sup>p</sup> `grapheme_str_split`<sup>p</sup> `grapheme_stripos`<sup>p</sup> `grapheme_stristr`<sup>p</sup> `grapheme_strlen`<sup>p</sup> `grapheme_strpos`<sup>p</sup> `grapheme_strripos`<sup>p</sup> `grapheme_strrpos`<sup>p</sup> `grapheme_strstr`<sup>p</sup> `grapheme_substr`<sup>p</sup> `intl_error_name`<sup>p</sup> `intl_get_error_code`<sup>p</sup> `intl_get_error_message`<sup>p</sup> `intl_is_failure`<sup>p</sup> `intlcal_add`<sup>p</sup> `intlcal_after`<sup>p</sup> `intlcal_before`<sup>p</sup> `intlcal_clear`<sup>p</sup> `intlcal_create_instance`<sup>p</sup> `intlcal_equals`<sup>p</sup> `intlcal_field_difference`<sup>p</sup> `intlcal_from_date_time`<sup>p</sup> `intlcal_get`<sup>p</sup> `intlcal_get_actual_maximum`<sup>p</sup> `intlcal_get_actual_minimum`<sup>p</sup> `intlcal_get_available_locales`<sup>p</sup> `intlcal_get_day_of_week_type`<sup>p</sup> `intlcal_get_error_code`<sup>p</sup> `intlcal_get_error_message`<sup>p</sup> `intlcal_get_first_day_of_week`<sup>p</sup> `intlcal_get_greatest_minimum`<sup>p</sup> `intlcal_get_keyword_values_for_locale`<sup>p</sup> `intlcal_get_least_maximum`<sup>p</sup> `intlcal_get_locale`<sup>p</sup> `intlcal_get_maximum`<sup>p</sup> `intlcal_get_minimal_days_in_first_week`<sup>p</sup> `intlcal_get_minimum`<sup>p</sup> `intlcal_get_now`<sup>p</sup> `intlcal_get_repeated_wall_time_option`<sup>p</sup> `intlcal_get_skipped_wall_time_option`<sup>p</sup> `intlcal_get_time`<sup>p</sup> `intlcal_get_time_zone`<sup>p</sup> `intlcal_get_type`<sup>p</sup> `intlcal_get_weekend_transition`<sup>p</sup> `intlcal_in_daylight_time`<sup>p</sup> `intlcal_is_equivalent_to`<sup>p</sup> `intlcal_is_lenient`<sup>p</sup> `intlcal_is_set`<sup>p</sup> `intlcal_is_weekend`<sup>p</sup> `intlcal_roll`<sup>p</sup> `intlcal_set`<sup>p</sup> `intlcal_set_first_day_of_week`<sup>p</sup> `intlcal_set_lenient`<sup>p</sup> `intlcal_set_minimal_days_in_first_week`<sup>p</sup> `intlcal_set_repeated_wall_time_option`<sup>p</sup> `intlcal_set_skipped_wall_time_option`<sup>p</sup> `intlcal_set_time`<sup>p</sup> `intlcal_set_time_zone`<sup>p</sup> `intlcal_to_date_time`<sup>p</sup> `intlgregcal_create_instance`<sup>p</sup> `intlgregcal_get_gregorian_change`<sup>p</sup> `intlgregcal_is_leap_year`<sup>p</sup> `intlgregcal_set_gregorian_change`<sup>p</sup> `intltz_count_equivalent_ids`<sup>p</sup> `intltz_create_default`<sup>p</sup> `intltz_create_enumeration`<sup>p</sup> `intltz_create_time_zone`<sup>p</sup> `intltz_create_time_zone_id_enumeration`<sup>p</sup> `intltz_from_date_time_zone`<sup>p</sup> `intltz_get_canonical_id`<sup>p</sup> `intltz_get_display_name`<sup>p</sup> `intltz_get_dst_savings`<sup>p</sup> `intltz_get_equivalent_id`<sup>p</sup> `intltz_get_error_code`<sup>p</sup> `intltz_get_error_message`<sup>p</sup> `intltz_get_gmt`<sup>p</sup> `intltz_get_iana_id`<sup>p</sup> `intltz_get_id`<sup>p</sup> `intltz_get_id_for_windows_id`<sup>p</sup> `intltz_get_offset`<sup>p</sup> `intltz_get_raw_offset`<sup>p</sup> `intltz_get_region`<sup>p</sup> `intltz_get_tz_data_version`<sup>p</sup> `intltz_get_unknown`<sup>p</sup> `intltz_get_windows_id`<sup>p</sup> `intltz_has_same_rules`<sup>p</sup> `intltz_to_date_time_zone`<sup>p</sup> `intltz_use_daylight_time`<sup>p</sup> `locale_accept_from_http`<sup>p</sup> `locale_add_likely_subtags`<sup>p</sup> `locale_canonicalize`<sup>p</sup> `locale_compose`<sup>p</sup> `locale_filter_matches`<sup>p</sup> `locale_get_all_variants`<sup>p</sup> `locale_get_default`<sup>p</sup> `locale_get_display_language`<sup>p</sup> `locale_get_display_name`<sup>p</sup> `locale_get_display_region`<sup>p</sup> `locale_get_display_script`<sup>p</sup> `locale_get_display_variant`<sup>p</sup> `locale_get_keywords`<sup>p</sup> `locale_get_primary_language`<sup>p</sup> `locale_get_region`<sup>p</sup> `locale_get_script`<sup>p</sup> `locale_is_right_to_left`<sup>p</sup> `locale_lookup`<sup>p</sup> `locale_minimize_subtags`<sup>p</sup> `locale_parse`<sup>p</sup> `locale_set_default`<sup>p</sup> `normalizer_is_normalized`<sup>p</sup> `normalizer_normalize`<sup>p</sup> `numfmt_create`<sup>p</sup> `numfmt_format`<sup>p</sup> `numfmt_format_currency`<sup>p</sup> `numfmt_get_attribute`<sup>p</sup> `numfmt_get_error_code`<sup>p</sup> `numfmt_get_error_message`<sup>p</sup> `numfmt_get_locale`<sup>p</sup> `numfmt_get_pattern`<sup>p</sup> `numfmt_get_symbol`<sup>p</sup> `numfmt_get_text_attribute`<sup>p</sup> `numfmt_parse`<sup>p</sup> `numfmt_parse_currency`<sup>p</sup> `numfmt_set_attribute`<sup>p</sup> `numfmt_set_pattern`<sup>p</sup> `numfmt_set_symbol`<sup>p</sup> `numfmt_set_text_attribute`<sup>p</sup> `transliterator_create`<sup>p</sup> `transliterator_create_from_rules`<sup>p</sup> `transliterator_create_inverse`<sup>p</sup> `transliterator_get_error_code`<sup>p</sup> `transliterator_get_error_message`<sup>p</sup> `transliterator_list_ids`<sup>p</sup> `transliterator_transliterate`<sup>p</sup>
 
-Classes: `Collator` `IntlCalendar` `IntlChar` `IntlDateFormatter` `IntlDatePatternGenerator` `IntlException` `IntlGregorianCalendar` `IntlIterator` `IntlTimeZone` `Locale` `Normalizer` `NumberFormatter` `Transliterator`
+Classes: `Collator` `IntlBreakIterator` `IntlCalendar` `IntlChar` `IntlCodePointBreakIterator` `IntlDateFormatter` `IntlDatePatternGenerator` `IntlException` `IntlGregorianCalendar` `IntlIterator` `IntlPartsIterator` `IntlRuleBasedBreakIterator` `IntlTimeZone` `Locale` `Normalizer` `NumberFormatter` `Transliterator`
 
 </details>
 
-<details><summary>missing (28)</summary>
+<details><summary>missing (24)</summary>
 
 `idn_to_ascii` `idn_to_utf8` `msgfmt_create` `msgfmt_format` `msgfmt_format_message` `msgfmt_get_error_code` `msgfmt_get_error_message` `msgfmt_get_locale` `msgfmt_get_pattern` `msgfmt_parse` `msgfmt_parse_message` `msgfmt_set_pattern` `normalizer_get_raw_decomposition` `resourcebundle_count` `resourcebundle_create` `resourcebundle_get` `resourcebundle_get_error_code` `resourcebundle_get_error_message` `resourcebundle_locales`
 
-Classes: `IntlBreakIterator` `IntlCodePointBreakIterator` `IntlListFormatter` `IntlPartsIterator` `IntlRuleBasedBreakIterator` `MessageFormatter` `ResourceBundle` `Spoofchecker` `UConverter`
+Classes: `IntlListFormatter` `MessageFormatter` `ResourceBundle` `Spoofchecker` `UConverter`
 
 </details>
 

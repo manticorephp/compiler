@@ -4392,6 +4392,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         "intl_timezone.php" => ['IntlTimeZone'],
         "intl_calendar.php" => ['IntlCalendar', 'IntlGregorianCalendar'],
         "intl_datefmt.php" => ['IntlDateFormatter', 'IntlDatePatternGenerator'],
+        "intl_breakiter.php" => ['IntlBreakIterator', 'IntlRuleBasedBreakIterator', 'IntlCodePointBreakIterator', 'IntlPartsIterator'],
     ];
     // A family another one is built on (picked with it, and listed before it above).
     /** @var array<string, string[]> */

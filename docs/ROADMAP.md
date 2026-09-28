@@ -340,8 +340,9 @@ Order:
    - ✅ `IntlDateFormatter` + `datefmt_*` + `IntlDatePatternGenerator` over udat_* / udatpg_* —
      every style × 14 locales × both calendar kinds, the whole pattern alphabet, parse round
      trips: identical to Zend.
-   - Next: `MessageFormatter`,
-     `ResourceBundle`, `Spoofchecker`, `IntlBreakIterator`, `UConverter`, `idn_to_*`.
+   - ✅ `IntlBreakIterator` / `IntlRuleBasedBreakIterator` / `IntlCodePointBreakIterator` /
+     `IntlPartsIterator` over ubrk_* and utext_* (getRules() read from the compiled data).
+   - Next: `MessageFormatter`, `ResourceBundle`, `Spoofchecker`, `UConverter`, `idn_to_*`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 
