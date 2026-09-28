@@ -4082,6 +4082,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $intlSrc = prelude_src_or_empty("intl.php");
     $intlCollatorSrc = prelude_src_or_empty("intl_collator.php");
     $intlNumfmtSrc = prelude_src_or_empty("intl_numfmt.php");
+    $intlTranslitSrc = prelude_src_or_empty("intl_translit.php");
     $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
@@ -4383,7 +4384,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         || $demand->mentionsAny(['Collator', 'ULOC_ACTUAL_LOCALE', 'ULOC_VALID_LOCALE']);
     $useIntlNumfmt = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlNumfmtSrc))
         || $demand->mentions('NumberFormatter');
-    $useIntl = $useIntlCollator || $useIntlNumfmt
+    $useIntlTranslit = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlTranslitSrc))
+        || $demand->mentions('Transliterator');
+    $useIntl = $useIntlCollator || $useIntlNumfmt || $useIntlTranslit
         || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))
         || $demand->mentionsAny(['Normalizer', 'IntlException']);
     // WeakMap / WeakReference: two global class names php owns outright.
@@ -4577,7 +4580,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
         $lower->intlSrc = ($useIntl ? $intlSrc : "") . ($useIntlCollator ? $intlCollatorSrc : "")
-            . ($useIntlNumfmt ? $intlNumfmtSrc : "");
+            . ($useIntlNumfmt ? $intlNumfmtSrc : "")
+            . ($useIntlTranslit ? $intlTranslitSrc : "");
         $lower->weakSrc = $useWeak ? $weakSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;
