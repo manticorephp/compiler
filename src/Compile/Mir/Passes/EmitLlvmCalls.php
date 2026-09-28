@@ -3023,6 +3023,18 @@ trait EmitLlvmCalls
             // its result is a release of something the caller never owned.
             // Ask what was actually EMITTED.
             $fname = $s->function;
+            // `array_pop($a);` / `array_shift($a);` as a statement: the builtin
+            // MOVES the element out of the array — its owner is whoever consumes
+            // the call ({@see EmitLlvm::isFreshStringTemp}'s cast arm) — so a
+            // discarded one is dropped here. SplFixedArray::setSize trims by
+            // popping and kept every popped token.
+            if ($this->lastCallWasBuiltin && ($fname === 'array_pop' || $fname === 'array_shift')) {
+                $pk = $s->type->kind;
+                $pf = ($pk === Type::KIND_CELL || $pk === Type::KIND_UNKNOWN) ? 'cell' : $this->discardReleaseFlavor($s->type);
+                if ($pf === '') { return ''; }
+                $out = $this->coerceToI64();
+                return $out . $this->rcReleaseReg($this->lastValue, $pf);
+            }
             if ($this->lastCallWasBuiltin) { return ''; }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
             // A by-ref-returning fn yields an address, not an owned value.
