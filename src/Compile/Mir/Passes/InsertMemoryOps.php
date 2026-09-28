@@ -282,7 +282,11 @@ final class InsertMemoryOps implements Pass
         foreach ($fn->params as $p) {
             if ($p->byRef || $p->variadic) { continue; }
             $pk = $p->type->kind;
-            if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING) { continue; }
+            // …and an ARRAY param: `$tokens = array_values(array_filter($tokens, …))`
+            // (php-cs-fixer's Tokens::getTokenOfKindSibling, per sibling search)
+            // stored an owned array into a blocked slot and nothing ever gave it
+            // back. The emitter's entry retain covers vec/assoc already.
+            if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING && !$p->type->isArray()) { continue; }
             if ($pk === Type::KIND_OBJ && $this->isClosureType($p->type)) { continue; }
             $st = $this->rcObjType[$p->name] ?? null;
             if ($st === null || isset($storeBlocked[$p->name])) { continue; }
