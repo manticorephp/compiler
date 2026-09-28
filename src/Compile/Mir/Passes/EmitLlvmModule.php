@@ -386,6 +386,12 @@ trait EmitLlvmModule
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
         }
+        if ($this->rt->needsCloArgc) {
+            // The closure arity channel ({@see closureArityPrologue}). linkonce_odr:
+            // a prelude body in stdlib.o calls a closure the program built.
+            $out .= "@__mir_clo_fp = linkonce_odr global i64 0\n";
+            $out .= "@__mir_clo_argc = linkonce_odr global i64 0\n";
+        }
         if ($this->rt->needsFuncArgs) {
             // The func-args side channel. A call site targeting a callee that
             // asks stores its as-written argument count here; the callee's
@@ -1024,8 +1030,9 @@ trait EmitLlvmModule
         if (\str_starts_with($fn->name, '__mc_fuse_')) { $linkage = 'internal '; }
         if ($isClosure) {
             $paramSig = 'ptr %env';
+            $optIdx = $this->closureOptionalParams($fn, $capCnt);
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
-                $paramSig .= ', i64 %arg.' . $fn->params[$pi]->name;
+                $paramSig .= ', i64 %arg.' . $fn->params[$pi]->name . (isset($optIdx[$pi]) ? '.in' : '');
             }
             // Closures are dispatched through a function pointer stored in
             // their env struct, never referenced by external symbol across a
@@ -1041,6 +1048,9 @@ trait EmitLlvmModule
             }
             $bodySink = new FunctionTextSink($sinkPath);
             $bodySink->write($header);
+            if ($optIdx !== []) {
+                $bodySink->write($this->closureArityPrologue($fn, $capCnt, $optIdx));
+            }
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
                 $slot = $this->ssa->allocReg();
@@ -2772,5 +2782,90 @@ trait EmitLlvmModule
         return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
             . '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n"
             . '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
+    }
+    /**
+     * The trailing parameters of closure `$fn` that carry a default, by FULL
+     * param index (captures first), and a trailing variadic (omitted = an
+     * empty pack).
+     *
+     * @return array<int, bool>
+     */
+    private function closureOptionalParams(\Compile\Mir\FunctionDef $fn, int $capCnt): array
+    {
+        $out = [];
+        for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
+            $pp = $fn->params[$pi];
+            // An omitted variadic is an EMPTY pack, never a missing slot.
+            if ($pp->variadic) { $out[$pi] = true; break; }
+            if ($pp->default !== null) { $out[$pi] = true; }
+        }
+        return $out;
+    }
+
+    /**
+     * The closure ABI carries no arity, so a caller that cannot name the
+     * closure it calls — a `callable` in a PRELUDE body (`array_map`, `usort`),
+     * which is linkonce_odr and may not list one module's closures — used to
+     * leave every omitted optional parameter to whatever the register held:
+     * `array_map('trim', …)` trimmed with a garbage character mask.
+     *
+     * Such a caller now stores the fn it calls and how many arguments it wrote
+     * ({@see EmitLlvmCalls::emitClosureStructInvoke}); here, FIRST, before any
+     * nested call can overwrite the pair, the closure takes it. The pair counts
+     * only when it names THIS closure — a caller that did not store (a runtime
+     * helper, a direct call that padded every argument itself) leaves the
+     * arguments as passed — and it is consumed, so it can never apply twice.
+     * Each omitted optional parameter then takes its default, evaluated only
+     * when it is actually omitted.
+     *
+     * @param array<int, bool> $optIdx
+     */
+    private function closureArityPrologue(\Compile\Mir\FunctionDef $fn, int $capCnt, array $optIdx): string
+    {
+        $this->rt->needsCloArgc = true;
+        $self = '@manticore_' . $this->mangle($fn->name);
+        $cf = $this->ssa->allocReg();
+        $me = $this->ssa->allocReg();
+        $ca = $this->ssa->allocReg();
+        $out  = '  ' . $cf . " = load i64, ptr @__mir_clo_fp\n";
+        $out .= '  ' . $me . ' = icmp eq i64 ' . $cf . ', ptrtoint (ptr ' . $self . " to i64)\n";
+        $out .= '  ' . $ca . " = load i64, ptr @__mir_clo_argc\n";
+        $out .= "  store i64 0, ptr @__mir_clo_fp\n";
+        foreach ($optIdx as $pi => $_) {
+            $pp = $fn->params[$pi];
+            $name = '%arg.' . $pp->name;
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  store i64 ' . $name . '.in, ptr ' . $slot . "\n";
+            $short = $this->ssa->allocReg();
+            $out .= '  ' . $short . ' = icmp ule i64 ' . $ca . ', ' . (string)($pi - $capCnt) . "\n";
+            $use = $this->ssa->allocReg();
+            $out .= '  ' . $use . ' = and i1 ' . $me . ', ' . $short . "\n";
+            $defL = $this->ssa->allocLabel('cdef');
+            $joinL = $this->ssa->allocLabel('cdef.join');
+            $out .= '  br i1 ' . $use . ', label %' . $defL . ', label %' . $joinL . "\n";
+            $out .= $defL . ":\n";
+            $def = $pp->variadic ? new \Compile\Mir\ArrayLit([], $pp->type) : $pp->default;
+            if ($def === null) { $def = new \Compile\Mir\NullConst(Type::null_()); }
+            $out .= $this->emitNode($def);
+            if ($pp->byRef) {
+                // A by-ref slot is an ADDRESS: back the default with a slot of
+                // its own, exactly as a padding caller does.
+                $out .= $this->coerceToI64();
+                $bs = $this->ssa->allocReg();
+                $out .= '  ' . $bs . " = alloca i64\n";
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $bs . "\n";
+                $ba = $this->ssa->allocReg();
+                $out .= '  ' . $ba . ' = ptrtoint ptr ' . $bs . " to i64\n";
+                $this->lastValue = $ba;
+            } else {
+                $out .= $this->closureArgRepr($def->type, $pp->type);
+            }
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $joinL . ":\n";
+            $out .= '  ' . $name . ' = load i64, ptr ' . $slot . "\n";
+        }
+        return $out;
     }
 }

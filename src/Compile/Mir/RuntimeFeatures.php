@@ -128,6 +128,14 @@ public bool $needsClosureRc = false;
     public bool $needsFuncArgs = false;
 
     /**
+     * The closure ARITY channel: a dynamic closure call stores the fn it calls
+     * and how many arguments it wrote into `@__mir_clo_fp` / `@__mir_clo_argc`;
+     * a closure with optional parameters takes them in its prologue and fills
+     * the defaults the call left out ({@see EmitLlvmModule::closureArityPrologue}).
+     */
+    public bool $needsCloArgc = false;
+
+    /**
      * The program asks `function_exists($var)` with a non-literal name — emit
      * the closed-world name table and the scan over it.
      */
