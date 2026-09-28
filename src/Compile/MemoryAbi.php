@@ -897,4 +897,9 @@ final class MemoryAbi
     public const COLOR_PURPLE = 1;
     public const COLOR_GRAY = 2;
     public const COLOR_WHITE = 3;
+
+    /** A buffered root whose count reached zero outside a collection: already
+     *  DROPPED (destructor run, children released) the moment it died, as php
+     *  frees it; only its SHELL waits in the root buffer for the collector. */
+    public const COLOR_DEAD = 4;
 }
