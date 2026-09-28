@@ -231,6 +231,8 @@ trait EmitLlvmBuiltins
         if ($name === 'peek_u32')                     { return $this->biPeek($args, 32, false); }
         if ($name === 'peek_u16')                     { return $this->biPeek($args, 16, false); }
         if ($name === 'peek_u8')                      { return $this->biPeek($args, 8, false); }
+        if ($name === 'peek_f64')                     { return $this->biPeekF64($args); }
+        if ($name === 'poke_f64')                     { return $this->biPokeF64($args); }
         if ($name === 'poke_i64')                     { return $this->biPoke($args, 64); }
         if ($name === 'poke_i32')                     { return $this->biPoke($args, 32); }
         if ($name === 'poke_i16')                     { return $this->biPoke($args, 16); }
@@ -2085,6 +2087,47 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $sv . ' = trunc i64 ' . $v . ' to ' . $ty . "\n";
         }
         $out .= '  store ' . $ty . ' ' . $sv . ', ptr ' . $gp . "\n";
+        return $this->finishI64($out, '0');
+    }
+
+    /**
+     * `peek_f64(\Ffi\Ptr $p, int $off): float` — the C `double` at a byte offset.
+     * @param Node[] $args
+     */
+    private function biPeekF64(array $args): string
+    {
+        $out = $this->emitFfiPtrArg($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load double, ptr ' . $gp . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'double';
+        return $out;
+    }
+
+    /**
+     * `poke_f64(\Ffi\Ptr $p, int $off, float $v): int` — store a C `double` at a
+     * byte offset (a va_list slot, a struct field). Yields 0.
+     * @param Node[] $args
+     */
+    private function biPokeF64(array $args): string
+    {
+        $out = $this->emitFfiPtrArg($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceDoubleOperand($args[2]);
+        $v = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $out .= '  store double ' . $v . ', ptr ' . $gp . "\n";
         return $this->finishI64($out, '0');
     }
 

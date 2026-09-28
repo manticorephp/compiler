@@ -1983,7 +1983,7 @@ final class InferTypes implements Pass
         $pos = \strrpos($fn, '\\');
         $n = $pos === false ? $fn : \substr($fn, $pos + 1);
         $n = \strtolower($n);
-        return $n === 'floatval' || $n === 'sqrt' || $n === 'floor' || $n === 'ceil'
+        return $n === 'floatval' || $n === 'sqrt' || $n === 'floor' || $n === 'ceil' || $n === 'peek_f64'
             || $n === 'round' || $n === 'fmod' || $n === 'sin' || $n === 'cos'
             || $n === 'tan' || $n === 'asin' || $n === 'acos' || $n === 'atan'
             || $n === 'atan2' || $n === 'sinh' || $n === 'cosh' || $n === 'tanh'

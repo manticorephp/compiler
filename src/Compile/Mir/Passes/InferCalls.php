@@ -356,7 +356,7 @@ trait InferCalls
             || $n === 'peek_i8'
             || $n === 'peek_u32' || $n === 'peek_u16' || $n === 'peek_u8'
             || $n === 'poke_i64' || $n === 'poke_i32' || $n === 'poke_i16'
-            || $n === 'poke_i8'
+            || $n === 'poke_i8' || $n === 'poke_f64'
             || $n === 'array_unshift' || $n === '__str_byte_at') {
             return Type::int_();
         }
@@ -529,7 +529,8 @@ trait InferCalls
             || $n === 'asin' || $n === 'acos' || $n === 'atan' || $n === 'atan2'
             || $n === 'sinh' || $n === 'cosh' || $n === 'tanh'
             || $n === 'exp' || $n === 'log' || $n === 'log10'
-            || $n === 'hypot' || $n === 'pi' || $n === 'deg2rad' || $n === 'rad2deg') {
+            || $n === 'hypot' || $n === 'pi' || $n === 'deg2rad' || $n === 'rad2deg'
+            || $n === 'peek_f64') {
             return Type::float_();
         }
         if ($n === 'chr' || $n === 'dechex' || $n === 'substr'
