@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **759 / 2135** · classes **142 / 327** · codegen builtins 228 · lowered 32 · stdlib globals 917 · prelude globals 534
+Functions **765 / 2135** · classes **142 / 327** · codegen builtins 228 · lowered 32 · stdlib globals 969 · prelude globals 534
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -48,7 +48,7 @@ Functions **759 / 2135** · classes **142 / 327** · codegen builtins 228 · low
 | [json](#json) | 5 / 5 | 2 / 2 | 100% |
 | [ldap](#ldap) | 0 / 55 | 0 / 3 | 0% |
 | [libxml](#libxml) | 6 / 8 | 1 / 1 | 78% |
-| [mbstring](#mbstring) | 23 / 65 | 0 / 0 | 35% |
+| [mbstring](#mbstring) | 29 / 65 | 0 / 0 | 45% |
 | [mysqli](#mysqli) | 0 / 106 | 0 / 6 | 0% |
 | [odbc](#odbc) | 0 / 48 | 0 / 2 | 0% |
 | [openssl](#openssl) | 4 / 64 | 1 / 3 | 7% |
@@ -155,7 +155,7 @@ Functions (37): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 900 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 946 — not user API.
 
 ## Per extension
 
@@ -483,17 +483,17 @@ Classes: `LibXMLError`
 
 ### mbstring
 
-Functions 23 / 65 · classes 0 / 0
+Functions 29 / 65 · classes 0 / 0
 
-<details><summary>implemented (23)</summary>
+<details><summary>implemented (29)</summary>
 
-`mb_check_encoding`<sup>s</sup> `mb_chr`<sup>s</sup> `mb_convert_encoding`<sup>s</sup> `mb_encoding_aliases`<sup>s</sup> `mb_internal_encoding`<sup>s</sup> `mb_list_encodings`<sup>s</sup> `mb_ltrim`<sup>s</sup> `mb_ord`<sup>s</sup> `mb_preferred_mime_name`<sup>s</sup> `mb_rtrim`<sup>s</sup> `mb_scrub`<sup>s</sup> `mb_str_pad`<sup>s</sup> `mb_str_split`<sup>s</sup> `mb_strcut`<sup>s</sup> `mb_strlen`<sup>s</sup> `mb_strpos`<sup>s</sup> `mb_strrchr`<sup>s</sup> `mb_strrpos`<sup>s</sup> `mb_strstr`<sup>s</sup> `mb_substitute_character`<sup>s</sup> `mb_substr`<sup>s</sup> `mb_substr_count`<sup>s</sup> `mb_trim`<sup>s</sup>
+`mb_check_encoding`<sup>s</sup> `mb_chr`<sup>s</sup> `mb_convert_encoding`<sup>s</sup> `mb_decode_mimeheader`<sup>s</sup> `mb_decode_numericentity`<sup>s</sup> `mb_detect_encoding`<sup>s</sup> `mb_detect_order`<sup>s</sup> `mb_encode_mimeheader`<sup>s</sup> `mb_encode_numericentity`<sup>s</sup> `mb_encoding_aliases`<sup>s</sup> `mb_internal_encoding`<sup>s</sup> `mb_list_encodings`<sup>s</sup> `mb_ltrim`<sup>s</sup> `mb_ord`<sup>s</sup> `mb_preferred_mime_name`<sup>s</sup> `mb_rtrim`<sup>s</sup> `mb_scrub`<sup>s</sup> `mb_str_pad`<sup>s</sup> `mb_str_split`<sup>s</sup> `mb_strcut`<sup>s</sup> `mb_strlen`<sup>s</sup> `mb_strpos`<sup>s</sup> `mb_strrchr`<sup>s</sup> `mb_strrpos`<sup>s</sup> `mb_strstr`<sup>s</sup> `mb_substitute_character`<sup>s</sup> `mb_substr`<sup>s</sup> `mb_substr_count`<sup>s</sup> `mb_trim`<sup>s</sup>
 
 </details>
 
-<details><summary>missing (42)</summary>
+<details><summary>missing (36)</summary>
 
-`mb_convert_case` `mb_convert_kana` `mb_convert_variables` `mb_decode_mimeheader` `mb_decode_numericentity` `mb_detect_encoding` `mb_detect_order` `mb_encode_mimeheader` `mb_encode_numericentity` `mb_ereg` `mb_ereg_match` `mb_ereg_replace` `mb_ereg_replace_callback` `mb_ereg_search` `mb_ereg_search_getpos` `mb_ereg_search_getregs` `mb_ereg_search_init` `mb_ereg_search_pos` `mb_ereg_search_regs` `mb_ereg_search_setpos` `mb_eregi` `mb_eregi_replace` `mb_get_info` `mb_http_input` `mb_http_output` `mb_language` `mb_lcfirst` `mb_output_handler` `mb_parse_str` `mb_regex_encoding` `mb_regex_set_options` `mb_send_mail` `mb_split` `mb_strimwidth` `mb_stripos` `mb_stristr` `mb_strrichr` `mb_strripos` `mb_strtolower` `mb_strtoupper` `mb_strwidth` `mb_ucfirst`
+`mb_convert_case` `mb_convert_kana` `mb_convert_variables` `mb_ereg` `mb_ereg_match` `mb_ereg_replace` `mb_ereg_replace_callback` `mb_ereg_search` `mb_ereg_search_getpos` `mb_ereg_search_getregs` `mb_ereg_search_init` `mb_ereg_search_pos` `mb_ereg_search_regs` `mb_ereg_search_setpos` `mb_eregi` `mb_eregi_replace` `mb_get_info` `mb_http_input` `mb_http_output` `mb_language` `mb_lcfirst` `mb_output_handler` `mb_parse_str` `mb_regex_encoding` `mb_regex_set_options` `mb_send_mail` `mb_split` `mb_strimwidth` `mb_stripos` `mb_stristr` `mb_strrichr` `mb_strripos` `mb_strtolower` `mb_strtoupper` `mb_strwidth` `mb_ucfirst`
 
 </details>
 

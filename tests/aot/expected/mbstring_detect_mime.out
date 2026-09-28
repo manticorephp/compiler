@@ -1,0 +1,49 @@
+UTF-8: 'UTF-8' / 'UTF-8'
+Windows-1251: 'Windows-1251' / 'Windows-1251'
+KOI8-R: 'Windows-1251' / 'Windows-1251'
+UTF-16LE: 'ASCII' / 'UTF-16LE'
+CP866: 'CP866' / 'Windows-1251'
+string(5) "ASCII"
+bool(false)
+array(2) {
+  [0]=>
+  string(5) "ASCII"
+  [1]=>
+  string(5) "UTF-8"
+}
+bool(true)
+array(3) {
+  [0]=>
+  string(5) "UTF-8"
+  [1]=>
+  string(5) "ASCII"
+  [2]=>
+  string(5) "UTF-8"
+}
+bool(true)
+Привіт
+UTF-7: +BBIERQQ+BDQETwRJBDgENQ +ACY Sent/2024 +ACvYPd4A- -> Входящие & Sent/2024 +😀 len=23 ok=truetrue
+UTF7-IMAP: &BBIERQQ+BDQETwRJBDgENQ- &- Sent/2024 +&2D3eAA- -> Входящие & Sent/2024 +😀 len=23 ok=truefalse
+<p>Caf&eacute; &laquo;na&iuml;ve&raquo; &mdash; 5 &euro;</p>
+é€A&&bogus;
+PHA+Q2Fmw6kgwqtuYcOvdmXCuyDigJQgNSDigqw8L3A+ Привіт
+a=3D=C3=A9
+|café
+begin 0644 filename
++=75E;F-O9&4@;64`
+<p>Caf&#233; &#171;na&#239;ve&#187; &#8212; 5 &#8364;</p>
+&#x457;&#x1F600;
+ї😀&#65;&#9999999999;&#;x
+=?UTF-8?B?0KLQtdC80LAg0LvQuNGB0YLQsDog0LfQstGW0YIg0LfQsCDQstC10YDQtdGB?=
+ =?UTF-8?B?0LXQvdGMIDIwMjYg0YDQvtC60YMsINC+0YHRgtCw0YLQvtGH0L3QsCDQstC1?=
+ =?UTF-8?B?0YDRgdGW0Y8=?=
+=?ISO-8859-1?Q?Gr=FC=DFe=20aus=20K=F6ln?=
+plain subject line
+ТемаGrüße tail
+mb_detect_encoding(): Argument #2 ($encodings) must specify at least one encoding
+mb_detect_encoding(): Argument #2 ($encodings) contains invalid encoding "zz"
+mb_detect_order(): Argument #1 ($encoding) must specify at least one encoding
+mb_ord() does not support the "UTF-7" encoding
+mb_chr() does not support the "HTML-ENTITIES" encoding
+mb_encode_numericentity(): Argument #2 ($map) must have a multiple of 4 elements
+mb_encode_mimeheader(): Argument #2 ($charset) "Quoted-Printable" cannot be used for MIME header encoding

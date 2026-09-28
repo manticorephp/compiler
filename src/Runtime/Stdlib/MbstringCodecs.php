@@ -72,7 +72,8 @@ function __mc_mb_width(string $enc): int
 function __mc_mb_kind_of(string $enc): int
 {
     if ($enc === "UTF-8" || \str_starts_with($enc, "UTF-8-Mobile")) { return 0; }
-    if (isset(\__mc_mb_sb_tables()[$enc])) { return 1; }
+    // UUENCODE carries Zend's single-byte flag: counted and cut as raw bytes.
+    if ($enc === "UUENCODE" || isset(\__mc_mb_sb_tables()[$enc])) { return 1; }
     if (\__mc_mb_width($enc) > 0) { return 2; }
     return 3;
 }
@@ -117,10 +118,15 @@ function __mc_mb_units(string $u): array
 /** Decode `$s` in `$enc` to marked UTF-8; `$big` keeps UCS-4 values past U+10FFFF (escaped) instead of marking them. */
 function __mc_mb_dec8(string $enc, string $s, bool $big = false): string
 {
+    if ($enc === "BASE64") { return \__mc_mb_base64_dec8($s); }
+    if ($enc === "Quoted-Printable") { return \__mc_mb_qprint_dec8($s); }
+    if ($enc === "UUENCODE") { return \__mc_mb_uuencode_dec8($s); }
+    if ($enc === "HTML-ENTITIES") { return \__mc_mb_htmlent_dec8($s); }
     $kind = \__mc_mb_kind_of($enc);
     if ($kind === 0) { return \__mc_mb_scrub_range(0, $s, 0, \strlen($s), "\xFF"); }
     if ($kind === 1) { return \__mc_mb_sb_dec8($enc, $s); }
     if (\__mc_mb_is_wide($enc)) { return \__mc_mb_wide_dec8($enc, $s, $big); }
+    if ($enc === "UTF-7" || $enc === "UTF7-IMAP") { return \__mc_mb_utf7_dec8($s, $enc === "UTF7-IMAP"); }
     return \__mc_mb_iconv_dec8($enc, $s);
 }
 
@@ -131,12 +137,17 @@ function __mc_mb_dec8(string $enc, string $s, bool $big = false): string
  */
 function __mc_mb_enc8(string $enc, string $u, bool $strict = false): ?string
 {
+    if ($enc === "BASE64") { return \__mc_mb_base64_enc(\__mc_mb_raw_units($u)); }
+    if ($enc === "Quoted-Printable") { return \__mc_mb_qprint_enc(\__mc_mb_raw_units($u)); }
+    if ($enc === "UUENCODE") { return \__mc_mb_uuencode_enc(\__mc_mb_raw_units($u)); }
+    if ($enc === "HTML-ENTITIES") { return \__mc_mb_htmlent_enc(\__mc_mb_raw_units($u)); }
     $kind = \__mc_mb_kind_of($enc);
     if ($kind === 0 && !\str_contains($u, "\xFE")) {
         if (!\str_contains($u, "\xFF")) { return $u; }
         if ($strict) { return null; }
         return \str_replace("\xFF", \__mc_mb_bad_bytes($enc), $u);
     }
+    if ($enc === "UTF-7" || $enc === "UTF7-IMAP") { return \__mc_mb_utf7_enc(\__mc_mb_units($u), $enc === "UTF7-IMAP", $strict); }
     if ($kind === 3 && !\__mc_mb_is_wide($enc)) { return \__mc_mb_iconv_enc8($enc, $u, $strict); }
     $out = "";
     foreach (\__mc_mb_units($u) as $cp) {
@@ -150,11 +161,36 @@ function __mc_mb_enc8(string $enc, string $u, bool $strict = false): ?string
     return $out;
 }
 
+/**
+ * Zend's mb_fast_convert. Converting TO Base64 / QPrint encodes the raw input
+ * bytes (the source is read as 8bit), converting FROM Base64 / QPrint / UUENCODE
+ * yields raw bytes (the target becomes 8bit). `$marker` is the BADUTF8 mode Zend
+ * searches in: every malformed or unencodable unit is one "\xFF" (targets UTF-8
+ * or, by the rule above, 8bit).
+ */
+function __mc_mb_fast(string $s, string $from, string $to, bool $marker = false): string
+{
+    if ($s === "") { return ""; }
+    if ($to === "BASE64" || $to === "Quoted-Printable") {
+        $from = "8bit";
+    } elseif ($from === "BASE64" || $from === "Quoted-Printable" || $from === "UUENCODE") {
+        $to = "8bit";
+    }
+    $u = \__mc_mb_dec8($from, $s, !$marker);
+    if (!$marker) { return (string)\__mc_mb_enc8($to, $u); }
+    if ($to !== "8bit") { return $u; }
+    $out = "";
+    foreach (\__mc_mb_units($u) as $w) { $out = $out . ($w < 0 || $w > 0xFF ? "\xFF" : \chr($w)); }
+    return $out;
+}
+
 /** Bytes of `$cp` in a single-byte or wide `$enc`, or null when it has none. */
 function __mc_mb_enc_cp(string $enc, int $kind, int $cp): ?string
 {
     if ($kind === 0) { return $cp <= 0x10FFFF ? \__mc_mb_u8_chr($cp) : null; }
     if ($kind === 1) {
+        $fix = \__mc_mb_sb_fix($enc);
+        if (isset($fix[$cp])) { return $fix[$cp] < 0 ? null : \chr($fix[$cp]); }
         if ($cp < 0x80) { return \chr($cp); }
         $rev = \__mc_mb_sb_rev($enc);
         return isset($rev[$cp]) ? \chr($rev[$cp]) : null;
@@ -194,6 +230,27 @@ function __mc_mb_bad_bytes(string $enc): string
     return $st[0] === 0 ? (string)\__mc_mb_enc8($enc, "?", true) : "";
 }
 
+/**
+ * The substitute for `$cp` (-1 = bad input) as codepoints, for an encoder that
+ * must emit it in-stream (a stateful one). Zend's mb_illegal_marker.
+ * @return int[]
+ */
+function __mc_mb_subst_cps(int $cp): array
+{
+    $st = \__mc_mb_subst();
+    if ($st[0] === 1) { return []; }
+    if ($cp < 0 || $st[0] === 0) { return [$st[1]]; }
+    $text = $st[0] === 2 ? "U+" . \strtoupper(\dechex($cp)) : "&#x" . \strtoupper(\dechex($cp)) . ";";
+    $out = [];
+    $n = \strlen($text);
+    $i = 0;
+    while ($i < $n) {
+        $out[] = \ord($text[$i]);
+        $i = $i + 1;
+    }
+    return $out;
+}
+
 /** What codepoint `$cp`, which `$enc` cannot spell, becomes. */
 function __mc_mb_unrep_bytes(string $enc, int $cp): string
 {
@@ -226,6 +283,30 @@ function __mc_mb_sb_dec8(string $enc, string $s): string
         $i = $i + 1;
     }
     return $out;
+}
+
+/** @return array<int,int> Zend's encoder answers that differ from the mirror of the decode table */
+function __mc_mb_sb_fix(string $enc): array
+{
+    static $all = [];
+    static $loaded = false;
+    if (!$loaded) {
+        $all = \__mc_mb_sbcs_rev_fix();
+        $loaded = true;
+    }
+    return isset($all[$enc]) ? $all[$enc] : [];
+}
+
+/** Lead-byte length table of `$enc` (one digit per byte), "" when Zend walks it by decoding. */
+function __mc_mb_mblen_table(string $enc): string
+{
+    static $all = [];
+    static $loaded = false;
+    if (!$loaded) {
+        $all = \__mc_mb_mblen_tables();
+        $loaded = true;
+    }
+    return isset($all[$enc]) ? $all[$enc] : "";
 }
 
 /** @return array<int,int> codepoint → byte, high half only */
@@ -381,7 +462,6 @@ function __mc_mb_iconv_name(string $enc): string
     elseif ($enc === "EUC-KR") { $cands = ["EUC-KR"]; }
     elseif ($enc === "UHC") { $cands = ["CP949", "UHC", "EUC-KR"]; }
     elseif ($enc === "ISO-2022-KR") { $cands = ["ISO-2022-KR"]; }
-    elseif ($enc === "UTF-7") { $cands = ["UTF-7"]; }
     else { $cands = []; }
     $found = "";
     foreach ($cands as $c) {

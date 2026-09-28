@@ -267,13 +267,30 @@ Order:
      All codecs meet in ONE interchange form, marked UTF-8 (see the codecs header). Fuzzed
      against Zend over 23 encodings × 18 functions incl. conversions: 0 mismatches over 9M
      cases; the iconv path has no Zend harness (FFI) — `mbstring_encodings` covers it
-     natively. Known gaps: CJK `mb_strcut` throws; malformed CJK input is marked per byte
-     (Zend's CJK decoders mark per sequence); a multi-candidate `from` takes the first valid
-     candidate (Zend scores them — 2b); `UTF-8-Mobile#*` is plain UTF-8.
-   - 2b: `mb_detect_encoding` / `mb_detect_order` with Zend's scoring.
-   - 2c: `BASE64`, `UUENCODE`, `HTML-ENTITIES`, `Quoted-Printable`, `UTF7-IMAP` (no codec yet
-     — an Error today), `mb_encode_numericentity` / `mb_decode_numericentity`,
-     `mb_encode_mimeheader` / `mb_decode_mimeheader`, `mb_convert_variables`.
+     natively. Known gaps: malformed CJK input is marked per byte (Zend's CJK decoders mark
+     per sequence); `UTF-8-Mobile#*` is plain UTF-8; the ArmSCII-8 encoder's five
+     non-mirror bytes come from a generated fix table.
+   - ✅ 2b: `mb_detect_encoding` / `mb_detect_order` and the candidate list of
+     `mb_convert_encoding` score candidates exactly as Zend's mb_guess_encoding (demerits,
+     php-src's rare-codepoint bit vector, generated into `MbstringTables.php`; the single-precision order
+     multiplier, strict elimination, the UTF-7/JIS/ISO-2022-JP pre-validators), and parse
+     encoding lists Zend's way ("auto" and every prefix of it, quotes).
+   - ✅ 2c: UTF-7 / UTF7-IMAP (`MbstringUtf7.php`, libmbfl transcribed, validators included);
+     BASE64 / Quoted-Printable / UUENCODE / HTML-ENTITIES (`MbstringBytes.php`, with
+     mb_fast_convert's byte rule: to Base64/QPrint reads the source as 8bit, from
+     Base64/QPrint/UUENCODE writes raw bytes — also in scrub / search / substr_count;
+     UUENCODE counts as single-byte); `mb_encode_numericentity` /
+     `mb_decode_numericentity`; `mb_encode_mimeheader` / `mb_decode_mimeheader`
+     (`MbstringMime.php`, the encoder's 90-codepoint buffer emulated — its line breaks
+     depend on it). The E_DEPRECATED notices of the byte encodings are not printed.
+     CJK `mb_str_split` / `mb_strcut` walk php's lead-byte tables (generated).
+     Fuzz: 29 encodings × 26 functions, 0 mismatches.
+   - Open: `mb_strcut` over UTF-7 / UTF7-IMAP / JIS / ISO-2022-* / CP5022x / HZ / GB18030 /
+     CP950 and the byte encodings (Zend cuts those through its legacy byte-at-a-time
+     filters with a 20-byte look-back heuristic) throws an Error; `mb_convert_variables`
+     waits on by-reference variadics (`mixed &...$vars`, a compiler gap); `mb_language`,
+     `mb_get_info`, `mb_http_input` / `mb_http_output`, `mb_parse_str`, `mb_output_handler`,
+     `mb_send_mail`.
 3. **ICU link infrastructure** — the one real prerequisite for intl:
    - ICU C symbols are VERSION-SUFFIXED (`u_strToUpper_74`) unless ICU was built with
      `U_DISABLE_RENAMING`; `#[Symbol]` needs the suffix resolved at build time (probe
