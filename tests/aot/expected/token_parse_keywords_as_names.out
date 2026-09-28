@@ -1,0 +1,6 @@
+T_INLINE_HTML(class A { const DEFAULT = 1; const int LIST = 2; public function list() {} public function &print() {} public static function new() {} use T { foo as protected echo; bar as default; } }
+enum E { case DEFAULT; case CLASS = 1; }
+$a->list(); A::new(); A::class; f(class: 1, default: 2);
+switch ($x) { case 1: break; default: break; }
+#[Attr(default: 1)] function g() {}
+$a = [0., 1., 2.5, 1_000.];) 

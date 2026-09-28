@@ -721,6 +721,82 @@ final class __McTok
             if ($st === self::ST_VARNAME) { $i = $this->scanVarname($s, $len, $i); continue; }
             $i = $this->scanEncaps($s, $len, $i);
         }
+        if (($flags & 1) !== 0) { $this->parseReclassify(); }
+    }
+
+    /**
+     * TOKEN_PARSE follows the PARSER, which reads a reserved word as a plain
+     * identifier wherever a NAME is expected. The lexer one-shots cover `->`,
+     * `::` and `function`; the contexts that need the NEXT token as well are
+     * settled here, over the finished stream: a named argument (`f(class: 1)`,
+     * `#[A(default: 1)]`), `function &print()`, a constant's name
+     * (`const DEFAULT = 1`, `const int LIST = 2`), an enum case
+     * (`case DEFAULT;`) and a trait alias (`as protected echo;`). Measured
+     * against Zend; php-cs-fixer spaced every `class:` argument as a ternary.
+     */
+    private function parseReclassify(): void
+    {
+        /** @var int[] $sig */
+        $sig = [];
+        $i = 0;
+        while ($i < $this->n) {
+            $id = $this->meta[$i] & 4095;
+            if ($id !== __McTokId::T_WHITESPACE && $id !== __McTokId::T_COMMENT && $id !== __McTokId::T_DOC_COMMENT) {
+                $sig[] = $i;
+            }
+            $i = $i + 1;
+        }
+        $m = \count($sig);
+        $k = 0;
+        while ($k < $m) {
+            $i = $sig[$k];
+            $id = $this->meta[$i] & 4095;
+            if ($id < 256 || $id === __McTokId::T_STRING || !isset($this->kw[\strtolower($this->texts[$i])])) {
+                $k = $k + 1;
+                continue;
+            }
+            $pt = $k > 0 ? $this->texts[$sig[$k - 1]] : '';
+            $pid = $k > 0 ? ($this->meta[$sig[$k - 1]] & 4095) : 0;
+            $ppid = $k > 1 ? ($this->meta[$sig[$k - 2]] & 4095) : 0;
+            $nt = $k + 1 < $m ? $this->texts[$sig[$k + 1]] : '';
+            $name = false;
+            if (($pt === '(' || $pt === ',') && $nt === ':') {
+                $name = true;
+            } elseif ($pt === '&' && $ppid === __McTokId::T_FUNCTION) {
+                $name = true;
+            } elseif ($pid === __McTokId::T_CASE && ($nt === ';' || $nt === '=')) {
+                $name = true;
+            } elseif ($nt === ';' && ($pid === __McTokId::T_AS
+                || (($pid === __McTokId::T_PUBLIC || $pid === __McTokId::T_PROTECTED || $pid === __McTokId::T_PRIVATE)
+                    && $ppid === __McTokId::T_AS))) {
+                $name = true;
+            } elseif ($nt === '=' && $this->inConstDecl($sig, $k)) {
+                $name = true;
+            }
+            if ($name) {
+                $this->meta[$i] = __McTokId::T_STRING | ($this->meta[$i] & ~4095);
+            }
+            $k = $k + 1;
+        }
+    }
+
+    /**
+     * Whether significant token `$k` sits in a `const` declaration's name list:
+     * the nearest `const` / `;` / `{` / `}` behind it is the `const`.
+     *
+     * @param int[] $sig
+     */
+    private function inConstDecl(array $sig, int $k): bool
+    {
+        $j = $k - 1;
+        while ($j >= 0) {
+            $t = $sig[$j];
+            if (($this->meta[$t] & 4095) === __McTokId::T_CONST) { return true; }
+            $x = $this->texts[$t];
+            if ($x === ';' || $x === '{' || $x === '}') { return false; }
+            $j = $j - 1;
+        }
+        return false;
     }
 
     /**
@@ -990,8 +1066,9 @@ final class __McTok
             if ($this->cls($c) === self::K_DIGIT || $c === 95) { $j = $j + 1; continue; }
             break;
         }
-        if ($j < $len && \ord($s[$j]) === 46 && $j + 1 < $len
-            && $this->cls(\ord($s[$j + 1])) === self::K_DIGIT) {
+        // DNUM is `[0-9]+ "." [0-9]*`: a trailing dot with no digit after it
+        // still makes the literal a float (`[0., 1.]`, symfony's CpuCoreCounter).
+        if ($j < $len && \ord($s[$j]) === 46) {
             $isFloat = true;
             $j = $j + 1;
             while ($j < $len) {
