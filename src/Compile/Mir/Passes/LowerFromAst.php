@@ -459,6 +459,8 @@ final class LowerFromAst implements Pass
     /** ext/openssl, the certificate-reading half — DEMAND-GATED. Pure DER, no
      *  libcrypto; carries OpenSSLAsymmetricKey, so closed-world analysis wants it. */
     public string $opensslSrc = '';
+    /** ext/intl over the host ICU (prelude/intl.php) — DEMAND-GATED; links libicu. */
+    public string $intlSrc = '';
     /** WeakMap + WeakReference (prelude/weak.php) — DEMAND-GATED on either
      *  name. Global namespace; implements spl_arrays.php's interfaces. */
     public string $weakSrc = '';

@@ -112,6 +112,9 @@ trait EmitLlvmCalls
     private function emitFfiWrapper(FunctionDef $fn): string
     {
         $cSym = $fn->ffiSymbol;
+        // ICU renames its C API with the major version (`u_strToUpper_78`); the
+        // bindings carry the plain name and the host's suffix is appended here.
+        if (\Manticore\is_icu_library($fn->ffiLibrary)) { $cSym = $cSym . \Manticore\icu_symbol_suffix(); }
         $ret = $fn->ffiRetCType;
         // `#[Ffi\Library('name')]` → a link requirement. Collected at the
         // WRAPPER, so the set is exactly what this module emitted rather than

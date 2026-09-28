@@ -221,7 +221,7 @@ jobs:
       # cache misses, which is the only one that needs Zend.
       - name: Toolchain
         run: |
-          brew install php pcre2 openssl@3 sqlite
+          brew install php pcre2 openssl@3 sqlite icu4c
           php -v
           clang --version | head -1
 

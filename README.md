@@ -32,7 +32,7 @@ plus a real toolchain, because it ends in `clang` and `cc`:
 | `php` | **8.5** | cold bootstrap only — Zend runs the compiler source once to seed the first native binary |
 | libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
 | OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
-| libxml2, libsqlite3, libcurl (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, or `curl_*` — each is demand-gated and linked on mention |
+| libxml2, libsqlite3, libcurl, libicu (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, `curl_*`, or ext/intl (`Normalizer`, …) — each is demand-gated and linked (dynamically) on mention; Homebrew's keg-only `icu4c` is found by itself |
 
 The `-dev` / `-devel` half matters: the headers are what the build looks for, not just
 the runtime library. It is also what carries the unversioned `lib<name>.so` symlink

@@ -377,6 +377,78 @@ function iconv_link_flags(): string {
     return \Manticore\host_os() === "Darwin" ? "-liconv" : "";
 }
 
+/** `pkg-config <args>` output, trimmed, or "" when it fails. `$path` extends PKG_CONFIG_PATH. */
+function pkg_config(string $args, string $path = ""): string {
+    $listPath = "/tmp/manticore_pkgconfig_" . (string)getpid() . ".txt";
+    $env = $path === "" ? "" : "PKG_CONFIG_PATH=" . $path . " ";
+    $rc = system($env . "pkg-config " . $args . " > " . $listPath . " 2>/dev/null");
+    $c = read_file($listPath);
+    system("rm -f " . $listPath);
+    if ($rc !== 0 || $c === null) { return ""; }
+    return \trim($c);
+}
+
+/**
+ * Where the host ICU lives: `[pkg-config path to use ("" = default), include dir]`.
+ * Homebrew keeps icu4c keg-only (off every default path), so its pkgconfig
+ * directory is tried when the default search finds nothing.
+ * @return string[]
+ */
+function icu_location(): array {
+    static $loc = [];
+    if ($loc !== []) { return $loc; }
+    $path = "";
+    $inc = pkg_config("--variable=includedir icu-uc");
+    if ($inc === "") {
+        $home = homebrew_opt_lib('icu4c');
+        if ($home !== '') {
+            $path = $home . "/pkgconfig";
+            $inc = pkg_config("--variable=includedir icu-uc", $path);
+        }
+    }
+    if ($inc === "" && \is_file("/usr/include/unicode/uvernum.h")) { $inc = "/usr/include"; }
+    $loc = [$path, $inc];
+    return $loc;
+}
+
+/**
+ * ICU renames every C symbol with its major version (`u_strToUpper` is really
+ * `u_strToUpper_78`) unless it was built with U_DISABLE_RENAMING. Bindings are
+ * written with the plain names; the FFI emitter appends this suffix for a
+ * binding whose `#[Library]` is one of ICU's (see EmitLlvmCalls::emitFfiWrapper).
+ * Read from the headers the program would compile against; "" when ICU renames
+ * nothing or cannot be found (the link then fails loudly on the plain name).
+ */
+function icu_symbol_suffix(): string {
+    static $suffix = null;
+    if ($suffix !== null) { return $suffix; }
+    $suffix = "";
+    $inc = icu_location()[1];
+    if ($inc === "") { return $suffix; }
+    $config = read_file($inc . "/unicode/uconfig.h");
+    if ($config !== null && \preg_match('/#\s*define\s+U_DISABLE_RENAMING\s+1\b/', $config) === 1) { return $suffix; }
+    $ver = read_file($inc . "/unicode/uvernum.h");
+    if ($ver !== null && \preg_match('/#\s*define\s+U_ICU_VERSION_SUFFIX\s+(_\w+)/', $ver, $m) === 1) {
+        $suffix = $m[1];
+    }
+    return $suffix;
+}
+
+/** Whether `#[Ffi\Library('<name>')]` names one of ICU's libraries. */
+function is_icu_library(string $name): bool {
+    return $name === "icuuc" || $name === "icui18n" || $name === "icuio" || $name === "icudata";
+}
+
+/** Link flags for one ICU library: pkg-config (Homebrew's keg path included), else a bare -l. */
+function icu_link_flags(string $name): string {
+    $module = $name === "icuuc" ? "icu-uc" : ($name === "icui18n" ? "icu-i18n" : ($name === "icuio" ? "icu-io" : ""));
+    if ($module !== "") {
+        $flags = pkg_config("--libs " . $module, icu_location()[0]);
+        if ($flags !== "") { return $flags; }
+    }
+    return "-l" . $name;
+}
+
 /**
  * Resolve a set of `#[Ffi\Library]` names to `cc` link tokens.
  *
@@ -422,6 +494,8 @@ function ffi_link_flags(array $libs, string $already = ""): string
             // there fails to resolve even though the symbols are present. The
             // answer is a property of the C library, not of what is installed.
             $flags = iconv_link_flags();
+        } elseif (is_icu_library($name)) {
+            $flags = icu_link_flags($name);
         } else {
             $flags = generic_link_flags($name);
         }
@@ -4005,6 +4079,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
     $opensslSrc = prelude_src_or_empty("openssl_x509.php");
+    $intlSrc = prelude_src_or_empty("intl.php");
     $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
@@ -4298,6 +4373,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
         || $demand->mentions('OpenSSLAsymmetricKey');
+    // ext/intl over the host ICU: gated on its functions and its classes, so a
+    // program that uses neither never links libicu.
+    $useIntl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))
+        || $demand->mentionsAny(['Normalizer']);
     // WeakMap / WeakReference: two global class names php owns outright.
     $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
@@ -4488,6 +4567,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
+        $lower->intlSrc = $useIntl ? $intlSrc : "";
         $lower->weakSrc = $useWeak ? $weakSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;

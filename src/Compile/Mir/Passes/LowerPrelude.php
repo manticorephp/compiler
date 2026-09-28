@@ -230,6 +230,10 @@ trait LowerPrelude
             // no dependency on any other prelude fragment.
             $src .= $this->opensslSrc;
         }
+        if ($this->intlSrc !== '') {
+            // ext/intl. After exceptions.php (ValueError).
+            $src .= $this->intlSrc;
+        }
         if ($this->weakSrc !== '') {
             // WeakMap / WeakReference. After spl_arrays.php: WeakMap implements
             // ArrayAccess, Countable and IteratorAggregate.

@@ -291,12 +291,18 @@ Order:
      waits on by-reference variadics (`mixed &...$vars`, a compiler gap); `mb_language`,
      `mb_get_info`, `mb_http_input` / `mb_http_output`, `mb_parse_str`, `mb_output_handler`,
      `mb_send_mail`.
-3. **ICU link infrastructure** — the one real prerequisite for intl:
+3. ✅ **ICU link infrastructure** (2026-09-28) — `prelude/intl.php` (demand-gated, so only a
+   program using intl links libicu), `#[Library('icuuc'|'icui18n')]` resolved by
+   `icu_link_flags()` (pkg-config; Homebrew's keg-only icu4c included), the version suffix
+   read from `unicode/uvernum.h` by `icu_symbol_suffix()` and appended by the FFI emitter;
+   ICU packages in both Docker images (php-intl in the oracle) and in macOS CI. First
+   consumer: `Normalizer` / `normalizer_normalize` / `normalizer_is_normalized`
+   (`intl_normalizer`). Linux not yet run against the new images. Was:
    - ICU C symbols are VERSION-SUFFIXED (`u_strToUpper_74`) unless ICU was built with
      `U_DISABLE_RENAMING`; `#[Symbol]` needs the suffix resolved at build time (probe
      `U_ICU_VERSION_MAJOR_NUM` / `icu-config`, like `pcre2_link_flags()`).
-   - static vs dynamic on Linux/Alpine: `libicudata` is ~30 MB; a static link wants an ICU
-     data filter, a dynamic one ties the binary to a distro's soname. Decide per target.
+   - ✅ decided 2026-09-28: DYNAMIC. A binary that uses intl links the system ICU at run time
+     (like `-lcurl` / `-lsqlite3`); no static ICU data.
    - docker images, CI and Alpine get the ICU packages.
    - AGENTS.md Design principle §2 and README list "the libraries of the extensions a
      program uses", not just libc + PCRE2 + OpenSSL.
@@ -312,7 +318,8 @@ Order:
 5. **intl over ICU** — `Normalizer`, `grapheme_*`, `Collator`, `NumberFormatter`,
    `IntlDateFormatter`, `Transliterator`, `IntlChar`. Parity is near-free (Zend calls the
    same ICU) modulo ICU version.
-6. **`mb_ereg*`** — Oniguruma in Zend; last, or approximated over PCRE2.
+6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
+   upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 
 Separate, not blocking: the stdlib `.o` links `-lssl -lcrypto -lpcre2-8` (+ `-liconv` on
 macOS) into EVERY binary, hello-world included. Gating those on use is a size / deps cleanup

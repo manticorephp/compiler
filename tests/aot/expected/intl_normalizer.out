@@ -1,0 +1,10 @@
+bool(true)
+65cc81 fi1 äöü ss hangul
+bool(false)
+string(0) ""
+bool(false)
+bool(true)
+bool(false)
+bool(false)
+10000
+normalizer_normalize(): Argument #2 ($form) must be a a valid normalization form
