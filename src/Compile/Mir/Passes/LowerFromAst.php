@@ -299,6 +299,12 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /** BY-REF parameter names of the body being lowered: such a name is already
+     *  defined — it IS the caller's variable — so a `#[RefOut]` argument init
+     *  must not overwrite it ({@see collectRefOutInits}).
+     *  @var array<string, bool> */
+    private array $currentRefParamNames = [];
+
 
     /** The program calls `function_exists()` with a NON-literal argument, so it
      *  needs the runtime name table rather than the compile-time fold. */
@@ -1357,6 +1363,9 @@ final class LowerFromAst implements Pass
             $this->currentLowerClass = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
+            // …nor parameters: a preceding function's by-ref names would
+            // suppress a top-level out-argument's init.
+            $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $mainStmts[] = $this->lowerStmt($stmt);
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
@@ -3084,6 +3093,7 @@ final class LowerFromAst implements Pass
         // enclosing function. Restored after, because the enclosing body keeps
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
+        $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         $this->setCurrentLowerParams($expr->params);
@@ -3096,6 +3106,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
             (bool)($expr->returnsByRef ?? false), $clUsesFa);
     }
@@ -3115,6 +3126,7 @@ final class LowerFromAst implements Pass
         }
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
+        $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         // A yield in the body makes it a GENERATOR, exactly as in a closure:
@@ -3134,6 +3146,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
             (bool)($expr->returnsByRef ?? false), $afUsesFa);
@@ -4313,8 +4326,10 @@ final class LowerFromAst implements Pass
     {
         $this->currentLowerParams = [];
         $this->currentLowerParamHints = [];
+        $this->currentRefParamNames = [];
         foreach ($params as $p) {
             $this->currentLowerParams[] = $p->name;
+            if ($p->byRef) { $this->currentRefParamNames[$p->name] = true; }
             // The hint travels WITH the name: func_get_args() boxes each
             // parameter into a cell array, and a load typed `unknown` puts the
             // raw word in the slot — an int then renders as the float its bits
@@ -5043,6 +5058,12 @@ final class LowerFromAst implements Pass
             if (!isset($names[$this->paramName($p)]) && !$this->paramRefOut($p)
                 && !$this->paramHasRefOutAttr($p)) { continue; }
             if ($a->kind !== 'Variable') { continue; }
+            // A BY-REF parameter of this body is the caller's variable, already
+            // defined: the init would store `[]` THROUGH the reference, over a
+            // value the caller owns, with nothing to give it back — php-cs-fixer's
+            // Preg::match($re, $s, $matches) leaked the previous matches array
+            // on every call that reused the variable.
+            if (isset($this->currentRefParamNames[$this->variableName($a)])) { continue; }
             // The same variable READ by another argument is live at the call:
             // `preg_match_all($re, $s, $s)` passes `$s` as the subject first, and
             // an init stored ahead of the call replaced that subject with `[]`.
@@ -5165,7 +5186,11 @@ final class LowerFromAst implements Pass
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         $bare = $this->bareName($fnName);
         $isPreg = $bare === 'preg_match' || $bare === 'preg_match_all';
+        // Not through a BY-REF parameter of this body ({@see collectRefOutInits}):
+        // `Preg::match(…, &$matches)` stored `[]` over the caller's previous
+        // matches with nothing to give them back — the whole array, per call.
         if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable'
+                && !isset($this->currentRefParamNames[$this->variableName($astArgs[2])])
                 && !$this->varReadByOtherArg($this->variableName($astArgs[2]), $astArgs, 2)) {
             $name = $this->variableName($astArgs[2]);
             $init = new StoreLocal($name, new ArrayLit([], Type::vec(Type::cell())), Type::vec(Type::cell()));

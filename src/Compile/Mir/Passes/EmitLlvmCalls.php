@@ -2432,6 +2432,7 @@ trait EmitLlvmCalls
                 $joinL = $this->ssa->allocLabel('dynref.join');
                 $out .= '  br i1 ' . $isRef . ', label %' . $refL . ', label %' . $valL . "\n";
                 $out .= $refL . ":\n";
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->byRefAddrOf($a);
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $joinL . "\n";
@@ -2455,6 +2456,7 @@ trait EmitLlvmCalls
             $out .= $this->dynByRefSelect($maskReg, $pi, $addrT, $val);
             return $out;
         }
+        $out .= $this->ownByRefArgLocal($a);
         $out .= $this->byRefAddrOf($a);
         $addr = $this->lastValue;
         // A CELL lvalue cannot be handed over as-is: the callee stores a RAW
@@ -3324,6 +3326,34 @@ trait EmitLlvmCalls
             || $k === Node::KIND_BOOL_CONST || $k === Node::KIND_STRING_CONST;
     }
 
+    /**
+     * A by-ref ARGUMENT's storage owns its value: a callee that stores a new
+     * one gives the old one back ({@see EmitLlvmLocals::refParamOverwriteIr}).
+     * A local this frame only BORROWS — a by-value parameter, a foreach value —
+     * owns nothing, so it takes a reference first, as php separates such a
+     * variable on the by-ref pass. The frame never releases a borrowed name, so
+     * that count is a leak at worst, where the callee's release on its own
+     * would free the caller's value (`k(array $p) { krsort($p); }`).
+     */
+    private function ownByRefArgLocal(Node $a): string
+    {
+        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return ''; }
+        $name = $this->asLoadLocalNode($a)->name;
+        if (!isset($this->locals->slots[$name])
+            || isset($this->frame->rcObjLocals[$name])
+            || isset($this->locals->refLocals[$name])
+            || isset($this->locals->globalBacked[$name])
+            || isset($this->locals->ownedBoxes[$name])
+            || isset($this->locals->byRefCaptured[$name])
+            || isset($this->locals->refCellTargets[$name])
+            || isset($this->locals->aliasLocals[$name])) { return ''; }
+        $flavor = $this->discardReleaseFlavor($a->type);
+        if ($flavor === '') { return ''; }
+        $v = $this->ssa->allocReg();
+        return '  ' . $v . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n"
+            . $this->rcRetainReg($v, $flavor);
+    }
+
     private function emitByRefArg(Node $a): string
     {
         $addr = $this->byRefAddrOf($a);
@@ -3546,6 +3576,7 @@ trait EmitLlvmCalls
                 // scratch slot holding the decoded payload, then re-box what it
                 // left back into the caller's slot. Passing the cell slot
                 // directly makes the callee deref the tag bits.
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai] ?? null);
                 $argList .= 'i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
@@ -3553,6 +3584,7 @@ trait EmitLlvmCalls
             } elseif (($mask[$ai] ?? false) && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellBox($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
@@ -3562,6 +3594,7 @@ trait EmitLlvmCalls
                 // By-ref param fed an addressable lvalue (plain local or
                 // `$obj->prop`): pass the address so the callee's writes land
                 // in the caller's slot / the object's field.
+                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->byRefAddrOf($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $ck = $this->byRefConformKind($a, $ptypes, $ai);

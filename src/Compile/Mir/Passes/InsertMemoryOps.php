@@ -295,6 +295,29 @@ final class InsertMemoryOps implements Pass
             unset($this->rcObjBlocked[$p->name]);
         }
 
+        // …and one the body hands on BY REFERENCE (`krsort($p)`): the callee
+        // replaces the slot's value and gives the old one back, so the slot must
+        // own what it holds — the entry retain makes the caller's value the
+        // frame's to release, and whatever the callee left is released at exit.
+        // Borrowed, the call site retained it on the frame's behalf and the
+        // replacement leaked ({@see EmitLlvmCalls::ownByRefArgLocal}).
+        foreach ($fn->params as $p) {
+            if ($p->byRef || $p->variadic) { continue; }
+            $pk = $p->type->kind;
+            if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING && !$p->type->isArray()) { continue; }
+            if ($pk === Type::KIND_OBJ && $this->isClosureType($p->type)) { continue; }
+            if (isset($storeBlocked[$p->name])) { continue; }
+            if (!\Compile\Mir\VecCopyOnAssign::passedByRef($fn->body, $p->name)) { continue; }
+            $st = $this->rcObjType[$p->name] ?? null;
+            if ($st !== null && $this->rcSlotFlavor($st) !== $this->rcSlotFlavor($p->type)) { continue; }
+            if ($this->rcObjSlotBoxed[$p->name] ?? false) { continue; }
+            unset($this->rcObjBlocked[$p->name]);
+            if ($st === null) {
+                $this->rcObjOrder[] = $p->name;
+                $this->rcObjType[$p->name] = $p->type;
+            }
+        }
+
         // The SECOND exception to the blanket param block: a BY-VALUE string
         // param the body self-appends to (`$out .= …`). The append takes
         // __mir_str_append's in-place fast path whenever rc == 1 — and rc IS 1
