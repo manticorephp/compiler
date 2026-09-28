@@ -2639,9 +2639,21 @@ trait EmitLlvmExpr
             $out .= '  ' . $nx . ' = load i64, ptr ' . $fp . "\n";
             $cur = $nx;
         }
-        // A present-but-NULL leaf value also takes the default.
+        // A present-but-NULL leaf value also takes the default: the null CELL,
+        // and — for a pointer-shaped leaf (`?string`, `?Obj`, `?array`) — the
+        // null POINTER. Missing the latter, `$n->type->class ?? ''` kept a null
+        // `?string` as a zero-length non-string that `=== ''` rejected.
         $vn = $this->ssa->allocReg();
         $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
+        $lk = $leafType->kind;
+        if ($lk === Type::KIND_STRING || $lk === Type::KIND_OBJ || $lk === Type::KIND_CLOSURE
+            || $leafType->isArray()) {
+            $vz = $this->ssa->allocReg();
+            $out .= '  ' . $vz . ' = icmp eq i64 ' . $cur . ", 0\n";
+            $vb = $this->ssa->allocReg();
+            $out .= '  ' . $vb . ' = or i1 ' . $vn . ', ' . $vz . "\n";
+            $vn = $vb;
+        }
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
             $this->lastValue = $cur;

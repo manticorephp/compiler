@@ -2993,6 +2993,13 @@ trait EmitLlvmCalls
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
+        // A value block discarded as a statement: its result is its last
+        // statement's, which {@see visitBlock} left owned.
+        if ($k === Node::KIND_BLOCK && $s->type->kind !== Type::KIND_VOID) {
+            $kids = $s->children();
+            $n = \count($kids);
+            return $n === 0 ? '' : $this->emitDiscardedCallRelease($kids[$n - 1]);
+        }
         // A conditional in STATEMENT position (`$c ? f() : $s;`) now owns a +1
         // from whichever arm ran, so the discarded value must be dropped.
         if ($this->condOwnsResult($s)) {

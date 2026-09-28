@@ -3097,6 +3097,13 @@ trait EmitLlvmBuiltins
     private function boxRawValue(string $ev, ?Type $t): string
     {
         $ek = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;
+        // A `void` callee's word is no value at all: its cell is null (a dispatch
+        // arm for `Iterator::next(): void` beside a valued sibling boxed it int 0).
+        if ($ek === Type::KIND_VOID) {
+            $this->lastValue = (string)\Compile\MemoryAbi::CELL_NULL;
+            $this->lastValueType = 'i64';
+            return '';
+        }
         // Already a tagged cell (heterogeneous / `mixed` / untyped) — passthrough.
         if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) {
             $this->lastValue = $ev;

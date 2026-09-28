@@ -7275,6 +7275,17 @@ trait EmitLlvmObjects
      *
      * @return array<string, string>
      */
+    /** Can `$holder`'s `$method` take `$argc` arguments (the receiver included)? */
+    private function holderTakesArgs(string $holder, string $method, int $argc): bool
+    {
+        $key = $holder . '__' . $method;
+        if (\count($this->sigs->paramTypes[$key] ?? []) >= $argc) { return true; }
+        foreach ($this->sigs->variadicParams[$key] ?? [] as $v) {
+            if ($v) { return true; }
+        }
+        return false;
+    }
+
     private function methodHolders(string $method): array
     {
         $this->ensureMethodIndex();
@@ -7807,6 +7818,21 @@ trait EmitLlvmObjects
         // site emits speaks the ABI the arms were selected for.
         if ($static === '' && $fallback === '') {
             foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
+        }
+        // The fallback's signature decides how many arguments the site emits
+        // ({@see faCallArgsRecv} trims the surplus), so on a receiver that is no
+        // one concrete class it must be a holder that can TAKE them: the first
+        // holder of `next` (an Iterator's, no params) made `$brk->next(3)` drop
+        // its argument before the class_id switch reached
+        // IntlBreakIterator::next(?int), which then read its default.
+        if ($fallback !== '' && ($static === '' || !isset($this->classes[$static]))) {
+            $argc = \count($mc->args) + 1;
+            if (!$this->holderTakesArgs($fallback, $mc->method, $argc)) {
+                foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                    if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
+                    if ($this->holderTakesArgs($r, $mc->method, $argc)) { $fallback = $r; break; }
+                }
+            }
         }
         // An ENUM method takes its case ORDINAL as `$this`, not a pointer. A
         // cell receiver (`?Enum` is a cell — an ordinal cannot carry null, see
