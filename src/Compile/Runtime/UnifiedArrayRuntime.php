@@ -2881,12 +2881,16 @@ final class UnifiedArrayRuntime
             $dtag = $done->load(Type::i64(), $this->hdr($done, $arr, MemoryAbi::RC_TAG_OFFSET));
             $done->brIf($done->icmp('eq', $dtag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $skip, $dofree);
             $base = $dofree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+            $this->profCounter($dofree, 26);
             $this->poolFree($dofree, $base);
             $dofree->br($skip);
             $skip->ret($nu);
             return;
         }
         $base = $done->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+        // `array_reclaim`: the packed buffer is freed HERE, not by a release —
+        // uncounted, every sparse-key write read as one leaked array.
+        $this->profCounter($done, 26);
         $this->poolFree($done, $base);
         $done->ret($nu);
     }

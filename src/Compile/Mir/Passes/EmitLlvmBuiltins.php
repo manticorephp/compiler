@@ -78,6 +78,16 @@ trait EmitLlvmBuiltins
      */
     private bool $cellifyMove = false;
 
+    /**
+     * Set around the one boxing that may MOVE a literal's elements
+     * ({@see litOwnsArrayElems}): an argument rebuilt for a parameter that
+     * DECLARES cell elements (`mixed[]`, a union list), whose body co-owns what
+     * it reads by tag. An erased `mixed` parameter is not one — `array_splice`'s
+     * `$replacement` appends each element into a shape-typed buffer without a
+     * reference of its own, so moving freed what it had just inserted.
+     */
+    private bool $cellifyMoveAllowed = false;
+
     private function emitBuiltin(Call $c): ?string
     {
         $mark = \count($this->arrArgTempRegs);
@@ -998,7 +1008,7 @@ trait EmitLlvmBuiltins
                 && $elem->kind !== Type::KIND_UNKNOWN) {
                 $sh = $this->boxArrayShallow($elem, $srcFlavor);
                 if ($sh !== null) { return $sh; }
-                $this->cellifyMove = $this->litOwnsArrayElems($src, $srcFlavor);
+                $this->cellifyMove = $this->cellifyMoveAllowed && $this->litOwnsArrayElems($src, $srcFlavor);
                 $ret = $this->emitVecToCellArray($elem, $srcFlavor);
                 $this->markCellBoxed($this->lastValue);
                 return $ret;
@@ -1022,7 +1032,7 @@ trait EmitLlvmBuiltins
                 && $elem->kind !== Type::KIND_UNKNOWN) {
                 $sh = $this->boxArrayShallow($elem, $srcFlavor);
                 if ($sh !== null) { return $sh; }
-                $this->cellifyMove = $this->litOwnsArrayElems($src, $srcFlavor);
+                $this->cellifyMove = $this->cellifyMoveAllowed && $this->litOwnsArrayElems($src, $srcFlavor);
                 $ret = $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
                 $this->markCellBoxed($this->lastValue);
                 return $ret;
