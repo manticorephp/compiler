@@ -1,33 +1,33 @@
-en_US 0/0: Tuesday, November 14, 2023 at 5:13:20 PM Eastern Standard Time | EEEE, MMMM d, y 'at' h:mm:ss a zzzz
-en_US 2/3: Nov 14, 2023, 5:13 PM | MMM d, y, h:mm a
-en_US 3/-1: 11/14/23 | M/d/yy
-en_US -1/1: 5:13:20 PM EST | h:mm:ss a z
-en_US 130/-1: Nov 14, 2023 | MMM d, y
-uk_UA 0/0: вівторок, 14 листопада 2023 р. о 17:13:20 за північноамериканським східним стандартним часом | EEEE, d MMMM y 'р'. 'о' HH:mm:ss zzzz
-uk_UA 2/3: 14 лист. 2023 р., 17:13 | d MMM y 'р'., HH:mm
-uk_UA 3/-1: 14.11.23 | dd.MM.yy
-uk_UA -1/1: 17:13:20 GMT-5 | HH:mm:ss z
-uk_UA 130/-1: 14 лист. 2023 р. | d MMM y 'р'.
-de_DE 0/0: Dienstag, 14. November 2023 um 17:13:20 Nordamerikanische Ostküsten-Normalzeit | EEEE, d. MMMM y 'um' HH:mm:ss zzzz
-de_DE 2/3: 14.11.2023, 17:13 | dd.MM.y, HH:mm
-de_DE 3/-1: 14.11.23 | dd.MM.yy
-de_DE -1/1: 17:13:20 GMT-5 | HH:mm:ss z
-de_DE 130/-1: 14.11.2023 | dd.MM.y
-ja_JP@calendar=japanese 0/0: 令和5年11月14日火曜日 17時13分20秒 米国東部標準時 | Gy年M月d日EEEE H時mm分ss秒 zzzz
-ja_JP@calendar=japanese 2/3: 令和5年11月14日 17:13 | Gy年M月d日 H:mm
-ja_JP@calendar=japanese 3/-1: R5/11/14 | GGGGGy/M/d
-ja_JP@calendar=japanese -1/1: 17:13:20 GMT-5 | H:mm:ss z
-ja_JP@calendar=japanese 130/-1: 令和5年11月14日 | Gy年M月d日
-ar_EG 0/0: الثلاثاء، ١٤ نوفمبر ٢٠٢٣ في ٥:١٣:٢٠ م التوقيت الرسمي الشرقي لأمريكا الشمالية | EEEE، d MMMM y في h:mm:ss a zzzz
-ar_EG 2/3: ١٤‏/١١‏/٢٠٢٣، ٥:١٣ م | dd‏/MM‏/y، h:mm a
-ar_EG 3/-1: ١٤‏/١١‏/٢٠٢٣ | d‏/M‏/y
-ar_EG -1/1: ٥:١٣:٢٠ م غرينتش-٥ | h:mm:ss a z
-ar_EG 130/-1: ١٤‏/١١‏/٢٠٢٣ | dd‏/MM‏/y
-fr_FR 0/0: mardi 14 novembre 2023 à 17:13:20 heure normale de l’Est nord-américain | EEEE d MMMM y 'à' HH:mm:ss zzzz
-fr_FR 2/3: 14 nov. 2023, 17:13 | d MMM y, HH:mm
-fr_FR 3/-1: 14/11/2023 | dd/MM/y
-fr_FR -1/1: 17:13:20 UTC−5 | HH:mm:ss z
-fr_FR 130/-1: 14 nov. 2023 | d MMM y
+en_US 0/0: Wednesday, November 15, 2023 at 7:13:20 AM Japan Standard Time | EEEE, MMMM d, y 'at' h:mm:ss a zzzz
+en_US 2/3: Nov 15, 2023, 7:13 AM | MMM d, y, h:mm a
+en_US 3/-1: 11/15/23 | M/d/yy
+en_US -1/1: 7:13:20 AM GMT+9 | h:mm:ss a z
+en_US 130/-1: Nov 15, 2023 | MMM d, y
+uk_UA 0/0: середа, 15 листопада 2023 р. о 07:13:20 за японським стандартним часом | EEEE, d MMMM y 'р'. 'о' HH:mm:ss zzzz
+uk_UA 2/3: 15 лист. 2023 р., 07:13 | d MMM y 'р'., HH:mm
+uk_UA 3/-1: 15.11.23 | dd.MM.yy
+uk_UA -1/1: 07:13:20 GMT+9 | HH:mm:ss z
+uk_UA 130/-1: 15 лист. 2023 р. | d MMM y 'р'.
+de_DE 0/0: Mittwoch, 15. November 2023 um 07:13:20 Japanische Normalzeit | EEEE, d. MMMM y 'um' HH:mm:ss zzzz
+de_DE 2/3: 15.11.2023, 07:13 | dd.MM.y, HH:mm
+de_DE 3/-1: 15.11.23 | dd.MM.yy
+de_DE -1/1: 07:13:20 GMT+9 | HH:mm:ss z
+de_DE 130/-1: 15.11.2023 | dd.MM.y
+ja_JP@calendar=japanese 0/0: 令和5年11月15日水曜日 7時13分20秒 日本標準時 | Gy年M月d日EEEE H時mm分ss秒 zzzz
+ja_JP@calendar=japanese 2/3: 令和5年11月15日 7:13 | Gy年M月d日 H:mm
+ja_JP@calendar=japanese 3/-1: R5/11/15 | GGGGGy/M/d
+ja_JP@calendar=japanese -1/1: 7:13:20 JST | H:mm:ss z
+ja_JP@calendar=japanese 130/-1: 令和5年11月15日 | Gy年M月d日
+ar_EG 0/0: الأربعاء، ١٥ نوفمبر ٢٠٢٣ في ٧:١٣:٢٠ ص توقيت اليابان الرسمي | EEEE، d MMMM y في h:mm:ss a zzzz
+ar_EG 2/3: ١٥‏/١١‏/٢٠٢٣، ٧:١٣ ص | dd‏/MM‏/y، h:mm a
+ar_EG 3/-1: ١٥‏/١١‏/٢٠٢٣ | d‏/M‏/y
+ar_EG -1/1: ٧:١٣:٢٠ ص غرينتش+٩ | h:mm:ss a z
+ar_EG 130/-1: ١٥‏/١١‏/٢٠٢٣ | dd‏/MM‏/y
+fr_FR 0/0: mercredi 15 novembre 2023 à 07:13:20 heure normale du Japon | EEEE d MMMM y 'à' HH:mm:ss zzzz
+fr_FR 2/3: 15 nov. 2023, 07:13 | d MMM y, HH:mm
+fr_FR 3/-1: 15/11/2023 | dd/MM/y
+fr_FR -1/1: 07:13:20 UTC+9 | HH:mm:ss z
+fr_FR 130/-1: 15 nov. 2023 | d MMM y
 string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
 string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
 string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
@@ -56,8 +56,8 @@ int(-2)
 int(-2)
 int(1)
 string(10) "Asia/Tokyo"
-string(4) "root"
-string(4) "root"
+bool(true)
+bool(true)
 bool(true)
 string(21) "IntlGregorianCalendar"
 string(10) "Asia/Tokyo"

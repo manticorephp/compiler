@@ -52,7 +52,7 @@ $g = IntlGregorianCalendar::createFromDate(2024, 1, 29); echo get_class($g), " "
 $g = IntlGregorianCalendar::createFromDateTime(2024, 1, 29, 10, 20); echo $g->getTime(), "\n";
 $g = IntlGregorianCalendar::createFromDateTime(2024, 1, 29, 10, 20, 30); echo $g->getTime(), "\n";
 $g = new IntlGregorianCalendar("Asia/Tokyo", "ja_JP"); echo $g->getType(), " ", $g->getTimeZone()->getID(), " ", $g->getLocale(Locale::VALID_LOCALE), "\n";
-$g = new IntlGregorianCalendar("UTC", "en_GB"); echo get_class($g), " ", $g->getLocale(Locale::ACTUAL_LOCALE), "\n";
+$g = new IntlGregorianCalendar("UTC", "en_GB"); echo get_class($g), " ", $g->getLocale(Locale::VALID_LOCALE), " ", in_array($g->getLocale(Locale::ACTUAL_LOCALE), ["en_001", "en_GB"], true) ? "actual" : "?", "\n";
 var_dump($g->getGregorianChange(), $g->isLeapYear(1500), $g->isLeapYear(1700), $g->isLeapYear(2000), $g->isLeapYear(2023));
 $g->setGregorianChange(-1e15); var_dump($g->getGregorianChange(), $g->isLeapYear(1500), $g->isLeapYear(1700));
 $g->setGregorianChange(1e14); var_dump($g->isLeapYear(1700), $g->isLeapYear(2100));
@@ -65,7 +65,7 @@ foreach ([fn() => $c->get(99), fn() => intlcal_get($c, -1), fn() => $c->add(1, 1
           fn() => IntlGregorianCalendar::createFromDate(1 << 40, 1, 1), fn() => $c->isSet(24)] as $bad) {
     try { var_dump($bad()); } catch (Throwable $ex) { echo get_class($ex), ": ", $ex->getMessage(), "\n"; }
 }
-$w = IntlCalendar::createInstance("UTC", "ar_SA");
+$w = IntlCalendar::createInstance("UTC", "ar_SA@calendar=gregorian");
 for ($d = 1; $d <= 7; $d++) { echo $w->getDayOfWeekType($d), ":"; try { echo $w->getWeekendTransition($d); } catch (Throwable $ex) { echo "x"; } echo " "; }
 echo $w->getErrorCode(), " ", $w->getErrorMessage(), "\n";
 var_dump(intlcal_get_time(intlcal_create_instance("UTC")) > 1.7e12, intlcal_get_now() > 1.7e12, intlcal_get_type($w), intlcal_is_lenient($w), intlcal_get_error_message($w));

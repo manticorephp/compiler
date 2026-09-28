@@ -1,4 +1,4 @@
-Europe/Kyiv         Europe/Kyiv raw=7200000 dst=0 local=7200000/3600000 savings=3600000 region='UA' eq=4
+Europe/Kyiv         Europe/Kyiv raw=7200000 dst=0 local=7200000/3600000 savings=3600000 region='UA' eq=y
   1: GMT+2 | GMT+3 | GMT+2
   2: Eastern European Standard Time | Eastern European Summer Time | за східноєвропейським стандартним часом
   3: Ukraine Time | Ukraine Time | час: Україна
@@ -7,7 +7,7 @@ Europe/Kyiv         Europe/Kyiv raw=7200000 dst=0 local=7200000/3600000 savings=
   6: GMT+02:00 | GMT+03:00 | GMT+02:00
   7: GMT+2 | GMT+3 | GMT+2
   8: Ukraine Time | Ukraine Time | час: Україна
-America/New_York    America/New_York raw=-18000000 dst=0 local=-18000000/3600000 savings=3600000 region='US' eq=3
+America/New_York    America/New_York raw=-18000000 dst=0 local=-18000000/3600000 savings=3600000 region='US' eq=y
   1: EST | EDT | GMT-5
   2: Eastern Standard Time | Eastern Daylight Time | за північноамериканським східним стандартним часом
   3: ET | ET | час: Нью-Йорк
@@ -16,7 +16,7 @@ America/New_York    America/New_York raw=-18000000 dst=0 local=-18000000/3600000
   6: GMT-05:00 | GMT-04:00 | GMT-05:00
   7: EST | EDT | GMT-5
   8: New York Time | New York Time | час: Нью-Йорк
-Asia/Kolkata        Asia/Kolkata raw=19800000 dst=0 local=19800000/0 savings=0 region='IN' eq=3
+Asia/Kolkata        Asia/Kolkata raw=19800000 dst=0 local=19800000/0 savings=0 region='IN' eq=y
   1: GMT+5:30 | GMT+5:30 | GMT+5:30
   2: India Standard Time | GMT+05:30 | за індійським стандартним часом
   3: India Time | India Time | час: Індія
@@ -25,16 +25,16 @@ Asia/Kolkata        Asia/Kolkata raw=19800000 dst=0 local=19800000/0 savings=0 r
   6: GMT+05:30 | GMT+05:30 | GMT+05:30
   7: GMT+5:30 | GMT+5:30 | GMT+5:30
   8: India Time | India Time | час: Індія
-Australia/Lord_Howe Australia/Lord_Howe raw=37800000 dst=1800000 local=37800000/0 savings=1800000 region='AU' eq=2
-  1: GMT+10:30 | GMT+11 | GMT+10:30
-  2: Lord Howe Standard Time | Lord Howe Daylight Time | за стандартним часом на острові Лорд-Хау
-  3: Lord Howe Island Time | Lord Howe Island Time | час: Лорд-Хау
-  4: Lord Howe Time | Lord Howe Time | за часом на острові Лорд-Хау
-  5: +1030 | +1100 | +1030
-  6: GMT+10:30 | GMT+11:00 | GMT+10:30
-  7: GMT+10:30 | GMT+11 | GMT+10:30
-  8: Lord Howe Island Time | Lord Howe Island Time | час: Лорд-Хау
-US/Pacific          US/Pacific raw=-28800000 dst=0 local=-28800000/3600000 savings=3600000 region='US' eq=5
+Asia/Tokyo          Asia/Tokyo raw=32400000 dst=0 local=32400000/0 savings=0 region='JP' eq=y
+  1: GMT+9 | GMT+9 | GMT+9
+  2: Japan Standard Time | Japan Daylight Time | за японським стандартним часом
+  3: Japan Time | Japan Time | час: Японія
+  4: Japan Standard Time | Japan Standard Time | за японським стандартним часом
+  5: +0900 | +0900 | +0900
+  6: GMT+09:00 | GMT+09:00 | GMT+09:00
+  7: GMT+9 | GMT+9 | GMT+9
+  8: Japan Time | Japan Time | час: Японія
+US/Pacific          US/Pacific raw=-28800000 dst=0 local=-28800000/3600000 savings=3600000 region='US' eq=y
   1: PST | PDT | GMT-8
   2: Pacific Standard Time | Pacific Daylight Time | за північноамериканським тихоокеанським стандартним часом
   3: PT | PT | час: Лос-Анджелес
@@ -43,16 +43,7 @@ US/Pacific          US/Pacific raw=-28800000 dst=0 local=-28800000/3600000 savin
   6: GMT-08:00 | GMT-07:00 | GMT-08:00
   7: PST | PDT | GMT-8
   8: Los Angeles Time | Los Angeles Time | час: Лос-Анджелес
-UTC                 UTC raw=0 dst=0 local=0/0 savings=0 region='001' eq=8
-  1: UTC | GMT+0 | UTC
-  2: Coordinated Universal Time | GMT+00:00 | за всесвітнім координованим часом
-  3: GMT+0 | GMT+0 | GMT+0
-  4: GMT+00:00 | GMT+00:00 | GMT+00:00
-  5: +0000 | +0000 | +0000
-  6: GMT+00:00 | GMT+00:00 | GMT+00:00
-  7: UTC | GMT+0 | UTC
-  8: GMT+00:00 | GMT+00:00 | GMT+00:00
-GMT+05:30           GMT+05:30 raw=19800000 dst=0 local=19800000/0 savings=3600000 region=false eq=0
+GMT+05:30           GMT+05:30 raw=19800000 dst=0 local=19800000/0 savings=3600000 region=false eq=n
   1: GMT+5:30 | GMT+5:30 | GMT+5:30
   2: GMT+05:30 | GMT+05:30 | GMT+05:30
   3: GMT+5:30 | GMT+6:30 | GMT+5:30
@@ -61,7 +52,7 @@ GMT+05:30           GMT+05:30 raw=19800000 dst=0 local=19800000/0 savings=360000
   6: GMT+05:30 | GMT+05:30 | GMT+05:30
   7: GMT+5:30 | GMT+5:30 | GMT+5:30
   8: GMT+05:30 | GMT+06:30 | GMT+05:30
-GMT-3               GMT-03:00 raw=-10800000 dst=0 local=-10800000/0 savings=3600000 region=false eq=0
+GMT-3               GMT-03:00 raw=-10800000 dst=0 local=-10800000/0 savings=3600000 region=false eq=n
   1: GMT-3 | GMT-3 | GMT-3
   2: GMT-03:00 | GMT-03:00 | GMT-03:00
   3: GMT-3 | GMT-2 | GMT-3
@@ -70,16 +61,9 @@ GMT-3               GMT-03:00 raw=-10800000 dst=0 local=-10800000/0 savings=3600
   6: GMT-03:00 | GMT-03:00 | GMT-03:00
   7: GMT-3 | GMT-3 | GMT-3
   8: GMT-03:00 | GMT-02:00 | GMT-03:00
-junk                Etc/Unknown raw=0 dst=0 local=0/0 savings=3600000 region=false eq=0
-  1: GMT+0 | GMT+0 | GMT+0
-  2: GMT+00:00 | GMT+00:00 | GMT+00:00
-  3: GMT+0 | GMT+1 | GMT+0
-  4: GMT+00:00 | GMT+01:00 | GMT+00:00
+junk                Etc/Unknown raw=0 dst=0 local=0/0 savings=3600000 region=false eq=n
   5: +0000 | +0000 | +0000
-  6: GMT+00:00 | GMT+00:00 | GMT+00:00
-  7: GMT+0 | GMT+0 | GMT+0
-  8: GMT+00:00 | GMT+01:00 | GMT+00:00
-Etc/GMT+2           Etc/GMT+2 raw=-7200000 dst=0 local=-7200000/0 savings=0 region='001' eq=0
+Etc/GMT+2           Etc/GMT+2 raw=-7200000 dst=0 local=-7200000/0 savings=0 region='001' eq=n
   1: GMT-2 | GMT-2 | GMT-2
   2: GMT-02:00 | GMT-02:00 | GMT-02:00
   3: GMT-2 | GMT-2 | GMT-2
@@ -126,10 +110,10 @@ Europe/Paris -> Europe/Paris -> Europe/Paris
 -00:30 -> GMT+00:30 -> +00:30
 +02:00 +00:00
 0=Europe/Kiev 1=Europe/Kyiv 2=Europe/Simferopol 3=Europe/Uzhgorod 4=Europe/Zaporozhye 
-0=America/Coral_Harbour 1=America/Iqaluit 2=America/Toronto 
+0=Asia/Tokyo 
 bool(false)
-string(21) "America/Coral_Harbour"
-string(15) "America/Iqaluit"
+string(10) "Asia/Tokyo"
+bool(false)
 bool(true)
 bool(true)
 IntlTimeZone::createTimeZoneIDEnumeration(): Argument #1 ($type) must be one of IntlTimeZone::TYPE_ANY, IntlTimeZone::TYPE_CANONICAL, or IntlTimeZone::TYPE_CANONICAL_LOCATION

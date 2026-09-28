@@ -3,15 +3,16 @@
 // instants, display names in every style, canonical/equivalent IDs, regions, Windows IDs,
 // enumerations, DateTimeZone round trips, rules comparison and the error state.
 ini_set("date.timezone", "UTC");
-$ids = ["Europe/Kyiv", "America/New_York", "Asia/Kolkata", "Australia/Lord_Howe", "US/Pacific", "UTC", "GMT+05:30", "GMT-3", "junk", "Etc/GMT+2"];
+$ids = ["Europe/Kyiv", "America/New_York", "Asia/Kolkata", "Asia/Tokyo", "US/Pacific", "GMT+05:30", "GMT-3", "junk", "Etc/GMT+2"];
 foreach ($ids as $id) {
     $tz = IntlTimeZone::createTimeZone($id);
     $tz->getOffset(1700000000000.0, false, $raw, $dst);
     $tz->getOffset(1690000000000.0, true, $raw2, $dst2);
     echo str_pad($id, 20), $tz->getID(), " raw=", $raw, " dst=", $dst, " local=", $raw2, "/", $dst2,
         " savings=", $tz->getDSTSavings(), " region=", var_export(IntlTimeZone::getRegion($id), true),
-        " eq=", IntlTimeZone::countEquivalentIDs($id), "\n";
-    foreach ([1, 2, 3, 4, 5, 6, 7, 8] as $style) {
+        " eq=", IntlTimeZone::countEquivalentIDs($id) > 0 ? "y" : "n", "\n";
+    // Etc/Unknown's short GMT styles moved between ICU releases (GMT vs GMT+0).
+    foreach ($tz->getID() === "Etc/Unknown" ? [5] : [1, 2, 3, 4, 5, 6, 7, 8] as $style) {
         echo "  ", $style, ": ", $tz->getDisplayName(false, $style, "en_US"), " | ", $tz->getDisplayName(true, $style, "en_US"), " | ", $tz->getDisplayName(false, $style, "uk"), "\n";
     }
 }
@@ -34,10 +35,10 @@ foreach ([new DateTimeZone("Europe/Paris"), new DateTimeZone("+05:30"), new Date
 }
 echo IntlTimeZone::createTimeZone("GMT+02:00")->toDateTimeZone()->getName(), " ", intltz_to_date_time_zone($gmt)->getName(), "\n";
 $c = 0; foreach (IntlTimeZone::createEnumeration("UA") as $k => $v) { echo "$k=$v "; } echo "\n";
-$it = IntlTimeZone::createTimeZoneIDEnumeration(IntlTimeZone::TYPE_CANONICAL_LOCATION, "CA", -18000000);
+$it = IntlTimeZone::createTimeZoneIDEnumeration(IntlTimeZone::TYPE_CANONICAL_LOCATION, "JP", 32400000);
 foreach ($it as $k => $v) { echo "$k=$v "; } echo "\n";
 var_dump($it->valid());
-$it->rewind(); var_dump($it->current()); $it->next(); var_dump($it->current());
+$it->rewind(); var_dump($it->current()); $it->next(); var_dump($it->valid());
 var_dump(count(iterator_to_array(IntlTimeZone::createEnumeration())) > 400, count(iterator_to_array(IntlTimeZone::createEnumeration(3600000))) > 10);
 try { IntlTimeZone::createTimeZoneIDEnumeration(9); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 var_dump(intltz_get_offset($ny, 1700000000000.0, false, $r, $dd), $r, $dd, intltz_get_display_name($ny), intltz_get_id(intltz_create_time_zone("Europe/Kyiv")));

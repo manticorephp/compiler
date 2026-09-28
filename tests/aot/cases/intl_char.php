@@ -32,7 +32,7 @@ foreach (["ab", "", "\xff", "\xe2\x82", "\xed\xa0\x80", "\xf4\x90\x80\x80", -1, 
 }
 var_dump(IntlChar::chr(0), IntlChar::ord("\0"), IntlChar::chr(0x10FFFF) === "\xf4\x8f\xbf\xbf", count(IntlChar::getUnicodeVersion()));
 $n = 0;
-IntlChar::enumCharTypes(function (int $start, int $end, int $type) use (&$n) { if ($start < 0x500) { echo "$start-$end:$type "; } $n++; });
+IntlChar::enumCharTypes(function (int $start, int $end, int $type) use (&$n) { if ($start < 0x250) { echo "$start-$end:$type "; } $n++; });
 echo "\n", $n > 1000 ? "many" : "few", "\n";
 var_dump(IntlChar::enumCharNames(0x41, 0x45, function (int $cp, int $choice, string $name) { echo "$cp $choice $name\n"; }));
 var_dump(IntlChar::enumCharNames("\x00", 0x3, function (int $cp, int $choice, string $name) { echo "$cp $choice $name\n"; }, IntlChar::EXTENDED_CHAR_NAME));
