@@ -4918,23 +4918,15 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['printf'] = 'declare i32 @printf(ptr, ...)';
         $out = '';
+        // php evaluates EVERY argument before var_dump prints the first:
+        // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
+        /** @var array<int, array{0: bool, 1: string}> float? + the value register */
+        $vals = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
-                // Shortest round-trip via the Ryu core (uppercase E, no forced
-                // `.0` — var_dump form), byte-exact with php and faster than the
-                // old snprintf-probe. The core takes the raw i64 bits.
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
-                $d = $this->lastValue;
-                $bitsr = $this->ssa->allocReg();
-                $out .= '  ' . $bitsr . ' = bitcast double ' . $d . " to i64\n";
-                $fsi = $this->ssa->allocReg();
-                $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
-                $fs = $this->ssa->allocReg();
-                $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
-                $out .= $this->emitOutLit('float(');
-                $out .= $this->emitOutStr($fs);
-                $out .= $this->emitOutLit(")\n");
+                $vals[] = [true, $this->lastValue];
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -4943,8 +4935,25 @@ trait EmitLlvmBuiltins
                 $out .= $a->type->kind === Type::KIND_UNKNOWN
                     ? $this->boxUnknownShallowIr()
                     : $this->boxToCell($a->type);
-                $bv = $this->lastValue;
-                $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $bv . ', i64 0)' . "\n";
+                $vals[] = [false, $this->lastValue];
+            }
+        }
+        foreach ($vals as $v) {
+            if ($v[0]) {
+                // Shortest round-trip via the Ryu core (uppercase E, no forced
+                // `.0` — var_dump form), byte-exact with php and faster than the
+                // old snprintf-probe. The core takes the raw i64 bits.
+                $bitsr = $this->ssa->allocReg();
+                $out .= '  ' . $bitsr . ' = bitcast double ' . $v[1] . " to i64\n";
+                $fsi = $this->ssa->allocReg();
+                $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
+                $fs = $this->ssa->allocReg();
+                $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
+                $out .= $this->emitOutLit('float(');
+                $out .= $this->emitOutStr($fs);
+                $out .= $this->emitOutLit(")\n");
+            } else {
+                $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $v[1] . ', i64 0)' . "\n";
             }
         }
         $this->lastValue = '0';

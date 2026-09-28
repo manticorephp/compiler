@@ -5348,6 +5348,38 @@ trait EmitLlvmObjects
         $strL = $this->ssa->allocLabel('iss.str');
         $arrL = $this->ssa->allocLabel('iss.arr');
         $endL = $this->ssa->allocLabel('iss.end');
+        // An OBJECT subject answers through ArrayAccess::offsetExists, as the
+        // erased READ calls offsetGet ({@see EmitLlvmArrays::erasedIndexCoreIr}):
+        // without this arm `isset($m['k'])` / `$m['k'] ?? $d` on a `mixed` holding
+        // an ArrayAccess object took the array path and answered false.
+        if ($this->ifaceMethodHolders('ArrayAccess', 'offsetExists') !== []) {
+            $keyCell = $key;
+            if (!$keyIsCell) {
+                $this->lastValue = $key;
+                $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
+                $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());
+                $keyCell = $this->lastValue;
+            }
+            $objL = $this->ssa->allocLabel('iss.obj');
+            $notObjL = $this->ssa->allocLabel('iss.notobj');
+            $isObjNib = $this->ssa->allocReg();
+            $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $notObjL . "\n";
+            $out .= $objL . ":\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetExists', [$keyCell]);
+            // A bool answer, raw or boxed: bit 0 either way.
+            $ob = $this->ssa->allocReg();
+            $out .= '  ' . $ob . ' = and i64 ' . $this->lastValue . ", 1\n";
+            $out .= '  store i64 ' . $ob . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $notObjL . ":\n";
+        }
         $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $arrL . "\n";
 
         $out .= $strL . ":\n";
