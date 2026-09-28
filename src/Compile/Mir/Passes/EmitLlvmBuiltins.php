@@ -4707,6 +4707,18 @@ trait EmitLlvmBuiltins
         // `implode($array)` (separator defaults to ""). In the one-arg form the
         // array is $args[0] — reading $args[1] here dereferenced a null node and
         // SIGSEGV'd the compiler.
+        // Elements that may be OBJECTS join through the module's own
+        // `__mir_implode_obj`: the central runtime join cannot call a
+        // __toString and printed the object's address (php-cs-fixer's
+        // DocBlock::getContent is `implode('', $this->lines)` over Line objects).
+        $ia = \count($args) >= 2 ? $args[1] : $args[0];
+        $iel = $ia->type->element ?? null;
+        if ($this->hasObjToStr && $ia->type->isArray()
+            && ($iel === null || $iel->kind === Type::KIND_OBJ || $iel->kind === Type::KIND_CELL
+                || $iel->kind === Type::KIND_UNKNOWN)) {
+            $sepN = \count($args) >= 2 ? $args[0] : new \Compile\Mir\StringConst('', Type::string_());
+            return $this->emitNode(new Call('__mir_implode_obj', [$sepN, $ia], Type::string_()));
+        }
         if (\count($args) >= 2) {
             $out = $this->emitPtrArg($args[0]);
             $sep = $this->lastValue;
