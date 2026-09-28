@@ -264,9 +264,9 @@ if [ "$MC_SUITE" != "1" ]; then
     SUITE_LABEL=skipped
 elif [ -n "${MC_FILTER:-}" ]; then
     echo "=== tests/aot/run.sh (-k $MC_FILTER, -j $MC_JOBS) — NOT the gate ==="
-    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh -k "$MC_FILTER" > "$MC_LOGDIR/suite.log" 2>&1
+    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh -v -k "$MC_FILTER" > "$MC_LOGDIR/suite.log" 2>&1
     suite_rc=$?
-    tail -15 "$MC_LOGDIR/suite.log"
+    head -c 400000 "$MC_LOGDIR/suite.log"
 else
     echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
     MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
