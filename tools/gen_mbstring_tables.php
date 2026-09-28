@@ -94,6 +94,58 @@ foreach ($mblenNames as $e) {
     $mblen[$e] = $t;
 }
 
+// Case mapping and width, per codepoint, straight out of Zend's own tables:
+// the full mappings (a string, maybe several codepoints) of upper / lower /
+// title / fold, the simple ones where they differ from the full, the two
+// properties the context rules read — case-ignorable and cased — and the
+// double-width ranges. The properties are recovered from MB_CASE_TITLE_SIMPLE:
+// after a cased letter "x" a following "a" stays lower unless w breaks the word
+// (not ignorable and not cased); after "." it is raised unless w is cased and
+// not ignorable. Where only one of the two answers matters, that is the one read.
+$caseFull = [[], [], [], []];
+$caseSimple = [[], [], [], []];
+$ignorable = [];
+$casedIgnorable = [];
+$cased = [];
+$wide = [];
+$modes = [MB_CASE_UPPER, MB_CASE_LOWER, MB_CASE_TITLE, MB_CASE_FOLD];
+$simples = [MB_CASE_UPPER_SIMPLE, MB_CASE_LOWER_SIMPLE, MB_CASE_TITLE_SIMPLE, MB_CASE_FOLD_SIMPLE];
+for ($cp = 0; $cp <= 0x10FFFF; $cp++) {
+    if ($cp >= 0xD800 && $cp <= 0xDFFF) { continue; }
+    $u = \mb_chr($cp, 'UTF-8');
+    for ($m = 0; $m < 4; $m++) {
+        $full = \mb_convert_case($u, $modes[$m], 'UTF-8');
+        if ($full !== $u) { $caseFull[$m][$cp] = $full; }
+        $simple = \mb_convert_case($u, $simples[$m], 'UTF-8');
+        $implied = \mb_strlen($full, 'UTF-8') === 1 ? $full : $u;
+        if ($simple !== $implied) { $caseSimple[$m][$cp] = \mb_ord($simple, 'UTF-8'); }
+    }
+    $afterCased = \substr(\mb_convert_case("x" . $u . "a", MB_CASE_TITLE_SIMPLE, 'UTF-8'), -1);
+    $afterPlain = \substr(\mb_convert_case("." . $u . "a", MB_CASE_TITLE_SIMPLE, 'UTF-8'), -1);
+    if ($afterCased === "a" && $afterPlain === "A") {
+        $ignorable[] = $cp;
+        // Zend's look-ahead past its 64-codepoint buffer asks "cased?" BEFORE
+        // "ignorable?": a final sigma at index 63 followed by w in the next
+        // buffer tells whether an ignorable w is also cased.
+        $probe = \mb_strtolower(\str_repeat("a", 63) . "Σ" . $u, 'UTF-8');
+        if (\str_contains($probe, "σ")) { $casedIgnorable[] = $cp; }
+    }
+    if ($afterCased === "a" && $afterPlain === "a") { $cased[] = $cp; }
+    if (\mb_strwidth($u, 'UTF-8') === 2) { $wide[] = $cp; }
+}
+function ranges(array $cps): array
+{
+    $out = [];
+    $n = \count($cps);
+    for ($i = 0; $i < $n; $i++) {
+        $a = $cps[$i];
+        while ($i + 1 < $n && $cps[$i + 1] === $cps[$i] + 1) { $i++; }
+        $out[] = $a;
+        $out[] = $cps[$i];
+    }
+    return $out;
+}
+
 if (!isset($argv[2]) || !\is_file($argv[1]) || !\is_file($argv[2])) {
     \fwrite(STDERR, "usage: gen_mbstring_tables.php path/to/rare_cp_bitvec.h path/to/html_entities.c\n");
     exit(2);
@@ -130,6 +182,21 @@ $out .= "\n/**\n * Single-byte encoders where Zend's byte for a codepoint is not
 $out .= "function __mc_mb_sbcs_rev_fix(): array\n{\n    return " . export($revFix) . ";\n}\n";
 $out .= "\n/**\n * Lead-byte length tables (one digit per byte 0x00..0xFF) of the multibyte\n * encodings Zend splits and cuts by table.\n * @return array<string,string>\n */\n";
 $out .= "function __mc_mb_mblen_tables(): array\n{\n    return " . export($mblen) . ";\n}\n";
+$names = ['upper', 'lower', 'title', 'fold'];
+for ($m = 0; $m < 4; $m++) {
+    $out .= "\n/**\n * Full " . $names[$m] . "-case mapping (UTF-8 of the result) of every codepoint it changes.\n * @return array<int,string>\n */\n";
+    $out .= "function __mc_mb_case_" . $names[$m] . "(): array\n{\n    return " . export($caseFull[$m]) . ";\n}\n";
+    $out .= "\n/**\n * Simple " . $names[$m] . "-case mapping where it is not the full one's single codepoint.\n * @return array<int,int>\n */\n";
+    $out .= "function __mc_mb_case_" . $names[$m] . "_simple(): array\n{\n    return " . export($caseSimple[$m]) . ";\n}\n";
+}
+$out .= "\n/**\n * Case-ignorable codepoints, as [first, last] range pairs.\n * @return int[]\n */\n";
+$out .= "function __mc_mb_case_ignorable(): array\n{\n    return " . export(ranges($ignorable)) . ";\n}\n";
+$out .= "\n/**\n * Cased codepoints that are not case-ignorable, as [first, last] range pairs.\n * @return int[]\n */\n";
+$out .= "function __mc_mb_case_cased(): array\n{\n    return " . export(ranges($cased)) . ";\n}\n";
+$out .= "\n/**\n * Case-ignorable codepoints that are also cased, as [first, last] range pairs.\n * @return int[]\n */\n";
+$out .= "function __mc_mb_case_cased_ignorable(): array\n{\n    return " . export(ranges($casedIgnorable)) . ";\n}\n";
+$out .= "\n/**\n * Codepoints mb_strwidth counts as 2, as [first, last] range pairs.\n * @return int[]\n */\n";
+$out .= "function __mc_mb_wide(): array\n{\n    return " . export(ranges($wide)) . ";\n}\n";
 $out .= "\n/**\n * HTML-ENTITIES names, in php-src's list order (the encoder takes the first\n * name of a codepoint, the decoder any name).\n * @return array<string,int>\n */\n";
 $out .= "function __mc_mb_html_entities(): array\n{\n    return " . export($entityMap) . ";\n}\n";
 $out .= "\n/**\n * mb_detect_encoding's 'rare codepoint' bits for U+0000..U+FFFF (php-src\n * rare_cp_bitvec.h), hex of the little-endian words: bit w is byte w>>3, bit w&7.\n */\n";

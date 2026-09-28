@@ -20,7 +20,7 @@ if (!\extension_loaded('mbstring')) {
     \fwrite(STDERR, "needs php with ext/mbstring\n");
     exit(2);
 }
-foreach (['MbstringTables', 'MbstringCodecs', 'MbstringUtf7', 'MbstringBytes', 'MbstringMime', 'Mbstring'] as $file) {
+foreach (['MbstringTables', 'MbstringCodecs', 'MbstringUtf7', 'MbstringBytes', 'MbstringMime', 'MbstringCase', 'Mbstring'] as $file) {
     $src = \file_get_contents(__DIR__ . "/../src/Runtime/Stdlib/$file.php");
     $src = \str_replace(['function mb_', '\\mb_'], ['function __z_mb_', '\\__z_mb_'], $src);
     $tmp = \tempnam(\sys_get_temp_dir(), 'mbdiff');
@@ -33,7 +33,7 @@ foreach (['MbstringTables', 'MbstringCodecs', 'MbstringUtf7', 'MbstringBytes', '
 \mt_srand((int)($argv[1] ?? 1));
 $iterations = (int)($argv[2] ?? 20000);
 $alpha = ["a", "b", "x", " ", "\x80", "\xBF", "\xC3", "\xC3\xA9", "\xE4\xB8\xAD", "\xE4\xB8", "\xED\xA0\x80",
-    "\xF0\x9F\x98\x80", "\xF0\x9F", "\xF4\x90\x80\x80", "\xC0\xAF", "\xFF", "\xE2\x80\x83", "\x00", "\xE0\x80", "\xD8", "\xDC", "\xFE\xFF", "\xFF\xFE", "\x00\x00", "\x11", "+", "&", "-", "+AGE-", "&AGE-", "+2D3eAA", "&2D3eAA-", "/", ",", "=", "=4", "=41", "=\r\n", "&amp;", "&#x41;", "&eacute;", "&#;", "begin 0644 x\n#86)C\n", "YWJj", "\r\n"];
+    "\xF0\x9F\x98\x80", "\xF0\x9F", "\xF4\x90\x80\x80", "\xC0\xAF", "\xFF", "\xE2\x80\x83", "\x00", "\xE0\x80", "\xD8", "\xDC", "\xFE\xFF", "\xFF\xFE", "\x00\x00", "\x11", "+", "&", "-", "+AGE-", "&AGE-", "+2D3eAA", "&2D3eAA-", "/", ",", "=", "=4", "=41", "=\r\n", "&amp;", "&#x41;", "&eacute;", "&#;", "begin 0644 x\n#86)C\n", "YWJj", "\r\n", "Σ", "σ", "ß", "İ", "ı", "I", "i", "ǅ", "ﬁ", "ʰ", "ͅ", "Ａ", "Ω", "ŉ", "ΐ", "A", "Z", "'", ".", "\xDD", "\xFD", "\xD0"];
 
 function rs(array $alpha, int $max): string
 {
@@ -54,7 +54,7 @@ function run(callable $f): string
 
 // Host-iconv encodings are left out: their codec is FFI, which Zend cannot run.
 $encs = ["UTF-8", "UTF-8", "UTF-8", "ISO-8859-1", "ASCII", "8bit", "Windows-1252", "KOI8-R", "ISO-8859-3", "ArmSCII-8", "7bit",
-    "UTF-16", "UTF-16LE", "UTF-16BE", "UCS-2", "UCS-2LE", "UTF-32", "UTF-32LE", "UCS-4", "UCS-4LE", "UCS-4BE", "UTF-32BE", "UCS-2BE", "UTF-7", "UTF7-IMAP", "BASE64", "Quoted-Printable", "UUENCODE", "HTML-ENTITIES"];
+    "UTF-16", "UTF-16LE", "UTF-16BE", "UCS-2", "UCS-2LE", "UTF-32", "UTF-32LE", "UCS-4", "UCS-4LE", "UCS-4BE", "UTF-32BE", "UCS-2BE", "UTF-7", "UTF7-IMAP", "BASE64", "Quoted-Printable", "UUENCODE", "HTML-ENTITIES", "ISO-8859-9", "UTF-8", "UTF-8"];
 $subs = [63, "none", 0x263A, "long"];
 $bad = 0;
 for ($it = 0; $it < $iterations && $bad < 15; $it++) {
@@ -93,6 +93,17 @@ for ($it = 0; $it < $iterations && $bad < 15; $it++) {
         'ltrim' => fn($p) => $p('ltrim')($h, $o > 3 ? $n : null, $e),
         'rtrim' => fn($p) => $p('rtrim')($h, $o > 3 ? $n : null, $e),
         'convert' => fn($p) => $p('convert_encoding')($h, $e2, $e),
+        'convert_case' => fn($p) => $p('convert_case')($long, \mt_rand(0, 7), $e),
+        'strtoupper' => fn($p) => $p('strtoupper')($h, $e),
+        'strtolower' => fn($p) => $p('strtolower')($h, $e),
+        'ucfirst' => fn($p) => $p('ucfirst')($h, $e),
+        'lcfirst' => fn($p) => $p('lcfirst')($h, $e),
+        'stripos' => fn($p) => $p('stripos')($h, $n, $o, $e),
+        'strripos' => fn($p) => $p('strripos')($h, $n, $o, $e),
+        'stristr' => fn($p) => $p('stristr')($h, $n, (bool)($o & 1), $e),
+        'strrichr' => fn($p) => $p('strrichr')($h, $n, (bool)($o & 1), $e),
+        'strwidth' => fn($p) => $p('strwidth')($h, $e),
+        'strimwidth' => fn($p) => $p('strimwidth')($h, $o, \mt_rand(-3, 12), $n, $e),
         'encode_mimeheader' => fn($p) => $p('encode_mimeheader')($long, $mimeCs, $o & 1 ? 'Q' : 'B', $o & 2 ? "\n" : "\r\n", $o * 7),
         'decode_mimeheader' => fn($p) => $p('decode_mimeheader')($o & 1 ? \mb_encode_mimeheader($long, $mimeCs, $o & 2 ? 'Q' : 'B') : $long),
         'encode_numericentity' => fn($p) => $p('encode_numericentity')($h, $map, $e, (bool)($o & 1)),
