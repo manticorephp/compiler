@@ -664,6 +664,8 @@ trait EmitLlvmObjects
             $reboxSlots = [];
             $reboxTmps = [];
             $refSlotDrops = '';
+            /** @var array<int, array{0: Node, 1: string}> */
+            $cellBoxDrops = [];
             // Ctor param 0 is the implicit `$this`, so call arg `ai` maps to
             // param `ai + 1` — unbox a cell arg bound to a scalar param.
             $ptypes = $this->sigs->paramTypes[$ctorClass . '____construct'] ?? [];
@@ -719,9 +721,15 @@ trait EmitLlvmObjects
                     $refSlotDrops .= $this->lastRefSlotDrop;
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
-                    // static type so the ctor reads the runtime tag.
-                    $out .= $this->emitNode($a);
-                    $out .= $this->boxToCell($a->type);
+                    // static type so the ctor reads the runtime tag. What the box
+                    // left behind is the CALLER's, as on every other call path
+                    // ({@see emitStaticCall}): `new Token([T_WHITESPACE, $ws])`
+                    // — php-cs-fixer's every whitespace edit — leaked the literal.
+                    $out .= $this->emitArgCollectingLitElems($a, null, false);
+                    $this->cellifyMoveBlocked = true;
+                    $out .= $this->boxToCell($a->type, $a);
+                    $this->cellifyMoveBlocked = false;
+                    $cellBoxDrops[] = [$a, $this->lastValue];
                 } else {
                     $litMark = \count($this->litElemDropRegs);
                     $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai + 1] ?? null);
@@ -794,6 +802,9 @@ trait EmitLlvmObjects
             // Free fresh string-temp ctor args (the ctor retained any it
             // stored into a property), matching emitCall.
             $out .= $this->freeStrArgTemps($argTemps);
+            foreach ($cellBoxDrops as $cbd) {
+                $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
+            }
             foreach ($cellArgTemps as $ct) { $out .= $this->rcReleaseReg($ct, 'cell'); }
             $ri = 0;
             foreach ($rcArgRegs as $rg) {
