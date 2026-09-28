@@ -822,3 +822,55 @@ function grapheme_levenshtein(string $string1, string $string2, int $insertion_c
     \__mc_icu_free($u2->buf);
     return $result;
 }
+
+// ── intl errors ─────────────────────────────────────────────────────────────
+
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('u_errorName')]
+function __mc_icu_u_errorName(#[\Ffi\CType('int')] int $code): \Ffi\Ptr {}
+
+/** The request-global intl error (intl_get_error_code / intl_get_error_message). */
+final class __McIntlError
+{
+    public static int $code = 0;
+    public static string $message = "";
+}
+
+function __mc_intl_reset(): void
+{
+    __McIntlError::$code = 0;
+    __McIntlError::$message = "";
+}
+
+/** "fn(): what: U_NAME", as intl formats an error with a custom message. */
+function __mc_intl_message(string $fn, string $what, int $code): string
+{
+    return $fn . "(): " . $what . ": " . \intl_error_name($code);
+}
+
+function __mc_intl_fail(string $fn, string $what, int $code): void
+{
+    __McIntlError::$code = $code;
+    __McIntlError::$message = \__mc_intl_message($fn, $what, $code);
+}
+
+function intl_error_name(int $errorCode): string
+{
+    return \cstr_to_str(\__mc_icu_u_errorName($errorCode));
+}
+
+function intl_is_failure(int $errorCode): bool
+{
+    return $errorCode > 0;
+}
+
+function intl_get_error_code(): int
+{
+    return __McIntlError::$code;
+}
+
+function intl_get_error_message(): string
+{
+    return __McIntlError::$message !== "" ? __McIntlError::$message : \intl_error_name(__McIntlError::$code);
+}
+
+class IntlException extends \Exception {}

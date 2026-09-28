@@ -4080,6 +4080,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
     $opensslSrc = prelude_src_or_empty("openssl_x509.php");
     $intlSrc = prelude_src_or_empty("intl.php");
+    $intlCollatorSrc = prelude_src_or_empty("intl_collator.php");
     $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
@@ -4375,8 +4376,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         || $demand->mentions('OpenSSLAsymmetricKey');
     // ext/intl over the host ICU: gated on its functions and its classes, so a
     // program that uses neither never links libicu.
-    $useIntl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))
-        || $demand->mentionsAny(['Normalizer']);
+    // One gate per class family; each needs intl.php (UTF-16 helpers, the
+    // intl error state), and the selected files ride ONE prelude blob.
+    $useIntlCollator = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlCollatorSrc))
+        || $demand->mentionsAny(['Collator', 'ULOC_ACTUAL_LOCALE', 'ULOC_VALID_LOCALE']);
+    $useIntl = $useIntlCollator
+        || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))
+        || $demand->mentionsAny(['Normalizer', 'IntlException']);
     // WeakMap / WeakReference: two global class names php owns outright.
     $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
@@ -4567,7 +4573,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
-        $lower->intlSrc = $useIntl ? $intlSrc : "";
+        $lower->intlSrc = ($useIntl ? $intlSrc : "") . ($useIntlCollator ? $intlCollatorSrc : "");
         $lower->weakSrc = $useWeak ? $weakSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;

@@ -1,0 +1,32 @@
+int(-1)
+int(-1)
+string(2) "de"
+string(4) "root"
+int(2)
+int(16)
+int(0)
+string(12) "U_ZERO_ERROR"
+1.5,2,9,10,a,Ä,Äpfel,apple,b,é,Zebra
+1.5,10,2,9,a,Ä,Äpfel,apple,b,é,Zebra
+b,a,Ä,é,Zebra,apple,Äpfel,1.5,2,9,10
+Array
+(
+    [y] => a
+    [z] => Ä
+    [x] => b
+)
+o,ö,Ö,p
+img2,img10,img12
+int(0)
+int(0)
+2b2d2f01070107
+bool(false)
+int(10)
+string(85) "Collator::compare(): Error converting second argument to UTF-16: U_INVALID_CHAR_FOUND"
+bool(false)
+string(81) "Collator::setAttribute(): Error setting attribute value: U_ILLEGAL_ARGUMENT_ERROR"
+a,z,å,ö 1
+int(0)
+string(12) "U_ZERO_ERROR"
+bool(true)
+string(20) "U_INVALID_CHAR_FOUND"
