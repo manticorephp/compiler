@@ -377,6 +377,78 @@ function iconv_link_flags(): string {
     return \Manticore\host_os() === "Darwin" ? "-liconv" : "";
 }
 
+/** `pkg-config <args>` output, trimmed, or "" when it fails. `$path` extends PKG_CONFIG_PATH. */
+function pkg_config(string $args, string $path = ""): string {
+    $listPath = "/tmp/manticore_pkgconfig_" . (string)getpid() . ".txt";
+    $env = $path === "" ? "" : "PKG_CONFIG_PATH=" . $path . " ";
+    $rc = system($env . "pkg-config " . $args . " > " . $listPath . " 2>/dev/null");
+    $c = read_file($listPath);
+    system("rm -f " . $listPath);
+    if ($rc !== 0 || $c === null) { return ""; }
+    return \trim($c);
+}
+
+/**
+ * Where the host ICU lives: `[pkg-config path to use ("" = default), include dir]`.
+ * Homebrew keeps icu4c keg-only (off every default path), so its pkgconfig
+ * directory is tried when the default search finds nothing.
+ * @return string[]
+ */
+function icu_location(): array {
+    static $loc = [];
+    if ($loc !== []) { return $loc; }
+    $path = "";
+    $inc = pkg_config("--variable=includedir icu-uc");
+    if ($inc === "") {
+        $home = homebrew_opt_lib('icu4c');
+        if ($home !== '') {
+            $path = $home . "/pkgconfig";
+            $inc = pkg_config("--variable=includedir icu-uc", $path);
+        }
+    }
+    if ($inc === "" && \is_file("/usr/include/unicode/uvernum.h")) { $inc = "/usr/include"; }
+    $loc = [$path, $inc];
+    return $loc;
+}
+
+/**
+ * ICU renames every C symbol with its major version (`u_strToUpper` is really
+ * `u_strToUpper_78`) unless it was built with U_DISABLE_RENAMING. Bindings are
+ * written with the plain names; the FFI emitter appends this suffix for a
+ * binding whose `#[Library]` is one of ICU's (see EmitLlvmCalls::emitFfiWrapper).
+ * Read from the headers the program would compile against; "" when ICU renames
+ * nothing or cannot be found (the link then fails loudly on the plain name).
+ */
+function icu_symbol_suffix(): string {
+    static $suffix = null;
+    if ($suffix !== null) { return $suffix; }
+    $suffix = "";
+    $inc = icu_location()[1];
+    if ($inc === "") { return $suffix; }
+    $config = read_file($inc . "/unicode/uconfig.h");
+    if ($config !== null && \preg_match('/#\s*define\s+U_DISABLE_RENAMING\s+1\b/', $config) === 1) { return $suffix; }
+    $ver = read_file($inc . "/unicode/uvernum.h");
+    if ($ver !== null && \preg_match('/#\s*define\s+U_ICU_VERSION_SUFFIX\s+(_\w+)/', $ver, $m) === 1) {
+        $suffix = $m[1];
+    }
+    return $suffix;
+}
+
+/** Whether `#[Ffi\Library('<name>')]` names one of ICU's libraries. */
+function is_icu_library(string $name): bool {
+    return $name === "icuuc" || $name === "icui18n" || $name === "icuio" || $name === "icudata";
+}
+
+/** Link flags for one ICU library: pkg-config (Homebrew's keg path included), else a bare -l. */
+function icu_link_flags(string $name): string {
+    $module = $name === "icuuc" ? "icu-uc" : ($name === "icui18n" ? "icu-i18n" : ($name === "icuio" ? "icu-io" : ""));
+    if ($module !== "") {
+        $flags = pkg_config("--libs " . $module, icu_location()[0]);
+        if ($flags !== "") { return $flags; }
+    }
+    return "-l" . $name;
+}
+
 /**
  * Resolve a set of `#[Ffi\Library]` names to `cc` link tokens.
  *
@@ -422,6 +494,8 @@ function ffi_link_flags(array $libs, string $already = ""): string
             // there fails to resolve even though the symbols are present. The
             // answer is a property of the C library, not of what is installed.
             $flags = iconv_link_flags();
+        } elseif (is_icu_library($name)) {
+            $flags = icu_link_flags($name);
         } else {
             $flags = generic_link_flags($name);
         }
@@ -3764,10 +3838,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
         }
-        preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/", $source, $m1);
+        preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m1);
         preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m2);
         preg_match_all("/\\b([A-Za-z_][A-Za-z0-9_\\\\]*)::[A-Za-z_][A-Za-z0-9_]*/", $source, $m3);
         preg_match_all('/\\b(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*[\'\"]([A-Za-z_][A-Za-z0-9_\\\\]*)[\'\"]/', $source, $m4);
+        // A caught type: a builtin throws the object, so no `new` names it.
+        preg_match_all("/\\bcatch\\s*\\(\\s*([A-Za-z_\\\\|\\s]+?)\\s*(?:\\$|\\))/", $source, $m5);
+        foreach ($m5[1] as $caught) {
+            foreach (explode("|", $caught) as $ct) { $walkerRoots[ltrim(trim($ct), "\\")] = true; }
+        }
         foreach ([$m1[1], $m2[1], $m3[1], $m4[2]] as $group) {
             foreach ($group as $root) { $walkerRoots[$root] = true; }
         }
@@ -4005,6 +4084,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $tokenizerSrc = prelude_src_or_empty("tokenizer.php");
     $tokenizerApiSrc = prelude_src_or_empty("tokenizer_api.php");
     $opensslSrc = prelude_src_or_empty("openssl_x509.php");
+    $intlSrc = prelude_src_or_empty("intl.php");
     $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
 
@@ -4298,6 +4378,64 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
         || $demand->mentions('OpenSSLAsymmetricKey');
+    // ext/intl over the host ICU: gated on its functions and its classes, so a
+    // program that uses neither never links libicu.
+    // One gate per class family; each needs intl.php (UTF-16 helpers, the
+    // intl error state), and the selected files ride ONE prelude blob.
+    /** @var array<string, string[]> */
+    $intlFamilies = [
+        "intl_collator.php" => ['Collator', 'ULOC_ACTUAL_LOCALE', 'ULOC_VALID_LOCALE'],
+        "intl_numfmt.php" => ['NumberFormatter'],
+        "intl_translit.php" => ['Transliterator'],
+        "intl_locale.php" => ['Locale'],
+        "intl_char.php" => ['IntlChar'],
+        "intl_timezone.php" => ['IntlTimeZone'],
+        "intl_calendar.php" => ['IntlCalendar', 'IntlGregorianCalendar'],
+        "intl_datefmt.php" => ['IntlDateFormatter', 'IntlDatePatternGenerator'],
+        "intl_breakiter.php" => ['IntlBreakIterator', 'IntlRuleBasedBreakIterator', 'IntlCodePointBreakIterator', 'IntlPartsIterator'],
+        "intl_spoof.php" => ['Spoofchecker'],
+        "intl_ucnv.php" => ['UConverter'],
+        "intl_rb.php" => ['ResourceBundle'],
+        "intl_msgfmt.php" => ['MessageFormatter'],
+        "intl_listfmt.php" => ['IntlListFormatter'],
+        "intl_idn.php" => ['IDNA_DEFAULT', 'IDNA_ALLOW_UNASSIGNED', 'IDNA_USE_STD3_RULES', 'IDNA_CHECK_BIDI',
+            'IDNA_CHECK_CONTEXTJ', 'IDNA_NONTRANSITIONAL_TO_ASCII', 'IDNA_NONTRANSITIONAL_TO_UNICODE',
+            'INTL_IDNA_VARIANT_UTS46', 'IDNA_ERROR_EMPTY_LABEL', 'IDNA_ERROR_LABEL_TOO_LONG',
+            'IDNA_ERROR_DOMAIN_NAME_TOO_LONG', 'IDNA_ERROR_LEADING_HYPHEN', 'IDNA_ERROR_TRAILING_HYPHEN',
+            'IDNA_ERROR_HYPHEN_3_4', 'IDNA_ERROR_LEADING_COMBINING_MARK', 'IDNA_ERROR_DISALLOWED',
+            'IDNA_ERROR_PUNYCODE', 'IDNA_ERROR_LABEL_HAS_DOT', 'IDNA_ERROR_INVALID_ACE_LABEL',
+            'IDNA_ERROR_BIDI', 'IDNA_ERROR_CONTEXTJ'],
+    ];
+    // A family another one is built on (picked with it, and listed before it above).
+    /** @var array<string, string[]> */
+    $intlFamilyNeeds = [
+        "intl_calendar.php" => ["intl_timezone.php"],
+        "intl_datefmt.php" => ["intl_calendar.php", "intl_timezone.php"],
+        "intl_msgfmt.php" => ["intl_numfmt.php", "intl_datefmt.php", "intl_calendar.php", "intl_timezone.php"],
+    ];
+    // Families whose API takes or returns ext/date objects.
+    $intlDateFamilies = ["intl_timezone.php" => true];
+    /** @var array<string, string> */
+    $intlFamilySrc = [];
+    /** @var array<string, bool> */
+    $intlChosen = [];
+    foreach ($intlFamilies as $file => $names) {
+        $intlFamilySrc[$file] = prelude_src_or_empty($file);
+        if ($demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlFamilySrc[$file])) || $demand->mentionsAny($names)) {
+            $intlChosen[$file] = true;
+            foreach ($intlFamilyNeeds[$file] ?? [] as $need) { $intlChosen[$need] = true; }
+        }
+    }
+    $intlPicked = "";
+    foreach ($intlFamilies as $file => $names) {
+        if (!isset($intlChosen[$file])) { continue; }
+        $intlPicked .= $intlFamilySrc[$file];
+        if (isset($intlDateFamilies[$file])) { $useDateTime = true; }
+    }
+    $useIntl = $intlPicked !== ""
+        || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))
+
+        || $demand->mentionsAny(['Normalizer', 'IntlException', 'IntlIterator']);
     // WeakMap / WeakReference: two global class names php owns outright.
     $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
@@ -4488,6 +4626,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
+        $lower->intlSrc = ($useIntl ? $intlSrc : "") . $intlPicked;
         $lower->weakSrc = $useWeak ? $weakSrc : "";
         $lower->backtraceSrc = $backtraceSrc;
         $lower->varDumpSrc = $varDumpSrc;

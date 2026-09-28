@@ -1806,16 +1806,18 @@ trait InferNodes
                 // An interface iterClass (e.g. getIterator(): Iterator) has no
                 // ClassDef — fall back to any implementer's sig.
                 $ic = $node->iterClass;
-                $elem = $this->iterMethodReturn($ic, 'current', $elem);
-                // An interface iterClass says nothing about the KEY either, and
-                // the int default was a claim, not knowledge: the iterator can
-                // be a Generator at runtime ({@see
-                // EmitLlvmControl::iterNeedsRuntimeClass}) and its `key`@24 is a
-                // boxed cell, which printed as its tag bits. Erased is the honest
-                // answer — every erased consumer classifies at runtime, and a
-                // genuinely-int key still renders as one.
-                $kd = isset($this->classes[$ic]) ? $keyT : Type::unknown();
-                $keyT = $this->iterMethodReturn($ic, 'key', $kd);
+                if (!isset($this->classes[$ic])) {
+                    // An interface iterClass is driven by runtime classification
+                    // ({@see EmitLlvmControl::iterProtoStep}), whose current/key
+                    // steps answer TAGGED cells whatever the implementers
+                    // return: typed from an implementer's narrowed `int`, the
+                    // loop variables printed the tag bits.
+                    $elem = Type::cell();
+                    $keyT = Type::cell();
+                } else {
+                    $elem = $this->iterMethodReturn($ic, 'current', $elem);
+                    $keyT = $this->iterMethodReturn($ic, 'key', $keyT);
+                }
             }
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an

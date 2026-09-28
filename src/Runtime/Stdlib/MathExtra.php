@@ -130,3 +130,34 @@ function is_finite(float $num): bool
     $bits = \__float_bits($num);
     return (($bits >> 52) & 2047) !== 2047;
 }
+
+/**
+ * The C `double` at a byte offset. A codegen builtin shadows this body; it is what a
+ * compiler one generation behind links (the bootstrap rule).
+ */
+function peek_f64(\Ffi\Ptr $ptr, int $offset): float
+{
+    return \__mc_f64_from_bits(\peek_i64($ptr, $offset));
+}
+
+/** Store a C `double` at a byte offset; the bootstrap body of the codegen builtin. */
+function poke_f64(\Ffi\Ptr $ptr, int $offset, float $value): int
+{
+    \poke_i64($ptr, $offset, \__float_bits($value));
+    return 0;
+}
+
+/** The double whose IEEE-754 bit pattern is `$bits` (the inverse of __float_bits). */
+function __mc_f64_from_bits(int $bits): float
+{
+    $sign = $bits < 0 ? -1.0 : 1.0;
+    $e = ($bits >> 52) & 0x7FF;
+    $m = $bits & 0xFFFFFFFFFFFFF;
+    if ($e === 0x7FF) {
+        return $m === 0 ? $sign * INF : NAN;
+    }
+    if ($e === 0) {
+        return $sign * ($m * 2.0 ** -1074);
+    }
+    return $sign * (($m + 4503599627370496) * 2.0 ** ($e - 1075));
+}

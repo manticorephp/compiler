@@ -1,0 +1,30 @@
+bool(true)
+bool(true)
+bool(true)
+mbstring folds true
+string(11) "a, b, and c"
+string(0) ""
+string(15) "1, 2.5, 1, and "
+bool(false)
+int(10)
+string(85) "IntlListFormatter::format(): Failed to convert string to UTF-16: U_INVALID_CHAR_FOUND"
+string(85) "IntlListFormatter::format(): Failed to convert string to UTF-16: U_INVALID_CHAR_FOUND"
+string(8) "x oder y"
+string(9) "3 ft 7 in"
+ValueError: IntlListFormatter::__construct(): Argument #1 ($locale) "xx_YY" is invalid
+ValueError: IntlListFormatter::__construct(): Argument #2 ($type) must be one of IntlListFormatter::TYPE_AND, IntlListFormatter::TYPE_OR, or IntlListFormatter::TYPE_UNITS
+ValueError: IntlListFormatter::__construct(): Argument #3 ($width) must be one of IntlListFormatter::WIDTH_WIDE, IntlListFormatter::WIDTH_SHORT, or IntlListFormatter::WIDTH_NARROW
+ValueError: IntlListFormatter::__construct(): Argument #1 ($locale) must be less than or equal to 156 characters
+Error: IntlListFormatter object is already constructed
+Error: Trying to clone an uncloneable object of class IntlListFormatter
+string(3) "é"
+NULL
+string(2) "fi"
+string(6) "가"
+NULL
+string(125) "normalizer_get_raw_decomposition(): Input string must be exactly one UTF-8 encoded code point long.: U_ILLEGAL_ARGUMENT_ERROR"
+NULL
+string(85) "normalizer_get_raw_decomposition(): Code point out of range: U_ILLEGAL_ARGUMENT_ERROR"
+string(0) ""
+NULL
+NULL

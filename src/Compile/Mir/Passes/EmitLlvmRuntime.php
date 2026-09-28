@@ -822,6 +822,14 @@ trait EmitLlvmRuntime
             // Recursive drop: release this object's obj-typed properties
             // before freeing it, so nested objects don't leak.
             $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
+            // A destructor that resurrected the object left rc > 0: it lives on.
+            $out .= "  %rwp2 = getelementptr i8, ptr %p, i64 8\n";
+            $out .= "  %rw2 = load i64, ptr %rwp2\n";
+            $out .= "  %rsh2 = shl i64 %rw2, 8\n";
+            $out .= "  %rsg2 = ashr i64 %rsh2, 8\n";
+            $out .= "  %alive2 = icmp sgt i64 %rsg2, 0\n";
+            $out .= "  br i1 %alive2, label %done, label %reallyfree\n";
+            $out .= "reallyfree:\n";
             $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
             $out .= $this->poolFreeCall('%obase');
             $out .= "  br label %done\n";
@@ -1962,9 +1970,37 @@ trait EmitLlvmRuntime
             $dtorCls = $this->resolveMethodClass($cls->name, '__destruct');
             $hasDtor = $dtorCls !== '';
             if ($hasDtor) {
+                // Once, and with the object HELD: the destructor runs at rc 1 so
+                // its own `$this` traffic cannot re-enter this drop, and an object
+                // it resurrected (rc still > 0 after the hold is given back) keeps
+                // its properties — the caller then sees rc > 0 and does not free
+                // it. A second rc → 0 skips the destructor (bit 62).
+                $rcMask = (string)\Compile\MemoryAbi::RC_MASK;
+                $dtorBit = (string)\Compile\MemoryAbi::DTOR_CALLED_MASK;
+                $body .= "  %dwp = getelementptr i8, ptr %o, i64 8\n";
+                $body .= "  %dw0 = load i64, ptr %dwp\n";
+                $body .= "  %dcb = and i64 %dw0, " . $dtorBit . "\n";
+                $body .= "  %dcalled = icmp ne i64 %dcb, 0\n";
+                $body .= "  br i1 %dcalled, label %members, label %dtor\n";
+                $body .= "dtor:\n";
+                $body .= "  %dfl = and i64 %dw0, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
+                $body .= "  %dhold = or i64 %dfl, " . (string)(\Compile\MemoryAbi::DTOR_CALLED_MASK | 1) . "\n";
+                $body .= "  store i64 %dhold, ptr %dwp\n";
                 $body .= '  %oi = ptrtoint ptr %o to i64' . "\n";
                 $body .= '  %dr = call i64 @manticore_' . $this->mangle($dtorCls)
                        . '____destruct(i64 %oi)' . "\n";
+                $body .= "  %dw1 = load i64, ptr %dwp\n";
+                $body .= "  %dsh = shl i64 %dw1, 8\n";
+                $body .= "  %drc = ashr i64 %dsh, 8\n";
+                $body .= "  %drc1 = sub i64 %drc, 1\n";
+                $body .= "  %dfl1 = and i64 %dw1, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
+                $body .= "  %drcm = and i64 %drc1, " . $rcMask . "\n";
+                $body .= "  %dw2 = or i64 %dfl1, %drcm\n";
+                $body .= "  store i64 %dw2, ptr %dwp\n";
+                $body .= "  %dlive = icmp sgt i64 %drc1, 0\n";
+                $body .= "  br i1 %dlive, label %resurrected, label %members\n";
+                $body .= "resurrected:\n  ret void\n";
+                $body .= "members:\n";
             }
             foreach ($cls->propertyNames as $pn) {
                 $pt = $cls->propertyTypes[$pn] ?? null;
@@ -2427,7 +2463,7 @@ trait EmitLlvmRuntime
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
         $out .= "  %c = lshr i64 %w, 56\n";
-        $out .= "  %m = and i64 %c, 127\n";
+        $out .= "  %m = and i64 %c, 63\n";
         $out .= "  ret i64 %m\n}\n";
         $out .= "define void @__cc_setcolor(ptr %s, i64 %c) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
@@ -2925,6 +2961,10 @@ trait EmitLlvmRuntime
         $out .= "mrfree:\n";
         $out .= $this->ccTrace('mrfree', 'ptr %s');
         $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
+        $out .= "  %mrv2 = call i64 @__cc_rcval(ptr %s)\n";
+        $out .= "  %mralive = icmp sgt i64 %mrv2, 0\n";
+        $out .= "  br i1 %mralive, label %mrn, label %mrfree2\n";
+        $out .= "mrfree2:\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%fbase');

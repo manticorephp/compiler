@@ -93,10 +93,19 @@ final class DeadStore implements Pass
     /** @var array<string, true> */
     private array $usedLocals = [];
 
+    /**
+     * Locals some store fills with a non-pure value — an object or array the
+     * local may OWN. Overwriting one is observable (`$o = null;` runs the old
+     * value's __destruct right there), so even an unread pure store to it stays.
+     * @var array<string, true>
+     */
+    private array $heldLocals = [];
+
     public function run(Module $module): Module
     {
         foreach ($module->functions as $fn) {
             $this->usedLocals = [];
+            $this->heldLocals = [];
             // A store to a by-ref param (incl. a closure's `use (&$x)` capture,
             // lowered to a byRef param) is observable by the caller, so it is
             // never dead even with no in-function read. Seed it as "used".
@@ -121,7 +130,11 @@ final class DeadStore implements Pass
             $this->usedLocals[$n->name] = true;
             return;
         }
-        if ($n->kind === Node::KIND_STORE_LOCAL) { $this->collectUses($n->value); return; }
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            if (!$this->isPure($n->value)) { $this->heldLocals[$n->name] = true; }
+            $this->collectUses($n->value);
+            return;
+        }
         if ($n->kind === Node::KIND_ADD) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
         if ($n->kind === Node::KIND_SUB) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
         if ($n->kind === Node::KIND_MUL) { $this->collectUses($n->left); $this->collectUses($n->right); return; }
@@ -346,7 +359,8 @@ final class DeadStore implements Pass
     private function rewriteStmt(Node $n): ?Node
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
-            if (!isset($this->usedLocals[$n->name]) && $this->isPure($n->value)) {
+            if (!isset($this->usedLocals[$n->name]) && !isset($this->heldLocals[$n->name])
+                && $this->isPure($n->value)) {
                 return null;
             }
             return $n;

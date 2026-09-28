@@ -46,6 +46,22 @@ trait EmitLlvmObjects
      * `new C(…)` and `new $cls(…)`, which differ only in how the class is chosen.
      * Leaves the object POINTER in {@see $lastValue}.
      */
+    /**
+     * The declared property defaults of a freshly allocated `$class` object
+     * (`C____mc_defaults`, own + inherited + mixed-in), run before any
+     * constructor. '' when the class declares none.
+     */
+    private function emitPropDefaultsCall(string $class, string $objPtr): string
+    {
+        $defSym = $class . '____mc_defaults';
+        if (!isset($this->sigs->paramTypes[$defSym])) { return ''; }
+        $oi = $this->ssa->allocReg();
+        $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $dr = $this->ssa->allocReg();
+        $out .= '  ' . $dr . ' = call i64 @manticore_' . $this->mangle($defSym) . '(i64 ' . $oi . ")\n";
+        return $out;
+    }
+
     private function emitObjAllocInit(?\Compile\Mir\ClassDef $cd): string
     {
         $size = $cd === null ? 16 : $cd->instanceSize();
@@ -387,6 +403,7 @@ trait EmitLlvmObjects
             $out .= $hitL . ":\n";
             $out .= $this->emitObjAllocInit($cd);
             $objPtr = $this->lastValue;
+            $out .= $this->emitPropDefaultsCall($cd->name, $objPtr);
             $objInt = $this->ssa->allocReg();
             $out .= '  ' . $objInt . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
             if ($ctorClass !== '') {
@@ -626,23 +643,11 @@ trait EmitLlvmObjects
         }
         $out = $this->emitObjAllocInit($cd);
         $obj = $this->lastValue;
+        // `__mc_new_uninit('C')` (unserialize, newInstanceWithoutConstructor):
+        // the defaults run, no CONSTRUCTOR BODY does — php's own split.
+        $out .= $this->emitPropDefaultsCall($n->class, $obj);
         // ctor call — resolve through the parent chain (a subclass
         // with no ctor inherits its parent's).
-        // `__mc_new_uninit('C')`: no CONSTRUCTOR BODY runs, but the declared
-        // property defaults do — that is exactly what php's unserialize does, so
-        // a property the stream omits keeps its default rather than reading 0.
-        // The defaults live in `C____mc_defaults`, emitted beside the ctor by
-        // LowerClasses when the program unserialises at all.
-        if ($n->bare) {
-            $defSym = $n->class . '____mc_defaults';
-            if (isset($this->sigs->paramTypes[$defSym])) {
-                $oi = $this->ssa->allocReg();
-                $out .= '  ' . $oi . ' = ptrtoint ptr ' . $obj . " to i64\n";
-                $dr = $this->ssa->allocReg();
-                $out .= '  ' . $dr . ' = call i64 @manticore_' . $this->mangle($defSym)
-                      . '(i64 ' . $oi . ")\n";
-            }
-        }
         $ctorClass = $n->bare ? '' : $this->resolveMethodClass($n->class, '__construct');
         if ($ctorClass !== '') {
             $objInt = $this->ssa->allocReg();
@@ -5348,6 +5353,38 @@ trait EmitLlvmObjects
         $strL = $this->ssa->allocLabel('iss.str');
         $arrL = $this->ssa->allocLabel('iss.arr');
         $endL = $this->ssa->allocLabel('iss.end');
+        // An OBJECT subject answers through ArrayAccess::offsetExists, as the
+        // erased READ calls offsetGet ({@see EmitLlvmArrays::erasedIndexCoreIr}):
+        // without this arm `isset($m['k'])` / `$m['k'] ?? $d` on a `mixed` holding
+        // an ArrayAccess object took the array path and answered false.
+        if ($this->ifaceMethodHolders('ArrayAccess', 'offsetExists') !== []) {
+            $keyCell = $key;
+            if (!$keyIsCell) {
+                $this->lastValue = $key;
+                $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
+                $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());
+                $keyCell = $this->lastValue;
+            }
+            $objL = $this->ssa->allocLabel('iss.obj');
+            $notObjL = $this->ssa->allocLabel('iss.notobj');
+            $isObjNib = $this->ssa->allocReg();
+            $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $notObjL . "\n";
+            $out .= $objL . ":\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetExists', [$keyCell]);
+            // A bool answer, raw or boxed: bit 0 either way.
+            $ob = $this->ssa->allocReg();
+            $out .= '  ' . $ob . ' = and i64 ' . $this->lastValue . ", 1\n";
+            $out .= '  store i64 ' . $ob . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $notObjL . ":\n";
+        }
         $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $arrL . "\n";
 
         $out .= $strL . ":\n";
@@ -7275,6 +7312,17 @@ trait EmitLlvmObjects
      *
      * @return array<string, string>
      */
+    /** Can `$holder`'s `$method` take `$argc` arguments (the receiver included)? */
+    private function holderTakesArgs(string $holder, string $method, int $argc): bool
+    {
+        $key = $holder . '__' . $method;
+        if (\count($this->sigs->paramTypes[$key] ?? []) >= $argc) { return true; }
+        foreach ($this->sigs->variadicParams[$key] ?? [] as $v) {
+            if ($v) { return true; }
+        }
+        return false;
+    }
+
     private function methodHolders(string $method): array
     {
         $this->ensureMethodIndex();
@@ -7807,6 +7855,21 @@ trait EmitLlvmObjects
         // site emits speaks the ABI the arms were selected for.
         if ($static === '' && $fallback === '') {
             foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
+        }
+        // The fallback's signature decides how many arguments the site emits
+        // ({@see faCallArgsRecv} trims the surplus), so on a receiver that is no
+        // one concrete class it must be a holder that can TAKE them: the first
+        // holder of `next` (an Iterator's, no params) made `$brk->next(3)` drop
+        // its argument before the class_id switch reached
+        // IntlBreakIterator::next(?int), which then read its default.
+        if ($fallback !== '' && ($static === '' || !isset($this->classes[$static]))) {
+            $argc = \count($mc->args) + 1;
+            if (!$this->holderTakesArgs($fallback, $mc->method, $argc)) {
+                foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                    if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
+                    if ($this->holderTakesArgs($r, $mc->method, $argc)) { $fallback = $r; break; }
+                }
+            }
         }
         // An ENUM method takes its case ORDINAL as `$this`, not a pointer. A
         // cell receiver (`?Enum` is a cell — an ordinal cannot carry null, see

@@ -231,6 +231,8 @@ trait EmitLlvmBuiltins
         if ($name === 'peek_u32')                     { return $this->biPeek($args, 32, false); }
         if ($name === 'peek_u16')                     { return $this->biPeek($args, 16, false); }
         if ($name === 'peek_u8')                      { return $this->biPeek($args, 8, false); }
+        if ($name === 'peek_f64')                     { return $this->biPeekF64($args); }
+        if ($name === 'poke_f64')                     { return $this->biPokeF64($args); }
         if ($name === 'poke_i64')                     { return $this->biPoke($args, 64); }
         if ($name === 'poke_i32')                     { return $this->biPoke($args, 32); }
         if ($name === 'poke_i16')                     { return $this->biPoke($args, 16); }
@@ -707,10 +709,22 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $ise . ' = ashr i64 ' . $ish . ", 16\n";
         $isInt = $this->ssa->allocReg();
         $out .= '  ' . $isInt . ' = icmp eq i64 ' . $ise . ', ' . $v . "\n";
+        // box_int only on a word that FITS: called unconditionally (its answer
+        // then dropped by a select), a tagged word or a wide raw int took its
+        // heap arm and leaked the 8-byte box on every pass-through.
+        $biL = $this->ssa->allocLabel('bx.int');
+        $nbL = $this->ssa->allocLabel('bx.noint');
+        $bjL = $this->ssa->allocLabel('bx.intj');
+        $out .= '  br i1 ' . $isInt . ', label %' . $biL . ', label %' . $nbL . "\n";
+        $out .= $biL . ":\n";
         $bi = $this->ssa->allocReg();
         $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $v . ")\n";
+        $out .= '  br label %' . $bjL . "\n";
+        $out .= $nbL . ":\n";
+        $out .= '  br label %' . $bjL . "\n";
+        $out .= $bjL . ":\n";
         $intB = $this->ssa->allocReg();
-        $out .= '  ' . $intB . ' = select i1 ' . $isInt . ', i64 ' . $bi . ', i64 ' . $v . "\n";
+        $out .= '  ' . $intB . ' = phi i64 [ ' . $bi . ', %' . $biL . ' ], [ ' . $v . ', %' . $nbL . " ]\n";
         // "Already a cell" = the NaN header AND a tag nibble the ABI assigns
         // (1..8): a raw negative int carries the header too (nibble 15) and
         // must still take the integer arm.
@@ -1635,6 +1649,25 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * Emit a `\Ffi\Ptr` argument of a raw-memory builtin (ptr_to_int, peek_*,
+     * poke_*, cstr_to_str, str_from_buffer, ptr_offset). A Ptr that crossed a
+     * cell — a `Ptr|false|null` result, a mixed slot — is boxed as an object
+     * cell, and these builtins used the tagged word as the address. Strip the
+     * tag; a null cell strips to address 0, as a null Ptr is. Not
+     * {@see emitPtrArg}: that one is the STRING pointer read (null → "").
+     */
+    private function emitFfiPtrArg(Node $arg): string
+    {
+        $out = $this->emitNode($arg);
+        $k = $arg->type->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType(Type::obj('Ffi\\Ptr'));
+        }
+        return $out;
+    }
+
+    /**
      * Emit `$arg` leaving a raw pointer in lastValue. A `mixed`/cell value
      * (NaN-boxed) used where a string/array/object pointer is expected is
      * unboxed (tag stripped) first — else a builtin like strlen derefs the
@@ -1784,7 +1817,7 @@ trait EmitLlvmBuiltins
      */
     private function biStrFromBuffer(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -1868,7 +1901,7 @@ trait EmitLlvmBuiltins
      */
     private function biPtrToInt(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToI64();
         $this->lastValueType = 'i64';
         return $out;
@@ -1986,7 +2019,7 @@ trait EmitLlvmBuiltins
 
     private function biPtrOffset(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2009,7 +2042,7 @@ trait EmitLlvmBuiltins
      */
     private function biPeek(array $args, int $bits, bool $signed): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2038,7 +2071,7 @@ trait EmitLlvmBuiltins
      */
     private function biPoke(array $args, int $bits): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2058,6 +2091,47 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `peek_f64(\Ffi\Ptr $p, int $off): float` — the C `double` at a byte offset.
+     * @param Node[] $args
+     */
+    private function biPeekF64(array $args): string
+    {
+        $out = $this->emitFfiPtrArg($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load double, ptr ' . $gp . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'double';
+        return $out;
+    }
+
+    /**
+     * `poke_f64(\Ffi\Ptr $p, int $off, float $v): int` — store a C `double` at a
+     * byte offset (a va_list slot, a struct field). Yields 0.
+     * @param Node[] $args
+     */
+    private function biPokeF64(array $args): string
+    {
+        $out = $this->emitFfiPtrArg($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceDoubleOperand($args[2]);
+        $v = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $out .= '  store double ' . $v . ', ptr ' . $gp . "\n";
+        return $this->finishI64($out, '0');
+    }
+
+    /**
      * `cstr_to_str(\Ffi\Ptr $p): string` — NUL-terminated raw C-string →
      * headered string (the single libc-strlen boundary, in the central core).
      * For OS/FFI char* (argv entries, uname buffer) whose length isn't known.
@@ -2065,7 +2139,7 @@ trait EmitLlvmBuiltins
      */
     private function biCstrToStr(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $r = $this->ssa->allocReg();
@@ -3066,6 +3140,13 @@ trait EmitLlvmBuiltins
     private function boxRawValue(string $ev, ?Type $t): string
     {
         $ek = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;
+        // A `void` callee's word is no value at all: its cell is null (a dispatch
+        // arm for `Iterator::next(): void` beside a valued sibling boxed it int 0).
+        if ($ek === Type::KIND_VOID) {
+            $this->lastValue = (string)\Compile\MemoryAbi::CELL_NULL;
+            $this->lastValueType = 'i64';
+            return '';
+        }
         // Already a tagged cell (heterogeneous / `mixed` / untyped) — passthrough.
         if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) {
             $this->lastValue = $ev;
@@ -4880,23 +4961,15 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['printf'] = 'declare i32 @printf(ptr, ...)';
         $out = '';
+        // php evaluates EVERY argument before var_dump prints the first:
+        // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
+        /** @var array<int, array{0: bool, 1: string}> float? + the value register */
+        $vals = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
-                // Shortest round-trip via the Ryu core (uppercase E, no forced
-                // `.0` — var_dump form), byte-exact with php and faster than the
-                // old snprintf-probe. The core takes the raw i64 bits.
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
-                $d = $this->lastValue;
-                $bitsr = $this->ssa->allocReg();
-                $out .= '  ' . $bitsr . ' = bitcast double ' . $d . " to i64\n";
-                $fsi = $this->ssa->allocReg();
-                $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
-                $fs = $this->ssa->allocReg();
-                $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
-                $out .= $this->emitOutLit('float(');
-                $out .= $this->emitOutStr($fs);
-                $out .= $this->emitOutLit(")\n");
+                $vals[] = [true, $this->lastValue];
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -4905,8 +4978,25 @@ trait EmitLlvmBuiltins
                 $out .= $a->type->kind === Type::KIND_UNKNOWN
                     ? $this->boxUnknownShallowIr()
                     : $this->boxToCell($a->type);
-                $bv = $this->lastValue;
-                $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $bv . ', i64 0)' . "\n";
+                $vals[] = [false, $this->lastValue];
+            }
+        }
+        foreach ($vals as $v) {
+            if ($v[0]) {
+                // Shortest round-trip via the Ryu core (uppercase E, no forced
+                // `.0` — var_dump form), byte-exact with php and faster than the
+                // old snprintf-probe. The core takes the raw i64 bits.
+                $bitsr = $this->ssa->allocReg();
+                $out .= '  ' . $bitsr . ' = bitcast double ' . $v[1] . " to i64\n";
+                $fsi = $this->ssa->allocReg();
+                $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
+                $fs = $this->ssa->allocReg();
+                $out .= '  ' . $fs . ' = inttoptr i64 ' . $fsi . " to ptr\n";
+                $out .= $this->emitOutLit('float(');
+                $out .= $this->emitOutStr($fs);
+                $out .= $this->emitOutLit(")\n");
+            } else {
+                $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $v[1] . ', i64 0)' . "\n";
             }
         }
         $this->lastValue = '0';
@@ -6087,6 +6177,12 @@ trait EmitLlvmBuiltins
     private function biGetClass(array $args, string $nullName = ''): string
     {
         $t = $args[0]->type;
+        if ($t->kind === Type::KIND_CLOSURE || ($t->kind === Type::KIND_OBJ && $this->isClosureClass($t->class ?? ''))) {
+            $out = $this->emitNode($args[0]);
+            $this->lastValue = $this->strLitId($this->pool->intern('Closure'));
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $erased = $this->getClassReceiverIsErased($t);
         $cls = $erased ? '' : ($t->class ?? '');
         // Candidate runtime classes = every class that IS-A $cls — extends AND
@@ -6200,6 +6296,39 @@ trait EmitLlvmBuiltins
             $out .= '  store ptr ' . $this->strRef($nullName) . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $liveL . ":\n";
+        }
+        if ($erased) {
+            // A closure env carries no class id: a plain rc at -8 (no allocator
+            // tag) and CLOSURE_TAG_MAGIC at -32, read only when -8 is untagged.
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $objp . ", i64 -8\n";
+            $tw = $this->ssa->allocReg();
+            $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+            $hi = $this->ssa->allocReg();
+            $out .= '  ' . $hi . ' = lshr i64 ' . $tw . ", 48\n";
+            $tagged = $this->ssa->allocReg();
+            $out .= '  ' . $tagged . ' = icmp eq i64 ' . $hi . ', '
+                  . (string)(\Compile\MemoryAbi::RC_TAG_MAGIC >> 48) . "\n";
+            $cloChk = $this->ssa->allocLabel('gc.clochk');
+            $cloL = $this->ssa->allocLabel('gc.clo');
+            $clsL = $this->ssa->allocLabel('gc.cls');
+            $out .= '  br i1 ' . $tagged . ', label %' . $clsL . ', label %' . $cloChk . "\n";
+            $out .= $cloChk . ":\n";
+            $cp = $this->ssa->allocReg();
+            $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 '
+                  . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+            $cw = $this->ssa->allocReg();
+            $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+            $cwm = $this->ssa->allocReg();
+            $out .= '  ' . $cwm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+            $isClo = $this->ssa->allocReg();
+            $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cwm . ', '
+                  . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+            $out .= '  br i1 ' . $isClo . ', label %' . $cloL . ', label %' . $clsL . "\n";
+            $out .= $cloL . ":\n";
+            $out .= '  store ptr ' . $this->strLitId($this->pool->intern('Closure')) . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $clsL . ":\n";
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;

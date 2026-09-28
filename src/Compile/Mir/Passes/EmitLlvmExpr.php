@@ -2639,9 +2639,21 @@ trait EmitLlvmExpr
             $out .= '  ' . $nx . ' = load i64, ptr ' . $fp . "\n";
             $cur = $nx;
         }
-        // A present-but-NULL leaf value also takes the default.
+        // A present-but-NULL leaf value also takes the default: the null CELL,
+        // and — for a pointer-shaped leaf (`?string`, `?Obj`, `?array`) — the
+        // null POINTER. Missing the latter, `$n->type->class ?? ''` kept a null
+        // `?string` as a zero-length non-string that `=== ''` rejected.
         $vn = $this->ssa->allocReg();
         $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
+        $lk = $leafType->kind;
+        if ($lk === Type::KIND_STRING || $lk === Type::KIND_OBJ || $lk === Type::KIND_CLOSURE
+            || $leafType->isArray()) {
+            $vz = $this->ssa->allocReg();
+            $out .= '  ' . $vz . ' = icmp eq i64 ' . $cur . ", 0\n";
+            $vb = $this->ssa->allocReg();
+            $out .= '  ' . $vb . ' = or i1 ' . $vn . ', ' . $vz . "\n";
+            $vn = $vb;
+        }
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
             $this->lastValue = $cur;
@@ -3900,6 +3912,32 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * `(string)` of an object value whose static class resolves no `__toString`
+     * (the value is in `lastValue`): through the class-id dispatcher, which calls
+     * a subclass's `__toString` or throws php's "Object of class X could not be
+     * converted to string" Error — the address was printed as a decimal. A
+     * closure throws outright. Null when `$operand` is not such an object.
+     */
+    private function objectWithoutToStringIr(Node $operand): ?string
+    {
+        $k = $operand->type->kind;
+        if ($k === Type::KIND_CLOSURE) {
+            $thr = new \Compile\Mir\Call('__mir_throw_error',
+                [new \Compile\Mir\StringConst('Object of class Closure could not be converted to string', Type::string_())],
+                Type::cell());
+            $out = $this->emitBuiltin($thr) ?? '';
+            $this->lastValue = $this->strSymBytes('@.cstr.empty');
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        if ($k !== Type::KIND_OBJ) { return null; }
+        $out = $this->boxToCell($operand->type);
+        $out .= $this->coerceToI64();
+        $out .= $this->coerceCellToStr($this->lastValue);
+        return $out;
+    }
+
     private function coerceToStr(Node $operand, bool $arena = false): string
     {
         if ($operand->type->kind === Type::KIND_STRING) {
@@ -4018,6 +4056,10 @@ trait EmitLlvmExpr
         $ts = $this->toStringClassOf($operand);
         if ($ts !== '') {
             return $this->emitToStringCall($ts, $this->staticClassOf($operand));
+        }
+        $noStr = $this->objectWithoutToStringIr($operand);
+        if ($noStr !== null) {
+            return $noStr;
         }
         // When the result feeds an arena-bound consumer (an Arena concat),
         // the coercion buffer is confined too — bump-allocate it so it is
@@ -5495,6 +5537,11 @@ trait EmitLlvmExpr
         if ($ts !== '') {
             $out .= $this->emitToStringCall($ts, $this->staticClassOf($e));
             $kind = Type::KIND_STRING;
+        } else {
+            $noStr = $this->objectWithoutToStringIr($e);
+            if ($noStr !== null) {
+                return $out . $noStr . $this->emitOutStr($this->lastValue);
+            }
         }
         // A NaN-boxed cell (e.g. `int|false` from strpos) dispatches
         // on its tag at runtime — int prints decimal, false / null

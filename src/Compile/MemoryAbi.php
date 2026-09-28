@@ -889,8 +889,15 @@ final class MemoryAbi
      */
     public const RC_MASK = 0x00FFFFFFFFFFFFFF;
 
-    /** Bits 56-62 hold the 7-bit color. */
-    public const COLOR_MASK = 0x7F00000000000000;
+    /** Bits 56-61 hold the color (Bacon-Rajan uses 0..3). */
+    public const COLOR_MASK = 0x3F00000000000000;
+
+    /**
+     * Bit 62: `__destruct` already ran. php calls a destructor ONCE; an object
+     * its destructor resurrected (stored `$this` somewhere) is later freed
+     * without a second call. Outside {@see COLOR_MASK}, so recoloring keeps it.
+     */
+    public const DTOR_CALLED_MASK = 0x4000000000000000;
 
     /** Bit 63 is the `buffered` (cc candidate list membership) flag. */
     public const BUFFERED_MASK = \PHP_INT_MIN;

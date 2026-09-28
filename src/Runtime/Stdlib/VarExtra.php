@@ -129,11 +129,12 @@ function filter_var(mixed $value, int $filter = 516, array|int $options = 0): mi
 /**
  * var_export string quoting: php.net escapes exactly two bytes inside the
  * single quotes — the backslash and the quote itself. Backslash first, or the
- * one introduced by the quote escape would be doubled again.
+ * one introduced by the quote escape would be doubled again. A NUL breaks out
+ * of the quotes as `' . "\0" . '`, as php writes it.
  */
 function __mc_var_export_qstr(string $s): string
 {
-    return \str_replace(['\\', "'"], ['\\\\', "\\'"], $s);
+    return \str_replace(['\\', "'", "\0"], ['\\\\', "\\'", "' . \"\\0\" . '"], $s);
 }
 
 
@@ -152,7 +153,7 @@ function extension_loaded(string $extension): bool
     // answers the EXPRESSION form. Two lists, one truth — change both.
     return $e === 'pcre' || $e === 'json' || $e === 'ctype'
         || $e === 'openssl' || $e === 'core' || $e === 'standard'
-        || $e === 'tokenizer';
+        || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl';
 }
 
 

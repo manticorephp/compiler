@@ -1,0 +1,5 @@
+B B
+A A
+B B
+2
+Call to undefined method A::nope()

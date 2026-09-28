@@ -1,0 +1,53 @@
+array(1) {
+  [0]=>
+  int(1)
+}
+array(1) {
+  ["k"]=>
+  int(2)
+}
+string(2) "s7"
+object(O)#1 (1) {
+  ["v"]=>
+  int(1)
+}
+array(1) {
+  [0]=>
+  int(1)
+}
+array(1) {
+  [0]=>
+  int(1)
+}
+bool(false)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+bool(false)
+int(2)
+[1]
+NULL
+NULL
+NULL
+NULL
+NULL
+string(1) "x"
+bool(true)
+NULL
+bool(true)
+int(0)
+null
+NULL
+NULL
+NULL
+NULL
+NULL
+NULL
+bool(true)
+NULL
+bool(true)
+int(0)
+null

@@ -1,0 +1,188 @@
+en_US 0/0: Tuesday, November 14, 2023 at 5:13:20 PM Eastern Standard Time | EEEE, MMMM d, y 'at' h:mm:ss a zzzz
+en_US 2/3: Nov 14, 2023, 5:13 PM | MMM d, y, h:mm a
+en_US 3/-1: 11/14/23 | M/d/yy
+en_US -1/1: 5:13:20 PM EST | h:mm:ss a z
+en_US 130/-1: Nov 14, 2023 | MMM d, y
+uk_UA 0/0: вівторок, 14 листопада 2023 р. о 17:13:20 за північноамериканським східним стандартним часом | EEEE, d MMMM y 'р'. 'о' HH:mm:ss zzzz
+uk_UA 2/3: 14 лист. 2023 р., 17:13 | d MMM y 'р'., HH:mm
+uk_UA 3/-1: 14.11.23 | dd.MM.yy
+uk_UA -1/1: 17:13:20 GMT-5 | HH:mm:ss z
+uk_UA 130/-1: 14 лист. 2023 р. | d MMM y 'р'.
+de_DE 0/0: Dienstag, 14. November 2023 um 17:13:20 Nordamerikanische Ostküsten-Normalzeit | EEEE, d. MMMM y 'um' HH:mm:ss zzzz
+de_DE 2/3: 14.11.2023, 17:13 | dd.MM.y, HH:mm
+de_DE 3/-1: 14.11.23 | dd.MM.yy
+de_DE -1/1: 17:13:20 GMT-5 | HH:mm:ss z
+de_DE 130/-1: 14.11.2023 | dd.MM.y
+ja_JP@calendar=japanese 0/0: 令和5年11月14日火曜日 17時13分20秒 米国東部標準時 | Gy年M月d日EEEE H時mm分ss秒 zzzz
+ja_JP@calendar=japanese 2/3: 令和5年11月14日 17:13 | Gy年M月d日 H:mm
+ja_JP@calendar=japanese 3/-1: R5/11/14 | GGGGGy/M/d
+ja_JP@calendar=japanese -1/1: 17:13:20 GMT-5 | H:mm:ss z
+ja_JP@calendar=japanese 130/-1: 令和5年11月14日 | Gy年M月d日
+ar_EG 0/0: الثلاثاء، ١٤ نوفمبر ٢٠٢٣ في ٥:١٣:٢٠ م التوقيت الرسمي الشرقي لأمريكا الشمالية | EEEE، d MMMM y في h:mm:ss a zzzz
+ar_EG 2/3: ١٤‏/١١‏/٢٠٢٣، ٥:١٣ م | dd‏/MM‏/y، h:mm a
+ar_EG 3/-1: ١٤‏/١١‏/٢٠٢٣ | d‏/M‏/y
+ar_EG -1/1: ٥:١٣:٢٠ م غرينتش-٥ | h:mm:ss a z
+ar_EG 130/-1: ١٤‏/١١‏/٢٠٢٣ | dd‏/MM‏/y
+fr_FR 0/0: mardi 14 novembre 2023 à 17:13:20 heure normale de l’Est nord-américain | EEEE d MMMM y 'à' HH:mm:ss zzzz
+fr_FR 2/3: 14 nov. 2023, 17:13 | d MMM y, HH:mm
+fr_FR 3/-1: 14/11/2023 | dd/MM/y
+fr_FR -1/1: 17:13:20 UTC−5 | HH:mm:ss z
+fr_FR 130/-1: 14 nov. 2023 | d MMM y
+string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
+string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
+string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
+string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
+string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
+string(58) "2023-11-15 07:13:20 Japan Standard Time (Wed) Q4 46 319 AM"
+string(56) "2020-02-29 21:34:56 Japan Standard Time (Sat) Q1 9 60 PM"
+string(56) "2001-02-03 13:05:06 Japan Standard Time (Sat) Q1 5 34 PM"
+string(56) "2020-02-29 13:14:15 Japan Standard Time (Sat) Q1 9 60 PM"
+string(57) "1998-12-31 00:00:00 Japan Standard Time (Thu) Q4 1 365 AM"
+bool(false)
+bool(false)
+  IntlDateFormatter::format(): string 'abc' is not numeric, which would be required for it to be a valid date: U_ILLEGAL_ARGUMENT_ERROR
+bool(false)
+  IntlDateFormatter::format(): invalid object type for date/time (only IntlCalendar and DateTimeInterface permitted): U_ILLEGAL_ARGUMENT_ERROR
+bool(false)
+  IntlDateFormatter::format(): invalid PHP type for date: U_ILLEGAL_ARGUMENT_ERROR
+bool(false)
+  IntlDateFormatter::format(): invalid PHP type for date: U_ILLEGAL_ARGUMENT_ERROR
+bool(false)
+  IntlDateFormatter::format(): date formatting failed: U_ILLEGAL_ARGUMENT_ERROR
+bool(false)
+  IntlDateFormatter::format(): date formatting failed: U_ILLEGAL_ARGUMENT_ERROR
+string(12) "22:13:20.789"
+int(-2)
+int(-2)
+int(1)
+string(10) "Asia/Tokyo"
+string(4) "root"
+string(4) "root"
+bool(true)
+string(21) "IntlGregorianCalendar"
+string(10) "Asia/Tokyo"
+string(16) "dd.MM.yyyy HH:mm"
+string(16) "15.11.2023 07:13"
+string(11) "Europe/Kyiv"
+string(16) "15.11.2023 00:13"
+string(9) "GMT+05:45"
+string(16) "15.11.2023 03:58"
+string(16) "14.11.2023 14:13"
+int(0)
+string(16) "14.11.2023 14:13"
+string(19) "America/Los_Angeles"
+bool(false)
+string(16) "15.11.2566 03:43"
+string(12) "Asia/Kolkata"
+string(8) "buddhist"
+bool(false)
+int(1699999980)
+int(1699999980)
+int(16)
+bool(false)
+int(0)
+int(1577934240)
+int(19)
+bool(false)
+int(99)
+bool(false)
+int(9)
+string(62) "IntlDateFormatter::parse(): Date parsing failed: U_PARSE_ERROR"
+string(12) "U_ZERO_ERROR"
+array(9) {
+  ["tm_sec"]=>
+  int(14)
+  ["tm_min"]=>
+  int(13)
+  ["tm_hour"]=>
+  int(22)
+  ["tm_year"]=>
+  int(123)
+  ["tm_mday"]=>
+  int(14)
+  ["tm_wday"]=>
+  int(2)
+  ["tm_yday"]=>
+  int(318)
+  ["tm_mon"]=>
+  int(10)
+  ["tm_isdst"]=>
+  int(0)
+}
+int(1709168523)
+int(2024)
+bool(false)
+int(0)
+array(9) {
+  ["tm_sec"]=>
+  int(15)
+  ["tm_min"]=>
+  int(30)
+  ["tm_hour"]=>
+  int(15)
+  ["tm_year"]=>
+  int(123)
+  ["tm_mday"]=>
+  int(4)
+  ["tm_wday"]=>
+  int(2)
+  ["tm_yday"]=>
+  int(185)
+  ["tm_mon"]=>
+  int(6)
+  ["tm_isdst"]=>
+  int(1)
+}
+int(23)
+string(25) "Jan 2, 2020, 3:04:05 AM"
+string(113) "четвер, 2 січня 2020 р. о 03:04:05 за всесвітнім координованим часом"
+string(8) "02.01.20"
+string(39) "четвер, 2 січня 2020 o 03:04"
+string(30) "令和2年1月2日 3:04:05 JST"
+bool(false)
+string(108) "IntlDateFormatter::formatObject(): bad format; if array, it must have two elements: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(97) "IntlDateFormatter::formatObject(): the date/time format type is invalid: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(131) "IntlDateFormatter::formatObject(): bad format; the time format (second element of the array) is not valid: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(80) "IntlDateFormatter::formatObject(): the format is empty: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(130) "IntlDateFormatter::formatObject(): the passed object must be an instance of either IntlCalendar or DateTimeInterface: U_ZERO_ERROR"
+IntlException: IntlDateFormatter::__construct(): invalid date format style | IntlDateFormatter::__construct(): invalid date format style: U_ILLEGAL_ARGUMENT_ERROR
+ValueError: IntlDateFormatter::__construct(): Argument #1 ($locale) "!!" is invalid | U_ZERO_ERROR
+IntlException: IntlDateFormatter::__construct(): Invalid value for calendar type; it must be one of IntlDateFormatter::TRADITIONAL (locale's default calendar) or IntlDateFormatter::GREGORIAN. Alternatively, it can be an IntlCalendar object | IntlDateFormatter::__construct(): Invalid value for calendar type; it must be one of IntlDateFormatter::TRADITIONAL (locale's default calendar) or IntlDateFormatter::GREGORIAN. Alternatively, it can be an IntlCalendar object: U_ILLEGAL_ARGUMENT_ERROR
+IntlException: IntlDateFormatter::__construct(): datefmt_create: time format must be IntlDateFormatter::PATTERN if date format is IntlDateFormatter::PATTERN | IntlDateFormatter::__construct(): datefmt_create: time format must be IntlDateFormatter::PATTERN if date format is IntlDateFormatter::PATTERN: U_ILLEGAL_ARGUMENT_ERROR
+IntlException: IntlDateFormatter::__construct(): No such time zone: "junk" | U_ZERO_ERROR
+NULL | datefmt_create(): invalid date format style: U_ILLEGAL_ARGUMENT_ERROR
+NULL | datefmt_create(): Invalid value for calendar type; it must be one of IntlDateFormatter::TRADITIONAL (locale's default calendar) or IntlDateFormatter::GREGORIAN. Alternatively, it can be an IntlCalendar object: U_ILLEGAL_ARGUMENT_ERROR
+IntlDateFormatter | U_ZERO_ERROR
+string(41) "15 листопада 2023 р. о 00:13"
+string(27) "d MMMM y 'р'. 'о' HH:mm"
+string(2) "uk"
+int(1)
+int(3)
+int(1)
+string(11) "Europe/Kyiv"
+bool(true)
+bool(true)
+string(4) "1970"
+int(1577829600)
+int(0)
+string(12) "U_ZERO_ERROR"
+bool(true)
+bool(true)
+int(1)
+bool(false)
+string(120) "datefmt_format(): string 'x' is not numeric, which would be required for it to be a valid date: U_ILLEGAL_ARGUMENT_ERROR"
+string(10) "1970-01-02"
+string(4) "yyyy"
+string(2) "MM"
+yMMMd => MMM d, y | d MMM y 'р'.
+jmm => h:mm a | HH:mm
+MMMMEEEEd => EEEE, MMMM d | EEEE, d MMMM
+yQQQ => QQQ y | QQQ y
+Hmsv => HH:mm:ss v | HH:mm:ss v
+dMMM => MMM d | d MMM
+string(12) "y年M月d日"
+string(5) "M/d/y"

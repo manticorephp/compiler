@@ -1050,12 +1050,9 @@ function curl_upkeep(CurlHandle $handle): bool
 /**
  * The `_T` sibling of a CURLINFO_DOUBLE info, or 0 if it has none.
  *
- * ⚠ THIS BUILD CANNOT READ A C `double` OUT OF MEMORY. There is no `peek_f64`,
- * no i64→double bitcast builtin, and prelude/binary.php's unpack() implements no
- * `d`/`f`/`e`/`g` code — so calling curl_easy_getinfo with a 0x300000-class info
- * would hand us eight bytes we cannot decode. Every float-valued key php reports
- * has an off_t sibling that carries the same number as an integer (microseconds
- * for the timers, bytes for the sizes), which is what we ask for instead.
+ * Every float-valued key php reports has an off_t sibling that carries the same
+ * number as an integer (microseconds for the timers, bytes for the sizes), which
+ * is what we ask for instead.
  */
 function __mc_curl_double_as_t(int $info): int
 {

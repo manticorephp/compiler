@@ -1,0 +1,68 @@
+object(IntlCalendar)#1 (5) {
+  ["valid"]=>
+  bool(true)
+  ["type"]=>
+  string(8) "japanese"
+  ["timeZone"]=>
+  array(4) {
+    ["valid"]=>
+    bool(true)
+    ["id"]=>
+    string(10) "Asia/Tokyo"
+    ["rawOffset"]=>
+    int(32400000)
+    ["currentOffset"]=>
+    int(32400000)
+  }
+  ["locale"]=>
+  string(5) "ja_JP"
+  ["fields"]=>
+  array(23) {
+    ["era"]=>
+    int(236)
+    ["year"]=>
+    int(5)
+    ["month"]=>
+    int(10)
+    ["week of year"]=>
+    int(46)
+    ["week of month"]=>
+    int(3)
+    ["day of year"]=>
+    int(319)
+    ["day of month"]=>
+    int(15)
+    ["day of week"]=>
+    int(4)
+    ["day of week in month"]=>
+    int(3)
+    ["AM/PM"]=>
+    int(0)
+    ["hour"]=>
+    int(7)
+    ["hour of day"]=>
+    int(7)
+    ["minute"]=>
+    int(13)
+    ["second"]=>
+    int(20)
+    ["millisecond"]=>
+    int(0)
+    ["zone offset"]=>
+    int(32400000)
+    ["DST offset"]=>
+    int(0)
+    ["year for week of year"]=>
+    int(2023)
+    ["localized day of week"]=>
+    int(4)
+    ["extended year"]=>
+    int(2023)
+    ["julian day"]=>
+    int(2460264)
+    ["milliseconds in day"]=>
+    int(26000000)
+    ["is leap month"]=>
+    int(0)
+  }
+}
