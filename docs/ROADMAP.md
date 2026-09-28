@@ -150,6 +150,7 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
 | A reference to a by-REF parameter dangles | `function f(&$x) { return [&$x]; }` | the REF cell points at the caller's slot | the caller has to box the argument it passes |
+| Division by zero never throws (found 2026-09-28) | `$z = 0; 1 % $z; 1 / $z; intdiv(1, $z); intdiv(PHP_INT_MIN, -1)` | `1`, `INF`, `0`, `PHP_INT_MIN` | `DivisionByZeroError` ("Modulo by zero" / "Division by zero") and `ArithmeticError` ("Division of PHP_INT_MIN by -1 is not an integer"). Sweep `%=` `/=` and the cell (mixed) operand paths too |
 | Scope-exit destructor order | two objects dying at one `}` where one sits in a reference box | box holders are released after the frame's other locals | php destroys the frame's variables in declaration order |
 
 An ARRAY in a `$GLOBALS['x']` slot still reads back as a float: the slot is a cell channel
