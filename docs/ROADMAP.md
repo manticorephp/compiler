@@ -337,7 +337,10 @@ Order:
      fields, limits, add/roll/fieldDifference identical to Zend across 14 calendar types.
      `isLeapYear` (C++ only) is GregorianCalendar's rule against the cutover year. The
      deprecated forms (`set()` with >2 args, the 3+-arg constructor) stay silent.
-   - Next: `IntlDateFormatter` (+ `IntlDatePatternGenerator`), `MessageFormatter`,
+   - ✅ `IntlDateFormatter` + `datefmt_*` + `IntlDatePatternGenerator` over udat_* / udatpg_* —
+     every style × 14 locales × both calendar kinds, the whole pattern alphabet, parse round
+     trips: identical to Zend.
+   - Next: `MessageFormatter`,
      `ResourceBundle`, `Spoofchecker`, `IntlBreakIterator`, `UConverter`, `idn_to_*`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.

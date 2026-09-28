@@ -118,32 +118,6 @@ function __mc_locale_strrtoken_pos(string $s, int $saved): int
     return $result < 1 ? -1 : $result;
 }
 
-/** A char-writing uloc_* call through a growing buffer; null on an ICU failure. `$call(buf, cap, err)` answers the length. */
-function __mc_icu_chars(\Closure $call): ?string
-{
-    $cap = 512;
-    while (true) {
-        $buf = \__mc_icu_malloc($cap + 1);
-        $e = \__mc_icu_err();
-        $n = $call($buf, $cap, $e);
-        $code = \peek_i32($e, 0);
-        \__mc_icu_free($e);
-        if ($code === 15) {
-            \__mc_icu_free($buf);
-            $cap = $n + 1;
-            continue;
-        }
-        if ($code > 0) {
-            \__mc_icu_free($buf);
-            return null;
-        }
-        $out = \str_from_buffer($buf, $n);
-        \__mc_icu_free($buf);
-        $nul = \strpos($out, "\x00");
-        return $nul === false ? $out : \substr($out, 0, $nul);
-    }
-}
-
 /** get_icu_value_internal's answer — status: 1 found, -1 empty, 0 none — or, with a value, Zend's early return that leaves `result` unset. */
 final class __McLocaleValue
 {
