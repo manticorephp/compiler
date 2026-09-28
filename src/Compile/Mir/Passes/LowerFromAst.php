@@ -593,6 +593,10 @@ final class LowerFromAst implements Pass
      */
     public array $externClassDecls = [];
 
+    /** @var array<string, bool> classes the RUNTIME library (stdlib) exports —
+     *  php's own classes as far as reflection is concerned. */
+    public array $runtimeClassNames = [];
+
     /** @var array<string, \Compile\Mir\ExternClassMeta> FQN → what the
      *  declaration alone cannot rebuild. */
     public array $externClassMeta = [];
@@ -843,6 +847,9 @@ final class LowerFromAst implements Pass
                     $this->classDecls[$iname] = $cdecl;
                     $this->knownClassNames[$iname] = true;
                     $module->interfaceNames[\ltrim($iname, '\\')] = true;
+                    if ($sIdx < $preludeCount || $this->exportRuntimeTypes) {
+                        $module->internalInterfaceNames[\ltrim($iname, '\\')] = true;
+                    }
                     $ibs = \strrpos($iname, '\\');
                     if ($ibs !== false && $ibs >= 0) {
                         $ishort = \substr($iname, $ibs + 1, \strlen($iname) - $ibs - 1);
@@ -957,6 +964,8 @@ final class LowerFromAst implements Pass
                 if ($dkind !== 'class') { continue; }
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $cd->isPreludeClass = $this->inPreludeClass;
+                $cd->isInternal = $this->inPreludeClass || $this->exportRuntimeTypes
+                    || isset($this->runtimeClassNames[\ltrim($cd->name, '\\')]);
                 if (isset($this->externClassMeta[$cd->name])) {
                     $this->applyExternMeta($cd, $this->externClassMeta[$cd->name]);
                 }
@@ -1003,6 +1012,7 @@ final class LowerFromAst implements Pass
                 methodNames: [],
                 hasBag: true,
             );
+            $std->isInternal = true;
             $this->classTable['stdClass'] = $std;
             $this->knownClassNames['stdClass'] = true;
             $module->addClass($std);
