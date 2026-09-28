@@ -56,6 +56,20 @@ final class ControlFlow
      * @var int[]
      */
     private array $loopTryLen = [];
+    /**
+     * The iterator slot of every open IteratorAggregate `foreach` — the loop owns
+     * the `getIterator()` result (+1) and gives it back after its end label —
+     * with the loop level it belongs to (1 = outermost) and whether it may be a
+     * Generator frame at run time. A `return`, and a `break N` / `continue N`
+     * that leaves such a loop, branches past that release: the iterator held
+     * its subject, and a SplFixedArray subject every element. innermost last.
+     * @var string[]
+     */
+    private array $aggIterSlots = [];
+    /** @var bool[] */
+    private array $aggIterDyn = [];
+    /** @var int[] */
+    private array $aggIterLevel = [];
 
     /** Restart for a new function body. */
     public function reset(): void
@@ -66,6 +80,9 @@ final class ControlFlow
         $this->tryDepthStack = [];
         $this->tryDepthSlots = [];
         $this->loopTryLen = [];
+        $this->aggIterSlots = [];
+        $this->aggIterDyn = [];
+        $this->aggIterLevel = [];
     }
 
     /** Enter a loop body: `break` lands at $break, `continue` at $continue. */
@@ -184,6 +201,42 @@ final class ControlFlow
         if ($idx < 0) { $idx = 0; }
         return $stack[$idx];
     }
+
+    /** Open an aggregate foreach whose loop is entered next. */
+    public function pushAggIter(string $slot, bool $dyn): void
+    {
+        $this->aggIterSlots[] = $slot;
+        $this->aggIterDyn[] = $dyn;
+        $this->aggIterLevel[] = \count($this->breakStack) + 1;
+    }
+
+    public function popAggIter(): void
+    {
+        \array_pop($this->aggIterSlots);
+        \array_pop($this->aggIterDyn);
+        \array_pop($this->aggIterLevel);
+    }
+
+    /**
+     * Indices of the open aggregate iterators a jump LEAVES, innermost first:
+     * all of them for a `return` ($level 0), and for a `break N` / `continue N`
+     * the loops strictly inside its target — the target's own iterator is
+     * released at its end label (break) or lives on (continue).
+     * @return int[]
+     */
+    public function aggItersLeftBy(int $level): array
+    {
+        $min = $level === 0 ? 0 : \count($this->breakStack) - $level + 2;
+        $out = [];
+        for ($i = \count($this->aggIterSlots) - 1; $i >= 0; $i--) {
+            if ($this->aggIterLevel[$i] >= $min) { $out[] = $i; }
+        }
+        return $out;
+    }
+
+    public function aggIterSlot(int $i): string { return $this->aggIterSlots[$i]; }
+
+    public function aggIterDyn(int $i): bool { return $this->aggIterDyn[$i]; }
 
     /** @param Node[] $body */
     public function pushFinally(array $body): void

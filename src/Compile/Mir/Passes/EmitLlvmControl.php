@@ -623,30 +623,52 @@ trait EmitLlvmControl
         // protocol step classifies and branches. The body is still emitted
         // exactly once.
         $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
-        $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
         // The iterator `getIterator()` handed back is the loop's own (+1): give
         // it back when the loop ends — it held the subject, and with it every
         // element (a SplFixedArray's). Only a concrete, non-Generator class: an
         // interface-typed one may be a Generator at run time, whose frame is
-        // released through another header.
-        if ($fe->iterAggregate && $fe->iterClass !== 'Generator'
-            && ($dyn || isset($this->classes[$fe->iterClass]))) {
-            $it = $this->ssa->allocReg();
-            $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
-            if ($dyn) {
-                // `getIterator(): Iterator` (SplFixedArray's own) may still be a
-                // Generator frame at run time: release only an object, by the
-                // same probe every protocol step takes.
-                $out .= $this->genFrameProbeIr($it);
-                $obj = $this->ssa->allocReg();
-                $out .= '  ' . $obj . ' = select i1 ' . $this->genFrameReg . ', i64 0, i64 ' . $it . "\n";
-                $out .= $this->rcReleaseReg($obj, 'obj');
-            } else {
-                $out .= $this->rcReleaseReg($it, 'obj');
-            }
-            $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+        // released through another header. A `return` / `break N` / `continue N`
+        // out of the body branches past the end label, so it releases the same
+        // slot on its way out ({@see ControlFlow::aggItersLeftBy}).
+        $owns = $fe->iterAggregate && $fe->iterClass !== 'Generator'
+            && ($dyn || isset($this->classes[$fe->iterClass]));
+        if ($owns) { $this->cf->pushAggIter($iterSlot, $dyn); }
+        $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
+        if ($owns) {
+            $this->cf->popAggIter();
+            $out .= $this->releaseAggIterSlot($iterSlot, $dyn);
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
+        }
+        return $out;
+    }
+
+    /** Give back an aggregate foreach's iterator and clear its slot. */
+    private function releaseAggIterSlot(string $iterSlot, bool $dyn): string
+    {
+        $it = $this->ssa->allocReg();
+        $out = '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
+        if ($dyn) {
+            // `getIterator(): Iterator` (SplFixedArray's own) may still be a
+            // Generator frame at run time: release only an object, by the
+            // same probe every protocol step takes.
+            $out .= $this->genFrameProbeIr($it);
+            $obj = $this->ssa->allocReg();
+            $out .= '  ' . $obj . ' = select i1 ' . $this->genFrameReg . ', i64 0, i64 ' . $it . "\n";
+            $out .= $this->rcReleaseReg($obj, 'obj');
+        } else {
+            $out .= $this->rcReleaseReg($it, 'obj');
+        }
+        $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+        return $out;
+    }
+
+    /** Release the open aggregate iterators a jump to loop `$level` leaves (0: a return). */
+    private function releaseAggItersLeftBy(int $level): string
+    {
+        $out = '';
+        foreach ($this->cf->aggItersLeftBy($level) as $i) {
+            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i));
         }
         return $out;
     }

@@ -1,0 +1,12 @@
+ret = 1
+dtor ret
+after ret
+nested = 7
+dtor nested
+after nested
+brk2 = 1
+dtor brk2
+after brk2
+cont2 = 3
+dtor cont2
+after cont2

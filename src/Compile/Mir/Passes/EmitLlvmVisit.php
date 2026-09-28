@@ -479,15 +479,18 @@ trait EmitLlvmVisit
     // A `break`/`continue` out of a try skips the fall-through pop exactly as a
     // `return` does — and from a loop it leaks a jmp slot per ITERATION. Hand
     // back every slot opened inside the target loop before branching.
+    // …and it leaves every IteratorAggregate foreach strictly inside its target.
     public function visitBreak(Break_ $n): string
     {
-        return $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
+        return $this->releaseAggItersLeftBy($n->level)
+             . $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
              . '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitContinue(Continue_ $n): string
     {
-        return $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
+        return $this->releaseAggItersLeftBy($n->level)
+             . $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
              . '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 
