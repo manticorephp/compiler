@@ -12,7 +12,7 @@ no import and no registration.
 | Group | Files |
 |---|---|
 | Arrays | `Arrays.php` |
-| Strings | `Strings.php`, `StringsExtra.php`, `NatCompare.php`, `Format.php` (the `printf` family), `Scanf.php`, `Encoding.php` |
+| Strings | `Strings.php`, `StringsExtra.php`, `NatCompare.php`, `Format.php` (the `printf` family), `Scanf.php`, `Encoding.php`, `Mbstring.php` (UTF-8 with Zend's malformed-input rules), `Iconv.php` |
 | Character classes | `Ctype.php` |
 | Regex | `Pcre.php` (the `preg_*` family over host PCRE2) |
 | Math / random | `MathExtra.php`, `Random.php` |

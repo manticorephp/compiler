@@ -230,6 +230,56 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
   nibble that release / retain / COW read, but the erased element channel is not yet a cell,
   so a concrete `string[]` parameter fed a cell-element array still misreads.
 
+## Unicode — mbstring and intl (decided 2026-09-28)
+
+The byte functions (`strlen`, `substr`, `strtoupper`, …) stay byte-oriented: that is the Zend
+contract, and `mbstring.func_overload` is gone from PHP 8 for that reason. Unicode arrives as
+the extensions Zend ships it in. Today: `iconv*` (libiconv / glibc), `preg_*` with `/u`
+(PCRE2), and `mb_strcut` — nothing else from mbstring.
+
+**Policy: the stdlib may link an external C library when an extension's functionality rests on
+it** (ICU for intl, as Zend does), through the existing demand-gated prelude + `#[Library]`
+path (`ext/curl` → `-lcurl`, `pdo_sqlite` → `-lsqlite3`), so only a program that uses the
+extension links it. Small hot cores stay pure PHP / codegen builtins.
+
+Order:
+
+1. ✅ **mbstring UTF-8 core, pure PHP** (`src/Runtime/Stdlib/Mbstring.php`, br `mbstring`) —
+   `mb_strlen`, `mb_substr`, `mb_strcut`, `mb_str_split`, `mb_strpos` / `mb_strrpos` /
+   `mb_strstr` / `mb_strrchr`, `mb_substr_count`, `mb_check_encoding`, `mb_scrub`,
+   `mb_ord` / `mb_chr`, `mb_str_pad`, `mb_trim` / `mb_ltrim` / `mb_rtrim`,
+   `mb_internal_encoding`, `mb_substitute_character`; encodings UTF-8, ASCII, 8bit,
+   ISO-8859-1 (any other name is a ValueError until step 2). Malformed UTF-8 is read the three
+   ways Zend reads it (decoder / mblen table / fast count — see the file header);
+   `tools/mbstring_diff.php` fuzzes it against Zend's mbstring, 0 mismatches over 2M cases.
+   Known divergence: a search offset walking past a truncated trailing sequence — Zend reads
+   past the string there. Open: the case-insensitive four (`mb_stripos`, `mb_stristr`,
+   `mb_strrichr`, `mb_strripos`) wait for case folding (step 4); hot ones (`mb_strlen`) later
+   become codegen builtins (with the PHP body, bootstrap rule).
+2. **`mb_convert_encoding` / `mb_detect_encoding` / `mb_list_encodings`** over iconv; the
+   encodings iconv lacks (`HTML-ENTITIES`, `UUENCODE`, `BASE64`, …) in PHP.
+3. **ICU link infrastructure** — the one real prerequisite for intl:
+   - ICU C symbols are VERSION-SUFFIXED (`u_strToUpper_74`) unless ICU was built with
+     `U_DISABLE_RENAMING`; `#[Symbol]` needs the suffix resolved at build time (probe
+     `U_ICU_VERSION_MAJOR_NUM` / `icu-config`, like `pcre2_link_flags()`).
+   - static vs dynamic on Linux/Alpine: `libicudata` is ~30 MB; a static link wants an ICU
+     data filter, a dynamic one ties the binary to a distro's soname. Decide per target.
+   - docker images, CI and Alpine get the ICU packages.
+   - AGENTS.md Design principle §2 and README list "the libraries of the extensions a
+     program uses", not just libc + PCRE2 + OpenSSL.
+4. **mbstring case / width** — `mb_strtoupper` / `mb_strtolower` / `mb_convert_case`,
+   `mb_strwidth` / `mb_strimwidth`. ⚠ Zend's mbstring uses libmbfl's OWN tables, not ICU:
+   through ICU the special-casing / title-case corners may diverge — difftest decides; fall
+   back to generated tables if they do.
+5. **intl over ICU** — `Normalizer`, `grapheme_*`, `Collator`, `NumberFormatter`,
+   `IntlDateFormatter`, `Transliterator`, `IntlChar`. Parity is near-free (Zend calls the
+   same ICU) modulo ICU version.
+6. **`mb_ereg*`** — Oniguruma in Zend; last, or approximated over PCRE2.
+
+Separate, not blocking: the stdlib `.o` links `-lssl -lcrypto -lpcre2-8` (+ `-liconv` on
+macOS) into EVERY binary, hello-world included. Gating those on use is a size / deps cleanup
+of the same mechanism.
+
 ## Tier 3 — infrastructure
 
 - **`.sig` schema 2 ships classes, interfaces, enums and constants** (`tests/libs/classes` +
