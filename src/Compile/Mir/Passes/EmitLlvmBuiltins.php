@@ -71,6 +71,13 @@ trait EmitLlvmBuiltins
      */
     private ?Type $litElemCalleeElem = null;
 
+    /**
+     * The next cellify rebuild MOVES the source's array elements instead of
+     * co-owning them ({@see litOwnsArrayElems}). Read and cleared on entry to
+     * {@see emitAssocToCellArrayUnified}, so a nested rebuild never inherits it.
+     */
+    private bool $cellifyMove = false;
+
     private function emitBuiltin(Call $c): ?string
     {
         $mark = \count($this->arrArgTempRegs);
@@ -991,6 +998,7 @@ trait EmitLlvmBuiltins
                 && $elem->kind !== Type::KIND_UNKNOWN) {
                 $sh = $this->boxArrayShallow($elem, $srcFlavor);
                 if ($sh !== null) { return $sh; }
+                $this->cellifyMove = $this->litOwnsArrayElems($src, $srcFlavor);
                 $ret = $this->emitVecToCellArray($elem, $srcFlavor);
                 $this->markCellBoxed($this->lastValue);
                 return $ret;
@@ -1014,6 +1022,7 @@ trait EmitLlvmBuiltins
                 && $elem->kind !== Type::KIND_UNKNOWN) {
                 $sh = $this->boxArrayShallow($elem, $srcFlavor);
                 if ($sh !== null) { return $sh; }
+                $this->cellifyMove = $this->litOwnsArrayElems($src, $srcFlavor);
                 $ret = $this->emitAssocToCellArrayUnified($elem, false, $srcFlavor);
                 $this->markCellBoxed($this->lastValue);
                 return $ret;
@@ -1092,6 +1101,23 @@ trait EmitLlvmBuiltins
      * vec[cell], boxing each element per $elem; result boxed as an
      * ARRAY cell in lastValue.
      */
+    /**
+     * A fresh array LITERAL whose elements are arrays is released BUFFER-ONLY
+     * ({@see EmitLlvm::freshRcArgFlavor}): its reference on each element is
+     * given back by whoever the literal was handed to. A cellify rebuild of it
+     * is that taker — it must MOVE each element's reference into the rebuilt
+     * array, not take a second one. Co-owning left the literal's reference on
+     * every inner array unreleased: `$tok->equalsAny([[T_STRING, 'get'],
+     * [T_STRING, 'set']])` into a `mixed[]` parameter leaked both per call.
+     */
+    private function litOwnsArrayElems(?Node $src, string $srcFlavor): bool
+    {
+        if ($src === null || $src->kind !== Node::KIND_ARRAY_LIT) { return false; }
+        if ($srcFlavor !== 'vecbuf' && $srcFlavor !== 'assocbuf') { return false; }
+        $el = $src->type->element;
+        return $el !== null && $el->isArray();
+    }
+
     private function emitVecToCellArray(Type $elem, string $srcFlavor = ''): string
     {
         return $this->emitVecToCellArrayUnified($elem, $srcFlavor);
@@ -1134,6 +1160,8 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
+        $move = $this->cellifyMove && $elem->isArray();
+        $this->cellifyMove = false;
         $out = $this->coerceToPtr();
         $rawSrc = $this->lastValue;
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0.
@@ -1264,19 +1292,23 @@ trait EmitLlvmBuiltins
                 // cells) — box it as a plain array cell. Rebuilding would re-box
                 // each already-boxed cell (else-branch box_int) → double-box
                 // garbage (a vec of mixed assocs read raw by var_dump/json).
-                // Boxed by pointer ⇒ co-owned, at the depth its drop walks.
-                $elemRetain = $this->discardReleaseFlavor($elem);
+                // Boxed by pointer ⇒ co-owned, at the depth its drop walks —
+                // or MOVED out of a literal that owned it, and not retained.
+                $elemRetain = $move ? '' : $this->discardReleaseFlavor($elem);
                 $ep = $this->ssa->allocReg();
                 $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
                 $out .= '  ' . $boxed . ' = call i64 @__manticore_box_array(ptr ' . $ep . ")\n";
             } else {
                 // Nested array value → recursively rebuild as a cell-array (see
-                // the vec variant) so its own concrete elements render.
+                // the vec variant) so its own concrete elements render. A MOVED
+                // inner array is dead once copied: the literal's reference on
+                // it goes with the rebuild.
+                $nestSrc = $move ? $this->discardReleaseFlavor($elem) : '';
                 $this->lastValue = $ev;
                 $this->lastValueType = 'i64';
                 $out .= $elem->isAssoc()
-                    ? $this->emitAssocToCellArrayUnified($nestElem)
-                    : $this->emitVecToCellArrayUnified($nestElem);
+                    ? $this->emitAssocToCellArrayUnified($nestElem, false, $nestSrc)
+                    : $this->emitVecToCellArrayUnified($nestElem, $nestSrc);
                 $boxed = $this->lastValue;
             }
         } else {
@@ -1292,7 +1324,7 @@ trait EmitLlvmBuiltins
         // kind takes its +1 through the tag (`__mir_cell_retain` is the mirror of
         // the `__mir_cell_drop` the rebuilt array's release runs per element);
         // a scalar kind owns nothing on either arm.
-        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || $ek === Type::KIND_ARRAY
+        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || ($ek === Type::KIND_ARRAY && !$move)
             || $ek === Type::KIND_CLOSURE) {
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
