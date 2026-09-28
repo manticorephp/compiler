@@ -346,10 +346,24 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
             $out .= "gccheck:\n";
             $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
-            $out .= '  %gchit = icmp sge i64 %gccnt, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
+            $out .= "  %gcthr = load i64, ptr @__manticore_cc_threshold\n";
+            $out .= "  %gchit = icmp sge i64 %gccnt, %gcthr\n";
             $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
             $out .= "gcrun:\n";
             $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+            // php's gc_adjust_threshold: under 100 freed, +10000 (to 1e9); a
+            // productive run steps back toward the default. Every Token of a
+            // php-cs-fixer run is a root, and a fixed threshold re-walked the
+            // live token graph every 10000 of them.
+            $out .= "  %gcfew = icmp slt i64 %gcfreed, 100\n";
+            $out .= "  %gcup = add i64 %gcthr, 10000\n";
+            $out .= "  %gccap = icmp sgt i64 %gcup, 1000000000\n";
+            $out .= "  %gcupc = select i1 %gccap, i64 %gcthr, i64 %gcup\n";
+            $out .= "  %gcabove = icmp sgt i64 %gcthr, " . (string)\Compile\Debug::$autoGcThreshold . "\n";
+            $out .= "  %gcdn = sub i64 %gcthr, 10000\n";
+            $out .= "  %gcdnc = select i1 %gcabove, i64 %gcdn, i64 %gcthr\n";
+            $out .= "  %gcnew = select i1 %gcfew, i64 %gcupc, i64 %gcdnc\n";
+            $out .= "  store i64 %gcnew, ptr @__manticore_cc_threshold\n";
             $out .= "  br label %gcskip\n";
             $out .= "gcskip:\n";
         }
@@ -815,6 +829,25 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %isbuf, label %blocked, label %dofree\n";
             $out .= "blocked:\n";
             $out .= $this->ccTrace('blocked', 'ptr %p');
+            if ($this->rt->needsCc) {
+                // DEAD NOW, not at the next collection: a buffered object used to
+                // wait here, with everything it held, until the root buffer hit
+                // its threshold — and every such wait made the collector walk it.
+                // Drop it as php does (destructor, children), keep only the SHELL
+                // for the buffer's sake ({@see MemoryAbi::COLOR_DEAD}). During a
+                // collection the collector still decides (its CollectRoots arm).
+                $out .= "  %bact = load i64, ptr @__manticore_cc_active\n";
+                $out .= "  %bbusy = icmp ne i64 %bact, 0\n";
+                $out .= "  br i1 %bbusy, label %done, label %bchk\n";
+                $out .= "bchk:\n";
+                $out .= "  %bcol = call i64 @__cc_color(ptr %p)\n";
+                $out .= "  %bdead = icmp eq i64 %bcol, " . (string)\Compile\MemoryAbi::COLOR_DEAD . "\n";
+                $out .= "  br i1 %bdead, label %done, label %bdrop\n";
+                $out .= "bdrop:\n";
+                $out .= "  call void @__cc_setcolor(ptr %p, i64 " . (string)\Compile\MemoryAbi::COLOR_DEAD . ")\n";
+                $out .= $this->profBump(25);
+                $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
+            }
             $out .= "  br label %done\n";
             $out .= "dofree:\n";
             if ($this->rt->needsCc) { $out .= $this->ccTrace('rcfree', 'ptr %p'); }
@@ -2446,6 +2479,9 @@ trait EmitLlvmRuntime
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
+        // The auto-collection threshold, ADAPTIVE as php's: a run that frees
+        // almost nothing raises it, a productive one lowers it back.
+        $out .= "@__manticore_cc_threshold = linkonce_odr global i64 " . (string)\Compile\Debug::$autoGcThreshold . "\n";
         // The GARBAGE list: what CollectWhite decided is dead this cycle. Freed
         // only after the whole root loop — a white root freed while another
         // white root still points at it is walked again as that root's child
@@ -2955,6 +2991,14 @@ trait EmitLlvmRuntime
         $out .= "  br label %mrn\n";
         $out .= "mrdrop:\n";
         $out .= "  call void @__cc_setbuffered(ptr %s, i64 0)\n";
+        // A DEAD root was dropped when it died; its shell is all that is left.
+        $out .= "  %isdd = icmp eq i64 %col, " . (string)\Compile\MemoryAbi::COLOR_DEAD . "\n";
+        $out .= "  br i1 %isdd, label %mrshell, label %mrlive\n";
+        $out .= "mrshell:\n";
+        $out .= "  %shbase = getelementptr i8, ptr %s, i64 -8\n";
+        $out .= $this->poolFreeCall('%shbase');
+        $out .= "  br label %mrn\n";
+        $out .= "mrlive:\n";
         $out .= "  %isbk = icmp eq i64 %col, " . $BLACK . "\n";
         $out .= "  %rcv = call i64 @__cc_rcval(ptr %s)\n";
         $out .= "  %rc0 = icmp eq i64 %rcv, 0\n";
