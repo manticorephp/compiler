@@ -1199,11 +1199,15 @@ final class InferTypes implements Pass
         if ($k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE || $k === Type::KIND_UNION) {
             // An enum case rides as an ORDINAL, not a pointer.
             $cn = $t->class ?? '';
-            return ($cn !== '' && isset($this->enums[$cn])) ? 'num' : 'obj';
+            return ($cn !== '' && isset($this->enums[$cn])) ? 'enum' : 'obj';
         }
         if ($k === Type::KIND_STRING) { return 'str'; }
-        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL) { return 'num'; }
+        // Each scalar reads back through its own hint: a raw 0 is int 0, false or
+        // null only by what the slot says it holds.
+        if ($k === Type::KIND_INT) { return 'int'; }
+        if ($k === Type::KIND_FLOAT) { return 'float'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_NULL) { return 'null'; }
         return '';
     }
 
@@ -1993,15 +1997,18 @@ final class InferTypes implements Pass
 
     /**
      * Coarse, pre-inference value class of a stored element value — only for
-     * nodes whose kind fixes the type (literals, array/new). int+float collapse
-     * to `num` (they share the numeric-cell discipline); anything unclassifiable
+     * nodes whose kind fixes the type (literals, array/new). int and float stay
+     * apart: a raw element word is an i64 or a double, and converting one into
+     * the other changes the value php hands back (`$f = [1.5]; $f[0] = 3` keeps
+     * int 3); anything unclassifiable
      * (a call / var / property read) returns '' and is ignored. ≥2 distinct
      * classes on one array ⇒ a genuinely mixed array (seed a cell element).
      */
     private function coarseValueClass(Node $v): string
     {
         $k = $v->kind;
-        if ($k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST) { return 'num'; }
+        if ($k === Node::KIND_INT_CONST) { return 'int'; }
+        if ($k === Node::KIND_FLOAT_CONST) { return 'float'; }
         if ($k === Node::KIND_STRING_CONST || $k === Node::KIND_CONCAT) { return 'string'; }
         if ($k === Node::KIND_BOOL_CONST) { return 'bool'; }
         if ($k === Node::KIND_NULL_CONST) { return 'null'; }

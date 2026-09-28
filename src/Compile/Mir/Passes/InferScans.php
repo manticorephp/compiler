@@ -1687,11 +1687,11 @@ trait InferScans
 
     /**
      * Post-inference value CLASSES stored into each local array, keyed by local
-     * name. Same classing as the pre-inference {@see coarseValueClass} (int and
-     * float collapse to `num`, they share the numeric-cell discipline) — but
-     * read off the INFERRED type, so a variable read counts too. An erased or
-     * cell value contributes nothing: it is either already right or a different
-     * root cause.
+     * name. Same classing as the pre-inference {@see coarseValueClass} — but
+     * read off the INFERRED type, so a variable read counts too, and together
+     * with the class the array already holds. An erased value contributes
+     * nothing; a cell is a class of its own. A store into a cell-element array
+     * is already right.
      *
      * @param array<string, array<string,bool>> $out
      */
@@ -1699,25 +1699,36 @@ trait InferScans
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
-            if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
+            $base = $se->array->type;
+            if ($se->array->kind === Node::KIND_LOAD_LOCAL
+                && !($base->isArray() && $base->element !== null && $base->element->kind === Type::KIND_CELL)) {
                 $cls = $this->typeValueClass($se->value->type);
                 if ($cls !== '') { $out[$se->array->name][$cls] = true; }
+                // The class the array already holds (its literal's, an earlier
+                // branch's): `$f = [1.5]; $f[] = $i` is mixed with one store.
+                if ($base->isArray() && $base->element !== null) {
+                    $cur = $this->typeValueClass($base->element);
+                    if ($cur !== '') { $out[$se->array->name][$cur] = true; }
+                }
             }
         }
         foreach (Walk::children($n) as $c) { $this->scanLocalElemClasses($c, $out); }
     }
 
     /** The {@see coarseValueClass} class of an INFERRED type, or '' when the type
-     *  carries no repr commitment (unknown / cell / void). */
+     *  carries no repr commitment (unknown / void). A cell is its own class: a
+     *  raw element array cannot hold one. */
     private function typeValueClass(Type $t): string
     {
         $k = $t->kind;
-        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT) { return 'num'; }
+        if ($k === Type::KIND_INT) { return 'int'; }
+        if ($k === Type::KIND_FLOAT) { return 'float'; }
         if ($k === Type::KIND_STRING) { return 'string'; }
         if ($k === Type::KIND_BOOL) { return 'bool'; }
         if ($k === Type::KIND_NULL) { return 'null'; }
         if ($t->isArray()) { return 'array'; }
         if ($k === Type::KIND_OBJ) { return 'obj'; }
+        if ($k === Type::KIND_CELL) { return 'cell'; }
         return '';
     }
 
@@ -2393,7 +2404,7 @@ trait InferScans
                     $bname = $base->name;
                     $this->recordDisqualified[$bname] = true; // nested mutation
                     $cls = $this->coarseValueClass($se->value);
-                    if ($cls === 'num' || $cls === 'string' || $cls === 'bool' || $cls === 'null') {
+                    if ($cls === 'int' || $cls === 'float' || $cls === 'string' || $cls === 'bool' || $cls === 'null') {
                         $this->nestedScalarStoreLocals[$bname] = true;
                     }
                 }
@@ -2402,7 +2413,7 @@ trait InferScans
             // Seed the value-class set from an array-LITERAL assignment too, so a
             // later differing store promotes to a cell element: `$r = [1,2]` (num)
             // then `$r[0] = "a"` (string) is a genuinely mixed array — without the
-            // literal's `num` the store's lone `string` looks homogeneous and the
+            // literal's `int` the store's lone `string` looks homogeneous and the
             // string is written raw into a vec[int] (read back as garbage bits).
             $sl = $n;
             if ($sl->value->kind === Node::KIND_ARRAY_LIT) {
