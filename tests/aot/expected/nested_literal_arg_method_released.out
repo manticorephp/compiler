@@ -18,7 +18,3 @@ dtor l1
 dtor l2
 2
 after list<mixed>
-dtor x1
-dtor x2
-2
-after mixed

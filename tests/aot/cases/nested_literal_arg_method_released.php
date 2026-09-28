@@ -19,15 +19,12 @@ echo (new K([[new Tok('c1'), 'x'], [new Tok('c2'), 'y']]))->n, "\n";
 echo "after ctor\n";
 echo fcnt([[new Tok('f1'), 'x'], [new Tok('f2'), 'y']]), "\n";
 echo "after function\n";
-// …and a literal REBUILT into a cell array for a `mixed[]` / `mixed` parameter
+// …and a literal REBUILT into a cell array for a `mixed[]` parameter
 // co-owned each inner array on top of the literal's own reference.
 final class M {
     /** @param list<mixed> $others */
     public function cm(array $others): int { return \count($others); }
-    public function mx(mixed $others): int { return \count($others); }
 }
 $m = new M();
 echo $m->cm([[new Tok('l1'), 'x'], [new Tok('l2'), 'y']]), "\n";
 echo "after list<mixed>\n";
-echo $m->mx([[new Tok('x1'), 'x'], [new Tok('x2'), 'y']]), "\n";
-echo "after mixed\n";

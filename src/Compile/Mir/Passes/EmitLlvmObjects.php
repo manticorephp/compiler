@@ -8038,7 +8038,9 @@ trait EmitLlvmObjects
                 // cannot go through Monomorphize (a method param is never
                 // specialized; the indirect trampoline call is invisible anyway).
                 $out .= $this->emitArgCollectingLitElems($a, null, false);
+                $this->cellifyMoveAllowed = true;
                 $out .= $this->boxToCell($a->type, $a);
+                $this->cellifyMoveAllowed = false;
                 // The rebuild is a fresh +1 the callee only borrows:
                 // `$this->f($lines)` with `f(array $b)` leaked the copy and one
                 // ref on every element, per call — HoistAllocas alone held
