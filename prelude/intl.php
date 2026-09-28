@@ -118,6 +118,11 @@ class Normalizer
     {
         return \normalizer_is_normalized($string, $form);
     }
+
+    public static function getRawDecomposition(string $string, int $form = self::FORM_C): ?string
+    {
+        return \__mc_normalizer_raw_decomposition("Normalizer::getRawDecomposition", $string, $form);
+    }
 }
 
 /** ICU's normalizer for a Normalizer::FORM_*; ValueError for anything else. */
@@ -164,6 +169,73 @@ function normalizer_normalize(string $string, int $form = Normalizer::FORM_C): s
     }
     $out = \__mc_icu_to8($dest, $got);
     \__mc_icu_free($dest);
+    return $out;
+}
+
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('unorm2_getRawDecomposition'), \Ffi\CType('int')]
+function __mc_icu_unorm2_getRawDecomposition(\Ffi\Ptr $norm, #[\Ffi\CType('int')] int $c, \Ffi\Ptr $dest,
+    #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $err): int { return 0; }
+
+/**
+ * U8_NEXT over the start of `$s`: the code point (-1 for an ill-formed sequence)
+ * and, in `$len`, the bytes it spans (a maximal subpart when ill-formed).
+ */
+function __mc_icu_u8_next(string $s, int &$len): int
+{
+    $n = \strlen($s);
+    $len = 1;
+    if ($n === 0) { return -1; }
+    $b = \ord($s[0]);
+    if ($b < 0x80) { return $b; }
+    $need = 0;
+    $lo = 0x80;
+    $hi = 0xBF;
+    $cp = 0;
+    if ($b >= 0xC2 && $b <= 0xDF) { $need = 1; $cp = $b & 0x1F; }
+    elseif ($b >= 0xE0 && $b <= 0xEF) { $need = 2; $cp = $b & 0x0F; $lo = $b === 0xE0 ? 0xA0 : 0x80; $hi = $b === 0xED ? 0x9F : 0xBF; }
+    elseif ($b >= 0xF0 && $b <= 0xF4) { $need = 3; $cp = $b & 0x07; $lo = $b === 0xF0 ? 0x90 : 0x80; $hi = $b === 0xF4 ? 0x8F : 0xBF; }
+    else { return -1; }
+    for ($i = 1; $i <= $need; $i++) {
+        if ($i >= $n) { return -1; }
+        $t = \ord($s[$i]);
+        if ($t < $lo || $t > $hi) { return -1; }
+        $cp = ($cp << 6) | ($t & 0x3F);
+        $len = $i + 1;
+        $lo = 0x80;
+        $hi = 0xBF;
+    }
+    return $cp;
+}
+
+function normalizer_get_raw_decomposition(string $string, int $form = Normalizer::FORM_C): ?string
+{
+    return \__mc_normalizer_raw_decomposition("normalizer_get_raw_decomposition", $string, $form);
+}
+
+function __mc_normalizer_raw_decomposition(string $fn, string $string, int $form): ?string
+{
+    \__mc_intl_reset();
+    $len = 0;
+    $cp = \__mc_icu_u8_next($string, $len);
+    if ($len !== \strlen($string)) {
+        \__mc_intl_fail($fn, "Input string must be exactly one UTF-8 encoded code point long.", 1);
+        return null;
+    }
+    if ($cp < 0 || $cp > 0x10FFFF) {
+        \__mc_intl_fail($fn, "Code point out of range", 1);
+        return null;
+    }
+    if ($form !== 4 && $form !== 8 && $form !== 16 && $form !== 32 && $form !== 48) {
+        // No normalizer: ICU answers an empty decomposition under the failed status.
+        return "";
+    }
+    $norm = \__mc_icu_normalizer($form, $fn);
+    $e = \__mc_icu_err();
+    $buf = \__mc_icu_malloc(64);
+    $n = \__mc_icu_unorm2_getRawDecomposition($norm, $cp, $buf, 32, $e);
+    \__mc_icu_free($e);
+    $out = $n < 0 ? null : \__mc_icu_to8($buf, $n);
+    \__mc_icu_free($buf);
     return $out;
 }
 
