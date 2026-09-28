@@ -3593,6 +3593,16 @@ trait EmitLlvmBuiltins
         if (\count($args) !== 2) { return null; }
         $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $a = $this->lastValue;
         $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $b = $this->lastValue;
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $b . ", 0\n";
+        $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Division by zero');
+        $m1 = $this->ssa->allocReg();
+        $out .= '  ' . $m1 . ' = icmp eq i64 ' . $b . ", -1\n";
+        $mn = $this->ssa->allocReg();
+        $out .= '  ' . $mn . ' = icmp eq i64 ' . $a . ", -9223372036854775808\n";
+        $ovf = $this->ssa->allocReg();
+        $out .= '  ' . $ovf . ' = and i1 ' . $m1 . ', ' . $mn . "\n";
+        $out .= $this->emitThrowIf($ovf, 'ArithmeticError', 'Division of PHP_INT_MIN by -1 is not an integer');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sdiv i64 ' . $a . ', ' . $b . "\n";
         return $this->finishI64($out, $reg);

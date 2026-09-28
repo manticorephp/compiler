@@ -161,3 +161,16 @@ function __mc_f64_from_bits(int $bits): float
     }
     return $sign * (($m + 4503599627370496) * 2.0 ** ($e - 1075));
 }
+
+/** IEEE 754 division: a zero divisor answers ±INF or NAN instead of throwing, as `/` does. */
+function fdiv(float $num1, float $num2): float
+{
+    if ($num2 != 0.0) {
+        return $num1 / $num2;
+    }
+    if (\is_nan($num1) || $num1 == 0.0) {
+        return NAN;
+    }
+    $neg = ($num1 < 0.0) !== (\__float_bits($num2) < 0);
+    return $neg ? -INF : INF;
+}

@@ -2067,10 +2067,74 @@ trait EmitLlvmExpr
         $out .= $this->emitNode($right);
         $out .= $this->coerceArithOperand($right, $isFloat);
         $r = $this->lastValue;
+        if ($op === 'srem') {
+            return $out . $this->emitIntRem($l, $r, $right);
+        }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = $target;
+        return $out;
+    }
+
+    /**
+     * PHP `%`: a zero divisor throws DivisionByZeroError("Modulo by zero"), and
+     * `% -1` is 0 — `srem PHP_INT_MIN, -1` traps (SIGFPE on x86_64).
+     */
+    private function emitIntRem(string $l, string $r, Node $right): string
+    {
+        $out = '';
+        $known = $right->kind === Node::KIND_INT_CONST && $right->value !== 0 && $right->value !== -1;
+        if (!$known) {
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = icmp eq i64 ' . $r . ", 0\n";
+            $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Modulo by zero');
+            $m1 = $this->ssa->allocReg();
+            $out .= '  ' . $m1 . ' = icmp eq i64 ' . $r . ", -1\n";
+            $safe = $this->ssa->allocReg();
+            $out .= '  ' . $safe . ' = select i1 ' . $m1 . ', i64 1, i64 ' . $r . "\n";
+            $r = $safe;
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = srem i64 ' . $l . ', ' . $r . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** A divisor known not to be zero: a non-zero int or float literal. */
+    private function isNonZeroConst(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_INT_CONST) { return $n->value !== 0; }
+        if ($n->kind === Node::KIND_FLOAT_CONST) { return $n->value != 0.0; }
+        return false;
+    }
+
+    /**
+     * Throw `new $class($message)` when the i1 `$cond` holds; the code after
+     * continues in a fresh block. The throw sits in its own cold block, the way
+     * php raises these from the operator itself.
+     */
+    private function emitThrowIf(string $cond, string $class, string $message): string
+    {
+        $thr = $this->ssa->allocLabel('arith.throw');
+        $ok = $this->ssa->allocLabel('arith.ok');
+        $out = '  br i1 ' . $cond . ', label %' . $thr . ', label %' . $ok . "\n";
+        $out .= $thr . ":\n";
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $out .= $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj($class, [
+                new \Compile\Mir\StringConst($message, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj($class)),
+            Type::void(),
+        ));
+        $out .= '  br label %' . $ok . "\n";
+        $out .= $ok . ":\n";
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
         return $out;
     }
 
@@ -2199,6 +2263,11 @@ trait EmitLlvmExpr
         $out .= $this->emitNode($d->right);
         $out .= $this->coerceDoubleOperand($d->right);
         $r = $this->lastValue;
+        if (!$this->isNonZeroConst($d->right)) {
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = fcmp oeq double ' . $r . ", 0.0\n";
+            $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Division by zero');
+        }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fdiv double ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
@@ -2294,8 +2363,47 @@ trait EmitLlvmExpr
         elseif ($op === 'shr')  { $ll = 'ashr'; }
         elseif ($op === 'or')   { $ll = 'or'; }
         elseif ($op === 'xor')  { $ll = 'xor'; }
+        if ($ll === 'shl' || $ll === 'ashr') {
+            return $out . $this->emitShift($ll, $l, $r, $b->right);
+        }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $ll . ' i64 ' . $l . ', ' . $r . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * PHP `<<` / `>>`: a negative count throws ArithmeticError; a count of 64 or
+     * more shifts every bit out (0, or -1 for `>>` of a negative) — LLVM's
+     * shift by >= the width is poison.
+     */
+    private function emitShift(string $ll, string $l, string $r, Node $right): string
+    {
+        $out = '';
+        $known = $right->kind === Node::KIND_INT_CONST && $right->value >= 0 && $right->value < 64;
+        if ($known) {
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = ' . $ll . ' i64 ' . $l . ', ' . $r . "\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $r . ", 0\n";
+        $out .= $this->emitThrowIf($neg, 'ArithmeticError', 'Bit shift by negative number');
+        $big = $this->ssa->allocReg();
+        $out .= '  ' . $big . ' = icmp sgt i64 ' . $r . ", 63\n";
+        $cnt = $this->ssa->allocReg();
+        $out .= '  ' . $cnt . ' = select i1 ' . $big . ', i64 63, i64 ' . $r . "\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = ' . $ll . ' i64 ' . $l . ', ' . $cnt . "\n";
+        $reg = $sh;
+        if ($ll === 'shl') {
+            // `ashr` by 63 already answers 0 / -1; `shl` must clear everything.
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = select i1 ' . $big . ', i64 0, i64 ' . $sh . "\n";
+        }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
