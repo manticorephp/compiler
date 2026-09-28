@@ -928,7 +928,13 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
             throw new ValueError('SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0');
         }
         if ($size < $this->__size) {
-            $this->__data = \array_slice($this->__data, 0, $size);
+            // Trim IN PLACE. Replacing the buffer with a slice copied every kept
+            // element with a reference of its own, while the old buffer — whose
+            // elements offsetGet lends out — was given back as a buffer only:
+            // every element it held stayed counted (php-cs-fixer's
+            // Tokens::clearEmptyTokens shrinks once per file and kept all its
+            // tokens). A pop hands each dropped element back to be released.
+            for ($i = $this->__size; $i > $size; $i--) { \array_pop($this->__data); }
         } else {
             for ($i = $this->__size; $i < $size; $i++) { $this->__data[] = null; }
         }
