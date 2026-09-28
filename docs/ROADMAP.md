@@ -344,7 +344,9 @@ Order:
      `IntlPartsIterator` over ubrk_* and utext_* (getRules() read from the compiled data).
    - ✅ `idn_to_ascii` / `idn_to_utf8` (UTS #46) and `Spoofchecker` (uspoof_*; Zend's
      warning sites answer their value silently, pending the warnings → exceptions epic).
-   - Next: `MessageFormatter`, `ResourceBundle`, `UConverter`.
+   - ✅ `UConverter` (ucnv_*; a subclass's toUCallback/fromUCallback are called back through
+     fixed trampolines, as Zend does — Zend itself segfaults converting with a CLONED one).
+   - Next: `MessageFormatter`, `ResourceBundle`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 

@@ -47,6 +47,9 @@ function __mc_icu_unorm2_normalize(\Ffi\Ptr $norm, \Ffi\Ptr $src, #[\Ffi\CType('
 function __mc_icu_unorm2_isNormalized(\Ffi\Ptr $norm, \Ffi\Ptr $src, #[\Ffi\CType('int')] int $len,
     \Ffi\Ptr $err): int { return 0; }
 
+#[\Ffi\Library('c'), \Ffi\Symbol('memcpy')]
+function __mc_c_memcpy(\Ffi\Ptr $dst, string $src, #[\Ffi\CType('size_t')] int $n): \Ffi\Ptr {}
+
 #[\Ffi\Library('c'), \Ffi\Symbol('malloc')]
 function __mc_icu_malloc(#[\Ffi\CType('size_t')] int $n): \Ffi\Ptr {}
 

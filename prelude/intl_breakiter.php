@@ -71,9 +71,6 @@ function __mc_icu_utext_clone(\Ffi\Ptr $dest, \Ffi\Ptr $src, #[\Ffi\CType('int')
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('u_getVersion')]
 function __mc_icu_u_getVersion(\Ffi\Ptr $v): void {}
 
-#[\Ffi\Library('c'), \Ffi\Symbol('memcpy')]
-function __mc_c_memcpy(\Ffi\Ptr $dst, string $src, #[\Ffi\CType('size_t')] int $n): \Ffi\Ptr {}
-
 /**
  * A malloc'd copy of a string ICU keeps pointing into (a break iterator's text, compiled
  * rules), freed with the last object holding it — a clone shares it, as Zend's zval does.
