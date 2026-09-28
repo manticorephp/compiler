@@ -1409,7 +1409,23 @@ trait EmitLlvmExpr
     private function taggedCompareRuntime(): string
     {
         $out  = "\ndefine i64 @__manticore_tagged_compare(i64 %a, i64 %b) {\n";
+        // Two INLINE int cells compare their payloads directly — a loop bound
+        // over erased values (`$i >= $index` in php-cs-fixer's insertSlices)
+        // was 6% of the run in the general dispatch below.
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $out .= "entry:\n";
+        $out .= "  %qah = and i64 %a, -281474976710656\n";
+        $out .= "  %qbh = and i64 %b, -281474976710656\n";
+        $out .= "  %qai = icmp eq i64 %qah, " . $ih . "\n";
+        $out .= "  %qbi = icmp eq i64 %qbh, " . $ih . "\n";
+        $out .= "  %qii = and i1 %qai, %qbi\n";
+        $out .= "  br i1 %qii, label %qfast, label %slow\n";
+        $out .= "qfast:\n";
+        $out .= "  %qas = shl i64 %a, 16\n  %qa = ashr i64 %qas, 16\n";
+        $out .= "  %qbs = shl i64 %b, 16\n  %qb = ashr i64 %qbs, 16\n";
+        $out .= "  %qlt = icmp slt i64 %qa, %qb\n  %qgt = icmp sgt i64 %qa, %qb\n";
+        $out .= "  %qsel = select i1 %qgt, i64 1, i64 0\n  %qres = select i1 %qlt, i64 -1, i64 %qsel\n  ret i64 %qres\n";
+        $out .= "slow:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
         $out .= "  %tb = call i64 @__manticore_tag(i64 %b)\n";
         $out .= $this->juggleRows('c');
@@ -1459,7 +1475,14 @@ trait EmitLlvmExpr
         // agreed by accident — a string pointer happens to outrank a small int.
         $out .= "chkmix:\n";
         $out .= "  %anystr = or i1 %as, %bs\n";
-        $out .= "  br i1 %anystr, label %strcmp, label %fcmp\n";
+        $out .= "  br i1 %anystr, label %mixnum, label %fcmp\n";
+        // …unless that string IS numeric: php 8 compares a number with a
+        // numeric string numerically (`10 < "9"` is false), and only a
+        // non-numeric one as strings.
+        $out .= "mixnum:\n";
+        $out .= "  %msv = select i1 %as, i64 %a, i64 %b\n";
+        $out .= "  %msn = call i1 @__mir_cell_numeric(i64 %msv)\n";
+        $out .= "  br i1 %msn, label %fcmp, label %strcmp\n";
         $out .= "icmp:\n";
         $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
         $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
@@ -1796,7 +1819,29 @@ trait EmitLlvmExpr
         // double and box a float cell, mirroring Zend.
         $intr = $iop === 'add' ? 'sadd' : ($iop === 'sub' ? 'ssub' : 'smul');
         $out  = "\ndefine i64 @__manticore_tagged_" . $name . "(i64 %a, i64 %b) {\n";
+        // Two INLINE int cells (tag 1, 48-bit payload) — the loop counters and
+        // offsets of erased code — compute and re-box without a single call;
+        // only a result past the inline range (or a non-int operand) takes the
+        // general path below.
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $out .= "entry:\n";
+        $out .= "  %qah = and i64 %a, -281474976710656\n";
+        $out .= "  %qbh = and i64 %b, -281474976710656\n";
+        $out .= "  %qai = icmp eq i64 %qah, " . $ih . "\n";
+        $out .= "  %qbi = icmp eq i64 %qbh, " . $ih . "\n";
+        $out .= "  %qii = and i1 %qai, %qbi\n";
+        $out .= "  br i1 %qii, label %qfast, label %slow\n";
+        $out .= "qfast:\n";
+        $out .= "  %qas = shl i64 %a, 16\n  %qa = ashr i64 %qas, 16\n";
+        $out .= "  %qbs = shl i64 %b, 16\n  %qb = ashr i64 %qbs, 16\n";
+        $out .= "  %qov = call {i64, i1} @llvm." . $intr . ".with.overflow.i64(i64 %qa, i64 %qb)\n";
+        $out .= "  %qr = extractvalue {i64, i1} %qov, 0\n  %qo = extractvalue {i64, i1} %qov, 1\n";
+        $out .= "  %qrs = shl i64 %qr, 16\n  %qrb = ashr i64 %qrs, 16\n";
+        $out .= "  %qfit = icmp eq i64 %qrb, %qr\n  %qnov = xor i1 %qo, true\n  %qok = and i1 %qfit, %qnov\n";
+        $out .= "  br i1 %qok, label %qbox, label %slow\n";
+        $out .= "qbox:\n";
+        $out .= "  %qpl = and i64 %qr, 281474976710655\n  %qw = or i64 %qpl, " . $ih . "\n  ret i64 %qw\n";
+        $out .= "slow:\n";
         $out .= "  %aistag = icmp ugt i64 %a, -4503599627370496\n";
         $out .= "  %tas = lshr i64 %a, 48\n";
         $out .= "  %tan = and i64 %tas, 15\n";

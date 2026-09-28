@@ -63,8 +63,11 @@ final class __McPcreCache
 
 function __preg_compile(string $pattern): int
 {
-    if (isset(__McPcreCache::$code[$pattern])) {
-        return __McPcreCache::$code[$pattern];
+    // ONE probe: `isset` then a read walked the map twice per call, and a
+    // php-cs-fixer pattern is a fresh multi-KB concatenation every time.
+    $hit = __McPcreCache::$code[$pattern] ?? 0;
+    if ($hit !== 0) {
+        return $hit;
     }
     $close = \__preg_close_delim($pattern[0]);
     $endPos = \strrpos($pattern, $close);
