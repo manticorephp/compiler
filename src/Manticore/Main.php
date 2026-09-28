@@ -4389,12 +4389,16 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         "intl_translit.php" => ['Transliterator'],
         "intl_locale.php" => ['Locale'],
         "intl_char.php" => ['IntlChar'],
+        "intl_timezone.php" => ['IntlTimeZone'],
     ];
+    // Families whose API takes or returns ext/date objects.
+    $intlDateFamilies = ["intl_timezone.php" => true];
     $intlPicked = "";
     foreach ($intlFamilies as $file => $names) {
         $famSrc = prelude_src_or_empty($file);
         if ($demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($famSrc)) || $demand->mentionsAny($names)) {
             $intlPicked .= $famSrc;
+            if (isset($intlDateFamilies[$file])) { $useDateTime = true; }
         }
     }
     $useIntl = $intlPicked !== ""

@@ -36,9 +36,6 @@ function __mc_icu_uloc_getDisplayName(string $loc, string $disp, \Ffi\Ptr $buf, 
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_openKeywords')]
 function __mc_icu_uloc_openKeywords(string $loc, \Ffi\Ptr $err): \Ffi\Ptr {}
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('uenum_next')]
-function __mc_icu_uenum_next(\Ffi\Ptr $en, \Ffi\Ptr $len, \Ffi\Ptr $err): \Ffi\Ptr {}
-
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getKeywordValue'), \Ffi\CType('int')]
 function __mc_icu_uloc_getKeywordValue(string $loc, string $kw, \Ffi\Ptr $buf, #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $err): int { return 0; }
 

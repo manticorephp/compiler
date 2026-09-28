@@ -151,6 +151,8 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
 | A reference to a by-REF parameter dangles | `function f(&$x) { return [&$x]; }` | the REF cell points at the caller's slot | the caller has to box the argument it passes |
 | Division by zero never throws (found 2026-09-28) | `$z = 0; 1 % $z; 1 / $z; intdiv(1, $z); intdiv(PHP_INT_MIN, -1)` | `1`, `INF`, `0`, `PHP_INT_MIN` | `DivisionByZeroError` ("Modulo by zero" / "Division by zero") and `ArithmeticError` ("Division of PHP_INT_MIN by -1 is not an integer"). Sweep `%=` `/=` and the cell (mixed) operand paths too |
+| A by-ref write that retypes a `foreach` value variable double-frees (found 2026-09-28) | `function f(&$x) { $x = 5; } foreach ([new stdClass] as $d) {} f($d); var_dump($d);` | SIGSEGV (a string element too) | `int(5)`. The loop variable holds a BORROW (see the foreach-borrow gap); the retyping write releases it as owned |
+| `print_r` of an object prints no properties | `class A { public $x = 1; } print_r(new A);` | `A Object ( )` | `[x] => 1`, visibility suffixes (`:protected`, `:A:private`) and `__debugInfo`, as var_dump's per-class arms already do |
 | Scope-exit destructor order | two objects dying at one `}` where one sits in a reference box | box holders are released after the frame's other locals | php destroys the frame's variables in declaration order |
 
 An ARRAY in a `$GLOBALS['x']` slot still reads back as a float: the slot is a cell channel
@@ -325,7 +327,12 @@ Order:
      `Transliterator` (symfony/string's slugger), `Locale` + `locale_*` (subtags, display
      names, keywords, compose/parse, lookup, acceptFromHttp, likely subtags).
    - ✅ `IntlChar` (all methods + constants; full-range parity over every code point).
-   - Next: `IntlDateFormatter` + `IntlCalendar` / `IntlTimeZone`, `MessageFormatter`,
+   - ✅ `IntlTimeZone` + `intltz_*` + `IntlIterator`: ucal_* for offsets/names/IDs, the zoneinfo64
+     resource (ures_*) for what only C++ exposes (equivalent IDs, region, hasSameRules,
+     useDaylightTime, getDSTSavings) — parity over every system zone × 3 locales × 8 styles.
+     Known: an explicit `IntlIterator::rewind()` resets `key()` (php keeps the old index; its
+     foreach resets it), and `current()` past the end is null (php var_dumps `UNKNOWN:0`).
+   - Next: `IntlDateFormatter` + `IntlCalendar`, `MessageFormatter`,
      `ResourceBundle`, `Spoofchecker`, `IntlBreakIterator`, `UConverter`, `idn_to_*`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.

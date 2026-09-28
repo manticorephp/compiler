@@ -101,36 +101,6 @@ function __mc_intl_canonical_locale(string $locale): string
     return $out;
 }
 
-/**
- * Call `$fill(buf, cap, err)` — an ICU API writing UChars and answering the
- * length — twice (measure, fill); UTF-8 of the result, or null with the ICU
- * error code in __McIcuStatus::$code.
- */
-function __mc_icu_uchars(\Closure $fill): ?string
-{
-    $e = \__mc_icu_err();
-    $n = $fill(\int_to_ptr(0), 0, $e);
-    $c = \peek_i32($e, 0);
-    if ($c > 0 && $c !== 15) {
-        \__mc_icu_free($e);
-        __McIcuStatus::$code = $c;
-        return null;
-    }
-    \poke_i32($e, 0, 0);
-    $buf = \__mc_icu_malloc(($n + 1) * 2);
-    $n = $fill($buf, $n + 1, $e);
-    $c = \peek_i32($e, 0);
-    \__mc_icu_free($e);
-    if ($c > 0) {
-        \__mc_icu_free($buf);
-        __McIcuStatus::$code = $c;
-        return null;
-    }
-    $out = \__mc_icu_to8($buf, $n);
-    \__mc_icu_free($buf);
-    return $out;
-}
-
 class NumberFormatter
 {
     public const PATTERN_DECIMAL = 0;

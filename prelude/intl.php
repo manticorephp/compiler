@@ -893,6 +893,115 @@ final class __McIcuStatus
     public static int $code = 0;
 }
 
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('uenum_next')]
+function __mc_icu_uenum_next(\Ffi\Ptr $en, \Ffi\Ptr $len, \Ffi\Ptr $err): \Ffi\Ptr {}
+
+/** Every string of an ICU UEnumeration, which it then closes. @return string[] */
+function __mc_icu_enum_strings(\Ffi\Ptr $en): array
+{
+    $out = [];
+    $len = \__mc_icu_malloc(8);
+    $e = \__mc_icu_err();
+    while (true) {
+        $p = \__mc_icu_uenum_next($en, $len, $e);
+        if (\ptr_to_int($p) === 0) { break; }
+        $out[] = \str_from_buffer($p, \peek_i32($len, 0));
+    }
+    \__mc_icu_free($e);
+    \__mc_icu_free($len);
+    \__mc_icu_uenum_close($en);
+    return $out;
+}
+
+/**
+ * IntlIterator over a materialized StringEnumeration. php's cursor: a rewind
+ * resets and fetches the first element, next() fetches the following one,
+ * key() is the count of next() calls since the rewind.
+ */
+class IntlIterator implements Iterator
+{
+    /** @var string[] */
+    private array $__mcItems = [];
+    private int $__mcCursor = 0;
+    private ?string $__mcCurrent = null;
+    private int $__mcIndex = 0;
+
+    /** @param string[] $items */
+    public static function __mcOf(array $items): IntlIterator
+    {
+        $it = new IntlIterator();
+        $it->__mcItems = $items;
+        return $it;
+    }
+
+    public function current(): mixed
+    {
+        return $this->__mcCurrent;
+    }
+
+    public function key(): mixed
+    {
+        return $this->__mcIndex;
+    }
+
+    public function next(): void
+    {
+        $this->__mcFetch();
+        $this->__mcIndex = $this->__mcIndex + 1;
+    }
+
+    public function rewind(): void
+    {
+        $this->__mcCursor = 0;
+        $this->__mcIndex = 0;
+        $this->__mcFetch();
+    }
+
+    public function valid(): bool
+    {
+        return $this->__mcCurrent !== null;
+    }
+
+    private function __mcFetch(): void
+    {
+        $this->__mcCurrent = null;
+        if ($this->__mcCursor < \count($this->__mcItems)) {
+            $this->__mcCurrent = $this->__mcItems[$this->__mcCursor];
+            $this->__mcCursor = $this->__mcCursor + 1;
+        }
+    }
+}
+
+/**
+ * Call `$fill(buf, cap, err)` — an ICU API writing UChars and answering the
+ * length — into a 128-UChar buffer, again at the answered size when that
+ * overflowed (some APIs reject a NULL measuring buffer outright); UTF-8 of the
+ * result, or null with the ICU error code in __McIcuStatus::$code.
+ */
+function __mc_icu_uchars(\Closure $fill): ?string
+{
+    $e = \__mc_icu_err();
+    $buf = \__mc_icu_malloc(256);
+    $n = $fill($buf, 128, $e);
+    $c = \peek_i32($e, 0);
+    if ($c === 15) {
+        \__mc_icu_free($buf);
+        \poke_i32($e, 0, 0);
+        $buf = \__mc_icu_malloc(($n + 1) * 2);
+        $n = $fill($buf, $n + 1, $e);
+        $c = \peek_i32($e, 0);
+    }
+    \__mc_icu_free($e);
+    if ($c > 0) {
+        \__mc_icu_free($buf);
+        __McIcuStatus::$code = $c;
+        return null;
+    }
+    $out = \__mc_icu_to8($buf, $n);
+    \__mc_icu_free($buf);
+    return $out;
+}
+
 /**
  * intl_locale_get_default: the Locale::setDefault() override (php's
  * intl.default_locale ini) or ICU's own default.
