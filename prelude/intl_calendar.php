@@ -100,7 +100,7 @@ function __mc_intlcal_zone(string $fn, IntlTimeZone|DateTimeZone|string|null $tz
     if ($tz instanceof DateTimeZone) {
         $z = \__mc_intltz_from_dtz($fn, $tz);
         if ($z === null) {
-            if ($obj !== null) { $obj->__mcSetError(__McIntlError::$code, __McIntlError::$message); }
+            if ($obj !== null) { $obj->__mcSetError(__McIntlError::$code, \intl_get_error_message()); }
             return null;
         }
         return $z->__mcId();

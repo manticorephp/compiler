@@ -85,9 +85,6 @@ function __mc_icu_unum_applyPattern(\Ffi\Ptr $fmt, #[\Ffi\CType('char')] int $lo
 #[\Ffi\Library('icui18n'), \Ffi\Symbol('unum_getLocaleByType')]
 function __mc_icu_unum_getLocaleByType(\Ffi\Ptr $fmt, #[\Ffi\CType('int')] int $type, \Ffi\Ptr $err): \Ffi\Ptr {}
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getISO3Language')]
-function __mc_icu_uloc_getISO3Language(string $locale): \Ffi\Ptr {}
-
 /** php's canonicalize_locale_string: ICU-canonical form of `$locale`, or `$locale` itself when that fails. */
 function __mc_intl_canonical_locale(string $locale): string
 {

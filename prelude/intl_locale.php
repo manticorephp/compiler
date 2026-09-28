@@ -48,9 +48,6 @@ function __mc_icu_uloc_addLikelySubtags(string $loc, \Ffi\Ptr $buf, #[\Ffi\CType
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_minimizeSubtags'), \Ffi\CType('int')]
 function __mc_icu_uloc_minimizeSubtags(string $loc, \Ffi\Ptr $buf, #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $err): int { return 0; }
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('ures_openAvailableLocales')]
-function __mc_icu_ures_openAvailableLocales(\Ffi\Ptr $path, \Ffi\Ptr $err): \Ffi\Ptr {}
-
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_acceptLanguageFromHTTP'), \Ffi\CType('int')]
 function __mc_icu_uloc_acceptLanguageFromHTTP(\Ffi\Ptr $buf, #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $outResult,
     string $accept, \Ffi\Ptr $available, \Ffi\Ptr $err): int { return 0; }

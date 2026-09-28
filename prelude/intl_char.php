@@ -238,7 +238,7 @@ function __mc_ichar_cp(string $fn, int|string $cp): ?int
 function __mc_ichar_status(int $code): void
 {
     __McIntlError::$code = $code;
-    __McIntlError::$message = \intl_error_name($code);
+    __McIntlError::$message = "";
 }
 
 /** A zend_long narrowed to C's int8_t / int32_t, as the implicit conversion does. */

@@ -483,7 +483,7 @@ class IntlRuleBasedBreakIterator extends IntlBreakIterator
             \__mc_icu_free($e);
             __McIntlError::$code = $c;
             if ($c > 0) {
-                $msg = \__mc_brk_parse_error($pe);
+                $msg = \__mc_icu_parse_error_string($pe);
                 \__mc_icu_free($pe);
                 throw new IntlException($fn . "(): unable to create RuleBasedBreakIterator from rules (" . $msg . ")");
             }
@@ -559,22 +559,6 @@ class IntlRuleBasedBreakIterator extends IntlBreakIterator
         \__mc_icu_free($buf);
         return $out;
     }
-}
-
-/** intl_parse_error_to_string over a UParseError {line, offset, preContext[16], postContext[16]}. */
-function __mc_brk_parse_error(\Ffi\Ptr $pe): string
-{
-    $line = \peek_i32($pe, 0);
-    $off = \peek_i32($pe, 4);
-    $pre = \__mc_icu_uchars_z(\ptr_offset($pe, 8), 16);
-    $post = \__mc_icu_uchars_z(\ptr_offset($pe, 40), 16);
-    $s = "parse error ";
-    $any = false;
-    if ($line > 0) { $s .= "on line " . (string)$line; $any = true; }
-    if ($off >= 0) { $s .= ($any ? ", " : "at ") . "offset " . (string)$off; $any = true; }
-    if ($pre !== "") { $s .= ($any ? ", " : "") . "after \"" . $pre . "\""; $any = true; }
-    if ($post !== "") { $s .= ($any ? ", " : "") . "before or at \"" . $post . "\""; $any = true; }
-    return $any ? $s : "no parse error";
 }
 
 class IntlCodePointBreakIterator extends IntlBreakIterator

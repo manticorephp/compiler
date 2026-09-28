@@ -43,9 +43,6 @@ function __mc_icu_ucal_setDateTime(\Ffi\Ptr $cal, #[\Ffi\CType('int')] int $y, #
     #[\Ffi\CType('int')] int $d, #[\Ffi\CType('int')] int $h, #[\Ffi\CType('int')] int $i,
     #[\Ffi\CType('int')] int $s, \Ffi\Ptr $err): void {}
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getISO3Language')]
-function __mc_icu_uloc_getISO3Language(string $locale): \Ffi\Ptr {}
-
 #[\Ffi\Library('icui18n'), \Ffi\Symbol('udatpg_open')]
 function __mc_icu_udatpg_open(string $locale, \Ffi\Ptr $err): \Ffi\Ptr {}
 
@@ -282,8 +279,7 @@ class IntlDateFormatter
             if ($zone === "") {
                 // The conversion error is already the global one; the constructor throws it.
                 if ($throw) {
-                    $m = __McIntlError::$message;
-                    throw new IntlException(\substr($m, 0, \strlen($m) - \strlen(\intl_error_name(__McIntlError::$code)) - 2));
+                    throw new IntlException(__McIntlError::$message);
                 }
                 return false;
             }
@@ -410,7 +406,7 @@ class IntlDateFormatter
         $zone = \__mc_intlcal_zone($fn, $timezone, null);
         if ($zone === null) {
             $this->__mcErrCode = __McIntlError::$code;
-            $this->__mcErrMessage = __McIntlError::$message;
+            $this->__mcErrMessage = \intl_get_error_message();
             return false;
         }
         $e = \__mc_icu_err();

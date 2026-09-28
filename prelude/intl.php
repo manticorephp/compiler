@@ -831,7 +831,11 @@ function grapheme_levenshtein(string $string1, string $string2, int $insertion_c
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('u_errorName')]
 function __mc_icu_u_errorName(#[\Ffi\CType('int')] int $code): \Ffi\Ptr {}
 
-/** The request-global intl error (intl_get_error_code / intl_get_error_message). */
+/**
+ * The request-global intl error (intl_get_error_code / intl_get_error_message): the
+ * code and the custom message, which the reader suffixes with the CURRENT code's name
+ * (a later status check may overwrite one and leave the other).
+ */
 final class __McIntlError
 {
     public static int $code = 0;
@@ -853,7 +857,7 @@ function __mc_intl_message(string $fn, string $what, int $code): string
 function __mc_intl_fail(string $fn, string $what, int $code): void
 {
     __McIntlError::$code = $code;
-    __McIntlError::$message = \__mc_intl_message($fn, $what, $code);
+    __McIntlError::$message = $fn . "(): " . $what;
 }
 
 function intl_error_name(int $errorCode): string
@@ -873,13 +877,19 @@ function intl_get_error_code(): int
 
 function intl_get_error_message(): string
 {
-    return __McIntlError::$message !== "" ? __McIntlError::$message : \intl_error_name(__McIntlError::$code);
+    return __McIntlError::$message !== "" ? __McIntlError::$message . ": " . \intl_error_name(__McIntlError::$code) : \intl_error_name(__McIntlError::$code);
 }
 
 class IntlException extends \Exception {}
 
 const ULOC_ACTUAL_LOCALE = 0;
 const ULOC_VALID_LOCALE = 1;
+
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getISO3Language')]
+function __mc_icu_uloc_getISO3Language(string $locale): \Ffi\Ptr {}
+
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('ures_openAvailableLocales')]
+function __mc_icu_ures_openAvailableLocales(\Ffi\Ptr $package, \Ffi\Ptr $err): \Ffi\Ptr {}
 
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('uloc_getDefault')]
 function __mc_icu_uloc_getDefault(): \Ffi\Ptr {}
@@ -1064,6 +1074,37 @@ function __mc_icu_uchars_z(\Ffi\Ptr $p, int $max): string
     $n = 0;
     while ($n < $max && \peek_u16($p, $n * 2) !== 0) { $n = $n + 1; }
     return \__mc_icu_to8($p, $n);
+}
+
+/**
+ * intl_parse_error_to_string: "parse error on line L, offset O after "PRE" before
+ * "POST"" (each part only when present). `$pe` is a UParseError.
+ */
+function __mc_icu_parse_error_string(\Ffi\Ptr $pe): string
+{
+    $line = \peek_i32($pe, 0);
+    $off = \peek_i32($pe, 4);
+    $pre = \__mc_icu_uchars_z(\ptr_offset($pe, 8), 16);
+    $post = \__mc_icu_uchars_z(\ptr_offset($pe, 40), 16);
+    $out = "parse error ";
+    $any = false;
+    if ($line > 0) {
+        $out = $out . "on line " . $line;
+        $any = true;
+    }
+    if ($off >= 0) {
+        $out = $out . ($any ? ", " : "at ") . "offset " . $off;
+        $any = true;
+    }
+    if ($pre !== "") {
+        $out = $out . ($any ? ", " : "") . "after \"" . $pre . "\"";
+        $any = true;
+    }
+    if ($post !== "") {
+        $out = $out . ($any ? ", " : "") . "before or at \"" . $post . "\"";
+        $any = true;
+    }
+    return $any ? $out : "no parse error";
 }
 
 /**

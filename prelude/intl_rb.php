@@ -14,9 +14,6 @@ function __mc_icu_ures_openDirect_pkg(\Ffi\Ptr $package, string $locale, \Ffi\Pt
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('ures_getLocaleByType')]
 function __mc_icu_ures_getLocaleByType(\Ffi\Ptr $res, #[\Ffi\CType('int')] int $type, \Ffi\Ptr $err): \Ffi\Ptr {}
 
-#[\Ffi\Library('icuuc'), \Ffi\Symbol('ures_openAvailableLocales')]
-function __mc_icu_ures_openAvailableLocales(\Ffi\Ptr $package, \Ffi\Ptr $err): \Ffi\Ptr {}
-
 #[\Ffi\Library('icuuc'), \Ffi\Symbol('ures_getByKey')]
 function __mc_icu_rb_getByKey(\Ffi\Ptr $res, string $key, \Ffi\Ptr $fill, \Ffi\Ptr $err): \Ffi\Ptr {}
 

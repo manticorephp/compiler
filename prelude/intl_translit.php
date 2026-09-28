@@ -35,37 +35,6 @@ function __mc_icu_uenum_unext(\Ffi\Ptr $en, \Ffi\Ptr $len, \Ffi\Ptr $err): \Ffi\
 #[\Ffi\Library('c'), \Ffi\Symbol('memcpy')]
 function __mc_icu_memcpy(\Ffi\Ptr $dst, \Ffi\Ptr $src, #[\Ffi\CType('size_t')] int $n): \Ffi\Ptr {}
 
-/**
- * intl_parse_error_to_string: "parse error on line L, offset O after "PRE" before
- * "POST"" (each part only when present). `$pe` is a UParseError.
- */
-function __mc_icu_parse_error_string(\Ffi\Ptr $pe): string
-{
-    $line = \peek_i32($pe, 0);
-    $off = \peek_i32($pe, 4);
-    $pre = \__mc_icu_uchars_z(\ptr_offset($pe, 8), 16);
-    $post = \__mc_icu_uchars_z(\ptr_offset($pe, 40), 16);
-    $out = "parse error ";
-    $any = false;
-    if ($line > 0) {
-        $out = $out . "on line " . $line;
-        $any = true;
-    }
-    if ($off >= 0) {
-        $out = $out . ($any ? ", " : "at ") . "offset " . $off;
-        $any = true;
-    }
-    if ($pre !== "") {
-        $out = $out . ($any ? ", " : "") . "after \"" . $pre . "\"";
-        $any = true;
-    }
-    if ($post !== "") {
-        $out = $out . ($any ? ", " : "") . "before or at \"" . $post . "\"";
-        $any = true;
-    }
-    return $any ? $out : "no parse error";
-}
-
 class Transliterator
 {
     public const FORWARD = 0;
