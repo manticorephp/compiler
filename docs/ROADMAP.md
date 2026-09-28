@@ -342,7 +342,9 @@ Order:
      trips: identical to Zend.
    - ✅ `IntlBreakIterator` / `IntlRuleBasedBreakIterator` / `IntlCodePointBreakIterator` /
      `IntlPartsIterator` over ubrk_* and utext_* (getRules() read from the compiled data).
-   - Next: `MessageFormatter`, `ResourceBundle`, `Spoofchecker`, `UConverter`, `idn_to_*`.
+   - ✅ `idn_to_ascii` / `idn_to_utf8` (UTS #46) and `Spoofchecker` (uspoof_*; Zend's
+     warning sites answer their value silently, pending the warnings → exceptions epic).
+   - Next: `MessageFormatter`, `ResourceBundle`, `UConverter`.
 6. **`mb_ereg*`** — UNDECIDED (2026-09-28): Zend binds Oniguruma, which is end-of-life
    upstream; neither vendoring it nor faking its syntax over PCRE2 is agreed yet. Parked.
 

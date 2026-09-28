@@ -1,0 +1,69 @@
+"m\u00fcnchen.de" 48 'xn--mnchen-3ya.de' {"result":"xn--mnchen-3ya.de","isTransitionalDifferent":false,"errors":0} | 'münchen.de' {"result":"m\u00fcnchen.de","isTransitionalDifferent":false,"errors":0}
+"m\u00fcnchen.de" 18 'xn--mnchen-3ya.de' {"result":"xn--mnchen-3ya.de","isTransitionalDifferent":false,"errors":0} | 'münchen.de' {"result":"m\u00fcnchen.de","isTransitionalDifferent":false,"errors":0}
+"m\u00fcnchen.de" 12 'xn--mnchen-3ya.de' {"result":"xn--mnchen-3ya.de","isTransitionalDifferent":false,"errors":0} | 'münchen.de' {"result":"m\u00fcnchen.de","isTransitionalDifferent":false,"errors":0}
+"\u043f\u0440\u0438\u043c\u0435\u0440.\u0438\u0441\u043f\u044b\u0442\u0430\u043d\u0438\u0435" 48 'xn--e1afmkfd.xn--80akhbyknj4f' {"result":"xn--e1afmkfd.xn--80akhbyknj4f","isTransitionalDifferent":false,"errors":0} | 'пример.испытание' {"result":"\u043f\u0440\u0438\u043c\u0435\u0440.\u0438\u0441\u043f\u044b\u0442\u0430\u043d\u0438\u0435","isTransitionalDifferent":false,"errors":0}
+"\u043f\u0440\u0438\u043c\u0435\u0440.\u0438\u0441\u043f\u044b\u0442\u0430\u043d\u0438\u0435" 18 'xn--e1afmkfd.xn--80akhbyknj4f' {"result":"xn--e1afmkfd.xn--80akhbyknj4f","isTransitionalDifferent":false,"errors":0} | 'пример.испытание' {"result":"\u043f\u0440\u0438\u043c\u0435\u0440.\u0438\u0441\u043f\u044b\u0442\u0430\u043d\u0438\u0435","isTransitionalDifferent":false,"errors":0}
+"\u043f\u0440\u0438\u043c\u0435\u0440.\u0438\u0441\u043f\u044b\u0442\u0430\u043d\u0438\u0435" 12 'xn--e1afmkfd.xn--80akhbyknj4f' {"result":"xn--e1afmkfd.xn--80akhbyknj4f","isTransitionalDifferent":false,"errors":0} | 'пример.испытание' {"result":"\u043f\u0440\u0438\u043c\u0435\u0440.\u0438\u0441\u043f\u044b\u0442\u0430\u043d\u0438\u0435","isTransitionalDifferent":false,"errors":0}
+"xn--mnchen-3ya.de" 48 'xn--mnchen-3ya.de' {"result":"xn--mnchen-3ya.de","isTransitionalDifferent":false,"errors":0} | 'münchen.de' {"result":"m\u00fcnchen.de","isTransitionalDifferent":false,"errors":0}
+"xn--mnchen-3ya.de" 18 'xn--mnchen-3ya.de' {"result":"xn--mnchen-3ya.de","isTransitionalDifferent":false,"errors":0} | 'münchen.de' {"result":"m\u00fcnchen.de","isTransitionalDifferent":false,"errors":0}
+"xn--mnchen-3ya.de" 12 'xn--mnchen-3ya.de' {"result":"xn--mnchen-3ya.de","isTransitionalDifferent":false,"errors":0} | 'münchen.de' {"result":"m\u00fcnchen.de","isTransitionalDifferent":false,"errors":0}
+"\u00d6BB.at" 48 'xn--bb-eka.at' {"result":"xn--bb-eka.at","isTransitionalDifferent":false,"errors":0} | 'öbb.at' {"result":"\u00f6bb.at","isTransitionalDifferent":false,"errors":0}
+"\u00d6BB.at" 18 'xn--bb-eka.at' {"result":"xn--bb-eka.at","isTransitionalDifferent":false,"errors":0} | 'öbb.at' {"result":"\u00f6bb.at","isTransitionalDifferent":false,"errors":0}
+"\u00d6BB.at" 12 'xn--bb-eka.at' {"result":"xn--bb-eka.at","isTransitionalDifferent":false,"errors":0} | 'öbb.at' {"result":"\u00f6bb.at","isTransitionalDifferent":false,"errors":0}
+"fa\u00df.de" 48 'xn--fa-hia.de' {"result":"xn--fa-hia.de","isTransitionalDifferent":true,"errors":0} | 'faß.de' {"result":"fa\u00df.de","isTransitionalDifferent":true,"errors":0}
+"fa\u00df.de" 18 'xn--fa-hia.de' {"result":"xn--fa-hia.de","isTransitionalDifferent":true,"errors":0} | 'fass.de' {"result":"fass.de","isTransitionalDifferent":true,"errors":0}
+"fa\u00df.de" 12 'fass.de' {"result":"fass.de","isTransitionalDifferent":true,"errors":0} | 'fass.de' {"result":"fass.de","isTransitionalDifferent":true,"errors":0}
+"a..b" 48 false {"result":"a..b","isTransitionalDifferent":false,"errors":1} | false {"result":"a..b","isTransitionalDifferent":false,"errors":1}
+"a..b" 18 false {"result":"a..b","isTransitionalDifferent":false,"errors":1} | false {"result":"a..b","isTransitionalDifferent":false,"errors":1}
+"a..b" 12 false {"result":"a..b","isTransitionalDifferent":false,"errors":1} | false {"result":"a..b","isTransitionalDifferent":false,"errors":1}
+"-bad-.com" 48 false {"result":"-bad-.com","isTransitionalDifferent":false,"errors":24} | false {"result":"-bad-.com","isTransitionalDifferent":false,"errors":24}
+"-bad-.com" 18 false {"result":"-bad-.com","isTransitionalDifferent":false,"errors":24} | false {"result":"-bad-.com","isTransitionalDifferent":false,"errors":24}
+"-bad-.com" 12 false {"result":"-bad-.com","isTransitionalDifferent":false,"errors":24} | false {"result":"-bad-.com","isTransitionalDifferent":false,"errors":24}
+"\u65e5\u672c\u8a9e.jp" 48 'xn--wgv71a119e.jp' {"result":"xn--wgv71a119e.jp","isTransitionalDifferent":false,"errors":0} | '日本語.jp' {"result":"\u65e5\u672c\u8a9e.jp","isTransitionalDifferent":false,"errors":0}
+"\u65e5\u672c\u8a9e.jp" 18 'xn--wgv71a119e.jp' {"result":"xn--wgv71a119e.jp","isTransitionalDifferent":false,"errors":0} | '日本語.jp' {"result":"\u65e5\u672c\u8a9e.jp","isTransitionalDifferent":false,"errors":0}
+"\u65e5\u672c\u8a9e.jp" 12 'xn--wgv71a119e.jp' {"result":"xn--wgv71a119e.jp","isTransitionalDifferent":false,"errors":0} | '日本語.jp' {"result":"\u65e5\u672c\u8a9e.jp","isTransitionalDifferent":false,"errors":0}
+"xn--zz" 48 false {"result":"xn--zz\ufffd","isTransitionalDifferent":false,"errors":256} | false {"result":"xn--zz\ufffd","isTransitionalDifferent":false,"errors":256}
+"xn--zz" 18 false {"result":"xn--zz\ufffd","isTransitionalDifferent":false,"errors":256} | false {"result":"xn--zz\ufffd","isTransitionalDifferent":false,"errors":256}
+"xn--zz" 12 false {"result":"xn--zz\ufffd","isTransitionalDifferent":false,"errors":256} | false {"result":"xn--zz\ufffd","isTransitionalDifferent":false,"errors":256}
+"ex ample.com" 48 'ex ample.com' {"result":"ex ample.com","isTransitionalDifferent":false,"errors":0} | 'ex ample.com' {"result":"ex ample.com","isTransitionalDifferent":false,"errors":0}
+"ex ample.com" 18 false {"result":"ex\ufffdample.com","isTransitionalDifferent":false,"errors":128} | false {"result":"ex\ufffdample.com","isTransitionalDifferent":false,"errors":128}
+"ex ample.com" 12 'ex ample.com' {"result":"ex ample.com","isTransitionalDifferent":false,"errors":0} | 'ex ample.com' {"result":"ex ample.com","isTransitionalDifferent":false,"errors":0}
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com" 48 false {"result":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com","isTransitionalDifferent":false,"errors":2} | 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com' {"result":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com","isTransitionalDifferent":false,"errors":0}
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com" 18 false {"result":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com","isTransitionalDifferent":false,"errors":2} | 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com' {"result":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com","isTransitionalDifferent":false,"errors":0}
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com" 12 false {"result":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com","isTransitionalDifferent":false,"errors":2} | 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com' {"result":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com","isTransitionalDifferent":false,"errors":0}
+"\u0423\u043a\u0440\u0430\u0457\u043d\u0430.\u0443\u043a\u0440" 48 'xn--80aa2annq7l.xn--j1amh' {"result":"xn--80aa2annq7l.xn--j1amh","isTransitionalDifferent":false,"errors":0} | 'україна.укр' {"result":"\u0443\u043a\u0440\u0430\u0457\u043d\u0430.\u0443\u043a\u0440","isTransitionalDifferent":false,"errors":0}
+"\u0423\u043a\u0440\u0430\u0457\u043d\u0430.\u0443\u043a\u0440" 18 'xn--80aa2annq7l.xn--j1amh' {"result":"xn--80aa2annq7l.xn--j1amh","isTransitionalDifferent":false,"errors":0} | 'україна.укр' {"result":"\u0443\u043a\u0440\u0430\u0457\u043d\u0430.\u0443\u043a\u0440","isTransitionalDifferent":false,"errors":0}
+"\u0423\u043a\u0440\u0430\u0457\u043d\u0430.\u0443\u043a\u0440" 12 'xn--80aa2annq7l.xn--j1amh' {"result":"xn--80aa2annq7l.xn--j1amh","isTransitionalDifferent":false,"errors":0} | 'україна.укр' {"result":"\u0443\u043a\u0440\u0430\u0457\u043d\u0430.\u0443\u043a\u0440","isTransitionalDifferent":false,"errors":0}
+string(21) "xn--bcher-kva.example"
+string(15) "bücher.example"
+idn_to_ascii(): Argument #1 ($domain) must not be empty
+idn_to_utf8(): Argument #2 ($flags) must be INTL_IDNA_VARIANT_UTS46
+"paypal" false 0
+"\u0440\u0430\u0443\u0440\u0430l" true 16
+"\uff30aypal" false 0
+"hello" false 0
+"\u04baello" true 16
+"\u0430\u0440\u0440\u04cf\u0435" false 0
+"abc123" false 0
+"a\u200bb" false 0
+"\u03b5\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac" false 0
+"\u65e5\u672c\u8a9e\u30c6\u30ad\u30b9\u30c8" false 0
+"abc\u0430\u0431\u0432" true 16
+"paypal"~"\u0440\u0430\u0443\u0440\u0430l" true 2
+"hello"~"\u04baello" false 0
+"scope"~"\u0455\u0441\u043e\u0440\u0435" true 6
+"abc"~"xyz" false 0
+"1l"~"Il" true 1
+bool(false)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+Spoofchecker::setRestrictionLevel(): Argument #1 ($level) must be one of Spoofchecker::ASCII, Spoofchecker::SINGLE_SCRIPT_RESTRICTIVE, Spoofchecker::HIGHLY_RESTRICTIVE, Spoofchecker::MODERATELY_RESTRICTIVE, Spoofchecker::MINIMALLY_RESTRICTIVE, or Spoofchecker::UNRESTRICTIVE
+Spoofchecker::setAllowedChars(): Argument #1 ($pattern) must be a valid regular expression character set pattern
+Spoofchecker::setAllowedChars(): Argument #2 ($patternOptions) must be a valid pattern option, 0 or (SpoofChecker::IGNORE_SPACE|(<none> or SpoofChecker::CASE_INSENSITIVE or SpoofChecker::ADD_CASE_MAPPINGS or SpoofChecker::SIMPLE_CASE_INSENSITIVE))
+Spoofchecker::setAllowedChars(): Argument #1 ($pattern) must be a valid regular expression character set pattern
+bool(false)
