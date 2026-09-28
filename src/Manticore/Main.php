@@ -4390,16 +4390,28 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         "intl_locale.php" => ['Locale'],
         "intl_char.php" => ['IntlChar'],
         "intl_timezone.php" => ['IntlTimeZone'],
+        "intl_calendar.php" => ['IntlCalendar', 'IntlGregorianCalendar'],
     ];
+    // A family another one is built on (picked with it, and listed before it above).
+    $intlFamilyNeeds = ["intl_calendar.php" => "intl_timezone.php"];
     // Families whose API takes or returns ext/date objects.
     $intlDateFamilies = ["intl_timezone.php" => true];
+    /** @var array<string, string> */
+    $intlFamilySrc = [];
+    /** @var array<string, bool> */
+    $intlChosen = [];
+    foreach ($intlFamilies as $file => $names) {
+        $intlFamilySrc[$file] = prelude_src_or_empty($file);
+        if ($demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlFamilySrc[$file])) || $demand->mentionsAny($names)) {
+            $intlChosen[$file] = true;
+            if (isset($intlFamilyNeeds[$file])) { $intlChosen[$intlFamilyNeeds[$file]] = true; }
+        }
+    }
     $intlPicked = "";
     foreach ($intlFamilies as $file => $names) {
-        $famSrc = prelude_src_or_empty($file);
-        if ($demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($famSrc)) || $demand->mentionsAny($names)) {
-            $intlPicked .= $famSrc;
-            if (isset($intlDateFamilies[$file])) { $useDateTime = true; }
-        }
+        if (!isset($intlChosen[$file])) { continue; }
+        $intlPicked .= $intlFamilySrc[$file];
+        if (isset($intlDateFamilies[$file])) { $useDateTime = true; }
     }
     $useIntl = $intlPicked !== ""
         || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($intlSrc))

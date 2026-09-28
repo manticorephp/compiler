@@ -1,0 +1,94 @@
+IntlGregorianCalendar gregorian Europe/Kyiv uk_UA first=2 minDays=1
+  1,2023,10,47,3,15,319,4,3,0,0,0,13,20,0,7200000,0,2023,3,2023,2460264,800000,0,
+  max: 30/31/28/1/1/1 11/11/11/0/0/0 365/366/365/1/1/1 53/53/52/1/1/1
+  dow: 1 0 0 0 0 0 1 weekend=false true dst=false
+IntlGregorianCalendar gregorian America/New_York en_US first=1 minDays=1
+  1,2023,10,46,3,14,318,3,2,1,5,17,13,20,0,-18000000,0,2023,3,2023,2460263,62000000,0,
+  max: 30/31/28/1/1/1 11/11/11/0/0/0 365/366/365/1/1/1 52/53/52/1/1/1
+  dow: 1 0 0 0 0 0 1 weekend=false true dst=false
+IntlCalendar japanese Asia/Tokyo ja_JP first=1 minDays=1
+  236,5,10,46,3,15,319,4,3,0,7,7,13,20,0,32400000,0,2023,4,2023,2460264,26000000,0,
+  max: 30/31/28/1/1/1 11/11/11/0/0/0 365/366/365/1/1/1 52/53/52/1/1/1
+  dow: 1 0 0 0 0 0 1 weekend=false true dst=false
+IntlCalendar hebrew Asia/Jerusalem he_IL first=1 minDays=1
+  0,5784,2,10,1,2,61,4,1,0,0,0,13,20,0,7200000,0,5784,4,5784,2460264,800000,0,
+  max: 29/30/29/1/1/1 12/12/12/0/0/0 383/385/353/1/1/1 55/56/51/1/1/1
+  dow: 0 0 0 0 0 1 1 weekend=false true dst=false
+IntlCalendar buddhist UTC th_TH first=1 minDays=1
+  0,2566,10,46,3,14,318,3,2,1,10,22,13,20,0,0,0,2023,3,2023,2460263,80000000,0,
+  max: 30/31/28/1/1/1 11/11/11/0/0/0 365/366/365/1/1/1 52/53/52/1/1/1
+  dow: 1 0 0 0 0 0 1 weekend=false true dst=false
+IntlGregorianCalendar gregorian Europe/Kyiv de_DE first=2 minDays=4
+  1,2023,10,46,3,15,319,4,3,0,0,0,13,20,0,7200000,0,2023,3,2023,2460264,800000,0,
+  max: 30/31/28/1/1/1 11/11/11/0/0/0 365/366/365/1/1/1 52/53/52/1/1/1
+  dow: 1 0 0 0 0 0 1 weekend=false true dst=false
+1711864800000 9
+1 2024
+11 2022
+1709190000000 1709207100000 1709207107000
+1709379907000 true
+false 1709377207000
+-10800000
+int(38)
+float(1799964800000)
+int(-2314)
+int(1)
+int(4)
+bool(false)
+int(0)
+int(2)
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+string(16) "America/New_York"
+int(21)
+bool(true)
+bool(true)
+int(30)
+bool(true)
+string(9) "GMT+03:00"
+DateTime 2024-03-31 04:00:00 GMT+0300 +03:00
+IntlGregorianCalendar 1614855967000 America/Chicago fr_FR 5
+946677600000 Europe/Kyiv
+IntlGregorianCalendar 1709157600000 Europe/Kyiv
+1709194800000
+1709194830000
+gregorian Asia/Tokyo ja_JP
+IntlGregorianCalendar en_001
+float(-12219292800000)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+float(-1000000000000000)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+0=gregorian 1=japanese 
+ok
+ValueError: IntlCalendar::get(): Argument #1 ($field) must be a valid field
+ValueError: intlcal_get(): Argument #2 ($field) must be a valid field
+ValueError: IntlCalendar::add(): Argument #2 ($value) must be between -2147483648 and 2147483647
+ValueError: IntlCalendar::getDayOfWeekType(): Argument #1 ($dayOfWeek) must be a valid day of the week
+ValueError: intlcal_get_weekend_transition(): Argument #2 ($dayOfWeek) must be a valid day of the week
+ValueError: IntlCalendar::setMinimalDaysInFirstWeek(): Argument #1 ($days) must be between 1 and 7
+ValueError: IntlCalendar::setRepeatedWallTimeOption(): Argument #1 ($option) must be either IntlCalendar::WALLTIME_FIRST or IntlCalendar::WALLTIME_LAST
+ValueError: IntlCalendar::setSkippedWallTimeOption(): Argument #1 ($option) must be one of IntlCalendar::WALLTIME_FIRST, IntlCalendar::WALLTIME_LAST, or IntlCalendar::WALLTIME_NEXT_VALID
+ValueError: IntlCalendar::getLocale(): Argument #1 ($type) must be either Locale::ACTUAL_LOCALE or Locale::VALID_LOCALE
+IntlException: IntlCalendar::createInstance(): No such time zone: "junk"
+ValueError: IntlGregorianCalendar::createFromDate(): Argument #1 ($year) must be between -2147483648 and 2147483647
+ValueError: IntlCalendar::isSet(): Argument #1 ($field) must be a valid field
+0: 0: 0: 0: 0: 1:0 1:86400000 0 U_ZERO_ERROR
+bool(true)
+bool(true)
+string(9) "gregorian"
+bool(true)
+string(12) "U_ZERO_ERROR"
