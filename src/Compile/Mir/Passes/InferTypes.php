@@ -2389,6 +2389,14 @@ final class InferTypes implements Pass
             || $k === Type::KIND_STRING || $k === Type::KIND_CLOSURE;
     }
 
+    /** {@see isPointerKind} less UNKNOWN: a merge must not claim an erased word is a pointer. */
+    private function isConcretePointerKind(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_OBJ || $k === Type::KIND_ARRAY || $k === Type::KIND_STRING
+            || $k === Type::KIND_CLOSURE;
+    }
+
     private function markArithLocal(?Node $operand): void
     {
         if ($operand !== null && $operand->kind === Node::KIND_LOAD_LOCAL) {
@@ -3198,6 +3206,14 @@ final class InferTypes implements Pass
                 if (isset($this->cellMergeLocals[$name])) {
                     // int|float merge → a numeric cell (arith-able past the if).
                     $out[$name] = $this->unifyToCell($type, $b[$name]);
+                } elseif ($type->kind === Type::KIND_NULL && $this->isConcretePointerKind($b[$name])) {
+                    // `$x = null; if (…) { $x = [1]; }`: a POINTER's null rides
+                    // raw as ptr 0 (the loop merge keeps the body type the same
+                    // way, {@see $nullLoopLocals}). The union collapsed to
+                    // `unknown`, whose null a consumer boxed as int(0).
+                    $out[$name] = $b[$name];
+                } elseif ($b[$name]->kind === Type::KIND_NULL && $this->isConcretePointerKind($type)) {
+                    $out[$name] = $type;
                 } else {
                     $out[$name] = $this->unionTypes($type, $b[$name]);
                 }
