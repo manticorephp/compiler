@@ -707,10 +707,22 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $ise . ' = ashr i64 ' . $ish . ", 16\n";
         $isInt = $this->ssa->allocReg();
         $out .= '  ' . $isInt . ' = icmp eq i64 ' . $ise . ', ' . $v . "\n";
+        // box_int only on a word that FITS: called unconditionally (its answer
+        // then dropped by a select), a tagged word or a wide raw int took its
+        // heap arm and leaked the 8-byte box on every pass-through.
+        $biL = $this->ssa->allocLabel('bx.int');
+        $nbL = $this->ssa->allocLabel('bx.noint');
+        $bjL = $this->ssa->allocLabel('bx.intj');
+        $out .= '  br i1 ' . $isInt . ', label %' . $biL . ', label %' . $nbL . "\n";
+        $out .= $biL . ":\n";
         $bi = $this->ssa->allocReg();
         $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $v . ")\n";
+        $out .= '  br label %' . $bjL . "\n";
+        $out .= $nbL . ":\n";
+        $out .= '  br label %' . $bjL . "\n";
+        $out .= $bjL . ":\n";
         $intB = $this->ssa->allocReg();
-        $out .= '  ' . $intB . ' = select i1 ' . $isInt . ', i64 ' . $bi . ', i64 ' . $v . "\n";
+        $out .= '  ' . $intB . ' = phi i64 [ ' . $bi . ', %' . $biL . ' ], [ ' . $v . ', %' . $nbL . " ]\n";
         // "Already a cell" = the NaN header AND a tag nibble the ABI assigns
         // (1..8): a raw negative int carries the header too (nibble 15) and
         // must still take the integer arm.

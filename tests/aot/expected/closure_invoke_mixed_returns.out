@@ -1,0 +1,10 @@
+integer 1
+object Box(7)
+array [1,2]
+string "s"
+NULL null
+double 1.5
+boolean false
+box Box 3
+none NULL -
+250002001000 growth ok

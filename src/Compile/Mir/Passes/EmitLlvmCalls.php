@@ -1835,6 +1835,7 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'double';
             }
             if ($n->type->kind === Type::KIND_CELL) {
+                $out .= $this->boxUnknownShallowIr();
                 $this->markCellOpaque($this->lastValue);
             }
             return $out;
@@ -1846,7 +1847,12 @@ trait EmitLlvmCalls
         if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
+        // …while an array / object result rides RAW. A cell-typed invoke (a
+        // closure out of a `vec[closure]` of mixed returns) read that pointer as
+        // a double: box it by its allocator magic. The closure's +1 moves into
+        // the cell. A tagged scalar passes through.
         if ($n->type->kind === Type::KIND_CELL) {
+            $out .= $this->boxUnknownShallowIr();
             $this->markCellOpaque($this->lastValue);
         }
         return $out;
