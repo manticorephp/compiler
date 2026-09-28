@@ -132,6 +132,7 @@ final class NodeClone
             // re-infer from its stores alone (and lose the cell element the
             // author asked for).
             $c->declaredType = $x->declaredType;
+            $c->outParamInit = $x->outParamInit;
             return $c;
         }
         if ($k === Node::KIND_NULLCOALESCE) { $x = self::asNullCoalesce($n); return new NullCoalesce_(self::node($x->left), self::node($x->right), $n->type); }

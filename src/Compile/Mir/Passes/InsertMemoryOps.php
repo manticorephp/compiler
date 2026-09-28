@@ -542,6 +542,8 @@ final class InsertMemoryOps implements Pass
      * it the retained memory has no attributable owner. First reason wins — a
      * name is blocked once and the first gate is the one that decided it.
      */
+    private static function isOutParamInit(StoreLocal $sl): bool { return $sl->outParamInit; }
+
     private function noteBlock(string $name, string $reason, ?Type $t): void
     {
         $this->ownTrace('BLOCK ' . $name . ' <- ' . $reason
@@ -1659,7 +1661,12 @@ final class InsertMemoryOps implements Pass
                 && self::arrayAliasCoOwns($value->type, $sl->type, $this->enums, $this->classes)) {
                 $ownedCopy = true;
             }
-            if (($this->isOwnedObj($value) || $ownedCopy)
+            // An out-parameter's NULL start: the by-ref callee stores an OWNED
+            // value into the slot (`preg_match($re, $s, $m)` a fresh matches
+            // array), and nothing else would ever give the last one back — every
+            // frame that called `Preg::match(…, $m)` leaked its final `$m`.
+            $outInit = self::isOutParamInit($sl);
+            if (($this->isOwnedObj($value) || $ownedCopy || $outInit)
                 && !($ownedByRetain && $boxedSlot && !self::cellElemReadCoOwns($value))) {
                 // Two stores that disagree about the slot's REPRESENTATION leave
                 // no single release flavor that is right for both — the scope-exit

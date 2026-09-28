@@ -178,6 +178,7 @@ final class VivifyRefArgs implements Pass
             }
             $init = new StoreLocal($name, new NullConst(Type::null_()), $declared);
             $init->declaredType = $declared;
+            $init->outParamInit = true;
             $inits[] = $init;
         }
         // php creates an ARRAY here, not NULL, and the element type is whatever

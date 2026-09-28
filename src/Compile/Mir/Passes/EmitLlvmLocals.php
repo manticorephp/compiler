@@ -859,7 +859,12 @@ trait EmitLlvmLocals
                 || $this->refStoreNeedsCellify($sl->name, $sl->value->type))) {
             $out = $this->emitNode($sl->value);
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
-            $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
+            // The rebuild co-owns every element, so an OWNED source dies with
+            // the walk, as on the return path: `$out = [new Tok($n)]` through
+            // `?array &$out` kept the literal and one count on each object.
+            $srcFlavor = $this->cellifySourceFlavor($sl->value);
+            $this->cellifyMove = $this->litOwnsArrayElems($sl->value, $srcFlavor);
+            $out .= $this->emitCellifyArrayRaw($sl->value->type->element, $srcFlavor);
             $out .= $this->coerceToI64();
             $dv = $this->lastValue;
             $addr = $this->ssa->allocReg();

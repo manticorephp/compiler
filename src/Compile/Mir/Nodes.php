@@ -172,6 +172,11 @@ final class StoreLocal extends Node
     {
         return [$this->value];
     }
+
+    /** The NULL an out-parameter local starts as ({@see Passes\VivifyRefArgs}):
+     *  the by-ref callee stores an owned value into the slot, so the slot owns
+     *  what it ends up holding. Declared LAST — field order is layout. */
+    public bool $outParamInit = false;
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────
