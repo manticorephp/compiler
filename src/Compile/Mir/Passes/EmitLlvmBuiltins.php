@@ -1230,7 +1230,7 @@ trait EmitLlvmBuiltins
         $out = $this->coerceToPtr();
         $rawSrc = $this->lastValue;
         $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . ' = call ptr ' . $this->cellifyHelper($elem) . '(ptr ' . $rawSrc . ")\n";
+        $out .= '  ' . $res . ' = call ptr ' . $this->cellifyHelper($elem, $move) . '(ptr ' . $rawSrc . ")\n";
         // The walk is over and every element the rebuild keeps is co-owned, so an
         // OWNED-TEMP source dies here — the helper read it until its last entry.
         if ($srcFlavor !== '') {
@@ -1260,7 +1260,7 @@ trait EmitLlvmBuiltins
      * module, ~6% of its instructions. Nothing in the loop depends on the site
      * but the element type, so the body is keyed by its own text.
      */
-    private function cellifyHelper(Type $elem): string
+    private function cellifyHelper(Type $elem, bool $move = false): string
     {
         $oldSsa = $this->ssa;
         $oldLast = $this->lastValue;
@@ -1272,7 +1272,7 @@ trait EmitLlvmBuiltins
         $this->ssa = new \Compile\Mir\SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
-        $body = $this->cellifyLoopIr($elem, '%src');
+        $body = $this->cellifyLoopIr($elem, '%src', $move);
         $res = $this->lastValue;
         $key = '__mc_cellify_' . \dechex(\crc32($body)) . '_' . (string)\strlen($body);
         $sym = '@manticore_' . $key;
@@ -1292,7 +1292,7 @@ trait EmitLlvmBuiltins
 
     /** The rebuild loop over the array at `$rawSrc`; the result pointer (null
      *  for a null source) is left in lastValue. */
-    private function cellifyLoopIr(Type $elem, string $rawSrc): string
+    private function cellifyLoopIr(Type $elem, string $rawSrc, bool $move = false): string
     {
         $out = '';
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0.
