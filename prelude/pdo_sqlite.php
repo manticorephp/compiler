@@ -289,7 +289,7 @@ final class __McPdoSq
      */
     public static function backoff(int $attempt, float $deadline): bool
     {
-        if (\microtime(true) >= $deadline) { return false; }
+        if (\__mc_monotonic_f() >= $deadline) { return false; }
         $delay = 0.001 * (float) $attempt;
         if ($delay > 0.05) { $delay = 0.05; }
         if (\Runtime\AsyncHook::active()) {
@@ -468,7 +468,7 @@ final class __McPdoSqliteDrv implements __McPdoDrv
     public function drive(\Ffi\Ptr $st): int
     {
         $attempt = 0;
-        $deadline = \microtime(true) + $this->timeout;
+        $deadline = \__mc_monotonic_f() + $this->timeout;
         while (true) {
             $rc = \__mc_pdosq_step($st);
             if ($rc === __McPdoSq::ROW) { continue; }
@@ -705,7 +705,7 @@ final class __McPdoSqliteStmt implements __McPdoDrvStmt
     private function stepOnce(\Ffi\Ptr $st): int
     {
         $attempt = 0;
-        $deadline = \microtime(true) + $this->db->timeout;
+        $deadline = \__mc_monotonic_f() + $this->db->timeout;
         while (true) {
             $rc = \__mc_pdosq_step($st);
             if ($rc !== __McPdoSq::BUSY && $rc !== __McPdoSq::LOCKED) { return $rc; }
