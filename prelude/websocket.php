@@ -1024,7 +1024,7 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
     foreach ($headers as $name => $v) {
         checkHeader((string)$name, $v);
     }
-    $deadline = \microtime(true) + $o->connectTimeout;
+    $deadline = \__mc_monotonic_f() + $o->connectTimeout;
     $ctx = null;
     if ($tls) {
         $peer = \strlen($host) > 1 && $host[0] === '[' ? \substr($host, 1, \strlen($host) - 2) : $host;
@@ -1103,7 +1103,7 @@ function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, a
         if ($end >= 0) {
             break;
         }
-        $left = $deadline - \microtime(true);
+        $left = $deadline - \__mc_monotonic_f();
         if ($left <= 0.0) {
             throw new HandshakeException('WebSocket handshake failed: timed out waiting for the response');
         }
