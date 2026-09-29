@@ -1520,8 +1520,16 @@ trait EmitLlvmBuiltins
      * e.g. `uasort`'s `$arr = $new` writeback restoring the byref param's typed
      * representation). lastValue holds the source array cell/ptr on entry; the
      * boxed concrete array on exit.
+     *
+     * ⚠ OWNERSHIP. By default the rebuild MOVES each value out of the source:
+     * right for an owned temp whose bare buffer the caller then frees. `$coOwn`
+     * is for a source that keeps its elements (a named local that is released
+     * at its own scope exit): the rebuild then takes a reference per element,
+     * or both arrays release the same payload — `$astArgs = $expanded` in
+     * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
+     * and the self-built compiler crashed on `method_exists(...$pack)`.
      */
-    private function emitCellArrayToTyped(Type $arrType): string
+    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -1566,9 +1574,14 @@ trait EmitLlvmBuiltins
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
             $out .= $this->unboxCellToType($elem);
-            $out .= $this->emitCellArrayToTyped($elem);
+            $out .= $this->emitCellArrayToTyped($elem, $coOwn);
             $raw = $this->lastValue;
         } else {
+            if ($coOwn) {
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_cell_retain(i64 ' . $ev . ")\n";
+            }
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
             $out .= $this->unboxCellToType($elem);

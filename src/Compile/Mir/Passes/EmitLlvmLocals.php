@@ -802,12 +802,14 @@ trait EmitLlvmLocals
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->coerceToPtr();
             $deSrc = $this->lastValue;
-            $out .= $this->emitCellArrayToTyped($sl->type);
+            // An owned temp is MOVED out of: its values change hands and it
+            // leaves as a bare buffer — it was never freed at all
+            // (`$t = array_values(…)` into a typed slot). Any other source keeps
+            // its elements and releases them itself, so the rebuild co-owns.
+            $deFlavor = $this->cellifySourceFlavor($sl->value);
+            $out .= $this->emitCellArrayToTyped($sl->type, $deFlavor === '');
             $dv = $this->lastValue;
-            // The rebuild MOVES each value out of the source without a reference
-            // of its own, so an owned temp source leaves as a bare buffer — it
-            // was never freed at all (`$t = array_values(…)` into a typed slot).
-            if ($this->cellifySourceFlavor($sl->value) !== '') {
+            if ($deFlavor !== '') {
                 $si = $this->ssa->allocReg();
                 $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
                 $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
