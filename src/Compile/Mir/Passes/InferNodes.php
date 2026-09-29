@@ -1924,11 +1924,23 @@ trait InferNodes
         /** @var array<string, bool> $exitNames */
         $exitNames = $this->loopExitNames;
         if (!$node->byRef) { $exitNames[$node->valueVar] = true; }
-        if (!$node->byRef && $at->isArray() && isset($this->cellLoopLocals[$node->valueVar])
+        // The same for a name that ENTERS the loop a cell, and for the KEY
+        // binding: the loop merge keeps the entry's cell, so the slot must leave
+        // the body one — `$k = $m[1]; foreach ($h as $k => $x) {} $t = 1 + $k;`
+        // read the raw key's string pointer by tag.
+        if (!$node->byRef && $at->isArray() && $this->bindingExitsCell($node->valueVar)
             && self::bindBoxesByTag($elem, $this->enums) && $this->inferFnBody !== null
             && self::readsOutsideBinders($this->inferFnBody, $node->valueVar) > 0) {
             $this->plantBoxBack($node->body, $node->valueVar, $elem);
             $this->boxBackBeforeJumps($node->body, $node->valueVar, $elem, 0);
+        }
+        $kv = $node->keyVar;
+        if ($kv !== null && $kv !== $node->valueVar && $at->isArray() && $this->bindingExitsCell($kv)
+            && self::bindBoxesByTag($keyT, $this->enums) && $this->inferFnBody !== null
+            && self::readsOutsideBinders($this->inferFnBody, $kv) > 0) {
+            $exitNames[$kv] = true;
+            $this->plantBoxBack($node->body, $kv, $keyT);
+            $this->boxBackBeforeJumps($node->body, $kv, $keyT, 0);
         }
         $outerExitNames = $this->loopExitNames;
         $this->loopExitNames = $exitNames;

@@ -2324,6 +2324,15 @@ final class InferTypes implements Pass
         return $st;
     }
 
+    /** Does a foreach binding `$name` leave its loop in a cell slot — a name a
+     *  loop re-kinds, or one that enters this loop a cell? */
+    private function bindingExitsCell(string $name): bool
+    {
+        if (isset($this->cellLoopLocals[$name])) { return true; }
+        $t = $this->localTypes[$name] ?? null;
+        return $t !== null && $t->kind === Type::KIND_CELL;
+    }
+
     /** How many reads of local `$name` sit under `$n` outside every foreach
      *  that binds it (whose body reads its own binding). */
     private static function readsOutsideBinders(Node $n, string $name): int
