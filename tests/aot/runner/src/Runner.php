@@ -18,6 +18,10 @@ final class Runner
     private string $rootDir;
     private string $compiler;
     private string $preludeDir;
+    private string $limitLib;
+    private bool $isMusl;
+    private int $runTimeout;
+    private int $compileTimeout;
 
     public function __construct(
         private readonly string $dir,
@@ -29,6 +33,32 @@ final class Runner
         $this->rootDir = (string)realpath(dirname($this->dir, 2));
         $this->compiler = $this->rootDir . '/bin/manticore';
         $this->preludeDir = $this->rootDir . '/prelude';
+        $this->limitLib = $this->rootDir . '/tools/lib/limit.sh';
+        // Once, not per case: the libc does not change mid-run.
+        $this->isMusl = PHP_OS_FAMILY === 'Linux'
+            && str_contains(strtolower((string)@shell_exec('ldd --version 2>&1')), 'musl');
+        // run.sh's limits and knobs: a hung case must fail, not hang the suite.
+        $this->runTimeout = (int)(getenv('MC_RUN_TIMEOUT') ?: 60);
+        $this->compileTimeout = (int)(getenv('MC_COMPILE_TIMEOUT') ?: 300);
+    }
+
+    /** `$cmd` (already escaped) under tools/lib/limit.sh's mc_limit: its own
+     *  exit status, or 124 when `$secs` ran out. */
+    private function limited(int $secs, string $cmd): string
+    {
+        return sprintf(
+            'bash -c %s _ %s',
+            escapeshellarg('. ' . escapeshellarg($this->limitLib) . '; mc_limit ' . $secs . ' "$@"'),
+            $cmd
+        );
+    }
+
+    /** A case marked `@serial` never shares the machine with another (run.sh's rule). */
+    private function isSerial(string $src): bool
+    {
+        $rc = 1;
+        system('grep -rqs @serial ' . escapeshellarg($src), $rc);
+        return $rc === 0;
     }
 
     public function execute(): int
@@ -54,19 +84,25 @@ final class Runner
             return 1;
         }
 
-        $cases = $this->getCases($entries, $args);
+        $all = $this->getCases($entries, $args);
+        $cases = [];
+        $serial = [];
+        foreach ($all as $case) {
+            if ($this->isSerial($case['src'])) { $serial[] = $case; } else { $cases[] = $case; }
+        }
+        $poolSize = count($cases);
 
-        $totalFiles = count($cases);
+        $totalFiles = count($all);
         if ($totalFiles === 0) {
             echo Text::COLOR_YELLOW . "No test cases match the given filter.\n" . Text::ROW_RESET;
             return 0;
         }
 
         $cpuCount = $this->terminal->getCpuCount();
-        $numWorkers = $args->customWorkers !== null && $args->customWorkers > 0 ? $args->customWorkers : min(
+        $numWorkers = max(1, $args->customWorkers !== null && $args->customWorkers > 0 ? $args->customWorkers : min(
             $cpuCount,
-            $totalFiles
-        );
+            $poolSize
+        ));
         $cols = $this->terminal->getGridColumns();
         $startTime = microtime(true);
         $isTty = $this->terminal->isInteractiveTty();
@@ -125,7 +161,7 @@ final class Runner
                     @fflush($writeSock);
 
                     return $res;
-                }, 4);
+                }, 1);
             });
 
             fclose($writeSock);
@@ -133,7 +169,8 @@ final class Runner
         }
 
         // Coordinator (Worker 0): manages UI, receives IPC events, and runs its own slice
-        echo Text::COLOR_BOLD . "Manticore AOT Test Suite" . Text::ROW_RESET . " ({$totalFiles} tests, {$numWorkers} workers, -O{$args->opt})\n\n";
+        echo Text::COLOR_BOLD . "Manticore AOT Test Suite" . Text::ROW_RESET . " ({$totalFiles} tests, {$numWorkers} workers, "
+            . count($serial) . " serial, -O{$args->opt})\n\n";
 
         fflush(STDOUT);
         $readSocks = [];
@@ -208,12 +245,12 @@ final class Runner
             );
         };
 
-        async(function () use ($myCases, &$readSocks, $onResult, $totalFiles, $args, &$completed) {
+        async(function () use ($myCases, &$readSocks, $onResult, $poolSize, $args, &$completed) {
             // Task A: Background IPC Stream Listener
-            $listener = spawn(function () use (&$readSocks, $onResult, $totalFiles, &$completed) {
+            $listener = spawn(function () use (&$readSocks, $onResult, $poolSize, &$completed) {
                 $buffers = array_fill_keys(array_keys($readSocks), '');
 
-                while (!empty($readSocks) && $completed < $totalFiles) {
+                while (!empty($readSocks) && $completed < $poolSize) {
                     $active = false;
                     foreach ($readSocks as $workerKey => $sock) {
                         $chunk = @fread($sock, 8192);
@@ -269,7 +306,7 @@ final class Runner
 
                 $onResult($res);
                 return $res;
-            }, 4);
+            }, 1);
 
             $listener->await();
         });
@@ -295,6 +332,24 @@ final class Runner
             // Reaping child workers
         }
 
+        // `@serial` cases, alone, after the pool (they time things).
+        foreach ($serial as $k => $case) {
+            $testStart = microtime(true);
+            $res = $this->runTest($case['name'], $case['src'], $this->casesDir, $this->expectedDir,
+                $this->preludeDir, $this->compiler, $this->workDir, $args->opt);
+            $res->time = round((microtime(true) - $testStart) * 1000, 1);
+            $res->idx = $poolSize + $k;
+            $onResult($res);
+        }
+
+        // A worker that died reports nothing; its cases must still count as red.
+        foreach ($cases as $idx => $case) {
+            if (!isset($allResults[$idx])) {
+                $onResult(new Result(file: $case['name'], ok: false,
+                    error: 'No verdict (worker died)', skipped: false, idx: $idx));
+            }
+        }
+
         $failed = count($failures);
         $elapsed = round(microtime(true) - $startTime, 2);
 
@@ -310,6 +365,17 @@ final class Runner
                 echo ($failure['error'] ?? 'Unknown error') . "\n\n";
             }
         }
+
+        // run.sh's summary, byte for byte: gate.sh and CI read these two lines.
+        $failedNames = [];
+        $order = [];
+        foreach ($all as $pos => $case) { $order[$case['name']] = $pos; }
+        foreach ($failures as $failure) { $failedNames[] = $failure['file']; }
+        usort($failedNames, fn(string $a, string $b): int => ($order[$a] ?? 0) <=> ($order[$b] ?? 0));
+        echo "---\n";
+        printf("passed: %d  failed: %d  total: %d  [-O%s]\n", $passed, $failed, $totalFiles, $args->opt);
+        if ($failedNames !== []) { echo 'failures: ', implode(' ', $failedNames), "\n"; }
+        echo "\n";
 
         // 6. Final PHPUnit-style Summary Badge
         echo "Time: {$elapsed}s, Workers: {$numWorkers}\n\n";
@@ -343,11 +409,7 @@ final class Runner
 
         // Resolve OS/Libc-specific or default expected output
         $os = strtolower(PHP_OS_FAMILY);
-        $isMusl = false;
-        if ($os === 'linux') {
-            $lddOut = (string)@shell_exec('ldd --version 2>&1');
-            $isMusl = str_contains(strtolower($lddOut), 'musl');
-        }
+        $isMusl = $this->isMusl;
 
         $expectedPath = match (true) {
             $isMusl && file_exists(
@@ -371,14 +433,13 @@ final class Runner
 
         // 1. Compile test case
         $compileLog = $workDir . '/' . $safeName . '_' . $uniqueSuffix . '.compile.log';
-        $compileCmd = sprintf(
-            '%s compile -O%s %s -o %s > %s 2>&1',
+        $compileCmd = $this->limited($this->compileTimeout, sprintf(
+            '%s compile -O%s %s -o %s',
             escapeshellarg($compiler),
             escapeshellarg($opt),
             escapeshellarg($srcPath),
-            escapeshellarg($tmpBinary),
-            escapeshellarg($compileLog)
-        );
+            escapeshellarg($tmpBinary)
+        )) . ' > ' . escapeshellarg($compileLog) . ' 2>&1';
 
         system($compileCmd, $compileRc);
         $compileOutput = file_exists($compileLog) ? file_get_contents($compileLog) : '';
@@ -390,18 +451,15 @@ final class Runner
             return new Result(
                 file: $caseName,
                 ok: false,
-                error: "Compilation error (rc={$compileRc}):\n" . ($compileOutput ?: 'No compiler output'),
+                error: ($compileRc === 124 ? "Compilation error (TIMEOUT >{$this->compileTimeout}s):\n" : "Compilation error (rc={$compileRc}):\n")
+                    . ($compileOutput ?: 'No compiler output'),
                 skipped: false,
             );
         }
 
         // 2. Execute compiled binary (STDOUT strictly isolated from STDERR)
-        $runCmd = sprintf(
-            '%s > %s 2> %s',
-            escapeshellarg($tmpBinary),
-            escapeshellarg($tmpOut),
-            escapeshellarg($tmpErr)
-        );
+        $runCmd = $this->limited($this->runTimeout, escapeshellarg($tmpBinary))
+            . ' > ' . escapeshellarg($tmpOut) . ' 2> ' . escapeshellarg($tmpErr);
         system($runCmd, $runRc);
 
         $actualRaw = file_exists($tmpOut) ? (string)file_get_contents($tmpOut) : '';
@@ -415,7 +473,8 @@ final class Runner
             return new Result(
                 file: $caseName,
                 ok: false,
-                error: "Runtime error (rc={$runRc}):\n" . ($stderrRaw ?: $actualRaw),
+                error: ($runRc === 124 ? "Runtime error (TIMEOUT >{$this->runTimeout}s):\n" : "Runtime error (rc={$runRc}):\n")
+                    . ($stderrRaw ?: $actualRaw),
                 skipped: false,
             );
         }
@@ -571,6 +630,11 @@ final class Runner
             } else {
                 $nonTtyDotCount++;
                 echo $isFail ? Text::COLOR_RED . 'F' . Text::ROW_RESET : Text::COLOR_GREEN . '.' . Text::ROW_RESET;
+                if ($isFail) {
+                    // A CI log has no live panel: name the failure the moment it lands.
+                    $last = $failures[count($failures) - 1];
+                    echo "\n" . Text::COLOR_RED . 'FAIL ' . $res->file . '  (' . $last['reason'] . ')' . Text::ROW_RESET . "\n";
+                }
                 if ($nonTtyDotCount % $cols === 0 || $nonTtyDotCount === $totalFiles) {
                     $padLen = strlen((string)$totalFiles);
                     $pct = (int)round(($nonTtyDotCount / $totalFiles) * 100);

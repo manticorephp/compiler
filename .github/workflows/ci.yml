@@ -54,12 +54,14 @@ concurrency:
 
 jobs:
   linux:
-    name: linux-${{ matrix.tag }}
+    name: linux-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native-runner' || '' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     timeout-minutes: 120
+    # The native-runner row is an experiment: it reports, it never blocks.
+    continue-on-error: ${{ matrix.suite == 'native' }}
     strategy:
       fail-fast: false
       # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
@@ -84,6 +86,15 @@ jobs:
             runner: ubuntu-latest
             tag: alpine-amd64
             dockerfile: Dockerfile.alpine
+          # EXPERIMENTAL: the same arm64 build, but the suite runs through the
+          # native tests/aot/runner, streamed live — beside the run.sh row so the
+          # two can be compared for speed and readability. It reads the arm64
+          # compiler cache and never writes it, nor publishes a seed.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: arm64
+            dockerfile: Dockerfile
+            suite: native
     steps:
       - uses: actions/checkout@v4
 
@@ -159,13 +170,14 @@ jobs:
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+            -e MC_RUNNER=${{ matrix.suite || 'sh' }} \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
       # A red suite on top of a good build still leaves a compiler worth keeping —
       # save before the job's result is decided, not after.
       - name: Save the compiler cache
-        if: always() && hashFiles('ci-cache/bin/manticore') != ''
+        if: always() && matrix.suite != 'native' && hashFiles('ci-cache/bin/manticore') != ''
         uses: actions/cache/save@v4
         with:
           path: ci-cache
@@ -179,7 +191,7 @@ jobs:
       # Only on main, and only after the suite: a red suite never reaches here,
       # and what is published is therefore always a compiler that passed.
       - name: Publish this compiler as the seed
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.suite != 'native'
         run: |
           docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
           docker build -f tools/docker/Dockerfile.publish \
@@ -195,7 +207,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## linux-${{ matrix.tag }} — \`${GITHUB_SHA::12}\`"
+            echo "## linux-${{ matrix.tag }}${{ matrix.suite == 'native' && ' (native runner)' || '' }} — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
@@ -205,7 +217,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.tag }}
+          name: logs-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native' || '' }}
           path: ci-logs/
           if-no-files-found: warn
 
