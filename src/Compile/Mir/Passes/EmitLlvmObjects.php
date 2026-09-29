@@ -6610,8 +6610,19 @@ trait EmitLlvmObjects
         }
         $out .= $this->faPush($target, $n->srcArgc, $n->args);
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
-              . '(' . $argList . ")\n";
+        $sfaInline = null;
+        if ($target === 'SplFixedArray__offsetSet') {
+            $callReg = $this->ssa->allocReg();
+            $sfaInline = $this->fixedArraySetInline($argList,
+                '  ' . $callReg . ' = call i64 @manticore_' . $this->mangle($target) . '(' . $argList . ")\n",
+                $callReg, $reg);
+        }
+        if ($sfaInline !== null) {
+            $out .= $sfaInline;
+        } else {
+            $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
+                  . '(' . $argList . ")\n";
+        }
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $padDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);

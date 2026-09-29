@@ -5412,9 +5412,11 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
-     * FNV-1a 64-bit over the bytes — MUST match __mir_array_hash_str exactly
-     * (offset basis 0xCBF29CE484222325, prime 0x100000001B3, wrapping mul over
-     * the len bytes). PHP's `*` overflows to float, so the multiply goes through
+     * The string hash — MUST match __mir_array_hash_str and __mc_refl_hash
+     * exactly: FNV-1a (basis 0xCBF29CE484222325, prime 0x100000001B3) over
+     * little-endian 8-byte words, then the tail bytes, then murmur's fmix64.
+     * Byte-at-a-time FNV made every fresh multi-KB key (a php-cs-fixer regex,
+     * rebuilt per call) cost a multiply per byte. PHP's `*` overflows to float, so the multiply goes through
      * {@see mulmod64} (16-bit limb schoolbook) — exact under BOTH the Zend
      * bootstrap and the native self-build, which native i64 `mul` would also give.
      */
@@ -5422,10 +5424,24 @@ final class EmitLlvm implements EmitVisitor
     {
         $h = -3750763034362895579; // 0xCBF29CE484222325 as signed i64
         $n = \strlen($s);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $h = $h ^ \ord($s[$i]);
-            $h = $this->mulmod64($h, 1099511628211);
+        $i = 0;
+        // Eight bytes a step, little-endian — the runtime loads an unaligned i64.
+        while ($i + 8 <= $n) {
+            $w = 0;
+            for ($k = 7; $k >= 0; $k = $k - 1) { $w = ($w << 8) | \ord($s[$i + $k]); }
+            $h = $this->mulmod64($h ^ $w, 1099511628211);
+            $i = $i + 8;
         }
+        for (; $i < $n; $i = $i + 1) {
+            $h = $this->mulmod64($h ^ \ord($s[$i]), 1099511628211);
+        }
+        // fmix64: a word step leaves the LOW bits — the bucket index — blind to
+        // a word's upper bytes, so everything is folded down before use.
+        $h = $h ^ (($h >> 33) & 0x7FFFFFFF);
+        $h = $this->mulmod64($h, -49064778989728563);
+        $h = $h ^ (($h >> 33) & 0x7FFFFFFF);
+        $h = $this->mulmod64($h, -4265267296055464877);
+        $h = $h ^ (($h >> 33) & 0x7FFFFFFF);
         return $h;
     }
 
