@@ -3659,6 +3659,46 @@ final class EmitLlvm implements EmitVisitor
         }
     }
 
+    /**
+     * `$l <op> $r` over two cells into `$res`, with the two-INLINE-int case done
+     * in place (48-bit payloads, a result that stays inline) and only the rest
+     * calling `__manticore_tagged_<op>`: the loop counters of erased code —
+     * `$i + $itemsCount` in php-cs-fixer's insertSlices — paid a call per step.
+     */
+    private function taggedIntStepInline(string $op, string $l, string $r, string $res): string
+    {
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
+        $a = fn (): string => $this->ssa->allocReg();
+        $lh = $a(); $rh = $a(); $li = $a(); $ri = $a(); $both = $a();
+        $ls = $a(); $lv = $a(); $rs = $a(); $rv = $a(); $sum = $a(); $ss = $a(); $sb = $a(); $fit = $a(); $ok = $a();
+        $pl = $a(); $fw = $a(); $sw = $a();
+        $fastL = $this->ssa->allocLabel('tint.fast');
+        $slowL = $this->ssa->allocLabel('tint.slow');
+        $endL = $this->ssa->allocLabel('tint.end');
+        $out  = '  ' . $lh . ' = and i64 ' . $l . ", -281474976710656\n";
+        $out .= '  ' . $rh . ' = and i64 ' . $r . ", -281474976710656\n";
+        $out .= '  ' . $li . ' = icmp eq i64 ' . $lh . ', ' . $ih . "\n";
+        $out .= '  ' . $ri . ' = icmp eq i64 ' . $rh . ', ' . $ih . "\n";
+        $out .= '  ' . $both . ' = and i1 ' . $li . ', ' . $ri . "\n";
+        $out .= '  ' . $ls . ' = shl i64 ' . $l . ", 16\n  " . $lv . ' = ashr i64 ' . $ls . ", 16\n";
+        $out .= '  ' . $rs . ' = shl i64 ' . $r . ", 16\n  " . $rv . ' = ashr i64 ' . $rs . ", 16\n";
+        $out .= '  ' . $sum . ' = ' . $op . ' i64 ' . $lv . ', ' . $rv . "\n";
+        $out .= '  ' . $ss . ' = shl i64 ' . $sum . ", 16\n  " . $sb . ' = ashr i64 ' . $ss . ", 16\n";
+        $out .= '  ' . $fit . ' = icmp eq i64 ' . $sb . ', ' . $sum . "\n";
+        $out .= '  ' . $ok . ' = and i1 ' . $both . ', ' . $fit . "\n";
+        $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $out .= '  ' . $pl . ' = and i64 ' . $sum . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= '  ' . $fw . ' = or i64 ' . $pl . ', ' . $ih . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= '  ' . $sw . ' = call i64 @__manticore_tagged_' . $op . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $out .= '  ' . $res . ' = phi i64 [ ' . $fw . ', %' . $fastL . ' ], [ ' . $sw . ', %' . $slowL . " ]\n";
+        return $out;
+    }
+
     /** `$left <op> $right` where the result is a numeric (int|float) cell: box
      *  both operands to tagged cells and call the runtime helper, which promotes
      *  to float iff either is float and re-boxes a cell. */
@@ -3677,8 +3717,12 @@ final class EmitLlvm implements EmitVisitor
         $out .= $this->boxToCell($right->type);
         $r = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_' . $op
-              . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        if ($op === 'add' || $op === 'sub') {
+            $out .= $this->taggedIntStepInline($op, $l, $r, $reg);
+        } else {
+            $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_' . $op
+                  . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        }
         $out .= $this->dropOperandCell($left, $l);
         $out .= $this->dropOperandCell($right, $r);
         $this->lastValue = $reg;

@@ -6715,26 +6715,33 @@ trait EmitLlvmObjects
         $argList .= $this->lastPadArgs;
         $padDrops = $refSlotDrops . $this->lastPadDrops;
         $btName = '';
+        $btPushIr = '';
         if ($this->rt->needsBacktrace) {
             $btName = $n->class . '::' . $n->method;
-            $out .= $this->btPush($btName, $n->line);
+            $btPushIr = $this->btPush($btName, $n->line);
         }
-        $out .= $this->faPush($target, $n->srcArgc, $n->args);
+        $faIr = $this->faPush($target, $n->srcArgc, $n->args);
         $reg = $this->ssa->allocReg();
         $sfaInline = null;
-        if ($target === 'SplFixedArray__offsetSet') {
+        if ($target === 'SplFixedArray__offsetSet' && $faIr === '') {
+            // The in-place store calls nothing, so the backtrace frame belongs
+            // to the call arm alone: pushed and popped around every store it
+            // was 6% of php-cs-fixer's insertSlices loop.
             $callReg = $this->ssa->allocReg();
             $sfaInline = $this->fixedArraySetInline($argList,
-                '  ' . $callReg . ' = call i64 @manticore_' . $this->mangle($target) . '(' . $argList . ")\n",
+                $btPushIr
+                . '  ' . $callReg . ' = call i64 @manticore_' . $this->mangle($target) . '(' . $argList . ")\n"
+                . ($btName !== '' ? $this->btPop() : ''),
                 $callReg, $reg);
         }
         if ($sfaInline !== null) {
             $out .= $sfaInline;
         } else {
+            $out .= $btPushIr . $faIr;
             $out .= '  ' . $reg . ' = call i64 @manticore_' . $this->mangle($target)
                   . '(' . $argList . ")\n";
+            if ($btName !== '') { $out .= $this->btPop(); }
         }
-        if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $padDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
