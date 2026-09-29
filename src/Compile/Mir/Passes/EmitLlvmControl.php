@@ -393,18 +393,21 @@ trait EmitLlvmControl
         $subjName = '@fe.subj.' . (string)$this->iterCounter;
         $iterName = '@fe.it.' . (string)$this->iterCounter;
         $this->iterCounter = $this->iterCounter + 1;
+        $nsh = \count($this->feShared);
+        $sh = ($nsh > 0 && $this->feShared[$nsh - 1]->fe === $fe) ? $this->feShared[$nsh - 1] : null;
+        $shared = $sh !== null && $sh->aggOwnSlot !== '';
         $subjSlot = $this->ssa->allocReg();
-        $iterSlot = $this->ssa->allocReg();
+        $iterSlot = $shared ? $sh->aggIterSlot : $this->ssa->allocReg();
         $this->locals->slots[$subjName] = $subjSlot;
         $this->locals->slots[$iterName] = $iterSlot;
         $out  = '  ' . $subjSlot . " = alloca i64\n";
-        $out .= '  ' . $iterSlot . " = alloca i64\n";
+        if (!$shared) { $out .= '  ' . $iterSlot . " = alloca i64\n"; }
         $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $iterSlot . "\n";
         // Whether the slot holds getIterator()'s result (+1, the loop's to give
         // back) or the subject itself (borrowed).
-        $ownSlot = $this->ssa->allocReg();
-        $out .= '  ' . $ownSlot . " = alloca i1\n";
+        $ownSlot = $shared ? $sh->aggOwnSlot : $this->ssa->allocReg();
+        if (!$shared) { $out .= '  ' . $ownSlot . " = alloca i1\n"; }
         $out .= '  store i1 0, ptr ' . $ownSlot . "\n";
         $aggL = $this->ssa->allocLabel('fe.agg');
         $joinL = $this->ssa->allocLabel('fe.agg.end');
@@ -1199,9 +1202,11 @@ trait EmitLlvmControl
         if (!$sh->bodyEmitted) {
             $sh->bodyEmitted = true;
             $out .= $sh->bodyLabel . ":\n";
+            if ($sh->aggOwnSlot !== '') { $this->cf->pushAggIter($sh->aggIterSlot, true, $sh->aggOwnSlot); }
             $this->cf->enterLoop($sh->brkLabel, $sh->contLabel);
             $out .= $this->emitNode($fe->body);
             $this->cf->leave();
+            if ($sh->aggOwnSlot !== '') { $this->cf->popAggIter(); }
             $out .= '  br label %' . $sh->contLabel . "\n";
         }
         return $out;
@@ -1300,6 +1305,17 @@ trait EmitLlvmControl
             $this->feShared[] = new \Compile\Mir\ForeachSharedBody($fe, $armSlot,
                 $this->ssa->allocLabel('fe.sh.body'), $this->ssa->allocLabel('fe.sh.cont'),
                 $this->ssa->allocLabel('fe.sh.brk'));
+            // The shared body may be emitted inside ANY arm (the first to reach
+            // it), so the Traversable arm's owned iterator is registered for the
+            // body itself: its slots exist, flag clear, before every arm.
+            if ($this->hasTraversableClasses()) {
+                $sh = $this->feShared[\count($this->feShared) - 1];
+                $sh->aggIterSlot = $this->ssa->allocReg();
+                $sh->aggOwnSlot = $this->ssa->allocReg();
+                $out .= '  ' . $sh->aggIterSlot . " = alloca i64\n";
+                $out .= '  ' . $sh->aggOwnSlot . " = alloca i1\n";
+                $out .= '  store i1 0, ptr ' . $sh->aggOwnSlot . "\n";
+            }
             // The shared body joins every arm and dispatches back to each arm's
             // step, so no arm's entry block dominates its own loop blocks any
             // more — exactly the generator-resume situation. Run the arms in

@@ -2558,7 +2558,11 @@ trait EmitLlvmModule
                 $out .= $this->localSlotAlloca($this->frame->retExitSlot);
             }
             if ($this->frame->retExitArena === $this->frame->hasArena) {
-                return $out . $this->nullReturnedSlots($this->frame->retExempt)
+                // The shared epilogue runs where no loop is open, so the
+                // IteratorAggregate foreach iterators THIS return leaves are
+                // released here, on its own path.
+                return $out . $this->releaseAggItersLeftBy(0)
+                    . $this->nullReturnedSlots($this->frame->retExempt)
                     . '  store i64 ' . $valReg . ', ptr ' . $this->frame->retExitSlot . "\n"
                     . '  br label %' . $this->frame->retExitLabel . "\n" . $this->emitDeadLabel();
             }

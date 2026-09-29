@@ -320,6 +320,7 @@ trait EmitLlvmRuntime
         // is unchanged. The rc helpers read ptr-8 to self-route (magic ⇒
         // obj/vec rc@+8; else ⇒ string). Free always releases ptr-8.
         $magic = (string)\Compile\MemoryAbi::RC_TAG_MAGIC;
+        $out .= $this->ccWeakHooks();
         $out .= "define ptr @__mir_alloc_tagged(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(21);
@@ -329,7 +330,7 @@ trait EmitLlvmRuntime
         $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %base, i64 8\n";
-        if (\Compile\Debug::$autoGc && $this->rt->needsCc) {
+        if (\Compile\Debug::$autoGc) {
             // ⚠ The collection runs HERE, at an allocation, and NOT where the
             // root is buffered. Triggering it from `cc_add_root` means running a
             // full mark/scan from INSIDE `__mir_rc_release` — the inliner even
@@ -341,29 +342,13 @@ trait EmitLlvmRuntime
             // nothing is half-released, and the object being allocated is not
             // yet reachable. The `active` guard still stands, because collection
             // frees objects, which allocates nothing but does release children.
-            $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
-            $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
-            $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
-            $out .= "gccheck:\n";
-            $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
-            $out .= "  %gcthr = load i64, ptr @__manticore_cc_threshold\n";
-            $out .= "  %gchit = icmp sge i64 %gccnt, %gcthr\n";
-            $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+            // Through a WEAK hook, not per-module IR: this body is linkonce_odr,
+            // so it must read the same in a module without the collector — which
+            // then finds the hook null ({@see ccWeakHooks}).
+            $out .= "  %gcon = icmp ne ptr @__manticore_cc_autogc, null\n";
+            $out .= "  br i1 %gcon, label %gcrun, label %gcskip\n";
             $out .= "gcrun:\n";
-            $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
-            // php's gc_adjust_threshold: under 100 freed, +10000 (to 1e9); a
-            // productive run steps back toward the default. Every Token of a
-            // php-cs-fixer run is a root, and a fixed threshold re-walked the
-            // live token graph every 10000 of them.
-            $out .= "  %gcfew = icmp slt i64 %gcfreed, 100\n";
-            $out .= "  %gcup = add i64 %gcthr, 10000\n";
-            $out .= "  %gccap = icmp sgt i64 %gcup, 1000000000\n";
-            $out .= "  %gcupc = select i1 %gccap, i64 %gcthr, i64 %gcup\n";
-            $out .= "  %gcabove = icmp sgt i64 %gcthr, " . (string)\Compile\Debug::$autoGcThreshold . "\n";
-            $out .= "  %gcdn = sub i64 %gcthr, 10000\n";
-            $out .= "  %gcdnc = select i1 %gcabove, i64 %gcdn, i64 %gcthr\n";
-            $out .= "  %gcnew = select i1 %gcfew, i64 %gcupc, i64 %gcdnc\n";
-            $out .= "  store i64 %gcnew, ptr @__manticore_cc_threshold\n";
+            $out .= "  call void @__manticore_cc_autogc()\n";
             $out .= "  br label %gcskip\n";
             $out .= "gcskip:\n";
         }
@@ -762,6 +747,7 @@ trait EmitLlvmRuntime
                 $out .= '@.orc.rel = private unnamed_addr constant ['
                     . (string)(\strlen($orcRaw) + 2) . ' x i8] c"' . $orcRaw . '\0A\00", align 1' . "\n";
             }
+            $out .= $this->ccWeakHooks();
             $out .= "define void @__mir_rc_release(ptr %p) {\n";
             $out .= "entry:\n";
             $out .= "  %z = icmp eq ptr %p, null\n";
@@ -812,13 +798,14 @@ trait EmitLlvmRuntime
             $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
             $out .= "  br i1 %zero, label %free, label %keep\n";
             $out .= "keep:\n";
-            if ($this->rt->needsCc) {
-                // On `rc>0` after a dec the object MIGHT be a cycle root
-                // (Bacon-Rajan PossibleRoot). Only a module that carries the
-                // collector can register one — a module without it simply does
-                // not participate, which costs cycle collection, never safety.
-                $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
-            }
+            // On `rc>0` after a dec the object MIGHT be a cycle root (Bacon-Rajan
+            // PossibleRoot). The collector's hooks are WEAK: this body is
+            // linkonce_odr and must read the same in every module, and one
+            // without the collector finds them null ({@see ccWeakHooks}).
+            $out .= "  %ccon = icmp ne ptr @__manticore_cc_add_root, null\n";
+            $out .= "  br i1 %ccon, label %addroot, label %done\n";
+            $out .= "addroot:\n";
+            $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
             $out .= "  br label %done\n";
             $out .= "free:\n";
             // A *buffered* object is NOT freed here even at rc<=0 — the
@@ -829,25 +816,12 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %isbuf, label %blocked, label %dofree\n";
             $out .= "blocked:\n";
             $out .= $this->ccTrace('blocked', 'ptr %p');
-            if ($this->rt->needsCc) {
-                // DEAD NOW, not at the next collection: a buffered object used to
-                // wait here, with everything it held, until the root buffer hit
-                // its threshold — and every such wait made the collector walk it.
-                // Drop it as php does (destructor, children), keep only the SHELL
-                // for the buffer's sake ({@see MemoryAbi::COLOR_DEAD}). During a
-                // collection the collector still decides (its CollectRoots arm).
-                $out .= "  %bact = load i64, ptr @__manticore_cc_active\n";
-                $out .= "  %bbusy = icmp ne i64 %bact, 0\n";
-                $out .= "  br i1 %bbusy, label %done, label %bchk\n";
-                $out .= "bchk:\n";
-                $out .= "  %bcol = call i64 @__cc_color(ptr %p)\n";
-                $out .= "  %bdead = icmp eq i64 %bcol, " . (string)\Compile\MemoryAbi::COLOR_DEAD . "\n";
-                $out .= "  br i1 %bdead, label %done, label %bdrop\n";
-                $out .= "bdrop:\n";
-                $out .= "  call void @__cc_setcolor(ptr %p, i64 " . (string)\Compile\MemoryAbi::COLOR_DEAD . ")\n";
-                $out .= $this->profBump(25);
-                $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
-            }
+            // DEAD NOW, not at the next collection ({@see ccDropDeadIr}) — through
+            // the weak hook for the same linkonce_odr reason as the root push.
+            $out .= "  %ccdd = icmp ne ptr @__manticore_cc_drop_dead, null\n";
+            $out .= "  br i1 %ccdd, label %bdrop, label %done\n";
+            $out .= "bdrop:\n";
+            $out .= "  call void @__manticore_cc_drop_dead(ptr %p)\n";
             $out .= "  br label %done\n";
             $out .= "dofree:\n";
             if ($this->rt->needsCc) { $out .= $this->ccTrace('rcfree', 'ptr %p'); }
@@ -2459,6 +2433,98 @@ trait EmitLlvmRuntime
 
     /** Unique register suffix for the {@see ccTrace} function-pointer load. */
     private int $ccTraceSeq = 0;
+
+    /**
+     * The collector's entry points a SHARED runtime body calls. `__mir_rc_release`
+     * and `__mir_alloc_tagged` are linkonce_odr: a program links ONE copy, which
+     * may come from a module that carries no collector (the stdlib). Their bodies
+     * must therefore not depend on this module's features — they call these
+     * hooks, declared `extern_weak` where the collector is absent and null-tested
+     * before each call. A program with the collector anywhere resolves them.
+     */
+    private function ccWeakHooks(): string
+    {
+        if ($this->rt->needsCc || $this->ccHooksDeclared) { return ''; }
+        $this->ccHooksDeclared = true;
+        $this->weakSyms['__manticore_cc_add_root'] = true;
+        $this->weakSyms['__manticore_cc_drop_dead'] = true;
+        $this->weakSyms['__manticore_cc_autogc'] = true;
+        return "declare extern_weak void @__manticore_cc_add_root(ptr)\n"
+            . "declare extern_weak void @__manticore_cc_drop_dead(ptr)\n"
+            . "declare extern_weak void @__manticore_cc_autogc()\n";
+    }
+
+    /** {@see ccWeakHooks} declares the hooks once per module. */
+    private bool $ccHooksDeclared = false;
+
+    /**
+     * A buffered object whose count reached zero outside a collection: DEAD NOW,
+     * not at the next collection. It used to wait, with everything it held, until
+     * the root buffer hit its threshold — and every such wait made the collector
+     * walk it. Drop it as php does (destructor, children) and keep only the SHELL
+     * for the buffer's sake ({@see MemoryAbi::COLOR_DEAD}). During a collection
+     * the collector still decides (its CollectRoots arm).
+     */
+    private function ccDropDeadIr(): string
+    {
+        $DEAD = (string)\Compile\MemoryAbi::COLOR_DEAD;
+        $out = "define void @__manticore_cc_drop_dead(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %bact = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %bbusy = icmp ne i64 %bact, 0\n";
+        $out .= "  br i1 %bbusy, label %done, label %bchk\n";
+        $out .= "bchk:\n";
+        $out .= "  %bcol = call i64 @__cc_color(ptr %p)\n";
+        $out .= "  %bdead = icmp eq i64 %bcol, " . $DEAD . "\n";
+        $out .= "  br i1 %bdead, label %done, label %bdrop\n";
+        $out .= "bdrop:\n";
+        $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $DEAD . ")\n";
+        $out .= $this->profBump(25);
+        $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
+    /**
+     * Auto-collection at an allocation ({@see __mir_alloc_tagged}): when the root
+     * buffer reaches the adaptive threshold, collect, then adjust the threshold as
+     * php's gc_adjust_threshold does.
+     */
+    private function ccAutoGcIr(): string
+    {
+        $out = "define void @__manticore_cc_autogc() {\n";
+        $out .= "entry:\n";
+        $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+        $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
+        $out .= "gccheck:\n";
+        $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
+        $out .= "  %gcthr = load i64, ptr @__manticore_cc_threshold\n";
+        $out .= "  %gchit = icmp sge i64 %gccnt, %gcthr\n";
+        $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+        $out .= "gcrun:\n";
+        $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+        // php's gc_adjust_threshold: under 100 freed, +10000 (to 1e9); a
+        // productive run steps back toward the default. Every Token of a
+        // php-cs-fixer run is a root, and a fixed threshold re-walked the
+        // live token graph every 10000 of them.
+        $out .= "  %gcfew = icmp slt i64 %gcfreed, 100\n";
+        $out .= "  %gcup = add i64 %gcthr, 10000\n";
+        $out .= "  %gccap = icmp sgt i64 %gcup, 1000000000\n";
+        $out .= "  %gcupc = select i1 %gccap, i64 %gcthr, i64 %gcup\n";
+        $out .= "  %gcabove = icmp sgt i64 %gcthr, " . (string)\Compile\Debug::$autoGcThreshold . "\n";
+        $out .= "  %gcdn = sub i64 %gcthr, 10000\n";
+        $out .= "  %gcdnc = select i1 %gcabove, i64 %gcdn, i64 %gcthr\n";
+        $out .= "  %gcnew = select i1 %gcfew, i64 %gcupc, i64 %gcdnc\n";
+        $out .= "  store i64 %gcnew, ptr @__manticore_cc_threshold\n";
+        $out .= "  br label %gcskip\n";
+        $out .= "gcskip:\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -2495,6 +2561,9 @@ trait EmitLlvmRuntime
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         $this->libcExtra['free'] = 'declare void @free(ptr)';
+
+        $out .= $this->ccDropDeadIr();
+        $out .= $this->ccAutoGcIr();
 
         // ── header-word accessors (rc word @ ptr+8) ──
         $out .= "define i64 @__cc_color(ptr %s) {\n";
