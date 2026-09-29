@@ -1000,11 +1000,15 @@ trait EmitLlvmLocals
         // pass answered that by BLOCKING the source, which leaks everything it
         // held ({@see \Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns},
         // the one predicate both halves ask). Take the +1 here and the source
-        // keeps its release.
+        // keeps its release. A store THROUGH a reference (`$message = $out` on a
+        // by-ref parameter) is the same second holder: the referenced storage
+        // owns what it holds and OwnershipFlow does not manage the name, so the
+        // source's drop at exit freed the caller's new array.
         $aliasArrayLocal = !$copiedVecLocal && !$selfCopy
             && $v->kind === Node::KIND_LOAD_LOCAL
-            && \Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns(
-                $v->type, $sl->type, $this->enums, $this->classes);
+            && (\Compile\Mir\Passes\InsertMemoryOps::arrayAliasCoOwns(
+                    $v->type, $sl->type, $this->enums, $this->classes)
+                || ($v->type->isArray() && isset($this->locals->refLocals[$sl->name])));
         // `$saved = $this->map` — a snapshot of an array PROPERTY. Co-own it
         // (rc>1) so a later mutation of the property copy-on-writes instead of
         // clobbering the snapshot's shared buffer (the InferTypes localTypes
