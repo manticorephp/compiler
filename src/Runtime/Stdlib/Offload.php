@@ -10,7 +10,13 @@ function __mc_pool_start(int $submitFd, int $doneFd): int
     return -1;
 }
 
-// Op codes: a mirror of MemoryAbi::OFFLOAD_OP_* — keep identical.
+// The job record: a mirror of MemoryAbi::OFFLOAD_* — tools/check_offload_abi.php
+// fails on drift.
+const __MC_OFF_JOB_SIZE = 64;
+const __MC_OFF_OP = 0;
+const __MC_OFF_ARG0 = 8;
+const __MC_OFF_RET = 48;
+const __MC_OFF_ERR = 56;
 const __MC_OFF_NOP = 0;
 const __MC_OFF_FOPEN = 1;
 const __MC_OFF_FREAD = 2;
@@ -29,6 +35,8 @@ const __MC_OFF_MKDIR = 14;
 const __MC_OFF_RMDIR = 15;
 const __MC_OFF_GETADDRINFO = 16;
 const __MC_OFF_OPEN = 17;
+const __MC_OFF_READDIR_NAME = 18;
+const __MC_OFF_SCANDIR = 19;
 
 /** True when a covered call should go through {@see __mc_offload()}. */
 function __mc_offload_active(): bool
@@ -38,8 +46,8 @@ function __mc_offload_active(): bool
 
 /**
  * Run one covered libc call on the pool and park the calling task until it is
- * done. The result is the C return widened to int (pointers as addresses);
- * errno via {@see __mc_offload_errno()}. With no scheduler it runs inline.
+ * done. The result is the C return widened to int (pointers as addresses).
+ * With no scheduler it runs inline.
  */
 function __mc_offload(int $op, int $a0 = 0, int $a1 = 0, int $a2 = 0, int $a3 = 0, int $a4 = 0): int
 {
@@ -50,18 +58,13 @@ function __mc_offload(int $op, int $a0 = 0, int $a1 = 0, int $a2 = 0, int $a3 = 
     return $f($op, $a0, $a1, $a2, $a3, $a4);
 }
 
-function __mc_offload_errno(): int
-{
-    return \Runtime\AsyncHook::offloadErrno();
-}
-
 /**
  * The synchronous twin of the pool worker: the same call per op, the same
  * argument slots, the same widened result. Taken when the pool cannot start.
  */
 function __mc_offload_inline(int $op, int $a0 = 0, int $a1 = 0, int $a2 = 0, int $a3 = 0, int $a4 = 0): int
 {
-    $ret = match ($op) {
+    return match ($op) {
         __MC_OFF_NOP => $a0,
         __MC_OFF_FOPEN => \ptr_to_int(\Runtime\Libc\fopen(
             \cstr_to_str(\int_to_ptr($a0)), \cstr_to_str(\int_to_ptr($a1)))),
@@ -83,15 +86,132 @@ function __mc_offload_inline(int $op, int $a0 = 0, int $a1 = 0, int $a2 = 0, int
         __MC_OFF_GETADDRINFO => \Runtime\Libc\sys_getaddrinfo_ptr(
             \int_to_ptr($a0), \int_to_ptr($a1), \int_to_ptr($a2), \int_to_ptr($a3)),
         __MC_OFF_OPEN => \Runtime\Libc\sys_open(\cstr_to_str(\int_to_ptr($a0)), $a1, $a2),
+        __MC_OFF_READDIR_NAME => \__mc_readdir_name_inline($a0, $a1, $a2),
+        __MC_OFF_SCANDIR => \__mc_scandir_inline($a0, $a1),
         default => -1,
     };
-    \Runtime\AsyncHook::setOffloadErrno(\__mc_errno());
-    return $ret;
+}
+
+/** The inline twin of the worker's READDIR_NAME: the next name of $dir copied into $buf. */
+function __mc_readdir_name_inline(int $dir, int $buf, int $cap): int
+{
+    $e = \Runtime\Libc\sys_readdir(\int_to_ptr($dir));
+    if ($e === null) {
+        return -1;
+    }
+    $name = \cstr_to_str(\ptr_offset($e, \__mc_dirent_name_off()));
+    $n = \strlen($name);
+    if ($n > $cap - 1) {
+        $n = $cap - 1;
+    }
+    \Runtime\Libc\memcpy(\int_to_ptr($buf), \int_to_ptr(\str_bytes($name)), $n);
+    \poke_i8(\int_to_ptr($buf), $n, 0);
+    return $n;
+}
+
+/** The inline twin of the worker's SCANDIR: every name, NUL-ended, in a malloc'd buffer stored at $slot. */
+function __mc_scandir_inline(int $path, int $slot): int
+{
+    $d = \Runtime\Libc\sys_opendir(\cstr_to_str(\int_to_ptr($path)));
+    if ($d === null) {
+        return -1;
+    }
+    $off = \__mc_dirent_name_off();
+    $all = '';
+    while (true) {
+        $e = \Runtime\Libc\sys_readdir($d);
+        if ($e === null) {
+            break;
+        }
+        $all .= \cstr_to_str(\ptr_offset($e, $off)) . "\0";
+    }
+    \Runtime\Libc\sys_closedir($d);
+    $n = \strlen($all);
+    $buf = \Runtime\Libc\malloc($n > 0 ? $n : 1);
+    if ($buf === null) {
+        return -1;
+    }
+    \Runtime\Libc\memcpy($buf, \int_to_ptr(\str_bytes($all)), $n);
+    \poke_i64(\int_to_ptr($slot), 0, \ptr_to_int($buf));
+    return $n;
+}
+
+/** A job record for the pool worker, laid out per MemoryAbi::OFFLOAD_*. */
+function __mc_offload_job(int $op, int $a0, int $a1, int $a2, int $a3, int $a4): \Ffi\Ptr
+{
+    $job = \Runtime\Libc\calloc(1, __MC_OFF_JOB_SIZE);
+    \poke_i64($job, __MC_OFF_OP, $op);
+    \poke_i64($job, __MC_OFF_ARG0, $a0);
+    \poke_i64($job, __MC_OFF_ARG0 + 8, $a1);
+    \poke_i64($job, __MC_OFF_ARG0 + 16, $a2);
+    \poke_i64($job, __MC_OFF_ARG0 + 24, $a3);
+    \poke_i64($job, __MC_OFF_ARG0 + 32, $a4);
+    return $job;
+}
+
+/** The widened C result the worker stored into $job. */
+function __mc_offload_job_ret(\Ffi\Ptr $job): int
+{
+    return \peek_i64($job, __MC_OFF_RET);
+}
+
+/** The libc call behind an op code, for the scheduler's task report. */
+function __mc_offload_op_name(int $op): string
+{
+    return match ($op) {
+        __MC_OFF_NOP => 'nop',
+        __MC_OFF_FOPEN => 'fopen',
+        __MC_OFF_FREAD => 'fread',
+        __MC_OFF_FWRITE => 'fwrite',
+        __MC_OFF_FFLUSH => 'fflush',
+        __MC_OFF_FCLOSE => 'fclose',
+        __MC_OFF_FSYNC => 'fsync',
+        __MC_OFF_STAT => 'stat',
+        __MC_OFF_LSTAT => 'lstat',
+        __MC_OFF_OPENDIR => 'opendir',
+        __MC_OFF_READDIR, __MC_OFF_READDIR_NAME => 'readdir',
+        __MC_OFF_CLOSEDIR => 'closedir',
+        __MC_OFF_UNLINK => 'unlink',
+        __MC_OFF_RENAME => 'rename',
+        __MC_OFF_MKDIR => 'mkdir',
+        __MC_OFF_RMDIR => 'rmdir',
+        __MC_OFF_GETADDRINFO => 'getaddrinfo',
+        __MC_OFF_OPEN => 'open',
+        __MC_OFF_SCANDIR => 'scandir',
+        default => 'op ' . (string)$op,
+    };
+}
+
+/** "dev:ino" of the pipe open on $fd; '' when $fd is not an open pipe. */
+function __mc_fd_pipe_id(int $fd): string
+{
+    $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
+    if ($buf === null) {
+        return '';
+    }
+    $id = '';
+    if (\Runtime\Libc\sys_fstat($fd, $buf) === 0 && (\__mc_stat_field($buf, 0, 1) & 0170000) === 0010000) {
+        $id = (string)\__mc_stat_field($buf, 12, 13) . ':' . (string)\peek_i64($buf, \__mc_stat_off(4));
+    }
+    \Runtime\Libc\free($buf);
+    return $id;
 }
 
 function posix_mkfifo(string $filename, int $permissions): bool
 {
     return \Runtime\Libc\sys_mkfifo($filename, $permissions) === 0;
+}
+
+/**
+ * A pooled call's cancellation point: taken where the call holds nothing yet, so
+ * a cancelled task stops before its job instead of after it.
+ */
+function __mc_offload_cancel_point(): void
+{
+    $c = \Runtime\AsyncHook::cancelPoint();
+    if ($c !== null) {
+        $c();
+    }
 }
 
 /**

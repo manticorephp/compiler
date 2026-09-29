@@ -1,6 +1,7 @@
 <?php
 // A task cancelled while its job is in flight is not resumed until the job
 // completes; it then settles as cancelled. The loop keeps running meanwhile.
+// A pooled call is itself a cancellation point before it holds anything.
 
 use function Async\async;
 use function Async\spawn;
@@ -38,5 +39,18 @@ async(function () use ($fifo) {
     $w->await();
     $s = $t->join();
     echo "settled: ", $s->error instanceof Async\CancelledException ? "cancelled" : "other", "\n";
+
+    // A loop of pooled calls with no other suspend point: each pooled call that
+    // holds nothing yet is a cancellation point, so the cancel lands at the next one.
+    $loop = spawn(function () {
+        while (true) {
+            clearstatcache();
+            is_dir('/');
+        }
+    });
+    delay(0.05);
+    $loop->cancel();
+    $s = $loop->join();
+    echo "stat loop: ", $s->error instanceof Async\CancelledException ? "cancelled" : "other", "\n";
 });
 unlink($fifo);

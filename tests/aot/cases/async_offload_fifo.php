@@ -17,6 +17,9 @@ async(function () use ($fifo) {
         for ($i = 1; $i <= 3; $i++) {
             delay(0.02);
             echo "tick $i\n";
+            if ($i === 1) {
+                echo "dump names the parked call: ", str_contains(Async\dump(), 'offload op=fopen') ? 'yes' : 'no', "\n";
+            }
         }
     });
     $writer = spawn(function () use ($fifo) {

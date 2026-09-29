@@ -21,6 +21,7 @@ function mkdir(string $directory, int $permissions = 0777, bool $recursive = fal
 {
     if (!$recursive) {
         if (\__mc_offload_active()) {
+            \__mc_offload_cancel_point();
             return \__mc_offload_path(__MC_OFF_MKDIR, $directory, $permissions) === 0;
         }
         return \Runtime\Libc\sys_mkdir($directory, $permissions) === 0;
@@ -43,6 +44,7 @@ function mkdir(string $directory, int $permissions = 0777, bool $recursive = fal
             continue;
         }
         if (\__mc_offload_active()) {
+            \__mc_offload_cancel_point();
             if (\__mc_offload_path(__MC_OFF_MKDIR, $cur, $permissions) !== 0) {
                 return false;
             }
@@ -59,6 +61,7 @@ function mkdir(string $directory, int $permissions = 0777, bool $recursive = fal
 function rmdir(string $directory): bool
 {
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         return \__mc_offload_path(__MC_OFF_RMDIR, $directory) === 0;
     }
     return \Runtime\Libc\sys_rmdir($directory) === 0;
@@ -68,6 +71,7 @@ function rmdir(string $directory): bool
 function rename(string $from, string $to): bool
 {
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         return \__mc_offload_path2(__MC_OFF_RENAME, $from, $to) === 0;
     }
     return \Runtime\Libc\sys_rename($from, $to) === 0;

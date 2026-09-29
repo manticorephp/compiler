@@ -932,7 +932,11 @@ final class MemoryAbi
 
     // ─── Blocking-offload job record ──────────────────────────────
 
-    /** Blocking-offload job record, shared by the IR pool worker and stdlib Offload.php. */
+    /**
+     * Blocking-offload job record, shared by the IR pool worker and stdlib Offload.php
+     * (mirrored there as `__MC_OFF_*`). A new op needs the worker arm, the mirror and
+     * the inline twin; `php tools/check_offload_abi.php` fails on any drift.
+     */
     public const OFFLOAD_JOB_SIZE = 64;
     public const OFFLOAD_OP = 0;
     public const OFFLOAD_ARG0 = 8;
@@ -956,4 +960,6 @@ final class MemoryAbi
     public const OFFLOAD_OP_RMDIR = 15;
     public const OFFLOAD_OP_GETADDRINFO = 16;
     public const OFFLOAD_OP_OPEN = 17;
+    public const OFFLOAD_OP_READDIR_NAME = 18;
+    public const OFFLOAD_OP_SCANDIR = 19;
 }

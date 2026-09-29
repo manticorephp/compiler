@@ -63,24 +63,20 @@ final class AsyncHook
     /**
      * The blocking-offload pool: `fn(int $op, int $a0, …, int $a4): int` runs
      * one covered libc call on a worker thread and parks the calling task until it
-     * is done. $offErrno is that call's errno, written before the task resumes.
+     * is done. `$cancelPoint: fn(): void` raises the running task's pending
+     * cancellation — a covered call that holds nothing yet calls it first.
      */
     public static ?\Closure $blocking = null;
-    public static int $offErrno = 0;
+    public static ?\Closure $cancelPoint = null;
 
-    public static function installBlocking(?\Closure $blocking): void
+    public static function installBlocking(?\Closure $blocking, ?\Closure $cancelPoint = null): void
     {
         self::$blocking = $blocking;
+        self::$cancelPoint = $cancelPoint;
     }
 
     public static function blocker(): ?\Closure { return self::$blocking; }
-
-    public static function setOffloadErrno(int $errno): void
-    {
-        self::$offErrno = $errno;
-    }
-
-    public static function offloadErrno(): int { return self::$offErrno; }
+    public static function cancelPoint(): ?\Closure { return self::$cancelPoint; }
 
     /**
      * Pool jobs in flight on one handle: `$idleWait: fn(\Resource): void` parks the
@@ -121,6 +117,7 @@ final class AsyncHook
         self::$dnsGet = null;
         self::$dnsPut = null;
         self::$blocking = null;
+        self::$cancelPoint = null;
         self::$idleWait = null;
         self::$idleWake = null;
     }

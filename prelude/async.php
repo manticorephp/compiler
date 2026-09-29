@@ -444,7 +444,7 @@ namespace Async {
             } elseif ($this->state === self::FAILED) {
                 $what = 'failed(' . ($this->error === null ? '?' : \get_class($this->error)) . ')';
             } elseif ($this->offloadOp >= 0) {
-                $what = 'offload op=' . (string)$this->offloadOp;
+                $what = 'offload op=' . \__mc_offload_op_name($this->offloadOp);
             } elseif ($this->ioFd >= 0) {
                 $what = ($this->ioWrite ? 'io-write fd=' : 'io-read fd=') . (string)$this->ioFd
                       . ($this->timerActive ? ' +deadline' : '');
@@ -1697,6 +1697,9 @@ namespace Async {
          * The blocking-offload pool. Per PROCESS, not per run: its threads and pipes
          * outlive an async() run; a fork's child (threads do not survive fork)
          * closes the inherited pipe ends and builds its own on first use.
+         * $poolIds holds each pipe end's identity (\__mc_fd_pipe_id) from creation:
+         * a child closes an inherited number only while it still names that pipe,
+         * never a file a daemonizing child has since opened on the same number.
          */
         private static int $poolPid = 0;
         private static int $poolSubR = -1;
@@ -1704,6 +1707,8 @@ namespace Async {
         private static int $poolDoneR = -1;
         private static int $poolDoneW = -1;
         private static int $poolThreads = 0;
+        /** @var array<int, string> fd → pipe identity */
+        private static array $poolIds = [];
         /** True when the pool could not start (pipe or pthread failure): run inline. */
         private static bool $poolInline = false;
         /** @var array<int, Task> job address → the task parked on it */
@@ -1996,6 +2001,7 @@ namespace Async {
                 function (int $op, int $a0, int $a1, int $a2, int $a3, int $a4): int {
                     return $this->offload($op, $a0, $a1, $a2, $a3, $a4);
                 },
+                function (): void { $this->checkCancel(); },
             );
             \Runtime\AsyncHook::installIdle(
                 function (\Resource $r): void { $this->waitPoolIdle($r); },
@@ -3034,9 +3040,10 @@ namespace Async {
             $pid = \getmypid();
             if (self::$poolPid === $pid) { return !self::$poolInline; }
             if (self::$poolPid !== 0) {
-                foreach ([self::$poolSubR, self::$poolSubmit, self::$poolDoneR, self::$poolDoneW] as $old) {
-                    if ($old >= 0) { \Runtime\Libc\sys_close($old); }
+                foreach (self::$poolIds as $old => $id) {
+                    if (\__mc_fd_pipe_id($old) === $id) { \Runtime\Libc\sys_close($old); }
                 }
+                self::$poolIds = [];
                 self::$poolSubR = -1;
                 self::$poolSubmit = -1;
                 self::$poolDoneR = -1;
@@ -3086,6 +3093,8 @@ namespace Async {
             self::$poolDoneR = $doneR;
             self::$poolDoneW = $doneW;
             self::$poolThreads = $started;
+            self::$poolIds = [];
+            foreach ([$subR, $subW, $doneR, $doneW] as $fd) { self::$poolIds[$fd] = \__mc_fd_pipe_id($fd); }
             self::$poolInline = false;
             return true;
         }
@@ -3103,13 +3112,7 @@ namespace Async {
                 return \__mc_offload_inline($op, $a0, $a1, $a2, $a3, $a4);
             }
             $me = $this->running;
-            $job = \Runtime\Libc\calloc(1, 64);
-            \poke_i64($job, 0, $op);
-            \poke_i64($job, 8, $a0);
-            \poke_i64($job, 16, $a1);
-            \poke_i64($job, 24, $a2);
-            \poke_i64($job, 32, $a3);
-            \poke_i64($job, 40, $a4);
+            $job = \__mc_offload_job($op, $a0, $a1, $a2, $a3, $a4);
             $addr = \ptr_to_int($job);
             $rec = \Runtime\Libc\calloc(1, 8);
             \poke_i64($rec, 0, $addr);
@@ -3135,8 +3138,7 @@ namespace Async {
                 $me->shield = $me->shield - 1;
                 $me->offloadOp = -1;
             }
-            $ret = \peek_i64($job, 48);
-            \Runtime\AsyncHook::setOffloadErrno(\peek_i64($job, 56));
+            $ret = \__mc_offload_job_ret($job);
             \Runtime\Libc\free($job);
             return $ret;
         }

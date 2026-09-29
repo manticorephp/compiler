@@ -11,6 +11,9 @@ function pooled_read(): string {
 echo "parent: ", pooled_read(), "\n";
 $codes = [];
 for ($i = 0; $i < 2; $i++) {
+    // stdout is a buffered FILE* here (php's CLI writes it straight through) and
+    // pcntl_fork() does not flush it yet: without this the child inherits the
+    // unflushed "parent:" line and prints it a second time.
     fflush(STDOUT);
     $pid = pcntl_fork();
     if ($pid === 0) {

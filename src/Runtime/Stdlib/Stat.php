@@ -173,6 +173,7 @@ function __mc_stat_into(string $path, \Ffi\Ptr $buf, bool $link = false): bool
 /** st_mode of $path, or -1 when it cannot be stat'ed. */
 function __mc_stat_mode(string $path, bool $link = false): int
 {
+    \__mc_offload_cancel_point();
     $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
     if ($buf === null) {
         return -1;
@@ -195,6 +196,7 @@ function __mc_stat_mode(string $path, bool $link = false): int
  */
 function __mc_stat_at(string $path, int $off, int $width = 8): int|false
 {
+    \__mc_offload_cancel_point();
     $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
     if ($buf === null) {
         return false;
@@ -263,6 +265,7 @@ function __mc_stat_buf_array(\Ffi\Ptr $buf): array
  */
 function stat(string $filename): array|false
 {
+    \__mc_offload_cancel_point();
     $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
     if ($buf === null) {
         return false;
@@ -282,6 +285,7 @@ function stat(string $filename): array|false
  */
 function lstat(string $filename): array|false
 {
+    \__mc_offload_cancel_point();
     $buf = \Runtime\Libc\calloc(\__mc_stat_off(11) + 64, 1);
     if ($buf === null) {
         return false;
@@ -514,6 +518,7 @@ function __mc_dirent_name_off(): int
 function opendir(string $directory)
 {
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         $dAddr = \__mc_offload_path(__MC_OFF_OPENDIR, $directory);
         if ($dAddr === 0) {
             return false;
@@ -538,11 +543,13 @@ function opendir(string $directory)
 function readdir(\Resource $dir_handle)
 {
     if (\__mc_res_pooled($dir_handle)) {
-        $eAddr = \__mc_res_offload($dir_handle, __MC_OFF_READDIR, $dir_handle->addr);
-        if ($eAddr === 0) {
-            return false;
-        }
-        return \cstr_to_str(\ptr_offset(\int_to_ptr($eAddr), \__mc_dirent_name_off()));
+        // The name is copied inside the job: a sibling's readdir on the same DIR
+        // may overwrite the dirent before this task resumes.
+        $buf = \Runtime\Libc\malloc(1040);
+        $n = \__mc_res_offload($dir_handle, __MC_OFF_READDIR_NAME, $dir_handle->addr, \ptr_to_int($buf), 1040);
+        $name = $n < 0 ? false : \cstr_to_str($buf);
+        \Runtime\Libc\free($buf);
+        return $name;
     }
     $e = \Runtime\Libc\sys_readdir(\int_to_ptr($dir_handle->addr));
     if ($e === null) {
@@ -609,20 +616,23 @@ function __mc_strcmp_bytes(string $a, string $b): int
 function scandir(string $directory, int $sorting_order = 0): array|false
 {
     if (\__mc_offload_active()) {
-        $dAddr = \__mc_offload_path(__MC_OFF_OPENDIR, $directory);
-        if ($dAddr === 0) {
+        \__mc_offload_cancel_point();
+        $slot = \Runtime\Libc\calloc(1, 8);
+        $n = \__mc_offload_path(__MC_OFF_SCANDIR, $directory, \ptr_to_int($slot));
+        if ($n < 0) {
+            \Runtime\Libc\free($slot);
             return false;
         }
-        $off = \__mc_dirent_name_off();
+        $names = \int_to_ptr(\peek_i64($slot, 0));
+        \Runtime\Libc\free($slot);
         $out = [];
-        while (true) {
-            $eAddr = \__mc_offload(__MC_OFF_READDIR, $dAddr);
-            if ($eAddr === 0) {
-                break;
-            }
-            $out[] = \cstr_to_str(\ptr_offset(\int_to_ptr($eAddr), $off));
+        $at = 0;
+        while ($at < $n) {
+            $name = \cstr_to_str(\ptr_offset($names, $at));
+            $out[] = $name;
+            $at = $at + \strlen($name) + 1;
         }
-        \__mc_offload(__MC_OFF_CLOSEDIR, $dAddr);
+        \Runtime\Libc\free($names);
         return \__mc_scandir_sort($out, $sorting_order);
     }
     $d = \Runtime\Libc\sys_opendir($directory);

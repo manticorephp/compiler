@@ -126,6 +126,7 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
         return false;
     }
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, \__mc_file_path($path), "rb");
         if ($fpAddr === 0) {
             return false;
@@ -176,6 +177,7 @@ function file_put_contents(string $path, string $data, int $flags = 0): int|fals
 {
     $mode = ($flags & 8) !== 0 ? "ab" : "wb";
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, $path, $mode);
         if ($fpAddr === 0) {
             return false;
@@ -1466,6 +1468,7 @@ function fopen(string $filename, string $mode)
         return false;   // no wrapper for it (yet) — php: "Unable to find the wrapper"
     }
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, \__mc_file_path($filename), $mode);
         if ($fpAddr === 0) {
             return false;
@@ -1870,6 +1873,7 @@ function is_readable(string $path): bool
 function unlink(string $path): bool
 {
     if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
         return \__mc_offload_path(__MC_OFF_UNLINK, $path) === 0;
     }
     return \Runtime\Libc\sys_unlink($path) === 0;
