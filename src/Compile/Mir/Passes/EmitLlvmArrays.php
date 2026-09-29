@@ -754,7 +754,14 @@ trait EmitLlvmArrays
 
     private function emitArrayLitValue(Node $value, bool $cellVals, bool $inShape = false): string
     {
+        // A value boxed into a CELL is owned by that cell, and the argument's
+        // cell release drops it — nested literals and all. Collecting a nested
+        // literal's elements for the call's post-release as well freed them
+        // twice (`array_replace_recursive(['x' => ['y' => ['z' => [...]]]], …)`).
+        $wasCollect = $this->litElemCollect;
+        if ($cellVals) { $this->litElemCollect = false; }
         $out = $this->emitNode($value);
+        $this->litElemCollect = $wasCollect;
         $shallow = $cellVals && $inShape && $value->type->isArray()
             && $this->hintDecodesExactly($value->type);
         if ($shallow) {
