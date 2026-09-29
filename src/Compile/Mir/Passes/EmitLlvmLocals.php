@@ -778,16 +778,26 @@ trait EmitLlvmLocals
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->coerceToPtr();
             $deSrc = $this->lastValue;
+            // The rebuild MOVES each value out of its source without a reference
+            // of its own. A source that keeps its elements — a local, a borrowed
+            // read — is copied first (`__mir_array_copy` adopts every element),
+            // and the rebuild moves out of the copy: `$input = $out;` through
+            // array_splice's by-ref parameter left `$out`'s elements owned twice.
+            $ownedSrc = $this->cellifySourceFlavor($sl->value) !== '';
+            if (!$ownedSrc) {
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $deSrc . ")\n";
+                $deSrc = $cp;
+                $this->lastValue = $cp;
+                $this->lastValueType = 'ptr';
+            }
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
-            // The rebuild MOVES each value out of the source without a reference
-            // of its own, so an owned temp source leaves as a bare buffer — it
+            // …and the moved-out source leaves as a bare buffer — an owned temp
             // was never freed at all (`$t = array_values(…)` into a typed slot).
-            if ($this->cellifySourceFlavor($sl->value) !== '') {
-                $si = $this->ssa->allocReg();
-                $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
-                $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
-            }
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
             if (isset($this->locals->globalBacked[$sl->name])) {
                 // The rebuild is a fresh +1 the cell takes outright; only the
                 // predecessor is owed ({@see globalCellOwnIr}).
