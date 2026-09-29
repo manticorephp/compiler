@@ -2936,6 +2936,8 @@ final class InferTypes implements Pass
     {
         $types = [];
         $first = null;
+        $offset = null;
+        $sameOffset = true;
         foreach ($this->classes as $cd) {
             if ($cd->name === $base) { continue; }
             if (!$this->classExtends($cd->name, $base)) { continue; }
@@ -2943,15 +2945,28 @@ final class InferTypes implements Pass
                 $t = $cd->propertyTypes[$prop];
                 if ($first === null) { $first = $t; }
                 $types[] = $t;
+                $off = $cd->propertyOffset($prop);
+                if ($offset === null) { $offset = $off; } elseif ($off !== $offset) { $sameOffset = false; }
             }
         }
         if ($first === null) { return null; }
+        // Subclasses that lay the property out differently, or type it
+        // differently, have no one static read: the value is whatever the
+        // object in hand holds. A CELL, read per class_id
+        // ({@see EmitLlvmObjects::emitRawPropByClassId}). Borrowing the first
+        // holder's type read `$expr->value` of a Spread as IntLiteral's int —
+        // an object handed on without its count, freed twice.
+        if (!$sameOffset) { return Type::cell(); }
         $allObj = true;
+        $allSame = true;
+        $firstS = $first->toString();
         foreach ($types as $t) {
-            if ($t->kind !== Type::KIND_OBJ) { $allObj = false; break; }
+            if ($t->kind !== Type::KIND_OBJ) { $allObj = false; }
+            if ($t->toString() !== $firstS) { $allSame = false; }
         }
+        if ($allSame) { return $first; }
         if ($allObj) { return $this->objUnion($types); }
-        return $first;
+        return Type::cell();
     }
 
     /**
