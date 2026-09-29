@@ -93,3 +93,42 @@ function posix_mkfifo(string $filename, int $permissions): bool
 {
     return \Runtime\Libc\sys_mkfifo($filename, $permissions) === 0;
 }
+
+/**
+ * {@see __mc_offload()} for an op whose first argument is a path: the pool gets a
+ * C copy of the string, freed once the job is done — never the PHP string itself.
+ */
+function __mc_offload_path(int $op, string $path, int $a1 = 0): int
+{
+    $c = \Runtime\Libc\strdup($path);
+    $r = \__mc_offload($op, \ptr_to_int($c), $a1);
+    \Runtime\Libc\free($c);
+    return $r;
+}
+
+/** {@see __mc_offload_path()} for an op taking two strings (fopen, rename). */
+function __mc_offload_path2(int $op, string $a, string $b): int
+{
+    $ca = \Runtime\Libc\strdup($a);
+    $cb = \Runtime\Libc\strdup($b);
+    $r = \__mc_offload($op, \ptr_to_int($ca), \ptr_to_int($cb));
+    \Runtime\Libc\free($ca);
+    \Runtime\Libc\free($cb);
+    return $r;
+}
+
+/** fwrite(3) of $len bytes of $data to the FILE* at $fp, from a private copy. */
+function __mc_offload_fwrite(string $data, int $len, int $fp): int
+{
+    if ($len <= 0) {
+        return 0;
+    }
+    $copy = \Runtime\Libc\malloc($len);
+    if ($copy === null) {
+        return 0;
+    }
+    \Runtime\Libc\memcpy($copy, \int_to_ptr(\str_bytes($data)), $len);
+    $n = \__mc_offload(__MC_OFF_FWRITE, \ptr_to_int($copy), $len, $fp);
+    \Runtime\Libc\free($copy);
+    return $n < 0 ? 0 : $n;
+}

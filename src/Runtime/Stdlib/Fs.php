@@ -20,6 +20,9 @@
 function mkdir(string $directory, int $permissions = 0777, bool $recursive = false): bool
 {
     if (!$recursive) {
+        if (\__mc_offload_active()) {
+            return \__mc_offload_path(__MC_OFF_MKDIR, $directory, $permissions) === 0;
+        }
         return \Runtime\Libc\sys_mkdir($directory, $permissions) === 0;
     }
     if ($directory === '') {
@@ -39,7 +42,11 @@ function mkdir(string $directory, int $permissions = 0777, bool $recursive = fal
             $made = false;
             continue;
         }
-        if (\Runtime\Libc\sys_mkdir($cur, $permissions) !== 0) {
+        if (\__mc_offload_active()) {
+            if (\__mc_offload_path(__MC_OFF_MKDIR, $cur, $permissions) !== 0) {
+                return false;
+            }
+        } elseif (\Runtime\Libc\sys_mkdir($cur, $permissions) !== 0) {
             return false;
         }
         $made = true;
@@ -51,12 +58,18 @@ function mkdir(string $directory, int $permissions = 0777, bool $recursive = fal
 /** Remove an empty directory. */
 function rmdir(string $directory): bool
 {
+    if (\__mc_offload_active()) {
+        return \__mc_offload_path(__MC_OFF_RMDIR, $directory) === 0;
+    }
     return \Runtime\Libc\sys_rmdir($directory) === 0;
 }
 
 /** Rename (move) a file or directory. */
 function rename(string $from, string $to): bool
 {
+    if (\__mc_offload_active()) {
+        return \__mc_offload_path2(__MC_OFF_RENAME, $from, $to) === 0;
+    }
     return \Runtime\Libc\sys_rename($from, $to) === 0;
 }
 
@@ -317,6 +330,10 @@ function fsync(\Resource $stream): bool
 {
     if (\__mc_stream_is_buffered($stream)) {
         return false;   // nothing buffered, nothing to sync
+    }
+    if (!$stream->persistent && \__mc_offload_active()) {
+        \__mc_offload(__MC_OFF_FFLUSH, $stream->addr);
+        return \__mc_offload(__MC_OFF_FSYNC, \__mc_fileno($stream)) === 0;
     }
     \Runtime\Libc\fflush(\int_to_ptr($stream->addr));
     return \Runtime\Libc\sys_fsync(\__mc_fileno($stream)) === 0;

@@ -21,16 +21,21 @@
  * Read up to $size bytes of the open FILE* $fp into $buf and return the count.
  *
  * A regular file has no readiness signal — `O_NONBLOCK` is a no-op for files on
- * both targets and there is no thread pool — so a read cannot be made async. It CAN
- * be made cooperative: under a scheduler this splits the transfer into 1 MiB pieces
+ * both targets. Under a scheduler with the offload pool ($pool: not a standard
+ * stream) the whole read is one pool job and the task parks. Without the pool it is
+ * made cooperative instead: under a scheduler this splits the transfer into 1 MiB pieces
  * and yields between them, so one big read no longer freezes every other task for
  * its whole duration. MEASURED on a 64 MB page-cache-hot file with a 1 ms ticker
  * beside the reader: a single libc fread stole 15-25 ms of loop time, chunk+yield
  * keeps the worst gap at ~2 ms. Outside a scheduler (or below the chunk size) it is
  * exactly the single libc call it always was.
  */
-function __mc_file_read_yielding(\Ffi\Ptr $buf, int $size, \Ffi\Ptr $fp): int
+function __mc_file_read_yielding(\Ffi\Ptr $buf, int $size, \Ffi\Ptr $fp, bool $pool = true): int
 {
+    if ($pool && \__mc_offload_active()) {
+        $n = \__mc_offload(__MC_OFF_FREAD, \ptr_to_int($buf), $size, \ptr_to_int($fp));
+        return $n < 0 ? 0 : $n;
+    }
     $chunk = 1048576;
     if ($size <= $chunk || !\Runtime\AsyncHook::active()) {
         $n = \Runtime\Libc\fread($buf, 1, $size, $fp);
@@ -79,7 +84,11 @@ function __mc_read_until_eof(\Ffi\Ptr $fp): string
             }
             $buf = $bigger;
         }
-        $got = \Runtime\Libc\fread(\ptr_offset($buf, $len), 1, $cap - $len, $fp);
+        if (\__mc_offload_active()) {
+            $got = \__mc_offload(__MC_OFF_FREAD, \ptr_to_int(\ptr_offset($buf, $len)), $cap - $len, \ptr_to_int($fp));
+        } else {
+            $got = \Runtime\Libc\fread(\ptr_offset($buf, $len), 1, $cap - $len, $fp);
+        }
         if ($got <= 0) {
             break;
         }
@@ -88,6 +97,15 @@ function __mc_read_until_eof(\Ffi\Ptr $fp): string
     $s = \str_from_buffer($buf, $len);
     \Runtime\Libc\free($buf);
     return $s;
+}
+
+/** fclose(3) of a FILE* the stdlib opened itself — on the pool under the scheduler. */
+function __mc_file_fclose(\Ffi\Ptr $fp): int
+{
+    if (\__mc_offload_active()) {
+        return \__mc_offload(__MC_OFF_FCLOSE, \ptr_to_int($fp));
+    }
+    return \Runtime\Libc\fclose($fp);
 }
 
 function file_get_contents(string $path, bool $use_include_path = false, ?\Resource $context = null): string|false
@@ -107,7 +125,15 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
     if ($scheme !== 'file') {
         return false;
     }
-    $fp = \Runtime\Libc\fopen(\__mc_file_path($path), "rb");
+    if (\__mc_offload_active()) {
+        $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, \__mc_file_path($path), "rb");
+        if ($fpAddr === 0) {
+            return false;
+        }
+        $fp = \int_to_ptr($fpAddr);
+    } else {
+        $fp = \Runtime\Libc\fopen(\__mc_file_path($path), "rb");
+    }
     if ($fp === null) {
         return false;
     }
@@ -115,26 +141,22 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
     \Runtime\Libc\fseek($fp, 0, 2);
     $size = \Runtime\Libc\ftell($fp);
     \Runtime\Libc\fseek($fp, 0, 0);
-    if ($size < 0) {
-        \Runtime\Libc\fclose($fp);
-        return false;
-    }
     // A file whose length ftell cannot report — every procfs and sysfs entry says
-    // 0 — has to be read until EOF instead. Sizing the buffer from ftell alone made
-    // `file_get_contents('/proc/self/status')` return the empty string, which is not
-    // an error anyone would notice: it reads as "the file is empty".
-    if ($size === 0) {
+    // 0, a FIFO says -1 — has to be read until EOF instead. Sizing the buffer from
+    // ftell alone made `file_get_contents('/proc/self/status')` return the empty
+    // string, which is not an error anyone would notice: it reads as "the file is empty".
+    if ($size <= 0) {
         $s = \__mc_read_until_eof($fp);
-        \Runtime\Libc\fclose($fp);
+        \__mc_file_fclose($fp);
         return $s;
     }
     $buf = \Runtime\Libc\calloc($size + 1, 1);
     if ($buf === null) {
-        \Runtime\Libc\fclose($fp);
+        \__mc_file_fclose($fp);
         return false;
     }
     \__mc_file_read_yielding($buf, $size, $fp);
-    \Runtime\Libc\fclose($fp);
+    \__mc_file_fclose($fp);
     // str_from_buffer, NOT substr: $buf is a raw \Ffi\Ptr (calloc), NOT a
     // headered string — substr would read a bogus header (and truncate a file
     // with an embedded NUL). str_from_buffer copies exactly $size bytes into a
@@ -153,6 +175,15 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
 function file_put_contents(string $path, string $data, int $flags = 0): int|false
 {
     $mode = ($flags & 8) !== 0 ? "ab" : "wb";
+    if (\__mc_offload_active()) {
+        $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, $path, $mode);
+        if ($fpAddr === 0) {
+            return false;
+        }
+        $n = \__mc_offload_fwrite($data, \strlen($data), $fpAddr);
+        \__mc_offload(__MC_OFF_FCLOSE, $fpAddr);
+        return $n;
+    }
     $fp = \Runtime\Libc\fopen($path, $mode);
     if ($fp === null) {
         return false;
@@ -1434,6 +1465,13 @@ function fopen(string $filename, string $mode)
     if ($scheme !== 'file') {
         return false;   // no wrapper for it (yet) — php: "Unable to find the wrapper"
     }
+    if (\__mc_offload_active()) {
+        $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, \__mc_file_path($filename), $mode);
+        if ($fpAddr === 0) {
+            return false;
+        }
+        return new \Resource(\Resource::KIND_FILE, 'stream', $fpAddr);
+    }
     $fp = \Runtime\Libc\fopen(\__mc_file_path($filename), $mode);
     if ($fp === null) {
         return false;
@@ -1467,6 +1505,14 @@ function fclose(\Resource $stream): bool
     if ($stream->kind === \Resource::KIND_SOCKET && $stream->ssl !== 0 && !$stream->closed) {
         \Runtime\Openssl\ctxFree($stream->ssl);
         $stream->ssl = 0;
+    }
+    if ($stream->kind === \Resource::KIND_FILE && !$stream->closed && !$stream->persistent
+        && $stream->addr !== 0 && \__mc_offload_active()) {
+        $ok = \__mc_offload(__MC_OFF_FCLOSE, $stream->addr) === 0;
+        $stream->closed = true;
+        $stream->addr = 0;
+        $stream->type = 'Unknown';
+        return $ok;
     }
     return $stream->close();
 }
@@ -1586,6 +1632,9 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         $n = \__mc_transport_send($stream, $data, $len);
         return $n < 0 ? 0 : $n;
     }
+    if (!$stream->persistent && \__mc_offload_active()) {
+        return \__mc_offload_fwrite(\substr($data, 0, (int)$len), (int)$len, $stream->addr);
+    }
     return \Runtime\Libc\fwrite($data, 1, $len, \int_to_ptr($stream->addr));
 }
 
@@ -1639,7 +1688,7 @@ function fread(\Resource $stream, int $length): string
         \Runtime\Libc\free($buf);
         return \__mc_stream_read($stream, $length);
     }
-    $n = \__mc_file_read_yielding($buf, $length, \int_to_ptr($stream->addr));
+    $n = \__mc_file_read_yielding($buf, $length, \int_to_ptr($stream->addr), !$stream->persistent);
     // str_from_buffer, NOT substr: raw \Ffi\Ptr, exactly $n bytes (binary-safe).
     $s = \str_from_buffer($buf, $n);
     \Runtime\Libc\free($buf);
@@ -1788,6 +1837,9 @@ function fflush(\Resource $stream): bool
     if (\__mc_stream_is_buffered($stream)) {
         return true;   // send(2)/memory is unbuffered — nothing to flush
     }
+    if (!$stream->persistent && \__mc_offload_active()) {
+        return \__mc_offload(__MC_OFF_FFLUSH, $stream->addr) === 0;
+    }
     return \Runtime\Libc\fflush(\int_to_ptr($stream->addr)) === 0;
 }
 
@@ -1812,6 +1864,9 @@ function is_readable(string $path): bool
  */
 function unlink(string $path): bool
 {
+    if (\__mc_offload_active()) {
+        return \__mc_offload_path(__MC_OFF_UNLINK, $path) === 0;
+    }
     return \Runtime\Libc\sys_unlink($path) === 0;
 }
 

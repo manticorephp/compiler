@@ -161,6 +161,9 @@ function __mc_stat_off(int $which): int
  */
 function __mc_stat_into(string $path, \Ffi\Ptr $buf, bool $link = false): bool
 {
+    if (\__mc_offload_active()) {
+        return \__mc_offload_path($link ? __MC_OFF_LSTAT : __MC_OFF_STAT, $path, \ptr_to_int($buf)) === 0;
+    }
     $rc = $link
         ? \Runtime\Libc\sys_lstat($path, $buf)
         : \Runtime\Libc\sys_stat($path, $buf);
@@ -510,6 +513,13 @@ function __mc_dirent_name_off(): int
  */
 function opendir(string $directory)
 {
+    if (\__mc_offload_active()) {
+        $dAddr = \__mc_offload_path(__MC_OFF_OPENDIR, $directory);
+        if ($dAddr === 0) {
+            return false;
+        }
+        return new \Resource(\Resource::KIND_DIR, 'stream', $dAddr);
+    }
     $d = \Runtime\Libc\sys_opendir($directory);
     if ($d === null) {
         return false;
@@ -527,6 +537,13 @@ function opendir(string $directory)
  */
 function readdir(\Resource $dir_handle)
 {
+    if (\__mc_offload_active()) {
+        $eAddr = \__mc_offload(__MC_OFF_READDIR, $dir_handle->addr);
+        if ($eAddr === 0) {
+            return false;
+        }
+        return \cstr_to_str(\ptr_offset(\int_to_ptr($eAddr), \__mc_dirent_name_off()));
+    }
     $e = \Runtime\Libc\sys_readdir(\int_to_ptr($dir_handle->addr));
     if ($e === null) {
         return false;
@@ -540,6 +557,14 @@ function readdir(\Resource $dir_handle)
  */
 function closedir(\Resource $dir_handle): void
 {
+    if ($dir_handle->kind === \Resource::KIND_DIR && !$dir_handle->closed && $dir_handle->addr !== 0
+        && \__mc_offload_active()) {
+        \__mc_offload(__MC_OFF_CLOSEDIR, $dir_handle->addr);
+        $dir_handle->closed = true;
+        $dir_handle->addr = 0;
+        $dir_handle->type = 'Unknown';
+        return;
+    }
     $dir_handle->close();
 }
 
@@ -587,6 +612,23 @@ function __mc_strcmp_bytes(string $a, string $b): int
  */
 function scandir(string $directory, int $sorting_order = 0): array|false
 {
+    if (\__mc_offload_active()) {
+        $dAddr = \__mc_offload_path(__MC_OFF_OPENDIR, $directory);
+        if ($dAddr === 0) {
+            return false;
+        }
+        $off = \__mc_dirent_name_off();
+        $out = [];
+        while (true) {
+            $eAddr = \__mc_offload(__MC_OFF_READDIR, $dAddr);
+            if ($eAddr === 0) {
+                break;
+            }
+            $out[] = \cstr_to_str(\ptr_offset(\int_to_ptr($eAddr), $off));
+        }
+        \__mc_offload(__MC_OFF_CLOSEDIR, $dAddr);
+        return \__mc_scandir_sort($out, $sorting_order);
+    }
     $d = \Runtime\Libc\sys_opendir($directory);
     if ($d === null) {
         return false;
@@ -601,6 +643,15 @@ function scandir(string $directory, int $sorting_order = 0): array|false
         $out[] = \cstr_to_str(\ptr_offset($e, $off));
     }
     \Runtime\Libc\sys_closedir($d);
+    return \__mc_scandir_sort($out, $sorting_order);
+}
+
+/**
+ * @param string[] $out
+ * @return string[]
+ */
+function __mc_scandir_sort(array $out, int $sorting_order): array
+{
     if ($sorting_order === 0) {
         \usort($out, function (string $a, string $b): int {
             return \__mc_strcmp_bytes($a, $b);
