@@ -543,8 +543,12 @@ function opendir(string $directory)
 function readdir(\Resource $dir_handle)
 {
     if (\__mc_res_pooled($dir_handle)) {
-        // The name is copied inside the job: a sibling's readdir on the same DIR
-        // may overwrite the dirent before this task resumes.
+        // One job at a time per DIR: musl's readdir takes no lock (POSIX does not
+        // promise one), so two workers on one stream race on its buffer. The
+        // name is copied inside the job, so the next job may refill the dirent.
+        if (!\__mc_res_wait_idle($dir_handle)) {
+            return false;
+        }
         $buf = \Runtime\Libc\malloc(1040);
         $n = \__mc_res_offload($dir_handle, __MC_OFF_READDIR_NAME, $dir_handle->addr, \ptr_to_int($buf), 1040);
         $name = $n < 0 ? false : \cstr_to_str($buf);

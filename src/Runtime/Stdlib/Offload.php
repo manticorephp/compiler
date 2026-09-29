@@ -267,6 +267,22 @@ function __mc_res_done(\Resource $r): void
     }
 }
 
+/**
+ * Park until no job uses $r's handle, for a stream that must not run two jobs
+ * at once. False when a sibling closed it meanwhile.
+ */
+function __mc_res_wait_idle(\Resource $r): bool
+{
+    while ($r->poolJobs > 0) {
+        $w = \Runtime\AsyncHook::idleWaiter();
+        if ($w === null) {
+            break;
+        }
+        $w($r);
+    }
+    return \__mc_res_pooled($r);
+}
+
 /** {@see __mc_offload()} on $r's handle, counted so a close can wait for it. */
 function __mc_res_offload(\Resource $r, int $op, int $a0 = 0, int $a1 = 0, int $a2 = 0): int
 {
