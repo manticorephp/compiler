@@ -92,6 +92,16 @@ final class ApplyMemoryMode implements Pass
         if ($this->mode === MemoryMode::RC) {
             return;   // nothing was routed to the arena in the first place
         }
+        // A generator frame outlives every invocation of its resume body: its
+        // `arena_enter` mark would sit on the ONE frame mark stack across each
+        // yield, above frames that return meanwhile, and its values in the ONE
+        // bump arena under their restores. The stack must hold only marks of
+        // frames live on the native call stack, so nothing in a generator is
+        // arena (its loops never reset either, {@see \Compile\Mir\ArenaContext::canResetPerIteration}).
+        if ($fn->isGenerator) {
+            $this->demote($fn->body, [], false);
+            return;
+        }
         do {
             $loops = [];
             $this->collectLoopVerdicts($fn->body, $fn, $loops);

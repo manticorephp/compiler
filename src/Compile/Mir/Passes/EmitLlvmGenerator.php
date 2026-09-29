@@ -292,6 +292,12 @@ trait EmitLlvmGenerator
         $ed = $this->ssa->allocReg();
         $out .= '  ' . $ed . " = load i64, ptr @__mir_jmp_depth\n";
         $out .= '  store i64 ' . $ed . ', ptr ' . $this->gen->entryDepthPtr . "\n";
+        $this->gen->entryArenaSp = '';
+        if ($this->locals->sjljPinAll) {
+            $this->rt->needsArena = true;
+            $this->gen->entryArenaSp = $this->ssa->allocReg();
+            $out .= '  ' . $this->gen->entryArenaSp . " = load i64, ptr @__mir_arena_sp\n";
+        }
         $st = $this->ssa->allocReg();
         $out .= '  ' . $st . ' = load i64, ptr ' . $this->gen->statePtr . "\n";
         $nYields = $this->countYields($fn->body);

@@ -209,19 +209,20 @@ trait EmitLlvmExceptions
      * when no enclosing loop resets. The landing ({@see arenaTryLandingIr})
      * pops the skipped frames' marks back to the depth sampled at try entry,
      * and rewinds to the landing mark a resetting loop in the region armed
-     * ({@see EmitLlvm::arenaArmTryMark}). The reg to hold that depth, or '' in
-     * a generator: a yield hands the mark stack to the consumer between try
-     * entry and landing, so the sampled depth would not be this frame's.
+     * ({@see EmitLlvm::arenaArmTryMark}). The reg to hold that depth. In a
+     * generator it is the depth its resume body was entered with
+     * ({@see \Compile\Mir\GeneratorContext::$entryArenaSp}), not one sampled at
+     * the try: a yield inside it hands the mark stack to the consumer between
+     * try entry and landing, and a generator pushes no mark of its own.
      */
     private function arenaTryEnter(): string
     {
-        if ($this->gen->inGenerator) { return ''; }
         $this->rt->needsArena = true;
         $this->arena->tryMarkCur[] = $this->ssa->allocReg();
         $this->arena->tryMarkUsed[] = $this->ssa->allocReg();
         $this->arena->tryMarkArmed[] = 0;
         $this->arena->tryMarkOpen[] = 0;
-        return $this->ssa->allocReg();
+        return $this->gen->inGenerator ? $this->gen->entryArenaSp : $this->ssa->allocReg();
     }
 
     /** The landing's arena reclaim, for the innermost open region. */
@@ -253,7 +254,6 @@ trait EmitLlvmExceptions
      *  initial disarm when a loop armed it, for the try's entry. */
     private function arenaTryLeave(): string
     {
-        if ($this->gen->inGenerator) { return ''; }
         $k = \count($this->arena->tryMarkCur) - 1;
         $cur = $this->arena->tryMarkCur[$k];
         $used = $this->arena->tryMarkUsed[$k];
@@ -283,7 +283,7 @@ trait EmitLlvmExceptions
         $out = '';
         $markInit = '';
         $spReg = $this->arenaTryEnter();
-        if ($spReg !== '') { $out .= '  ' . $spReg . " = load i64, ptr @__mir_arena_sp\n"; }
+        if ($spReg !== '' && !$this->gen->inGenerator) { $out .= '  ' . $spReg . " = load i64, ptr @__mir_arena_sp\n"; }
         // Save the backtrace depth at try entry; a caught throw longjmps past
         // the per-call bt_pop()s, so the catch restores it (else the stack keeps
         // the unwound frames and later traces grow). alloca survives setjmp.
