@@ -72,6 +72,8 @@ final class ControlFlow
     private array $aggIterLevel = [];
     /** @var string[] an i1 slot that says whether the iterator is owned at all ('': always) */
     private array $aggIterFlag = [];
+    /** @var string[] the release flavor of an owned array iterable ('': an iterator object) */
+    private array $aggIterFlavor = [];
 
     /** Restart for a new function body. */
     public function reset(): void
@@ -205,9 +207,11 @@ final class ControlFlow
         return $stack[$idx];
     }
 
-    /** Open an aggregate foreach whose loop is entered next. */
-    public function pushAggIter(string $slot, bool $dyn, string $flag = ''): void
+    /** Open an aggregate foreach whose loop is entered next — or, `$flavor`
+     *  set, a foreach that owns a fresh array iterable, released by that flavor. */
+    public function pushAggIter(string $slot, bool $dyn, string $flag = '', string $flavor = ''): void
     {
+        $this->aggIterFlavor[] = $flavor;
         $this->aggIterFlag[] = $flag;
         $this->aggIterSlots[] = $slot;
         $this->aggIterDyn[] = $dyn;
@@ -220,6 +224,7 @@ final class ControlFlow
         \array_pop($this->aggIterDyn);
         \array_pop($this->aggIterLevel);
         \array_pop($this->aggIterFlag);
+        \array_pop($this->aggIterFlavor);
     }
 
     /**
@@ -244,6 +249,8 @@ final class ControlFlow
     public function aggIterDyn(int $i): bool { return $this->aggIterDyn[$i]; }
 
     public function aggIterFlag(int $i): string { return $this->aggIterFlag[$i]; }
+
+    public function aggIterFlavor(int $i): string { return $this->aggIterFlavor[$i]; }
 
     /** @param Node[] $body */
     public function pushFinally(array $body): void

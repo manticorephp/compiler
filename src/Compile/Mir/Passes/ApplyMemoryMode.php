@@ -275,20 +275,32 @@ final class ApplyMemoryMode implements Pass
     }
 
     /**
-     * Walk with "the loop directly around here resets" threaded down, demoting
-     * every Arena stamp that arrives with it false.
+     * Walk with "what reclaims an allocation here" threaded down, demoting every
+     * Arena stamp that arrives with it false. A loop's pre-save parts (a `for`
+     * init, a foreach iterable) run outside its reset window and keep the
+     * enclosing answer; its window (condition, body, step) is reclaimed by its
+     * own per-iteration and exit restores — and, when a `break N` / `continue N`
+     * / `goto` can leave past that exit restore, ALSO needs the enclosing answer
+     * ({@see \Compile\Mir\ArenaContext::reclaimsOwnWindow}). The emitter's
+     * {@see \Compile\Mir\ArenaContext::holdsArena} check reads the same split.
      *
      * @param array<int, array{0:Node,1:bool}> $loops
      */
     private function demote(Node $n, array $loops, bool $reclaimed): void
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_FOR || $k === Node::KIND_WHILE
-            || $k === Node::KIND_DOWHILE || $k === Node::KIND_FOREACH) {
-            $reclaimed = false;
+        if (\Compile\Mir\ArenaContext::isLoop($n)) {
+            $own = false;
             foreach ($loops as $pair) {
-                if ($pair[0] === $n) { $reclaimed = $pair[1]; break; }
+                if ($pair[0] === $n) { $own = $pair[1]; break; }
             }
+            foreach (\Compile\Mir\ArenaContext::preSaveParts($n) as $c) {
+                $this->demote($c, $loops, $reclaimed);
+            }
+            $window = $own && ($reclaimed || \Compile\Mir\ArenaContext::reclaimsOwnWindow($n));
+            foreach (\Compile\Mir\ArenaContext::windowParts($n) as $c) {
+                $this->demote($c, $loops, $window);
+            }
+            return;
         }
         if (!$reclaimed && $n->allocKind === AllocationKind::ARENA) {
             $n->allocKind = AllocationKind::RC_HEAP;

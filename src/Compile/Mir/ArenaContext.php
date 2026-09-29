@@ -139,14 +139,93 @@ final class ArenaContext
             || ($step !== null && $this->directArena($step));
     }
 
+    /** A nested loop's pre-save parts are this loop's, and so is its window
+     *  when a jump can leave it past its exit restore ({@see reclaimsOwnWindow}). */
     private function directArena(Node $n): bool
     {
         if ($n->allocKind === AllocationKind::ARENA) { return true; }
-        $k = $n->kind;
-        if ($k === Node::KIND_FOR || $k === Node::KIND_WHILE || $k === Node::KIND_DOWHILE
-            || $k === Node::KIND_FOREACH) { return false; }
+        if (self::isLoop($n)) {
+            foreach (self::preSaveParts($n) as $c) { if ($this->directArena($c)) { return true; } }
+            if (self::reclaimsOwnWindow($n)) { return false; }
+            foreach (self::windowParts($n) as $c) { if ($this->directArena($c)) { return true; } }
+            return false;
+        }
         foreach (Walk::children($n) as $c) {
             if ($this->directArena($c)) { return true; }
+        }
+        return false;
+    }
+
+    public static function isLoop(Node $n): bool
+    {
+        $k = $n->kind;
+        return $k === Node::KIND_FOR || $k === Node::KIND_WHILE || $k === Node::KIND_DOWHILE
+            || $k === Node::KIND_FOREACH;
+    }
+
+    /**
+     * The parts of a loop evaluated BEFORE its arena save — a `for` init, a
+     * foreach iterable: once per execution of the loop, never inside its reset
+     * window, so they are reclaimed by whatever reclaims the enclosing code.
+     *
+     * @return Node[]
+     */
+    public static function preSaveParts(Node $loop): array
+    {
+        if ($loop->kind === Node::KIND_FOR) {
+            $init = self::asFor($loop)->init;
+            return $init === null ? [] : [$init];
+        }
+        if ($loop->kind === Node::KIND_FOREACH) { return [self::asForeach($loop)->array]; }
+        return [];
+    }
+
+    /**
+     * The parts inside the loop's reset window: condition, body, step. The
+     * per-iteration restore reclaims every iteration but the last; the restore
+     * on the exit edge reclaims the last one.
+     *
+     * @return Node[]
+     */
+    public static function windowParts(Node $loop): array
+    {
+        $k = $loop->kind;
+        if ($k === Node::KIND_FOR) {
+            $f = self::asFor($loop);
+            $out = [];
+            if ($f->cond !== null) { $out[] = $f->cond; }
+            if ($f->step !== null) { $out[] = $f->step; }
+            $out[] = $f->body;
+            return $out;
+        }
+        if ($k === Node::KIND_FOREACH) { return [self::asForeach($loop)->body]; }
+        if ($k === Node::KIND_WHILE) { return [self::asWhile($loop)->cond, self::asWhile($loop)->body]; }
+        return [self::asDoWhile($loop)->body, self::asDoWhile($loop)->cond];
+    }
+
+    /**
+     * Every way out of the loop passes its exit restore: no `break N` /
+     * `continue N` leaves it for an enclosing loop, and no `goto` leaves at
+     * all. When one can, what the last iteration allocated escapes into the
+     * enclosing code, which must reclaim it too.
+     */
+    public static function reclaimsOwnWindow(Node $loop): bool
+    {
+        foreach (self::windowParts($loop) as $p) {
+            if (self::jumpsOut($p, 1)) { return false; }
+        }
+        return true;
+    }
+
+    private static function jumpsOut(Node $n, int $depth): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_GOTO) { return true; }
+        if ($k === Node::KIND_BREAK) { return self::asBreak($n)->level > $depth; }
+        if ($k === Node::KIND_CONTINUE) { return self::asContinue($n)->level > $depth; }
+        $inner = self::isLoop($n) || $k === Node::KIND_SWITCH;
+        foreach (Walk::children($n) as $c) {
+            if (self::jumpsOut($c, $inner ? $depth + 1 : $depth)) { return true; }
         }
         return false;
     }
@@ -290,8 +369,8 @@ final class ArenaContext
 
     /**
      * StoreLocals of `$name` in the subtree whose value the flow stores as a
-     * BORROW because the arena frees it: a `new`, an array literal or a concat
-     * stamped Arena — the producers {@see Ownership::classifyStored} sends to its
+     * BORROW because the arena frees it: a `new`, an array literal, a concat, a
+     * `clone` or an array union stamped Arena — the producers {@see Ownership::classifyStored} sends to its
      * allocation gate. Every other arena-stamped producer is claimed OWNED
      * before that gate (a `(string)` cast, a bitwise op, a call…, and a
      * conditional over any of them), so the flow drops it, and after a reset
@@ -328,10 +407,16 @@ final class ArenaContext
     {
         if ($v->allocKind !== AllocationKind::ARENA) { return false; }
         $k = $v->kind;
-        return $k === Node::KIND_CONCAT || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_ARRAY_LIT;
+        return $k === Node::KIND_CONCAT || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_ARRAY_LIT
+            || $k === Node::KIND_CLONE || ($k === Node::KIND_ADD && $v->type->isArray());
     }
 
     private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }
+    private static function asFor(Node $n): For_ { return $n; }
+    private static function asWhile(Node $n): While_ { return $n; }
+    private static function asDoWhile(Node $n): DoWhile_ { return $n; }
+    private static function asBreak(Node $n): Break_ { return $n; }
+    private static function asContinue(Node $n): Continue_ { return $n; }
     private static function asStoreLocal(Node $n): StoreLocal { return $n; }
     private static function asLoadLocal(Node $n): LoadLocal { return $n; }
     private static function asReturn(Node $n): Return_ { return $n; }

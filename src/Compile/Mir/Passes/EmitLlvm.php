@@ -5036,6 +5036,13 @@ final class EmitLlvm implements EmitVisitor
         return $out;
     }
 
+    /** The restore to a save position a loop captured after its own save (a
+     *  nested loop's save overwrites {@see ArenaContext::$saveCurReg}). */
+    private function arenaRestoreIr(string $cur, string $used): string
+    {
+        return '  call void @__mir_arena_restore(ptr ' . $cur . ', i64 ' . $used . ")\n";
+    }
+
     /** Emit a reset to the saved arena position (read immediately after save). */
     private function emitArenaReset(): string
     {

@@ -670,9 +670,37 @@ trait EmitLlvmControl
      * — the erased foreach drives a subject that IS an Iterator (borrowed) or
      * one it got from getIterator() (owned) through the same slot.
      */
-    private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = ''): string
+    /**
+     * The release flavor of a foreach's iterable when the loop owns it: a fresh
+     * +1 array ({@see \Compile\Mir\Ownership::tempArgFlavor}) that nothing
+     * past the loop can still borrow from — a by-value walk whose value var the
+     * flow co-owns (or holds a non-rc scalar) and whose keys are ints. ''
+     * otherwise: a borrowed element or string key read after the loop would
+     * die with the array.
+     */
+    private function ownedIterableFlavor(\Compile\Mir\Foreach_ $fe): string
+    {
+        if ($fe->byRef || $fe->genSlotBase >= 0) { return ''; }
+        $at = $fe->array->type;
+        if (!$at->isArray()) { return ''; }
+        $el = $at->element;
+        if (!$fe->ownCoOwn && ($el === null || $el->kind === Type::KIND_UNKNOWN
+            || $el->kind === Type::KIND_CELL || $this->own->flavorOf($el) > 0)) { return ''; }
+        if ($fe->keyVar !== null && !$at->isVec()) { return ''; }
+        return $this->freshRcArgFlavor($fe->array);
+    }
+
+    private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
     {
         $out = '';
+        if ($flavor !== '') {
+            // A fresh array iterable the loop owns ({@see ownedIterableFlavor}).
+            $a = $this->ssa->allocReg();
+            $out .= '  ' . $a . ' = load i64, ptr ' . $iterSlot . "\n";
+            $out .= $this->rcReleaseReg($a, $flavor);
+            $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+            return $out;
+        }
         $skipL = '';
         if ($flag !== '') {
             $fv = $this->ssa->allocReg();
@@ -708,7 +736,8 @@ trait EmitLlvmControl
     {
         $out = '';
         foreach ($this->cf->aggItersLeftBy($level) as $i) {
-            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i), $this->cf->aggIterFlag($i));
+            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i),
+                $this->cf->aggIterFlag($i), $this->cf->aggIterFlavor($i));
         }
         return $out;
     }
@@ -1388,6 +1417,17 @@ trait EmitLlvmControl
             $out .= $this->coerceToPtr();
         }
         $arr = $this->lastValue;
+        // A fresh array iterable (a literal, a call result) is the loop's own:
+        // given back at the end and on every jump out of the body.
+        $iterFlavor = $this->ownedIterableFlavor($fe);
+        $iterSlot = '';
+        if ($iterFlavor !== '') {
+            $iterSlot = $this->ssa->allocReg();
+            $out .= '  ' . $iterSlot . " = alloca i64\n";
+            $iw = $this->ssa->allocReg();
+            $out .= '  ' . $iw . ' = ptrtoint ptr ' . $arr . " to i64\n";
+            $out .= '  store i64 ' . $iw . ', ptr ' . $iterSlot . "\n";
+        }
         // `foreach ($a as $k => $v) { … unset($a[$k]); … }` — PHP iterates a
         // SNAPSHOT of a by-value foreach, so the deletions do not disturb the
         // walk. That is not free here: an unset on a packed buffer promotes it
@@ -1472,6 +1512,7 @@ trait EmitLlvmControl
         $bodyLabel = $this->ssa->allocLabel('fe.body');
         $stepLabel = $this->ssa->allocLabel('fe.step');
         $endLabel  = $this->ssa->allocLabel('fe.end');
+        if ($iterSlot !== '') { $this->cf->pushAggIter($iterSlot, false, '', $iterFlavor); }
         $this->cf->enterLoop($endLabel, $stepLabel);
 
         // Per-iteration arena reset. Safe because the save point is taken
@@ -1483,6 +1524,7 @@ trait EmitLlvmControl
             && $this->arena->canResetForeach($fe, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
         if (!$reset) { $this->arenaBoundedOrFail(null, $fe->body, null, $fe); }
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
 
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
@@ -1748,14 +1790,19 @@ trait EmitLlvmControl
             $out .= '  br label %' . $condLabel . "\n";
         }
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
         if ($live) {
             // A `break` leaves the body's key still held.
             $lk = $this->ssa->allocReg();
             $out .= '  ' . $lk . ' = load i64, ptr ' . $liveKey . "\n";
             $out .= '  call void @__mir_cell_drop(i64 ' . $lk . ")\n";
         }
+        if ($iterSlot !== '') { $out .= $this->releaseAggIterSlot($iterSlot, false, '', $iterFlavor); }
 
         $this->cf->leave();
+        if ($iterSlot !== '') { $this->cf->popAggIter(); }
         // Rejoin the generator arm of the erased-base classify above.
         if ($dynEnd !== '') {
             $out .= '  br label %' . $dynEnd . "\n";
@@ -2209,6 +2256,7 @@ trait EmitLlvmControl
         if (!$reset) { $this->arenaBoundedOrFail($w->cond, $w->body, null, $w); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -2221,6 +2269,9 @@ trait EmitLlvmControl
         $out .= $this->emitNode($w->body);
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
 
         $this->cf->leave();
         return $out;
@@ -2241,6 +2292,7 @@ trait EmitLlvmControl
         $out = '';
         if ($f->init !== null) { $out .= $this->emitNode($f->init); }
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -2260,6 +2312,9 @@ trait EmitLlvmControl
         if ($f->step !== null) { $out .= $this->emitNode($f->step); }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
 
         $this->cf->leave();
         return $out;
@@ -2277,6 +2332,7 @@ trait EmitLlvmControl
         if (!$reset) { $this->arenaBoundedOrFail($d->cond, $d->body, null, $d); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $bodyLabel . "\n";
         $out .= $bodyLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -2289,6 +2345,9 @@ trait EmitLlvmControl
         $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
         $out .= '  br i1 ' . $condBit . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
 
         $this->cf->leave();
         return $out;
