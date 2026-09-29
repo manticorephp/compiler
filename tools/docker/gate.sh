@@ -104,6 +104,26 @@ cache_id() {
         "$(php -r 'echo PHP_VERSION;')"
 }
 
+# Content hash of a list of tree paths (sorted, so the walk order cannot move
+# it). macOS has shasum, not sha256sum.
+tree_sha() {
+    local sum=sha256sum
+    command -v sha256sum > /dev/null 2>&1 || sum="shasum -a 256"
+    find "$@" -type f | LC_ALL=C sort | xargs $sum | $sum | cut -d' ' -f1
+}
+
+# What the COMPILER binary is a function of: its source, the manifest and the
+# script that drive its build, and the toolchain that compiles it.
+src_sha() {
+    { tree_sha src manticore.json bin/build; cache_id; } | tree_sha_stdin
+}
+tree_sha_stdin() {
+    local sum=sha256sum
+    command -v sha256sum > /dev/null 2>&1 || sum="shasum -a 256"
+    $sum | cut -d' ' -f1
+}
+prelude_sha() { tree_sha prelude; }
+
 # The id is a NOTE, not a gate. It used to be one, and that cost a cold seed for
 # every difference it could name — including the run that ADDED `libc` to it,
 # where a cached compiler was thrown away because the id it was stored with
@@ -187,9 +207,12 @@ save_compiler_cache() {
     cp bin/manticore "$tmp/bin/manticore"
     cp -RP lib/. "$tmp/lib/"
     cache_id > "$tmp/id"
+    src_sha > "$tmp/src.sha"
+    prelude_sha > "$tmp/prelude.sha"
 
-    if rm -rf "$MC_COMPILER_CACHE/bin" "$MC_COMPILER_CACHE/lib" "$MC_COMPILER_CACHE/id" 2>/dev/null \
-            && mv "$tmp/bin" "$tmp/lib" "$tmp/id" "$MC_COMPILER_CACHE/" 2>/dev/null; then
+    if rm -rf "$MC_COMPILER_CACHE/bin" "$MC_COMPILER_CACHE/lib" "$MC_COMPILER_CACHE/id" \
+              "$MC_COMPILER_CACHE/src.sha" "$MC_COMPILER_CACHE/prelude.sha" 2>/dev/null \
+            && mv "$tmp/bin" "$tmp/lib" "$tmp/id" "$tmp/src.sha" "$tmp/prelude.sha" "$MC_COMPILER_CACHE/" 2>/dev/null; then
         rmdir "$tmp" 2>/dev/null
         echo "cache: saved ($(du -sh "$MC_COMPILER_CACHE" 2>/dev/null | cut -f1))"
     else
@@ -210,6 +233,35 @@ if restore_compiler_cache; then
     WARM="cache"
 elif restore_published_seed; then
     WARM="published seed"
+fi
+
+# A cached compiler built from THIS src/ is already the self-built compiler of
+# this tree — rebuilding it (twice) buys nothing. Only a change under src/ (or
+# the manifest / bin/build that drive the build) makes a new compiler; a change
+# confined to prelude/ or tests/ does not. prelude/ is read from the tree by the
+# compiler in a checkout, but the stdlib object carries linkonce copies of the
+# prelude functions it calls, so a prelude change still rebuilds lib/ — with
+# the cached compiler, in one pass.
+if [ "$WARM" = "cache" ] && [ -f "$MC_COMPILER_CACHE/src.sha" ] \
+        && [ "$(cat "$MC_COMPILER_CACHE/src.sha")" = "$(src_sha)" ]; then
+    echo "=== compiler: src/ unchanged since the cached build — reused, not rebuilt ==="
+    reuse=1
+    if [ "$(cat "$MC_COMPILER_CACHE/prelude.sha" 2>/dev/null)" != "$(prelude_sha)" ]; then
+        echo "prelude/ changed — rebuilding lib/ with the cached compiler"
+        if MANTICORE_PRELUDE="$PWD/prelude" MANTICORE_CELLGUARD=strict \
+                bin/manticore build --libs-only manticore.json > "$MC_LOGDIR/compile.log" 2>&1; then
+            echo "lib/: OK"
+        else
+            echo "lib/: FAILED — falling back to the full self-build"
+            tail -20 "$MC_LOGDIR/compile.log"
+            reuse=0
+        fi
+    fi
+    if [ "$reuse" = "1" ]; then
+        mkdir -p lib/prelude
+        cp prelude/*.php lib/prelude/
+        WARM=""
+    fi
 fi
 
 if [ -n "$WARM" ]; then
