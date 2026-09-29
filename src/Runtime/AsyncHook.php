@@ -82,6 +82,24 @@ final class AsyncHook
 
     public static function offloadErrno(): int { return self::$offErrno; }
 
+    /**
+     * Pool jobs in flight on one handle: `$idleWait: fn(\Resource): void` parks the
+     * calling task until `$r->poolJobs` is 0 (a close must not free a FILE* or DIR* a
+     * sibling's job still uses); `$idleWake: fn(\Resource): void` is called when
+     * the count drops to 0.
+     */
+    public static ?\Closure $idleWait = null;
+    public static ?\Closure $idleWake = null;
+
+    public static function installIdle(?\Closure $wait, ?\Closure $wake): void
+    {
+        self::$idleWait = $wait;
+        self::$idleWake = $wake;
+    }
+
+    public static function idleWaiter(): ?\Closure { return self::$idleWait; }
+    public static function idleWaker(): ?\Closure { return self::$idleWake; }
+
     public static function installSelect(?\Closure $add, ?\Closure $wait, ?\Closure $done): void
     {
         self::$selectAdd = $add;
@@ -103,6 +121,8 @@ final class AsyncHook
         self::$dnsGet = null;
         self::$dnsPut = null;
         self::$blocking = null;
+        self::$idleWait = null;
+        self::$idleWake = null;
     }
 
     /** True while a scheduler is driving I/O and a fiber is running. */

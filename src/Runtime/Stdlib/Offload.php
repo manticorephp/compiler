@@ -117,6 +117,64 @@ function __mc_offload_path2(int $op, string $a, string $b): int
     return $r;
 }
 
+/** A regular file or directory handle opened on a path: its calls may go to the pool. */
+function __mc_pooled_res(int $kind, int $addr): \Resource
+{
+    $r = new \Resource($kind, 'stream', $addr);
+    $r->pooled = true;
+    return $r;
+}
+
+/** Whether a call on $r's handle goes to the pool now. */
+function __mc_res_pooled(\Resource $r): bool
+{
+    return $r->pooled && !$r->closed && $r->addr !== 0 && \__mc_offload_active();
+}
+
+function __mc_res_busy(\Resource $r): void
+{
+    $r->poolJobs = $r->poolJobs + 1;
+}
+
+function __mc_res_done(\Resource $r): void
+{
+    $r->poolJobs = $r->poolJobs - 1;
+    if ($r->poolJobs === 0) {
+        $w = \Runtime\AsyncHook::idleWaker();
+        if ($w !== null) {
+            $w($r);
+        }
+    }
+}
+
+/** {@see __mc_offload()} on $r's handle, counted so a close can wait for it. */
+function __mc_res_offload(\Resource $r, int $op, int $a0 = 0, int $a1 = 0, int $a2 = 0): int
+{
+    \__mc_res_busy($r);
+    $n = \__mc_offload($op, $a0, $a1, $a2);
+    \__mc_res_done($r);
+    return $n;
+}
+
+/**
+ * Close $r's handle on the pool. The resource is retired first, so no new job
+ * takes the handle, then the close waits until no sibling's job still uses it.
+ */
+function __mc_res_offload_close(\Resource $r, int $op): bool
+{
+    $addr = $r->addr;
+    $r->closed = true;
+    $r->addr = 0;
+    $r->type = 'Unknown';
+    if ($r->poolJobs > 0) {
+        $w = \Runtime\AsyncHook::idleWaiter();
+        if ($w !== null) {
+            $w($r);
+        }
+    }
+    return \__mc_offload($op, $addr) === 0;
+}
+
 /** fwrite(3) of $len bytes of $data to the FILE* at $fp, from a private copy. */
 function __mc_offload_fwrite(string $data, int $len, int $fp): int
 {

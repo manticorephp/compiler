@@ -331,9 +331,13 @@ function fsync(\Resource $stream): bool
     if (\__mc_stream_is_buffered($stream)) {
         return false;   // nothing buffered, nothing to sync
     }
-    if (!$stream->persistent && \__mc_offload_active()) {
+    if (\__mc_res_pooled($stream)) {
+        $fd = \__mc_fileno($stream);
+        \__mc_res_busy($stream);
         \__mc_offload(__MC_OFF_FFLUSH, $stream->addr);
-        return \__mc_offload(__MC_OFF_FSYNC, \__mc_fileno($stream)) === 0;
+        $rc = \__mc_offload(__MC_OFF_FSYNC, $fd);
+        \__mc_res_done($stream);
+        return $rc === 0;
     }
     \Runtime\Libc\fflush(\int_to_ptr($stream->addr));
     return \Runtime\Libc\sys_fsync(\__mc_fileno($stream)) === 0;

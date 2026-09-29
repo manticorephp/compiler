@@ -245,6 +245,14 @@ final class Resource
      * field ahead of an existing one moves every offset a stale stdlib.o still uses.
      */
     public int $wtimeoutMs = 0;
+    /**
+     * A regular file or directory opened by fopen()/opendir() on a path: under a
+     * scheduler its libc calls may run on the offload pool. Pipes and sockets never
+     * are. `$poolJobs` counts this handle's jobs in flight; fclose/closedir wait
+     * for 0. Appended last for the same reason as $wtimeoutMs.
+     */
+    public bool $pooled = false;
+    public int $poolJobs = 0;
 
     public function __construct(int $kind, string $type, int $addr, bool $persistent = false)
     {

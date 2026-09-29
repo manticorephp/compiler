@@ -21,8 +21,8 @@
  * Read up to $size bytes of the open FILE* $fp into $buf and return the count.
  *
  * A regular file has no readiness signal — `O_NONBLOCK` is a no-op for files on
- * both targets. Under a scheduler with the offload pool ($pool: not a standard
- * stream) the whole read is one pool job and the task parks. Without the pool it is
+ * both targets. Under a scheduler with the offload pool ($pool) the whole read is
+ * one pool job and the task parks. Without the pool it is
  * made cooperative instead: under a scheduler this splits the transfer into 1 MiB pieces
  * and yields between them, so one big read no longer freezes every other task for
  * its whole duration. MEASURED on a 64 MB page-cache-hot file with a 1 ms ticker
@@ -1470,13 +1470,13 @@ function fopen(string $filename, string $mode)
         if ($fpAddr === 0) {
             return false;
         }
-        return new \Resource(\Resource::KIND_FILE, 'stream', $fpAddr);
+        return \__mc_pooled_res(\Resource::KIND_FILE, $fpAddr);
     }
     $fp = \Runtime\Libc\fopen(\__mc_file_path($filename), $mode);
     if ($fp === null) {
         return false;
     }
-    return new \Resource(\Resource::KIND_FILE, 'stream', \ptr_to_int($fp));
+    return \__mc_pooled_res(\Resource::KIND_FILE, \ptr_to_int($fp));
 }
 
 /**
@@ -1506,13 +1506,8 @@ function fclose(\Resource $stream): bool
         \Runtime\Openssl\ctxFree($stream->ssl);
         $stream->ssl = 0;
     }
-    if ($stream->kind === \Resource::KIND_FILE && !$stream->closed && !$stream->persistent
-        && $stream->addr !== 0 && \__mc_offload_active()) {
-        $ok = \__mc_offload(__MC_OFF_FCLOSE, $stream->addr) === 0;
-        $stream->closed = true;
-        $stream->addr = 0;
-        $stream->type = 'Unknown';
-        return $ok;
+    if ($stream->kind === \Resource::KIND_FILE && \__mc_res_pooled($stream)) {
+        return \__mc_res_offload_close($stream, __MC_OFF_FCLOSE);
     }
     return $stream->close();
 }
@@ -1632,8 +1627,11 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         $n = \__mc_transport_send($stream, $data, $len);
         return $n < 0 ? 0 : $n;
     }
-    if (!$stream->persistent && \__mc_offload_active()) {
-        return \__mc_offload_fwrite(\substr($data, 0, (int)$len), (int)$len, $stream->addr);
+    if (\__mc_res_pooled($stream)) {
+        \__mc_res_busy($stream);
+        $n = \__mc_offload_fwrite(\substr($data, 0, (int)$len), (int)$len, $stream->addr);
+        \__mc_res_done($stream);
+        return $n;
     }
     return \Runtime\Libc\fwrite($data, 1, $len, \int_to_ptr($stream->addr));
 }
@@ -1688,7 +1686,14 @@ function fread(\Resource $stream, int $length): string
         \Runtime\Libc\free($buf);
         return \__mc_stream_read($stream, $length);
     }
-    $n = \__mc_file_read_yielding($buf, $length, \int_to_ptr($stream->addr), !$stream->persistent);
+    if (\__mc_res_pooled($stream)) {
+        $n = \__mc_res_offload($stream, __MC_OFF_FREAD, \ptr_to_int($buf), $length, $stream->addr);
+        if ($n < 0) {
+            $n = 0;
+        }
+    } else {
+        $n = \__mc_file_read_yielding($buf, $length, \int_to_ptr($stream->addr), false);
+    }
     // str_from_buffer, NOT substr: raw \Ffi\Ptr, exactly $n bytes (binary-safe).
     $s = \str_from_buffer($buf, $n);
     \Runtime\Libc\free($buf);
@@ -1837,8 +1842,8 @@ function fflush(\Resource $stream): bool
     if (\__mc_stream_is_buffered($stream)) {
         return true;   // send(2)/memory is unbuffered — nothing to flush
     }
-    if (!$stream->persistent && \__mc_offload_active()) {
-        return \__mc_offload(__MC_OFF_FFLUSH, $stream->addr) === 0;
+    if (\__mc_res_pooled($stream)) {
+        return \__mc_res_offload($stream, __MC_OFF_FFLUSH, $stream->addr) === 0;
     }
     return \Runtime\Libc\fflush(\int_to_ptr($stream->addr)) === 0;
 }

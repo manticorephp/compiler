@@ -1690,6 +1690,8 @@ namespace Async {
         private array $selWaiter = [];
         /** Parked-on-I/O task count (NOT registered-fd count: an idle fd is not work). */
         private int $ioWaiters = 0;
+        /** @var array<int, Task[]> tasks parked in waitPoolIdle(), by Resource id */
+        private array $idleWaiters = [];
 
         /**
          * The blocking-offload pool. Per PROCESS, not per run: its threads and pipes
@@ -1995,6 +1997,37 @@ namespace Async {
                     return $this->offload($op, $a0, $a1, $a2, $a3, $a4);
                 },
             );
+            \Runtime\AsyncHook::installIdle(
+                function (\Resource $r): void { $this->waitPoolIdle($r); },
+                function (\Resource $r): void { $this->wakePoolIdle($r); },
+            );
+        }
+
+        /**
+         * Park until no pool job uses $r. Shielded like the job park itself: the
+         * jobs it waits for always finish, and the close that follows must run.
+         */
+        public function waitPoolIdle(\Resource $r): void
+        {
+            $me = $this->running;
+            if ($me === null) { return; }
+            $me->shield = $me->shield + 1;
+            try {
+                while ($r->poolJobs > 0) {
+                    $this->idleWaiters[$r->id][] = $me;
+                    \Fiber::suspend();
+                }
+            } finally {
+                $me->shield = $me->shield - 1;
+            }
+        }
+
+        public function wakePoolIdle(\Resource $r): void
+        {
+            if (!isset($this->idleWaiters[$r->id])) { return; }
+            $waiters = $this->idleWaiters[$r->id];
+            unset($this->idleWaiters[$r->id]);
+            foreach ($waiters as $t) { $this->wake($t); }
         }
 
         private function clearNetpoller(): void

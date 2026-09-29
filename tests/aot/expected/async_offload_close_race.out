@@ -1,0 +1,5 @@
+fwrite: wrote=8388608 close=true after write: true
+size: 8388608
+fsync: true close=true
+fread: got=8388608 close=true after read: true
+readdir: entry=true after readdir: true

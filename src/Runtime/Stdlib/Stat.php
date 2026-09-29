@@ -518,14 +518,14 @@ function opendir(string $directory)
         if ($dAddr === 0) {
             return false;
         }
-        return new \Resource(\Resource::KIND_DIR, 'stream', $dAddr);
+        return \__mc_pooled_res(\Resource::KIND_DIR, $dAddr);
     }
     $d = \Runtime\Libc\sys_opendir($directory);
     if ($d === null) {
         return false;
     }
     // php reports a DIR as type "stream", not "dir" — verified against php 8.5.
-    return new \Resource(\Resource::KIND_DIR, 'stream', \ptr_to_int($d));
+    return \__mc_pooled_res(\Resource::KIND_DIR, \ptr_to_int($d));
 }
 
 /**
@@ -537,8 +537,8 @@ function opendir(string $directory)
  */
 function readdir(\Resource $dir_handle)
 {
-    if (\__mc_offload_active()) {
-        $eAddr = \__mc_offload(__MC_OFF_READDIR, $dir_handle->addr);
+    if (\__mc_res_pooled($dir_handle)) {
+        $eAddr = \__mc_res_offload($dir_handle, __MC_OFF_READDIR, $dir_handle->addr);
         if ($eAddr === 0) {
             return false;
         }
@@ -557,12 +557,8 @@ function readdir(\Resource $dir_handle)
  */
 function closedir(\Resource $dir_handle): void
 {
-    if ($dir_handle->kind === \Resource::KIND_DIR && !$dir_handle->closed && $dir_handle->addr !== 0
-        && \__mc_offload_active()) {
-        \__mc_offload(__MC_OFF_CLOSEDIR, $dir_handle->addr);
-        $dir_handle->closed = true;
-        $dir_handle->addr = 0;
-        $dir_handle->type = 'Unknown';
+    if ($dir_handle->kind === \Resource::KIND_DIR && \__mc_res_pooled($dir_handle)) {
+        \__mc_res_offload_close($dir_handle, __MC_OFF_CLOSEDIR);
         return;
     }
     $dir_handle->close();
