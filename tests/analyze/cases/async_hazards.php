@@ -40,7 +40,7 @@ async(function () {
         readfile('/etc/hostname');
         copy('/etc/hosts', '/tmp/hosts');          // inline: blocks the loop
         copy($GLOBALS['path'], '/tmp/x');          // computed: no claim made
-        $g = glob('/tmp/*.log');                   // inline: blocks the loop
+        $g = glob('/tmp/*.log');                   // pooled: scandir + stat
         return count($d) + count($e) + count($g);
     });
 });

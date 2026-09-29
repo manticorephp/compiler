@@ -475,7 +475,7 @@ to the inline path, and outside `async()` every call runs inline as before.
 
 Not pooled, still inline: sockets (they have a readiness path), `popen` / `proc_open` pipes,
 `tmpfile`, `STDIN` / `STDOUT` / `STDERR`, and `file_exists` / `is_readable` (an `access`
-call), `fgets`, `stream_get_contents`, `copy`, `glob`, `rewinddir`. A slow one of these still stalls
+call), `fgets`, `stream_get_contents`, `copy`, `rewinddir` (`glob` walks through the pooled `scandir` and stat). A slow one of these still stalls
 the loop — measured on a 64 MB page-cache-hot file, a single inline `fread($h, 64MB)` holds
 every other task for **15-25 ms**. `Async\readFile()` / `Async\writeFile()` stay for
 that reason and for chunked progress: they read in 1 MB pieces with a yield between them
