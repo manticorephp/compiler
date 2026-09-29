@@ -1016,7 +1016,12 @@ final class OwnershipFlow implements Pass
             $this->noteOwnKey($name, $key);
             return;
         }
-        $lat->storeState[$id] = OwnLattice::stateOf($c === Ownership::NONE ? Ownership::NONE : Ownership::BORROW, $key);
+        // A non-rc word boxed into a CELL slot is empty for a cell drop only:
+        // a raw class another path leaves in the same slot meets it as a
+        // mismatch, not as the identity (a foreach's owned array, then an int).
+        $lat->storeState[$id] = ($c === Ownership::NONE && $boxed)
+            ? OwnLattice::CELLNIL
+            : OwnLattice::stateOf($c === Ownership::NONE ? Ownership::NONE : Ownership::BORROW, $key);
     }
 
     /** `$s = $s . …` on a string slot — the emitter's in-place append, which

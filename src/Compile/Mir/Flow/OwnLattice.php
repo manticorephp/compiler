@@ -14,6 +14,9 @@ use Compile\Mir\Node;
  *                   of ({@see borrow}: encoded below BORROW_BASE);
  *   SCALAR          a raw non-rc word: never dropped, never retained;
  *   MIXDEAD         the representation differs per incoming path (below);
+ *   CELLNIL         a CELL slot holding a word every cell drop no-ops on (a
+ *                   boxed scalar or null): EMPTY for a cell class, a raw
+ *                   word for any other;
  *   k > 0           Own(k) — k is a release class interned by the pass (a
  *                   flavor plus the slot type it releases by).
  *
@@ -38,6 +41,9 @@ final class OwnLattice implements Lattice
     /** Past a representation MISMATCH: never dropped or retained, and an rc read
      *  of the name here is an error ({@see $deadRead}). */
     public const MIXDEAD = -4;
+    /** A cell slot's non-rc word: absorbed by a cell class, a MISMATCH with
+     *  any other Own — a raw class's drop does not no-op on a tagged word. */
+    public const CELLNIL = -5;
 
     /** Store modes. */
     public const PLAIN = 0;
@@ -189,6 +195,7 @@ final class OwnLattice implements Lattice
         if (self::isBorrow($s)) { return 'Borrow:' . (string)self::borrowKey($s); }
         if ($s === self::SCALAR) { return 'Scalar'; }
         if ($s === self::MIXDEAD) { return 'MixDead'; }
+        if ($s === self::CELLNIL) { return 'CellNil'; }
         return 'Own:' . (string)$s;
     }
 
@@ -223,6 +230,16 @@ final class OwnLattice implements Lattice
         if ($x === $y) { return $x; }
         if ($x === self::EMPTY) { return $y; }
         if ($y === self::EMPTY) { return $x; }
+        if ($x === self::CELLNIL || $y === self::CELLNIL) {
+            $o = $x === self::CELLNIL ? $y : $x;
+            if ($o > 0) {
+                if (isset($this->cellish[$o])) { return $o; }
+                $this->mismatch[$n] = self::show($o) . ' vs ' . self::show(self::CELLNIL);
+                return self::MIXDEAD;
+            }
+            if (self::isBorrow($o) && isset($this->cellish[self::borrowKey($o)])) { return $o; }
+            return $o === self::MIXDEAD ? self::MIXDEAD : self::SCALAR;
+        }
         if ($x > 0 || $y > 0) {
             $own = $x > 0 ? $x : $y;
             $other = $x > 0 ? $y : $x;
@@ -269,7 +286,7 @@ final class OwnLattice implements Lattice
                 // a cell every drop no-ops on.
                 if ($x > 0) { $v = $this->storeKey[$id]; }
                 if (self::isBorrow($x)) { $v = self::borrow($this->storeKey[$id]); }
-                if ($x === self::SCALAR) { $v = self::EMPTY; }
+                if ($x === self::SCALAR || $x === self::CELLNIL) { $v = self::CELLNIL; }
             } elseif ($mode === self::SELF_COPY) {
                 if ($x > 0 && isset($this->cellish[$x])) { $v = $this->storeKey[$id]; }
                 // A cell self-copy stores `__mir_cell_own_alias`'s answer, a
@@ -315,7 +332,7 @@ final class OwnLattice implements Lattice
                 $this->refArgIn[$id] = $x;
                 if (self::isBorrow($x)) { return $this->with($in, $n, self::borrowKey($x)); }
                 $rk = $this->refArgKey[$id] ?? 0;
-                if ($x === self::EMPTY && $rk > 0) { return $this->with($in, $n, $rk); }
+                if (($x === self::EMPTY || $x === self::CELLNIL) && $rk > 0) { return $this->with($in, $n, $rk); }
                 return $in;
             }
             if ($x > 0 && isset($this->moveName[$id])) { return $this->with($in, $n, self::borrow($x)); }
