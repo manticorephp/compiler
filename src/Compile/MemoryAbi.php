@@ -929,4 +929,31 @@ final class MemoryAbi
      *  DROPPED (destructor run, children released) the moment it died, as php
      *  frees it; only its SHELL waits in the root buffer for the collector. */
     public const COLOR_DEAD = 4;
+
+    // ─── Blocking-offload job record ──────────────────────────────
+
+    /** Blocking-offload job record, shared by the IR pool worker and stdlib Offload.php. */
+    public const OFFLOAD_JOB_SIZE = 64;
+    public const OFFLOAD_OP = 0;
+    public const OFFLOAD_ARG0 = 8;
+    public const OFFLOAD_RET = 48;
+    public const OFFLOAD_ERR = 56;
+    public const OFFLOAD_OP_NOP = 0;
+    public const OFFLOAD_OP_FOPEN = 1;
+    public const OFFLOAD_OP_FREAD = 2;
+    public const OFFLOAD_OP_FWRITE = 3;
+    public const OFFLOAD_OP_FFLUSH = 4;
+    public const OFFLOAD_OP_FCLOSE = 5;
+    public const OFFLOAD_OP_FSYNC = 6;
+    public const OFFLOAD_OP_STAT = 7;
+    public const OFFLOAD_OP_LSTAT = 8;
+    public const OFFLOAD_OP_OPENDIR = 9;
+    public const OFFLOAD_OP_READDIR = 10;
+    public const OFFLOAD_OP_CLOSEDIR = 11;
+    public const OFFLOAD_OP_UNLINK = 12;
+    public const OFFLOAD_OP_RENAME = 13;
+    public const OFFLOAD_OP_MKDIR = 14;
+    public const OFFLOAD_OP_RMDIR = 15;
+    public const OFFLOAD_OP_GETADDRINFO = 16;
+    public const OFFLOAD_OP_OPEN = 17;
 }

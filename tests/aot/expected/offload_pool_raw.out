@@ -1,0 +1,5 @@
+start: 0
+start2: 0
+nop: same=1 ret=4242
+stat: ret=0 size>0=1
+stat missing: ret=-1 enoent=1

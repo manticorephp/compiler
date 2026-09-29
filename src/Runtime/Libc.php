@@ -113,6 +113,10 @@ function write(#[CType('int')] int $fd, string $buf, #[CType('size_t')] int $n):
 #[Library('c'), Symbol('read')]
 function read(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n): int {}
 
+// Same `write` symbol as above over a raw buffer, not a headered string.
+#[Library('c'), Symbol('write')]
+function sys_write_ptr(#[CType('int')] int $fd, Ptr $buf, #[CType('size_t')] int $n): int {}
+
 // ── files / filesystem ─────────────────────────────────────────────────
 
 #[Library('c'), Symbol('fopen'), Give]

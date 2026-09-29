@@ -144,6 +144,42 @@ trait EmitLlvmModule
             $this->libcExtra['ferror'] = 'declare i32 @ferror(ptr)';
             $this->libcExtra['exit'] = 'declare void @exit(i32)';
         }
+        // The offload worker's libc demand. Same spellings as the Runtime\Libc
+        // bindings of these symbols — the FFI binding check compares them.
+        if ($this->rt->needsPool) {
+            $this->libcExtra['read'] = 'declare i64 @read(i32, ptr, i64)';
+            $this->libcExtra['write'] = 'declare i64 @write(i32, ptr, i64)';
+            $this->libcExtra['free'] = 'declare void @free(ptr)';
+            $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
+            $this->libcExtra['fopen'] = 'declare ptr @fopen(ptr, ptr)';
+            $this->libcExtra['fread'] = 'declare i64 @fread(ptr, i64, i64, ptr)';
+            $this->libcExtra['fwrite'] = 'declare i64 @fwrite(ptr, i64, i64, ptr)';
+            $this->libcExtra['fflush'] = 'declare i32 @fflush(ptr)';
+            $this->libcExtra['fclose'] = 'declare i32 @fclose(ptr)';
+            $this->libcExtra['fsync'] = 'declare i32 @fsync(i32)';
+            $this->libcExtra['stat'] = 'declare i32 @stat(ptr, ptr)';
+            $this->libcExtra['lstat'] = 'declare i32 @lstat(ptr, ptr)';
+            $this->libcExtra['opendir'] = 'declare ptr @opendir(ptr)';
+            $this->libcExtra['readdir'] = 'declare ptr @readdir(ptr)';
+            $this->libcExtra['closedir'] = 'declare i32 @closedir(ptr)';
+            $this->libcExtra['unlink'] = 'declare i32 @unlink(ptr)';
+            $this->libcExtra['rename'] = 'declare i32 @rename(ptr, ptr)';
+            $this->libcExtra['mkdir'] = 'declare i32 @mkdir(ptr, i32)';
+            $this->libcExtra['rmdir'] = 'declare i32 @rmdir(ptr)';
+            $this->libcExtra['open'] = 'declare i32 @open(ptr, i32, ...)';
+            $this->libcExtra['getaddrinfo'] = 'declare i32 @getaddrinfo(ptr, ptr, ptr, ptr)';
+            $this->libcExtra['sigfillset'] = 'declare i32 @sigfillset(ptr)';
+            $this->libcExtra['pthread_sigmask'] = 'declare i32 @pthread_sigmask(i32, ptr, ptr)';
+            $this->libcExtra['pthread_attr_init'] = 'declare i32 @pthread_attr_init(ptr)';
+            $this->libcExtra['pthread_attr_setstacksize'] = 'declare i32 @pthread_attr_setstacksize(ptr, i64)';
+            $this->libcExtra['pthread_attr_setdetachstate'] = 'declare i32 @pthread_attr_setdetachstate(ptr, i32)';
+            $this->libcExtra['pthread_create'] = 'declare i32 @pthread_create(ptr, ptr, ptr, ptr)';
+            $this->libcExtra['pthread_attr_destroy'] = 'declare i32 @pthread_attr_destroy(ptr)';
+            $this->libcExtra['__error'] = 'declare extern_weak ptr @__error()';
+            $this->libcExtra['__errno_location'] = 'declare extern_weak ptr @__errno_location()';
+            $this->weakSyms['__error'] = true;
+            $this->weakSyms['__errno_location'] = true;
+        }
         $out  = "; ModuleID = 'mir'\n";
         $out .= "source_filename = \"mir\"\n\n";
         $out .= "@.fmt.d = private unnamed_addr constant [5 x i8] c\"%lld\\00\", align 1\n";
@@ -657,6 +693,9 @@ trait EmitLlvmModule
             $out .= "  %sn = mul i64 %s, 1000000000\n";
             $out .= "  %t = add i64 %sn, %n\n";
             $out .= "  ret i64 %t\n}\n";
+        }
+        if ($this->rt->needsPool) {
+            $out .= $this->offloadRuntime();
         }
         if ($this->rt->needsStdStreams) {
             // STDIN/STDOUT/STDERR resolve to libc's own FILE* globals so a
@@ -2869,5 +2908,179 @@ trait EmitLlvmModule
             $out .= '  ' . $name . ' = load i64, ptr ' . $slot . "\n";
         }
         return $out;
+    }
+
+    /**
+     * The blocking-offload pool: one worker body, one start helper
+     * ({@see \Compile\MemoryAbi::OFFLOAD_JOB_SIZE}). The worker reads 8-byte job
+     * pointers off the submit pipe, runs one libc call per job, stores ret and
+     * errno into the record and writes the same pointer to the done pipe. It
+     * touches its own stack, the job record and libc — never PHP state.
+     *
+     * Per-OS constants are picked at RUN time off the `@__error` weak null test
+     * (non-null ⇒ Darwin): SIG_BLOCK is 1 on Darwin, 0 on glibc/musl;
+     * PTHREAD_CREATE_DETACHED is 2 on Darwin, 1 on glibc/musl.
+     */
+    private function offloadRuntime(): string
+    {
+        $o = "define ptr @__mc_pool_errno_ptr() {\nentry:\n";
+        $o .= "  %dar = icmp ne ptr @__error, null\n";
+        $o .= "  br i1 %dar, label %d, label %g\n";
+        $o .= "d:\n  %pd = call ptr @__error()\n  br label %r\n";
+        $o .= "g:\n  %pg = call ptr @__errno_location()\n  br label %r\n";
+        $o .= "r:\n  %p = phi ptr [ %pd, %d ], [ %pg, %g ]\n";
+        $o .= "  ret ptr %p\n}\n";
+
+        $o .= "define ptr @__mc_pool_worker(ptr %arg) {\nentry:\n";
+        $o .= "  %s64 = load i64, ptr %arg\n";
+        $o .= "  %dp = getelementptr inbounds i8, ptr %arg, i64 8\n";
+        $o .= "  %d64 = load i64, ptr %dp\n";
+        $o .= "  call void @free(ptr %arg)\n";
+        $o .= "  %sub = trunc i64 %s64 to i32\n";
+        $o .= "  %done = trunc i64 %d64 to i32\n";
+        $o .= "  %set = alloca [128 x i8], align 8\n";
+        $o .= "  %slot = alloca ptr, align 8\n";
+        $o .= "  %sf = call i32 @sigfillset(ptr %set)\n";
+        $o .= "  %dar = icmp ne ptr @__error, null\n";
+        $o .= "  %how = select i1 %dar, i32 1, i32 0\n";
+        $o .= "  %sm = call i32 @pthread_sigmask(i32 %how, ptr %set, ptr null)\n";
+        $o .= "  %ep = call ptr @__mc_pool_errno_ptr()\n";
+        $o .= "  br label %loop\n";
+        $o .= "loop:\n";
+        $o .= "  %n = call i64 @read(i32 %sub, ptr %slot, i64 8)\n";
+        $o .= "  %ok = icmp eq i64 %n, 8\n";
+        $o .= "  br i1 %ok, label %run, label %rderr\n";
+        $o .= "rderr:\n";
+        $o .= "  %neg = icmp slt i64 %n, 0\n";
+        $o .= "  br i1 %neg, label %intr, label %exit\n";
+        $o .= "intr:\n";
+        $o .= "  %e0 = load i32, ptr %ep\n";
+        $o .= "  %isintr = icmp eq i32 %e0, 4\n";
+        $o .= "  br i1 %isintr, label %loop, label %exit\n";
+        $o .= "run:\n";
+        $o .= "  %job = load ptr, ptr %slot\n";
+        $o .= '  %opp = getelementptr inbounds i8, ptr %job, i64 ' . \Compile\MemoryAbi::OFFLOAD_OP . "\n";
+        $o .= "  %op = load i64, ptr %opp\n";
+        for ($i = 0; $i < 5; $i++) {
+            $off = \Compile\MemoryAbi::OFFLOAD_ARG0 + 8 * $i;
+            $o .= '  %ap' . $i . ' = getelementptr inbounds i8, ptr %job, i64 ' . $off . "\n";
+            $o .= '  %a' . $i . ' = load i64, ptr %ap' . $i . "\n";
+            $o .= '  %p' . $i . ' = inttoptr i64 %a' . $i . " to ptr\n";
+            $o .= '  %w' . $i . ' = trunc i64 %a' . $i . " to i32\n";
+        }
+        // errno cleared first: readdir's end-of-directory is NULL with errno 0.
+        $o .= "  store i32 0, ptr %ep\n";
+        /** @var array<string, int> $codes */
+        $codes = [
+            'NOP' => \Compile\MemoryAbi::OFFLOAD_OP_NOP,
+            'FOPEN' => \Compile\MemoryAbi::OFFLOAD_OP_FOPEN,
+            'FREAD' => \Compile\MemoryAbi::OFFLOAD_OP_FREAD,
+            'FWRITE' => \Compile\MemoryAbi::OFFLOAD_OP_FWRITE,
+            'FFLUSH' => \Compile\MemoryAbi::OFFLOAD_OP_FFLUSH,
+            'FCLOSE' => \Compile\MemoryAbi::OFFLOAD_OP_FCLOSE,
+            'FSYNC' => \Compile\MemoryAbi::OFFLOAD_OP_FSYNC,
+            'STAT' => \Compile\MemoryAbi::OFFLOAD_OP_STAT,
+            'LSTAT' => \Compile\MemoryAbi::OFFLOAD_OP_LSTAT,
+            'OPENDIR' => \Compile\MemoryAbi::OFFLOAD_OP_OPENDIR,
+            'READDIR' => \Compile\MemoryAbi::OFFLOAD_OP_READDIR,
+            'CLOSEDIR' => \Compile\MemoryAbi::OFFLOAD_OP_CLOSEDIR,
+            'UNLINK' => \Compile\MemoryAbi::OFFLOAD_OP_UNLINK,
+            'RENAME' => \Compile\MemoryAbi::OFFLOAD_OP_RENAME,
+            'MKDIR' => \Compile\MemoryAbi::OFFLOAD_OP_MKDIR,
+            'RMDIR' => \Compile\MemoryAbi::OFFLOAD_OP_RMDIR,
+            'GETADDRINFO' => \Compile\MemoryAbi::OFFLOAD_OP_GETADDRINFO,
+            'OPEN' => \Compile\MemoryAbi::OFFLOAD_OP_OPEN,
+        ];
+        /** @var array<string, string> $calls */
+        $calls = [
+            'NOP' => 'add i64 %a0, 0',
+            'FOPEN' => 'call ptr @fopen(ptr %p0, ptr %p1)',
+            'FREAD' => 'call i64 @fread(ptr %p0, i64 1, i64 %a1, ptr %p2)',
+            'FWRITE' => 'call i64 @fwrite(ptr %p0, i64 1, i64 %a1, ptr %p2)',
+            'FFLUSH' => 'call i32 @fflush(ptr %p0)',
+            'FCLOSE' => 'call i32 @fclose(ptr %p0)',
+            'FSYNC' => 'call i32 @fsync(i32 %w0)',
+            'STAT' => 'call i32 @stat(ptr %p0, ptr %p1)',
+            'LSTAT' => 'call i32 @lstat(ptr %p0, ptr %p1)',
+            'OPENDIR' => 'call ptr @opendir(ptr %p0)',
+            'READDIR' => 'call ptr @readdir(ptr %p0)',
+            'CLOSEDIR' => 'call i32 @closedir(ptr %p0)',
+            'UNLINK' => 'call i32 @unlink(ptr %p0)',
+            'RENAME' => 'call i32 @rename(ptr %p0, ptr %p1)',
+            'MKDIR' => 'call i32 @mkdir(ptr %p0, i32 %w1)',
+            'RMDIR' => 'call i32 @rmdir(ptr %p0)',
+            'GETADDRINFO' => 'call i32 @getaddrinfo(ptr %p0, ptr %p1, ptr %p2, ptr %p3)',
+            'OPEN' => 'call i32 (ptr, i32, ...) @open(ptr %p0, i32 %w1, i32 %w2)',
+        ];
+        /** @var array<string, string> $kinds */
+        $kinds = [
+            'NOP' => 'i64', 'FOPEN' => 'ptr', 'FREAD' => 'i64', 'FWRITE' => 'i64',
+            'FFLUSH' => 'i32', 'FCLOSE' => 'i32', 'FSYNC' => 'i32', 'STAT' => 'i32',
+            'LSTAT' => 'i32', 'OPENDIR' => 'ptr', 'READDIR' => 'ptr', 'CLOSEDIR' => 'i32',
+            'UNLINK' => 'i32', 'RENAME' => 'i32', 'MKDIR' => 'i32', 'RMDIR' => 'i32',
+            'GETADDRINFO' => 'i32', 'OPEN' => 'i32',
+        ];
+        $o .= "  switch i64 %op, label %unknown [\n";
+        foreach ($codes as $name => $code) {
+            $o .= '    i64 ' . $code . ', label %op.' . $name . "\n";
+        }
+        $o .= "  ]\n";
+        $phi = '';
+        foreach ($calls as $name => $call) {
+            $kind = $kinds[$name];
+            $o .= 'op.' . $name . ":\n";
+            if ($kind === 'i64') {
+                $o .= '  %r' . $name . ' = ' . $call . "\n";
+            } else {
+                $o .= '  %c' . $name . ' = ' . $call . "\n";
+                if ($kind === 'ptr') {
+                    $o .= '  %r' . $name . ' = ptrtoint ptr %c' . $name . " to i64\n";
+                } else {
+                    $o .= '  %r' . $name . ' = sext i32 %c' . $name . " to i64\n";
+                }
+            }
+            $o .= "  br label %store\n";
+            $phi .= '[ %r' . $name . ', %op.' . $name . ' ], ';
+        }
+        $o .= "unknown:\n  br label %store\n";
+        $phi .= '[ -1, %unknown ]';
+        $o .= "store:\n";
+        $o .= '  %ret = phi i64 ' . $phi . "\n";
+        $o .= "  %err = load i32, ptr %ep\n";
+        $o .= "  %err64 = sext i32 %err to i64\n";
+        $o .= '  %rp = getelementptr inbounds i8, ptr %job, i64 ' . \Compile\MemoryAbi::OFFLOAD_RET . "\n";
+        $o .= "  store i64 %ret, ptr %rp\n";
+        $o .= '  %xp = getelementptr inbounds i8, ptr %job, i64 ' . \Compile\MemoryAbi::OFFLOAD_ERR . "\n";
+        $o .= "  store i64 %err64, ptr %xp\n";
+        $o .= "  br label %post\n";
+        $o .= "post:\n";
+        $o .= "  %wn = call i64 @write(i32 %done, ptr %slot, i64 8)\n";
+        $o .= "  %wok = icmp eq i64 %wn, 8\n";
+        $o .= "  br i1 %wok, label %loop, label %werr\n";
+        $o .= "werr:\n";
+        $o .= "  %e1 = load i32, ptr %ep\n";
+        $o .= "  %wintr = icmp eq i32 %e1, 4\n";
+        $o .= "  br i1 %wintr, label %post, label %exit\n";
+        $o .= "exit:\n  ret ptr null\n}\n";
+
+        $o .= "define i64 @__mc_pool_start(i64 %sub, i64 %done) {\nentry:\n";
+        $o .= "  %attr = alloca [128 x i8], align 8\n";
+        $o .= "  %tid = alloca i64, align 8\n";
+        $o .= "  %arg = call ptr @malloc(i64 16)\n";
+        $o .= "  store i64 %sub, ptr %arg\n";
+        $o .= "  %dp = getelementptr inbounds i8, ptr %arg, i64 8\n";
+        $o .= "  store i64 %done, ptr %dp\n";
+        $o .= "  %dar = icmp ne ptr @__error, null\n";
+        $o .= "  %det = select i1 %dar, i32 2, i32 1\n";
+        $o .= "  %i0 = call i32 @pthread_attr_init(ptr %attr)\n";
+        $o .= "  %i1 = call i32 @pthread_attr_setstacksize(ptr %attr, i64 524288)\n";
+        $o .= "  %i2 = call i32 @pthread_attr_setdetachstate(ptr %attr, i32 %det)\n";
+        $o .= "  %rc = call i32 @pthread_create(ptr %tid, ptr %attr, ptr @__mc_pool_worker, ptr %arg)\n";
+        $o .= "  %i3 = call i32 @pthread_attr_destroy(ptr %attr)\n";
+        $o .= "  %bad = icmp ne i32 %rc, 0\n";
+        $o .= "  br i1 %bad, label %fail, label %ok\n";
+        $o .= "fail:\n  call void @free(ptr %arg)\n  br label %ok\n";
+        $o .= "ok:\n  %r = sext i32 %rc to i64\n  ret i64 %r\n}\n";
+        return $o;
     }
 }

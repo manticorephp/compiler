@@ -95,6 +95,10 @@ public bool $needsClosureRc = false;
     /** The program asks the clock (time/microtime/hrtime): emit the
      *  clock_gettime wrapper. */
     public bool $needsClock = false;
+
+    /** The program starts the blocking-offload pool (`__mc_pool_start`): emit
+     *  the worker thread body and its start helper. */
+    public bool $needsPool = false;
     public bool $needsStdStreams = false;
 
     /**
