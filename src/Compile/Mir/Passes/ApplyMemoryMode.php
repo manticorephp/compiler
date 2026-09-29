@@ -249,15 +249,18 @@ final class ApplyMemoryMode implements Pass
     private function loopResets(Node $n, \Compile\Mir\FunctionDef $fn): bool
     {
         $arena = new \Compile\Mir\ArenaContext();
+        /** @var array<string, bool> $params */
+        $params = [];
+        foreach ($fn->params as $p) { $params[$p->name] = true; }
         $k = $n->kind;
         if ($k === Node::KIND_FOREACH) {
             if ($n->byRef) { return false; }
-            return $arena->canResetPerIteration(null, $n->body, null, $fn->body, $fn->isGenerator);
+            return $arena->canResetPerIteration(null, $n->body, null, $fn->body, $fn->isGenerator, $params);
         }
         if ($k === Node::KIND_FOR) {
-            return $arena->canResetPerIteration($n->cond, $n->body, $n->step, $fn->body, $fn->isGenerator);
+            return $arena->canResetPerIteration($n->cond, $n->body, $n->step, $fn->body, $fn->isGenerator, $params);
         }
-        return $arena->canResetPerIteration($n->cond, $n->body, null, $fn->body, $fn->isGenerator);
+        return $arena->canResetPerIteration($n->cond, $n->body, null, $fn->body, $fn->isGenerator, $params);
     }
 
     /**

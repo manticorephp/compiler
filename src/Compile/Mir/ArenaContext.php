@@ -55,9 +55,23 @@ final class ArenaContext
      * local is (A) written before it is read on each iteration (so the prior
      * iteration's freed value is never observed) AND (B) not read anywhere in
      * the function outside this loop (so the last iteration's value — freed by
-     * the pre-exit reset — is never observed either). `$step` may be null.
+     * the pre-exit reset — is never observed either) AND (C) bound by nothing
+     * but direct arena allocations stored inside this loop — no store outside
+     * it, no copy of another local, no heap value, not a param / foreach /
+     * catch variable.
+     *
+     * (C) is what keeps this ONE answer before and after {@see
+     * Passes\OwnershipFlow}: such a local is only ever a Borrow (or Empty) to
+     * the flow, so the flow plans no drop, retain or share on it that could
+     * touch a value a reset already freed. {@see Passes\ApplyMemoryMode} asks
+     * before the flow ran and the emitter after, and both get the same verdict.
+     * The flow ops ride on node fields, not children ({@see countLocalReads}
+     * still counts them, a backstop should (C) ever let an Own through).
+     * `$step` may be null.
+     *
+     * @param array<string, bool> $params the function's param names
      */
-    public function canResetPerIteration(?Node $cond, Node $body, ?Node $step, ?Node $fnBody, bool $inGenerator): bool
+    public function canResetPerIteration(?Node $cond, Node $body, ?Node $step, ?Node $fnBody, bool $inGenerator, array $params = []): bool
     {
         // A generator resume body re-enters mid-loop via the entry state
         // switch (irreducible CFG), so a per-iteration arena save placed
@@ -85,6 +99,12 @@ final class ArenaContext
             if ($total > $inLoop) { return false; }
             // (A) written before read on each iteration.
             if (!$this->writtenBeforeRead($name, $body)) { return false; }
+            // (C) arena-bound only, and only here.
+            if (isset($params[$name])) { return false; }
+            $here = $this->arenaStores($name, $body)
+                + ($cond !== null ? $this->arenaStores($name, $cond) : 0)
+                + ($step !== null ? $this->arenaStores($name, $step) : 0);
+            if ($fnBody !== null && $this->bindings($name, $fnBody) !== $here) { return false; }
         }
         return true;
     }
@@ -107,18 +127,36 @@ final class ArenaContext
         foreach (Walk::children($n) as $c) { $this->scan($c); }
     }
 
-    /** Count LOAD_LOCAL reads of `$name` in the subtree. An `own_local` /
-     *  `own_local_b` registration ({@see Passes\OwnershipFlow}) names the local
-     *  for the emitter and executes nothing: not a read. */
+    /** Count reads of `$name`'s slot in the subtree: every LOAD_LOCAL, and
+     *  every {@see Passes\OwnershipFlow} op riding on a node field (a store's
+     *  drop of the old value or retain of the new, a return's drops and
+     *  identity-compared arms, a foreach binding's drop). An `own_local` /
+     *  `own_local_b` registration names the local for the emitter and executes
+     *  nothing: not a read. */
     private function countLocalReads(string $name, Node $n): int
     {
-        if ($n->kind === Node::KIND_MEMORY_OP) {
+        $k = $n->kind;
+        if ($k === Node::KIND_MEMORY_OP) {
             $op = self::asMemoryOp($n)->op;
             if ($op === 'own_local' || $op === 'own_local_b') { return 0; }
         }
         $c = 0;
-        if ($n->kind === Node::KIND_LOAD_LOCAL && $n->name === $name) {
+        if ($k === Node::KIND_LOAD_LOCAL && $n->name === $name) {
             $c = 1;
+        } elseif ($k === Node::KIND_STORE_LOCAL) {
+            $sl = self::asStoreLocal($n);
+            if ($sl->name === $name && ($sl->ownOld !== null || $sl->ownNew !== null)) { $c = 1; }
+        } elseif ($k === Node::KIND_RETURN) {
+            $r = self::asReturn($n);
+            if (isset($r->ownArms[$name])) { $c = 1; }
+            foreach ($r->ownDrops as $d) {
+                $t = $d->target;
+                if ($t !== null && $t->kind === Node::KIND_LOAD_LOCAL && self::asLoadLocal($t)->name === $name) { $c = 1; }
+            }
+        } elseif ($k === Node::KIND_FOREACH) {
+            $fe = self::asForeach($n);
+            if (($fe->valueVar === $name && $fe->ownDropValue !== null)
+                || ($fe->keyVar === $name && $fe->ownDropKey !== null)) { $c = 1; }
         }
         foreach (Walk::children($n) as $ch) {
             $c = $c + $this->countLocalReads($name, $ch);
@@ -138,8 +176,10 @@ final class ArenaContext
         foreach ($this->stmtList($body) as $stmt) {
             if ($stmt->kind === Node::KIND_STORE_LOCAL
                 && $stmt->name === $name) {
-                // Fresh re-init iff the value doesn't read $name itself.
-                return $this->countLocalReads($name, $stmt->value) === 0;
+                // Fresh re-init iff the value doesn't read $name itself, and
+                // no flow drop reads the previous iteration's value first.
+                return $this->countLocalReads($name, $stmt->value) === 0
+                    && self::asStoreLocal($stmt)->ownOld === null;
             }
             // Any other statement that mentions $name (read, or a nested/
             // conditional/element write) reaches a use before a clean write.
@@ -206,5 +246,38 @@ final class ArenaContext
         return null;
     }
 
+    /** StoreLocals of `$name` in the subtree whose value is an arena allocation. */
+    private function arenaStores(string $name, Node $n): int
+    {
+        $c = 0;
+        if ($n->kind === Node::KIND_STORE_LOCAL && self::asStoreLocal($n)->name === $name
+            && self::asStoreLocal($n)->value->allocKind === AllocationKind::ARENA) { $c = 1; }
+        foreach (Walk::children($n) as $ch) { $c = $c + $this->arenaStores($name, $ch); }
+        return $c;
+    }
+
+    /** Everything that binds `$name` in the subtree: its stores, and a foreach
+     *  or catch binding it (counted twice, so it never equals a store count). */
+    private function bindings(string $name, Node $n): int
+    {
+        $c = 0;
+        $k = $n->kind;
+        if ($k === Node::KIND_STORE_LOCAL && self::asStoreLocal($n)->name === $name) { $c = 1; }
+        if ($k === Node::KIND_FOREACH) {
+            $fe = self::asForeach($n);
+            if ($fe->valueVar === $name || $fe->keyVar === $name) { $c = 2; }
+        }
+        if ($k === Node::KIND_TRY_CATCH) {
+            foreach (self::asTryCatch($n)->catches as $cc) { if ($cc->var === $name) { $c = $c + 2; } }
+        }
+        foreach (Walk::children($n) as $ch) { $c = $c + $this->bindings($name, $ch); }
+        return $c;
+    }
+
     private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }
+    private static function asStoreLocal(Node $n): StoreLocal { return $n; }
+    private static function asLoadLocal(Node $n): LoadLocal { return $n; }
+    private static function asReturn(Node $n): Return_ { return $n; }
+    private static function asForeach(Node $n): Foreach_ { return $n; }
+    private static function asTryCatch(Node $n): TryCatch_ { return $n; }
 }

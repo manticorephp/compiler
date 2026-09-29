@@ -862,6 +862,11 @@ final class OwnershipFlow implements Pass
      * holds from the call on. A borrowed one takes its own reference before the
      * statement ({@see OwnLattice::$refArgIn}); an empty one (an out-parameter's
      * null start) owns whatever the callee left.
+     *
+     * `byRefArgs($call, false)`: user callees only. The by-ref arguments of the
+     * builtins that walk an array in place (`sort`, `next`, …) are left OUTSIDE
+     * the flow: their local keeps the state it had before the call, and the
+     * emitter's builtin path owns whatever the call does to the slot.
      */
     private function scanRefArgs(Node $call, OwnLattice $lat): void
     {

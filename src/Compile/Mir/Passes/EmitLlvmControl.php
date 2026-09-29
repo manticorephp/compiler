@@ -1466,7 +1466,7 @@ trait EmitLlvmControl
         // By-ref foreach writes the value slot back into the element, so an
         // arena value could escape into the (pre-save) array — skip it.
         $reset = !$fe->byRef && !$this->inSharedForeach($fe)
-            && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
+            && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
         $out .= '  br label %' . $condLabel . "\n";
@@ -2190,7 +2190,7 @@ trait EmitLlvmControl
         $endLabel  = $this->ssa->allocLabel('loop.end');
         $this->cf->enterLoop($endLabel, $condLabel);
 
-        $reset = $this->arena->canResetPerIteration($w->cond, $w->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = $this->arena->canResetPerIteration($w->cond, $w->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
         $out .= '  br label %' . $condLabel . "\n";
@@ -2220,7 +2220,7 @@ trait EmitLlvmControl
         // `continue` runs the step before re-testing the condition.
         $this->cf->enterLoop($endLabel, $stepLabel);
 
-        $reset = $this->arena->canResetPerIteration($f->cond, $f->body, $f->step, $this->frame->body, $this->gen->inGenerator);
+        $reset = $this->arena->canResetPerIteration($f->cond, $f->body, $f->step, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
         $out = '';
         if ($f->init !== null) { $out .= $this->emitNode($f->init); }
         if ($reset) { $out .= $this->emitArenaSave(); }
@@ -2256,7 +2256,7 @@ trait EmitLlvmControl
         $endLabel  = $this->ssa->allocLabel('do.end');
         $this->cf->enterLoop($endLabel, $condLabel);
 
-        $reset = $this->arena->canResetPerIteration($d->cond, $d->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = $this->arena->canResetPerIteration($d->cond, $d->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
         $out .= '  br label %' . $bodyLabel . "\n";

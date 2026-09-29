@@ -188,7 +188,7 @@ final class StoreLocal extends Node
 
     /** The NULL an out-parameter local starts as ({@see Passes\VivifyRefArgs}):
      *  the by-ref callee stores an owned value into the slot, so the slot owns
-     *  what it ends up holding. Declared LAST — field order is layout. */
+     *  what it ends up holding. Field order is layout: append after the last. */
     public bool $outParamInit = false;
     /** `$x = $x` on one cell slot the flow manages: a relabel that moves
      *  nothing ({@see Passes\OwnershipFlow}), so the emitter emits no store. */
