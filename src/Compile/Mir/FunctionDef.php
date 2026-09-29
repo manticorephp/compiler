@@ -118,4 +118,13 @@ final class FunctionDef
      * caller's local owns what it stores ({@see Ownership::erasedArrayReturn}).
      */
     public bool $returnArrayHinted = false;
+
+    /**
+     * Generated from THIS module's class table (`__mir_obj_to_str` and its arms):
+     * another module's body under the same name dispatches over different
+     * classes, so it is emitted `internal`, never `linkonce_odr` — the stdlib's
+     * copy, knowing no user class, won the link and every `(string)` of a user
+     * object threw "Object of class  could not be converted".
+     */
+    public bool $moduleLocal = false;
 }

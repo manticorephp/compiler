@@ -207,6 +207,9 @@ namespace {
      */
     function pcntl_fork(): int
     {
+        // php's CLI writes echo straight through; ours buffers it, and a child
+        // that inherited the unflushed bytes printed them a second time on exit.
+        \flush();
         return \__mc_proc_fork();
     }
 

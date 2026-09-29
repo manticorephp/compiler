@@ -1062,6 +1062,7 @@ final class LowerFromAst implements Pass
             $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
             $tfn = $this->lowerFunction($tstmt->decl);
             $tfn->isPrelude = true;
+            $tfn->moduleLocal = true;
             $module->addFunction($tfn);
         }
         $module->hasObjToStr = true;

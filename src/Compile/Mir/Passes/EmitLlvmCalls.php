@@ -3225,7 +3225,7 @@ trait EmitLlvmCalls
         $dk = $def->type->kind;
         if (($tagged || ($pt !== null && $pt->kind === Type::KIND_CELL))
             && $dk !== Type::KIND_CELL && $dk !== Type::KIND_UNKNOWN) {
-            $out .= $this->boxToCell($def->type);
+            $out .= $this->boxToCell($def->type, $def);
         }
         $out .= $this->coerceToI64();
         return $out;

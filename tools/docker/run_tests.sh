@@ -107,6 +107,7 @@ for platform in "${PLATFORMS[@]}"; do
         -e MC_COLD="$COLD_MODE" \
         -e MC_COMPILER_CACHE=/compiler-cache \
         -e MC_FILTER="$FILTER" \
+        -e MC_RUNNER="${MC_RUNNER:-sh}" \
         -e MC_STABILITY_N="${MC_STABILITY_N:-2}" \
         -e MC_JOBS="${MC_JOBS:-0}" \
         "$image" /bin/bash /repo/tools/docker/gate.sh \

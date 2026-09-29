@@ -44,7 +44,10 @@ async(function () use ($l, $port) {
         while ($total < $want) {
             \Async\delay(0.1);
             $chunk = \fread($c, 8192);
-            if ($chunk === '') {
+            // '' on a NON-blocking TLS stream is "no whole record yet", not
+            // EOF — a slow runner (alpine-amd64 CI) hit it mid-transfer and
+            // stopped short. Only the peer's close ends the drain.
+            if ($chunk === false || ($chunk === '' && \feof($c))) {
                 break;
             }
             $total = $total + \strlen($chunk);

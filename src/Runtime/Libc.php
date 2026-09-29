@@ -10,7 +10,7 @@ namespace Runtime\Libc;
 // broke every async socket test on Linux while macOS stayed green.
 //
 // Do NOT add it to a bind that returns ssize_t (read/write/recv/send/readlink), size_t
-// (strlen/fread/fwrite), long (ftell), off_t (lseek/truncate) or a POINTER carried as int
+// (strlen/fread/fwrite), long (ftell), off_t (lseek) or a POINTER carried as int
 // (strstr/malloc/fopen) — the sign-extension would truncate those to 32 bits.
 
 use Ffi\CType;
@@ -180,18 +180,18 @@ function sys_rename(string $from, string $to): int {}
 #[Library('c'), Symbol('chmod'), CType('int')]
 function sys_chmod(string $path, #[CType('int')] int $mode): int {}
 
-#[Library('c'), Symbol('chown')]
+#[Library('c'), Symbol('chown'), CType('int')]
 function sys_chown(string $path, #[CType('int')] int $owner, #[CType('int')] int $group): int {}
 
 // `int lchown(const char *, uid_t, gid_t)` — chown a symlink ITSELF, not its
 // target (the l* variant, like lstat vs stat).
-#[Library('c'), Symbol('lchown')]
+#[Library('c'), Symbol('lchown'), CType('int')]
 function sys_lchown(string $path, #[CType('int')] int $owner, #[CType('int')] int $group): int {}
 
-#[Library('c'), Symbol('symlink')]
+#[Library('c'), Symbol('symlink'), CType('int')]
 function sys_symlink(string $target, string $link): int {}
 
-#[Library('c'), Symbol('link')]
+#[Library('c'), Symbol('link'), CType('int')]
 function sys_link(string $target, string $link): int {}
 
 // `ssize_t readlink(const char *, char *, size_t)` — does NOT NUL-terminate;
@@ -200,7 +200,7 @@ function sys_link(string $target, string $link): int {}
 #[Library('c'), Symbol('readlink')]
 function sys_readlink(string $path, Ptr $buf, #[CType('size_t')] int $size): int {}
 
-#[Library('c'), Symbol('truncate')]
+#[Library('c'), Symbol('truncate'), CType('int')]
 function sys_truncate(string $path, #[CType('long')] int $length): int {}
 
 #[Library('c'), Symbol('ftruncate'), CType('int')]
@@ -233,7 +233,7 @@ function sys_realpath(string $path, Ptr $resolved): Ptr {}
 
 // `int utimes(const char *, const struct timeval[2])` — always passed a real
 // timeval pair (see the NULL note on sys_realpath).
-#[Library('c'), Symbol('utimes')]
+#[Library('c'), Symbol('utimes'), CType('int')]
 function sys_utimes(string $path, Ptr $times): int {}
 
 // ── stat / dirent ──────────────────────────────────────────────────────
@@ -252,7 +252,7 @@ function sys_stat(string $path, Ptr $buf): int {}
 // `int statvfs(const char *, struct statvfs *)` — filesystem stats for
 // disk_free_space / disk_total_space. The struct layout differs per host
 // (Darwin's block counts are 32-bit, glibc's 64-bit), read at runtime offsets.
-#[Library('c'), Symbol('statvfs')]
+#[Library('c'), Symbol('statvfs'), CType('int')]
 function sys_statvfs(string $path, Ptr $buf): int {}
 
 #[Library('c'), Symbol('lstat'), CType('int')]
@@ -296,7 +296,7 @@ function sys_chdir(string $path): int {}
 // match, FNM_NOMATCH (1) otherwise. The flag VALUES are host-specific
 // (FNM_PATHNAME and FNM_NOESCAPE are swapped between Darwin and glibc), but php
 // exposes the host's own header values, so callers pass them straight through.
-#[Library('c'), Symbol('fnmatch')]
+#[Library('c'), Symbol('fnmatch'), CType('int')]
 function sys_fnmatch(string $pattern, string $string, #[CType('int')] int $flags): int {}
 
 // `FILE *tmpfile(void)` — an unnamed temp file, removed when closed.
@@ -305,7 +305,7 @@ function sys_tmpfile(): Ptr {}
 
 // `int mkstemp(char *template)` — mutates the template in place (the trailing
 // XXXXXX become the chosen suffix) and returns an open fd, or -1.
-#[Library('c'), Symbol('mkstemp')]
+#[Library('c'), Symbol('mkstemp'), CType('int')]
 function sys_mkstemp(Ptr $template): int {}
 
 #[Library('c'), Symbol('close'), CType('int')]
@@ -545,7 +545,7 @@ function sys_accept(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 function sys_getsockname(#[CType('int')] int $fd, Ptr $addr, Ptr $addrlen): int {}
 
 // `int gethostname(char *name, size_t len)` — the local host's name into $name.
-#[Library('c'), Symbol('gethostname')]
+#[Library('c'), Symbol('gethostname'), CType('int')]
 function sys_gethostname(Ptr $name, #[CType('size_t')] int $len): int {}
 
 // `int getnameinfo(const sockaddr *addr, socklen_t addrlen, char *host,
@@ -610,14 +610,14 @@ function sys_socketpair(#[CType('int')] int $domain, #[CType('int')] int $type,
 
 // `int sockatmark(int fd)` — 1 if the read pointer is at the OOB mark, 0 if not,
 // -1 on error. Backs socket_atmark.
-#[Library('c'), Symbol('sockatmark')]
+#[Library('c'), Symbol('sockatmark'), CType('int')]
 function sys_sockatmark(#[CType('int')] int $fd): int {}
 
 // `int dup(int fd)` — a NEW fd referring to the same open file/socket, or -1.
 // Used to duplicate a fd for socket_import_stream / socket_export_stream. dup(2)
 // is non-variadic, unlike fcntl(F_DUPFD) whose vararg arg breaks the Darwin arm64
 // variadic ABI when called through the fixed-arity FFI wrapper.
-#[Library('c'), Symbol('dup')]
+#[Library('c'), Symbol('dup'), CType('int')]
 function sys_dup(#[CType('int')] int $fd): int {}
 
 // ── Signals + process control (ext/pcntl, ext/posix) ───────────────────
@@ -632,29 +632,29 @@ function sys_dup(#[CType('int')] int $fd): int {}
 // callers allocate the 128-byte superset and let the host's own
 // sigemptyset/sigaddset write into it.
 
-#[Library('c'), Symbol('sigemptyset')]
+#[Library('c'), Symbol('sigemptyset'), CType('int')]
 function sys_sigemptyset(Ptr $set): int {}
 
-#[Library('c'), Symbol('sigaddset')]
+#[Library('c'), Symbol('sigaddset'), CType('int')]
 function sys_sigaddset(Ptr $set, #[CType('int')] int $signo): int {}
 
 // 1 = member, 0 = not, -1 = error.
-#[Library('c'), Symbol('sigismember')]
+#[Library('c'), Symbol('sigismember'), CType('int')]
 function sys_sigismember(Ptr $set, #[CType('int')] int $signo): int {}
 
 // `int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)` — how is
 // SIG_BLOCK/UNBLOCK/SETMASK, whose VALUES DIFFER between hosts (1/2/3 Darwin vs
 // 0/1/2 Linux), so callers take them from __mc_sig_const(), never a literal.
-#[Library('c'), Symbol('sigprocmask')]
+#[Library('c'), Symbol('sigprocmask'), CType('int')]
 function sys_sigprocmask(#[CType('int')] int $how, Ptr $set, Ptr $old): int {}
 
-#[Library('c'), Symbol('sigpending')]
+#[Library('c'), Symbol('sigpending'), CType('int')]
 function sys_sigpending(Ptr $set): int {}
 
 // `int sigwait(const sigset_t *set, int *sig)` — blocks until one of $set is
 // delivered. Only ever called on a signal already known to be BLOCKED AND
 // PENDING, so it returns immediately.
-#[Library('c'), Symbol('sigwait')]
+#[Library('c'), Symbol('sigwait'), CType('int')]
 function sys_sigwait(Ptr $set, Ptr $sig): int {}
 
 // `int signalfd(int fd, const sigset_t *mask, int flags)` — LINUX ONLY, hence
@@ -676,18 +676,18 @@ function sys_signal(#[CType('int')] int $signo, Ptr $handler): int {}
 #[Library('c'), Symbol('kill'), CType('int')]
 function sys_kill(#[CType('int')] int $pid, #[CType('int')] int $sig): int {}
 
-#[Library('c'), Symbol('fork')]
+#[Library('c'), Symbol('fork'), CType('int')]
 function sys_fork(): int {}
 
 // `pid_t waitpid(pid_t pid, int *status, int options)` — $status is a 4-byte
 // out slot. The W* macros are pure bit math on it and live in the PHP layer.
-#[Library('c'), Symbol('waitpid')]
+#[Library('c'), Symbol('waitpid'), CType('int')]
 function sys_waitpid(#[CType('int')] int $pid, Ptr $status, #[CType('int')] int $options): int {}
 
 #[Library('c'), Symbol('getpid'), CType('int')]
 function sys_getpid(): int {}
 
-#[Library('c'), Symbol('getppid')]
+#[Library('c'), Symbol('getppid'), CType('int')]
 function sys_getppid(): int {}
 
 #[Library('c'), Symbol('alarm')]
@@ -698,7 +698,7 @@ function sys_alarm(#[CType('unsigned int')] int $seconds): int {}
 // cryptographically-secure random bytes; 0 on success, -1 on error. Present on
 // both Darwin and glibc (>= 2.25), non-variadic — the cross-host choice for
 // random_bytes/random_int (getrandom is Linux-only, arc4random_buf BSD-only).
-#[Library('c'), Symbol('getentropy')]
+#[Library('c'), Symbol('getentropy'), CType('int')]
 function sys_getentropy(Ptr $buf, #[CType('size_t')] int $buflen): int {}
 
 // ── Locale ─────────────────────────────────────────────────────────────
@@ -720,5 +720,5 @@ function sys_setlocale_query(#[CType('int')] int $category, Ptr $locale): Ptr {}
 // `struct rusage` opens with two `struct timeval` (16 bytes each on both
 // Darwin and glibc/x86_64), so `ru_maxrss` sits at offset 32 on both. Its UNIT
 // differs: bytes on Darwin, kilobytes on Linux.
-#[Library('c'), Symbol('getrusage')]
+#[Library('c'), Symbol('getrusage'), CType('int')]
 function sys_getrusage(#[CType('int')] int $who, Ptr $usage): int {}
