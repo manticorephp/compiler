@@ -185,6 +185,7 @@ final class LowerFromAst implements Pass
     /** Cached trailing segments for repeatedly lowered names. */
     private array $bareNameCache = [];
     private ?bool $hasNamespacedGetenvCache = null;
+    private int $hasNamespacedGetenvAt = -1;
     /** @var array<string, array<int, \Parser\Ast\Param>|null> */
     private array $methodParamsCache = [];
     /** @var array<string, string> */
@@ -470,6 +471,8 @@ final class LowerFromAst implements Pass
     /** ext/openssl, the certificate-reading half — DEMAND-GATED. Pure DER, no
      *  libcrypto; carries OpenSSLAsymmetricKey, so closed-world analysis wants it. */
     public string $opensslSrc = '';
+    /** ext/intl over the host ICU (prelude/intl.php) — DEMAND-GATED; links libicu. */
+    public string $intlSrc = '';
     /** WeakMap + WeakReference (prelude/weak.php) — DEMAND-GATED on either
      *  name. Global namespace; implements spl_arrays.php's interfaces. */
     public string $weakSrc = '';
@@ -700,6 +703,7 @@ final class LowerFromAst implements Pass
         $this->methodReturnClassCache = [];
         $this->bareNameCache = [];
         $this->hasNamespacedGetenvCache = null;
+        $this->hasNamespacedGetenvAt = -1;
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
         $this->variadicMethodParamsCache = [];
@@ -1052,17 +1056,15 @@ final class LowerFromAst implements Pass
         // The shared @__manticore_tagged_to_str cannot do this itself: it is one
         // external body in the central core and knows no user class, so the
         // emitter branches on the object tag at the CALL SITE and lands here.
-        if ($this->anyToStringClass()) {
-            $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
-            foreach ($tsProg->statements as $tstmt) {
-                if ($tstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
-                $tfn = $this->lowerFunction($tstmt->decl);
-                $tfn->isPrelude = true;
-                $module->addFunction($tfn);
-            }
-            $module->hasObjToStr = true;
+        $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
+        foreach ($tsProg->statements as $tstmt) {
+            if ($tstmt->kind !== 'Function') { continue; }
+            $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+            $tfn = $this->lowerFunction($tstmt->decl);
+            $tfn->isPrelude = true;
+            $module->addFunction($tfn);
         }
+        $module->hasObjToStr = true;
 
         // var_export()'s object arm — same point and pattern as
         // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
@@ -1611,7 +1613,7 @@ final class LowerFromAst implements Pass
      * Drop method-body AST nodes after their ordinary lowering owner is done.
      * Generic origins and methods queued for late-static specialisation retain
      * their bodies because a later lowering pass still needs them. Constructors
-     * also remain available to inheritedCtorDecl() for descendant setup.
+     * are kept as well.
      */
     /** Drop class-local AST metadata after its class body has been lowered. */
     private function releaseLoweredClassMetadata(\Parser\Ast\ClassDecl $decl): void
@@ -2513,8 +2515,10 @@ final class LowerFromAst implements Pass
         }
         $stmts = [];
         if ($m->name === '__construct') {
-            // Property defaults run first, then promoted-param stores.
-            foreach ($defaultStores as $ds) { $stmts[] = $ds; }
+            // Promoted-param stores first. The property defaults are NOT here: they
+            // run once, at allocation (`C____mc_defaults`), so a second
+            // `__construct()` call or a `parent::__construct()` after the child
+            // assigned a parent property does not reset it.
             foreach ($m->params as $p) {
                 if ($p->promoted !== '') {
                     $stmts[] = new StoreProperty(
@@ -4875,15 +4879,16 @@ final class LowerFromAst implements Pass
 
     /**
      * The extensions a compiled binary genuinely carries. `pcre` is linked
-     * (pcre2), `json` / `ctype` are built in, `openssl` rides the TLS stack.
-     * Everything else — mbstring, intl, pcntl, dom — is absent, and a program
-     * that asks gets the honest answer rather than a link-time surprise.
+     * (pcre2), `json` / `ctype` / `mbstring` are built in, `openssl` rides the TLS
+     * stack, `intl` links ICU on use. Everything else — pcntl, dom — is absent,
+     * and a program that asks gets the honest answer rather than a link-time
+     * surprise.
      */
     private function extensionIsBuiltIn(string $ext): bool
     {
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
-            || $ext === 'tokenizer';
+            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),

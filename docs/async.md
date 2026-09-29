@@ -123,7 +123,9 @@ $rows = Async\async(fn() => Async\group(function (TaskGroup $g) {
 `timeout()` is a scope with a deadline. On expiry the body **and everything it spawned** is
 cancelled and joined before `TimeoutException` is thrown — a timeout that leaves work running
 is not a timeout. Nesting only ever tightens: a 30 s inner scope inside a 2 s outer one still
-dies at 2 s.
+dies at 2 s. Every deadline, timer, stream timeout and backoff runs on the **monotonic**
+clock, so an NTP or `date -s` step neither stalls a timer nor fires them all at once;
+`Context::deadline()` still reports a unix time.
 
 ```php
 $page = Async\timeout(2.0, fn() => file_get_contents($url));

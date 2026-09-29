@@ -1979,10 +1979,24 @@ trait EmitLlvmArrays
         if ($ek === Type::KIND_CELL) { return '@__mir_array_cow_cell'; }
         if ($ek === Type::KIND_UNKNOWN) { return '@__mir_array_cow'; }
         if ($ek === Type::KIND_STRING) { return '@__mir_array_cow_str'; }
-        if ($ek === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) {
-            return '@__mir_array_cow_obj';
-        }
+        if ($this->isRcObjElement($el)) { return '@__mir_array_cow_obj'; }
         return '@__mir_array_cow';
+    }
+
+    /**
+     * An object element the array holds a COUNT of — the classification the
+     * element hint makes, shared with every release / COW flavor so the two
+     * never disagree. Not an `Ffi\Ptr` (a raw address: releasing it free()d a
+     * malloc block the program still owned), a `#[Struct]` word, an enum case or
+     * a closure env.
+     */
+    private function isRcObjElement(?Type $el): bool
+    {
+        if ($el === null || $el->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $el->class ?? '';
+        if ($cls === 'Ffi\\Ptr') { return false; }
+        if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
+        return !$this->isEnumClass($cls) && !$this->isClosureClass($cls);
     }
 
     /**

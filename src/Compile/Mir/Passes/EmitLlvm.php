@@ -578,6 +578,9 @@ final class EmitLlvm implements EmitVisitor
      * non-null. Reset per function by emitFunction.
      */
     private array $arrayHintedParams = [];
+    /** @var array<string, bool> the by-REFERENCE `array &$x` params — truthiness only: the
+     *  word read through the reference may be a raw array pointer or a tagged cell */
+    private array $arrayHintedRefParams = [];
     /** @var string[] module global cell names (static props/locals/global) */
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */
@@ -646,6 +649,10 @@ final class EmitLlvm implements EmitVisitor
         $this->cf = new ControlFlow();
         $this->frame = new FunctionEmitFrame();
         $this->readCellGuardFlags();
+        $this->irCensus = \getenv('MANTICORE_IR_CENSUS') === '1';
+        $this->censusBytes = [];
+        $this->censusCount = [];
+        $this->censusChild = [];
         $this->resetCellGuardFrame();
         $this->sigs = new FunctionSignatures();
         $this->arena = new ArenaContext();
@@ -827,6 +834,8 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
         $this->litTableCount = 0;
+        $this->objTemplates = [];
+        $this->litTablesFlushed = false;
         $this->btBaseLine = [];
         $this->dynScopeRelTables = [];
         $this->newDynTableCache = null;
@@ -1154,6 +1163,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
         $extraBodies .= $this->litTableBodies;
+        $this->litTablesFlushed = true;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1201,6 +1211,7 @@ final class EmitLlvm implements EmitVisitor
             $this->drainLazyHelpers($appendStreamedBody);
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
+            $this->reportIrCensus($bodyBytes);
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
                 . (string)$fileHoistThreshold . ')');
@@ -1226,6 +1237,13 @@ final class EmitLlvm implements EmitVisitor
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
         $statT = \Compile\Stats::now();
         $preamble = $this->linkonceRuntime($this->emitPreamble());
+        // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
+        // cellifying an array property), after both drains above ran. Drained
+        // entries are blanked, so this only picks up the late ones.
+        $late = '';
+        $this->drainLazyHelpers(function (string $body, string $label) use (&$late): void { $late .= $body; });
+        $preamble .= $late;
+        unset($late);
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
@@ -2332,6 +2350,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classlessCandidatesMemo = [];
 
     private int $litTableCount = 0;
+    /** @var array<string, string> class name => its instance template symbol, '' = none ({@see EmitLlvmObjects::objInitTemplate}) */
+    private array $objTemplates = [];
+    /** `litTableBodies` is already in the output: a template minted now would never be defined. */
+    private bool $litTablesFlushed = false;
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
@@ -3545,9 +3567,96 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitNode(Node $n): string
     {
+        if ($this->irCensus) { return $this->emitNodeCensus($n); }
         $out = $n->accept($this);
         if ($this->cellGuard) { $this->markCellCalleeResult($n); }
         return $out;
+    }
+
+    /**
+     * `MANTICORE_IR_CENSUS=1` (with MANTICORE_STATS=1): the IR bytes each MIR
+     * construct emits ITSELF — its whole output minus what its children emitted —
+     * summed over the module, a direct call split by callee (an inlined builtin
+     * is a call). Answers which constructs the IR volume comes from, which the
+     * finished `.ll` cannot: by then every construct is instructions.
+     */
+    private bool $irCensus = false;
+    /** @var array<string, int> */
+    private array $censusBytes = [];
+    /** @var array<string, int> */
+    private array $censusCount = [];
+    /** @var int[] */
+    private array $censusChild = [];
+    /** @var array<string, int> */
+    private array $censusMax = [];
+    /** @var array<string, string> */
+    private array $censusMaxFn = [];
+    /** @var array<string, int> bytes in instances over 2 KB */
+    private array $censusBig = [];
+
+    private function emitNodeCensus(Node $n): string
+    {
+        $this->censusChild[] = 0;
+        $out = $n->accept($this);
+        if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        $kids = (int)\array_pop($this->censusChild);
+        $len = \strlen($out);
+        $key = $n->kind;
+        if ($n instanceof \Compile\Mir\Call) { $key = 'call:' . $this->censusCallee($n); }
+        $this->censusBytes[$key] = ($this->censusBytes[$key] ?? 0) + $len - $kids;
+        $this->censusCount[$key] = ($this->censusCount[$key] ?? 0) + 1;
+        $self = $len - $kids;
+        if ($n instanceof \Compile\Mir\Foreach_) {
+            $bk = $this->censusForeachBaseKind($n);
+            $tk = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) ? 'foreach.erased(total)' : 'foreach.typed(total)';
+            $this->censusBytes[$tk] = ($this->censusBytes[$tk] ?? 0) + $len;
+            $this->censusCount[$tk] = ($this->censusCount[$tk] ?? 0) + 1;
+            if ($tk === 'foreach.erased(total)') {
+                $bn = 'fe.erased.base ' . $this->censusForeachBaseNode($n) . ' in ' . $this->frame->name;
+                $this->censusBytes[$bn] = ($this->censusBytes[$bn] ?? 0) + $len;
+                $this->censusCount[$bn] = ($this->censusCount[$bn] ?? 0) + 1;
+            }
+        }
+        if ($self > ($this->censusMax[$key] ?? 0)) { $this->censusMax[$key] = $self; $this->censusMaxFn[$key] = $this->frame->name; }
+        if ($self > 2000) { $this->censusBig[$key] = ($this->censusBig[$key] ?? 0) + $self; }
+        $d = \count($this->censusChild);
+        if ($d > 0) { $this->censusChild[$d - 1] = $this->censusChild[$d - 1] + $len; }
+        return $out;
+    }
+
+    private function censusForeachBaseKind(\Compile\Mir\Foreach_ $f): string { return $f->array->type->kind; }
+    private function censusForeachBaseNode(\Compile\Mir\Foreach_ $f): string
+    {
+        $a = $f->array;
+        $d = $a->kind;
+        if ($a instanceof \Compile\Mir\LoadLocal) { $d .= ':' . $a->name; }
+        if ($a instanceof \Compile\Mir\PropertyAccess_) { $d .= ':' . $a->property; }
+        if ($a instanceof \Compile\Mir\Call) { $d .= ':' . $a->function; }
+        return $d;
+    }
+
+    private function censusCallee(\Compile\Mir\Call $c): string { return $c->function; }
+
+    private function reportIrCensus(int $bodyBytes): void
+    {
+        if (!$this->irCensus) { return; }
+        $bytes = $this->censusBytes;
+        \arsort($bytes);
+        $sum = 0;
+        foreach ($bytes as $b) { $sum = $sum + $b; }
+        \Compile\Stats::line('census: node-attributed ' . (string)$sum . ' of ' . (string)$bodyBytes
+            . ' body bytes (rest = prologues/epilogues/helpers)');
+        $i = 0;
+        foreach ($bytes as $k => $b) {
+            $c = $this->censusCount[$k] ?? 1;
+            \Compile\Stats::line('census: ' . \str_pad((string)$b, 10, ' ', \STR_PAD_LEFT)
+                . ' B ' . \str_pad((string)$c, 8, ' ', \STR_PAD_LEFT) . ' x '
+                . \str_pad((string)\intdiv($b, $c > 0 ? $c : 1), 7, ' ', \STR_PAD_LEFT) . ' B/each  ' . (string)$k
+                . '  | >2KB ' . (string)($this->censusBig[$k] ?? 0)
+                . ' | max ' . (string)($this->censusMax[$k] ?? 0) . ' in ' . ($this->censusMaxFn[$k] ?? ''));
+            $i = $i + 1;
+            if ($i >= 400) { break; }
+        }
     }
 
     /** `$left <op> $right` where the result is a numeric (int|float) cell: box
@@ -3570,11 +3679,34 @@ final class EmitLlvm implements EmitVisitor
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_' . $op
               . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        $out .= $this->dropOperandCell($left, $l);
+        $out .= $this->dropOperandCell($right, $r);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // The helper re-boxes on every path (int cell, float cell, promoted).
         $this->markCellBoxed($reg);
         return $out;
+    }
+
+    /**
+     * The cell an operand became for a runtime helper that only READS it: a
+     * fresh cell producer's +1, or the box an INT was just wrapped in (past the
+     * 48-bit inline form that box is a counted heap block,
+     * {@see \Compile\MemoryAbi::CELL_TAG_BIGINT}), is dead after the read. A
+     * string / object / array boxed by pointer is a borrow and stays.
+     */
+    private function dropOperandCell(Node $n, string $cell): string
+    {
+        if ($this->isFreshCellTemp($n) || $n->type->kind === Type::KIND_INT) {
+            return $this->rcReleaseReg($cell, 'cell');
+        }
+        // An element READ used right here is a one-use temp that may be the
+        // owner-less box the read minted. Only the read itself: a LOCAL may hold a
+        // borrowed box it reads again (a foreach value is a borrow).
+        if ($n->type->kind === Type::KIND_CELL && $n->kind === Node::KIND_ARRAY_ACCESS) {
+            return '  call void @__mir_cell_float_free(i64 ' . $cell . ")\n";
+        }
+        return '';
     }
 
     /**
@@ -3985,6 +4117,10 @@ final class EmitLlvm implements EmitVisitor
         if (\Compile\Mir\CondOwn::isConditional($n)) { return $this->condOwnsResult($n); }
         $k = $n->kind;
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        // `+ - *` over a numeric cell run {@see emitTaggedArith}: the helper boxes
+        // a NEW cell on every path, a counted heap box past the inline int form.
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
+            && $n->type->isNumericCell()) { return true; }
         if (\Compile\Mir\BitOp::mintsFresh($n)) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }
         $fn = $n->function;
@@ -4701,15 +4837,10 @@ final class EmitLlvm implements EmitVisitor
             $sv = $this->lastValue;
             $st = $this->lastValueType;
             $o = $this->coerceToI64();
-            // An ERASED word may be a RAW pointer that the box after this call
-            // tags: retained raw it was a no-op, then the container dropped the
-            // tagged box — one release too many. symfony's EventDispatcher
-            // packed `object $event` (a raw object pointer) into a callable-array
-            // invoke's argument list and freed the event under the caller.
-            // Classify first, exactly as the box will, and retain that.
-            if ($k === Type::KIND_UNKNOWN) {
-                $o .= $this->boxUnknownShallowIr();
-            }
+            // An erased word may be a RAW container the boxer is about to wrap
+            // ({@see EmitLlvmBuiltins::boxUnknownShallowIr}); the tag retain
+            // no-ops on the raw word, so retain what the slot will hold.
+            if ($k === Type::KIND_UNKNOWN) { $o .= $this->boxUnknownShallowIr(); }
             $o .= $this->rcRetainReg($this->lastValue, 'cell');
             $this->lastValue = $sv;
             $this->lastValueType = $st;
@@ -5129,7 +5260,35 @@ final class EmitLlvm implements EmitVisitor
      * lastValue ← the vec ptr as i64. Shared by the backtrace builtin and the
      * Throwable trace capture.
      */
+    /**
+     * The active frames of `$global` (`@__mir_bt_name` / `@__mir_bt_line`) as a
+     * fresh packed vec, innermost first — ONE body per global, called: the copy
+     * loop used to be inlined twice at every Throwable construction.
+     */
     private function emitBtVec(string $global): string
+    {
+        $key = '__mc_btvec_' . \ltrim($global, '@');
+        $sym = '@manticore_' . $key;
+        if (!isset($this->propertyReadHelpers[$key])) {
+            $oldSsa = $this->ssa;
+            $oldLast = $this->lastValue;
+            $oldLastType = $this->lastValueType;
+            $this->ssa = new \Compile\Mir\SsaBuilder();
+            $this->ssa->reset();
+            $body = $this->btVecLoopIr($global);
+            $this->propertyReadHelpers[$key] = 'define linkonce_odr i64 ' . $sym . "() {\nentry:\n"
+                . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+            $this->ssa = $oldSsa;
+            $this->lastValue = $oldLast;
+            $this->lastValueType = $oldLastType;
+        }
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $r . ' = call i64 ' . $sym . "()\n";
+    }
+
+    private function btVecLoopIr(string $global): string
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";

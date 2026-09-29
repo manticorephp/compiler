@@ -106,6 +106,7 @@ final class Builtins
             'str_bytes',
             'peek_i64', 'peek_i32', 'peek_i16', 'peek_i8', 'peek_u32', 'peek_u16',
             'peek_u8', 'poke_i64', 'poke_i32', 'poke_i16', 'poke_i8',
+            'peek_f64', 'poke_f64',
             '__ryu_msp', '__mir_to_cell', '__mir_throw_error',
             '__float_bits', '__mir_clock_ns', '__ugt',
             '__mir_fiber_make', '__mir_fiber_jump', '__mir_fiber_current',

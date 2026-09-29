@@ -271,10 +271,20 @@ trait EmitLlvmVisit
         $out = '';
         /** @var string[]|null $chunks */
         $chunks = null;
-        foreach ($n->stmts as $s) {
+        // A VALUE block (a lowering's `Block([...], T)` standing for an expression)
+        // answers its last statement: that value is the block's result, not a
+        // discarded one. Dropping it here freed a `Class::$name()` result before
+        // the assignment stored it. The block's own consumer owns it now — and a
+        // value block in statement position is dropped by {@see
+        // emitDiscardedCallRelease}, which looks through to that statement.
+        $last = \count($n->stmts) - 1;
+        $isValue = $n->type->kind !== Type::KIND_VOID;
+        foreach ($n->stmts as $i => $s) {
             $fragment = $this->emitNoDiscardWarn($s);
             $fragment .= $this->emitNode($s);
-            $fragment .= $this->emitDiscardedCallRelease($s);
+            if (!$isValue || $i !== $last) {
+                $fragment .= $this->emitDiscardedCallRelease($s);
+            }
             if ($chunks === null) {
                 $out .= $fragment;
                 if (\strlen($out) >= 65536) {

@@ -1,0 +1,11 @@
+0: 0: Error: Object of class Plain could not be converted to string
+1: 1: Error: Object of class Plain could not be converted to string
+2: 2: Error: Object of class Plain could not be converted to string
+3: 3: Error: Object of class Plain could not be converted to string
+4: named
+5: <named>
+6: 6: Error: Object of class Base could not be converted to string
+7: 7: Error: Object of class DateTime could not be converted to string
+8: 8: Error: Object of class Closure could not be converted to string
+echo: Object of class Plain could not be converted to string
+interp: Object of class Plain could not be converted to string

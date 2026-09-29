@@ -1,0 +1,9 @@
+destruct a
+after a
+destruct b
+after b
+destruct z
+after z
+destruct w
+after w
+destruct c

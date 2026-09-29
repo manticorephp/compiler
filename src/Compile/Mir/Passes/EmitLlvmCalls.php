@@ -112,6 +112,9 @@ trait EmitLlvmCalls
     private function emitFfiWrapper(FunctionDef $fn): string
     {
         $cSym = $fn->ffiSymbol;
+        // ICU renames its C API with the major version (`u_strToUpper_78`); the
+        // bindings carry the plain name and the host's suffix is appended here.
+        if (\Manticore\is_icu_library($fn->ffiLibrary)) { $cSym = $cSym . \Manticore\icu_symbol_suffix(); }
         $ret = $fn->ffiRetCType;
         // `#[Ffi\Library('name')]` → a link requirement. Collected at the
         // WRAPPER, so the set is exactly what this module emitted rather than
@@ -1580,6 +1583,8 @@ trait EmitLlvmCalls
         // expanded into multiple positional slots.
         $pi = 0;
         $padDrops = '';
+        /** @var string[] $intArgBoxes */
+        $intArgBoxes = [];
         $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
@@ -1671,6 +1676,11 @@ trait EmitLlvmCalls
             // — a `usort($x, fn($a,$b)=>$cmp($a["k"],$b["k"]))` with an int-arith
             // `$cmp` — is still open, pending a representation discriminator.
             $out .= $this->closureArgRepr($a->type, $known ? $pt : null);
+            // The box an INT arg became is this call site's own ({@see
+            // EmitLlvmBuiltins::cellBoxTempDrop}): given back once the callee ran.
+            if ($a->type->kind === Type::KIND_INT && $this->isCellBoxableArg($a->type)) {
+                $intArgBoxes[] = $this->lastValue;
+            }
             $argList .= ', i64 ' . $this->lastValue;
             $argTypes .= ', i64';
             $pi = $pi + 1;
@@ -1726,6 +1736,7 @@ trait EmitLlvmCalls
             $out .= $padDrops;
         }
         $out .= $this->faPop();
+        foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -1827,6 +1838,7 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'double';
             }
             if ($n->type->kind === Type::KIND_CELL) {
+                $out .= $this->boxInvokeResultIr();
                 $this->markCellOpaque($this->lastValue);
             }
             return $out;
@@ -1838,9 +1850,35 @@ trait EmitLlvmCalls
         if ($unboxResult && $this->isCellScalarParam($n->type)) {
             $out .= $this->unboxCellToType($n->type);
         }
+        // …while an array / object result rides RAW. A cell-typed invoke (a
+        // closure out of a `vec[closure]` of mixed returns) read that pointer as
+        // a double: box it by its allocator magic. The closure's +1 moves into
+        // the cell. A tagged scalar passes through.
         if ($n->type->kind === Type::KIND_CELL) {
+            $out .= $this->boxInvokeResultIr();
             $this->markCellOpaque($this->lastValue);
         }
+        return $out;
+    }
+
+    /**
+     * The cell of a closure call's result (lastValue). Under the uniform ABI a
+     * scalar comes back already tagged and an array / object / closure RAW, so
+     * a raw word is a container — boxed by its allocator magic — or a null
+     * pointer, which is a `?Class` returning null, not the integer 0.
+     */
+    private function boxInvokeResultIr(): string
+    {
+        $out = $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->boxUnknownShallowIr();
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $raw . ", 0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
+            . ', i64 ' . $this->lastValue . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
@@ -2976,6 +3014,13 @@ trait EmitLlvmCalls
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
+        // A value block discarded as a statement: its result is its last
+        // statement's, which {@see visitBlock} left owned.
+        if ($k === Node::KIND_BLOCK && $s->type->kind !== Type::KIND_VOID) {
+            $kids = $s->children();
+            $n = \count($kids);
+            return $n === 0 ? '' : $this->emitDiscardedCallRelease($kids[$n - 1]);
+        }
         // A conditional in STATEMENT position (`$c ? f() : $s;`) now owns a +1
         // from whichever arm ran, so the discarded value must be dropped.
         if ($this->condOwnsResult($s)) {

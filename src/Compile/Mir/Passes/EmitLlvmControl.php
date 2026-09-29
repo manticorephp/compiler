@@ -207,10 +207,7 @@ trait EmitLlvmControl
             $out .= $this->genFieldLoad($g, 24);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
-        $this->cf->enterLoop($endLabel, $stepLabel);
-        $out .= $this->emitNode($fe->body);
-        $this->cf->leave();
-        $out .= '  br label %' . $stepLabel . "\n";
+        $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, true);
 
         $out .= $stepLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
@@ -753,10 +750,7 @@ trait EmitLlvmControl
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
-        $this->cf->enterLoop($endL, $stepL);
-        $out .= $this->emitNode($fe->body);
-        $this->cf->leave();
-        $out .= '  br label %' . $stepL . "\n";
+        $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);
 
         $out .= $stepL . ":\n";
         $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next');
@@ -1096,6 +1090,150 @@ trait EmitLlvmControl
         return isset($this->frame->rcObjLocals[$fe->valueVar]);
     }
 
+    /**
+     * A bare `array` parameter read as the foreach subject, in a body that never
+     * rebinds it: php checked the hint at the call, so it IS an array (or the
+     * null of `?array`), whatever its erased static type says. The generator and
+     * Traversable arms of an erased foreach — each a full copy of the body —
+     * are dead for it. Every prelude `array_*` walker was exactly this shape.
+     */
+    private function isSettledArrayParam(Node $base): bool
+    {
+        if (!($base instanceof \Compile\Mir\LoadLocal)) { return false; }
+        $name = $base->name;
+        // The hint set is filled by the ordinary function emitter only; main and
+        // a generator body are emitted elsewhere and would read a stale one.
+        if ($this->writtenNamesFn !== $this->frame->name) { return false; }
+        if (!isset($this->arrayHintedParams[$name])) { return false; }
+        if (isset($this->locals->globalBacked[$name])) { return false; }
+        return !isset($this->writtenNames[$name]);
+    }
+
+    /** @var array<string, bool> locals the current body may rebind ({@see collectWrittenNames}),
+     *  collected at function entry — emission detaches statements as it goes */
+    private array $writtenNames = [];
+    /** The function {@see $writtenNames} and the hint set were collected for. */
+    private string $writtenNamesFn = '';
+
+    /**
+     * Every local name the body may REBIND — conservative by design: a store, a
+     * foreach variable, anything a reference or a by-ref closure capture
+     * reaches, and any local handed directly to a call that is not a known free
+     * function taking that argument by value.
+     */
+    private function collectWrittenNames(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\StoreLocal) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof Foreach_) {
+            $this->writtenNames[$n->valueVar] = true;
+            if ($n->keyVar !== null) { $this->writtenNames[$n->keyVar] = true; }
+        } elseif ($n instanceof \Compile\Mir\StaticLocalDecl_) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof \Compile\Mir\RefAlias_ || $n instanceof \Compile\Mir\RefBind_
+            || $n instanceof \Compile\Mir\RefAddr_ || $n instanceof \Compile\Mir\RefCell_) {
+            $this->markLocalsWritten($n);
+        } elseif ($n instanceof \Compile\Mir\Closure_) {
+            $i = 0;
+            foreach ($n->captures as $cap) {
+                if (($n->captureByRef[$i] ?? false) && $cap instanceof \Compile\Mir\LoadLocal) {
+                    $this->writtenNames[$cap->name] = true;
+                }
+                $i = $i + 1;
+            }
+        } elseif ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_INVOKE) {
+            $refs = null;
+            if ($n instanceof \Compile\Mir\Call && isset($this->sigs->paramTypes[$n->function])) {
+                $refs = $this->sigs->refParams[$n->function] ?? [];
+            }
+            $args = $n instanceof \Compile\Mir\Call ? $n->args : \Compile\Mir\Walk::children($n);
+            foreach ($args as $i => $c) {
+                if ($c instanceof \Compile\Mir\LoadLocal && ($refs === null || ($refs[$i] ?? false))) {
+                    $this->writtenNames[$c->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectWrittenNames($c); }
+    }
+
+    private function markLocalsWritten(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\LoadLocal) { $this->writtenNames[$n->name] = true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markLocalsWritten($c); }
+    }
+
+    /** @var \Compile\Mir\ForeachSharedBody[] erased foreaches whose arms share one body, innermost last */
+    private array $feShared = [];
+    private int $feSharedSeq = 0;
+
+    private function inSharedForeach(\Compile\Mir\Foreach_ $fe): bool
+    {
+        $n = \count($this->feShared);
+        return $n > 0 && $this->feShared[$n - 1]->fe === $fe;
+    }
+
+    /**
+     * The loop body of one foreach arm, ending in a branch to `$stepLabel`. For
+     * an erased base's arms ({@see \Compile\Mir\ForeachSharedBody}) the body
+     * is emitted ONCE — each of the three arms used to carry its own copy — and
+     * every arm enters it with its index; `$pushLoop` is false for an arm that
+     * already entered its own loop frame.
+     */
+    private function emitForeachBodyArm(\Compile\Mir\Foreach_ $fe, string $endLabel, string $stepLabel, bool $pushLoop): string
+    {
+        $n = \count($this->feShared);
+        $sh = $n > 0 ? $this->feShared[$n - 1] : null;
+        if ($sh === null || $sh->fe !== $fe) {
+            if ($pushLoop) { $this->cf->enterLoop($endLabel, $stepLabel); }
+            $out = $this->emitNode($fe->body);
+            if ($pushLoop) { $this->cf->leave(); }
+            return $out . '  br label %' . $stepLabel . "\n";
+        }
+        $id = \count($sh->steps);
+        $sh->steps[] = $stepLabel;
+        $sh->ends[] = $endLabel;
+        $out = '  store i64 ' . (string)$id . ', ptr ' . $sh->armSlot . "\n"
+            . '  br label %' . $sh->bodyLabel . "\n";
+        if (!$sh->bodyEmitted) {
+            $sh->bodyEmitted = true;
+            $out .= $sh->bodyLabel . ":\n";
+            $this->cf->enterLoop($sh->brkLabel, $sh->contLabel);
+            $out .= $this->emitNode($fe->body);
+            $this->cf->leave();
+            $out .= '  br label %' . $sh->contLabel . "\n";
+        }
+        return $out;
+    }
+
+    /** The shared body's way back to the arm that entered it; pops the entry. */
+    private function emitForeachSharedDispatch(\Compile\Mir\Foreach_ $fe): string
+    {
+        $n = \count($this->feShared);
+        if ($n === 0) { return ''; }
+        $sh = $this->feShared[$n - 1];
+        if ($sh->fe !== $fe) { return ''; }
+        \array_pop($this->feShared);
+        if (!$sh->bodyEmitted) { return ''; }
+        return $this->armSwitchIr($sh->contLabel, $sh->armSlot, $sh->steps)
+            . $this->armSwitchIr($sh->brkLabel, $sh->armSlot, $sh->ends);
+    }
+
+    /** @param string[] $targets */
+    private function armSwitchIr(string $label, string $armSlot, array $targets): string
+    {
+        $a = $this->ssa->allocReg();
+        $out = $label . ":\n" . '  ' . $a . ' = load i64, ptr ' . $armSlot . "\n";
+        $out .= '  switch i64 ' . $a . ', label %' . $targets[0] . " [\n";
+        $i = 0;
+        foreach ($targets as $lbl) {
+            if ($i > 0) { $out .= '    i64 ' . (string)$i . ', label %' . $lbl . "\n"; }
+            $i = $i + 1;
+        }
+        return $out . "  ]\n";
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
@@ -1125,7 +1263,8 @@ trait EmitLlvmControl
         $bk = $fe->array->type->kind;
         $dynEnd = '';
         $dynGen = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN)
-            && !$this->foreachBodyYields($fe->body);
+            && !$this->foreachBodyYields($fe->body)
+            && !$this->isSettledArrayParam($fe->array);
         if ($dynGen) {
             $out .= $this->coerceToI64();
             $word = $this->lastValue;
@@ -1156,6 +1295,25 @@ trait EmitLlvmControl
             // is left exactly as it is.
             $out .= $this->untagCarrierIr($word);
             $word = $this->lastValue;
+            $armSlot = $this->ssa->allocReg();
+            $out .= '  ' . $armSlot . " = alloca i64\n";
+            $this->feShared[] = new \Compile\Mir\ForeachSharedBody($fe, $armSlot,
+                $this->ssa->allocLabel('fe.sh.body'), $this->ssa->allocLabel('fe.sh.cont'),
+                $this->ssa->allocLabel('fe.sh.brk'));
+            // The shared body joins every arm and dispatches back to each arm's
+            // step, so no arm's entry block dominates its own loop blocks any
+            // more — exactly the generator-resume situation. Run the arms in
+            // their FRAMED mode, which keeps the iterator state in slots and
+            // reloads it per block, with two allocas standing in for the frame.
+            if ($fe->genSlotBase < 0) {
+                $fe->genSlotBase = 1000000 + $this->feSharedSeq;
+                $this->feSharedSeq = $this->feSharedSeq + 1;
+                $s0 = $this->ssa->allocReg();
+                $s1 = $this->ssa->allocReg();
+                $out .= '  ' . $s0 . " = alloca i64\n" . '  ' . $s1 . " = alloca i64\n";
+                $this->locals->slots['@fe.0.' . (string)$fe->genSlotBase] = $s0;
+                $this->locals->slots['@fe.1.' . (string)$fe->genSlotBase] = $s1;
+            }
             $out .= $this->genFrameProbeIr($word);
             $isGen = $this->genFrameReg;
             $gArm = $this->ssa->allocLabel('fe.dyn.gen');
@@ -1292,7 +1450,8 @@ trait EmitLlvmControl
         // are materialized, so a reset never frees the array being walked.
         // By-ref foreach writes the value slot back into the element, so an
         // arena value could escape into the (pre-save) array — skip it.
-        $reset = !$fe->byRef && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = !$fe->byRef && !$this->inSharedForeach($fe)
+            && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
         // The co-owning loop drops the slot's PREVIOUS word on every iteration,
@@ -1516,7 +1675,7 @@ trait EmitLlvmControl
             $this->feCellFlags[$fe->valueVar] = $feFlag;
             unset($this->feCellFlagSet[$fe->valueVar]);
         }
-        $out .= $this->emitNode($fe->body);
+        $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, false);
         if ($feFlag !== '') {
             $feFlagUsed = isset($this->feCellFlagSet[$fe->valueVar]);
             if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
@@ -1524,7 +1683,6 @@ trait EmitLlvmControl
             if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
             else { unset($this->feCellFlagSet[$fe->valueVar]); }
         }
-        $out .= '  br label %' . $stepLabel . "\n";
 
         $out .= $stepLabel . ":\n";
         if ($framed && $fe->byRef) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
@@ -1593,6 +1751,7 @@ trait EmitLlvmControl
         // Rejoin the generator arm of the erased-base classify above.
         if ($dynEnd !== '') {
             $out .= '  br label %' . $dynEnd . "\n";
+            $out .= $this->emitForeachSharedDispatch($fe);
             $out .= $dynEnd . ":\n";
             $this->lastValue = '0';
             $this->lastValueType = 'i64';

@@ -1275,6 +1275,15 @@ trait EmitLlvmLocals
                 // retain must co-own to the same depth ({@see arrayRetainFlavor});
                 // with no release to pair, the value's own depth.
                 $out .= $this->rcRetainByType($v, $val, $flavor === '' ? null : $dt, 3);
+            } elseif ($vk === Type::KIND_UNKNOWN && $this->isSettledArrayParam($v)) {
+                // A bare `array` parameter the body never rebinds erases to
+                // UNKNOWN, but php checked the hint: the word IS an array
+                // buffer (or the 0 of `?array`). Stored into a module cell it
+                // must be co-owned like any borrow — `static $o; $o = $param;`
+                // otherwise kept the caller's temporary after it was freed.
+                // The cell is vetoed (a borrowed erased word), so this takes
+                // the buffer-level +1 only and nothing releases through it.
+                $out .= $this->rcRetainByType($v, $val, Type::vec(Type::unknown()), 3);
             }
         }
         if ($flavor === '') { return $out; }

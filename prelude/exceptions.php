@@ -253,6 +253,8 @@ function __mir_str_offset_digit(string $c): bool
 
 class ArgumentCountError extends TypeError {}
 class ValueError extends Error {}
+class ArithmeticError extends Error {}
+class DivisionByZeroError extends ArithmeticError {}
 class AssertionError extends Error {}
 
 // The rest of SPL's exception tree, with php's exact parentage — `catch

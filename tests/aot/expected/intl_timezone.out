@@ -1,0 +1,126 @@
+Europe/Kyiv         Europe/Kyiv raw=7200000 dst=0 local=7200000/3600000 savings=3600000 region='UA' eq=y
+  1: GMT+2 | GMT+3 | GMT+2
+  2: Eastern European Standard Time | Eastern European Summer Time | за східноєвропейським стандартним часом
+  3: Ukraine Time | Ukraine Time | час: Україна
+  4: Eastern European Time | Eastern European Time | за східноєвропейським часом
+  5: +0200 | +0300 | +0200
+  6: GMT+02:00 | GMT+03:00 | GMT+02:00
+  7: GMT+2 | GMT+3 | GMT+2
+  8: Ukraine Time | Ukraine Time | час: Україна
+America/New_York    America/New_York raw=-18000000 dst=0 local=-18000000/3600000 savings=3600000 region='US' eq=y
+  1: EST | EDT | GMT-5
+  2: Eastern Standard Time | Eastern Daylight Time | за північноамериканським східним стандартним часом
+  3: ET | ET | час: Нью-Йорк
+  4: Eastern Time | Eastern Time | за північноамериканським східним часом
+  5: -0500 | -0400 | -0500
+  6: GMT-05:00 | GMT-04:00 | GMT-05:00
+  7: EST | EDT | GMT-5
+  8: New York Time | New York Time | час: Нью-Йорк
+Asia/Kolkata        Asia/Kolkata raw=19800000 dst=0 local=19800000/0 savings=0 region='IN' eq=y
+  1: GMT+5:30 | GMT+5:30 | GMT+5:30
+  2: India Standard Time | GMT+05:30 | за індійським стандартним часом
+  3: India Time | India Time | час: Індія
+  4: India Standard Time | India Standard Time | за індійським стандартним часом
+  5: +0530 | +0530 | +0530
+  6: GMT+05:30 | GMT+05:30 | GMT+05:30
+  7: GMT+5:30 | GMT+5:30 | GMT+5:30
+  8: India Time | India Time | час: Індія
+Asia/Tokyo          Asia/Tokyo raw=32400000 dst=0 local=32400000/0 savings=0 region='JP' eq=y
+  1: GMT+9 | GMT+9 | GMT+9
+  2: Japan Standard Time | Japan Daylight Time | за японським стандартним часом
+  3: Japan Time | Japan Time | час: Японія
+  4: Japan Standard Time | Japan Standard Time | за японським стандартним часом
+  5: +0900 | +0900 | +0900
+  6: GMT+09:00 | GMT+09:00 | GMT+09:00
+  7: GMT+9 | GMT+9 | GMT+9
+  8: Japan Time | Japan Time | час: Японія
+US/Pacific          US/Pacific raw=-28800000 dst=0 local=-28800000/3600000 savings=3600000 region='US' eq=y
+  1: PST | PDT | GMT-8
+  2: Pacific Standard Time | Pacific Daylight Time | за північноамериканським тихоокеанським стандартним часом
+  3: PT | PT | час: Лос-Анджелес
+  4: Pacific Time | Pacific Time | за північноамериканським тихоокеанським часом
+  5: -0800 | -0700 | -0800
+  6: GMT-08:00 | GMT-07:00 | GMT-08:00
+  7: PST | PDT | GMT-8
+  8: Los Angeles Time | Los Angeles Time | час: Лос-Анджелес
+GMT+05:30           GMT+05:30 raw=19800000 dst=0 local=19800000/0 savings=3600000 region=false eq=n
+  1: GMT+5:30 | GMT+5:30 | GMT+5:30
+  2: GMT+05:30 | GMT+05:30 | GMT+05:30
+  3: GMT+5:30 | GMT+6:30 | GMT+5:30
+  4: GMT+05:30 | GMT+06:30 | GMT+05:30
+  5: +0530 | +0530 | +0530
+  6: GMT+05:30 | GMT+05:30 | GMT+05:30
+  7: GMT+5:30 | GMT+5:30 | GMT+5:30
+  8: GMT+05:30 | GMT+06:30 | GMT+05:30
+GMT-3               GMT-03:00 raw=-10800000 dst=0 local=-10800000/0 savings=3600000 region=false eq=n
+  1: GMT-3 | GMT-3 | GMT-3
+  2: GMT-03:00 | GMT-03:00 | GMT-03:00
+  3: GMT-3 | GMT-2 | GMT-3
+  4: GMT-03:00 | GMT-02:00 | GMT-03:00
+  5: -0300 | -0300 | -0300
+  6: GMT-03:00 | GMT-03:00 | GMT-03:00
+  7: GMT-3 | GMT-3 | GMT-3
+  8: GMT-03:00 | GMT-02:00 | GMT-03:00
+junk                Etc/Unknown raw=0 dst=0 local=0/0 savings=3600000 region=false eq=n
+  5: +0000 | +0000 | +0000
+Etc/GMT+2           Etc/GMT+2 raw=-7200000 dst=0 local=-7200000/0 savings=0 region='001' eq=n
+  1: GMT-2 | GMT-2 | GMT-2
+  2: GMT-02:00 | GMT-02:00 | GMT-02:00
+  3: GMT-2 | GMT-2 | GMT-2
+  4: GMT-02:00 | GMT-02:00 | GMT-02:00
+  5: -0200 | -0200 | -0200
+  6: GMT-02:00 | GMT-02:00 | GMT-02:00
+  7: GMT-2 | GMT-2 | GMT-2
+  8: GMT-02:00 | GMT-02:00 | GMT-02:00
+string(19) "America/Los_Angeles"
+bool(true)
+string(9) "GMT+05:00"
+bool(false)
+bool(false)
+string(86) "IntlTimeZone::getCanonicalID(): error obtaining canonical ID: U_ILLEGAL_ARGUMENT_ERROR"
+bool(true)
+string(0) ""
+string(0) ""
+string(17) "FLE Standard Time"
+string(19) "America/Los_Angeles"
+string(17) "America/Vancouver"
+bool(false)
+string(79) "IntlTimeZone::getWindowsID(): unknown system timezone: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(85) "IntlTimeZone::getIDForWindowsID(): unknown windows timezone: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(69) "intltz_get_region(): error obtaining region: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+string(3) "GMT"
+int(3600000)
+string(11) "Etc/Unknown"
+bool(false)
+bool(false)
+int(1)
+string(76) "IntlTimeZone::getDisplayName(): wrong display type: U_ILLEGAL_ARGUMENT_ERROR"
+string(12) "U_ZERO_ERROR"
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+Europe/Paris -> Europe/Paris -> Europe/Paris
++05:30 -> GMT+05:30 -> +05:30
+-00:30 -> GMT+00:30 -> +00:30
++02:00 +00:00
+0=Europe/Kiev 1=Europe/Kyiv 2=Europe/Simferopol 3=Europe/Uzhgorod 4=Europe/Zaporozhye 
+0=Asia/Tokyo 
+bool(false)
+string(10) "Asia/Tokyo"
+bool(false)
+bool(true)
+bool(true)
+IntlTimeZone::createTimeZoneIDEnumeration(): Argument #1 ($type) must be one of IntlTimeZone::TYPE_ANY, IntlTimeZone::TYPE_CANONICAL, or IntlTimeZone::TYPE_CANONICAL_LOCATION
+bool(true)
+int(-18000000)
+int(0)
+string(21) "Eastern Standard Time"
+string(11) "Europe/Kyiv"
+int(1)
+string(16) "America/New_York"

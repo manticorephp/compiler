@@ -49,6 +49,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  `curl-config` and the `libcurl.so` symlink, and Main.php's
 #                  generic_link_flags() needs one of them — `pkg-config --libs
 #                  curl` fails everywhere, since the module is called libcurl.
+# libicu-dev   -> ext/intl (prelude/intl.php binds `icuuc` / `icui18n`). Linked
+#                 DYNAMICALLY, like curl and sqlite; the headers are also where
+#                 Main.php reads ICU's symbol-version suffix (unicode/uvernum.h).
 # libxml2-dev  -> ext/dom + SimpleXML (prelude/xml.php binds `xml2` by name).
 #                 It was NEVER declared here and the XML cases passed anyway,
 #                 because llvm.sh installed llvm-NN-dev, which Depends: libxml2-dev
@@ -61,7 +64,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # clang any more — that comes from the distribution's own archive below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg \
-        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev libxml2-dev pkg-config \
+        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev libxml2-dev libicu-dev pkg-config \
         binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*
@@ -94,7 +97,7 @@ RUN apt-get update \
 
 RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
-    && curl-config --libs && pkg-config --libs sqlite3
+    && curl-config --libs && pkg-config --libs sqlite3 && pkg-config --libs icu-uc icu-i18n
 
 # Run as a normal, unprivileged user. Under root every file is writable/executable
 # regardless of mode, so a suite that checks permissions diverges from a real
@@ -130,13 +133,14 @@ RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.or
         > /etc/apt/sources.list.d/php.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 \
+        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 php8.5-intl \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --set php /usr/bin/php8.5
 
 RUN php --version \
     && php -r 'exit(function_exists("curl_init") ? 0 : 1);' \
-    && php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);'
+    && php -r 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);' \
+    && php -r 'exit(class_exists("Normalizer") ? 0 : 1);'
 
 USER manticore
 

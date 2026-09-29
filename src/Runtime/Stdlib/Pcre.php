@@ -46,12 +46,26 @@ function __preg_close_delim(string $open): string
  * Compile a PHP-delimited pattern to a cached pcre2_code* (raw address), or 0
  * on a compile error.
  */
+/**
+ * The regex caches as TYPED properties. A `static $cache = []` is a cell slot, so
+ * every read boxed the stored handle into a cell on the way out — and a PCRE2
+ * handle is a heap address, above bit 47 on Linux arm64, which does not fit
+ * the inline int form: each lookup allocated an immortal 8-byte int box, two
+ * per preg_match.
+ */
+final class __McPcreCache
+{
+    /** @var array<string, int> pattern => compiled code */
+    public static array $code = [];
+    /** @var array<int, int> code => its idle match block ({@see __preg_md}) */
+    public static array $idle = [];
+}
+
 function __preg_compile(string $pattern): int
 {
-    static $cache = [];
     // ONE probe: `isset` then a read walked the map twice per call, and a
     // php-cs-fixer pattern is a fresh multi-KB concatenation every time.
-    $hit = $cache[$pattern] ?? 0;
+    $hit = __McPcreCache::$code[$pattern] ?? 0;
     if ($hit !== 0) {
         return $hit;
     }
@@ -77,8 +91,37 @@ function __preg_compile(string $pattern): int
     if ($code === 0) {
         return 0;
     }
-    $cache[$pattern] = $code;
+    __McPcreCache::$code[$pattern] = $code;
     return $code;
+}
+
+/**
+ * A match block for compiled `$code`, lent out and handed back: `$give === 0`
+ * borrows one (the idle one, or a fresh one), otherwise returns `$give`.
+ *
+ * PCRE2 keeps its backtracking frames IN the match block (10.41+), and creating
+ * one per call made every preg_* allocate and free >= 20 KiB — the malloc churn
+ * that grew a Linux process's RSS by megabytes over a loop that kept nothing.
+ * One idle block per pattern: a nested match of the same pattern while the
+ * outer holds its block (a preg_replace_callback callback) simply gets its own,
+ * and whichever comes back second is freed.
+ */
+function __preg_md(int $code, int $give): int
+{
+    if ($give === 0) {
+        $md = isset(__McPcreCache::$idle[$code]) ? __McPcreCache::$idle[$code] : 0;
+        if ($md !== 0) {
+            __McPcreCache::$idle[$code] = 0;
+            return $md;
+        }
+        return \Runtime\Pcre\matchDataCreate($code, 0);
+    }
+    if (!isset(__McPcreCache::$idle[$code]) || __McPcreCache::$idle[$code] === 0) {
+        __McPcreCache::$idle[$code] = $give;
+    } else {
+        \Runtime\Pcre\matchDataFree($give);
+    }
+    return 0;
 }
 
 /**
@@ -121,7 +164,7 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
     if ($code === 0) {
         return 0;
     }
-    $md = \Runtime\Pcre\matchDataCreate($code, 0);
+    $md = \__preg_md($code, 0);
     $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, 0);
     // A C int came back in a 64-bit slot: keep the low 32 bits, sign-extend.
     $rc = $rc & 0xFFFFFFFF;
@@ -130,7 +173,7 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
     }
     if ($rc <= 0) {
         // <0: no-match (-1) or error; ==0: ovector too small (won't happen).
-        \Runtime\Pcre\matchDataFree($md);
+        \__preg_md($code, $md);
         return 0;
     }
     $ov = \Runtime\Pcre\ovectorPtr($md);
@@ -169,7 +212,7 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
         }
         $matches[$i] = \__mir_to_cell($val);
     }
-    \Runtime\Pcre\matchDataFree($md);
+    \__preg_md($code, $md);
     return 1;
 }
 
@@ -310,7 +353,7 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
     $setOrder = ($flags & 2) !== 0;               // PREG_SET_ORDER
     $offsetCapture = ($flags & 256) !== 0;        // PREG_OFFSET_CAPTURE
     $len = \strlen($subject);
-    $md = \Runtime\Pcre\matchDataCreate($code, 0);
+    $md = \__preg_md($code, 0);
 
     // Collect each match's groups as a local mixed[][] — already CELLS, so the
     // offset-capture pair (itself an array) and a plain string share one shape.
@@ -333,7 +376,7 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
         $rows[] = $row;
         $offset = \__preg_advance($m[1], $m[2]);
     }
-    \Runtime\Pcre\matchDataFree($md);
+    \__preg_md($code, $md);
 
     $count = \count($rows);
     // Same interleaving rule as preg_match: a named group is reported under its
@@ -568,7 +611,7 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
     $code = \__preg_compile($pattern);
     if ($code === 0) { return $subject; }
     $len = \strlen($subject);
-    $md = \Runtime\Pcre\matchDataCreate($code, 0);
+    $md = \__preg_md($code, 0);
     $out = "";
     $pos = 0;
     while ($pos <= $len) {
@@ -584,7 +627,7 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
         if ($me === $ms) { $out .= \substr($subject, $ms, 1); }  // empty match: keep the char
         $pos = $next;
     }
-    \Runtime\Pcre\matchDataFree($md);
+    \__preg_md($code, $md);
     if ($pos < $len) { $out .= \substr($subject, $pos, $len - $pos); }
     return $out;
 }
@@ -632,7 +675,7 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
     $code = \__preg_compile($pattern);
     if ($code === 0) { return $subject; }
     $len = \strlen($subject);
-    $md = \Runtime\Pcre\matchDataCreate($code, 0);
+    $md = \__preg_md($code, 0);
     $out = "";
     $pos = 0;
     while ($pos <= $len) {
@@ -656,7 +699,7 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
         if ($me === $ms) { $out .= \substr($subject, $ms, 1); }
         $pos = $next;
     }
-    \Runtime\Pcre\matchDataFree($md);
+    \__preg_md($code, $md);
     if ($pos < $len) { $out .= \substr($subject, $pos, $len - $pos); }
     return $out;
 }
@@ -688,7 +731,7 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
     $code = \__preg_compile($pattern);
     if ($code === 0) { $out[] = $subject; return $out; }
     $len = \strlen($subject);
-    $md = \Runtime\Pcre\matchDataCreate($code, 0);
+    $md = \__preg_md($code, 0);
     $last = 0;
     $pos = 0;
     $pieces = 0;
@@ -717,7 +760,7 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
         $last = $me;
         $pos = \__preg_advance($ms, $me);
     }
-    \Runtime\Pcre\matchDataFree($md);
+    \__preg_md($code, $md);
     $tail = \substr($subject, $last, $len - $last);
     if (!$noEmpty || $tail !== "") { $out[] = $tail; }
     return $out;

@@ -215,6 +215,56 @@ final class InferTypes implements Pass
         foreach (Walk::children($n) as $c) { $this->fpCallTypes($c, $acc); }
     }
 
+    /**
+     * fn name → the node kinds its body holds, plus `call:<short name>` for every
+     * direct call. One walk per function per run, so a scan that looks for a RARE
+     * node (a reference, a `static` local, a closure capture, `array_unshift`,
+     * an element store by what it stores INTO — `se:<base kind>`)
+     * skips the bodies that cannot hold it instead of walking every body on
+     * every pass. Sound within a run: inference itself only mints StoreLocal /
+     * LoadLocal / Block / IntConst nodes ({@see boxBackStore}), never a kind a
+     * scan is gated on.
+     * @var array<string, array<string, bool>>
+     */
+    private array $bodyKinds = [];
+
+    private function bodyHas(FunctionDef $fn, string $kind): bool
+    {
+        $set = $this->bodyKinds[$fn->name] ?? null;
+        if ($set === null) {
+            $set = [];
+            $this->collectBodyKinds($fn->body, $set);
+            $this->bodyKinds[$fn->name] = $set;
+        }
+        return isset($set[$kind]);
+    }
+
+    /** @param array<string, bool> $keys */
+    private function bodyHasAnyOf(FunctionDef $fn, array $keys): bool
+    {
+        $this->bodyHas($fn, Node::KIND_BLOCK);
+        foreach ($this->bodyKinds[$fn->name] as $k => $unused) {
+            if (isset($keys[$k])) { return true; }
+        }
+        return false;
+    }
+
+    /** @param array<string, bool> $set */
+    private function collectBodyKinds(Node $n, array &$set): void
+    {
+        $set[$n->kind] = true;
+        if ($n->kind === Node::KIND_CALL) {
+            $fname = $n->function;
+            $bs = \strrpos($fname, '\\');
+            if ($bs !== false) { $fname = \substr($fname, $bs + 1); }
+            $set['call:' . $fname] = true;
+            $set['callf:' . $n->function] = true;
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $set['se:' . $n->array->kind] = true;
+        }
+        foreach (Walk::children($n) as $c) { $this->collectBodyKinds($c, $set); }
+    }
+
     /** @return FunctionDef[] */
     private function functionsForScope(Module $module): array
     {
@@ -362,6 +412,24 @@ final class InferTypes implements Pass
             \Compile\Stats::bump('infer.rescan.' . $reason . '.calls', 1);
             \Compile\Stats::bump('infer.rescan.' . $reason . '.functions', \count($queue));
         }
+    }
+
+    /**
+     * A LIGHT round after {@see NarrowReturns} narrowed `$narrowed`: re-infer
+     * the bodies that observe those returns, with the tables and scan state of
+     * this instance's last {@see run}, and follow the change only as far as
+     * types keep moving. No module scan runs — the caller closes on a full run.
+     * @param array<string, bool> $narrowed
+     */
+    public function reinferAfterNarrow(Module $module, array $narrowed): void
+    {
+        $seed = [];
+        foreach ($module->functions as $fn) {
+            if (!isset($narrowed[$fn->name])) { continue; }
+            $this->sigs[$fn->name] = $fn->returnType;
+            foreach ($this->depGraph($module)->neighbors($fn->name) as $nb => $unused) { $seed[$nb] = true; }
+        }
+        $this->inferPropagating($module, 'narrow_light', $seed);
     }
 
     /**
@@ -753,6 +821,7 @@ final class InferTypes implements Pass
         $this->sigs = [];
         $this->callGraph = null;
         $this->rescanTouched = [];
+        $this->bodyKinds = [];
         $this->classes = $module->classes;
         $this->declarersIdx = [];
         $this->enums = $module->enums;
@@ -1130,11 +1199,15 @@ final class InferTypes implements Pass
         if ($k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE || $k === Type::KIND_UNION) {
             // An enum case rides as an ORDINAL, not a pointer.
             $cn = $t->class ?? '';
-            return ($cn !== '' && isset($this->enums[$cn])) ? 'num' : 'obj';
+            return ($cn !== '' && isset($this->enums[$cn])) ? 'enum' : 'obj';
         }
         if ($k === Type::KIND_STRING) { return 'str'; }
-        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL) { return 'num'; }
+        // Each scalar reads back through its own hint: a raw 0 is int 0, false or
+        // null only by what the slot says it holds.
+        if ($k === Type::KIND_INT) { return 'int'; }
+        if ($k === Type::KIND_FLOAT) { return 'float'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_NULL) { return 'null'; }
         return '';
     }
 
@@ -1558,6 +1631,8 @@ final class InferTypes implements Pass
      * @param array<string,bool> $conflict
      * @param array<string,Type> $assocKey
      * @param array<string,string> $shape
+     * @param array<string,bool> $sawCell
+     * @param array<string,bool> $erasedArg
      */
     private function collectCallArgElems(Node $n, array $cand, array &$observed, array &$conflict, array &$assocKey, array &$shape, array &$sawCell, array &$erasedArg): void
     {
@@ -1853,6 +1928,7 @@ final class InferTypes implements Pass
     {
         $out = [];
         foreach ($this->functionsForScope($module) as $fn) {
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_LOAD_LOCAL)) { continue; }
             if ($this->bodyHasUntypedAssocKeyStore($fn->body)) {
                 $out[$fn->name] = true;
             }
@@ -1913,7 +1989,7 @@ final class InferTypes implements Pass
         $pos = \strrpos($fn, '\\');
         $n = $pos === false ? $fn : \substr($fn, $pos + 1);
         $n = \strtolower($n);
-        return $n === 'floatval' || $n === 'sqrt' || $n === 'floor' || $n === 'ceil'
+        return $n === 'floatval' || $n === 'sqrt' || $n === 'floor' || $n === 'ceil' || $n === 'peek_f64'
             || $n === 'round' || $n === 'fmod' || $n === 'sin' || $n === 'cos'
             || $n === 'tan' || $n === 'asin' || $n === 'acos' || $n === 'atan'
             || $n === 'atan2' || $n === 'sinh' || $n === 'cosh' || $n === 'tanh'
@@ -1923,15 +1999,18 @@ final class InferTypes implements Pass
 
     /**
      * Coarse, pre-inference value class of a stored element value — only for
-     * nodes whose kind fixes the type (literals, array/new). int+float collapse
-     * to `num` (they share the numeric-cell discipline); anything unclassifiable
+     * nodes whose kind fixes the type (literals, array/new). int and float stay
+     * apart: a raw element word is an i64 or a double, and converting one into
+     * the other changes the value php hands back (`$f = [1.5]; $f[0] = 3` keeps
+     * int 3); anything unclassifiable
      * (a call / var / property read) returns '' and is ignored. ≥2 distinct
      * classes on one array ⇒ a genuinely mixed array (seed a cell element).
      */
     private function coarseValueClass(Node $v): string
     {
         $k = $v->kind;
-        if ($k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST) { return 'num'; }
+        if ($k === Node::KIND_INT_CONST) { return 'int'; }
+        if ($k === Node::KIND_FLOAT_CONST) { return 'float'; }
         if ($k === Node::KIND_STRING_CONST || $k === Node::KIND_CONCAT) { return 'string'; }
         if ($k === Node::KIND_BOOL_CONST) { return 'bool'; }
         if ($k === Node::KIND_NULL_CONST) { return 'null'; }
@@ -2317,6 +2396,14 @@ final class InferTypes implements Pass
         return $k === Type::KIND_OBJ || $k === Type::KIND_UNION
             || $k === Type::KIND_UNKNOWN || $k === Type::KIND_ARRAY
             || $k === Type::KIND_STRING || $k === Type::KIND_CLOSURE;
+    }
+
+    /** {@see isPointerKind} less UNKNOWN: a merge must not claim an erased word is a pointer. */
+    private function isConcretePointerKind(Type $t): bool
+    {
+        $k = $t->kind;
+        return $k === Type::KIND_OBJ || $k === Type::KIND_ARRAY || $k === Type::KIND_STRING
+            || $k === Type::KIND_CLOSURE;
     }
 
     private function markArithLocal(?Node $operand): void
@@ -3128,6 +3215,14 @@ final class InferTypes implements Pass
                 if (isset($this->cellMergeLocals[$name])) {
                     // int|float merge → a numeric cell (arith-able past the if).
                     $out[$name] = $this->unifyToCell($type, $b[$name]);
+                } elseif ($type->kind === Type::KIND_NULL && $this->isConcretePointerKind($b[$name])) {
+                    // `$x = null; if (…) { $x = [1]; }`: a POINTER's null rides
+                    // raw as ptr 0 (the loop merge keeps the body type the same
+                    // way, {@see $nullLoopLocals}). The union collapsed to
+                    // `unknown`, whose null a consumer boxed as int(0).
+                    $out[$name] = $b[$name];
+                } elseif ($b[$name]->kind === Type::KIND_NULL && $this->isConcretePointerKind($type)) {
+                    $out[$name] = $type;
                 } else {
                     $out[$name] = $this->unionTypes($type, $b[$name]);
                 }

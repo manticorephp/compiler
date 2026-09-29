@@ -101,9 +101,14 @@ trait LowerExprs
 
     private function hasNamespacedGetenv(): bool
     {
-        if ($this->hasNamespacedGetenvCache !== null) {
+        // Keyed by the declaration count: a call lowered while fnDecls is still
+        // filling (a property default, a synthesized prelude body) must not
+        // freeze the answer before the user's `ns\getenv` registers.
+        $n = \count($this->fnDecls);
+        if ($this->hasNamespacedGetenvCache !== null && $this->hasNamespacedGetenvAt === $n) {
             return $this->hasNamespacedGetenvCache;
         }
+        $this->hasNamespacedGetenvAt = $n;
         foreach ($this->fnDecls as $declName => $_decl) {
             $dp = \strrpos($declName, \chr(92));
             if ($dp !== false && \substr($declName, $dp + 1) === 'getenv') {
@@ -184,7 +189,20 @@ trait LowerExprs
             // self-host usage (bool / null / `?? false` flags); the
             // string-"0"/"" subtlety is not exercised by the compiler.
             if ($fn === 'empty' && \count($expr->args) === 1) {
-                return new Not_($this->markProbe($this->lowerExpr($expr->args[0])));
+                // An element read is an isset-then-read, as php's has_dimension
+                // with check_empty: ArrayAccess answers offsetExists() first and
+                // offsetGet() only when that says yes. Only over a side-effect-free
+                // subscript, which is read twice here.
+                $arg = $expr->args[0];
+                if ($arg->kind === 'ArrayAccess' && $this->astIsPlainRead($arg)) {
+                    return new Ternary(
+                        new Isset_([$this->markProbe($this->lowerExpr($arg))], Type::bool_()),
+                        new Not_($this->markProbe($this->lowerExpr($arg))),
+                        new BoolConst(true, Type::bool_()),
+                        Type::bool_(),
+                    );
+                }
+                return new Not_($this->markProbe($this->lowerExpr($arg)));
             }
             // By-ref `sscanf($str, $fmt, $a, $b, …)` — the array-return form
             // (`$r = sscanf($s, $f)`) is a plain stdlib call; the trailing-lvalue
@@ -197,8 +215,7 @@ trait LowerExprs
             // a bare `__mc_env` call) lets injectSuperglobals seed + keep the
             // builder; a direct call would be tree-shaken (undefined at link). The
             // single-arg `getenv($name)` stays the codegen builtin.
-            $hasNamespacedGetenv = $this->hasNamespacedGetenv();
-            if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$hasNamespacedGetenv) {
+            if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$this->hasNamespacedGetenv()) {
                 return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
             }
             if ($fnBare === 'sscanf' && \count($expr->args) > 2) {
@@ -962,5 +979,22 @@ trait LowerExprs
         throw new \RuntimeException(
             'MIR.lower: unsupported binary op ' . $op
         );
+    }
+
+    /** A variable / literal / property / element read chain: re-evaluating it has no effect. */
+    private function astIsPlainRead(\Parser\Ast\Expr $e): bool
+    {
+        $k = $e->kind;
+        if ($k === 'Variable' || $k === 'IntLiteral' || $k === 'StringLiteral' || $k === 'FloatLiteral'
+            || $k === 'BoolLiteral' || $k === 'NullLiteral') {
+            return true;
+        }
+        if ($e instanceof \Parser\Ast\ArrayAccess) {
+            return $e->index !== null && $this->astIsPlainRead($e->array) && $this->astIsPlainRead($e->index);
+        }
+        if ($e instanceof \Parser\Ast\PropertyAccess) {
+            return $this->astIsPlainRead($e->object);
+        }
+        return false;
     }
 }

@@ -549,6 +549,9 @@ trait EmitLlvmModule
             // tagged_compare stringifies a number to compare it against a
             // NON-numeric string (PHP's `5 < "abc"`).
             $this->rt->needsTaggedToStr   = true;
+            // …and releases the string it made ({@see taggedCompareRuntime}).
+            $this->rt->needsRc            = true;
+            $this->rt->needsStrRc         = true;
             $this->rt->needsStrcmp        = true;
             $this->rt->needsStrtod        = true;
         }
@@ -921,6 +924,9 @@ trait EmitLlvmModule
         $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;
+        $this->frame->retExitLabel = '';
+        $this->frame->retExitSlot = '';
+        $this->frame->retExempt = [];
         $this->arena->vecAllocated = false;
         $this->arena->vecLocals = [];
         $this->locals->slots = [];
@@ -929,9 +935,14 @@ trait EmitLlvmModule
         $this->locals->sjljPinAll = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
+        $this->arrayHintedRefParams = [];
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
+            if ($ahp->arrayHinted && $ahp->byRef) { $this->arrayHintedRefParams[$ahp->name] = true; }
         }
+        $this->writtenNames = [];
+        $this->writtenNamesFn = $fn->name;
+        if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
         $this->locals->collectSjljPins($fn->body);
@@ -1220,7 +1231,8 @@ trait EmitLlvmModule
         // caller reads the result by tag, so raw 0 decoded as float and
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
         $bodySink->write($this->emitOwnedBoxReleases([]));
-        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n}");
+        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n");
+        $bodySink->write($this->emitSharedReturnExit() . '}');
         $body = $bodySink->finish() . "\n\n";
         // Do not keep the per-invocation chunk array alive through the return
         // boundary. Doctrine emits tens of thousands of functions; explicit
@@ -2259,6 +2271,7 @@ trait EmitLlvmModule
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        $this->frame->retExempt = $exempt;
         $leave = $this->emitRcReturnCleanup($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
@@ -2368,7 +2381,10 @@ trait EmitLlvmModule
                     $out .= $this->coerceToI64();
                     $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
                 }
-                $out .= $this->boxUnknownIfRaw();
+                $out .= $this->coerceToI64();
+                $raw = $this->lastValue;
+                $out .= $this->boxUnknownShallowIr();
+                $out .= $this->retainIfProbeBoxed($raw, $this->lastValue);
             } else {
                 // `$v` so a rebuilt concrete-element array releases its source.
                 $out .= $this->boxToCell($v->type, $v);
@@ -2395,7 +2411,22 @@ trait EmitLlvmModule
             // tagged bits flow back as the result (a boxed int read as a raw
             // i64). Mirrors the cell→param unboxing.
             if ($v->type->kind === Type::KIND_CELL && $this->frame->returnType !== null) {
+                $out .= $this->coerceToI64();
+                $retCell = $this->lastValue;
                 $out .= $this->unboxCellToType($this->frame->returnType);
+                // A SCALAR unbox copies the value out; a fresh cell (a call or
+                // a numeric op's +1 — a counted box past the inline int form) is
+                // dead from here. A string / array unbox hands the payload itself
+                // back, which the cell's count is what keeps alive.
+                $rk = $this->frame->returnType->kind;
+                if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
+                    && $this->isFreshCellTemp($v)) {
+                    $unboxed = $this->lastValue;
+                    $unboxedType = $this->lastValueType;
+                    $out .= $this->rcReleaseReg($retCell, 'cell');
+                    $this->lastValue = $unboxed;
+                    $this->lastValueType = $unboxedType;
+                }
             }
             // …and an ERASED value into a STRING / ARRAY return, on the terms
             // {@see unboxCellArg} gives the call-argument sink: those unboxes are
@@ -2476,8 +2507,64 @@ trait EmitLlvmModule
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);
-        return $out . $leave . $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot())
+        $jmp = $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
+        if ($jmp === '' && $this->sharedReturnOk()) {
+            if ($this->frame->retExitLabel === '') {
+                $this->frame->retExitLabel = $this->ssa->allocLabel('ret.exit');
+                $this->frame->retExitSlot = $this->ssa->allocReg();
+                $this->frame->retExitArena = $this->frame->hasArena;
+                $out .= $this->localSlotAlloca($this->frame->retExitSlot);
+            }
+            if ($this->frame->retExitArena === $this->frame->hasArena) {
+                return $out . $this->nullReturnedSlots($this->frame->retExempt)
+                    . '  store i64 ' . $valReg . ', ptr ' . $this->frame->retExitSlot . "\n"
+                    . '  br label %' . $this->frame->retExitLabel . "\n" . $this->emitDeadLabel();
+            }
+        }
+        return $out . $leave . $jmp
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
+    }
+
+    /**
+     * Every `return` of a function used to carry its own copy of the scope-exit
+     * cleanup — one release per owned local — so a function with 29 returns and
+     * 100 string locals emitted 2 900 releases (8% of the compiler's own IR). A
+     * return outside every `try` instead stores its value and branches to ONE
+     * epilogue ({@see emitSharedReturnExit}). The locals it hands back are
+     * nulled first, which is exactly the exemption: their slots were null-inited
+     * or retained on entry, and a release of 0 is a no-op in every flavor.
+     * Frames with reference boxes keep the per-return cleanup: theirs depends on
+     * the exemption in ways a nulled slot does not express.
+     */
+    private function sharedReturnOk(): bool
+    {
+        return !$this->frame->isMain && !$this->gen->inGenerator && !$this->frame->returnsByRef
+            && !$this->locals->sjljPinAll
+            && $this->locals->ownedBoxes === [] && $this->locals->elemRefBoxes === [];
+    }
+
+    /** @param array<string, bool> $exempt */
+    private function nullReturnedSlots(array $exempt): string
+    {
+        $out = '';
+        foreach ($exempt as $name => $unused) {
+            if (!isset($this->frame->rcObjLocals[$name])) { continue; }
+            if (isset($this->frame->transferredLocals[$name])) { continue; }
+            if (isset($this->locals->refLocals[$name])) { continue; }
+            if (!isset($this->locals->slots[$name])) { continue; }
+            $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
+        }
+        return $out;
+    }
+
+    private function emitSharedReturnExit(): string
+    {
+        if ($this->frame->retExitLabel === '') { return ''; }
+        $out = $this->frame->retExitLabel . ":\n" . $this->emitRcReturnCleanup([]);
+        if ($this->frame->retExitArena) { $out .= "  call void @__mir_arena_leave()\n"; }
+        $v = $this->ssa->allocReg();
+        return $out . '  ' . $v . ' = load i64, ptr ' . $this->frame->retExitSlot . "\n"
+            . '  ret i64 ' . $v . "\n";
     }
 
     /**
@@ -2577,6 +2664,9 @@ trait EmitLlvmModule
         // the arm's fresh +1, plus this retain, against the caller's single
         // drop. 12.3 → 43.8 MB over 200k→800k calls, flat once the retain goes.
         if ($this->condOwnsResult($v)) { return false; }
+        // A numeric op's cell is minted by its helper ({@see EmitLlvm::isFreshCellTemp}).
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
+            && $v->type->isNumericCell()) { return false; }
         return true;
     }
 

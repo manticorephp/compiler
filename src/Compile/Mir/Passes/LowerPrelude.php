@@ -230,6 +230,10 @@ trait LowerPrelude
             // no dependency on any other prelude fragment.
             $src .= $this->opensslSrc;
         }
+        if ($this->intlSrc !== '') {
+            // ext/intl. After exceptions.php (ValueError).
+            $src .= $this->intlSrc;
+        }
         if ($this->weakSrc !== '') {
             // WeakMap / WeakReference. After spl_arrays.php: WeakMap implements
             // ArrayAccess, Countable and IteratorAggregate.
@@ -286,15 +290,6 @@ trait LowerPrelude
         return $stmts;
     }
 
-    /** Whether any class in the finished table resolves a `__toString` — the
-     *  gate for generating {@see objToStrSrc}. */
-    private function anyToStringClass(): bool
-    {
-        foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            if ($this->declaresMethod($cname, '__toString')) { return true; }
-        }
-        return false;
-    }
 
     /**
      * PHP source for `__mir_obj_to_str` — `(string)` on a value whose STATIC
@@ -308,8 +303,7 @@ trait LowerPrelude
      *
      * Generated from the finished class table exactly like {@see dumpObjectSrc}:
      * most-derived first, so a subclass is matched before its base. A class with
-     * no `__toString` falls through to '' — php fatals there, and the sentinel
-     * → exception conversion is its own owed epic.
+     * no `__toString` throws php's Error — also when no class declares one.
      */
     private function objToStrSrc(): string
     {
@@ -334,10 +328,8 @@ trait LowerPrelude
             $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
             $arm = $arm + 1;
         }
-        if ($arm === 1) {
-            return $body . "function __mir_obj_to_str(mixed \$v): string { return __mir_obj_to_str_arm_0(\$v); }\n";
-        }
-        return $body . $dispatch . "  }\n  return '';\n}\n";
+        return $body . $dispatch . "  }\n"
+            . "  throw new \\Error('Object of class ' . \\get_class(\$v) . ' could not be converted to string');\n}\n";
     }
 
     /**
@@ -424,6 +416,23 @@ trait LowerPrelude
         return $body . $dispatch;
     }
 
+    /** Class names the unconditional prelude files declare, filled once.
+     *  @var array<string, bool> */
+    private array $basePreludeClasses = [];
+    private bool $basePreludeScanned = false;
+
+    private function isBasePreludeClass(string $cname): bool
+    {
+        if (!$this->basePreludeScanned) {
+            $this->basePreludeScanned = true;
+            $m = [];
+            \preg_match_all('/^\s*(?:abstract\s+|final\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)/m',
+                $this->exceptionsSrc . $this->resourceSrc . $this->backtraceSrc, $m);
+            foreach ($m[1] as $n) { $this->basePreludeClasses[$n] = true; }
+        }
+        return isset($this->basePreludeClasses[$cname]);
+    }
+
     /**
      * The class table sorted most-derived-first, with the classes that have no
      * object to walk removed (stdClass — the dynamic-bag fallback handles it;
@@ -445,7 +454,13 @@ trait LowerPrelude
             if ($cd->isStruct) { continue; }
             if ($this->isTypeDef($cname)) { continue; }
             if ($this->walkerReachabilityKnown) {
-                $keep = isset($this->walkerReachableClasses[$cname]);
+                // A prelude class is born inside a builtin (date_create(),
+                // IntlTimeZone::createTimeZone()), where no user `new` names it;
+                // without an arm the bag walk reads a declared object as a bag.
+                // The unconditional files (the Throwable tree) stay demand-rooted:
+                // an arm for each would grow every var_dump program by ~70 KB.
+                $keep = ($cd->isPreludeClass && !$this->isBasePreludeClass($cname))
+                    || isset($this->walkerReachableClasses[$cname]);
                 $cur = $cd->parent;
                 while (!$keep && $cur !== "" && isset($this->classTable[$cur])) {
                     $keep = isset($this->walkerReachableClasses[$cur]);
@@ -1324,7 +1339,7 @@ trait LowerPrelude
 
         $strs = [
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.1', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.11', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references

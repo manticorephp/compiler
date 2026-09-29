@@ -250,6 +250,8 @@ trait EmitLlvmBuiltins
         if ($name === 'peek_u32')                     { return $this->biPeek($args, 32, false); }
         if ($name === 'peek_u16')                     { return $this->biPeek($args, 16, false); }
         if ($name === 'peek_u8')                      { return $this->biPeek($args, 8, false); }
+        if ($name === 'peek_f64')                     { return $this->biPeekF64($args); }
+        if ($name === 'poke_f64')                     { return $this->biPokeF64($args); }
         if ($name === 'poke_i64')                     { return $this->biPoke($args, 64); }
         if ($name === 'poke_i32')                     { return $this->biPoke($args, 32); }
         if ($name === 'poke_i16')                     { return $this->biPoke($args, 16); }
@@ -673,6 +675,26 @@ trait EmitLlvmBuiltins
         return $ret;
     }
 
+    /**
+     * A RAW container word the probe just wrapped into an array / object cell:
+     * the erased slot says nothing about who owns it (a foreach value is a
+     * borrow), and the new cell is dropped by its receiver. Take the +1 that
+     * drop gives back — at worst one leaked reference, never a stolen one.
+     * An already-tagged word or a scalar comes back unchanged or reference-free.
+     */
+    private function retainIfProbeBoxed(string $raw, string $boxed): string
+    {
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $c = $this->ssa->allocReg();
+        $yes = $this->ssa->allocLabel('bxr.own');
+        $end = $this->ssa->allocLabel('bxr.end');
+        return '  ' . $c . ' = icmp ne i64 ' . $boxed . ', ' . $raw . "\n"
+            . '  br i1 ' . $c . ', label %' . $yes . ', label %' . $end . "\n"
+            . $yes . ":\n  call void @__mir_cell_retain(i64 " . $boxed . ")\n"
+            . '  br label %' . $end . "\n" . $end . ":\n";
+    }
+
     /** The one shared body {@see boxUnknownShallowIr} calls. */
     private function emitBoxUnknownFn(): string
     {
@@ -706,12 +728,39 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $ise . ' = ashr i64 ' . $ish . ", 16\n";
         $isInt = $this->ssa->allocReg();
         $out .= '  ' . $isInt . ' = icmp eq i64 ' . $ise . ', ' . $v . "\n";
+        // box_int only on a word that FITS: called unconditionally (its answer
+        // then dropped by a select), a tagged word or a wide raw int took its
+        // heap arm and leaked the 8-byte box on every pass-through.
+        $biL = $this->ssa->allocLabel('bx.int');
+        $nbL = $this->ssa->allocLabel('bx.noint');
+        $bjL = $this->ssa->allocLabel('bx.intj');
+        $out .= '  br i1 ' . $isInt . ', label %' . $biL . ', label %' . $nbL . "\n";
+        $out .= $biL . ":\n";
         $bi = $this->ssa->allocReg();
         $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $v . ")\n";
+        $out .= '  br label %' . $bjL . "\n";
+        $out .= $nbL . ":\n";
+        $out .= '  br label %' . $bjL . "\n";
+        $out .= $bjL . ":\n";
         $intB = $this->ssa->allocReg();
-        $out .= '  ' . $intB . ' = select i1 ' . $isInt . ', i64 ' . $bi . ', i64 ' . $v . "\n";
+        $out .= '  ' . $intB . ' = phi i64 [ ' . $bi . ', %' . $biL . ' ], [ ' . $v . ', %' . $nbL . " ]\n";
+        // "Already a cell" = the NaN header AND a tag nibble the ABI assigns
+        // (1..8): a raw negative int carries the header too (nibble 15) and
+        // must still take the integer arm.
+        $hdr = $this->ssa->allocReg();
+        $out .= '  ' . $hdr . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $v . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $lo = $this->ssa->allocReg();
+        $out .= '  ' . $lo . ' = icmp uge i64 ' . $nib . ", 1\n";
+        $hiN = $this->ssa->allocReg();
+        $out .= '  ' . $hiN . ' = icmp ule i64 ' . $nib . ", 8\n";
+        $rng = $this->ssa->allocReg();
+        $out .= '  ' . $rng . ' = and i1 ' . $lo . ', ' . $hiN . "\n";
         $isBox = $this->ssa->allocReg();
-        $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $v . ", -4503599627370496\n";
+        $out .= '  ' . $isBox . ' = and i1 ' . $hdr . ', ' . $rng . "\n";
         $out .= '  br i1 ' . $isBox . ', label %' . $endL . ', label %' . $rawL . "\n";
         $out .= $rawL . ":\n";
         $out .= '  store i64 ' . $intB . ', ptr ' . $slot . "\n";
@@ -857,6 +906,10 @@ trait EmitLlvmBuiltins
     private function cellBoxTempDrop(Type $t, string $cellReg, ?Node $src = null): string
     {
         if ($t->kind === Type::KIND_CELL) { return ''; }
+        // An INT box is the call site's own: inline it owns nothing, past the
+        // 48-bit form it is a counted heap block ({@see
+        // \Compile\MemoryAbi::CELL_TAG_BIGINT}) the callee co-owns if it keeps it.
+        if ($t->kind === Type::KIND_INT) { return $this->rcReleaseReg($cellReg, 'cell'); }
         // ★ A STRING box allocates NOTHING — it re-tags the same pointer — so a
         // FRESH temp handed to a cell-taking builtin has no owner but this call
         // site: `json_encode($s . $i)` / `print_r($a . $b)` leaked the whole
@@ -1176,6 +1229,72 @@ trait EmitLlvmBuiltins
         $this->cellifyMove = false;
         $out = $this->coerceToPtr();
         $rawSrc = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = call ptr ' . $this->cellifyHelper($elem) . '(ptr ' . $rawSrc . ")\n";
+        // The walk is over and every element the rebuild keeps is co-owned, so an
+        // OWNED-TEMP source dies here — the helper read it until its last entry.
+        if ($srcFlavor !== '') {
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $rawSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $srcFlavor);
+        }
+        if ($raw) {
+            // The cell-element array itself, unboxed: a `vec[cell]` slot is
+            // KIND_ARRAY and travels RAW, so a return/store boundary wants this
+            // pointer, not a cell wrapping it. {@see emitCellifyArrayRaw}
+            $this->lastValue = $res;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $res . ")\n";
+        // Every element was boxed to a cell by the rebuild, and this boxes the
+        // ARRAY ITSELF — boxed by construction on every path into $r.
+        $this->markCellBoxed($r);
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * The cellify rebuild as ONE body per element type, called: inline it was a
+     * ~45-line loop at every boundary — 2 650 copies in the compiler's own
+     * module, ~6% of its instructions. Nothing in the loop depends on the site
+     * but the element type, so the body is keyed by its own text.
+     */
+    private function cellifyHelper(Type $elem): string
+    {
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $body = $this->cellifyLoopIr($elem, '%src');
+        $res = $this->lastValue;
+        $key = '__mc_cellify_' . \dechex(\crc32($body)) . '_' . (string)\strlen($body);
+        $sym = '@manticore_' . $key;
+        if (!isset($this->propertyReadHelpers[$key])) {
+            $this->propertyReadHelpers[$key] = 'define linkonce_odr ptr ' . $sym . "(ptr %src) {\nentry:\n"
+                . $body . '  ret ptr ' . $res . "\n}\n\n";
+        }
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        return $sym;
+    }
+
+    /** The rebuild loop over the array at `$rawSrc`; the result pointer (null
+     *  for a null source) is left in lastValue. */
+    private function cellifyLoopIr(Type $elem, string $rawSrc): string
+    {
+        $out = '';
         // Empty `[]` → null ptr; redirect to the zero-word so len reads 0.
         $isNull = $this->ssa->allocReg();
         $out .= '  ' . $isNull . ' = icmp eq ptr ' . $rawSrc . ", null\n";
@@ -1369,30 +1488,9 @@ trait EmitLlvmBuiltins
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = select i1 ' . $isNull
               . ', ptr null, ptr ' . $dst . "\n";
-        // The walk is over and every element the rebuild keeps is co-owned, so an
-        // OWNED-TEMP source dies here. Emitted after the loop and after $dst is
-        // loaded — the source is read until the last iteration.
-        if ($srcFlavor !== '') {
-            $si = $this->ssa->allocReg();
-            $out .= '  ' . $si . ' = ptrtoint ptr ' . $rawSrc . " to i64\n";
-            $out .= $this->rcReleaseReg($si, $srcFlavor);
-        }
-        if ($raw) {
-            // The cell-element array itself, unboxed: a `vec[cell]` slot is
-            // KIND_ARRAY and travels RAW, so a return/store boundary wants this
-            // pointer, not a cell wrapping it. {@see emitCellifyArrayRaw}
-            $this->lastValue = $res;
-            $this->lastValueType = 'ptr';
-            return $out;
-        }
-        $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $res . ")\n";
-        // The whole point of this rebuild: every element above was already
-        // boxed to a cell, and this final call boxes the ARRAY ITSELF —
-        // boxed by construction on every path into $r (the $isNull select
-        // just picks the source pointer this same call then boxes either way).
-        $this->markCellBoxed($r);
-        return $this->finishI64($out, $r);
+        $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /**
@@ -1605,6 +1703,25 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * Emit a `\Ffi\Ptr` argument of a raw-memory builtin (ptr_to_int, peek_*,
+     * poke_*, cstr_to_str, str_from_buffer, ptr_offset). A Ptr that crossed a
+     * cell — a `Ptr|false|null` result, a mixed slot — is boxed as an object
+     * cell, and these builtins used the tagged word as the address. Strip the
+     * tag; a null cell strips to address 0, as a null Ptr is. Not
+     * {@see emitPtrArg}: that one is the STRING pointer read (null → "").
+     */
+    private function emitFfiPtrArg(Node $arg): string
+    {
+        $out = $this->emitNode($arg);
+        $k = $arg->type->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType(Type::obj('Ffi\\Ptr'));
+        }
+        return $out;
+    }
+
+    /**
      * Emit `$arg` leaving a raw pointer in lastValue. A `mixed`/cell value
      * (NaN-boxed) used where a string/array/object pointer is expected is
      * unboxed (tag stripped) first — else a builtin like strlen derefs the
@@ -1754,7 +1871,7 @@ trait EmitLlvmBuiltins
      */
     private function biStrFromBuffer(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -1838,7 +1955,7 @@ trait EmitLlvmBuiltins
      */
     private function biPtrToInt(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToI64();
         $this->lastValueType = 'i64';
         return $out;
@@ -1956,7 +2073,7 @@ trait EmitLlvmBuiltins
 
     private function biPtrOffset(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -1979,7 +2096,7 @@ trait EmitLlvmBuiltins
      */
     private function biPeek(array $args, int $bits, bool $signed): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2008,7 +2125,7 @@ trait EmitLlvmBuiltins
      */
     private function biPoke(array $args, int $bits): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $out .= $this->emitIntArg($args[1]);
@@ -2028,6 +2145,47 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `peek_f64(\Ffi\Ptr $p, int $off): float` — the C `double` at a byte offset.
+     * @param Node[] $args
+     */
+    private function biPeekF64(array $args): string
+    {
+        $out = $this->emitFfiPtrArg($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load double, ptr ' . $gp . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'double';
+        return $out;
+    }
+
+    /**
+     * `poke_f64(\Ffi\Ptr $p, int $off, float $v): int` — store a C `double` at a
+     * byte offset (a va_list slot, a struct field). Yields 0.
+     * @param Node[] $args
+     */
+    private function biPokeF64(array $args): string
+    {
+        $out = $this->emitFfiPtrArg($args[0]);
+        $out .= $this->coerceToPtr();
+        $p = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $off = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceDoubleOperand($args[2]);
+        $v = $this->lastValue;
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr i8, ptr ' . $p . ', i64 ' . $off . "\n";
+        $out .= '  store double ' . $v . ', ptr ' . $gp . "\n";
+        return $this->finishI64($out, '0');
+    }
+
+    /**
      * `cstr_to_str(\Ffi\Ptr $p): string` — NUL-terminated raw C-string →
      * headered string (the single libc-strlen boundary, in the central core).
      * For OS/FFI char* (argv entries, uname buffer) whose length isn't known.
@@ -2035,7 +2193,7 @@ trait EmitLlvmBuiltins
      */
     private function biCstrToStr(array $args): string
     {
-        $out = $this->emitNode($args[0]);
+        $out = $this->emitFfiPtrArg($args[0]);
         $out .= $this->coerceToPtr();
         $p = $this->lastValue;
         $r = $this->ssa->allocReg();
@@ -3036,6 +3194,13 @@ trait EmitLlvmBuiltins
     private function boxRawValue(string $ev, ?Type $t): string
     {
         $ek = ($t !== null) ? $t->kind : Type::KIND_UNKNOWN;
+        // A `void` callee's word is no value at all: its cell is null (a dispatch
+        // arm for `Iterator::next(): void` beside a valued sibling boxed it int 0).
+        if ($ek === Type::KIND_VOID) {
+            $this->lastValue = (string)\Compile\MemoryAbi::CELL_NULL;
+            $this->lastValueType = 'i64';
+            return '';
+        }
         // Already a tagged cell (heterogeneous / `mixed` / untyped) — passthrough.
         if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) {
             $this->lastValue = $ev;
@@ -3482,6 +3647,16 @@ trait EmitLlvmBuiltins
         if (\count($args) !== 2) { return null; }
         $out = $this->emitNode($args[0]); $out .= $this->coerceIntArg($args[0]); $a = $this->lastValue;
         $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $b = $this->lastValue;
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $b . ", 0\n";
+        $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Division by zero');
+        $m1 = $this->ssa->allocReg();
+        $out .= '  ' . $m1 . ' = icmp eq i64 ' . $b . ", -1\n";
+        $mn = $this->ssa->allocReg();
+        $out .= '  ' . $mn . ' = icmp eq i64 ' . $a . ", -9223372036854775808\n";
+        $ovf = $this->ssa->allocReg();
+        $out .= '  ' . $ovf . ' = and i1 ' . $m1 . ', ' . $mn . "\n";
+        $out .= $this->emitThrowIf($ovf, 'ArithmeticError', 'Division of PHP_INT_MIN by -1 is not an integer');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sdiv i64 ' . $a . ', ' . $b . "\n";
         return $this->finishI64($out, $reg);
@@ -4857,16 +5032,33 @@ trait EmitLlvmBuiltins
     {
         $this->libcExtra['printf'] = 'declare i32 @printf(ptr, ...)';
         $out = '';
+        // php evaluates EVERY argument before var_dump prints the first:
+        // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
+        /** @var array<int, array{0: bool, 1: string}> float? + the value register */
+        $vals = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceTo('double');
+                $vals[] = [true, $this->lastValue];
+            } else {
+                $out .= $this->emitNode($a);
+                // An erased value may already BE a cell (array_shift over a
+                // bare-`array` answers a boxed NULL on empty); box_int would
+                // re-box it and print the carrier as an integer.
+                $out .= $a->type->kind === Type::KIND_UNKNOWN
+                    ? $this->boxUnknownShallowIr()
+                    : $this->boxToCell($a->type);
+                $vals[] = [false, $this->lastValue];
+            }
+        }
+        foreach ($vals as $v) {
+            if ($v[0]) {
                 // Shortest round-trip via the Ryu core (uppercase E, no forced
                 // `.0` — var_dump form), byte-exact with php and faster than the
                 // old snprintf-probe. The core takes the raw i64 bits.
-                $out .= $this->emitNode($a);
-                $out .= $this->coerceTo('double');
-                $d = $this->lastValue;
                 $bitsr = $this->ssa->allocReg();
-                $out .= '  ' . $bitsr . ' = bitcast double ' . $d . " to i64\n";
+                $out .= '  ' . $bitsr . ' = bitcast double ' . $v[1] . " to i64\n";
                 $fsi = $this->ssa->allocReg();
                 $out .= '  ' . $fsi . ' = call i64 @manticore___mc_dtoa_core(i64 ' . $bitsr . ', i64 1, i64 0)' . "\n";
                 $fs = $this->ssa->allocReg();
@@ -4875,15 +5067,7 @@ trait EmitLlvmBuiltins
                 $out .= $this->emitOutStr($fs);
                 $out .= $this->emitOutLit(")\n");
             } else {
-                $out .= $this->emitNode($a);
-                // An erased value may already BE a cell (array_shift over a
-                // bare-`array` answers a boxed NULL on empty); box_int would
-                // re-box it and print the carrier as an integer.
-                $out .= $a->type->kind === Type::KIND_UNKNOWN
-                    ? $this->boxUnknownIfRaw()
-                    : $this->boxToCell($a->type);
-                $bv = $this->lastValue;
-                $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $bv . ', i64 0)' . "\n";
+                $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $v[1] . ', i64 0)' . "\n";
             }
         }
         $this->lastValue = '0';
@@ -6064,6 +6248,12 @@ trait EmitLlvmBuiltins
     private function biGetClass(array $args, string $nullName = ''): string
     {
         $t = $args[0]->type;
+        if ($t->kind === Type::KIND_CLOSURE || ($t->kind === Type::KIND_OBJ && $this->isClosureClass($t->class ?? ''))) {
+            $out = $this->emitNode($args[0]);
+            $this->lastValue = $this->strLitId($this->pool->intern('Closure'));
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $erased = $this->getClassReceiverIsErased($t);
         $cls = $erased ? '' : ($t->class ?? '');
         // Candidate runtime classes = every class that IS-A $cls — extends AND
@@ -6177,6 +6367,39 @@ trait EmitLlvmBuiltins
             $out .= '  store ptr ' . $this->strRef($nullName) . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $liveL . ":\n";
+        }
+        if ($erased) {
+            // A closure env carries no class id: a plain rc at -8 (no allocator
+            // tag) and CLOSURE_TAG_MAGIC at -32, read only when -8 is untagged.
+            $tp = $this->ssa->allocReg();
+            $out .= '  ' . $tp . ' = getelementptr inbounds i8, ptr ' . $objp . ", i64 -8\n";
+            $tw = $this->ssa->allocReg();
+            $out .= '  ' . $tw . ' = load i64, ptr ' . $tp . "\n";
+            $hi = $this->ssa->allocReg();
+            $out .= '  ' . $hi . ' = lshr i64 ' . $tw . ", 48\n";
+            $tagged = $this->ssa->allocReg();
+            $out .= '  ' . $tagged . ' = icmp eq i64 ' . $hi . ', '
+                  . (string)(\Compile\MemoryAbi::RC_TAG_MAGIC >> 48) . "\n";
+            $cloChk = $this->ssa->allocLabel('gc.clochk');
+            $cloL = $this->ssa->allocLabel('gc.clo');
+            $clsL = $this->ssa->allocLabel('gc.cls');
+            $out .= '  br i1 ' . $tagged . ', label %' . $clsL . ', label %' . $cloChk . "\n";
+            $out .= $cloChk . ":\n";
+            $cp = $this->ssa->allocReg();
+            $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 '
+                  . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+            $cw = $this->ssa->allocReg();
+            $out .= '  ' . $cw . ' = load i64, ptr ' . $cp . "\n";
+            $cwm = $this->ssa->allocReg();
+            $out .= '  ' . $cwm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK . "\n";
+            $isClo = $this->ssa->allocReg();
+            $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cwm . ', '
+                  . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+            $out .= '  br i1 ' . $isClo . ', label %' . $cloL . ', label %' . $clsL . "\n";
+            $out .= $cloL . ":\n";
+            $out .= '  store ptr ' . $this->strLitId($this->pool->intern('Closure')) . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $clsL . ":\n";
         }
         $out .= $this->emitLoadClassId($objp);
         $cid = $this->classIdReg;

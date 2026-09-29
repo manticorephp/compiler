@@ -42,6 +42,16 @@ function __mc_microtime_f(): float
     return (float)__mir_clock_ns(0) / 1000000000.0;
 }
 
+/**
+ * Monotonic float seconds from an arbitrary origin — the clock every timeout,
+ * deadline and backoff measures with. The wall clock steps (NTP, `date -s`): a
+ * step back stalls every timer by its size, a step forward fires them all at once.
+ */
+function __mc_monotonic_f(): float
+{
+    return (float)__mir_clock_ns(1) / 1000000000.0;
+}
+
 /** `hrtime(true)` (literal) lowers here — a concrete int (nanoseconds). */
 function __mc_hrtime_i(): int
 {

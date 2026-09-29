@@ -1,0 +1,87 @@
+[sr_Latn_RS] 'sr' 'Latn' 'RS' 'sr_Latn_RS' | 'Serbian (Latin, Serbia)' | 'serbe' | 'Сербія' | 'Lateinisch'
+array (
+  'language' => 'sr',
+  'script' => 'Latn',
+  'region' => 'RS',
+) array (
+) NULL
+[zh-Hant-TW] 'zh' 'Hant' 'TW' 'zh_Hant_TW' | 'Chinese (Traditional, Taiwan)' | 'chinois' | 'Тайвань' | 'Traditionelles Chinesisch'
+array (
+  'language' => 'zh',
+  'script' => 'Hant',
+  'region' => 'TW',
+) array (
+) NULL
+[de_DE@currency=EUR;collation=phonebook] 'de' '' 'DE' 'de_DE@collation=phonebook;currency=EUR' | 'German (Germany, Sort Order=Phonebook Sort Order, Currency=Euro)' | 'allemand' | 'Німеччина' | ''
+array (
+  'language' => 'de',
+  'region' => 'DE',
+) array (
+) array (
+  'collation' => 'phonebook',
+  'currency' => 'EUR',
+)
+[en] 'en' '' '' 'en' | 'English' | 'anglais' | '' | ''
+array (
+  'language' => 'en',
+) array (
+) NULL
+[i-klingon] 'i-klingon' NULL NULL 'tlh' | 'Klingon' | 'klingon' | false | false
+array (
+  'grandfathered' => 'i-klingon',
+) array (
+) NULL
+[x-private] 'x-private' '' '' '@x=private' | 'x-private (Private-Use=private)' | 'x-private' | '' | ''
+array (
+  'private0' => 'private',
+) array (
+) array (
+  'x' => 'private',
+)
+[sl-rozaj-biske-1994] 'sl' '' '' 'sl__ROZAJ_BISKE_1994' | 'Slovenian (ROZAJ_BISKE_1994)' | 'slovène' | '' | ''
+array (
+  'language' => 'sl',
+  'variant0' => 'ROZAJ',
+  'variant1' => 'BISKE',
+  'variant2' => '1994',
+) array (
+  0 => 'ROZAJ',
+  1 => 'BISKE',
+  2 => '1994',
+) NULL
+[] 'en' '' 'US' 'en_US' | 'English (United States)' | 'anglais' | 'Сполучені Штати' | ''
+array (
+  'language' => 'en',
+  'region' => 'US',
+) array (
+) NULL
+[uk_UA] 'uk' '' 'UA' 'uk_UA' | 'Ukrainian (Ukraine)' | 'ukrainien' | 'Україна' | ''
+array (
+  'language' => 'uk',
+  'region' => 'UA',
+) array (
+) NULL
+string(21) "sr_Latn_RS_a1_b2_x_pv"
+string(12) "en_yue_x1_x3"
+string(9) "i-klingon"
+bool(false)
+string(90) "Locale::composeLocale(): parameter array element is not a string: U_ILLEGAL_ARGUMENT_ERROR"
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+string(10) "de_de_1996"
+string(2) "en"
+string(5) "en-US"
+string(0) ""
+string(5) "en_US"
+bool(false)
+bool(true)
+bool(false)
+string(10) "zh_Hans_CN"
+string(2) "zh"
+string(5) "en_US"
+string(5) "en_US"
+NULL
+string(119) "Locale::getPrimaryLanguage(): Locale string too long, should be no longer than 156 characters: U_ILLEGAL_ARGUMENT_ERROR"
+Locale::composeLocale(): Argument #1 ($subtags) must contain a "language" key

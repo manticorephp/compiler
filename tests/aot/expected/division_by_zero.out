@@ -1,0 +1,41 @@
+%: DivisionByZeroError: Modulo by zero
+/: DivisionByZeroError: Division by zero
+/f: DivisionByZeroError: Division by zero
+intdiv: DivisionByZeroError: Division by zero
+intdiv min: ArithmeticError: Division of PHP_INT_MIN by -1 is not an integer
+int(0)
+float(NAN)
+/str: DivisionByZeroError: Division by zero
+%=: DivisionByZeroError: Modulo by zero
+/=: DivisionByZeroError: Division by zero
+int(1)
+shift: ArithmeticError: Bit shift by negative number
+shiftr: ArithmeticError: Bit shift by negative number
+mixed /: DivisionByZeroError: Division by zero
+mixed %: DivisionByZeroError: Modulo by zero
+mixed / null: DivisionByZeroError: Division by zero
+int(0)
+float(2.5)
+int(2)
+int(0)
+int(-1)
+int(0)
+mod str: DivisionByZeroError: Modulo by zero
+<<=: ArithmeticError: Bit shift by negative number
+float(INF)
+float(-INF)
+zz: DivisionByZeroError: Division by zero
+float(-0)
+int(206)
+-9223372036854775808 0 -1 1
+lit%: DivisionByZeroError: Modulo by zero
+lit/: DivisionByZeroError: Division by zero
+lit intdiv: DivisionByZeroError: Division by zero
+lit intdiv min: ArithmeticError: Division of PHP_INT_MIN by -1 is not an integer
+lit shl: ArithmeticError: Bit shift by negative number
+int(0)
+float(INF)
+float(NAN)
+float(INF)
+const%: DivisionByZeroError: Modulo by zero
+2.5 1
