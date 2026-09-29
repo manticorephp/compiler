@@ -3063,6 +3063,9 @@ namespace Async {
          */
         public function offload(int $op, int $a0, int $a1, int $a2, int $a3, int $a4): int
         {
+            if (self::$poolPid !== 0 && self::$poolPid !== \getmypid()) {
+                $this->forgetParentPool();
+            }
             if (!self::poolUp()) {
                 return \__mc_offload_inline($op, $a0, $a1, $a2, $a3, $a4);
             }
@@ -3103,6 +3106,26 @@ namespace Async {
             \Runtime\AsyncHook::setOffloadErrno(\peek_i64($job, 56));
             \Runtime\Libc\free($job);
             return $ret;
+        }
+
+        /**
+         * A fork's child inherited the parent's pool registration: the done pipe's
+         * records belong to the parent's workers and the parent's tasks. Drop the
+         * watcher from THIS reactor only (the kernel registration may be the
+         * parent's own — a shared epoll instance) and abandon the inherited parks:
+         * no worker in this process will ever finish them, so they stop counting as
+         * I/O work and a loop left with only them reports a deadlock, not a hang.
+         */
+        private function forgetParentPool(): void
+        {
+            $fd = self::$poolDoneR;
+            if ($fd >= 0 && isset($this->connWatcher[$fd])) {
+                $this->connWatcher[$fd]->forget();
+                unset($this->connWatcher[$fd]);
+                unset($this->writeArmed[$fd]);
+            }
+            $this->ioWaiters = $this->ioWaiters - \count($this->jobTask);
+            $this->jobTask = [];
         }
 
         /** Wake every task whose job the workers finished. Records are whole 8-byte writes. */
@@ -3158,6 +3181,10 @@ namespace Async {
                         continue;
                     }
                     if ($fd === self::$poolDoneR) {
+                        if (self::$poolPid !== \getmypid()) {
+                            $this->forgetParentPool();
+                            continue;
+                        }
                         $this->drainPool();
                         continue;
                     }
