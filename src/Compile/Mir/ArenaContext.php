@@ -56,9 +56,9 @@ final class ArenaContext
      * iteration's freed value is never observed) AND (B) not read anywhere in
      * the function outside this loop (so the last iteration's value — freed by
      * the pre-exit reset — is never observed either) AND (C) bound by nothing
-     * but direct arena allocations stored inside this loop — no store outside
-     * it, no copy of another local, no heap value, not a param / foreach /
-     * catch variable.
+     * but arena allocations the flow stores as a borrow ({@see arenaStores}),
+     * inside this loop — no store outside it, no copy of another local, no
+     * heap value, not a param / foreach / catch variable.
      *
      * (C) is what keeps this ONE answer before and after {@see
      * Passes\OwnershipFlow}: such a local is only ever a Borrow (or Empty) to
@@ -107,6 +107,48 @@ final class ArenaContext
             if ($fnBody !== null && $this->bindings($name, $fnBody) !== $here) { return false; }
         }
         return true;
+    }
+
+    /**
+     * {@see canResetPerIteration} for a foreach — the ONE question both
+     * {@see Passes\ApplyMemoryMode} and the emitter ask. A by-ref foreach writes
+     * the value slot back into the element, so an arena value could escape into
+     * the array; an ERASED base (a cell, an unknown) runs its body in the
+     * runtime-classified arms of {@see Passes\EmitLlvmControl}, which share one
+     * body no single arena save dominates. Neither resets.
+     *
+     * @param array<string, bool> $params
+     */
+    public function canResetForeach(Foreach_ $fe, ?Node $fnBody, bool $inGenerator, array $params = []): bool
+    {
+        if ($fe->byRef) { return false; }
+        $bk = $fe->array->type->kind;
+        if ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) { return false; }
+        return $this->canResetPerIteration(null, $fe->body, null, $fnBody, $inGenerator, $params);
+    }
+
+    /**
+     * An arena allocation whose INNERMOST enclosing loop is this one — what a
+     * loop that does not reset would accumulate every iteration. After {@see
+     * Passes\ApplyMemoryMode} none may be left in such a loop.
+     */
+    public function holdsArena(?Node $cond, Node $body, ?Node $step): bool
+    {
+        return ($cond !== null && $this->directArena($cond))
+            || $this->directArena($body)
+            || ($step !== null && $this->directArena($step));
+    }
+
+    private function directArena(Node $n): bool
+    {
+        if ($n->allocKind === AllocationKind::ARENA) { return true; }
+        $k = $n->kind;
+        if ($k === Node::KIND_FOR || $k === Node::KIND_WHILE || $k === Node::KIND_DOWHILE
+            || $k === Node::KIND_FOREACH) { return false; }
+        foreach (Walk::children($n) as $c) {
+            if ($this->directArena($c)) { return true; }
+        }
+        return false;
     }
 
     private function scan(Node $n): void
@@ -246,12 +288,20 @@ final class ArenaContext
         return null;
     }
 
-    /** StoreLocals of `$name` in the subtree whose value is an arena allocation. */
+    /**
+     * StoreLocals of `$name` in the subtree whose value the flow stores as a
+     * BORROW because the arena frees it: a `new`, an array literal or a concat
+     * stamped Arena — the producers {@see Ownership::classifyStored} sends to its
+     * allocation gate. Every other arena-stamped producer is claimed OWNED
+     * before that gate (a `(string)` cast, a bitwise op, a call…, and a
+     * conditional over any of them), so the flow drops it, and after a reset
+     * that drop would read freed arena memory.
+     */
     private function arenaStores(string $name, Node $n): int
     {
         $c = 0;
         if ($n->kind === Node::KIND_STORE_LOCAL && self::asStoreLocal($n)->name === $name
-            && self::asStoreLocal($n)->value->allocKind === AllocationKind::ARENA) { $c = 1; }
+            && self::arenaBorrow(self::asStoreLocal($n)->value)) { $c = 1; }
         foreach (Walk::children($n) as $ch) { $c = $c + $this->arenaStores($name, $ch); }
         return $c;
     }
@@ -272,6 +322,13 @@ final class ArenaContext
         }
         foreach (Walk::children($n) as $ch) { $c = $c + $this->bindings($name, $ch); }
         return $c;
+    }
+
+    private static function arenaBorrow(Node $v): bool
+    {
+        if ($v->allocKind !== AllocationKind::ARENA) { return false; }
+        $k = $v->kind;
+        return $k === Node::KIND_CONCAT || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_ARRAY_LIT;
     }
 
     private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }

@@ -1170,6 +1170,20 @@ trait EmitLlvmControl
     private array $feShared = [];
     private int $feSharedSeq = 0;
 
+    /**
+     * A loop the emitter does not reset must hold no arena allocation of its
+     * own: {@see ApplyMemoryMode} asked the same question on the same stamps and
+     * demoted every allocation of a loop it refused. A disagreement would grow
+     * the arena every iteration until the frame returns — never silently.
+     */
+    private function arenaBoundedOrFail(?Node $cond, Node $body, ?Node $step, Node $loop): void
+    {
+        if (!$this->arena->holdsArena($cond, $body, $step)) { return; }
+        throw new \RuntimeException('EmitLlvm: ' . $this->frame->name . ': the loop at line '
+            . (string)$loop->line . ' keeps arena allocations but takes no per-iteration reset'
+            . ' (ApplyMemoryMode and the emitter disagree on ArenaContext::canResetPerIteration)');
+    }
+
     private function inSharedForeach(\Compile\Mir\Foreach_ $fe): bool
     {
         $n = \count($this->feShared);
@@ -1465,8 +1479,9 @@ trait EmitLlvmControl
         // are materialized, so a reset never frees the array being walked.
         // By-ref foreach writes the value slot back into the element, so an
         // arena value could escape into the (pre-save) array — skip it.
-        $reset = !$fe->byRef && !$this->inSharedForeach($fe)
-            && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        $reset = !$this->inSharedForeach($fe)
+            && $this->arena->canResetForeach($fe, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail(null, $fe->body, null, $fe); }
         if ($reset) { $out .= $this->emitArenaSave(); }
 
         $out .= '  br label %' . $condLabel . "\n";
@@ -2191,6 +2206,7 @@ trait EmitLlvmControl
         $this->cf->enterLoop($endLabel, $condLabel);
 
         $reset = $this->arena->canResetPerIteration($w->cond, $w->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail($w->cond, $w->body, null, $w); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
         $out .= '  br label %' . $condLabel . "\n";
@@ -2221,6 +2237,7 @@ trait EmitLlvmControl
         $this->cf->enterLoop($endLabel, $stepLabel);
 
         $reset = $this->arena->canResetPerIteration($f->cond, $f->body, $f->step, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail($f->cond, $f->body, $f->step, $f); }
         $out = '';
         if ($f->init !== null) { $out .= $this->emitNode($f->init); }
         if ($reset) { $out .= $this->emitArenaSave(); }
@@ -2257,6 +2274,7 @@ trait EmitLlvmControl
         $this->cf->enterLoop($endLabel, $condLabel);
 
         $reset = $this->arena->canResetPerIteration($d->cond, $d->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail($d->cond, $d->body, null, $d); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
         $out .= '  br label %' . $bodyLabel . "\n";

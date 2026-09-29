@@ -27,6 +27,7 @@ final class ApplyMemoryMode implements Pass
 {
     /** Narrow to the concrete class so a field read uses ITS offsets. */
     private static function asRefCell(Node $n): RefCell_ { return $n; }
+    private static function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 
     public const NAME = 'apply-memory-mode';
 
@@ -78,23 +79,33 @@ final class ApplyMemoryMode implements Pass
      * outer iteration does not bound an inner loop running 300 000 times, so a
      * node is safe only when the loop DIRECTLY around it resets.
      *
-     * Verdicts are computed over the whole tree BEFORE anything is demoted:
-     * demotion only ever removes arena allocations, so evaluating first keeps
-     * the answer independent of the order loops are visited.
+     * Verdicts are computed over the whole tree BEFORE anything is demoted, and
+     * then again on the demoted stamps until nothing changes: a verdict reads
+     * the stamps ({@see \Compile\Mir\ArenaContext::canResetPerIteration} admits
+     * a local only when its stores are arena allocations), so demoting an inner
+     * loop can turn an outer yes into a no — and the emitter, which asks the
+     * same question on the final stamps, must get the answer this pass acted on.
+     * Demotion only turns ARENA into RC_HEAP, so the loop terminates.
      */
     private function unconfineUnresettableLoops(\Compile\Mir\FunctionDef $fn): void
     {
         if ($this->mode === MemoryMode::RC) {
             return;   // nothing was routed to the arena in the first place
         }
-        $loops = [];
-        $this->collectLoopVerdicts($fn->body, $fn, $loops);
-        if (\count($loops) === 0) {
-            return;
-        }
-        $this->demote($fn->body, $loops, true);
-        $this->unarenaMutatedAcrossReset($fn, $loops);
+        do {
+            $loops = [];
+            $this->collectLoopVerdicts($fn->body, $fn, $loops);
+            if (\count($loops) === 0) {
+                return;
+            }
+            $this->demoted = false;
+            $this->demote($fn->body, $loops, true);
+            $this->unarenaMutatedAcrossReset($fn, $loops);
+        } while ($this->demoted);
     }
+
+    /** A stamp changed in this round of {@see unconfineUnresettableLoops}. */
+    private bool $demoted = false;
 
     /**
      * Take an allocation OUT of the arena when a resetting loop mutates the
@@ -210,6 +221,7 @@ final class ApplyMemoryMode implements Pass
     {
         if ($v->allocKind === AllocationKind::ARENA) {
             $v->allocKind = AllocationKind::RC_HEAP;
+            $this->demoted = true;
         }
         if ($v->kind === Node::KIND_TERNARY) {
             if ($v->then !== null) { $this->unarena($v->then); }
@@ -254,8 +266,7 @@ final class ApplyMemoryMode implements Pass
         foreach ($fn->params as $p) { $params[$p->name] = true; }
         $k = $n->kind;
         if ($k === Node::KIND_FOREACH) {
-            if ($n->byRef) { return false; }
-            return $arena->canResetPerIteration(null, $n->body, null, $fn->body, $fn->isGenerator, $params);
+            return $arena->canResetForeach(self::asForeach($n), $fn->body, $fn->isGenerator, $params);
         }
         if ($k === Node::KIND_FOR) {
             return $arena->canResetPerIteration($n->cond, $n->body, $n->step, $fn->body, $fn->isGenerator, $params);
@@ -281,6 +292,7 @@ final class ApplyMemoryMode implements Pass
         }
         if (!$reclaimed && $n->allocKind === AllocationKind::ARENA) {
             $n->allocKind = AllocationKind::RC_HEAP;
+            $this->demoted = true;
         }
         foreach (Walk::children($n) as $c) {
             $this->demote($c, $loops, $reclaimed);
