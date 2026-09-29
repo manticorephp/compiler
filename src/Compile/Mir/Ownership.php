@@ -94,7 +94,8 @@ final class Ownership
      *    Borrow — only a STRING-base char read is a fresh temp;
      *  - Invoke of an obj / array / cell result: stored Own, temp Borrow
      *    (a closure- or string-typed Invoke agrees);
-     *  - Clone and an array-union Add: stored Own, temp Borrow;
+     *  - Clone and an array-union Add stamped RC_HEAP: stored Own, temp Borrow
+     *    (stamped ARENA, both are Borrow: the arena frees them);
      *  - Call of an obj / array / closure / cell result to a NON-FFI callee:
      *    stored Own for every one but a borrowing builtin; temp Own only for a
      *    fn with a FunctionDef in the module ({@see OwnershipContext::$moduleFns})

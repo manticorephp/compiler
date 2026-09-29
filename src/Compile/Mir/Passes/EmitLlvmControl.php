@@ -687,6 +687,14 @@ trait EmitLlvmControl
         if (!$fe->ownCoOwn && ($el === null || $el->kind === Type::KIND_UNKNOWN
             || $el->kind === Type::KIND_CELL || $this->own->flavorOf($el) > 0)) { return ''; }
         if ($fe->keyVar !== null && !$at->isVec()) { return ''; }
+        // A literal holds one reference on each array element (a fresh one
+        // transferred, a borrowed one retained); `vecbuf` is the ARGUMENT
+        // answer, where the call gives those back. Here nobody else does: the
+        // loop is the literal's sole owner, as a local slot is, so it drops
+        // them by the local slot's element walk ({@see rcReleaseFlavorPlain}).
+        if ($fe->array->kind === Node::KIND_ARRAY_LIT && $el !== null && $el->isArray()) {
+            return $this->nestedArrFlavor($el, $at->isAssoc() ? 'assoc' : 'vec');
+        }
         return $this->freshRcArgFlavor($fe->array);
     }
 
