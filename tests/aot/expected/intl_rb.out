@@ -1,0 +1,35 @@
+bool(true)
+string(13) "left-to-right"
+string(13) "top-to-bottom"
+alternateQuotationEnd=‘
+alternateQuotationStart=‚
+quotationEnd=“
+quotationStart=„
+int(4)
+int(4)
+string(16) "InternalIterator"
+string(14) "ResourceBundle"
+int(12)
+string(6) "Januar"
+string(8) "Dezember"
+string(3) "Mai"
+bool(true)
+NULL
+int(2)
+string(84) "ResourceBundle::get(): Cannot load resource element 'nope': U_MISSING_RESOURCE_ERROR"
+NULL
+string(82) "ResourceBundle::get(): Cannot load resource element 9999: U_MISSING_RESOURCE_ERROR"
+NULL
+string(84) "resourcebundle_get(): Cannot load resource element 'nope2': U_MISSING_RESOURCE_ERROR"
+string(14) "ResourceBundle"
+string(3) "US$"
+ResourceBundle::__construct(): Cannot load libICU resource bundle
+NULL
+string(85) "resourcebundle_create(): Cannot load libICU resource bundle: U_MISSING_RESOURCE_ERROR"
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+Error: Cannot use object of type ResourceBundle as array
+ValueError: Offset must not be empty
+ValueError: ResourceBundle::get(): Argument #1 ($index) must not be empty

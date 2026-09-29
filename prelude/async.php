@@ -210,15 +210,15 @@ namespace Async {
         /** The earliest deadline on this scope or an ancestor, as a unix time. */
         public function deadline(): ?float
         {
-            return $this->scope->deadlineAt();
+            return __wallDeadline($this->scope->deadlineAt());
         }
 
         /** Seconds left before the deadline (never negative); null when unbounded. */
         public function remaining(): ?float
         {
-            $d = $this->deadline();
+            $d = $this->scope->deadlineAt();
             if ($d === null) { return null; }
-            $left = $d - \microtime(true);
+            $left = $d - \__mc_monotonic_f();
             return $left > 0.0 ? $left : 0.0;
         }
 
@@ -514,6 +514,17 @@ namespace Async {
             $this->waiters[] = $w;
         }
 
+        /** Unregister $w — a waiter that stopped waiting before this settled. */
+        public function dropWaiter(Task $w): void
+        {
+            /** @var Task[] $keep */
+            $keep = [];
+            foreach ($this->waiters as $x) {
+                if ($x !== $w) { $keep[] = $x; }
+            }
+            $this->waiters = $keep;
+        }
+
         /**
          * Suspend the calling task until this one settles, then return its value
          * (or rethrow its error). Loops: a wake is a HINT, not a promise — the
@@ -562,7 +573,7 @@ namespace Async {
         {
             $sched = Scheduler::instance();
             $this->claimed = true;
-            if (!$sched->awaitDeadline($this, \microtime(true) + $seconds)) {
+            if (!$sched->awaitDeadline($this, \__mc_monotonic_f() + $seconds)) {
                 $sched->cancelTask($this);
                 $sched->shieldedJoinTask($this);
                 throw new TimeoutException('await timed out after ' . (string)$seconds . 's');
@@ -620,7 +631,8 @@ namespace Async {
         }
 
         /**
-         * The earliest deadline on this scope or an ancestor. A nested timeout
+         * The earliest deadline on this scope or an ancestor, on the MONOTONIC
+         * clock ({@see __wallDeadline()} for a unix time). A nested timeout
          * can only ever TIGHTEN the enclosing one — a 30s inner scope inside a
          * 2s outer one still dies at 2s.
          */
@@ -1596,15 +1608,16 @@ namespace Async {
         public static function deadline(): ?float
         {
             $group = self::currentScope();
-            return $group === null ? null : $group->deadlineAt();
+            return $group === null ? null : __wallDeadline($group->deadlineAt());
         }
 
         /** Seconds left before the deadline; null when unbounded. */
         public static function remaining(): ?float
         {
-            $d = self::deadline();
+            $group = self::currentScope();
+            $d = $group === null ? null : $group->deadlineAt();
             if ($d === null) { return null; }
-            $left = $d - \microtime(true);
+            $left = $d - \__mc_monotonic_f();
             return $left > 0.0 ? $left : 0.0;
         }
 
@@ -1823,7 +1836,7 @@ namespace Async {
                 return '';
             }
             $exp = $this->dnsExp[$host] ?? 0.0;
-            if ($exp <= \microtime(true)) {
+            if ($exp <= \__mc_monotonic_f()) {
                 unset($this->dnsIp[$host]);
                 unset($this->dnsExp[$host]);
                 return '';
@@ -1844,7 +1857,7 @@ namespace Async {
             }
             $secs = $ttl > 300 ? 300 : $ttl;
             $this->dnsIp[$host] = $ip;
-            $this->dnsExp[$host] = \microtime(true) + (float)$secs;
+            $this->dnsExp[$host] = \__mc_monotonic_f() + (float)$secs;
         }
 
         /**
@@ -2126,8 +2139,8 @@ namespace Async {
             if (\function_exists('Manticore\\Sapi\\contextSwitch')) {
                 \Manticore\Sapi\contextSwitch($prev === null ? 0 : $prev->id, $task->id);
             }
-            // One float compare when the watchdog is off; microtime only when it is on.
-            $t0 = $this->watchdog > 0.0 ? \microtime(true) : 0.0;
+            // One float compare when the watchdog is off; the clock only when it is on.
+            $t0 = $this->watchdog > 0.0 ? \__mc_monotonic_f() : 0.0;
             try {
                 if (!$task->fiber->isStarted()) {
                     $task->fiber->start();
@@ -2176,7 +2189,7 @@ namespace Async {
          */
         private function watchdogCheck(Task $task, float $t0): void
         {
-            $held = \microtime(true) - $t0;
+            $held = \__mc_monotonic_f() - $t0;
             if ($held < $this->watchdog) { return; }
             // First breach, then only a doubling: see Task::$wdWorst.
             if ($task->wdWorst > 0.0 && $held < $task->wdWorst * 2.0) { return; }
@@ -2461,7 +2474,7 @@ namespace Async {
             // the signal pump would keep every program alive forever. It still
             // rides the heap, so the loop wakes for it while other work exists.
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-            $this->timerPush(\microtime(true) + $seconds, $me);
+            $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             \Fiber::suspend();
             if ($me->timerActive) {
                 // Woken by something other than the timer (cancel already cleared
@@ -2472,7 +2485,7 @@ namespace Async {
         }
 
         /**
-         * Park until $t settles OR $deadline (a unix time) passes. Returns true
+         * Park until $t settles OR $deadline (monotonic, {@see \__mc_monotonic_f()}) passes. Returns true
          * when the task settled, false on expiry — it does NOT cancel or throw,
          * so the caller decides what a timeout means. The one primitive under
          * {@see Task::awaitWithin()} and {@see timeout()}.
@@ -2482,18 +2495,26 @@ namespace Async {
             $me = $this->running;
             $t->claimed = true;   // we are handling its outcome — do not escalate
             while ($t->state === Task::PENDING) {
-                if (\microtime(true) >= $deadline) {
+                if (\__mc_monotonic_f() >= $deadline) {
                     return false;
                 }
                 $this->checkCancel();
                 $t->addWaiter($me);
                 $me->timerActive = true;
-                $this->tmLive = $this->tmLive + 1;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
                 $this->timerPush($deadline, $me);
-                \Fiber::suspend();
-                if ($me->timerActive) {
-                    $me->timerActive = false;
-                    $this->tmLive = $this->tmLive - 1;
+                try {
+                    \Fiber::suspend();
+                } finally {
+                    // Woken by the timer or cancelled, $t is still pending and
+                    // still holds us: its settle() would later wake us wherever
+                    // we are parked by then — mid-send, say, which returns as if
+                    // delivered.
+                    $t->dropWaiter($me);
+                    if ($me->timerActive) {
+                        $me->timerActive = false;
+                        if (!$me->daemon) { $this->tmLive = $this->tmLive - 1; }
+                    }
                 }
             }
             return true;
@@ -2725,7 +2746,7 @@ namespace Async {
             $this->chainRead($fd, $me);
             $me->timerActive = true;
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-            $this->timerPush(\microtime(true) + $seconds, $me);
+            $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             \Fiber::suspend();
             // The reactor clears ioFd when IT wakes the task; fireTimers clears
             // timerActive when the deadline does. Read both before releasing.
@@ -2758,7 +2779,7 @@ namespace Async {
             }
             $me->timerActive = true;
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-            $this->timerPush(\microtime(true) + $seconds, $me);
+            $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             \Fiber::suspend();
             $ready = $me->ioFd === -1;
             $this->releaseIo($me);
@@ -2830,7 +2851,7 @@ namespace Async {
             if ($seconds >= 0.0) {
                 $me->timerActive = true;
                 if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-                $this->timerPush(\microtime(true) + $seconds, $me);
+                $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             }
             \Fiber::suspend();
             // cancelTask() releases the records AND the waiter count for a select
@@ -2948,7 +2969,7 @@ namespace Async {
             $this->timerPrune();
             $timeout = -1.0;
             if (\count($this->tmDeadline) > 0) {
-                $timeout = $this->tmDeadline[0] - \microtime(true);
+                $timeout = $this->tmDeadline[0] - \__mc_monotonic_f();
                 if ($timeout < 0) { $timeout = 0.0; }
             }
 
@@ -3002,7 +3023,7 @@ namespace Async {
 
         private function fireTimers(): void
         {
-            $now = \microtime(true);
+            $now = \__mc_monotonic_f();
             while (\count($this->tmDeadline) > 0) {
                 $this->timerPrune();
                 if (\count($this->tmDeadline) === 0) { return; }
@@ -3128,7 +3149,7 @@ namespace Async {
         $cur = $sched->current();
         $group = new TaskGroup($cur->scope);
         $group->site = $site;
-        $group->deadline = \microtime(true) + $seconds;
+        $group->deadline = \__mc_monotonic_f() + $seconds;
         $effective = $group->deadlineAt();   // an enclosing deadline still wins if nearer
         $cur->scope = $group;
 
@@ -3570,6 +3591,17 @@ namespace Async {
         return (string)\round($seconds * 1000.0, 1);
     }
 
+    /**
+     * @internal a monotonic deadline as the unix time the public API reports.
+     * Deadlines are kept monotonic because the wall clock steps; only this
+     * edge translates, so a step moves the reported time, never the expiry.
+     */
+    function __wallDeadline(?float $monotonic): ?float
+    {
+        if ($monotonic === null) { return null; }
+        return $monotonic - \__mc_monotonic_f() + \microtime(true);
+    }
+
     /** Suspend the current task for $seconds without blocking the loop. */
     function delay(float $seconds): void
     {
@@ -3623,7 +3655,7 @@ namespace Async {
      */
     function selectWithin(float $seconds, array $cases): ?Selected
     {
-        return __selectImpl($cases, true, \microtime(true) + $seconds);
+        return __selectImpl($cases, true, \__mc_monotonic_f() + $seconds);
     }
 
     /**

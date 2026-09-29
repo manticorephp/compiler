@@ -185,6 +185,14 @@ final class StoreLocal extends Node
     {
         return [$this->value];
     }
+
+    /** The NULL an out-parameter local starts as ({@see Passes\VivifyRefArgs}):
+     *  the by-ref callee stores an owned value into the slot, so the slot owns
+     *  what it ends up holding. Declared LAST — field order is layout. */
+    public bool $outParamInit = false;
+    /** `$x = $x` on one cell slot the flow manages: a relabel that moves
+     *  nothing ({@see Passes\OwnershipFlow}), so the emitter emits no store. */
+    public bool $ownRelabel = false;
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────
@@ -1359,6 +1367,10 @@ final class Foreach_ extends Node
      *  {@see EmitLlvmLocals::preallocateLocals} so its slot alloca lands in the
      *  ENTRY block. Emitted lazily (and unhoisted) when still ''. */
     public string $iterName = '';
+    /** Object-iterator path: the type `current()` of {@see $iterClass}
+     *  answers — a method return, so a +1 the loop variable may co-own
+     *  ({@see Passes\InsertMemoryOps::foreachValueSlotType}). Set by InferTypes. */
+    public ?Type $iterValueType = null;
 
     /** Set by {@see Passes\OwnershipFlow}: whether this loop's value binding
      *  co-owns (the emitter retains each element), and the `drop` of the

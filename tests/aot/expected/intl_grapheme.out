@@ -1,0 +1,48 @@
+65cc81f09f91a8e2808df09f91a9e2808df09f91a720e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a58720c384cc88626320f09f87baf09f87a620780d0a79: 16 | 65cc81,f09f91a8e2808df09f91a9e2808df09f91a7,20,e0a4a8,e0a4ae,e0a4b8e0a58de0a4a4e0a587,20,c384cc88,62,63,20,f09f87baf09f87a6,20,78,0d0a,79
+68656c6c6f20776f726c64: 11 | 68,65,6c,6c,6f,20,77,6f,72,6c,64
+610d0a62: 3 | 61,0d0a,62
+: 0 | 
+f09f87baf09f87a6f09f87b5f09f87b1: 2 | f09f87baf09f87a6,f09f87b5f09f87b1
+c385c389c38e: 3 | c385,c389,c38e
+fffe: NULL | ff,fe
+substr(0,NULL): 'é👨‍👩‍👧 नमस्ते Ä̈bc 🇺🇦 x
+y'
+substr(1,2): '👨‍👩‍👧 '
+substr(-3,NULL): 'x
+y'
+substr(2,-2): ' नमस्ते Ä̈bc 🇺🇦 x'
+substr(-20,3): 'é👨‍👩‍👧 '
+substr(5,0): ''
+substr(30,NULL): ''
+substr(0,100): 'é👨‍👩‍👧 नमस्ते Ä̈bc 🇺🇦 x
+y'
+c384: false false false false false false
+c3a4: false false false false false false
+62: 8 8 8 8 '🇺🇦 x
+y' 'é👨‍👩‍👧 नमस्ते Ä̈bc '
+f09f87baf09f87a6: 11 11 11 11 'x
+y' 'é👨‍👩‍👧 नमस्ते Ä̈bc 🇺🇦 '
+65: false false false false false false
+c3a9: 0 0 0 0 false ''
+: 0 0 16 16 'é👨‍👩‍👧 नमस्ते Ä̈bc 🇺🇦 x
+y' ''
+7a7a: false false false false false false
+cc88: false false false false false false
+int(4)
+int(1)
+int(1)
+bool(false)
+int(9)
+extract: 'é👨‍👩‍👧 ' next=22
+extract: 'é' next=3
+extract: 'é' next=3
+extract: '👨‍👩‍👧 ' next=22
+extract: ' ' next=57
+int(3)
+int(1)
+int(6)
+int(1)
+grapheme_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
+grapheme_str_split(): Argument #2 ($length) must be greater than 0 and less than or equal to 1073741823
+grapheme_extract(): Argument #3 ($type) must be one of GRAPHEME_EXTR_COUNT, GRAPHEME_EXTR_MAXBYTES, or GRAPHEME_EXTR_MAXCHARS
+grapheme_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)

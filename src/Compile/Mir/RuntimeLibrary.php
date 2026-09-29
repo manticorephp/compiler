@@ -587,21 +587,41 @@ final class RuntimeLibrary
         $out .= "calc:\n";
         $out .= '  %lp = getelementptr i8, ptr %p, i64 ' . $lo . "\n";
         $out .= "  %len = load i64, ptr %lp\n";
-        $out .= "  %zero = icmp eq i64 %len, 0\n";
-        $out .= "  br i1 %zero, label %done, label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ 0, %calc ], [ %i1, %loop ]\n";
-        $out .= "  %h = phi i64 [ -3750763034362895579, %calc ], [ %hm, %loop ]\n";
-        $out .= "  %bp = getelementptr i8, ptr %p, i64 %i\n";
+        // The string hash: FNV-1a over little-endian 8-byte words, the tail bytes,
+        // then fmix64 — {@see \Compile\Mir\Passes\EmitLlvm::fnvHash64} and
+        // __mir_array_hash_str compute the same, and share this cache word.
+        $out .= "  br label %wl\n";
+        $out .= "wl:\n";
+        $out .= "  %wi = phi i64 [ 0, %calc ], [ %wi8, %wb ]\n";
+        $out .= "  %wh = phi i64 [ -3750763034362895579, %calc ], [ %whm, %wb ]\n";
+        $out .= "  %wi8 = add i64 %wi, 8\n";
+        $out .= "  %wfit = icmp sle i64 %wi8, %len\n";
+        $out .= "  br i1 %wfit, label %wb, label %tl\n";
+        $out .= "wb:\n";
+        $out .= "  %wp = getelementptr i8, ptr %p, i64 %wi\n";
+        $out .= "  %w = load i64, ptr %wp, align 1\n";
+        $out .= "  %whx = xor i64 %wh, %w\n";
+        $out .= "  %whm = mul i64 %whx, 1099511628211\n";
+        $out .= "  br label %wl\n";
+        $out .= "tl:\n";
+        $out .= "  %ti = phi i64 [ %wi, %wl ], [ %ti1, %tb ]\n";
+        $out .= "  %th = phi i64 [ %wh, %wl ], [ %thm, %tb ]\n";
+        $out .= "  %tmore = icmp ult i64 %ti, %len\n";
+        $out .= "  br i1 %tmore, label %tb, label %done\n";
+        $out .= "tb:\n";
+        $out .= "  %bp = getelementptr i8, ptr %p, i64 %ti\n";
         $out .= "  %b = load i8, ptr %bp\n";
         $out .= "  %bz = zext i8 %b to i64\n";
-        $out .= "  %hx = xor i64 %h, %bz\n";
-        $out .= "  %hm = mul i64 %hx, 1099511628211\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  %more = icmp ult i64 %i1, %len\n";
-        $out .= "  br i1 %more, label %loop, label %done\n";
+        $out .= "  %thx = xor i64 %th, %bz\n";
+        $out .= "  %thm = mul i64 %thx, 1099511628211\n";
+        $out .= "  %ti1 = add i64 %ti, 1\n";
+        $out .= "  br label %tl\n";
         $out .= "done:\n";
-        $out .= "  %hf = phi i64 [ -3750763034362895579, %calc ], [ %hm, %loop ]\n";
+        $out .= "  %f1s = lshr i64 %th, 33\n  %f1 = xor i64 %th, %f1s\n";
+        $out .= "  %f2 = mul i64 %f1, -49064778989728563\n";
+        $out .= "  %f2s = lshr i64 %f2, 33\n  %f3 = xor i64 %f2, %f2s\n";
+        $out .= "  %f4 = mul i64 %f3, -4265267296055464877\n";
+        $out .= "  %f4s = lshr i64 %f4, 33\n  %hf = xor i64 %f4, %f4s\n";
         $out .= "  store i64 %hf, ptr %hp\n";
         $out .= "  ret i64 %hf\n}\n";
         return $out;
@@ -1078,7 +1098,8 @@ final class RuntimeLibrary
         $out .= "  %eNameI = ptrtoint ptr %name to i64\n";
         $out .= "  %eDeclI = ptrtoint ptr %errDecl to i64\n";
         $out .= "  %eScopeI = ptrtoint ptr %scope to i64\n";
-        $out .= "  %eres = call i64 @manticore___mc_dyn_method_error(i64 %obj, i64 %eNameI, i64 %kind, i64 %eDeclI, i64 %eScopeI)\n";
+        $out .= "  %eObj = or i64 %obj, " . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
+        $out .= "  %eres = call i64 @manticore___mc_dyn_method_error(i64 %eObj,i64 %eNameI, i64 %kind, i64 %eDeclI, i64 %eScopeI)\n";
         $out .= "  store i64 %eres, ptr %outp\n";
         $out .= "  ret i1 true\n";
         $out .= "inline:\n  ret i1 false\n}\n";
@@ -1260,6 +1281,25 @@ final class RuntimeLibrary
         $out .= "  %c = call i32 @memcmp(ptr %a, ptr %b, i64 %la)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  ret i1 %eq\n}\n";
+        // `===` over two string CARRIERS, either of which may be a `?string`'s
+        // null (0): the same word is equal, a null beside a string is not, and
+        // anything else compares bytes. It used to be three blocks and a phi at
+        // every comparison site — 8 493 of them in the compiler's own module.
+        $out .= "\ndefine i1 @__mir_str_eq_ns(i64 %a, i64 %b) {\nentry:\n";
+        $out .= "  %same = icmp eq i64 %a, %b\n";
+        $out .= "  br i1 %same, label %yes, label %nz\n";
+        $out .= "yes:\n  ret i1 1\n";
+        $out .= "nz:\n";
+        $out .= "  %an = icmp eq i64 %a, 0\n";
+        $out .= "  %bn = icmp eq i64 %b, 0\n";
+        $out .= "  %nul = or i1 %an, %bn\n";
+        $out .= "  br i1 %nul, label %no, label %cmp\n";
+        $out .= "no:\n  ret i1 0\n";
+        $out .= "cmp:\n";
+        $out .= "  %pa = inttoptr i64 %a to ptr\n";
+        $out .= "  %pb = inttoptr i64 %b to ptr\n";
+        $out .= "  %r = call i1 @__mir_str_eq(ptr %pa, ptr %pb)\n";
+        $out .= "  ret i1 %r\n}\n";
 
         // ── The 256 single-byte strings, interned ───────────────────────────
         //

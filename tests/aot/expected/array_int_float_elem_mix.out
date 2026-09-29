@@ -1,0 +1,38 @@
+int(3)
+float(2.5)
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  int(4)
+}
+array(1) {
+  [1]=>
+  int(7)
+}
+array(1) {
+  [1]=>
+  int(7)
+}
+array(1) {
+  [1]=>
+  int(7)
+}
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  int(4)
+}
+array(2) {
+  [0]=>
+  bool(true)
+  [1]=>
+  int(1)
+}
+array(2) {
+  [0]=>
+  NULL
+  [1]=>
+  int(2)
+}

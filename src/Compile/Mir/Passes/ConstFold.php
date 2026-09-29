@@ -539,6 +539,12 @@ final class ConstFold implements Pass
         if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
             $l = $n->left->value;
             $r = $n->right->value;
+            // `-1` never reaches `%` or `/` here: a compiler built by the
+            // previous generation lowers them to srem/sdiv, and MIN by -1 traps
+            // (SIGFPE on x86_64). MIN / -1 is a float in php — runtime's job.
+            if ($r === -1) {
+                return $l === PHP_INT_MIN ? $n : new IntConst(-$l, Type::int_());
+            }
             if ($r !== 0 && $l % $r === 0) {
                 return new IntConst((int)($l / $r), Type::int_());
             }
@@ -553,6 +559,7 @@ final class ConstFold implements Pass
         if ($n->left->kind === Node::KIND_INT_CONST && $n->right->kind === Node::KIND_INT_CONST) {
             $r = $n->right->value;
             if ($r === 0) { return $n; }
+            if ($r === -1) { return new IntConst(0, Type::int_()); }
             $l = $n->left->value;
             return new IntConst($l % $r, Type::int_());
         }

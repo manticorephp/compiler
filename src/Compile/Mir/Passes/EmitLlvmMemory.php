@@ -123,6 +123,7 @@ trait EmitLlvmMemory
         $out = '';
         $this->frame->mixedFlagSlots = [];
         $this->frame->mixedFlagBySlot = [];
+        $this->frame->mixedRawByFlag = [];
         foreach ($this->frame->ownLocals as $name => $mo) {
             if (isset($paramNames[$name])) { continue; }
             if (\str_starts_with($mo->flavor, 'mix') && isset($this->locals->slots[$name])) {
@@ -131,11 +132,13 @@ trait EmitLlvmMemory
                 $out .= '  store i64 0, ptr ' . $flag . "\n";
                 $this->frame->mixedFlagSlots[$name] = $flag;
                 $this->frame->mixedFlagBySlot[$this->locals->slots[$name]] = $flag;
+                $this->frame->mixedRawByFlag[$flag] = [\substr($this->rcReleaseFlavor($mo), 3)];
             }
             if (isset($this->locals->slots[$name])) {
                 $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
             }
         }
+        if ($this->frame->mixedFlagSlots !== []) { $this->collectMixedRawFlavors($body); }
         return $out;
     }
 
@@ -458,7 +461,7 @@ trait EmitLlvmMemory
             if ($t === null) { return 'vecbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'vecobj'; }
+            if ($this->isRcObjElement($el)) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A NESTED array element — the member the flavor family was
             // missing, so this fell through to the plain repr walk and
@@ -477,7 +480,7 @@ trait EmitLlvmMemory
             if ($t === null) { return 'assocbuf'; }
             $el = $t->type->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
-            if ($el !== null && $el->kind === Type::KIND_OBJ && !$this->isEnumClass($el->class ?? '') && !$this->isClosureClass($el->class ?? '')) { return 'assocobj'; }
+            if ($this->isRcObjElement($el)) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && $el->kind === Type::KIND_ARRAY) { return $this->nestedArrFlavor($el, 'assoc'); }
             if ($el !== null && $this->isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
@@ -757,13 +760,33 @@ trait EmitLlvmMemory
         $out = '  ' . $tagged . ' = icmp ugt i64 ' . $w . ', '
             . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
         $isCell = $tagged;
+        $flavors = $flagSlot !== '' ? ($this->frame->mixedRawByFlag[$flagSlot] ?? []) : [];
         if ($flagSlot !== '') {
             $fl = $this->ssa->allocReg();
             $fb = $this->ssa->allocReg();
             $isCell = $this->ssa->allocReg();
             $out .= '  ' . $fl . ' = load i64, ptr ' . $flagSlot . "\n";
-            $out .= '  ' . $fb . ' = icmp ne i64 ' . $fl . ", 0\n";
+            $out .= '  ' . $fb . ' = icmp eq i64 ' . $fl . ", 1\n";
             $out .= '  ' . $isCell . ' = or i1 ' . $tagged . ', ' . $fb . "\n";
+            // More than one RAW flavor: the flag names which one this slot
+            // holds, and each is released by its own helper.
+            if (\count($flavors) > 1) {
+                $cw = $this->ssa->allocReg();
+                $out .= '  ' . $cw . ' = select i1 ' . $isCell . ', i64 ' . $w . ", i64 0\n";
+                $out .= '  call void @__mir_cell_drop(i64 ' . $cw . ")\n";
+                $untag = $this->ssa->allocReg();
+                $out .= '  ' . $untag . ' = xor i1 ' . $tagged . ", true\n";
+                foreach ($flavors as $i => $f) {
+                    $is = $this->ssa->allocReg();
+                    $ok = $this->ssa->allocReg();
+                    $rw = $this->ssa->allocReg();
+                    $out .= '  ' . $is . ' = icmp eq i64 ' . $fl . ', ' . (string)($i === 0 ? 0 : $i + 1) . "\n";
+                    $out .= '  ' . $ok . ' = and i1 ' . $is . ', ' . $untag . "\n";
+                    $out .= '  ' . $rw . ' = select i1 ' . $ok . ', i64 ' . $w . ", i64 0\n";
+                    $out .= $this->rcReleaseReg($rw, $f);
+                }
+                return $out;
+            }
         }
         $cw = $this->ssa->allocReg();
         $rw = $this->ssa->allocReg();
@@ -771,6 +794,49 @@ trait EmitLlvmMemory
         $out .= '  ' . $rw . ' = select i1 ' . $isCell . ', i64 0, i64 ' . $w . "\n";
         $out .= '  call void @__mir_cell_drop(i64 ' . $cw . ")\n";
         return $out . $this->rcReleaseReg($rw, $raw);
+    }
+
+    /**
+     * Every RAW release flavor a MIXED slot's stores can leave, beyond the
+     * plan's own ({@see \Compile\Mir\Passes\InsertMemoryOps::$rcObjRawAlt}):
+     * collected before any of its releases is emitted, so each one covers
+     * them all.
+     */
+    private function collectMixedRawFlavors(Node $n): void
+    {
+        if ($n instanceof StoreLocal) {
+            $flag = $this->frame->mixedFlagSlots[$n->name] ?? '';
+            if ($flag !== '') {
+                $st = InsertMemoryOps::slotStoredType($n);
+                $sk = $st->kind;
+                if ($sk === Type::KIND_STRING || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY) {
+                    $f = $this->mixedRawFlavorOf($n->name, $st);
+                    if (!\in_array($f, $this->frame->mixedRawByFlag[$flag], true)) {
+                        $this->frame->mixedRawByFlag[$flag][] = $f;
+                    }
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectMixedRawFlavors($c); }
+    }
+
+    /** The release flavor of a RAW `$t` stored into MIXED local `$name`. */
+    private function mixedRawFlavorOf(string $name, Type $t): string
+    {
+        $base = $t->kind === Type::KIND_STRING ? 'str'
+            : ($t->isAssoc() ? 'assoc' : ($t->kind === Type::KIND_ARRAY ? 'vec' : 'obj'));
+        $mo = new MemoryOp_('rc_release', 'mix' . $base, new LoadLocal($name, $t), Type::void());
+        return \substr($this->rcReleaseFlavor($mo), 3);
+    }
+
+    /** The value a MIXED slot's flag takes for a store of stored-type `$t`. */
+    private function mixedFlagCode(string $name, Type $t): string
+    {
+        $sk = $t->kind;
+        if ($sk !== Type::KIND_STRING && $sk !== Type::KIND_OBJ && $sk !== Type::KIND_ARRAY) { return '1'; }
+        $flag = $this->frame->mixedFlagSlots[$name] ?? '';
+        $i = \array_search($this->mixedRawFlavorOf($name, $t), $this->frame->mixedRawByFlag[$flag] ?? [], true);
+        return ($i === false || $i === 0) ? '0' : (string)($i + 1);
     }
 
     /** Emit a release of the rc value carried in the i64 register `$i64reg`. */

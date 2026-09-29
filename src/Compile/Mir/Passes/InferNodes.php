@@ -240,16 +240,20 @@ trait InferNodes
         // undone by `$a = 1` on the next round and the fixpoint never carries it.
         // The two readers below consult this set directly.
         $this->refCellLocalsCur = [];
-        $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        if ($this->bodyHas($fn, Node::KIND_REF_CELL)) {
+            $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
+        }
         $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
         // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
         // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
         // box — a cell — whatever it is later assigned.
-        $this->collectElemRefTargetsInfer($fn->body);
+        if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectElemRefTargetsInfer($fn->body); }
         // A `static $x;` whose stores are scalar rides a CELL for the same
         // reason a ref-taken slot does: its null start must stay observable
         // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
-        $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
+        if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
+            $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
+        }
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
@@ -405,7 +409,7 @@ trait InferNodes
         // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
         // a raw string pointer.
         $this->refElemBases = [];
-        $this->collectRefElemBases($fn->body);
+        if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectRefElemBases($fn->body); }
         foreach ($this->refElemBases as $name => $unused) {
             unset($this->recordLocals[$name]);
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
@@ -1652,8 +1656,13 @@ trait InferNodes
             $node->type = $cur;
             return $cur;
         }
-        // `$x++` reads + writes an int local; pin the slot to int.
+        // `$x++` reads + writes an int local; pin the slot to int — and the
+        // NODE: an earlier inference round may have stamped it `cell` (`$j = $i`
+        // with `$i` a key not yet narrowed), and the emitter reads the node. A
+        // stale `cell` ran the raw int slot through the cell decrement, so
+        // `for ($j = $i; $j >= 0; --$j)` stopped after one step.
         $this->localTypes[$node->name] = Type::int_();
+        $node->type = Type::int_();
         return Type::int_();
     }
 
@@ -1816,17 +1825,20 @@ trait InferNodes
                 // An interface iterClass (e.g. getIterator(): Iterator) has no
                 // ClassDef — fall back to any implementer's sig.
                 $ic = $node->iterClass;
-                $elem = $this->iterMethodReturn($ic, 'current', $elem);
-                // An interface iterClass says nothing about the KEY either, and
-                // the int default was a claim, not knowledge: the iterator can
-                // be a Generator at runtime ({@see
-                // EmitLlvmControl::iterNeedsRuntimeClass}) and its `key`@24 is a
-                // boxed cell, which printed as its tag bits. Erased is the honest
-                // answer — every erased consumer classifies at runtime, and a
-                // genuinely-int key still renders as one.
-                $kd = isset($this->classes[$ic]) ? $keyT : Type::unknown();
-                $keyT = $this->iterMethodReturn($ic, 'key', $kd);
+                if (!isset($this->classes[$ic])) {
+                    // An interface iterClass is driven by runtime classification
+                    // ({@see EmitLlvmControl::iterProtoStep}), whose current/key
+                    // steps answer TAGGED cells whatever the implementers
+                    // return: typed from an implementer's narrowed `int`, the
+                    // loop variables printed the tag bits.
+                    $elem = Type::cell();
+                    $keyT = Type::cell();
+                } else {
+                    $elem = $this->iterMethodReturn($ic, 'current', $elem);
+                    $keyT = $this->iterMethodReturn($ic, 'key', $keyT);
+                }
             }
+            $node->iterValueType = $node->iterClass !== '' ? $elem : null;
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an
         // auto-incrementing int — so the key rides a tagged cell, boxed at the

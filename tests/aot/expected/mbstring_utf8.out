@@ -1,0 +1,40 @@
+13 26
+世界|😀!|ивіт, 世界
+ї中,😀a,b
+int(8)
+int(1)
+bool(false)
+string(12) "世界 😀!"
+string(14) "Привіт, "
+string(2) "/c"
+1
+中中ї中中|xyzab
+[ї][їx][xxї]
+int(1111)
+string(4) "😀"
+bool(false)
+bool(true)
+bool(false)
+bool(false)
+5 3f623f3f 613f623f3f
+61,e4b862,80,c3
+int(2)
+int(3)
+
+6162
+a☺b☺☺ 9786
+string(5) "UTF-8"
+bool(true)
+string(10) "ISO-8859-1"
+int(2)
+int(2)
+string(2) "e9"
+bool(false)
+mb_strlen(): Argument #2 ($encoding) must be a valid encoding, "nope" given
+mb_str_split(): Argument #2 ($length) must be greater than 0
+mb_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
+mb_ord(): Argument #1 ($string) must not be empty
+mb_substr_count(): Argument #2 ($needle) must not be empty
+mb_str_pad(): Argument #3 ($pad_string) must not be empty
+mb_substitute_character(): Argument #1 ($substitute_character) must be "none", "long", "entity" or a valid codepoint
+mb_substitute_character(): Argument #1 ($substitute_character) is not a valid codepoint

@@ -1,0 +1,42 @@
+en_US/1: 1,234,567.891 | -42 | 0.5 | #,##0.### | en_US
+de_DE/1: 1.234.567,891 | -42 | 0,5 | #,##0.### | de_DE
+uk_UA/2: 1 234 567,89 ₴ | -42,00 ₴ | 0,50 ₴ | #,##0.00 ¤ | uk_UA
+en_US/3: 123,456,789% | -4,200% | 50% | #,##0% | en_US
+fr_FR/4: 1,234567891E6 | -4,2E1 | 5E-1 | #E0 | fr_FR
+en/5: one million two hundred thirty-four thousand five hundred sixty-seven point eight nine one | minus forty-two | zero point five | %%2d-year: | en
+en/6: 1,234,568th | −42nd | 0st | %digits-ordinal: | en
+en/14: 1.2M | -42 | 0.5 | # | root
+ja_JP/2: ￥1,234,568 | -￥42 | ￥0 | ¤#,##0 | ja_JP
+string(11) "1.234,50 $"
+string(6) "-0 ¥"
+string(33) "9.223.372.036.854.775.807,00 €"
+string(9) "7,00 €"
+float(1234.5)
+int(1234)
+float(12.5)
+int(5)
+bool(false)
+int(9)
+string(62) "NumberFormatter::parse(): Number parsing failed: U_PARSE_ERROR"
+float(1234.56)
+string(3) "USD"
+int(9)
+string(11) "neg 1'234.9"
+int(1)
+float(0)
+string(1) "'"
+string(4) "neg "
+bool(true)
+string(5) "3.141"
+bool(false)
+string(83) "NumberFormatter::getAttribute(): Error getting attribute value: U_UNSUPPORTED_ERROR"
+bool(false)
+string(76) "NumberFormatter::getSymbol(): invalid symbol value: U_ILLEGAL_ARGUMENT_ERROR"
+string(5) "03.46"
+string(5) "00.##"
+NULL
+int(16)
+IntlException: NumberFormatter::__construct(): number formatter creation failed
+ValueError: NumberFormatter::__construct(): Argument #1 ($locale) "xx_invalid!!" is invalid
+ValueError: NumberFormatter::format(): Argument #2 ($type) cannot be NumberFormatter::TYPE_CURRENCY constant, use NumberFormatter::formatCurrency() method instead
+ValueError: numfmt_format(): Argument #3 ($type) must be a NumberFormatter::TYPE_* constant

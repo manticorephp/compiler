@@ -1,0 +1,23 @@
+x
+dtor a0
+x
+dtor b0
+dtor c0
+x
+x
+dtor d0
+end
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  NULL
+  [2]=>
+  int(9)
+}
+dtor p1
+x
+dtor p0
+y
+2
+end2

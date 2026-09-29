@@ -22,6 +22,11 @@ FROM alpine:${ALPINE_TAG} AS base
 # each package is one cluster of suite failures:
 #   tzdata        -> /usr/share/zoneinfo, which TzInfo.php reads directly. Alpine
 #                    ships no tz database at all, so every date_* case failed.
+#   icu-dev       -> prelude/intl.php binds ICU (`icuuc` / `icui18n`), linked
+#                    dynamically; its headers give the symbol-version suffix.
+#   icu-data-full -> icu-libs pulls only icu-data-en (English locales, a few
+#                    converters); every other locale, zone name and codepage
+#                    fell back to root and the intl_* cases diverged.
 #   libxml2-dev   -> prelude/xml.php binds libxml2 through FFI (`#[Library('xml2')]`),
 #                    and the dev package is what provides the linkable .so.
 # NOT gnu-libiconv: musl keeps iconv inside libc (so no `-liconv`, as on glibc),
@@ -31,11 +36,11 @@ RUN apk add --no-cache \
         clang lld gcc musl-dev binutils \
         pcre2-dev openssl-dev curl-dev sqlite-dev pkgconf \
         bash file make curl ca-certificates \
-        tzdata libxml2-dev
+        tzdata libxml2-dev icu-dev icu-data-full
 
 RUN clang --version | head -1 && cc --version | head -1 \
     && pcre2-config --libs8 && pkg-config --libs openssl \
-    && curl-config --libs && pkg-config --libs sqlite3
+    && curl-config --libs && pkg-config --libs sqlite3 && pkg-config --libs icu-uc icu-i18n
 
 # uid 1000, matching the Debian image: running as root would make is_writable()
 # of a 0400 file answer true and quietly disagree with the recorded expectations.
@@ -59,7 +64,7 @@ FROM base AS toolchain
 # what Debian's php8.5-cli bundles and Alpine does not.
 USER root
 RUN apk add --no-cache \
-        php85 php85-mbstring php85-curl php85-pdo_sqlite \
+        php85 php85-mbstring php85-curl php85-pdo_sqlite php85-intl \
         php85-ctype php85-tokenizer php85-openssl php85-phar \
         php85-session php85-posix php85-iconv php85-fileinfo \
     && ln -sf /usr/bin/php85 /usr/local/bin/php

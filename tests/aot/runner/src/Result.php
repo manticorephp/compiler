@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace Manticore\TestRunner;
 
-use Manticore\Attr\Struct;
-
-#[Struct]
 final class Result implements \JsonSerializable
 {
     public function __construct(

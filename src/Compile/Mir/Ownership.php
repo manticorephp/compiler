@@ -363,6 +363,7 @@ final class Ownership
             && self::elemReadCoOwns($value->type, $this->ctx->enums, $this->ctx->classes)) {
             return true;
         }
+        if (self::cellElemReadCoOwns($value)) { return true; }
         // A PROPERTY read of an ARRAY is owned BY RETAIN rather than by
         // allocation — the one producer the pass could not see, because it gates
         // on `effects->alloc`. {@see Passes\EmitLlvmLocals::emitStoreLocal}'s snapshot
@@ -451,6 +452,23 @@ final class Ownership
         $cd = $this->ctx->classes[$cls];
         if ($cd->propertyOffset($pa->property) < 0) { return false; }
         return $cd->propertyArrayHinted[$pa->property] ?? false;
+    }
+
+    /**
+     * A CELL read out of a container's element into a local co-owns what it
+     * holds, as a string / array / object element read does: the emitter takes
+     * `__mir_cell_retain` ({@see Passes\EmitLlvmLocals::elemReadCoOwn}) and the
+     * store is Own ({@see storedOwned}). A bare borrow was safe only while no
+     * cell element slot dropped what it held; now an overwrite or an unset
+     * does, and `$y = $a[0]; $a[0] = 5; $y->n` read freed memory.
+     */
+    public static function cellElemReadCoOwns(Node $v): bool
+    {
+        if (!\Compile\Debug::$rcElemReadOwns) { return false; }
+        if (!($v instanceof ArrayAccess_) || $v->probe) { return false; }
+        if ($v->type->kind !== Type::KIND_CELL) { return false; }
+        $at = $v->array->type;
+        return $at->isVec() || $at->isAssoc() || $at->kind === Type::KIND_OBJ;
     }
 
     /**
@@ -668,6 +686,11 @@ final class Ownership
         if (CondOwn::isConditional($n)) { return $this->condOwnedTemp($n); }
         $k = $n->kind;
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        // `+ - *` over a numeric cell run {@see Passes\EmitLlvmExpr::emitTaggedArith}:
+        // the helper boxes a NEW cell on every path, a counted heap box past the
+        // inline int form.
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
+            && $n->type->isNumericCell()) { return true; }
         if (BitOp::mintsFresh($n)) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }
         $fn = $n->function;
@@ -1180,6 +1203,9 @@ final class Ownership
         if ($v instanceof Cast && $v->target === 'object') { return false; }
         if ($k === Node::KIND_LOAD_LOCAL && $moved) { return false; }
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
+        // A numeric op's cell is minted by its helper ({@see tempCellOwned}).
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
+            && $v->type->isNumericCell()) { return false; }
         return true;
     }
 

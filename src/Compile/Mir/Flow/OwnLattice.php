@@ -93,6 +93,17 @@ final class OwnLattice implements Lattice
     public array $shareKey = [];
     /** @var array<string, int> name → line of an rc read past a mismatch */
     public array $deadRead = [];
+    /** @var array<int, string> LoadLocal id → name, for a local a by-ref
+     *  parameter receives: it owns its value from the call on */
+    public array $refArgName = [];
+    /** @var array<int, Node> by-ref argument id → the statement it sits in */
+    public array $refArgAt = [];
+    /** @var array<int, int> by-ref argument id → the class an EMPTY local owns
+     *  after the call (0: none) */
+    public array $refArgKey = [];
+    /** @var array<int, int> by-ref argument id → the local's state there: a
+     *  Borrow is owed a retain before the statement */
+    public array $refArgIn = [];
 
     /** @var array<int, string> MirCatch id → its managed var */
     public array $catchName = [];
@@ -300,6 +311,13 @@ final class OwnLattice implements Lattice
             $n = $this->loadName[$id];
             $x = $in[$n] ?? self::EMPTY;
             if ($x === self::MIXDEAD) { $this->deadRead[$n] = $stmt->line; }
+            if (isset($this->refArgName[$id])) {
+                $this->refArgIn[$id] = $x;
+                if (self::isBorrow($x)) { return $this->with($in, $n, self::borrowKey($x)); }
+                $rk = $this->refArgKey[$id] ?? 0;
+                if ($x === self::EMPTY && $rk > 0) { return $this->with($in, $n, $rk); }
+                return $in;
+            }
             if ($x > 0 && isset($this->moveName[$id])) { return $this->with($in, $n, self::borrow($x)); }
             if ($x > 0 && isset($this->shareName[$id])) { $this->shareKey[$id] = $x; }
             return $in;

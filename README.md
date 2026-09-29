@@ -32,7 +32,7 @@ plus a real toolchain, because it ends in `clang` and `cc`:
 | `php` | **8.5** | cold bootstrap only — Zend runs the compiler source once to seed the first native binary |
 | libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
 | OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
-| libxml2, libsqlite3, libcurl (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, or `curl_*` — each is demand-gated and linked on mention |
+| libxml2, libsqlite3, libcurl, libicu (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, `curl_*`, or ext/intl (`Normalizer`, …) — each is demand-gated and linked (dynamically) on mention; Homebrew's keg-only `icu4c` is found by itself |
 
 The `-dev` / `-devel` half matters: the headers are what the build looks for, not just
 the runtime library. It is also what carries the unversioned `lib<name>.so` symlink
@@ -177,8 +177,12 @@ implicit monomorphization of erased `array` / `callable` params
 ([`docs/generics.md`](docs/generics.md)).
 
 **Standard library:** the `array_*` family in full, strings (incl. the whole `preg_*`
-family over host PCRE2), type/reflection, math, `ctype_*`, JSON, `var_dump`/`print_r`,
-SPL, date/time, sockets and streams, hashing and crypto. Each function is either a
+family over host PCRE2), **mbstring** (every encoding Zend ships, case mapping,
+width, MIME/HTML-entity codecs — pure PHP; `mb_ereg*` not yet), **ext/intl** complete
+over the system ICU (`Collator`, `NumberFormatter`, `IntlDateFormatter`, `IntlCalendar`,
+`MessageFormatter`, `Transliterator`, `IntlBreakIterator`, `IntlChar`, …), type/reflection,
+math, `ctype_*`, JSON, `var_dump`/`print_r`, SPL, date/time, sockets and streams, hashing
+and crypto. `extension_loaded()` answers true for `mbstring` and `intl`. Each function is either a
 PHP-level stdlib function (`src/Runtime/Stdlib/`, compiled into
 `lib/manticore_stdlib.o` and auto-linked), an injected prelude helper, or an inlined
 codegen builtin. No imports, no registration — they are simply there. The exact

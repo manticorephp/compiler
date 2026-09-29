@@ -518,10 +518,30 @@ trait EmitLlvmLocals
      * ride {@see \Compile\Debug::$rcElemReadOwns}, and shipping one alone is
      * a leak or a double free.
      */
-    private function elemReadCoOwn(Node $v, ?Type $slotType = null): string
+    private function elemReadCoOwn(Node $v, ?Type $slotType = null, string $dest = ''): string
     {
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
+        // THE PASS DECIDES: a plain local the plan does not own releases
+        // nothing, so a retain here is one nobody gives back — php-cs-fixer's
+        // UseTransformer rebinds its `Token $token` PARAM from `$tokens[++$i]`
+        // (a cell into an object slot, which the plan refuses) and kept every
+        // token of every file. A global-backed or reference slot owns what it
+        // is handed by its own contract and keeps the retain.
+        if ($dest !== '' && !isset($this->frame->ownLocals[$dest])
+            && !isset($this->locals->globalBacked[$dest])
+            && !isset($this->locals->refLocals[$dest])) { return ''; }
+        if (InsertMemoryOps::cellElemReadCoOwns($v)) {
+            $sv = $this->lastValue;
+            $st = $this->lastValueType;
+            $out = $this->coerceToI64();
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+            $this->lastValue = $sv;
+            $this->lastValueType = $st;
+            return $out;
+        }
         // The SAME predicate the pass half decides on — one condition, two halves.
         if (!InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes)) { return ''; }
         $sv = $this->lastValue;
@@ -570,6 +590,24 @@ trait EmitLlvmLocals
         // O(n²) concat. The helper owns the old value's lifetime, so this
         // path deliberately skips the standard release-before-overwrite.
         $sv = $sl->value;
+        // `$x = $x` on one CELL slot moves nothing. The join after an
+        // `instanceof` narrowing reconciles its local this way, and the alias
+        // path below COPIES an array payload (own_alias) and drops the original
+        // — a whole-array clone on every call of php-cs-fixer's Token::equals.
+        // Only where OwnershipFlow manages the name ({@see StoreLocal::$ownRelabel}):
+        // it keeps the name's state across the relabel. An untracked local's
+        // alias store is what kept an aliased string alive (Normalizer::recompose).
+        if ($sl->ownRelabel
+            && isset($this->locals->slots[$sl->name])
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && !isset($this->frame->mixedFlagSlots[$sl->name])) {
+            $r = $this->ssa->allocReg();
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            $this->markCellOpaque($r);
+            return '  ' . $r . ' = load i64, ptr ' . $this->locals->slots[$sl->name] . "\n";
+        }
         // NB: no ARENA gate here — a `$s = $s . …` accumulator ESCAPES across a
         // loop back-edge, so even if InferAllocKind confined the concat, it must
         // become a heap str_append: str_append converts the (immortal-rc) arena
@@ -630,7 +668,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->refLocals[$sl->name])
             && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
-            $coOwn = $this->elemReadCoOwn($sl->value, $sl->type);
+            $coOwn = $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $coOwn;
             $ownsCell = isset($this->locals->globalBacked[$sl->name])
                 && !$this->isGlobalsViewName($sl->name);
@@ -682,7 +720,7 @@ trait EmitLlvmLocals
             }
             if ($selfDrop) {
                 $fl = $this->rcReleaseFlavor($sl->ownOld);
-                if (\str_starts_with($fl, 'mix')) { $fl = \substr($fl, 3); }
+                if (\str_starts_with($fl, 'mix')) { $fl = $this->mixedRawFlavorOf($sl->name, $v0->type); }
                 $pay = $this->ssa->allocReg();
                 $moved = $this->ssa->allocReg();
                 $gone = $this->ssa->allocReg();
@@ -710,7 +748,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->unboxCellToType($sl->type);
             // A float unboxes to a `double`; the slot is an i64, so put the bits
             // back the way the float-slot plant below does.
@@ -740,7 +778,7 @@ trait EmitLlvmLocals
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->coerceToI64();
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
@@ -761,9 +799,19 @@ trait EmitLlvmLocals
         if ($this->needsDeCellify($sl->type, $sl->value->type)
             && isset($this->locals->slots[$sl->name])) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
+            $out .= $this->coerceToPtr();
+            $deSrc = $this->lastValue;
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
+            // The rebuild MOVES each value out of the source without a reference
+            // of its own, so an owned temp source leaves as a bare buffer — it
+            // was never freed at all (`$t = array_values(…)` into a typed slot).
+            if ($this->cellifySourceFlavor($sl->value) !== '') {
+                $si = $this->ssa->allocReg();
+                $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
+                $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
+            }
             if (isset($this->locals->globalBacked[$sl->name])) {
                 // The rebuild is a fresh +1 the cell takes outright; only the
                 // predecessor is owed ({@see globalCellOwnIr}).
@@ -775,6 +823,7 @@ trait EmitLlvmLocals
                 $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
                 $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+                $out .= $this->refParamOverwriteIr($sl->name, $p, $dv);
                 $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             } else {
                 $out .= $this->ownOldIr($sl);
@@ -813,7 +862,7 @@ trait EmitLlvmLocals
             && $sl->value->type->kind !== Type::KIND_CELL
             && $this->viewSlotBoxes($sl->value->type)) {
             $out = $this->emitNode($sl->value);
-            $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+            $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             // An array goes in FLAT and an object by pointer, as into every other
             // cell slot ({@see boxForViewSlot}): the caller's cell reads the
             // elements through the buffer's hint. `$v = [$v]` through `mixed &$v`
@@ -835,6 +884,7 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $dv);
             $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $this->lastValueType = 'i64';
@@ -845,8 +895,13 @@ trait EmitLlvmLocals
             && ($this->needsRefOutCellify($sl->value->type)
                 || $this->refStoreNeedsCellify($sl->name, $sl->value->type))) {
             $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
-            $out .= $this->emitCellifyArrayRaw($sl->value->type->element);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
+            // The rebuild co-owns every element, so an OWNED source dies with
+            // the walk, as on the return path: `$out = [new Tok($n)]` through
+            // `?array &$out` kept the literal and one count on each object.
+            $srcFlavor = $this->cellifySourceFlavor($sl->value);
+            $this->cellifyMove = $this->litOwnsArrayElems($sl->value, $srcFlavor);
+            $out .= $this->emitCellifyArrayRaw($sl->value->type->element, $srcFlavor);
             $out .= $this->coerceToI64();
             $dv = $this->lastValue;
             $addr = $this->ssa->allocReg();
@@ -854,6 +909,7 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $dv);
             $out .= '  store i64 ' . $dv . ', ptr ' . $p . "\n";
             $this->lastValue = $dv;
             $this->lastValueType = 'i64';
@@ -861,7 +917,7 @@ trait EmitLlvmLocals
         }
         $this->arena->vecAllocated = false;
         $out = $this->emitNode($sl->value);
-        $out .= $this->elemReadCoOwn($sl->value, $sl->type);
+        $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
         // The value just emitted an arena vec → this local owns it, so
         // its `$x[] =` appends must realloc through the arena.
         if ($this->arena->vecAllocated) {
@@ -1060,9 +1116,10 @@ trait EmitLlvmLocals
             $val = $reg;
         }
         if (isset($this->locals->globalBacked[$sl->name])) {
-            $elemOwned = \Compile\Debug::$rcElemReadOwns
+            $elemOwned = (\Compile\Debug::$rcElemReadOwns
                 && $v->kind === Node::KIND_ARRAY_ACCESS
-                && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes);
+                && \Compile\Mir\Passes\InsertMemoryOps::elemReadCoOwns($v->type, $this->enums, $this->classes))
+                || InsertMemoryOps::cellElemReadCoOwns($v);
             $out .= $this->globalCellOwnIr($sl, $val,
                 $copiedVecLocal || $copiedVecProp || $aliasObjStr || $aliasArrayProp
                 || $aliasArrayLocal || $aliasStrProp || $elemOwned);
@@ -1073,6 +1130,7 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $val);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite, where OwnershipFlow owns the old value.
@@ -1095,6 +1153,45 @@ trait EmitLlvmLocals
      * value being stored already carries its own count, taken by the same
      * conventions as a plain local's store.
      */
+    /**
+     * A whole store through a by-ref PARAMETER replaces the value the caller's
+     * storage holds, and that storage OWNS it — a local's slot (a borrowed one
+     * took a reference before the call, {@see OwnershipFlow::scanRefArgs}), an
+     * element or property slot, or the scratch a cell caller re-boxes from
+     * without a release of its own ({@see EmitLlvmCalls::emitByRefCellRebox}).
+     * Nothing gave the old value back: `$matches = []` at the top of
+     * preg_match leaked the previous matches of every reused variable — the
+     * whole array per `Preg::match` call in php-cs-fixer — and every prelude key
+     * sort's `$arr = $new` leaked the caller's array.
+     *
+     * By the PARAMETER's declared type, the representation the caller conformed
+     * its argument to; an erased `array` names no flavor and keeps the leak. A
+     * closure's by-ref parameter is cell-typed by the ABI, not by what it points
+     * at (an array element of any representation), so it is left alone; so is a
+     * name rebound by `=&`, and a store of the word the slot already holds.
+     */
+    private function refParamOverwriteIr(string $name, string $slotPtr, string $val): string
+    {
+        if ($this->frame->isClosure || $this->frame->isTrampoline) { return ''; }
+        $pt = $this->locals->refParamTypes[$name] ?? null;
+        if ($pt === null || isset($this->locals->aliasLocals[$name])
+            || isset($this->locals->ownedBoxes[$name])) { return ''; }
+        $flavor = $this->discardReleaseFlavor($pt);
+        if ($flavor === '') { return ''; }
+        $old = $this->ssa->allocReg();
+        $out = '  ' . $old . ' = load i64, ptr ' . $slotPtr . "\n";
+        $diff = $this->ssa->allocReg();
+        $out .= '  ' . $diff . ' = icmp ne i64 ' . $old . ', ' . $val . "\n";
+        $relL = $this->ssa->allocLabel('refp.ow');
+        $contL = $this->ssa->allocLabel('refp.ow.cont');
+        $out .= '  br i1 ' . $diff . ', label %' . $relL . ', label %' . $contL . "\n";
+        $out .= $relL . ":\n";
+        $out .= $this->rcReleaseReg($old, $flavor);
+        $out .= '  br label %' . $contL . "\n";
+        $out .= $contL . ":\n";
+        return $out;
+    }
+
     private function ownedBoxOverwriteIr(string $name, string $addrI64): string
     {
         if (!isset($this->locals->ownedBoxes[$name])) { return ''; }
@@ -1192,6 +1289,15 @@ trait EmitLlvmLocals
                 // retain must co-own to the same depth ({@see arrayRetainFlavor});
                 // with no release to pair, the value's own depth.
                 $out .= $this->rcRetainByType($v, $val, $flavor === '' ? null : $dt, 3);
+            } elseif ($vk === Type::KIND_UNKNOWN && $this->isSettledArrayParam($v)) {
+                // A bare `array` parameter the body never rebinds erases to
+                // UNKNOWN, but php checked the hint: the word IS an array
+                // buffer (or the 0 of `?array`). Stored into a module cell it
+                // must be co-owned like any borrow — `static $o; $o = $param;`
+                // otherwise kept the caller's temporary after it was freed.
+                // The cell is vetoed (a borrowed erased word), so this takes
+                // the buffer-level +1 only and nothing releases through it.
+                $out .= $this->rcRetainByType($v, $val, Type::vec(Type::unknown()), 3);
             }
         }
         if ($flavor === '') { return $out; }

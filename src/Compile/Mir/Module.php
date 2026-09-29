@@ -33,6 +33,10 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, true> the interfaces php itself declares (prelude /
+     *  runtime library) — ReflectionClass::isInternal(). */
+    public array $internalInterfaceNames = [];
+
     /** @var array<string, string[]> interface → every interface it extends,
      *  transitively: `foreach` over an `Aware extends \Iterator` slot must know
      *  it is Traversable (it walked the object as an array) */

@@ -366,6 +366,10 @@ trait LowerTypes
         // object iteration through an iterable binding needs runtime
         // array-vs-object dispatch (a follow-up).
         if ($low === 'iterable') { return Type::cell(); }
+        // `object` = any class: only a tagged cell says which. Erased to `unknown`,
+        // a caller handed the raw pointer and `(string)$o` printed the address
+        // where php throws "could not be converted to string".
+        if ($low === 'object') { return Type::cell(); }
         // A nullable SCALAR (`?int`/`?float`/`?bool`) can't ride a raw i64: null
         // would collide with 0 / 0.0 / false (so `=== null` and var_dump fail).
         // Box it as a NUMERIC cell — null gets the NULL tag, the value its own,

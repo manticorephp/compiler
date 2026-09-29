@@ -162,10 +162,10 @@ trait EmitLlvmVisit
         // slotStoredType}), so every later release drops what is really there.
         $flag = $this->frame->mixedFlagSlots[$n->name] ?? '';
         if ($flag !== '') {
-            // 0 = a raw rc pointer; 1 = anything else (a cell, a raw scalar).
-            $sk = InsertMemoryOps::slotStoredType($n)->kind;
-            $raw = $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
-            $out .= '  store i64 ' . ($raw ? '0' : '1') . ', ptr ' . $flag . "\n";
+            // 1 = anything but a raw rc pointer (a cell, a raw scalar); 0 / i + 1
+            // = a raw pointer of the slot's raw flavor [0] / [i].
+            $out .= '  store i64 ' . $this->mixedFlagCode($n->name, InsertMemoryOps::slotStoredType($n))
+                . ', ptr ' . $flag . "\n";
         }
         $ff = $this->feCellFlags[$n->name] ?? '';
         if ($ff !== '') {
@@ -283,10 +283,20 @@ trait EmitLlvmVisit
         $out = '';
         /** @var string[]|null $chunks */
         $chunks = null;
-        foreach ($n->stmts as $s) {
+        // A VALUE block (a lowering's `Block([...], T)` standing for an expression)
+        // answers its last statement: that value is the block's result, not a
+        // discarded one. Dropping it here freed a `Class::$name()` result before
+        // the assignment stored it. The block's own consumer owns it now — and a
+        // value block in statement position is dropped by {@see
+        // emitDiscardedCallRelease}, which looks through to that statement.
+        $last = \count($n->stmts) - 1;
+        $isValue = $n->type->kind !== Type::KIND_VOID;
+        foreach ($n->stmts as $i => $s) {
             $fragment = $this->emitNoDiscardWarn($s);
             $fragment .= $this->emitNode($s);
-            $fragment .= $this->emitDiscardedCallRelease($s);
+            if (!$isValue || $i !== $last) {
+                $fragment .= $this->emitDiscardedCallRelease($s);
+            }
             if ($chunks === null) {
                 $out .= $fragment;
                 if (\strlen($out) >= 65536) {
@@ -481,15 +491,18 @@ trait EmitLlvmVisit
     // A `break`/`continue` out of a try skips the fall-through pop exactly as a
     // `return` does — and from a loop it leaks a jmp slot per ITERATION. Hand
     // back every slot opened inside the target loop before branching.
+    // …and it leaves every IteratorAggregate foreach strictly inside its target.
     public function visitBreak(Break_ $n): string
     {
-        return $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
+        return $this->releaseAggItersLeftBy($n->level)
+             . $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
              . '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitContinue(Continue_ $n): string
     {
-        return $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
+        return $this->releaseAggItersLeftBy($n->level)
+             . $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
              . '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 

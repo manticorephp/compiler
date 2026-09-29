@@ -1,0 +1,49 @@
+createWordInstance IntlRuleBasedBreakIterator NULL 0:0,1:5,2:6,3:7,4:12,5:13,6:14,7:18,8:19,9:25,10:26,11:27,12:29,13:30,14:38,15:39,16:40,17:49,18:52,19:64,20:67,21:68,22:76,23:77,24:85,25:86,26:90,27:91
+  status 200,0,0,200,0,0,200,0,200,0,0,100,0,200,0,0,400,400,400,0,0,200,0,0,0,200,0
+  first=0 last=91 prev=90 cur=90 following(5)=6 preceding(20)=18 next(3)=26 next(-2)=19 next(0)=19 isBoundary(7)=true isBoundary(8)=false
+  en_US 
+createLineInstance IntlRuleBasedBreakIterator NULL 0:0,1:7,2:14,3:19,4:27,5:30,6:40,7:43,8:46,9:49,10:52,11:55,12:58,13:61,14:68,15:77,16:86,17:91
+  status 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  first=0 last=91 prev=86 cur=86 following(5)=7 preceding(20)=14 next(3)=30 next(-2)=19 next(0)=19 isBoundary(7)=true isBoundary(8)=false
+  en_US 
+createSentenceInstance IntlRuleBasedBreakIterator NULL 0:0,1:14,2:40,3:68,4:91
+  status 0,0,0,0
+  first=0 last=91 prev=68 cur=68 following(5)=14 preceding(20)=14 next(3)=91 next(-2)=40 next(0)=40 isBoundary(7)=false isBoundary(8)=false
+  en_US 
+createCharacterInstance IntlRuleBasedBreakIterator NULL 0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:7,8:8,9:9,10:10,11:11,12:12,13:13,14:14,15:16,16:18,17:19,18:21,19:23,20:25,21:26,22:27,23:28,24:29,25:30,26:32,27:34,28:36,29:38,30:39,31:40,32:43,33:46,34:49,35:52,36:55,37:58,38:61,39:64,40:67,41:68,42:71,43:72,44:73,45:74,46:75,47:76,48:77,49:85,50:86,51:87,52:88,53:89,54:90,55:91
+  status 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  first=0 last=91 prev=90 cur=90 following(5)=6 preceding(20)=18 next(3)=23 next(-2)=19 next(0)=19 isBoundary(7)=true isBoundary(8)=true
+  en_US 
+createTitleInstance IntlRuleBasedBreakIterator NULL 0:0,1:7,2:14,3:19,4:30,5:68,6:86,7:91
+  status 0,0,0,0,0,0,0
+  first=0 last=91 prev=86 cur=86 following(5)=7 preceding(20)=14 next(3)=68 next(-2)=19 next(0)=19 isBoundary(7)=true isBoundary(8)=false
+  en_US 
+IntlPartsIterator: [0]"The"/200 [1]" "/0 [2]"3"/100 [3]" "/0 [4]"quick"/200 [5]"-"/0 [6]"brown"/200 [7]" "/0 [8]"foxes"/200 [9]"."/0
+IntlPartsIterator: [0]"The"/200 [3]" "/0 [4]"3"/100 [5]" "/0 [6]"quick"/200 [11]"-"/0 [12]"brown"/200 [17]" "/0 [18]"foxes"/200 [23]"."/0
+IntlPartsIterator: [3]"The"/200 [4]" "/0 [5]"3"/100 [6]" "/0 [11]"quick"/200 [12]"-"/0 [17]"brown"/200 [18]" "/0 [23]"foxes"/200 [24]"."/0
+array(1) {
+  [0]=>
+  int(0)
+}
+string(26) "IntlRuleBasedBreakIterator"
+IntlCodePointBreakIterator NULL 0 -1 -1
+1=61 3=e9 6=65e5 10=1f44d 11=fffd | -1 11 10 fffd 3 3 10 1 false 1
+0=61 1=c3a9 2=e697a5 3=f09f918d 4=ff 
+0:"ab":200 2:"12":100 4:" ":0 5:"c":200 6:"3":100 
+$d=[0-9];$l=[a-z];$d+{100};$l+{200};[^$d$l];
+0,2,4,5,6, same rules
+The 3 quick-brown foxes. | x y 3 24
+IntlRuleBasedBreakIterator::__construct(): unable to create RuleBasedBreakIterator from rules (parse error on line 1, offset 1)
+IntlRuleBasedBreakIterator::__construct(): unable to create RuleBasedBreakIterator from rules (parse error on line 1, offset 6)
+IntlRuleBasedBreakIterator::__construct(): unable to create RuleBasedBreakIterator from rules (parse error on line 1, offset 3)
+IntlRuleBasedBreakIterator::__construct(): unable to create instance from compiled rules
+bool(false)
+string(77) "IntlBreakIterator::getLocale(): invalid locale type: U_ILLEGAL_ARGUMENT_ERROR"
+int(0)
+string(12) "U_ZERO_ERROR"
+IntlBreakIterator::following(): Argument #1 ($offset) must be between -2147483648 and 2147483647
+IntlBreakIterator::getPartsIterator(): Argument #1 ($type) must be one of IntlPartsIterator::KEY_SEQUENTIAL, IntlPartsIterator::KEY_LEFT, or IntlPartsIterator::KEY_RIGHT
+int(0)
+int(-1)
+int(0)
+int(0)

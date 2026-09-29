@@ -294,6 +294,20 @@ final class MixedSlots
 
     private function refArgRoots(Node $n): void
     {
+        foreach ($this->byRefArgs($n, true) as $a) { $this->refRoot($a); }
+    }
+
+    /**
+     * The arguments of call `$n` a by-ref parameter receives: by the callee's
+     * mask when it resolves to a body, every argument of an unresolved
+     * user callee, and — `$withBuiltins` — the first argument of the builtins
+     * that walk an array in place.
+     *
+     * @return Node[]
+     */
+    public function byRefArgs(Node $n, bool $withBuiltins): array
+    {
+        $out = [];
         $k = $n->kind;
         $fn = '';
         $offset = 0;
@@ -325,19 +339,19 @@ final class MixedSlots
             $args = $iv->args;
             $offset = $this->closureCaptureCount[$fn] ?? 0;
         } else {
-            return;
+            return $out;
         }
         if (!isset($this->refMasks[$fn])) {
             if ($builtin) {
-                if (\count($args) > 0 && ($fn === 'current' || $fn === 'pos' || $fn === 'key'
+                if ($withBuiltins && \count($args) > 0 && ($fn === 'current' || $fn === 'pos' || $fn === 'key'
                     || $fn === 'next' || $fn === 'prev' || $fn === 'reset' || $fn === 'end'
                     || $fn === 'array_pop' || $fn === 'array_shift' || $fn === 'array_unshift')) {
-                    $this->refRoot($args[0]);
+                    $out[] = $args[0];
                 }
-                return;
+                return $out;
             }
-            foreach ($args as $a) { $this->refRoot($a); }
-            return;
+            foreach ($args as $a) { $out[] = $a; }
+            return $out;
         }
         $mask = $this->refMasks[$fn];
         $cnt = \count($mask);
@@ -347,9 +361,10 @@ final class MixedSlots
             $p = $i + $offset;
             $byRef = $p < $cnt ? $mask[$p] : false;
             if (!$byRef && $tail && $p >= $cnt - 1) { $byRef = true; }
-            if ($byRef) { $this->refRoot($a); }
+            if ($byRef) { $out[] = $a; }
             $i = $i + 1;
         }
+        return $out;
     }
 
     private function resolveMethodFn(string $class, string $method): string

@@ -59,6 +59,13 @@ final class NarrowReturns implements Pass
      *   that Monomorphize must specialize first. The default (post-Mono) pass
      *   narrows every agreeing array return.
      */
+    /**
+     * The pass ended on a FULL inference over the module exactly as it leaves
+     * it: the last round narrowed nothing, so nothing moved after that run. A
+     * caller about to re-infer the unchanged module can skip it.
+     */
+    public bool $endedOnFullInfer = false;
+
     public function __construct(private bool $concreteOnly = false, private ?\Compile\Mir\AnalysisContext $analysis = null, private bool $targetedInfer = false) {}
 
     public function name(): string { return self::NAME; }
@@ -87,17 +94,27 @@ final class NarrowReturns implements Pass
         $iters = 0;
         $closing = false;
         $sawFull = false;
+        // The instance of the last FULL inference, and whether a LIGHT round
+        // ({@see InferTypes::reinferAfterNarrow}) ran since. A narrowing only
+        // moves the callers of what it narrowed, so a round re-infers just those
+        // until narrowing stops, and one full inference then closes the fixpoint
+        // exactly as before — instead of a full inference per narrowed chain link.
+        $light = null;
+        $lastLight = false;
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
             $roundT = \Compile\Stats::now();
             $changed = false;
             $narrowed = 0;
+            /** @var array<string, bool> $narrowedNames */
+            $narrowedNames = [];
             foreach ($module->functions as $fn) {
                 if (isset($generic[$fn->name])) { continue; }
                 if ($this->narrowFunction($fn)) {
                     $changed = true;
                     $narrowed = $narrowed + 1;
+                    $narrowedNames[$fn->name] = true;
                     // A function that narrows only AFTER a full inference is one the
                     // dependency model failed to invalidate — name it, that is the
                     // bug report the scope cannot produce for itself.
@@ -112,11 +129,22 @@ final class NarrowReturns implements Pass
                 // scoped, that convergence is only as good as the scope. Run one
                 // full inference and let the loop have another go; a second
                 // no-change round after a FULL inference is the real fixpoint.
-                if (!$this->targetedInfer || $this->analysis === null || $sawFull) { break; }
-                $closing = true;
-                $sawFull = true;
+                // A light round is scoped the same way, so it closes the same way.
+                if (!$lastLight) {
+                    if (!$this->targetedInfer || $this->analysis === null || $sawFull) { break; }
+                    $closing = true;
+                    $sawFull = true;
+                }
             } else {
                 $sawFull = false;
+                if ($light !== null) {
+                    $inferT = \Compile\Stats::now();
+                    $light->reinferAfterNarrow($module, $narrowedNames);
+                    $lastLight = true;
+                    $this->endedOnFullInfer = false;
+                    \Compile\Stats::step('  narrow light round ' . (string)$iters, $inferT, -1, -1);
+                    continue;
+                }
             }
             $inferT = \Compile\Stats::now();
             // Report the closure this round WOULD infer over, whether or not the
@@ -148,6 +176,9 @@ final class NarrowReturns implements Pass
             if ($this->analysis !== null) { $this->analysis->beginRound(); }
             $infer = new InferTypes($scope, $this->analysis);
             $infer->run($module);
+            $this->endedOnFullInfer = $scope === null;
+            $lastLight = false;
+            $light = ($scope === null && $this->analysis === null) ? $infer : null;
             // THE HARNESS. `MANTICORE_INFER_DIFF=1` asks the one question three
             // rounds of theory could not answer: after the SCOPED pass, does a
             // FULL pass still move anything? Every name it prints is a function

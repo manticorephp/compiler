@@ -209,10 +209,7 @@ trait EmitLlvmControl
             $out .= $this->foreachPrevDrop($fe, true);
             $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
-        $this->cf->enterLoop($endLabel, $stepLabel);
-        $out .= $this->emitNode($fe->body);
-        $this->cf->leave();
-        $out .= '  br label %' . $stepLabel . "\n";
+        $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, true);
 
         $out .= $stepLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
@@ -406,6 +403,11 @@ trait EmitLlvmControl
         $out .= '  ' . $iterSlot . " = alloca i64\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $iterSlot . "\n";
+        // Whether the slot holds getIterator()'s result (+1, the loop's to give
+        // back) or the subject itself (borrowed).
+        $ownSlot = $this->ssa->allocReg();
+        $out .= '  ' . $ownSlot . " = alloca i1\n";
+        $out .= '  store i1 0, ptr ' . $ownSlot . "\n";
         $aggL = $this->ssa->allocLabel('fe.agg');
         $joinL = $this->ssa->allocLabel('fe.agg.end');
         $probe = new \Compile\Mir\Instanceof_(
@@ -423,10 +425,21 @@ trait EmitLlvmControl
         $out .= $this->emitNode($gi);
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $out .= '  store i1 1, ptr ' . $ownSlot . "\n";
         $out .= '  br label %' . $joinL . "\n";
         $out .= $joinL . ":\n";
-        return $out . $this->emitIterProtocolLoop(
+        // The getIterator() result was never given back — not even at the end
+        // label — so every erased foreach over an IteratorAggregate leaked it,
+        // and with it the subject (php-cs-fixer: a Tokens and all its tokens
+        // per erased `foreach ($tokens …)`).
+        $this->cf->pushAggIter($iterSlot, true, $ownSlot);
+        $out .= $this->emitIterProtocolLoop(
             $fe, $iterSlot, $iterName, \Compile\Mir\Type::obj('Iterator'), true);
+        $this->cf->popAggIter();
+        $out .= $this->releaseAggIterSlot($iterSlot, true, $ownSlot);
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     private function genFrameProbeIr(string $iw): string
@@ -627,9 +640,74 @@ trait EmitLlvmControl
         // An interface-typed iterator may be a Generator at runtime, so each
         // protocol step classifies and branches. The body is still emitted
         // exactly once.
-        return $out . $this->emitIterProtocolLoop(
-            $fe, $iterSlot, $iterName, $iterType,
-            $this->iterNeedsRuntimeClass($fe->iterClass));
+        $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
+        // The iterator `getIterator()` handed back is the loop's own (+1): give
+        // it back when the loop ends — it held the subject, and with it every
+        // element (a SplFixedArray's). Only a concrete, non-Generator class: an
+        // interface-typed one may be a Generator at run time, whose frame is
+        // released through another header. A `return` / `break N` / `continue N`
+        // out of the body branches past the end label, so it releases the same
+        // slot on its way out ({@see ControlFlow::aggItersLeftBy}).
+        $owns = $fe->iterAggregate && $fe->iterClass !== 'Generator'
+            && ($dyn || isset($this->classes[$fe->iterClass]));
+        if ($owns) { $this->cf->pushAggIter($iterSlot, $dyn); }
+        $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
+        if ($owns) {
+            $this->cf->popAggIter();
+            $out .= $this->releaseAggIterSlot($iterSlot, $dyn);
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+        }
+        return $out;
+    }
+
+    /**
+     * Give back an aggregate foreach's iterator and clear its slot. `$flag`,
+     * when set, is an i1 slot saying whether the loop owns the iterator at all
+     * — the erased foreach drives a subject that IS an Iterator (borrowed) or
+     * one it got from getIterator() (owned) through the same slot.
+     */
+    private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = ''): string
+    {
+        $out = '';
+        $skipL = '';
+        if ($flag !== '') {
+            $fv = $this->ssa->allocReg();
+            $out .= '  ' . $fv . ' = load i1, ptr ' . $flag . "\n";
+            $relL = $this->ssa->allocLabel('aggit.rel');
+            $skipL = $this->ssa->allocLabel('aggit.skip');
+            $out .= '  br i1 ' . $fv . ', label %' . $relL . ', label %' . $skipL . "\n";
+            $out .= $relL . ":\n";
+            $out .= '  store i1 0, ptr ' . $flag . "\n";
+        }
+        $it = $this->ssa->allocReg();
+        $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
+        if ($dyn) {
+            // `getIterator(): Iterator` (SplFixedArray's own) may still be a
+            // Generator frame at run time: release only an object, by the
+            // same probe every protocol step takes.
+            $out .= $this->genFrameProbeIr($it);
+            $obj = $this->ssa->allocReg();
+            $out .= '  ' . $obj . ' = select i1 ' . $this->genFrameReg . ', i64 0, i64 ' . $it . "\n";
+            $out .= $this->rcReleaseReg($obj, 'obj');
+        } else {
+            $out .= $this->rcReleaseReg($it, 'obj');
+        }
+        $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+        if ($skipL !== '') {
+            $out .= '  br label %' . $skipL . "\n" . $skipL . ":\n";
+        }
+        return $out;
+    }
+
+    /** Release the open aggregate iterators a jump to loop `$level` leaves (0: a return). */
+    private function releaseAggItersLeftBy(int $level): string
+    {
+        $out = '';
+        foreach ($this->cf->aggItersLeftBy($level) as $i) {
+            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i), $this->cf->aggIterFlag($i));
+        }
+        return $out;
     }
 
     /**
@@ -677,10 +755,7 @@ trait EmitLlvmControl
             $out .= $this->foreachPrevDrop($fe, true);
             $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
-        $this->cf->enterLoop($endL, $stepL);
-        $out .= $this->emitNode($fe->body);
-        $this->cf->leave();
-        $out .= '  br label %' . $stepL . "\n";
+        $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);
 
         $out .= $stepL . ":\n";
         $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next');
@@ -1014,6 +1089,150 @@ trait EmitLlvmControl
         return $slot === '' ? '' : $this->ownDropIr($slot, $mo);
     }
 
+    /**
+     * A bare `array` parameter read as the foreach subject, in a body that never
+     * rebinds it: php checked the hint at the call, so it IS an array (or the
+     * null of `?array`), whatever its erased static type says. The generator and
+     * Traversable arms of an erased foreach — each a full copy of the body —
+     * are dead for it. Every prelude `array_*` walker was exactly this shape.
+     */
+    private function isSettledArrayParam(Node $base): bool
+    {
+        if (!($base instanceof \Compile\Mir\LoadLocal)) { return false; }
+        $name = $base->name;
+        // The hint set is filled by the ordinary function emitter only; main and
+        // a generator body are emitted elsewhere and would read a stale one.
+        if ($this->writtenNamesFn !== $this->frame->name) { return false; }
+        if (!isset($this->arrayHintedParams[$name])) { return false; }
+        if (isset($this->locals->globalBacked[$name])) { return false; }
+        return !isset($this->writtenNames[$name]);
+    }
+
+    /** @var array<string, bool> locals the current body may rebind ({@see collectWrittenNames}),
+     *  collected at function entry — emission detaches statements as it goes */
+    private array $writtenNames = [];
+    /** The function {@see $writtenNames} and the hint set were collected for. */
+    private string $writtenNamesFn = '';
+
+    /**
+     * Every local name the body may REBIND — conservative by design: a store, a
+     * foreach variable, anything a reference or a by-ref closure capture
+     * reaches, and any local handed directly to a call that is not a known free
+     * function taking that argument by value.
+     */
+    private function collectWrittenNames(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\StoreLocal) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof Foreach_) {
+            $this->writtenNames[$n->valueVar] = true;
+            if ($n->keyVar !== null) { $this->writtenNames[$n->keyVar] = true; }
+        } elseif ($n instanceof \Compile\Mir\StaticLocalDecl_) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof \Compile\Mir\RefAlias_ || $n instanceof \Compile\Mir\RefBind_
+            || $n instanceof \Compile\Mir\RefAddr_ || $n instanceof \Compile\Mir\RefCell_) {
+            $this->markLocalsWritten($n);
+        } elseif ($n instanceof \Compile\Mir\Closure_) {
+            $i = 0;
+            foreach ($n->captures as $cap) {
+                if (($n->captureByRef[$i] ?? false) && $cap instanceof \Compile\Mir\LoadLocal) {
+                    $this->writtenNames[$cap->name] = true;
+                }
+                $i = $i + 1;
+            }
+        } elseif ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_INVOKE) {
+            $refs = null;
+            if ($n instanceof \Compile\Mir\Call && isset($this->sigs->paramTypes[$n->function])) {
+                $refs = $this->sigs->refParams[$n->function] ?? [];
+            }
+            $args = $n instanceof \Compile\Mir\Call ? $n->args : \Compile\Mir\Walk::children($n);
+            foreach ($args as $i => $c) {
+                if ($c instanceof \Compile\Mir\LoadLocal && ($refs === null || ($refs[$i] ?? false))) {
+                    $this->writtenNames[$c->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectWrittenNames($c); }
+    }
+
+    private function markLocalsWritten(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\LoadLocal) { $this->writtenNames[$n->name] = true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markLocalsWritten($c); }
+    }
+
+    /** @var \Compile\Mir\ForeachSharedBody[] erased foreaches whose arms share one body, innermost last */
+    private array $feShared = [];
+    private int $feSharedSeq = 0;
+
+    private function inSharedForeach(\Compile\Mir\Foreach_ $fe): bool
+    {
+        $n = \count($this->feShared);
+        return $n > 0 && $this->feShared[$n - 1]->fe === $fe;
+    }
+
+    /**
+     * The loop body of one foreach arm, ending in a branch to `$stepLabel`. For
+     * an erased base's arms ({@see \Compile\Mir\ForeachSharedBody}) the body
+     * is emitted ONCE — each of the three arms used to carry its own copy — and
+     * every arm enters it with its index; `$pushLoop` is false for an arm that
+     * already entered its own loop frame.
+     */
+    private function emitForeachBodyArm(\Compile\Mir\Foreach_ $fe, string $endLabel, string $stepLabel, bool $pushLoop): string
+    {
+        $n = \count($this->feShared);
+        $sh = $n > 0 ? $this->feShared[$n - 1] : null;
+        if ($sh === null || $sh->fe !== $fe) {
+            if ($pushLoop) { $this->cf->enterLoop($endLabel, $stepLabel); }
+            $out = $this->emitNode($fe->body);
+            if ($pushLoop) { $this->cf->leave(); }
+            return $out . '  br label %' . $stepLabel . "\n";
+        }
+        $id = \count($sh->steps);
+        $sh->steps[] = $stepLabel;
+        $sh->ends[] = $endLabel;
+        $out = '  store i64 ' . (string)$id . ', ptr ' . $sh->armSlot . "\n"
+            . '  br label %' . $sh->bodyLabel . "\n";
+        if (!$sh->bodyEmitted) {
+            $sh->bodyEmitted = true;
+            $out .= $sh->bodyLabel . ":\n";
+            $this->cf->enterLoop($sh->brkLabel, $sh->contLabel);
+            $out .= $this->emitNode($fe->body);
+            $this->cf->leave();
+            $out .= '  br label %' . $sh->contLabel . "\n";
+        }
+        return $out;
+    }
+
+    /** The shared body's way back to the arm that entered it; pops the entry. */
+    private function emitForeachSharedDispatch(\Compile\Mir\Foreach_ $fe): string
+    {
+        $n = \count($this->feShared);
+        if ($n === 0) { return ''; }
+        $sh = $this->feShared[$n - 1];
+        if ($sh->fe !== $fe) { return ''; }
+        \array_pop($this->feShared);
+        if (!$sh->bodyEmitted) { return ''; }
+        return $this->armSwitchIr($sh->contLabel, $sh->armSlot, $sh->steps)
+            . $this->armSwitchIr($sh->brkLabel, $sh->armSlot, $sh->ends);
+    }
+
+    /** @param string[] $targets */
+    private function armSwitchIr(string $label, string $armSlot, array $targets): string
+    {
+        $a = $this->ssa->allocReg();
+        $out = $label . ":\n" . '  ' . $a . ' = load i64, ptr ' . $armSlot . "\n";
+        $out .= '  switch i64 ' . $a . ', label %' . $targets[0] . " [\n";
+        $i = 0;
+        foreach ($targets as $lbl) {
+            if ($i > 0) { $out .= '    i64 ' . (string)$i . ', label %' . $lbl . "\n"; }
+            $i = $i + 1;
+        }
+        return $out . "  ]\n";
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
@@ -1043,7 +1262,8 @@ trait EmitLlvmControl
         $bk = $fe->array->type->kind;
         $dynEnd = '';
         $dynGen = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN)
-            && !$this->foreachBodyYields($fe->body);
+            && !$this->foreachBodyYields($fe->body)
+            && !$this->isSettledArrayParam($fe->array);
         if ($dynGen) {
             $out .= $this->coerceToI64();
             $word = $this->lastValue;
@@ -1074,6 +1294,25 @@ trait EmitLlvmControl
             // is left exactly as it is.
             $out .= $this->untagCarrierIr($word);
             $word = $this->lastValue;
+            $armSlot = $this->ssa->allocReg();
+            $out .= '  ' . $armSlot . " = alloca i64\n";
+            $this->feShared[] = new \Compile\Mir\ForeachSharedBody($fe, $armSlot,
+                $this->ssa->allocLabel('fe.sh.body'), $this->ssa->allocLabel('fe.sh.cont'),
+                $this->ssa->allocLabel('fe.sh.brk'));
+            // The shared body joins every arm and dispatches back to each arm's
+            // step, so no arm's entry block dominates its own loop blocks any
+            // more — exactly the generator-resume situation. Run the arms in
+            // their FRAMED mode, which keeps the iterator state in slots and
+            // reloads it per block, with two allocas standing in for the frame.
+            if ($fe->genSlotBase < 0) {
+                $fe->genSlotBase = 1000000 + $this->feSharedSeq;
+                $this->feSharedSeq = $this->feSharedSeq + 1;
+                $s0 = $this->ssa->allocReg();
+                $s1 = $this->ssa->allocReg();
+                $out .= '  ' . $s0 . " = alloca i64\n" . '  ' . $s1 . " = alloca i64\n";
+                $this->locals->slots['@fe.0.' . (string)$fe->genSlotBase] = $s0;
+                $this->locals->slots['@fe.1.' . (string)$fe->genSlotBase] = $s1;
+            }
             $out .= $this->genFrameProbeIr($word);
             $isGen = $this->genFrameReg;
             $gArm = $this->ssa->allocLabel('fe.dyn.gen');
@@ -1210,7 +1449,8 @@ trait EmitLlvmControl
         // are materialized, so a reset never frees the array being walked.
         // By-ref foreach writes the value slot back into the element, so an
         // arena value could escape into the (pre-save) array — skip it.
-        $reset = !$fe->byRef && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = !$fe->byRef && !$this->inSharedForeach($fe)
+            && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
         if ($reset) { $out .= $this->emitArenaSave(); }
 
         $out .= '  br label %' . $condLabel . "\n";
@@ -1412,7 +1652,7 @@ trait EmitLlvmControl
             $this->feCellFlags[$fe->valueVar] = $feFlag;
             unset($this->feCellFlagSet[$fe->valueVar]);
         }
-        $out .= $this->emitNode($fe->body);
+        $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, false);
         if ($feFlag !== '') {
             $feFlagUsed = isset($this->feCellFlagSet[$fe->valueVar]);
             if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
@@ -1420,7 +1660,6 @@ trait EmitLlvmControl
             if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
             else { unset($this->feCellFlagSet[$fe->valueVar]); }
         }
-        $out .= '  br label %' . $stepLabel . "\n";
 
         $out .= $stepLabel . ":\n";
         if ($framed && $fe->byRef) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
@@ -1489,6 +1728,7 @@ trait EmitLlvmControl
         // Rejoin the generator arm of the erased-base classify above.
         if ($dynEnd !== '') {
             $out .= '  br label %' . $dynEnd . "\n";
+            $out .= $this->emitForeachSharedDispatch($fe);
             $out .= $dynEnd . ":\n";
             $this->lastValue = '0';
             $this->lastValueType = 'i64';

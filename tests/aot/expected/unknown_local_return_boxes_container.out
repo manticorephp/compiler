@@ -1,0 +1,19 @@
+bool(true)
+int(3)
+int(9)
+int(-1)
+string(3) "str"
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+bool(true)
+float(2.5)
+NULL
+int(-7)
+array(1) {
+  [0]=>
+  int(3)
+}

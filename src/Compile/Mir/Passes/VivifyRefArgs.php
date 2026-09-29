@@ -120,6 +120,9 @@ final class VivifyRefArgs implements Pass
             $this->refMasks[$fn->name] = $mask;
             $this->paramTypes[$fn->name] = $ptypes;
         }
+        // A by-value param handed on BY REF is written through, so the frame must
+        // own it ({@see \Compile\Mir\VecCopyOnAssign::passedByRef}).
+        \Compile\Mir\VecCopyOnAssign::$refMasks = $this->refMasks;
         // method name → SOME declaring function, for an interface-typed
         // receiver. Keyed off the FIRST `__` so `C____construct` reads back as
         // `__construct` rather than `construct`.
@@ -178,6 +181,7 @@ final class VivifyRefArgs implements Pass
             }
             $init = new StoreLocal($name, new NullConst(Type::null_()), $declared);
             $init->declaredType = $declared;
+            $init->outParamInit = true;
             $inits[] = $init;
         }
         // php creates an ARRAY here, not NULL, and the element type is whatever

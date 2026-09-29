@@ -771,14 +771,30 @@ final class UnifiedArrayRuntime
         $raw->raw('  br label %fnv');
         $fh = $fn->block('fnvh');
         $fh->raw('  br label %fnv');
-        // Shared FNV-1a loop over %uselen bytes.
+        // The shared hash over %uselen bytes — {@see EmitLlvm::fnvHash64} is its
+        // compile-time twin and must agree bit for bit: FNV-1a over little-endian
+        // 8-byte words, the tail bytes one by one, then fmix64.
         $start = $fn->block('fnv');
         $start->raw('  %uselen = phi i64 [ %hlen, %fnvh ], [ %rawlen, %raw ]');
         $start->raw('  %h.addr = alloca i64');
         $start->raw('  store i64 -3750763034362895579, ptr %h.addr'); // FNV offset basis
         $start->raw('  %i.addr = alloca i64');
         $start->raw('  store i64 0, ptr %i.addr');
-        $start->raw('  br label %loop');
+        $start->raw('  br label %wloop');
+        $wl = $fn->block('wloop');
+        $wl->raw('  %wi = load i64, ptr %i.addr');
+        $wl->raw('  %wi8 = add i64 %wi, 8');
+        $wl->raw('  %wfits = icmp sle i64 %wi8, %uselen');
+        $wl->raw('  br i1 %wfits, label %wbody, label %loop');
+        $wb = $fn->block('wbody');
+        $wb->raw('  %wptr = getelementptr inbounds i8, ptr ' . $k . ', i64 %wi');
+        $wb->raw('  %w = load i64, ptr %wptr, align 1');
+        $wb->raw('  %wh = load i64, ptr %h.addr');
+        $wb->raw('  %whx = xor i64 %wh, %w');
+        $wb->raw('  %whm = mul i64 %whx, 1099511628211');
+        $wb->raw('  store i64 %whm, ptr %h.addr');
+        $wb->raw('  store i64 %wi8, ptr %i.addr');
+        $wb->raw('  br label %wloop');
         $loop = $fn->block('loop');
         $loop->raw('  %i = load i64, ptr %i.addr');
         $loop->raw('  %atend = icmp sge i64 %i, %uselen');
@@ -797,7 +813,15 @@ final class UnifiedArrayRuntime
         // Cache the result only for a headered HEAP string (rc > 0): never a
         // .rodata literal or arena string (both rc=-1, read-only / abandoned).
         $done = $fn->block('done');
-        $done->raw('  %hf = load i64, ptr %h.addr');
+        $done->raw('  %hr = load i64, ptr %h.addr');
+        $done->raw('  %f1s = lshr i64 %hr, 33');
+        $done->raw('  %f1 = xor i64 %hr, %f1s');
+        $done->raw('  %f2 = mul i64 %f1, -49064778989728563');
+        $done->raw('  %f2s = lshr i64 %f2, 33');
+        $done->raw('  %f3 = xor i64 %f2, %f2s');
+        $done->raw('  %f4 = mul i64 %f3, -4265267296055464877');
+        $done->raw('  %f4s = lshr i64 %f4, 33');
+        $done->raw('  %hf = xor i64 %f4, %f4s');
         $done->raw('  %heap = icmp sgt i64 %rc, 0');
         $done->raw('  %notraw = icmp eq i1 %bad, false');
         $done->raw('  %docache = and i1 %heap, %notraw');
@@ -1869,6 +1893,7 @@ final class UnifiedArrayRuntime
         $this->emitCellRetain();
         $this->emitCellRcFast('__mir_cell_drop');
         $this->emitCellRcFast('__mir_cell_retain');
+        $this->emitCellFloatFree();
         $this->emitDropByRepr();
         $this->emitRetainByRepr();
         $this->emitElemAutoOps();
@@ -1990,10 +2015,12 @@ final class UnifiedArrayRuntime
 
         // tag 9: a reference — this holder's count on the box (self-guards
         // REF_TAG_MAGIC, so a REF cell onto a non-box slot is left alone).
-        $chkref->brIf($chkref->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)), $doref, $done);
+        $chkbig = $fn->block('chkbig');
+        $chkref->brIf($chkref->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)), $doref, $chkbig);
         $rp = $doref->inttoptr($doref->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
         $doref->call('__mir_ref_release', Type::void(), [$rp]);
         $doref->br($done);
+        $this->bigintRcArm($fn, $chkbig, $v, $nib, $done, false);
 
         $done->retVoid();
     }
@@ -2382,12 +2409,65 @@ final class UnifiedArrayRuntime
         $doarr->call('__mir_array_retain', Type::void(), [$ap]);
         $doarr->br($done);
 
-        $chkref->brIf($chkref->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)), $doref, $done);
+        $chkbig = $fn->block('chkbig');
+        $chkref->brIf($chkref->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)), $doref, $chkbig);
         $rp = $doref->inttoptr($doref->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
         $doref->call('__mir_ref_retain', Type::void(), [$rp]);
         $doref->br($done);
+        $this->bigintRcArm($fn, $chkbig, $v, $nib, $done, true);
 
         $done->retVoid();
+    }
+
+    /**
+     * `__mir_cell_float_free(v)` — free a BIGINT box that NOBODY owns: the count-0
+     * box an array READ mints ({@see emitCkeyBoxInt}) once a read-only consumer
+     * is done with it. A box something keeps has a count of 1 or more and is
+     * left alone, as is every other cell — so it is safe on any borrowed operand.
+     */
+    private function emitCellFloatFree(): void
+    {
+        $fn = $this->module->func('__mir_cell_float_free', Type::void());
+        $fn->attrs = 'alwaysinline';
+        $v = $fn->param(Type::i64(), 'v');
+        $e = $fn->block('entry');
+        $big = $fn->block('big');
+        $free = $fn->block('free');
+        $done = $fn->block('done');
+        $hdr = $e->lshr($v, Value::int(Type::i64(), 48));
+        // header 0xFFF5: a tagged cell whose nibble is BIGINT.
+        $e->brIf($e->icmp('eq', $hdr, Value::int(Type::i64(), 0xFFF0 | MemoryAbi::CELL_TAG_BIGINT)), $big, $done);
+        $vp = $big->inttoptr($big->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $rcp = $big->gep(Type::i8(), $vp, [Value::int(Type::i64(), MemoryAbi::BIGINT_BOX_RC_OFFSET)]);
+        $big->brIf($big->icmp('sle', $big->load(Type::i64(), $rcp), Value::int(Type::i64(), 0)), $free, $done);
+        $free->call('free', Type::void(), [$rcp]);
+        $free->br($done);
+        $done->retVoid();
+    }
+
+    /**
+     * Tag 5 — a counted BIGINT box ({@see MemoryAbi::CELL_TAG_BIGINT}): the
+     * count sits just before the value the payload points at; the last drop
+     * frees the box.
+     */
+    private function bigintRcArm(FunctionDef $fn, Block $chk, Value $v, Value $nib, Block $done, bool $retain): void
+    {
+        $go = $fn->block($retain ? 'bigret' : 'bigdrop');
+        $chk->brIf($chk->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_BIGINT)), $go, $done);
+        $vp = $go->inttoptr($go->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $rcp = $go->gep(Type::i8(), $vp, [Value::int(Type::i64(), MemoryAbi::BIGINT_BOX_RC_OFFSET)]);
+        $rc = $go->load(Type::i64(), $rcp);
+        if ($retain) {
+            $go->store($go->add($rc, Value::int(Type::i64(), 1)), $rcp);
+            $go->br($done);
+            return;
+        }
+        $rc1 = $go->sub($rc, Value::int(Type::i64(), 1));
+        $go->store($rc1, $rcp);
+        $free = $fn->block('bigfree');
+        $go->brIf($go->icmp('sle', $rc1, Value::int(Type::i64(), 0)), $free, $done);
+        $free->call('free', Type::void(), [$rcp]);
+        $free->br($done);
     }
 
     private function emitReleaseVariant(string $symbol, string $valueFlavor, bool $dropAlways = false): void
@@ -2882,12 +2962,22 @@ final class UnifiedArrayRuntime
             $dtag = $done->load(Type::i64(), $this->hdr($done, $arr, MemoryAbi::RC_TAG_OFFSET));
             $done->brIf($done->icmp('eq', $dtag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $skip, $dofree);
             $base = $dofree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+            $this->profCounter($dofree, 26);
             $this->poolFree($dofree, $base);
             $dofree->br($skip);
             $skip->ret($nu);
             return;
         }
         $base = $done->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+        // `array_reclaim`: the packed buffer is freed HERE, not by a release —
+        // uncounted, every sparse-key write read as one leaked array.
+        $this->profCounter($done, 26);
+        if (Debug::$arrRcTrace) {
+            $ff = $this->module->anonString("[ARC] free arr=%p fn=%s\n");
+            $fc = $done->call('__mir_bt_top', Type::ptr(), []);
+            $done->call('dprintf', Type::i32(),
+                [Value::int(Type::i32(), 2), $ff, $arr, $fc], null, '(i32, ptr, ...)');
+        }
         $this->poolFree($done, $base);
         $done->ret($nu);
     }
@@ -4197,9 +4287,8 @@ final class UnifiedArrayRuntime
      * (rather than calling the `needsBoxInt`-gated `__manticore_box_int`)
      * because the array runtime is ALWAYS emitted and must not depend on a
      * gated helper. A key that fits signed-48 rides inline (tag 1); a larger
-     * one is stored on the heap and tagged nibble 5, exactly like the general
-     * int box. The heap word leaks — acceptable for a rare huge key, matching
-     * the general box_int.
+     * one is stored in a counted heap box and tagged nibble 5, exactly like the
+     * general int box ({@see MemoryAbi::CELL_TAG_BIGINT}).
      */
     private function emitCkeyBoxInt(): void
     {
@@ -4215,9 +4304,14 @@ final class UnifiedArrayRuntime
         $inl->raw('  %b = or i64 %m, -4222124650659840');
         $inl->raw('  ret i64 %b');
         $heap = $fn->block('heap');
-        $heap->raw('  %p = call ptr @malloc(i64 8)');
-        $heap->raw('  store i64 %v, ptr %p');
-        $heap->raw('  %pi = ptrtoint ptr %p to i64');
+        $heap->raw('  %p = call ptr @malloc(i64 ' . (string)MemoryAbi::BIGINT_BOX_SIZE . ')');
+        // Count 0: both callers are READS (`key_cell_at`, `elem_decode`) that hand
+        // out a borrow, so the box they mint has no owner yet — the first
+        // consumer that keeps it retains it (0 → 1) and its drop frees it.
+        $heap->raw('  store i64 0, ptr %p');
+        $heap->raw('  %vp = getelementptr inbounds i8, ptr %p, i64 ' . (string)MemoryAbi::BIGINT_BOX_VALUE_OFFSET);
+        $heap->raw('  store i64 %v, ptr %vp');
+        $heap->raw('  %pi = ptrtoint ptr %vp to i64');
         $heap->raw('  %pm = and i64 %pi, 281474976710655');
         $heap->raw('  %pb = or i64 %pm, -3096224743817216');
         $heap->raw('  ret i64 %pb');
@@ -4662,8 +4756,9 @@ final class UnifiedArrayRuntime
         $done = $fn->block('done');
         $e->brIf($e->icmp('ugt', $v, Value::int(Type::i64(), -4503599627370496)), $chk, $done);
         $nib = $chk->and_($chk->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
-        // bits 4, 7, 8, 9 of 0x390: the pointer-carrying tags.
-        $bit = $chk->and_($chk->lshr(Value::int(Type::i64(), 0x390), $nib), Value::int(Type::i64(), 1));
+        // bits 4, 5, 7, 8, 9 of 0x3B0: the tags whose payload carries a count
+        // (5 = a counted BIGINT box).
+        $bit = $chk->and_($chk->lshr(Value::int(Type::i64(), 0x3B0), $nib), Value::int(Type::i64(), 1));
         $chk->brIf($chk->icmp('ne', $bit, Value::int(Type::i64(), 0)), $slow, $done);
         $slow->call($name . '_slow', Type::void(), [$v]);
         $slow->br($done);

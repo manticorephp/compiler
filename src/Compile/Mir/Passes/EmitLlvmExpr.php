@@ -116,10 +116,10 @@ trait EmitLlvmExpr
     /**
      * `__manticore_box_int` / `__manticore_unbox_int` — int↔cell boxing. An int
      * in [-2^47, 2^47) fits the 48-bit payload (tag INT=1); a WIDER int is
-     * heap-boxed (malloc 8, store the full i64) and tagged BIGINT=5 (tagBits
-     * 0xFFF5.. = -3096224743817216), so a 64-bit int survives a cell round-trip.
-     * The 8-byte cell is immortal (ints carry no rc) — a bounded leak for the
-     * rare large-int-in-cell case. Emitted under a broad gate (boxIntRuntime is
+     * heap-boxed and tagged BIGINT=5 (tagBits 0xFFF5.. = -3096224743817216), so
+     * a 64-bit int survives a cell round-trip. The box is counted like any cell
+     * payload ({@see \Compile\MemoryAbi::CELL_TAG_BIGINT}): a fresh one carries
+     * the +1 its cell owns. Emitted under a broad gate (boxIntRuntime is
      * called by the render helpers too — they call unbox_int for the int arm).
      */
     private function boxIntRuntime(): string
@@ -135,9 +135,11 @@ trait EmitLlvmExpr
         $out .= "  %b = or i64 %m, -4222124650659840\n";
         $out .= "  ret i64 %b\n";
         $out .= "heap:\n";
-        $out .= "  %p = call ptr @malloc(i64 8)\n";
-        $out .= "  store i64 %v, ptr %p\n";
-        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %p = call ptr @malloc(i64 " . (string)\Compile\MemoryAbi::BIGINT_BOX_SIZE . ")\n";
+        $out .= "  store i64 1, ptr %p\n";
+        $out .= "  %vp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::BIGINT_BOX_VALUE_OFFSET . "\n";
+        $out .= "  store i64 %v, ptr %vp\n";
+        $out .= "  %pi = ptrtoint ptr %vp to i64\n";
         $out .= "  %pm = and i64 %pi, 281474976710655\n";
         $out .= "  %pb = or i64 %pm, -3096224743817216\n";
         $out .= "  ret i64 %pb\n";
@@ -1407,7 +1409,23 @@ trait EmitLlvmExpr
     private function taggedCompareRuntime(): string
     {
         $out  = "\ndefine i64 @__manticore_tagged_compare(i64 %a, i64 %b) {\n";
+        // Two INLINE int cells compare their payloads directly — a loop bound
+        // over erased values (`$i >= $index` in php-cs-fixer's insertSlices)
+        // was 6% of the run in the general dispatch below.
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $out .= "entry:\n";
+        $out .= "  %qah = and i64 %a, -281474976710656\n";
+        $out .= "  %qbh = and i64 %b, -281474976710656\n";
+        $out .= "  %qai = icmp eq i64 %qah, " . $ih . "\n";
+        $out .= "  %qbi = icmp eq i64 %qbh, " . $ih . "\n";
+        $out .= "  %qii = and i1 %qai, %qbi\n";
+        $out .= "  br i1 %qii, label %qfast, label %slow\n";
+        $out .= "qfast:\n";
+        $out .= "  %qas = shl i64 %a, 16\n  %qa = ashr i64 %qas, 16\n";
+        $out .= "  %qbs = shl i64 %b, 16\n  %qb = ashr i64 %qbs, 16\n";
+        $out .= "  %qlt = icmp slt i64 %qa, %qb\n  %qgt = icmp sgt i64 %qa, %qb\n";
+        $out .= "  %qsel = select i1 %qgt, i64 1, i64 0\n  %qres = select i1 %qlt, i64 -1, i64 %qsel\n  ret i64 %qres\n";
+        $out .= "slow:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
         $out .= "  %tb = call i64 @__manticore_tag(i64 %b)\n";
         $out .= $this->juggleRows('c');
@@ -1427,6 +1445,16 @@ trait EmitLlvmExpr
         $out .= "  %ppa = call ptr @__manticore_tagged_to_str(i64 %a)\n";
         $out .= "  %ppb = call ptr @__manticore_tagged_to_str(i64 %b)\n";
         $out .= "  %sc = call i64 @__mir_str_cmp(ptr %ppa, ptr %ppb)\n";
+        // tagged_to_str hands back a string cell's own payload (a borrow) and a
+        // FRESH buffer for anything else — the number side of `5 < "abc"`, once
+        // per comparison, i.e. per sort step. Release what it made.
+        $out .= "  %pla = and i64 %a, 281474976710655\n  %plap = inttoptr i64 %pla to ptr\n";
+        $out .= "  %fra = icmp ne ptr %ppa, %plap\n  br i1 %fra, label %rela, label %chkrelb\n";
+        $out .= "rela:\n  call void @__mir_rc_release_str(ptr %ppa)\n  br label %chkrelb\n";
+        $out .= "chkrelb:\n  %plb = and i64 %b, 281474976710655\n  %plbp = inttoptr i64 %plb to ptr\n";
+        $out .= "  %frb = icmp ne ptr %ppb, %plbp\n  br i1 %frb, label %relb, label %scdone\n";
+        $out .= "relb:\n  call void @__mir_rc_release_str(ptr %ppb)\n  br label %scdone\n";
+        $out .= "scdone:\n";
         // str_cmp hands back the raw byte difference; this function's contract is
         // -1/0/+1 (a `<=>` result is returned verbatim now, not merely tested
         // against 0), so normalize the sign.
@@ -1447,7 +1475,14 @@ trait EmitLlvmExpr
         // agreed by accident — a string pointer happens to outrank a small int.
         $out .= "chkmix:\n";
         $out .= "  %anystr = or i1 %as, %bs\n";
-        $out .= "  br i1 %anystr, label %strcmp, label %fcmp\n";
+        $out .= "  br i1 %anystr, label %mixnum, label %fcmp\n";
+        // …unless that string IS numeric: php 8 compares a number with a
+        // numeric string numerically (`10 < "9"` is false), and only a
+        // non-numeric one as strings.
+        $out .= "mixnum:\n";
+        $out .= "  %msv = select i1 %as, i64 %a, i64 %b\n";
+        $out .= "  %msn = call i1 @__mir_cell_numeric(i64 %msv)\n";
+        $out .= "  br i1 %msn, label %fcmp, label %strcmp\n";
         $out .= "icmp:\n";
         $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
         $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
@@ -1670,6 +1705,17 @@ trait EmitLlvmExpr
         $out .= "  %same = icmp eq i64 %ta, %tb\n";
         $out .= "  br i1 %same, label %chk, label %ne\n";
         $out .= "chk:\n";
+        // Two INTS compare by value: an int that does not fit the 48-bit inline
+        // form rides a heap box ({@see boxIntRuntime}), a fresh one per boxing, so
+        // two equal big ints are two different words. A pointer-sized id —
+        // spl_object_id on a heap above bit 47 (Linux arm64) — is exactly that.
+        $out .= "  %isint = icmp eq i64 %ta, 1\n";
+        $out .= "  br i1 %isint, label %ints, label %chkarr\n";
+        $out .= "ints:\n";
+        $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
+        $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
+        $out .= "  %ie = icmp eq i64 %ua, %ub\n  %iz = zext i1 %ie to i64\n  ret i64 %iz\n";
+        $out .= "chkarr:\n";
         // Same tag: an ARRAY needs the recursive by-value `===` (same pairs, in
         // order); an OBJECT stays raw-bit identity, which is what PHP's `===`
         // means for objects.
@@ -1773,7 +1819,29 @@ trait EmitLlvmExpr
         // double and box a float cell, mirroring Zend.
         $intr = $iop === 'add' ? 'sadd' : ($iop === 'sub' ? 'ssub' : 'smul');
         $out  = "\ndefine i64 @__manticore_tagged_" . $name . "(i64 %a, i64 %b) {\n";
+        // Two INLINE int cells (tag 1, 48-bit payload) — the loop counters and
+        // offsets of erased code — compute and re-box without a single call;
+        // only a result past the inline range (or a non-int operand) takes the
+        // general path below.
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $out .= "entry:\n";
+        $out .= "  %qah = and i64 %a, -281474976710656\n";
+        $out .= "  %qbh = and i64 %b, -281474976710656\n";
+        $out .= "  %qai = icmp eq i64 %qah, " . $ih . "\n";
+        $out .= "  %qbi = icmp eq i64 %qbh, " . $ih . "\n";
+        $out .= "  %qii = and i1 %qai, %qbi\n";
+        $out .= "  br i1 %qii, label %qfast, label %slow\n";
+        $out .= "qfast:\n";
+        $out .= "  %qas = shl i64 %a, 16\n  %qa = ashr i64 %qas, 16\n";
+        $out .= "  %qbs = shl i64 %b, 16\n  %qb = ashr i64 %qbs, 16\n";
+        $out .= "  %qov = call {i64, i1} @llvm." . $intr . ".with.overflow.i64(i64 %qa, i64 %qb)\n";
+        $out .= "  %qr = extractvalue {i64, i1} %qov, 0\n  %qo = extractvalue {i64, i1} %qov, 1\n";
+        $out .= "  %qrs = shl i64 %qr, 16\n  %qrb = ashr i64 %qrs, 16\n";
+        $out .= "  %qfit = icmp eq i64 %qrb, %qr\n  %qnov = xor i1 %qo, true\n  %qok = and i1 %qfit, %qnov\n";
+        $out .= "  br i1 %qok, label %qbox, label %slow\n";
+        $out .= "qbox:\n";
+        $out .= "  %qpl = and i64 %qr, 281474976710655\n  %qw = or i64 %qpl, " . $ih . "\n  ret i64 %qw\n";
+        $out .= "slow:\n";
         $out .= "  %aistag = icmp ugt i64 %a, -4503599627370496\n";
         $out .= "  %tas = lshr i64 %a, 48\n";
         $out .= "  %tan = and i64 %tas, 15\n";
@@ -2044,10 +2112,74 @@ trait EmitLlvmExpr
         $out .= $this->emitNode($right);
         $out .= $this->coerceArithOperand($right, $isFloat);
         $r = $this->lastValue;
+        if ($op === 'srem') {
+            return $out . $this->emitIntRem($l, $r, $right);
+        }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = $target;
+        return $out;
+    }
+
+    /**
+     * PHP `%`: a zero divisor throws DivisionByZeroError("Modulo by zero"), and
+     * `% -1` is 0 — `srem PHP_INT_MIN, -1` traps (SIGFPE on x86_64).
+     */
+    private function emitIntRem(string $l, string $r, Node $right): string
+    {
+        $out = '';
+        $known = $right->kind === Node::KIND_INT_CONST && $right->value !== 0 && $right->value !== -1;
+        if (!$known) {
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = icmp eq i64 ' . $r . ", 0\n";
+            $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Modulo by zero');
+            $m1 = $this->ssa->allocReg();
+            $out .= '  ' . $m1 . ' = icmp eq i64 ' . $r . ", -1\n";
+            $safe = $this->ssa->allocReg();
+            $out .= '  ' . $safe . ' = select i1 ' . $m1 . ', i64 1, i64 ' . $r . "\n";
+            $r = $safe;
+        }
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = srem i64 ' . $l . ', ' . $r . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** A divisor known not to be zero: a non-zero int or float literal. */
+    private function isNonZeroConst(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_INT_CONST) { return $n->value !== 0; }
+        if ($n->kind === Node::KIND_FLOAT_CONST) { return $n->value != 0.0; }
+        return false;
+    }
+
+    /**
+     * Throw `new $class($message)` when the i1 `$cond` holds; the code after
+     * continues in a fresh block. The throw sits in its own cold block, the way
+     * php raises these from the operator itself.
+     */
+    private function emitThrowIf(string $cond, string $class, string $message): string
+    {
+        $thr = $this->ssa->allocLabel('arith.throw');
+        $ok = $this->ssa->allocLabel('arith.ok');
+        $out = '  br i1 ' . $cond . ', label %' . $thr . ', label %' . $ok . "\n";
+        $out .= $thr . ":\n";
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $out .= $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj($class, [
+                new \Compile\Mir\StringConst($message, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj($class)),
+            Type::void(),
+        ));
+        $out .= '  br label %' . $ok . "\n";
+        $out .= $ok . ":\n";
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
         return $out;
     }
 
@@ -2176,6 +2308,11 @@ trait EmitLlvmExpr
         $out .= $this->emitNode($d->right);
         $out .= $this->coerceDoubleOperand($d->right);
         $r = $this->lastValue;
+        if (!$this->isNonZeroConst($d->right)) {
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = fcmp oeq double ' . $r . ", 0.0\n";
+            $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Division by zero');
+        }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = fdiv double ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
@@ -2271,8 +2408,47 @@ trait EmitLlvmExpr
         elseif ($op === 'shr')  { $ll = 'ashr'; }
         elseif ($op === 'or')   { $ll = 'or'; }
         elseif ($op === 'xor')  { $ll = 'xor'; }
+        if ($ll === 'shl' || $ll === 'ashr') {
+            return $out . $this->emitShift($ll, $l, $r, $b->right);
+        }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $ll . ' i64 ' . $l . ', ' . $r . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * PHP `<<` / `>>`: a negative count throws ArithmeticError; a count of 64 or
+     * more shifts every bit out (0, or -1 for `>>` of a negative) — LLVM's
+     * shift by >= the width is poison.
+     */
+    private function emitShift(string $ll, string $l, string $r, Node $right): string
+    {
+        $out = '';
+        $known = $right->kind === Node::KIND_INT_CONST && $right->value >= 0 && $right->value < 64;
+        if ($known) {
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = ' . $ll . ' i64 ' . $l . ', ' . $r . "\n";
+            $this->lastValue = $reg;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $r . ", 0\n";
+        $out .= $this->emitThrowIf($neg, 'ArithmeticError', 'Bit shift by negative number');
+        $big = $this->ssa->allocReg();
+        $out .= '  ' . $big . ' = icmp sgt i64 ' . $r . ", 63\n";
+        $cnt = $this->ssa->allocReg();
+        $out .= '  ' . $cnt . ' = select i1 ' . $big . ', i64 63, i64 ' . $r . "\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = ' . $ll . ' i64 ' . $l . ', ' . $cnt . "\n";
+        $reg = $sh;
+        if ($ll === 'shl') {
+            // `ashr` by 63 already answers 0 / -1; `shl` must clear everything.
+            $reg = $this->ssa->allocReg();
+            $out .= '  ' . $reg . ' = select i1 ' . $big . ', i64 0, i64 ' . $sh . "\n";
+        }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
@@ -2616,17 +2792,21 @@ trait EmitLlvmExpr
             $out .= '  ' . $nx . ' = load i64, ptr ' . $fp . "\n";
             $cur = $nx;
         }
-        // A present-but-NULL leaf value also takes the default — in either
-        // representation, as the one-hop coalesce reads it: a null POINTER is 0
-        // (a `?T` object / string / array slot), a null SCALAR the boxed-NULL
-        // sentinel. Testing the sentinel alone kept a raw 0 from `?T $p = null`
-        // and handed the caller a NULL object (`$n->type->element ?? T::unknown()`).
-        $vz = $this->ssa->allocReg();
-        $out .= '  ' . $vz . ' = icmp eq i64 ' . $cur . ", 0\n";
-        $vs = $this->ssa->allocReg();
-        $out .= '  ' . $vs . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
+        // A present-but-NULL leaf value also takes the default: the null CELL,
+        // and — for a pointer-shaped leaf (`?string`, `?Obj`, `?array`) — the
+        // null POINTER. Missing the latter, `$n->type->class ?? ''` kept a null
+        // `?string` as a zero-length non-string that `=== ''` rejected.
         $vn = $this->ssa->allocReg();
-        $out .= '  ' . $vn . ' = or i1 ' . $vz . ', ' . $vs . "\n";
+        $out .= '  ' . $vn . ' = icmp eq i64 ' . $cur . ", -3659174697238528\n";
+        $lk = $leafType->kind;
+        if ($lk === Type::KIND_STRING || $lk === Type::KIND_OBJ || $lk === Type::KIND_CLOSURE
+            || $leafType->isArray()) {
+            $vz = $this->ssa->allocReg();
+            $out .= '  ' . $vz . ' = icmp eq i64 ' . $cur . ", 0\n";
+            $vb = $this->ssa->allocReg();
+            $out .= '  ' . $vb . ' = or i1 ' . $vn . ', ' . $vz . "\n";
+            $vn = $vb;
+        }
         $out .= '  br i1 ' . $vn . ', label %' . $useR . ', label %' . $keep . "\n" . $keep . ":\n";
         if ($wantCell) {
             $this->lastValue = $cur;
@@ -3493,6 +3673,11 @@ trait EmitLlvmExpr
             $this->lastValue = $r; $this->lastValueType = 'i64';
             return $out;
         }
+        // Every other kind by the same rule `if` uses: comparing the raw word
+        // with 0 answered TRUE for `[]` (a non-null singleton), "0" and ""
+        // (non-null buffers) and -0.0 (sign bit set).
+        if ($ok === Type::KIND_FLOAT) { return $out . $this->floatTruthy(); }
+        $out .= $this->truthinessOf($c->operand->type, $c->operand);
         $out .= $this->coerceToI64();
         $bit = $this->ssa->allocReg();
         $out .= '  ' . $bit . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
@@ -3528,8 +3713,50 @@ trait EmitLlvmExpr
                 $fn = $d->op === '+' ? '@manticore___mir_str_increment' : '@manticore___mir_str_decrement';
                 $old = $this->ssa->allocReg();
                 $out .= '  ' . $old . ' = load i64, ptr ' . $ptr . "\n";
+                // An inline INT cell (tag 1, 48-bit payload) steps in place;
+                // only another kind — or a step out of the 48-bit range — takes
+                // the stdlib call. `$tokens[--$index]` over a `?int` index was
+                // 5.6% of php-cs-fixer's run spent in the PHP-level body.
+                $intHdr = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
+                $hi = $this->ssa->allocReg();
+                $out .= '  ' . $hi . ' = and i64 ' . $old . ", -281474976710656\n";
+                $isInt = $this->ssa->allocReg();
+                $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ', ' . $intHdr . "\n";
+                $sh = $this->ssa->allocReg();
+                $out .= '  ' . $sh . ' = shl i64 ' . $old . ", 16\n";
+                $pv = $this->ssa->allocReg();
+                $out .= '  ' . $pv . ' = ashr i64 ' . $sh . ", 16\n";
+                $nv = $this->ssa->allocReg();
+                $out .= '  ' . $nv . ' = ' . ($d->op === '+' ? 'add' : 'sub') . ' i64 ' . $pv . ", 1\n";
+                $sh2 = $this->ssa->allocReg();
+                $out .= '  ' . $sh2 . ' = shl i64 ' . $nv . ", 16\n";
+                $back = $this->ssa->allocReg();
+                $out .= '  ' . $back . ' = ashr i64 ' . $sh2 . ", 16\n";
+                $fits = $this->ssa->allocReg();
+                $out .= '  ' . $fits . ' = icmp eq i64 ' . $back . ', ' . $nv . "\n";
+                $fast = $this->ssa->allocReg();
+                $out .= '  ' . $fast . ' = and i1 ' . $isInt . ', ' . $fits . "\n";
+                $fastL = $this->ssa->allocLabel('incdec.fast');
+                $slowL = $this->ssa->allocLabel('incdec.slow');
+                $joinL = $this->ssa->allocLabel('incdec.join');
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . " = alloca i64\n";
+                $out .= '  br i1 ' . $fast . ', label %' . $fastL . ', label %' . $slowL . "\n";
+                $out .= $fastL . ":\n";
+                $pl = $this->ssa->allocReg();
+                $out .= '  ' . $pl . ' = and i64 ' . $nv . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $fw = $this->ssa->allocReg();
+                $out .= '  ' . $fw . ' = or i64 ' . $pl . ', ' . $intHdr . "\n";
+                $out .= '  store i64 ' . $fw . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $slowL . ":\n";
+                $sw = $this->ssa->allocReg();
+                $out .= '  ' . $sw . ' = call i64 ' . $fn . '(i64 ' . $old . ")\n";
+                $out .= '  store i64 ' . $sw . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $joinL . ":\n";
                 $new = $this->ssa->allocReg();
-                $out .= '  ' . $new . ' = call i64 ' . $fn . '(i64 ' . $old . ")\n";
+                $out .= '  ' . $new . ' = load i64, ptr ' . $res . "\n";
                 $out .= '  store i64 ' . $new . ', ptr ' . $ptr . "\n";
                 $this->lastValue = $d->prefix ? $new : $old;
                 $this->lastValueType = 'i64';
@@ -3885,6 +4112,32 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * `(string)` of an object value whose static class resolves no `__toString`
+     * (the value is in `lastValue`): through the class-id dispatcher, which calls
+     * a subclass's `__toString` or throws php's "Object of class X could not be
+     * converted to string" Error — the address was printed as a decimal. A
+     * closure throws outright. Null when `$operand` is not such an object.
+     */
+    private function objectWithoutToStringIr(Node $operand): ?string
+    {
+        $k = $operand->type->kind;
+        if ($k === Type::KIND_CLOSURE) {
+            $thr = new \Compile\Mir\Call('__mir_throw_error',
+                [new \Compile\Mir\StringConst('Object of class Closure could not be converted to string', Type::string_())],
+                Type::cell());
+            $out = $this->emitBuiltin($thr) ?? '';
+            $this->lastValue = $this->strSymBytes('@.cstr.empty');
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        if ($k !== Type::KIND_OBJ) { return null; }
+        $out = $this->boxToCell($operand->type);
+        $out .= $this->coerceToI64();
+        $out .= $this->coerceCellToStr($this->lastValue);
+        return $out;
+    }
+
     private function coerceToStr(Node $operand, bool $arena = false): string
     {
         if ($operand->type->kind === Type::KIND_STRING) {
@@ -4003,6 +4256,10 @@ trait EmitLlvmExpr
         $ts = $this->toStringClassOf($operand);
         if ($ts !== '') {
             return $this->emitToStringCall($ts, $this->staticClassOf($operand));
+        }
+        $noStr = $this->objectWithoutToStringIr($operand);
+        if ($noStr !== null) {
+            return $noStr;
         }
         // When the result feeds an arena-bound consumer (an Arena concat),
         // the coercion buffer is confined too — bump-allocate it so it is
@@ -4957,6 +5214,23 @@ trait EmitLlvmExpr
             // address 0 — guard it: strcmp only when both carriers are
             // non-null; otherwise the result is the i64-carrier identity
             // (both null → equal, one null → unequal).
+            $bothKnownStr = $lk === Type::KIND_STRING && $rk === Type::KIND_STRING;
+            if (($isEq || $isNe) && ($strictEq || !$bothKnownStr)) {
+                $eqr = $this->ssa->allocReg();
+                $chunks[] = '  ' . $eqr . ' = call i1 @__mir_str_eq_ns(i64 ' . $li . ', i64 ' . $ri . ")\n";
+                $res = $eqr;
+                if ($isNe) {
+                    $res = $this->ssa->allocReg();
+                    $chunks[] = '  ' . $res . ' = xor i1 ' . $eqr . ", true\n";
+                }
+                $chunks[] = $this->freeStrTemp($c->left, $lp);
+                $chunks[] = $this->freeStrTemp($c->right, $rp);
+                $extReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $res . " to i64\n";
+                $this->lastValue = $extReg;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
+            }
             if ($isEq || $isNe) {
                 $lnz = $this->ssa->allocReg();
                 $chunks[] = '  ' . $lnz . ' = icmp ne i64 ' . $li . ", 0\n";
@@ -5463,6 +5737,11 @@ trait EmitLlvmExpr
         if ($ts !== '') {
             $out .= $this->emitToStringCall($ts, $this->staticClassOf($e));
             $kind = Type::KIND_STRING;
+        } else {
+            $noStr = $this->objectWithoutToStringIr($e);
+            if ($noStr !== null) {
+                return $out . $noStr . $this->emitOutStr($this->lastValue);
+            }
         }
         // A NaN-boxed cell (e.g. `int|false` from strpos) dispatches
         // on its tag at runtime — int prints decimal, false / null
@@ -5775,6 +6054,27 @@ trait EmitLlvmExpr
      * Split from emitCondVal so the short-ternary (`?:`) can compute truthiness
      * WITHOUT clobbering the raw operand it reuses as its then-value.
      */
+    /** A float's truthiness as i64 0/1: -0.0 is falsy in php and its bits are
+     *  not 0. The value is a double or its bits in an i64 carrier. */
+    private function floatTruthy(): string
+    {
+        $out = '';
+        $v = $this->lastValue;
+        if ($this->lastValueType !== 'double') {
+            $out .= $this->coerceToI64();
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+            $v = $d;
+        }
+        $bit = $this->ssa->allocReg();
+        $out .= '  ' . $bit . ' = fcmp une double ' . $v . ", 0.0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $bit . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function truthinessOf(Type $t, ?Node $n = null): string
     {
         // A bare `array` param erased to KIND_UNKNOWN would fall through to the
@@ -5787,6 +6087,31 @@ trait EmitLlvmExpr
             && $n->kind === Node::KIND_LOAD_LOCAL
             && isset($this->arrayHintedParams[$n->name])) {
             return $this->truthinessOf(Type::vec(Type::unknown()));
+        }
+        // The same erasure through a REFERENCE (`array &$x`): `empty($x)` and
+        // `if (!$x)` read the non-null `[]` singleton as TRUE. The referenced
+        // slot may hold the raw pointer or a tagged cell, so box only an untagged
+        // word before the tagged length check.
+        if ($t->kind === Type::KIND_UNKNOWN && $n !== null
+            && $n->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->arrayHintedRefParams[$n->name])) {
+            $out = $this->coerceToI64();
+            $raw = $this->lastValue;
+            $this->rt->needsTagged = true;
+            $this->rt->needsTaggedTruthy = true;
+            $tagged = $this->ssa->allocReg();
+            $out .= '  ' . $tagged . ' = icmp ugt i64 ' . $raw . ', ' . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = inttoptr i64 ' . $raw . " to ptr\n";
+            $ba = $this->ssa->allocReg();
+            $out .= '  ' . $ba . ' = call i64 @__manticore_box_array(ptr ' . $p . ")\n";
+            $pick = $this->ssa->allocReg();
+            $out .= '  ' . $pick . ' = select i1 ' . $tagged . ', i64 ' . $raw . ', i64 ' . $ba . "\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_tagged_truthy(i64 ' . $pick . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
         }
         if ($t->kind === Type::KIND_CELL) {
             $this->rt->needsTaggedTruthy = true;
@@ -5806,6 +6131,7 @@ trait EmitLlvmExpr
             $this->lastValueType = 'i64';
             return $out;
         }
+        if ($t->kind === Type::KIND_FLOAT) { return $this->floatTruthy(); }
         // An array is falsy iff empty (len 0); a raw ptr coerce reads any
         // non-null array (incl. `[]`) as truthy. Tag the raw ptr (box_array is
         // bit-ops + a null guard, no element rebuild) and reuse tagged-truthy's

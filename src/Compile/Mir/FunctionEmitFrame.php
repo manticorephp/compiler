@@ -77,4 +77,9 @@ final class FunctionEmitFrame
      *  BORROW (a param, an alias, a non-co-owning binding): registered, but not
      *  proven to hold element refs of their own. Appended at the END. */
     public array $ownBorrowed = [];
+    /** @var array<string, string[]> a MIXED local's flag alloca → the release
+     *  flavors of the RAW representations its stores leave, index 0 the plan's
+     *  own. The flag holds 1 for a cell, 0 for raw [0], i + 1 for raw [i].
+     *  Appended at the END. */
+    public array $mixedRawByFlag = [];
 }

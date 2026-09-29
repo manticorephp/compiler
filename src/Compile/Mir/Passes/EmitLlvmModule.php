@@ -370,12 +370,14 @@ trait EmitLlvmModule
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %ok = icmp sgt i64 %d, 0\n";
-            $out .= "  %im = sub i64 %d, 1\n";
-            $out .= "  %i = select i1 %ok, i64 %im, i64 0\n";
+            $out .= "  %im = sub i64 %d, " . (string)(1 + \Compile\Debug::$btTopSkip) . "\n";
+            $out .= "  %ok2 = icmp sge i64 %im, 0\n";
+            $out .= "  %okb = and i1 %ok, %ok2\n";
+            $out .= "  %i = select i1 %okb, i64 %im, i64 0\n";
             $out .= "  %p = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %i\n";
             $out .= "  %v = load i64, ptr %p\n";
             $out .= "  %set = icmp ne i64 %v, 0\n";
-            $out .= "  %live = and i1 %ok, %set\n";
+            $out .= "  %live = and i1 %okb, %set\n";
             $out .= "  %np = inttoptr i64 %v to ptr\n";
             $out .= "  %r = select i1 %live, ptr %np, ptr @__mir_bt_unknown\n";
             $out .= "  ret ptr %r\n}\n";
@@ -385,6 +387,12 @@ trait EmitLlvmModule
             $out .= "  %d1 = sub i64 %d, 1\n";
             $out .= "  store i64 %d1, ptr @__mir_bt_depth\n";
             $out .= "  ret void\n}\n";
+        }
+        if ($this->rt->needsCloArgc) {
+            // The closure arity channel ({@see closureArityPrologue}). linkonce_odr:
+            // a prelude body in stdlib.o calls a closure the program built.
+            $out .= "@__mir_clo_fp = linkonce_odr global i64 0\n";
+            $out .= "@__mir_clo_argc = linkonce_odr global i64 0\n";
         }
         if ($this->rt->needsFuncArgs) {
             // The func-args side channel. A call site targeting a callee that
@@ -541,6 +549,9 @@ trait EmitLlvmModule
             // tagged_compare stringifies a number to compare it against a
             // NON-numeric string (PHP's `5 < "abc"`).
             $this->rt->needsTaggedToStr   = true;
+            // …and releases the string it made ({@see taggedCompareRuntime}).
+            $this->rt->needsRc            = true;
+            $this->rt->needsStrRc         = true;
             $this->rt->needsStrcmp        = true;
             $this->rt->needsStrtod        = true;
         }
@@ -921,9 +932,14 @@ trait EmitLlvmModule
         $this->locals->sjljPinAll = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
+        $this->arrayHintedRefParams = [];
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
+            if ($ahp->arrayHinted && $ahp->byRef) { $this->arrayHintedRefParams[$ahp->name] = true; }
         }
+        $this->writtenNames = [];
+        $this->writtenNamesFn = $fn->name;
+        if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
         $this->locals->collectSjljPins($fn->body);
@@ -1013,8 +1029,9 @@ trait EmitLlvmModule
         if (\str_starts_with($fn->name, '__mc_fuse_')) { $linkage = 'internal '; }
         if ($isClosure) {
             $paramSig = 'ptr %env';
+            $optIdx = $this->closureOptionalParams($fn, $capCnt);
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
-                $paramSig .= ', i64 %arg.' . $fn->params[$pi]->name;
+                $paramSig .= ', i64 %arg.' . $fn->params[$pi]->name . (isset($optIdx[$pi]) ? '.in' : '');
             }
             // Closures are dispatched through a function pointer stored in
             // their env struct, never referenced by external symbol across a
@@ -1030,6 +1047,9 @@ trait EmitLlvmModule
             }
             $bodySink = new FunctionTextSink($sinkPath);
             $bodySink->write($header);
+            if ($optIdx !== []) {
+                $bodySink->write($this->closureArityPrologue($fn, $capCnt, $optIdx));
+            }
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
                 $slot = $this->ssa->allocReg();
@@ -2138,7 +2158,9 @@ trait EmitLlvmModule
      */
     private function retLeave(Return_ $r, string $moved, string $val, string $leave): string
     {
-        return $this->ownReturnIr($r, $moved, $r->ownArms, $val) . $leave;
+        // Every open IteratorAggregate foreach gives its iterator back first.
+        $aggs = $this->gen->inGenerator ? '' : $this->releaseAggItersLeftBy(0);
+        return $aggs . $this->ownReturnIr($r, $moved, $r->ownArms, $val) . $leave;
     }
 
 
@@ -2446,7 +2468,22 @@ trait EmitLlvmModule
             // tagged bits flow back as the result (a boxed int read as a raw
             // i64). Mirrors the cell→param unboxing.
             if ($v->type->kind === Type::KIND_CELL && $this->frame->returnType !== null) {
+                $out .= $this->coerceToI64();
+                $retCell = $this->lastValue;
                 $out .= $this->unboxCellToType($this->frame->returnType);
+                // A SCALAR unbox copies the value out; a fresh cell (a call or
+                // a numeric op's +1 — a counted box past the inline int form) is
+                // dead from here. A string / array unbox hands the payload itself
+                // back, which the cell's count is what keeps alive.
+                $rk = $this->frame->returnType->kind;
+                if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL)
+                    && $this->isFreshCellTemp($v)) {
+                    $unboxed = $this->lastValue;
+                    $unboxedType = $this->lastValueType;
+                    $out .= $this->rcReleaseReg($retCell, 'cell');
+                    $this->lastValue = $unboxed;
+                    $this->lastValueType = $unboxedType;
+                }
             }
             // …and an ERASED value into a STRING / ARRAY return, on the terms
             // {@see unboxCellArg} gives the call-argument sink: those unboxes are
@@ -2531,7 +2568,8 @@ trait EmitLlvmModule
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);
-        return $out . $leave . $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot())
+        $jmp = $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
+        return $out . $leave . $jmp
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 
@@ -2607,5 +2645,90 @@ trait EmitLlvmModule
         return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
             . '  ' . $mk . ' = and i64 ' . $rw . ", 281474976710655\n"
             . '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
+    }
+    /**
+     * The trailing parameters of closure `$fn` that carry a default, by FULL
+     * param index (captures first), and a trailing variadic (omitted = an
+     * empty pack).
+     *
+     * @return array<int, bool>
+     */
+    private function closureOptionalParams(\Compile\Mir\FunctionDef $fn, int $capCnt): array
+    {
+        $out = [];
+        for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
+            $pp = $fn->params[$pi];
+            // An omitted variadic is an EMPTY pack, never a missing slot.
+            if ($pp->variadic) { $out[$pi] = true; break; }
+            if ($pp->default !== null) { $out[$pi] = true; }
+        }
+        return $out;
+    }
+
+    /**
+     * The closure ABI carries no arity, so a caller that cannot name the
+     * closure it calls — a `callable` in a PRELUDE body (`array_map`, `usort`),
+     * which is linkonce_odr and may not list one module's closures — used to
+     * leave every omitted optional parameter to whatever the register held:
+     * `array_map('trim', …)` trimmed with a garbage character mask.
+     *
+     * Such a caller now stores the fn it calls and how many arguments it wrote
+     * ({@see EmitLlvmCalls::emitClosureStructInvoke}); here, FIRST, before any
+     * nested call can overwrite the pair, the closure takes it. The pair counts
+     * only when it names THIS closure — a caller that did not store (a runtime
+     * helper, a direct call that padded every argument itself) leaves the
+     * arguments as passed — and it is consumed, so it can never apply twice.
+     * Each omitted optional parameter then takes its default, evaluated only
+     * when it is actually omitted.
+     *
+     * @param array<int, bool> $optIdx
+     */
+    private function closureArityPrologue(\Compile\Mir\FunctionDef $fn, int $capCnt, array $optIdx): string
+    {
+        $this->rt->needsCloArgc = true;
+        $self = '@manticore_' . $this->mangle($fn->name);
+        $cf = $this->ssa->allocReg();
+        $me = $this->ssa->allocReg();
+        $ca = $this->ssa->allocReg();
+        $out  = '  ' . $cf . " = load i64, ptr @__mir_clo_fp\n";
+        $out .= '  ' . $me . ' = icmp eq i64 ' . $cf . ', ptrtoint (ptr ' . $self . " to i64)\n";
+        $out .= '  ' . $ca . " = load i64, ptr @__mir_clo_argc\n";
+        $out .= "  store i64 0, ptr @__mir_clo_fp\n";
+        foreach ($optIdx as $pi => $_) {
+            $pp = $fn->params[$pi];
+            $name = '%arg.' . $pp->name;
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  store i64 ' . $name . '.in, ptr ' . $slot . "\n";
+            $short = $this->ssa->allocReg();
+            $out .= '  ' . $short . ' = icmp ule i64 ' . $ca . ', ' . (string)($pi - $capCnt) . "\n";
+            $use = $this->ssa->allocReg();
+            $out .= '  ' . $use . ' = and i1 ' . $me . ', ' . $short . "\n";
+            $defL = $this->ssa->allocLabel('cdef');
+            $joinL = $this->ssa->allocLabel('cdef.join');
+            $out .= '  br i1 ' . $use . ', label %' . $defL . ', label %' . $joinL . "\n";
+            $out .= $defL . ":\n";
+            $def = $pp->variadic ? new \Compile\Mir\ArrayLit([], $pp->type) : $pp->default;
+            if ($def === null) { $def = new \Compile\Mir\NullConst(Type::null_()); }
+            $out .= $this->emitNode($def);
+            if ($pp->byRef) {
+                // A by-ref slot is an ADDRESS: back the default with a slot of
+                // its own, exactly as a padding caller does.
+                $out .= $this->coerceToI64();
+                $bs = $this->ssa->allocReg();
+                $out .= '  ' . $bs . " = alloca i64\n";
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $bs . "\n";
+                $ba = $this->ssa->allocReg();
+                $out .= '  ' . $ba . ' = ptrtoint ptr ' . $bs . " to i64\n";
+                $this->lastValue = $ba;
+            } else {
+                $out .= $this->closureArgRepr($def->type, $pp->type);
+            }
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $joinL . ":\n";
+            $out .= '  ' . $name . ' = load i64, ptr ' . $slot . "\n";
+        }
+        return $out;
     }
 }

@@ -162,7 +162,30 @@ final class InsertMemoryOps implements Pass
         }
         $ic = $fe->iterClass;
         if ($ic === 'Generator' || ($ic !== '' && !isset($classes[$ic]))) { return Type::cell(); }
+        // A concrete Iterator CLASS: `current()` is a method, so its answer is
+        // a +1 under the return convention whatever it read — the prelude's
+        // SplFixedArray iterator hands out a retained element, and a borrowed
+        // loop variable stranded one per iteration (php-cs-fixer's
+        // `foreach ($tokens as $index => $token)` in every transformer).
+        $vt = $fe->iterValueType;
+        if ($ic !== '' && $vt !== null) {
+            if ($vt->kind === Type::KIND_CELL) { return $vt; }
+            return self::elemReadCoOwns($vt, $enums, $classes) ? $vt : null;
+        }
         return null;
+    }
+
+    /**
+     * {@see \Compile\Mir\Ownership::cellElemReadCoOwns}. A CELL read out of a container's element into a local co-owns what it
+     * holds, as a string / array / object element read does: the emitter takes
+     * `__mir_cell_retain` ({@see EmitLlvmLocals::elemReadCoOwn}) and the local
+     * owns at the `cell` class. It was a bare borrow, safe only while no cell
+     * element slot ever dropped what it held; now an overwrite or an unset
+     * does, and `$y = $a[0]; $a[0] = 5; $y->n` read freed memory.
+     */
+    public static function cellElemReadCoOwns(Node $v): bool
+    {
+        return \Compile\Mir\Ownership::cellElemReadCoOwns($v);
     }
 
     /**

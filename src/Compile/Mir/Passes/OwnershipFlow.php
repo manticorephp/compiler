@@ -175,6 +175,10 @@ final class OwnershipFlow implements Pass
     private array $moveLoop = [];
     /** The function jumps by `goto` (a label may be re-reached). */
     private bool $hasGoto = false;
+    /** The statement-list member {@see scan} is inside. */
+    private ?Node $curStmt = null;
+    /** @var array<int, LoadLocal> by-ref argument LoadLocal id → the node */
+    private array $refArgLoad = [];
 
     public function run(Module $module): Module
     {
@@ -276,7 +280,10 @@ final class OwnershipFlow implements Pass
         $this->erasedNames = $this->erasedArrayLocals();
 
         $lat = new OwnLattice();
+        $this->curStmt = null;
+        $this->refArgLoad = [];
         $this->scan($fn->body, $lat);
+        $this->keyRefArgs($lat);
         $this->refineFromLoads($fn->body);
         $this->decideMoves($fn->body, $lat);
 
@@ -365,6 +372,19 @@ final class OwnershipFlow implements Pass
                     $stuck[$name] = $l1->fixKind[$i] . ' (line ' . (string)$l1->fixAt[$i]->line . ')';
                 }
             }
+            // A borrowed by-ref argument takes its reference before its statement.
+            foreach ($l1->refArgIn as $lid => $x) {
+                if (!OwnLattice::isBorrow($x)) { continue; }
+                $name = $l1->refArgName[$lid];
+                if (isset($force[$name])) { continue; }
+                $n = $n + 1;
+                $at = $l1->refArgAt[$lid];
+                if ($this->placeFix('own_retain', 'refarg', $at, $at, false, $name, OwnLattice::borrowKey($x))) {
+                    continue;
+                }
+                $force[$name] = true;
+                $newForce = true;
+            }
             if ($newForce) {
                 // The ops this round planned were never applied: forget them.
                 $this->inserted = [];
@@ -384,6 +404,11 @@ final class OwnershipFlow implements Pass
             }
             foreach ($l2->doubleRetain as $name => $unused) {
                 $force[$name] = true;
+                $bad = true;
+            }
+            foreach ($l2->refArgIn as $lid => $x) {
+                if (!OwnLattice::isBorrow($x)) { continue; }
+                $force[$l2->refArgName[$lid]] = true;
                 $bad = true;
             }
             if (!$bad) {
@@ -497,6 +522,9 @@ final class OwnershipFlow implements Pass
         $l->loadName = $p->loadName;
         $l->moveName = $p->moveName;
         $l->shareName = $p->shareName;
+        $l->refArgName = $p->refArgName;
+        $l->refArgAt = $p->refArgAt;
+        $l->refArgKey = $p->refArgKey;
         foreach ($this->keyClass as $k => $cls) {
             if ($cls === 'cell' || $cls === 'mix') { $l->cellish[$k] = true; }
         }
@@ -764,7 +792,13 @@ final class OwnershipFlow implements Pass
 
     private function scan(Node $n, OwnLattice $lat): void
     {
+        $outerStmt = $this->curStmt;
+        if (isset($this->inList[\spl_object_id($n)])) { $this->curStmt = $n; }
         $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE) {
+            $this->scanRefArgs($n, $lat);
+        }
         if ($k === Node::KIND_STORE_LOCAL) {
             $sl = self::asStoreLocal($n);
             $this->storeById[\spl_object_id($sl)] = $sl;
@@ -818,6 +852,43 @@ final class OwnershipFlow implements Pass
             }
         }
         foreach (Walk::children($n) as $c) { $this->scan($c, $lat); }
+        $this->curStmt = $outerStmt;
+    }
+
+    /**
+     * A local a by-ref parameter receives: the callee may store a new value
+     * through the reference and give the old one back
+     * ({@see EmitLlvmLocals::refParamOverwriteIr}), so the local OWNS what it
+     * holds from the call on. A borrowed one takes its own reference before the
+     * statement ({@see OwnLattice::$refArgIn}); an empty one (an out-parameter's
+     * null start) owns whatever the callee left.
+     */
+    private function scanRefArgs(Node $call, OwnLattice $lat): void
+    {
+        if ($this->curStmt === null) { return; }
+        foreach ($this->mixedSlots->byRefArgs($call, false) as $a) {
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $ll = self::asLoadLocal($a);
+            if (isset($this->excluded[$ll->name])) { continue; }
+            $lid = \spl_object_id($ll);
+            $lat->refArgName[$lid] = $ll->name;
+            $lat->refArgAt[$lid] = $this->curStmt;
+            $this->refArgLoad[$lid] = $ll;
+        }
+    }
+
+    /** The class an empty by-ref argument owns after the call. */
+    private function keyRefArgs(OwnLattice $lat): void
+    {
+        foreach ($this->refArgLoad as $lid => $ll) {
+            $name = $ll->name;
+            $k = $this->firstOwnKey[$name] ?? $this->firstKey[$name] ?? 0;
+            if ($k === 0 && !isset($this->mixedHere[$name])) {
+                $ks = $this->keyString($ll->type);
+                if ($ks !== '') { $k = $this->intern($name, $ks, $ll->type); }
+            }
+            $lat->refArgKey[$lid] = $k;
+        }
     }
 
     private function scanStore(StoreLocal $sl, OwnLattice $lat): void
@@ -826,6 +897,15 @@ final class OwnershipFlow implements Pass
         if (isset($this->excluded[$name])) { return; }
         $id = \spl_object_id($sl);
         $v = $sl->value;
+        // `$x = $x` on one plain CELL slot emits nothing ({@see
+        // EmitLlvmLocals::emitStoreLocal}): the word, and whoever owns it, stay.
+        if ($v->kind === Node::KIND_LOAD_LOCAL && self::asLoadLocal($v)->name === $name
+            && $v->type->kind === Type::KIND_CELL && $sl->type->kind === Type::KIND_CELL
+            && !isset($this->mixedHere[$name])) {
+            $this->skipLoad[\spl_object_id($v)] = true;
+            $sl->ownRelabel = true;
+            return;
+        }
         $slotT = InsertMemoryOps::slotStoredType($sl);
         $boxed = $slotT->kind === Type::KIND_CELL;
         if ($slotT->kind === Type::KIND_UNKNOWN && $this->own->erasedArrayPropRead($v)) {
@@ -1145,6 +1225,9 @@ final class OwnershipFlow implements Pass
         if ($kind === 'break' || $kind === 'continue' || $kind === 'goto') {
             if ($pid !== $aid || !isset($this->inList[$aid])) { return false; }
             return $this->plan($op, 'before', $aid, $name, $k);
+        }
+        if ($kind === 'refarg') {
+            return isset($this->inList[$aid]) && $this->plan($op, 'before', $aid, $name, $k);
         }
         if ($kind === 'fallthrough') {
             if ($at->kind !== Node::KIND_LABEL || !isset($this->inList[$aid])) { return false; }

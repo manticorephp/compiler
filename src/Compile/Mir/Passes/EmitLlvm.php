@@ -327,6 +327,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, true> interface names (interface_exists fold) */
     private array $interfaceNames = [];
+    /** @var array<string, true> {@see Module::$internalInterfaceNames} */
+    private array $internalInterfaceNames = [];
 
     /** @var array<string, true> trait names (trait_exists fold) */
     private array $traitNames = [];
@@ -579,6 +581,9 @@ final class EmitLlvm implements EmitVisitor
      * non-null. Reset per function by emitFunction.
      */
     private array $arrayHintedParams = [];
+    /** @var array<string, bool> the by-REFERENCE `array &$x` params — truthiness only: the
+     *  word read through the reference may be a raw array pointer or a tagged cell */
+    private array $arrayHintedRefParams = [];
     /** @var string[] module global cell names (static props/locals/global) */
     private array $globalNames = [];
     /** @var Node[] parallel default-init nodes for $globalNames */
@@ -647,6 +652,10 @@ final class EmitLlvm implements EmitVisitor
         $this->cf = new ControlFlow();
         $this->frame = new FunctionEmitFrame();
         $this->readCellGuardFlags();
+        $this->irCensus = \getenv('MANTICORE_IR_CENSUS') === '1';
+        $this->censusBytes = [];
+        $this->censusCount = [];
+        $this->censusChild = [];
         $this->resetCellGuardFrame();
         $this->sigs = new FunctionSignatures();
         $this->arena = new ArenaContext();
@@ -675,6 +684,7 @@ final class EmitLlvm implements EmitVisitor
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
+        $this->internalInterfaceNames = $module->internalInterfaceNames;
         $this->interfaceAncestors = $module->interfaceAncestors;
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
@@ -828,6 +838,8 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
         $this->litTableCount = 0;
+        $this->objTemplates = [];
+        $this->litTablesFlushed = false;
         $this->btBaseLine = [];
         $this->dynScopeRelTables = [];
         $this->newDynTableCache = null;
@@ -1155,6 +1167,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->scmpExtraBodies;
         $extraBodies .= $this->dynfExtraBodies;
         $extraBodies .= $this->litTableBodies;
+        $this->litTablesFlushed = true;
         if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
@@ -1202,6 +1215,7 @@ final class EmitLlvm implements EmitVisitor
             $this->drainLazyHelpers($appendStreamedBody);
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
+            $this->reportIrCensus($bodyBytes);
             \Compile\Stats::line('IR: file-hoisted bodies ' . (string)$fileHoistedBodies
                 . ' (' . (string)$fileHoistedBytes . ' bytes; threshold '
                 . (string)$fileHoistThreshold . ')');
@@ -1227,6 +1241,13 @@ final class EmitLlvm implements EmitVisitor
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
         $statT = \Compile\Stats::now();
         $preamble = $this->linkonceRuntime($this->emitPreamble());
+        // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
+        // cellifying an array property), after both drains above ran. Drained
+        // entries are blanked, so this only picks up the late ones.
+        $late = '';
+        $this->drainLazyHelpers(function (string $body, string $label) use (&$late): void { $late .= $body; });
+        $preamble .= $late;
+        unset($late);
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
@@ -1466,11 +1487,18 @@ final class EmitLlvm implements EmitVisitor
      * non-string element vec (int/float/mixed): biImplode boxes the vec into a
      * cell-array first. Two passes (sum lengths, then copy with separators).
      */
-    private function implodeCellRuntime(): string
+    private function implodeCellRuntime(bool $withObj = false): string
     {
+        // Both variants from one body: `_obj` takes the module's own
+        // `__mir_obj_to_str` as a POINTER — the central core cannot name it, and
+        // a Stringable element joined as its address (php-cs-fixer's
+        // DocBlock::getContent). Null = no __toString class anywhere.
+        if (!$withObj) { $plain = $this->implodeCellRuntime(true); } else { $plain = ''; }
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
-        $out  = "\ndefine ptr @__mir_array_implode_cell(ptr %sep, ptr %arr) {\n";
+        $out  = $withObj
+            ? "\ndefine ptr @__mir_array_implode_cell_obj(ptr %sep, ptr %arr, ptr %objfn) {\n"
+            : $plain . "\ndefine ptr @__mir_array_implode_cell(ptr %sep, ptr %arr) {\n";
         $out .= "entry:\n";
         $out .= "  %len = call i64 @__mir_array_live_len(ptr %arr)\n";
         $out .= "  %ez = icmp sle i64 %len, 0\n";
@@ -1507,7 +1535,18 @@ final class EmitLlvm implements EmitVisitor
         $out .= "body:\n";
         $out .= "  %ev0 = call i64 @__mir_array_value_at(ptr %arr, i64 %i)\n";
         $out .= "  %ev = call i64 @__mir_box_by_repr(i64 %ev0, i64 %repr)\n";
-        $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
+        if ($withObj) {
+            $out .= "  %eistag = icmp ugt i64 %ev, -4503599627370496\n";
+            $out .= "  %eh = lshr i64 %ev, 48\n  %enib = and i64 %eh, 15\n";
+            $out .= "  %eisobjn = icmp eq i64 %enib, 8\n  %eisobj = and i1 %eistag, %eisobjn\n";
+            $out .= "  %ehasfn = icmp ne ptr %objfn, null\n  %euse = and i1 %eisobj, %ehasfn\n";
+            $out .= "  br i1 %euse, label %eobj, label %escal\n";
+            $out .= "eobj:\n  %eo = call ptr %objfn(i64 %ev)\n  br label %eend\n";
+            $out .= "escal:\n  %es0 = call ptr @__manticore_tagged_to_str(i64 %ev)\n  br label %eend\n";
+            $out .= "eend:\n  %es = phi ptr [ %eo, %eobj ], [ %es0, %escal ]\n";
+        } else {
+            $out .= "  %es = call ptr @__manticore_tagged_to_str(i64 %ev)\n";
+        }
         $out .= "  %el = call i64 @__mir_strlen(ptr %es)\n";
         $out .= "  %isfirst = icmp eq i64 %i, 0\n";
         $out .= "  %sepn = select i1 %isfirst, i64 0, i64 %seplen\n";
@@ -2315,6 +2354,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classlessCandidatesMemo = [];
 
     private int $litTableCount = 0;
+    /** @var array<string, string> class name => its instance template symbol, '' = none ({@see EmitLlvmObjects::objInitTemplate}) */
+    private array $objTemplates = [];
+    /** `litTableBodies` is already in the output: a template minted now would never be defined. */
+    private bool $litTablesFlushed = false;
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
@@ -3395,9 +3438,96 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitNode(Node $n): string
     {
+        if ($this->irCensus) { return $this->emitNodeCensus($n); }
         $out = $n->accept($this);
         if ($this->cellGuard) { $this->markCellCalleeResult($n); }
         return $out;
+    }
+
+    /**
+     * `MANTICORE_IR_CENSUS=1` (with MANTICORE_STATS=1): the IR bytes each MIR
+     * construct emits ITSELF — its whole output minus what its children emitted —
+     * summed over the module, a direct call split by callee (an inlined builtin
+     * is a call). Answers which constructs the IR volume comes from, which the
+     * finished `.ll` cannot: by then every construct is instructions.
+     */
+    private bool $irCensus = false;
+    /** @var array<string, int> */
+    private array $censusBytes = [];
+    /** @var array<string, int> */
+    private array $censusCount = [];
+    /** @var int[] */
+    private array $censusChild = [];
+    /** @var array<string, int> */
+    private array $censusMax = [];
+    /** @var array<string, string> */
+    private array $censusMaxFn = [];
+    /** @var array<string, int> bytes in instances over 2 KB */
+    private array $censusBig = [];
+
+    private function emitNodeCensus(Node $n): string
+    {
+        $this->censusChild[] = 0;
+        $out = $n->accept($this);
+        if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        $kids = (int)\array_pop($this->censusChild);
+        $len = \strlen($out);
+        $key = $n->kind;
+        if ($n instanceof \Compile\Mir\Call) { $key = 'call:' . $this->censusCallee($n); }
+        $this->censusBytes[$key] = ($this->censusBytes[$key] ?? 0) + $len - $kids;
+        $this->censusCount[$key] = ($this->censusCount[$key] ?? 0) + 1;
+        $self = $len - $kids;
+        if ($n instanceof \Compile\Mir\Foreach_) {
+            $bk = $this->censusForeachBaseKind($n);
+            $tk = ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) ? 'foreach.erased(total)' : 'foreach.typed(total)';
+            $this->censusBytes[$tk] = ($this->censusBytes[$tk] ?? 0) + $len;
+            $this->censusCount[$tk] = ($this->censusCount[$tk] ?? 0) + 1;
+            if ($tk === 'foreach.erased(total)') {
+                $bn = 'fe.erased.base ' . $this->censusForeachBaseNode($n) . ' in ' . $this->frame->name;
+                $this->censusBytes[$bn] = ($this->censusBytes[$bn] ?? 0) + $len;
+                $this->censusCount[$bn] = ($this->censusCount[$bn] ?? 0) + 1;
+            }
+        }
+        if ($self > ($this->censusMax[$key] ?? 0)) { $this->censusMax[$key] = $self; $this->censusMaxFn[$key] = $this->frame->name; }
+        if ($self > 2000) { $this->censusBig[$key] = ($this->censusBig[$key] ?? 0) + $self; }
+        $d = \count($this->censusChild);
+        if ($d > 0) { $this->censusChild[$d - 1] = $this->censusChild[$d - 1] + $len; }
+        return $out;
+    }
+
+    private function censusForeachBaseKind(\Compile\Mir\Foreach_ $f): string { return $f->array->type->kind; }
+    private function censusForeachBaseNode(\Compile\Mir\Foreach_ $f): string
+    {
+        $a = $f->array;
+        $d = $a->kind;
+        if ($a instanceof \Compile\Mir\LoadLocal) { $d .= ':' . $a->name; }
+        if ($a instanceof \Compile\Mir\PropertyAccess_) { $d .= ':' . $a->property; }
+        if ($a instanceof \Compile\Mir\Call) { $d .= ':' . $a->function; }
+        return $d;
+    }
+
+    private function censusCallee(\Compile\Mir\Call $c): string { return $c->function; }
+
+    private function reportIrCensus(int $bodyBytes): void
+    {
+        if (!$this->irCensus) { return; }
+        $bytes = $this->censusBytes;
+        \arsort($bytes);
+        $sum = 0;
+        foreach ($bytes as $b) { $sum = $sum + $b; }
+        \Compile\Stats::line('census: node-attributed ' . (string)$sum . ' of ' . (string)$bodyBytes
+            . ' body bytes (rest = prologues/epilogues/helpers)');
+        $i = 0;
+        foreach ($bytes as $k => $b) {
+            $c = $this->censusCount[$k] ?? 1;
+            \Compile\Stats::line('census: ' . \str_pad((string)$b, 10, ' ', \STR_PAD_LEFT)
+                . ' B ' . \str_pad((string)$c, 8, ' ', \STR_PAD_LEFT) . ' x '
+                . \str_pad((string)\intdiv($b, $c > 0 ? $c : 1), 7, ' ', \STR_PAD_LEFT) . ' B/each  ' . (string)$k
+                . '  | >2KB ' . (string)($this->censusBig[$k] ?? 0)
+                . ' | max ' . (string)($this->censusMax[$k] ?? 0) . ' in ' . ($this->censusMaxFn[$k] ?? ''));
+            $i = $i + 1;
+            if ($i >= 400) { break; }
+        }
     }
 
     /** `$left <op> $right` where the result is a numeric (int|float) cell: box
@@ -3420,11 +3550,34 @@ final class EmitLlvm implements EmitVisitor
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_' . $op
               . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        $out .= $this->dropOperandCell($left, $l);
+        $out .= $this->dropOperandCell($right, $r);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // The helper re-boxes on every path (int cell, float cell, promoted).
         $this->markCellBoxed($reg);
         return $out;
+    }
+
+    /**
+     * The cell an operand became for a runtime helper that only READS it: a
+     * fresh cell producer's +1, or the box an INT was just wrapped in (past the
+     * 48-bit inline form that box is a counted heap block,
+     * {@see \Compile\MemoryAbi::CELL_TAG_BIGINT}), is dead after the read. A
+     * string / object / array boxed by pointer is a borrow and stays.
+     */
+    private function dropOperandCell(Node $n, string $cell): string
+    {
+        if ($this->isFreshCellTemp($n) || $n->type->kind === Type::KIND_INT) {
+            return $this->rcReleaseReg($cell, 'cell');
+        }
+        // An element READ used right here is a one-use temp that may be the
+        // owner-less box the read minted. Only the read itself: a LOCAL may hold a
+        // borrowed box it reads again (a foreach value is a borrow).
+        if ($n->type->kind === Type::KIND_CELL && $n->kind === Node::KIND_ARRAY_ACCESS) {
+            return '  call void @__mir_cell_float_free(i64 ' . $cell . ")\n";
+        }
+        return '';
     }
 
     /**
@@ -3861,16 +4014,17 @@ final class EmitLlvm implements EmitVisitor
      *    no element type we may trust);
      *  - an UNKNOWN element — the erased channel is not self-describing, and
      *    the repr nibble it does carry is stamped only by the stores that erase;
-     *  - a CELL element — `cell` is a static CLAIM, not a runtime guarantee, so
-     *    `__mir_cell_drop` would dispatch on bits that may be a bare address
-     *    (the same refusal the property slot drop makes). EXCEPT on a
-     *    SUPERGLOBAL base (`$cellElemOwned`): its cell is filled by the seeding
-     *    in `prelude/sapi.php` (element stores, each retaining what it boxes),
-     *    by `contextSwitch`'s restore (an element read, co-owned at the cell
-     *    flavor) and by the CLI seed, so every word it holds is a cell the
-     *    buffer owns — or a raw word from a whole-array store, on which
-     *    `__mir_cell_drop` is a no-op. Refusing it left every `$_SERVER[$k] =
-     *    $v` of the per-request merge holding the previous request's value.
+     *
+     * A CELL element drops too. It was refused while `cell` was a static claim
+     * rather than a runtime guarantee; the value channel is verified since
+     * (W4), every cell store retains what it boxes, and the buffer's own
+     * release already drops every element it holds — so refusing the
+     * overwrite only stranded the displaced value: `$this->__data[$i] = $v`
+     * in SplFixedArray::offsetSet kept every token php-cs-fixer replaced. The
+     * word is decoded by the buffer's hint first ({@see elemSlotReleaseIr}),
+     * so a raw word in a raw-hinted buffer is never read as a cell.
+     * (`$cellElemOwned` — a superglobal base — predates this and is kept for
+     * its callers.)
      */
     private function elemSlotDropFlavor(Type $arrType, bool $cellElemOwned = false): string
     {
@@ -3880,7 +4034,7 @@ final class EmitLlvm implements EmitVisitor
         if ($el === null) { return ''; }
         $k = $el->kind;
         if ($k === Type::KIND_UNKNOWN) { return ''; }
-        if ($k === Type::KIND_CELL) { return $cellElemOwned ? 'cell' : ''; }
+        if ($k === Type::KIND_CELL) { return 'cell'; }
         // A closure slot drops through the buffer's own ownership record
         // (`__mir_array_clo_drop`, {@see \Compile\MemoryAbi::ARRAY_REPR_CLO}):
         // the static type cannot say whether this buffer counted its closure
@@ -4178,9 +4332,7 @@ final class EmitLlvm implements EmitVisitor
         // silently skipped the retain that `mymerge` emitted — every element of a
         // merged array was freed while the result still pointed at it
         // (`is_array($r[0])` true, `count($r[0])` 0, every symfony Table cell
-        // blank). Retaining by tag is safe in the erased case: the helper
-        // dispatches on the tag and no-ops on a raw / non-pointer payload, so it
-        // can only ever under-retain, never over-retain.
+        // blank).
         if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
             // `__mir_to_cell($x)` is pure BOXING ({@see EmitLlvmBuiltins::biToCell}
             // = emit the arg, then boxToCell), so ownership follows its ARGUMENT.
@@ -4615,7 +4767,35 @@ final class EmitLlvm implements EmitVisitor
      * lastValue ← the vec ptr as i64. Shared by the backtrace builtin and the
      * Throwable trace capture.
      */
+    /**
+     * The active frames of `$global` (`@__mir_bt_name` / `@__mir_bt_line`) as a
+     * fresh packed vec, innermost first — ONE body per global, called: the copy
+     * loop used to be inlined twice at every Throwable construction.
+     */
     private function emitBtVec(string $global): string
+    {
+        $key = '__mc_btvec_' . \ltrim($global, '@');
+        $sym = '@manticore_' . $key;
+        if (!isset($this->propertyReadHelpers[$key])) {
+            $oldSsa = $this->ssa;
+            $oldLast = $this->lastValue;
+            $oldLastType = $this->lastValueType;
+            $this->ssa = new \Compile\Mir\SsaBuilder();
+            $this->ssa->reset();
+            $body = $this->btVecLoopIr($global);
+            $this->propertyReadHelpers[$key] = 'define linkonce_odr i64 ' . $sym . "() {\nentry:\n"
+                . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+            $this->ssa = $oldSsa;
+            $this->lastValue = $oldLast;
+            $this->lastValueType = $oldLastType;
+        }
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $r . ' = call i64 ' . $sym . "()\n";
+    }
+
+    private function btVecLoopIr(string $global): string
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
@@ -4686,6 +4866,13 @@ final class EmitLlvm implements EmitVisitor
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
             return $this->arrayElemAddressable($a);
+        }
+        // A static property is an external-linkage global, and
+        // {@see EmitLlvmLocals::byRefAddrOf} hands its address over. Not listed
+        // here, `uksort(self::$defs, …)` rode the throwaway-slot path: the sort
+        // landed in a temporary and the property kept its old order.
+        if ($a->kind === Node::KIND_STATIC_PROP) {
+            return true;
         }
         return false;
     }
@@ -4891,9 +5078,11 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
-     * FNV-1a 64-bit over the bytes — MUST match __mir_array_hash_str exactly
-     * (offset basis 0xCBF29CE484222325, prime 0x100000001B3, wrapping mul over
-     * the len bytes). PHP's `*` overflows to float, so the multiply goes through
+     * The string hash — MUST match __mir_array_hash_str and __mc_refl_hash
+     * exactly: FNV-1a (basis 0xCBF29CE484222325, prime 0x100000001B3) over
+     * little-endian 8-byte words, then the tail bytes, then murmur's fmix64.
+     * Byte-at-a-time FNV made every fresh multi-KB key (a php-cs-fixer regex,
+     * rebuilt per call) cost a multiply per byte. PHP's `*` overflows to float, so the multiply goes through
      * {@see mulmod64} (16-bit limb schoolbook) — exact under BOTH the Zend
      * bootstrap and the native self-build, which native i64 `mul` would also give.
      */
@@ -4901,10 +5090,24 @@ final class EmitLlvm implements EmitVisitor
     {
         $h = -3750763034362895579; // 0xCBF29CE484222325 as signed i64
         $n = \strlen($s);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $h = $h ^ \ord($s[$i]);
-            $h = $this->mulmod64($h, 1099511628211);
+        $i = 0;
+        // Eight bytes a step, little-endian — the runtime loads an unaligned i64.
+        while ($i + 8 <= $n) {
+            $w = 0;
+            for ($k = 7; $k >= 0; $k = $k - 1) { $w = ($w << 8) | \ord($s[$i + $k]); }
+            $h = $this->mulmod64($h ^ $w, 1099511628211);
+            $i = $i + 8;
         }
+        for (; $i < $n; $i = $i + 1) {
+            $h = $this->mulmod64($h ^ \ord($s[$i]), 1099511628211);
+        }
+        // fmix64: a word step leaves the LOW bits — the bucket index — blind to
+        // a word's upper bytes, so everything is folded down before use.
+        $h = $h ^ (($h >> 33) & 0x7FFFFFFF);
+        $h = $this->mulmod64($h, -49064778989728563);
+        $h = $h ^ (($h >> 33) & 0x7FFFFFFF);
+        $h = $this->mulmod64($h, -4265267296055464877);
+        $h = $h ^ (($h >> 33) & 0x7FFFFFFF);
         return $h;
     }
 

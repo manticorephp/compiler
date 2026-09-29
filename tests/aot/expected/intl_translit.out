@@ -1,0 +1,22 @@
+string(29) "Any-Latin;Latin-ASCII;Lower()"
+string(49) "privit, svite! ellenika ri ben yu strasse unicode"
+Kiiv - Harkiv
+Кыив Кхаркив
+string(13) "RulesTransPHP"
+string(6) "bbdbbd"
+string(6) "abdbbc"
+string(11) "Greek-Latin"
+string(7) "Elláda"
+bool(true)
+bool(true)
+NULL
+int(65569)
+string(97) "Transliterator::create(): unable to open ICU transliterator with id "No-Such-Thing": U_INVALID_ID"
+NULL
+string(165) "transliterator_create_from_rules(): unable to create ICU transliterator from rules (parse error at offset 8, after "a > ;;; ", before or at "(("): U_MISSING_OPERATOR"
+bool(false)
+int(1)
+string(159) "Transliterator::transliterate(): Neither "start" nor the "end" arguments can exceed the number of UTF-16 code units (in this case, 3): U_ILLEGAL_ARGUMENT_ERROR"
+Transliterator::transliterate(): Argument #2 ($start) must be greater than or equal to 0
+Transliterator::transliterate(): Argument #2 ($start) must be less than or equal to argument #3 ($end)
+Transliterator::create(): Argument #2 ($direction) must be either Transliterator::FORWARD or Transliterator::REVERSE

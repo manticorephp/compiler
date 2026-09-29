@@ -1,0 +1,27 @@
+int(5)
+string(3) "set"
+string(3) "own"
+array(2) {
+  [0]=>
+  string(1) "c"
+  [1]=>
+  string(1) "p"
+}
+int(5)
+string(3) "set"
+array(2) {
+  [0]=>
+  string(1) "c"
+  [1]=>
+  string(1) "p"
+}
+ctor 5
+ctor 7
+int(2)
+int(7)
+int(1)
+string(5) "trait"
+string(3) "own"
+array(0) {
+}
+int(1)

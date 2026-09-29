@@ -185,6 +185,7 @@ final class LowerFromAst implements Pass
     /** Cached trailing segments for repeatedly lowered names. */
     private array $bareNameCache = [];
     private ?bool $hasNamespacedGetenvCache = null;
+    private int $hasNamespacedGetenvAt = -1;
     /** @var array<string, array<int, \Parser\Ast\Param>|null> */
     private array $methodParamsCache = [];
     /** @var array<string, string> */
@@ -298,10 +299,21 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /** BY-REF parameter names of the body being lowered: such a name is already
+     *  defined — it IS the caller's variable — so a `#[RefOut]` argument init
+     *  must not overwrite it ({@see collectRefOutInits}).
+     *  @var array<string, bool> */
+    private array $currentRefParamNames = [];
+
 
     /** The program calls `function_exists()` with a NON-literal argument, so it
      *  needs the runtime name table rather than the compile-time fold. */
     private bool $sawDynFnExists = false;
+    /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
+    private bool $sawGetDefinedFns = false;
+    /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
+     *  get_defined_functions()['user']. */
+    private array $userFnNames = [];
 
     /** The body being lowered called one of the func-args family, so it needs
      *  the argument-count prologue. Saved/restored around every nested body the
@@ -459,6 +471,8 @@ final class LowerFromAst implements Pass
     /** ext/openssl, the certificate-reading half — DEMAND-GATED. Pure DER, no
      *  libcrypto; carries OpenSSLAsymmetricKey, so closed-world analysis wants it. */
     public string $opensslSrc = '';
+    /** ext/intl over the host ICU (prelude/intl.php) — DEMAND-GATED; links libicu. */
+    public string $intlSrc = '';
     /** WeakMap + WeakReference (prelude/weak.php) — DEMAND-GATED on either
      *  name. Global namespace; implements spl_arrays.php's interfaces. */
     public string $weakSrc = '';
@@ -593,6 +607,10 @@ final class LowerFromAst implements Pass
      */
     public array $externClassDecls = [];
 
+    /** @var array<string, bool> classes the RUNTIME library (stdlib) exports —
+     *  php's own classes as far as reflection is concerned. */
+    public array $runtimeClassNames = [];
+
     /** @var array<string, \Compile\Mir\ExternClassMeta> FQN → what the
      *  declaration alone cannot rebuild. */
     public array $externClassMeta = [];
@@ -684,6 +702,7 @@ final class LowerFromAst implements Pass
         $this->methodReturnClassCache = [];
         $this->bareNameCache = [];
         $this->hasNamespacedGetenvCache = null;
+        $this->hasNamespacedGetenvAt = -1;
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
         $this->variadicMethodParamsCache = [];
@@ -842,6 +861,9 @@ final class LowerFromAst implements Pass
                     $this->classDecls[$iname] = $cdecl;
                     $this->knownClassNames[$iname] = true;
                     $module->interfaceNames[\ltrim($iname, '\\')] = true;
+                    if ($sIdx < $preludeCount || $this->exportRuntimeTypes) {
+                        $module->internalInterfaceNames[\ltrim($iname, '\\')] = true;
+                    }
                     $ibs = \strrpos($iname, '\\');
                     if ($ibs !== false && $ibs >= 0) {
                         $ishort = \substr($iname, $ibs + 1, \strlen($iname) - $ibs - 1);
@@ -956,6 +978,8 @@ final class LowerFromAst implements Pass
                 if ($dkind !== 'class') { continue; }
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $cd->isPreludeClass = $this->inPreludeClass;
+                $cd->isInternal = $this->inPreludeClass || $this->exportRuntimeTypes
+                    || isset($this->runtimeClassNames[\ltrim($cd->name, '\\')]);
                 if (isset($this->externClassMeta[$cd->name])) {
                     $this->applyExternMeta($cd, $this->externClassMeta[$cd->name]);
                 }
@@ -1003,6 +1027,7 @@ final class LowerFromAst implements Pass
                 methodNames: [],
                 hasBag: true,
             );
+            $std->isInternal = true;
             $this->classTable['stdClass'] = $std;
             $this->knownClassNames['stdClass'] = true;
             $module->addClass($std);
@@ -1031,17 +1056,15 @@ final class LowerFromAst implements Pass
         // The shared @__manticore_tagged_to_str cannot do this itself: it is one
         // external body in the central core and knows no user class, so the
         // emitter branches on the object tag at the CALL SITE and lands here.
-        if ($this->anyToStringClass()) {
-            $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
-            foreach ($tsProg->statements as $tstmt) {
-                if ($tstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
-                $tfn = $this->lowerFunction($tstmt->decl);
-                $tfn->isPrelude = true;
-                $module->addFunction($tfn);
-            }
-            $module->hasObjToStr = true;
+        $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
+        foreach ($tsProg->statements as $tstmt) {
+            if ($tstmt->kind !== 'Function') { continue; }
+            $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+            $tfn = $this->lowerFunction($tstmt->decl);
+            $tfn->isPrelude = true;
+            $module->addFunction($tfn);
         }
+        $module->hasObjToStr = true;
 
         // var_export()'s object arm — same point and pattern as
         // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
@@ -1288,6 +1311,12 @@ final class LowerFromAst implements Pass
                 if ($measureLower) { $lowerFnNs += \Compile\Stats::now() - $lowerStart; }
                 $lowerFnCount = $lowerFnCount + 1;
                 if ($isPrelude) { $fn->isPrelude = true; }
+                elseif (!$this->exportRuntimeTypes) {
+                    $un = \ltrim($stmt->decl->name, '\\');
+                    if (\strncmp($un, '__mc_', 5) !== 0 && \strncmp($un, '__mir_', 6) !== 0) {
+                        $this->userFnNames[\strtolower($un)] = true;
+                    }
+                }
                 $module->addFunction($fn);
                 continue;
             }
@@ -1334,6 +1363,9 @@ final class LowerFromAst implements Pass
             $this->currentLowerClass = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
+            // …nor parameters: a preceding function's by-ref names would
+            // suppress a top-level out-argument's init.
+            $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $mainStmts[] = $this->lowerStmt($stmt);
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
@@ -1420,6 +1452,14 @@ final class LowerFromAst implements Pass
         }
         if ($this->sawDynFnExists) {
             $module->knownFnNames = $this->collectKnownFnNames();
+        }
+        if ($this->sawGetDefinedFns) {
+            $dfProg = \Parser\Parser::parseSource("<?php\n" . $this->definedFunctionsSource());
+            foreach ($dfProg->statements as $dfs) {
+                if ($dfs->kind !== 'Function') { continue; }
+                $this->fnDecls[$dfs->decl->name] = $dfs->decl;
+                $module->addFunction($this->lowerFunction($dfs->decl));
+            }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
@@ -1573,7 +1613,7 @@ final class LowerFromAst implements Pass
      * Drop method-body AST nodes after their ordinary lowering owner is done.
      * Generic origins and methods queued for late-static specialisation retain
      * their bodies because a later lowering pass still needs them. Constructors
-     * also remain available to inheritedCtorDecl() for descendant setup.
+     * are kept as well.
      */
     /** Drop class-local AST metadata after its class body has been lowered. */
     private function releaseLoweredClassMetadata(\Parser\Ast\ClassDecl $decl): void
@@ -1713,6 +1753,29 @@ final class LowerFromAst implements Pass
             $out[] = $n;
         }
         return $out;
+    }
+
+    /**
+     * `get_defined_functions()` as a function returning a LITERAL: the set of
+     * functions is closed at compile time. `internal` is every name php itself
+     * would provide that this build knows ({@see collectKnownFnNames} — the
+     * builtins, the stdlib, the prelude), `user` the program's own, lowercased
+     * as php reports them. php-cs-fixer's NativeFunctionCasingFixer reads it.
+     */
+    private function definedFunctionsSource(): string
+    {
+        $internal = [];
+        foreach ($this->collectKnownFnNames() as $fname) {
+            $lc = \strtolower($fname);
+            if (isset($this->userFnNames[$lc])) { continue; }
+            $internal[$lc] = true;
+        }
+        $iq = [];
+        foreach ($internal as $lc => $_) { $iq[] = var_export((string)$lc, true); }
+        $uq = [];
+        foreach ($this->userFnNames as $lc => $_) { $uq[] = var_export((string)$lc, true); }
+        return "/** @return array<string, string[]> */\nfunction __mc_defined_functions(): array\n{\n"
+            . "    return ['internal' => [" . \implode(', ', $iq) . "], 'user' => [" . \implode(', ', $uq) . "]];\n}\n";
     }
 
     /** Trailing segment of a possibly-namespaced name. */
@@ -2452,8 +2515,10 @@ final class LowerFromAst implements Pass
         }
         $stmts = [];
         if ($m->name === '__construct') {
-            // Property defaults run first, then promoted-param stores.
-            foreach ($defaultStores as $ds) { $stmts[] = $ds; }
+            // Promoted-param stores first. The property defaults are NOT here: they
+            // run once, at allocation (`C____mc_defaults`), so a second
+            // `__construct()` call or a `parent::__construct()` after the child
+            // assigned a parent property does not reset it.
             foreach ($m->params as $p) {
                 if ($p->promoted !== '') {
                     $stmts[] = new StoreProperty(
@@ -3029,6 +3094,7 @@ final class LowerFromAst implements Pass
         // enclosing function. Restored after, because the enclosing body keeps
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
+        $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         $this->setCurrentLowerParams($expr->params);
@@ -3041,6 +3107,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
             (bool)($expr->returnsByRef ?? false), $clUsesFa);
     }
@@ -3060,6 +3127,7 @@ final class LowerFromAst implements Pass
         }
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
+        $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         // A yield in the body makes it a GENERATOR, exactly as in a closure:
@@ -3079,6 +3147,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
             (bool)($expr->returnsByRef ?? false), $afUsesFa);
@@ -4260,8 +4329,10 @@ final class LowerFromAst implements Pass
     {
         $this->currentLowerParams = [];
         $this->currentLowerParamHints = [];
+        $this->currentRefParamNames = [];
         foreach ($params as $p) {
             $this->currentLowerParams[] = $p->name;
+            if ($p->byRef) { $this->currentRefParamNames[$p->name] = true; }
             // The hint travels WITH the name: func_get_args() boxes each
             // parameter into a cell array, and a load typed `unknown` puts the
             // raw word in the slot — an int then renders as the float its bits
@@ -4811,15 +4882,16 @@ final class LowerFromAst implements Pass
 
     /**
      * The extensions a compiled binary genuinely carries. `pcre` is linked
-     * (pcre2), `json` / `ctype` are built in, `openssl` rides the TLS stack.
-     * Everything else — mbstring, intl, pcntl, dom — is absent, and a program
-     * that asks gets the honest answer rather than a link-time surprise.
+     * (pcre2), `json` / `ctype` / `mbstring` are built in, `openssl` rides the TLS
+     * stack, `intl` links ICU on use. Everything else — pcntl, dom — is absent,
+     * and a program that asks gets the honest answer rather than a link-time
+     * surprise.
      */
     private function extensionIsBuiltIn(string $ext): bool
     {
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
-            || $ext === 'tokenizer';
+            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),
@@ -4989,6 +5061,12 @@ final class LowerFromAst implements Pass
             if (!isset($names[$this->paramName($p)]) && !$this->paramRefOut($p)
                 && !$this->paramHasRefOutAttr($p)) { continue; }
             if ($a->kind !== 'Variable') { continue; }
+            // A BY-REF parameter of this body is the caller's variable, already
+            // defined: the init would store `[]` THROUGH the reference, over a
+            // value the caller owns, with nothing to give it back — php-cs-fixer's
+            // Preg::match($re, $s, $matches) leaked the previous matches array
+            // on every call that reused the variable.
+            if (isset($this->currentRefParamNames[$this->variableName($a)])) { continue; }
             // The same variable READ by another argument is live at the call:
             // `preg_match_all($re, $s, $s)` passes `$s` as the subject first, and
             // an init stored ahead of the call replaced that subject with `[]`.
@@ -5111,7 +5189,11 @@ final class LowerFromAst implements Pass
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         $bare = $this->bareName($fnName);
         $isPreg = $bare === 'preg_match' || $bare === 'preg_match_all';
+        // Not through a BY-REF parameter of this body ({@see collectRefOutInits}):
+        // `Preg::match(…, &$matches)` stored `[]` over the caller's previous
+        // matches with nothing to give them back — the whole array, per call.
         if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable'
+                && !isset($this->currentRefParamNames[$this->variableName($astArgs[2])])
                 && !$this->varReadByOtherArg($this->variableName($astArgs[2]), $astArgs, 2)) {
             $name = $this->variableName($astArgs[2]);
             $init = new StoreLocal($name, new ArrayLit([], Type::vec(Type::cell())), Type::vec(Type::cell()));

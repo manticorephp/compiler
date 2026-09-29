@@ -513,33 +513,7 @@ trait LowerClasses
                 $methodMeta[$mn] = $mm;
             }
         }
-        // A class with defaulted properties but no user ctor gets a
-        // synthesised one (see lowerClassMethods) — flag it so NewObj
-        // calls it.
-        $userCtor = isset($methodNames['__construct']);
-        foreach ($decl->properties as $prop) {
-            if ($prop->isStatic) { continue; }
-            if ($prop->default !== null) { $methodNames['__construct'] = true; break; }
-        }
-        // A defaulted trait property also needs the synthesised ctor to run.
-        if (!isset($methodNames['__construct'])) {
-            foreach ($this->usedTraitsFlat($decl) as $traitName) {
-                $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
-                if ($td === null) { continue; }
-                foreach ($td->properties as $tprop) {
-                    if ($this->traitPropHasDefault($tprop)) { $methodNames['__construct'] = true; break; }
-                }
-            }
-        }
-        // The synthesised ctor IS the inherited one's body run as this class,
-        // so for late static binding it forwards like `parent::__construct()`:
-        // counted as an override, it withheld the ancestor's `__lsb<this>` copy
-        // and `static::class` in AbstractFixer's ctor named AbstractFixer
-        // (php-cs-fixer's configurable proxy fixers, whose trait defaults a
-        // property, all registered as "abstract").
-        if (!$userCtor && isset($methodNames['__construct'])) {
-            $this->forwardsToParent[$decl->name . '::__construct'] = true;
-        }
+
         // The TRANSITIVE closure, not just the `implements` line: an interface
         // may extend others (`WrappableOutputFormatterInterface extends
         // OutputFormatterInterface`), and the ClassDef list is what
@@ -1166,7 +1140,6 @@ trait LowerClasses
                 $src->lazyBody === null ? null : clone $src->lazyBody,
             );
         }
-        $sawCtor = false;
         $isTypeDefDecl = $this->isTypeDef($decl->name);
         foreach ($methods as $m) {
             $this->materializeMethodBody($m);
@@ -1176,7 +1149,6 @@ trait LowerClasses
             // needs it — `new` lowers to the normaliser (`__invoke`) or, for the bare
             // promoted-property shape, to the argument itself.
             if ($isTypeDefDecl && $m->name === '__construct') { continue; }
-            if ($m->name === '__construct') { $sawCtor = true; }
             // Normal copy: late-static scope == the lexical class.
             $mfn = $this->lowerMethodFn(
                 $decl, $m, $cd, $defaultStores,
@@ -1218,24 +1190,14 @@ trait LowerClasses
                 ),
             ));
         }
-        // php's `unserialize` creates the object with the class's DEFAULT
-        // property table and then overwrites from the stream — it skips the
-        // constructor BODY, not the defaults. So a property the stream omits
-        // keeps its declared default (`public int $ignored = 5` reads 5, not 0).
-        //
-        // Here the defaults are ordinary stores, prepended to the ctor (or the
-        // whole synthesised one), so a bare NewObj cannot run them without also
-        // running the user's body. Emit them ONCE MORE as their own function,
-        // which `__mc_new_uninit` calls. The nodes are cloned: the originals go
-        // on being the ctor's prologue, and a shared subtree would be lowered
-        // twice under two frames. Gated on the program actually unserialising —
-        // nothing else needs the defaults without the ctor.
-        // …and REFLECTION needs the same thing for the same reason:
-        // `newInstanceWithoutConstructor()` is php's other door to an object
-        // whose constructor never ran, and php applies the declared defaults
-        // there too. Gated on either, so a program that only reflects still
-        // gets `private string $title = 'unset'` instead of NULL.
-        if (($this->includeUnserialize || $this->includeReflection) && $defaultStores !== []) {
+        // The declared property defaults (own, inherited, mixed-in) as their own
+        // function, which every allocation runs before any constructor — php
+        // builds the object from the class's default property table. Not the
+        // ctor's prologue: `parent::__construct()` after the child assigned a
+        // parent property reset it, and so did a second `__construct()` call.
+        // unserialize and newInstanceWithoutConstructor() skip the constructor
+        // body but not the defaults, and get them the same way.
+        if ($defaultStores !== []) {
             $copies = [];
             foreach ($defaultStores as $ds) { $copies[] = \Compile\Mir\NodeClone::node($ds); }
             $module->addFunction(new FunctionDef(
@@ -1250,81 +1212,6 @@ trait LowerClasses
                 body: new Block($copies, Type::void()),
             ));
         }
-        // No user ctor but defaulted properties → the defaults still have to run
-        // at instantiation, so a ctor is synthesised for them.
-        if (!$sawCtor && $defaultStores !== []) {
-            // If an ANCESTOR declares a real constructor, a nullary
-            // `Class____construct($this)` would SHADOW it: `new Leaf(9)` resolved
-            // the subclass symbol, dropped the argument and never ran the parent
-            // body, so every parent-initialised field read back as 0. Re-lower the
-            // inherited constructor under this class instead — same shape as the
-            // late-static-binding specialisations — with this class's defaults
-            // prepended, which is exactly php's order (defaults, then ctor body).
-            $inherited = $this->inheritedCtorDecl($decl);
-            if ($inherited !== null) {
-                $owner = $this->inheritedCtorOwner($decl);
-                $module->addFunction($this->lowerMethodFn(
-                    $decl, $inherited, $cd, $defaultStores,
-                    $decl->name, $decl->name . '____construct', $owner,
-                ));
-                $module->methodDisplay[$decl->name . '____construct'] =
-                    $decl->name . '->__construct';
-                if ($this->sawStaticUse) {
-                    $this->lsbPending[] = new LsbPending($decl, $inherited, $cd, $defaultStores, $owner);
-                }
-                return;
-            }
-            $module->addFunction(new FunctionDef(
-                name: $decl->name . '____construct',
-                params: [new Param(
-                    name: 'this',
-                    type: Type::obj($decl->name),
-                    byRef: false,
-                    variadic: false,
-                )],
-                returnType: Type::void(),
-                body: new Block($defaultStores, Type::void()),
-            ));
-        }
-    }
-
-    /**
-     * The nearest ancestor's `__construct` declaration, or null when no ancestor
-     * declares one with a body. Guarded against a cyclic `extends`.
-     */
-    private function inheritedCtorDecl(\Parser\Ast\ClassDecl $decl): ?\Parser\Ast\MethodDecl
-    {
-        $pname = $decl->extends !== [] ? \ltrim($decl->extends[0], '\\') : '';
-        $guard = 0;
-        while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
-            $pdecl = $this->classDecls[$pname];
-            foreach ($this->classDeclMethods($pdecl) as $m) {
-                if ($this->methodDeclName($m) !== '__construct') { continue; }
-                if ($this->methodDeclBody($m) === null) { continue; }
-                return $m;
-            }
-            $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
-            $guard = $guard + 1;
-        }
-        return null;
-    }
-
-    /** The class that declares the constructor {@see inheritedCtorDecl} finds. */
-    private function inheritedCtorOwner(\Parser\Ast\ClassDecl $decl): string
-    {
-        $pname = $decl->extends !== [] ? \ltrim($decl->extends[0], '\\') : '';
-        $guard = 0;
-        while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
-            $pdecl = $this->classDecls[$pname];
-            foreach ($this->classDeclMethods($pdecl) as $m) {
-                if ($this->methodDeclName($m) !== '__construct') { continue; }
-                if ($this->methodDeclBody($m) === null) { continue; }
-                return $pname;
-            }
-            $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
-            $guard = $guard + 1;
-        }
-        return '';
     }
 
     /** Typed read of a method's body (T5). */

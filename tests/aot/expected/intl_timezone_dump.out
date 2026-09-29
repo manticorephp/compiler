@@ -1,0 +1,30 @@
+object(IntlTimeZone)#1 (4) {
+  ["valid"]=>
+  bool(true)
+  ["id"]=>
+  string(12) "Asia/Kolkata"
+  ["rawOffset"]=>
+  int(19800000)
+  ["currentOffset"]=>
+  int(19800000)
+}
+object(IntlTimeZone)#1 (4) {
+  ["valid"]=>
+  bool(true)
+  ["id"]=>
+  string(9) "GMT-05:30"
+  ["rawOffset"]=>
+  int(-19800000)
+  ["currentOffset"]=>
+  int(-19800000)
+}
+object(IntlTimeZone)#1 (4) {
+  ["valid"]=>
+  bool(true)
+  ["id"]=>
+  string(3) "GMT"
+  ["rawOffset"]=>
+  int(0)
+  ["currentOffset"]=>
+  int(0)
+}

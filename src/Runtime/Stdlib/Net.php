@@ -658,7 +658,7 @@ function __mc_tls_drive_connect(\Resource $sock, int $ssl, float $timeout = 0.0)
     // an SSL error, so the old loop parked forever — a trivial way to wedge a
     // client. 0.0 = no explicit timeout → the same 60 s default_socket_timeout
     // floor the connect and read paths use.
-    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $deadline = \__mc_monotonic_f() + ($timeout > 0.0 ? $timeout : 60.0);
     $rf = \Runtime\AsyncHook::readableFor();
     $wf = \Runtime\AsyncHook::writableFor();
     while ($rc !== 1) {
@@ -666,7 +666,7 @@ function __mc_tls_drive_connect(\Resource $sock, int $ssl, float $timeout = 0.0)
         if ($err !== 2 && $err !== 3) {
             return $rc;   // a real handshake failure (bad chain, wrong host, reset)
         }
-        $left = $deadline - \__mc_microtime_f();
+        $left = $deadline - \__mc_monotonic_f();
         if ($left <= 0.0) {
             \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
             return -1;
@@ -928,7 +928,7 @@ function __mc_tls_drive_accept(\Resource $sock, int $ssl, float $timeout = 0.0):
     if ($rc === 1 || !\Runtime\AsyncHook::active()) {
         return $rc;
     }
-    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $deadline = \__mc_monotonic_f() + ($timeout > 0.0 ? $timeout : 60.0);
     $rf = \Runtime\AsyncHook::readableFor();
     $wf = \Runtime\AsyncHook::writableFor();
     while ($rc !== 1) {
@@ -936,7 +936,7 @@ function __mc_tls_drive_accept(\Resource $sock, int $ssl, float $timeout = 0.0):
         if ($err !== 2 && $err !== 3) {
             return $rc;   // a real handshake failure (no cert, bad client, reset)
         }
-        $left = $deadline - \__mc_microtime_f();
+        $left = $deadline - \__mc_monotonic_f();
         if ($left <= 0.0) {
             \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
             return -1;
@@ -1418,7 +1418,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null,
         // not even trip the watchdog (it suspends every iteration); it shows only as
         // an exploding `wakes` counter, while every sibling task starves.
         $deadline = ($timeout !== null && $timeout >= 0.0)
-            ? \__mc_microtime_f() + $timeout : -1.0;
+            ? \__mc_monotonic_f() + $timeout : -1.0;
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
         $backoff = 0.0;
         $fast = 0;
@@ -1440,7 +1440,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null,
                 \__mc_net_errno(true, $e);
                 $backoff = \__mc_accept_backoff($backoff);
                 if ($deadline >= 0.0) {
-                    $left = $deadline - \__mc_microtime_f();
+                    $left = $deadline - \__mc_monotonic_f();
                     if ($left <= 0.0) { return false; }
                     if ($backoff > $left) { $backoff = $left; }
                 }
@@ -1450,7 +1450,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null,
                 continue;
             }
             if ($deadline >= 0.0) {
-                $left = $deadline - \__mc_microtime_f();
+                $left = $deadline - \__mc_monotonic_f();
                 if ($left <= 0.0) { return false; }
                 $hf = \Runtime\AsyncHook::readableFor();
                 // `=== true`: the hook is an untyped slot, so its result arrives as
@@ -1922,7 +1922,7 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
     if ($rc !== 0 || $timeoutMs === 0) {
         return $rc;
     }
-    $deadline = $timeoutMs < 0 ? -1.0 : \__mc_microtime_f() + (float)$timeoutMs / 1000.0;
+    $deadline = $timeoutMs < 0 ? -1.0 : \__mc_monotonic_f() + (float)$timeoutMs / 1000.0;
     if (!\Runtime\AsyncHook::selectReady()) {
         return \__mc_select_poll_park($pfds, $count, $deadline);
     }
@@ -1942,7 +1942,7 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
         }
         $left = -1.0;
         if ($deadline >= 0.0) {
-            $left = $deadline - \__mc_microtime_f();
+            $left = $deadline - \__mc_monotonic_f();
             if ($left <= 0.0) { $done(); return 0; }
         }
         $wait($left);
@@ -1951,7 +1951,7 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
         if ($rc !== 0) {
             return $rc;   // ready fds, or a poll error for the caller to report
         }
-        if ($deadline >= 0.0 && $deadline - \__mc_microtime_f() <= 0.0) {
+        if ($deadline >= 0.0 && $deadline - \__mc_monotonic_f() <= 0.0) {
             return 0;
         }
         // A wake with nothing ready is a HINT, not an answer (level-triggered, and
@@ -1975,7 +1975,7 @@ function __mc_select_poll_park(\Ffi\Ptr $pfds, int $count, float $deadline): int
             return $rc;
         }
         if ($deadline >= 0.0) {
-            $left = $deadline - \__mc_microtime_f();
+            $left = $deadline - \__mc_monotonic_f();
             if ($left <= 0.0) {
                 return 0;
             }

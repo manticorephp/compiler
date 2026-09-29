@@ -613,7 +613,7 @@ function __mc_stream_recv_into(\Resource $s, \Ffi\Ptr $buf, int $want): int
     // false. __mc_wait_read above already honours the deadline; this loop must not
     // then hand it away.
     if ($got <= 0 && $s->kind === \Resource::KIND_TLS && \Runtime\AsyncHook::active()) {
-        $deadline = \__mc_microtime_f()
+        $deadline = \__mc_monotonic_f()
             + ($s->rtimeoutMs > 0 ? (float)$s->rtimeoutMs : 60000.0) / 1000.0;
         $rf = \Runtime\AsyncHook::readableFor();
         $wf = \Runtime\AsyncHook::writableFor();
@@ -622,7 +622,7 @@ function __mc_stream_recv_into(\Resource $s, \Ffi\Ptr $buf, int $want): int
             if ($err !== 2 && $err !== 3) {
                 break;   // clean shutdown (SSL_ERROR_ZERO_RETURN) or a hard error
             }
-            $left = $deadline - \__mc_microtime_f();
+            $left = $deadline - \__mc_monotonic_f();
             if ($left <= 0.0) {
                 $s->timedOut = true;
                 break;
