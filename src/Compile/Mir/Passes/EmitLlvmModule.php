@@ -1029,7 +1029,7 @@ trait EmitLlvmModule
         // miscompile and external linkage duplicate-symbols at link. `internal`
         // (like closures) keeps each module's copy private; the counter makes the
         // name unique within the module, and Sig never exports it.
-        if (\str_starts_with($fn->name, '__mc_fuse_')) { $linkage = 'internal '; }
+        if (\str_starts_with($fn->name, '__mc_fuse_') || $fn->moduleLocal) { $linkage = 'internal '; }
         if ($isClosure) {
             $paramSig = 'ptr %env';
             $optIdx = $this->closureOptionalParams($fn, $capCnt);
