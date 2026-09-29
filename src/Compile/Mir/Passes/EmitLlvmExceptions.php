@@ -202,6 +202,76 @@ trait EmitLlvmExceptions
              . '  store i64 ' . $b . ", ptr @__mir_bt_depth\n";
     }
 
+    /**
+     * Open a try region's arena landing: a throw skips the `arena_leave` of
+     * every frame it unwinds and the exit restore of every resetting loop it
+     * leaves, and whatever those would have reclaimed piles up once per throw
+     * when no enclosing loop resets. The landing ({@see arenaTryLandingIr})
+     * pops the skipped frames' marks back to the depth sampled at try entry,
+     * and rewinds to the landing mark a resetting loop in the region armed
+     * ({@see EmitLlvm::arenaArmTryMark}). The reg to hold that depth, or '' in
+     * a generator: a yield hands the mark stack to the consumer between try
+     * entry and landing, so the sampled depth would not be this frame's.
+     */
+    private function arenaTryEnter(): string
+    {
+        if ($this->gen->inGenerator) { return ''; }
+        $this->rt->needsArena = true;
+        $this->arena->tryMarkCur[] = $this->ssa->allocReg();
+        $this->arena->tryMarkUsed[] = $this->ssa->allocReg();
+        $this->arena->tryMarkArmed[] = 0;
+        $this->arena->tryMarkOpen[] = 0;
+        return $this->ssa->allocReg();
+    }
+
+    /** The landing's arena reclaim, for the innermost open region. */
+    private function arenaTryLandingIr(string $spReg): string
+    {
+        if ($spReg === '') { return ''; }
+        $out = '  call void @__mir_arena_unwind(i64 ' . $spReg . ")\n";
+        $k = \count($this->arena->tryMarkCur) - 1;
+        if ($this->arena->tryMarkArmed[$k] === 0) { return $out; }
+        $mp = $this->arena->tryMarkUsed[$k];
+        $u = $this->ssa->allocReg();
+        $on = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $rl = $this->ssa->allocLabel('try_arena');
+        $jl = $this->ssa->allocLabel('try_arena_done');
+        $out .= '  ' . $u . ' = load i64, ptr ' . $mp . "\n";
+        $out .= '  ' . $on . ' = icmp sge i64 ' . $u . ", 0\n";
+        $out .= '  br i1 ' . $on . ', label %' . $rl . ', label %' . $jl . "\n";
+        $out .= $rl . ":\n";
+        $out .= '  ' . $c . ' = load ptr, ptr ' . $this->arena->tryMarkCur[$k] . "\n";
+        $out .= '  call void @__mir_arena_restore(ptr ' . $c . ', i64 ' . $u . ")\n";
+        $out .= '  store i64 -1, ptr ' . $mp . "\n";
+        $out .= '  br label %' . $jl . "\n";
+        $out .= $jl . ":\n";
+        return $out;
+    }
+
+    /** Close the innermost region's arena landing; the mark's allocas and
+     *  initial disarm when a loop armed it, for the try's entry. */
+    private function arenaTryLeave(): string
+    {
+        if ($this->gen->inGenerator) { return ''; }
+        $k = \count($this->arena->tryMarkCur) - 1;
+        $cur = $this->arena->tryMarkCur[$k];
+        $used = $this->arena->tryMarkUsed[$k];
+        $armed = $this->arena->tryMarkArmed[$k];
+        \array_pop($this->arena->tryMarkCur);
+        \array_pop($this->arena->tryMarkUsed);
+        \array_pop($this->arena->tryMarkArmed);
+        \array_pop($this->arena->tryMarkOpen);
+        if ($armed === 0) { return ''; }
+        // Pinned to memory like a local slot ({@see localSlotAlloca}): the loop
+        // arms it after the setjmp, and the landing must read that store.
+        return '  ' . $cur . " = alloca ptr\n"
+            . '  call void asm sideeffect "", "r"(ptr ' . $cur . ")\n"
+            . '  ' . $used . " = alloca i64\n"
+            . '  call void asm sideeffect "", "r"(ptr ' . $used . ")\n"
+            . '  store i64 -1, ptr ' . $used . "\n";
+    }
+
     private function emitTryCatch(\Compile\Mir\TryCatch_ $n): string
     {
         $this->rt->needsExceptions = true;
@@ -211,6 +281,9 @@ trait EmitLlvmExceptions
         $joinLbl = $hasFinally ? $finLbl : $endLbl;
 
         $out = '';
+        $markInit = '';
+        $spReg = $this->arenaTryEnter();
+        if ($spReg !== '') { $out .= '  ' . $spReg . " = load i64, ptr @__mir_arena_sp\n"; }
         // Save the backtrace depth at try entry; a caught throw longjmps past
         // the per-call bt_pop()s, so the catch restores it (else the stack keeps
         // the unwound frames and later traces grow). alloca survives setjmp.
@@ -351,6 +424,7 @@ trait EmitLlvmExceptions
             $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             $out .= $this->btRestore($btSlot);
+            $out .= $this->arenaTryLandingIr($spReg);
             $clt = $this->ssa->allocReg();
             $out .= '  ' . $clt . " = load ptr, ptr @__mir_thrown\n";
             $out .= '  store ptr ' . $clt . ', ptr ' . $pendVal . "\n";
@@ -364,6 +438,8 @@ trait EmitLlvmExceptions
             $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
             $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             $out .= $this->btRestore($btSlot);
+            $out .= $this->arenaTryLandingIr($spReg);
+            if (!$hasFinally) { $markInit = $this->arenaTryLeave(); }
             $thrown = $this->ssa->allocReg();
             $out .= '  ' . $thrown . " = load ptr, ptr @__mir_thrown\n";
             $out .= $this->emitLoadClassId($thrown);
@@ -399,6 +475,8 @@ trait EmitLlvmExceptions
         if ($hasFinally) {
             $this->cf->popFinally();
             $out .= $outerCatchLbl . ":\n";
+            $out .= $this->arenaTryLandingIr($spReg);
+            $markInit = $this->arenaTryLeave();
             // Record the in-flight exception for rethrow after finally.
             $oce = $this->ssa->allocReg();
             $out .= '  ' . $oce . " = load ptr, ptr @__mir_thrown\n";
@@ -427,6 +505,7 @@ trait EmitLlvmExceptions
         }
 
         $out .= $endLbl . ":\n";
+        $out = $markInit . $out;
         // Region closed: an escape emitted after this point belongs to an outer
         // try (or to none), and must not restore to this one's depth.
         $this->cf->popTryDepth();

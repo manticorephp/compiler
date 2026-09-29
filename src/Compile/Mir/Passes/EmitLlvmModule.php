@@ -926,6 +926,10 @@ trait EmitLlvmModule
         $this->frame->hasArena = false;
         $this->arena->vecAllocated = false;
         $this->arena->vecLocals = [];
+        $this->arena->tryMarkCur = [];
+        $this->arena->tryMarkUsed = [];
+        $this->arena->tryMarkArmed = [];
+        $this->arena->tryMarkOpen = [];
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
         $this->locals->globalBackedType = [];

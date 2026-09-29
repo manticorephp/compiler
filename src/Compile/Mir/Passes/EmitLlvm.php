@@ -5050,6 +5050,42 @@ final class EmitLlvm implements EmitVisitor
             . ', i64 ' . $this->arena->saveUsedReg . ")\n";
     }
 
+    /**
+     * Arm the innermost open try's landing mark with a resetting loop's save
+     * position; the index of that try, or -1. Only the outermost resetting loop
+     * of the try region arms it, and only one whose every other way out passes
+     * its exit restore ({@see ArenaContext::reclaimsOwnWindow}), which disarms
+     * it: an armed mark always names a loop the control is still inside, so
+     * all a restore to it frees is that loop's window, which (A)/(B)/(C) of
+     * {@see ArenaContext::canResetPerIteration} leave dead outside the loop,
+     * and frames the throw unwound. Called right after {@see emitArenaSave}.
+     */
+    private function arenaArmTryMark(Node $loop): int
+    {
+        $k = \count($this->arena->tryMarkCur) - 1;
+        if ($k < 0 || $this->arena->tryMarkOpen[$k] === 1
+            || !\Compile\Mir\ArenaContext::reclaimsOwnWindow($loop)) { return -1; }
+        $this->arena->tryMarkOpen[$k] = 1;
+        $this->arena->tryMarkArmed[$k] = 1;
+        return $k;
+    }
+
+    /** The stores that arm mark `$k` with the save {@see emitArenaSave} just took. */
+    private function arenaArmTryMarkIr(int $k): string
+    {
+        if ($k < 0) { return ''; }
+        return '  store ptr ' . $this->arena->saveCurReg . ', ptr ' . $this->arena->tryMarkCur[$k] . "\n"
+            . '  store i64 ' . $this->arena->saveUsedReg . ', ptr ' . $this->arena->tryMarkUsed[$k] . "\n";
+    }
+
+    /** Disarm on the loop's exit edge, after its exit restore. */
+    private function arenaDisarmTryMark(int $k): string
+    {
+        if ($k < 0) { return ''; }
+        $this->arena->tryMarkOpen[$k] = 0;
+        return '  store i64 -1, ptr ' . $this->arena->tryMarkUsed[$k] . "\n";
+    }
+
     // ── String pool / escaping ─────────────────────────────────
 
     private function hexByte(int $b): string

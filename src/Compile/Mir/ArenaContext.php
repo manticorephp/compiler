@@ -39,6 +39,21 @@ final class ArenaContext
     public string $saveCurReg = '';
     public string $saveUsedReg = '';
 
+    // ── try landing marks ({@see Passes\EmitLlvmExceptions::emitTryCatch}) ──
+    // A throw jumps past the exit restore of every loop it leaves. Per open try
+    // region, innermost last: the allocas of its landing mark (the save
+    // position of the resetting loop a throw may leave; used -1 = none),
+    // whether a loop armed it at all, and whether an armed loop is open now.
+
+    /** @var string[] */
+    public array $tryMarkCur = [];
+    /** @var string[] */
+    public array $tryMarkUsed = [];
+    /** @var int[] */
+    public array $tryMarkArmed = [];
+    /** @var int[] */
+    public array $tryMarkOpen = [];
+
     /** Restart the loop-reset scan. */
     public function resetScan(): void
     {

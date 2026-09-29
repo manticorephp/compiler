@@ -1524,6 +1524,8 @@ trait EmitLlvmControl
             && $this->arena->canResetForeach($fe, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
         if (!$reset) { $this->arenaBoundedOrFail(null, $fe->body, null, $fe); }
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($fe) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
         $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
 
         $out .= '  br label %' . $condLabel . "\n";
@@ -1793,6 +1795,7 @@ trait EmitLlvmControl
         // The last iteration (the final condition, a `break`) left its
         // allocations above the save: reclaim them on the way out too.
         if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
         if ($live) {
             // A `break` leaves the body's key still held.
             $lk = $this->ssa->allocReg();
@@ -2256,6 +2259,8 @@ trait EmitLlvmControl
         if (!$reset) { $this->arenaBoundedOrFail($w->cond, $w->body, null, $w); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($n) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
         $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
@@ -2272,6 +2277,7 @@ trait EmitLlvmControl
         // The last iteration (the final condition, a `break`) left its
         // allocations above the save: reclaim them on the way out too.
         if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
 
         $this->cf->leave();
         return $out;
@@ -2292,6 +2298,8 @@ trait EmitLlvmControl
         $out = '';
         if ($f->init !== null) { $out .= $this->emitNode($f->init); }
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($n) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
         $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
@@ -2315,6 +2323,7 @@ trait EmitLlvmControl
         // The last iteration (the final condition, a `break`) left its
         // allocations above the save: reclaim them on the way out too.
         if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
 
         $this->cf->leave();
         return $out;
@@ -2332,6 +2341,8 @@ trait EmitLlvmControl
         if (!$reset) { $this->arenaBoundedOrFail($d->cond, $d->body, null, $d); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($n) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
         $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $bodyLabel . "\n";
         $out .= $bodyLabel . ":\n";
@@ -2348,6 +2359,7 @@ trait EmitLlvmControl
         // The last iteration (the final condition, a `break`) left its
         // allocations above the save: reclaim them on the way out too.
         if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
 
         $this->cf->leave();
         return $out;
