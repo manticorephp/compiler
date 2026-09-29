@@ -222,6 +222,16 @@ function __mc_fd_nonblock(int $fd): bool
     return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5)) >= 0;
 }
 
+/** Set FD_CLOEXEC on $fd. F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1 on Darwin, glibc and musl. */
+function __mc_fd_cloexec(int $fd): bool
+{
+    $fl = \Runtime\Libc\sys_fcntl($fd, 1, 0);
+    if ($fl < 0) {
+        return false;
+    }
+    return \Runtime\Libc\sys_fcntl($fd, 2, $fl | 1) >= 0;
+}
+
 /** Clear O_NONBLOCK on $fd. The undo of {@see __mc_fd_nonblock}: a socket made
  *  non-blocking only to bound its connect must go back to blocking, or every
  *  later read on it returns EAGAIN to a caller that never asked for that. */

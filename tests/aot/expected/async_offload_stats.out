@@ -1,0 +1,5 @@
+threads=4 offloaded>0=1
+threads=2 offloaded>0=1
+threads=1 offloaded>0=1
+threads=64 offloaded>0=1
+threads=4 offloaded>0=1

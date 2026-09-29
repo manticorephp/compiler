@@ -60,6 +60,28 @@ final class AsyncHook
         self::$dnsPut = $dnsPut;
     }
 
+    /**
+     * The blocking-offload pool: `fn(int $op, int $a0, …, int $a4): int` runs
+     * one covered libc call on a worker thread and parks the calling task until it
+     * is done. $offErrno is that call's errno, written before the task resumes.
+     */
+    public static ?\Closure $blocking = null;
+    public static int $offErrno = 0;
+
+    public static function installBlocking(?\Closure $blocking): void
+    {
+        self::$blocking = $blocking;
+    }
+
+    public static function blocker(): ?\Closure { return self::$blocking; }
+
+    public static function setOffloadErrno(int $errno): void
+    {
+        self::$offErrno = $errno;
+    }
+
+    public static function offloadErrno(): int { return self::$offErrno; }
+
     public static function installSelect(?\Closure $add, ?\Closure $wait, ?\Closure $done): void
     {
         self::$selectAdd = $add;
@@ -80,6 +102,7 @@ final class AsyncHook
         self::$sleeper = null;
         self::$dnsGet = null;
         self::$dnsPut = null;
+        self::$blocking = null;
     }
 
     /** True while a scheduler is driving I/O and a fiber is running. */

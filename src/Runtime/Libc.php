@@ -175,6 +175,13 @@ function access(string $path, #[CType('int')] int $mode): int {}
 #[Library('c'), Symbol('mkdir'), CType('int')]
 function sys_mkdir(string $path, #[CType('int')] int $mode): int {}
 
+#[Library('c'), Symbol('mkfifo'), CType('int')]
+function sys_mkfifo(string $path, #[CType('int')] int $mode): int {}
+
+// `int open(const char *, int, ...)` — the mode is the vararg (O_CREAT only).
+#[Library('c'), Symbol('open'), Variadic(2), CType('int')]
+function sys_open(string $path, #[CType('int')] int $flags, #[CType('int')] int $mode): int {}
+
 #[Library('c'), Symbol('rmdir'), CType('int')]
 function sys_rmdir(string $path): int {}
 
@@ -382,6 +389,10 @@ function sys_getcwd(Ptr $buf, #[CType('size_t')] int $size): Ptr {}
 // out slot that receives the head of the result list.
 #[Library('c'), Symbol('getaddrinfo'), CType('int')]
 function sys_getaddrinfo(string $node, string $service, Ptr $hints, Ptr $res): int {}
+
+// Same `getaddrinfo` over raw C strings — either may be NULL (int_to_ptr(0)).
+#[Library('c'), Symbol('getaddrinfo'), CType('int')]
+function sys_getaddrinfo_ptr(Ptr $node, Ptr $service, Ptr $hints, Ptr $res): int {}
 
 // `void freeaddrinfo(struct addrinfo *res)` — frees the whole list.
 #[Library('c'), Symbol('freeaddrinfo')]
