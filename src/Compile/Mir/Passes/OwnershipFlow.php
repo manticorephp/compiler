@@ -991,7 +991,9 @@ final class OwnershipFlow implements Pass
         }
         // The merge box-back arm of the emitter returns before the retain a
         // property / element / static-vec read owns by: such a store borrows.
-        if (($c > 0 || $ownedCopy) && !($ownedByRetain && $boxed)) {
+        // A CELL element read is no box-back: the general arm co-owns it.
+        if (($c > 0 || $ownedCopy)
+            && !($ownedByRetain && $boxed && !Ownership::cellElemReadCoOwns($v))) {
             $lat->storeState[$id] = $key;
             $this->noteOwnKey($name, $key);
             return;
