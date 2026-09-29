@@ -372,7 +372,9 @@ trait EmitLlvmObjects
         $endL = $this->ssa->allocLabel('newdyn.end');
 
         foreach ($this->classes as $cd) {
-            if ($cd->isStruct) { continue; }
+            // An abstract class is never instantiated: its constructor may have
+            // no body at all (symfony/string AbstractString), and php refuses it.
+            if ($cd->isStruct || $cd->isAbstract) { continue; }
             if (isset($skip[$cd->name])) { continue; }
             $ctorClass = $this->resolveMethodClass($cd->name, '__construct');
             $ptypes = [];
@@ -634,6 +636,23 @@ trait EmitLlvmObjects
             $thr = new \Compile\Mir\Call(
                 '__mir_throw_error',
                 [new \Compile\Mir\StringConst('Class "' . $className . '" not found', Type::string_())],
+                Type::cell(),
+            );
+            $out = $this->emitBuiltin($thr) ?? '';
+            $this->lastValue = 'null';
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        // An ABSTRACT class is never instantiated: php raises
+        // `Error: Cannot instantiate abstract class X`. The one way here is a
+        // `new static` in the abstract class's own unspecialised copy (every
+        // subclass runs its late-bound one), and its constructor may itself be
+        // abstract — a call to a body that does not exist, which failed the
+        // whole assemble (symfony/string's AbstractString).
+        if ($cd->isAbstract && !$n->bare) {
+            $thr = new \Compile\Mir\Call(
+                '__mir_throw_error',
+                [new \Compile\Mir\StringConst('Cannot instantiate abstract class ' . $cd->name, Type::string_())],
                 Type::cell(),
             );
             $out = $this->emitBuiltin($thr) ?? '';

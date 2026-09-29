@@ -1583,13 +1583,15 @@ trait EmitLlvmBuiltins
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
-        if ($isAssoc) {
-            $kb = $this->ssa->allocReg();
-            $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-            $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
-        } else {
-            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $raw . ")\n";
-        }
+        // KEYS preserved for a `vec` target too, as the forward rebuild does
+        // ({@see emitVecToCellArrayUnified}): the static `vec` is a hint, and
+        // the buffer may be hashed with string or sparse keys at run time. An
+        // append renumbered them — `array_filter(['|' => …, '&' => …])` stored
+        // into a `vec[bool]` local answered key 0, and php-cs-fixer's
+        // TypeExpression glued `null|Expr[]` as `null0Expr[]`.
+        $kb = $this->ssa->allocReg();
+        $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+        $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
         $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
