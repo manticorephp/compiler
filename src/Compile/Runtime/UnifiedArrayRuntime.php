@@ -771,14 +771,30 @@ final class UnifiedArrayRuntime
         $raw->raw('  br label %fnv');
         $fh = $fn->block('fnvh');
         $fh->raw('  br label %fnv');
-        // Shared FNV-1a loop over %uselen bytes.
+        // The shared hash over %uselen bytes — {@see EmitLlvm::fnvHash64} is its
+        // compile-time twin and must agree bit for bit: FNV-1a over little-endian
+        // 8-byte words, the tail bytes one by one, then fmix64.
         $start = $fn->block('fnv');
         $start->raw('  %uselen = phi i64 [ %hlen, %fnvh ], [ %rawlen, %raw ]');
         $start->raw('  %h.addr = alloca i64');
         $start->raw('  store i64 -3750763034362895579, ptr %h.addr'); // FNV offset basis
         $start->raw('  %i.addr = alloca i64');
         $start->raw('  store i64 0, ptr %i.addr');
-        $start->raw('  br label %loop');
+        $start->raw('  br label %wloop');
+        $wl = $fn->block('wloop');
+        $wl->raw('  %wi = load i64, ptr %i.addr');
+        $wl->raw('  %wi8 = add i64 %wi, 8');
+        $wl->raw('  %wfits = icmp sle i64 %wi8, %uselen');
+        $wl->raw('  br i1 %wfits, label %wbody, label %loop');
+        $wb = $fn->block('wbody');
+        $wb->raw('  %wptr = getelementptr inbounds i8, ptr ' . $k . ', i64 %wi');
+        $wb->raw('  %w = load i64, ptr %wptr, align 1');
+        $wb->raw('  %wh = load i64, ptr %h.addr');
+        $wb->raw('  %whx = xor i64 %wh, %w');
+        $wb->raw('  %whm = mul i64 %whx, 1099511628211');
+        $wb->raw('  store i64 %whm, ptr %h.addr');
+        $wb->raw('  store i64 %wi8, ptr %i.addr');
+        $wb->raw('  br label %wloop');
         $loop = $fn->block('loop');
         $loop->raw('  %i = load i64, ptr %i.addr');
         $loop->raw('  %atend = icmp sge i64 %i, %uselen');
@@ -797,7 +813,15 @@ final class UnifiedArrayRuntime
         // Cache the result only for a headered HEAP string (rc > 0): never a
         // .rodata literal or arena string (both rc=-1, read-only / abandoned).
         $done = $fn->block('done');
-        $done->raw('  %hf = load i64, ptr %h.addr');
+        $done->raw('  %hr = load i64, ptr %h.addr');
+        $done->raw('  %f1s = lshr i64 %hr, 33');
+        $done->raw('  %f1 = xor i64 %hr, %f1s');
+        $done->raw('  %f2 = mul i64 %f1, -49064778989728563');
+        $done->raw('  %f2s = lshr i64 %f2, 33');
+        $done->raw('  %f3 = xor i64 %f2, %f2s');
+        $done->raw('  %f4 = mul i64 %f3, -4265267296055464877');
+        $done->raw('  %f4s = lshr i64 %f4, 33');
+        $done->raw('  %hf = xor i64 %f4, %f4s');
         $done->raw('  %heap = icmp sgt i64 %rc, 0');
         $done->raw('  %notraw = icmp eq i1 %bad, false');
         $done->raw('  %docache = and i1 %heap, %notraw');

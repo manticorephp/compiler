@@ -397,6 +397,101 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    /**
+     * A call of the prelude's own `SplFixedArray::offsetSet`, already lowered
+     * to `$callIr` over `$argList` (`this`, the index cell, the value cell),
+     * with an in-place store in front of it: an INT index inside `__size`, a
+     * `__data` buffer this object alone holds (rc 1), packed, of CELL
+     * elements, long enough — the store the method body would do, minus the
+     * call, the offset rule, the copy-on-write test and the element encoding.
+     * Anything else runs the call. php-cs-fixer's Tokens::insertSlices shifts
+     * the whole tail through `parent::offsetSet` on every insertion; that call
+     * was a fifth of the run. null when the class layout does not apply.
+     */
+    private function fixedArraySetInline(string $argList, string $callIr, string $callReg, string $resReg): ?string
+    {
+        $cd = $this->classes['SplFixedArray'] ?? null;
+        if ($cd === null) { return null; }
+        $dataOff = $cd->propertyOffset('__data');
+        $sizeOff = $cd->propertyOffset('__size');
+        if ($dataOff < 0 || $sizeOff < 0) { return null; }
+        $parts = \explode(', ', $argList);
+        if (\count($parts) !== 3) { return null; }
+        $regs = [];
+        foreach ($parts as $p) {
+            if (!\str_starts_with($p, 'i64 ')) { return null; }
+            $regs[] = \substr($p, 4);
+        }
+        $thisW = $regs[0];
+        $idxW = $regs[1];
+        $valW = $regs[2];
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $intHdr = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
+        $r = fn (): string => $this->ssa->allocReg();
+        $obj = $r(); $hi = $r(); $isInt = $r(); $sh = $r(); $iv = $r(); $sp = $r(); $size = $r();
+        $inb = $r(); $ok1 = $r();
+        $out = '  ' . $obj . ' = inttoptr i64 ' . $thisW . " to ptr\n";
+        $out .= '  ' . $hi . ' = and i64 ' . $idxW . ", -281474976710656\n";
+        $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ', ' . $intHdr . "\n";
+        $out .= '  ' . $sh . ' = shl i64 ' . $idxW . ", 16\n";
+        $out .= '  ' . $iv . ' = ashr i64 ' . $sh . ", 16\n";
+        $out .= '  ' . $sp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$sizeOff . "\n";
+        $out .= '  ' . $size . ' = load i64, ptr ' . $sp . "\n";
+        $out .= '  ' . $inb . ' = icmp ult i64 ' . $iv . ', ' . $size . "\n";
+        $out .= '  ' . $ok1 . ' = and i1 ' . $isInt . ', ' . $inb . "\n";
+        $chkL = $this->ssa->allocLabel('sfaset.chk');
+        $fastL = $this->ssa->allocLabel('sfaset.fast');
+        $slowL = $this->ssa->allocLabel('sfaset.slow');
+        $endL = $this->ssa->allocLabel('sfaset.end');
+        $out .= '  br i1 ' . $ok1 . ', label %' . $chkL . ', label %' . $slowL . "\n";
+        $out .= $chkL . ":\n";
+        $dp = $r(); $dw = $r(); $data = $r(); $nn = $r(); $rcp = $r(); $rc = $r(); $one = $r();
+        $fp = $r(); $fl = $r(); $hm = $r(); $cellH = $r(); $hsh = $r(); $packed = $r(); $len = $r(); $inl = $r();
+        $a1 = $r(); $a2 = $r(); $a3 = $r(); $a4 = $r();
+        $out .= '  ' . $dp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$dataOff . "\n";
+        $out .= '  ' . $dw . ' = load i64, ptr ' . $dp . "\n";
+        $out .= '  ' . $data . ' = inttoptr i64 ' . $dw . " to ptr\n";
+        $out .= '  ' . $nn . ' = icmp ne i64 ' . $dw . ", 0\n";
+        $out .= '  ' . $rcp . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_RC_OFFSET . "\n";
+        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        // Only dereference a non-null buffer: select a harmless address first.
+        $safe = $r(); $safeRc = $r(); $safeFl = $r(); $safeLen = $r();
+        $out .= '  ' . $safe . ' = select i1 ' . $nn . ', ptr ' . $data . ", ptr @__mir_zero_word\n";
+        $out .= '  ' . $safeRc . ' = select i1 ' . $nn . ', ptr ' . $rcp . ", ptr @__mir_zero_word\n";
+        $out .= '  ' . $safeFl . ' = select i1 ' . $nn . ', ptr ' . $fp . ", ptr @__mir_zero_word\n";
+        $out .= '  ' . $rc . ' = load i64, ptr ' . $safeRc . "\n";
+        $out .= '  ' . $one . ' = icmp eq i64 ' . $rc . ", 1\n";
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $safeFl . "\n";
+        $out .= '  ' . $hm . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+        $out .= '  ' . $cellH . ' = icmp eq i64 ' . $hm . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+        $out .= '  ' . $hsh . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
+        $out .= '  ' . $packed . ' = icmp eq i64 ' . $hsh . ", 0\n";
+        $out .= '  ' . $len . ' = load i64, ptr ' . $safe . "\n";
+        $out .= '  ' . $inl . ' = icmp ult i64 ' . $iv . ', ' . $len . "\n";
+        $out .= '  ' . $a1 . ' = and i1 ' . $nn . ', ' . $one . "\n";
+        $out .= '  ' . $a2 . ' = and i1 ' . $a1 . ', ' . $cellH . "\n";
+        $out .= '  ' . $a3 . ' = and i1 ' . $a2 . ', ' . $packed . "\n";
+        $out .= '  ' . $a4 . ' = and i1 ' . $a3 . ', ' . $inl . "\n";
+        $out .= '  br i1 ' . $a4 . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $off = $r(); $off2 = $r(); $slot = $r(); $old = $r();
+        $out .= '  ' . $off . ' = mul i64 ' . $iv . ", 8\n";
+        $out .= '  ' . $off2 . ' = add i64 ' . $off . ', ' . (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE . "\n";
+        $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . $off2 . "\n";
+        $out .= '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
+        $out .= '  call void @__mir_cell_retain(i64 ' . $valW . ")\n";
+        $out .= '  store i64 ' . $valW . ', ptr ' . $slot . "\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $old . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $callIr;
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $out .= '  ' . $resReg . ' = phi i64 [ 0, %' . $fastL . ' ], [ ' . $callReg . ', %' . $slowL . " ]\n";
+        return $out;
+    }
+
     /** A local, a constant, or `+`/`-` over them: safe to evaluate twice. */
     private function pureIntExpr(Node $n): bool
     {
