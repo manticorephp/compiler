@@ -463,7 +463,7 @@ and the task parks until the job finishes — the loop keeps running other tasks
 - files opened by `fopen()` on a path: `fread` / `fwrite` / `fflush` / `fclose` / `fsync`;
 - `file_get_contents()` / `file_put_contents()`;
 - `stat` / `lstat` and the rest of that family (`filesize`, `is_dir`, `filemtime`, …);
-- `opendir` / `readdir` / `closedir` / `scandir`;
+- `opendir` / `readdir` / `closedir`, and `scandir` as one job for the whole directory;
 - `unlink` / `rename` / `mkdir` / `rmdir`;
 - the `getaddrinfo` path — `gethostbyname()` and the name resolution in connect / bind.
 
@@ -475,7 +475,7 @@ to the inline path, and outside `async()` every call runs inline as before.
 
 Not pooled, still inline: sockets (they have a readiness path), `popen` / `proc_open` pipes,
 `tmpfile`, `STDIN` / `STDOUT` / `STDERR`, and `file_exists` / `is_readable` (an `access`
-call), `fgets`, `stream_get_contents`, `copy`, `rewinddir`. A slow one of these still stalls
+call), `fgets`, `stream_get_contents`, `copy`, `glob`, `rewinddir`. A slow one of these still stalls
 the loop — measured on a 64 MB page-cache-hot file, a single inline `fread($h, 64MB)` holds
 every other task for **15-25 ms**. `Async\readFile()` / `Async\writeFile()` stay for
 that reason and for chunked progress: they read in 1 MB pieces with a yield between them
@@ -491,14 +491,45 @@ The pool is lazy: it starts on the first covered call, is per process, and outli
 anything unparsable means 4. A forked child never inherits the parent's workers; its first
 covered call builds its own pool.
 
-Two consequences. A task parked on a pool job cannot be cancelled until the job finishes —
-a `read` on a FIFO with no writer holds it — so cancellation lands at the next suspend point
-after the call returns. And `fclose` / `closedir` wait for every in-flight job on that handle
-before they free it, so a sibling task's read never touches a freed `FILE*`.
-`file_get_contents()` on a FIFO (where `ftell` is negative) reads to EOF, as php does.
+Cancellation. A task parked on a pool job cannot be cancelled until the job finishes — a
+`read` on a FIFO with no writer holds it. A pooled call that holds nothing yet (`fopen`,
+`file_get_contents` / `file_put_contents`, the stat family, `opendir`, `scandir`, `unlink`,
+`rename`, `mkdir`, `rmdir`) is itself a cancellation point: a cancelled task throws there
+instead of submitting the job. Calls on a handle it already holds (`fread`, `fwrite`,
+`fflush`, `fclose`, `readdir`, `closedir`) and the `getaddrinfo` path are not, so a loop of
+them — `while (!feof($h)) fread(...)`, a `readdir` loop — runs on after `cancel()` until its
+next real suspend point.
+
+`fclose` / `closedir` wait for every in-flight job on that handle before they free it, so a
+sibling task's read never touches a freed `FILE*`, and a pooled `readdir` copies the name
+inside the job, so two tasks sharing one `DIR` never see a torn entry. `file_get_contents()`
+on a FIFO (where `ftell` is negative) reads to EOF, as php does.
+
+**Starvation.** The pool is small and shared by the whole process. N jobs that never finish
+— `open` on a FIFO nobody writes, a hung NFS hard mount, a dead resolver — hold all N workers,
+and every covered call in every task then queues behind them forever. The loop itself keeps
+running (timers, sockets, channels), so deadlock detection sees live I/O and reports nothing.
+With the default of 4, four tasks each opening a FIFO its sibling will write are enough: the
+writers' `fopen` jobs wait behind the readers' and never run. Size the pool above the number
+of calls that can block indefinitely at once with `MANTICORE_BLOCKING_THREADS`.
+
+**Cost.** A pooled call is two pipe writes, a reactor wake and two fiber switches — about
+10 µs, against ~60 ns for a buffered inline `fwrite` that never reaches the kernel. There is
+no size threshold: a call under the scheduler always goes to the pool, so a hot loop of tiny
+calls pays that per call. Measured with `tools/offload_bench.php` (Apple M1 Pro, macOS 27,
+page cache hot, best of 3):
+
+| work | outside `async()` | inside `async()` |
+|---|---|---|
+| 1M × 16-byte `fwrite` to a file | 60 ms | 9 560 ms |
+| `scandir` of 50k entries | 45 ms | 46 ms (one job; per-entry jobs were ~470 ms) |
+| 10k `file_get_contents` of 64 bytes | 126 ms | 532 ms |
+
+Batch small writes into one string (or write through `Async\writeFile()`) when a task writes
+in a hot loop.
 
 `Async\stats()` adds `offloaded` (jobs submitted) and `pool_threads` (0 until the pool is
-up); `Async\dump()` names a parked task `offload op=<n>`.
+up); `Async\dump()` names a parked task by its call, e.g. `offload op=fopen`.
 
 A fork+socketpair worker pool was measured against the old inline path and rejected: it copies
 every byte through a socket, which for a hot read costs more than the read. Threads that never
