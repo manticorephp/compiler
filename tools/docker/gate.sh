@@ -37,6 +37,10 @@
 #   MC_COMPILER_CACHE writable directory holding a compatible self-hosted
 #                    compiler (optional; unset means always cold-seed)
 #   MC_COLD=0|1      ignore a compiler cache and force the Zend cold seed
+#   MC_RUNNER=sh|native  which harness runs the suite: tests/aot/run.sh (the
+#                    gate), or the EXPERIMENTAL native runner tests/aot/runner —
+#                    built here by the compiler under test and streamed LIVE, so
+#                    a CI row can compare the two for speed and readability.
 #   MC_SUITE=0|1     0 = build and install_smoke only, no AOT suite. What the
 #                    release asks for: CI has already run the suite against that
 #                    commit, and a second run is a slower release, not new news.
@@ -55,6 +59,7 @@ MC_LOGDIR="${MC_LOGDIR:-$MC_WORK}"
 MC_COMPILER_CACHE="${MC_COMPILER_CACHE:-}"
 MC_COLD="${MC_COLD:-0}"
 MC_SUITE="${MC_SUITE:-1}"
+MC_RUNNER="${MC_RUNNER:-sh}"
 
 mkdir -p "$MC_WORK" "$MC_LOGDIR"
 
@@ -269,6 +274,24 @@ if [ "$MC_SUITE" != "1" ]; then
     # asks about the artifact being shipped rather than about the tree.
     echo "=== suite skipped (MC_SUITE=0) — this build is not a verdict on the tree ==="
     SUITE_LABEL=skipped
+elif [ "$MC_RUNNER" = "native" ]; then
+    # Compiled by the compiler it is about to judge — a broken compiler can break
+    # the verdict itself, which is why this is not the gate. Streamed, not
+    # buffered: seeing it run is half of what the experiment is about.
+    echo "=== tests/aot/runner (EXPERIMENTAL native runner${MC_FILTER:+, -k $MC_FILTER}) ==="
+    if bin/manticore build tests/aot/runner/manticore.json > "$MC_LOGDIR/runner-build.log" 2>&1; then
+        rargs=()
+        [ -n "${MC_FILTER:-}" ] && rargs=(-k "$MC_FILTER")
+        [ "$MC_JOBS" != "0" ] && rargs+=(-j "$MC_JOBS")
+        t0=$SECONDS
+        tests/aot/runner/bin/runner ${rargs[@]+"${rargs[@]}"} 2>&1 | tee "$MC_LOGDIR/suite.log"
+        suite_rc=${PIPESTATUS[0]}
+        echo "suite time: $((SECONDS - t0))s (native runner)"
+    else
+        echo "runner: build FAILED"
+        tail -20 "$MC_LOGDIR/runner-build.log"
+        suite_rc=1
+    fi
 elif [ -n "${MC_FILTER:-}" ]; then
     echo "=== tests/aot/run.sh (-k $MC_FILTER, -j $MC_JOBS) — NOT the gate ==="
     MC_JOBS="$MC_JOBS" bash tests/aot/run.sh -v -k "$MC_FILTER" > "$MC_LOGDIR/suite.log" 2>&1
@@ -276,9 +299,11 @@ elif [ -n "${MC_FILTER:-}" ]; then
     head -c 400000 "$MC_LOGDIR/suite.log"
 else
     echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
+    t0=$SECONDS
     MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
     suite_rc=$?
     tail -15 "$MC_LOGDIR/suite.log"
+    echo "suite time: $((SECONDS - t0))s (run.sh)"
 fi
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
