@@ -5280,12 +5280,17 @@ final class LowerFromAst implements Pass
         if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
         if (!$this->isCodegenBuiltin($fnName)) { return null; }
         $bare = $this->constBareName(\strtolower($fnName));
-        // min/max are variadic, but their spread form is exactly the
-        // existing single-array "winner element" lowering. Keep the
-        // original array expression intact so it may be an arbitrary call
-        // such as max(...array_map(...)).
+        // min/max are variadic: `min(...$p)` is the single-array form over the
+        // pack's elements only when the pack holds TWO or more; a one-element
+        // pack is `min($p[0])`, the fold over THAT array (`min(...[[5, 2]])` is
+        // 2, not `[5, 2]`). `__mc_minmax_unpack` decides at run time and hands
+        // the one argument over. The pack expression is evaluated once, so it
+        // may be an arbitrary call such as max(...array_map(...)).
         if ($bare === 'min' || $bare === 'max') {
-            return [$astArgs[0]->value];
+            $span = $astArgs[0]->span;
+            return [new \Parser\Ast\CallExpr('\\__mc_minmax_unpack', [
+                $astArgs[0]->value, new \Parser\Ast\StringLiteral($bare, $span),
+            ], $span)];
         }
         $arity = $this->fixedBuiltinArity($bare);
         if ($arity === 0) { return null; }

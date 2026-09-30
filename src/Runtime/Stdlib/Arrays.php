@@ -421,6 +421,42 @@ function __mc_minmax_of(mixed $arr, bool $isMax): mixed
 }
 
 /**
+ * One step of an n-ary `max(a, b, …)` / `min(…)` whose operands are not all
+ * numbers: php's own `>` / `<` over two cells, the EARLIER operand kept on a
+ * tie (php replaces the winner only on a strict compare).
+ * @return mixed
+ */
+function __mc_minmax2(mixed $a, mixed $b, bool $isMax): mixed
+{
+    if ($isMax) {
+        return $b > $a ? $b : $a;
+    }
+    return $b < $a ? $b : $a;
+}
+
+/**
+ * `min(...$pack)` / `max(...$pack)`: the argument list the pack stands for.
+ * One element is the single-array form (its ELEMENTS compete, and a non-array
+ * is php's TypeError downstream); two or more compete themselves. Returned as
+ * the one argument {@see __mc_minmax_of} folds.
+ * @return mixed
+ */
+function __mc_minmax_unpack(mixed $pack, string $fn): mixed
+{
+    /** @var mixed[] $vals */
+    $vals = [];
+    foreach ($pack as $v) { $vals[] = $v; }
+    $n = \count($vals);
+    if ($n === 0) {
+        throw new \ArgumentCountError($fn . '() expects at least 1 argument, 0 given');
+    }
+    if ($n === 1) {
+        return $vals[0];
+    }
+    return $vals;
+}
+
+/**
  * The `+` array-union operator: every key of $a, then each key of $b that $a
  * does NOT already have (first-wins, and int keys are NOT renumbered — unlike
  * array_merge). A fresh array is built so neither operand is mutated.

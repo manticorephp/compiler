@@ -3144,13 +3144,6 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * Box a raw element value (i64 SSA `$ev`, as stored by __mir_array_value_at)
-     * into a tagged cell per the source array's STATIC element kind; lastValue ←
-     * the boxed i64. An already-cell element (heterogeneous / `mixed` source)
-     * passes through untouched. Mirrors the element switch in
-     * {@see emitAssocToCellArrayUnified}.
-     */
-    /**
      * As {@see boxRawElem}, but an erased / CELL element channel is decoded by
      * the BUFFER's hint (`__mir_elem_decode`), not passed through: a cell-typed
      * base (`array|string $v` after `$v = explode(…)`) may hold a raw-hinted
@@ -3170,6 +3163,13 @@ trait EmitLlvmBuiltins
         return $this->boxRawValue($ev, $elem);
     }
 
+    /**
+     * Box a raw element value (i64 SSA `$ev`, as stored by __mir_array_value_at)
+     * into a tagged cell per the source array's STATIC element kind; lastValue ←
+     * the boxed i64. An already-cell element (heterogeneous / `mixed` source)
+     * passes through untouched. Mirrors the element switch in
+     * {@see emitAssocToCellArrayUnified}.
+     */
     private function boxRawElem(string $ev, Type $arrT): string
     {
         $elem = ($arrT->isVec() || $arrT->isAssoc()) ? $arrT->element : null;
@@ -4416,11 +4416,10 @@ trait EmitLlvmBuiltins
         // is 3, not the array). The numeric paths below unboxed the array
         // POINTER as an int and printed a raw address; defer to the stdlib fold,
         // which compares the elements with `<` / `>` and so rides the same table.
-        // A lone CELL / erased operand is that form too (php accepts nothing
-        // but an array there): the int path unboxed the array it holds and
-        // answered its address.
-        $k0 = $count === 1 ? $args[0]->type->kind : '';
-        if ($k0 === Type::KIND_ARRAY || $k0 === Type::KIND_CELL || $k0 === Type::KIND_UNKNOWN) {
+        // ANY lone operand is that form (php accepts nothing but an array
+        // there, and the stdlib fold throws its TypeError for the rest): the
+        // int path unboxed the array a cell holds and answered its address.
+        if ($count === 1) {
             if (!isset($this->definedFns[$this->mangle('__mc_minmax_of')])) {
                 $this->libcExtra['manticore___mc_minmax_of'] =
                     'declare i64 @manticore___mc_minmax_of(i64, i64)';
@@ -4505,6 +4504,14 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'ptr';
             return $out;
         }
+        // Any operand that is not a NUMBER (a cell that may hold an array or a
+        // string, a bool, null, an object, or a string next to an int) is
+        // ordered by php's full comparison, pairwise through the stdlib — the
+        // int path below unboxed an array operand and answered its ADDRESS
+        // (`max($a, 2)` with `array|int $a`). {@see InferCalls} types it cell.
+        if ($this->minMaxNeedsFold($args)) {
+            return $this->minMaxFold($args, $pred === 'sgt');
+        }
         $anyFloat = false;
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) { $anyFloat = true; break; }
@@ -4558,6 +4565,64 @@ trait EmitLlvmBuiltins
             $acc = $sel;
         }
         return $this->finishI64($out, $acc);
+    }
+
+    /**
+     * Whether an n-ary min/max leaves the numeric paths for the comparison
+     * fold: some operand is not an int or a float. A numeric cell counts as
+     * not: it may hold null or a bool (`?int`), which php orders as a bool
+     * (`max(null, -5)` is -5), not as 0. Callers have
+     * already taken the all-string and all-array forms. Mirrored by
+     * {@see InferCalls} (`min`/`max` return type).
+     * @param Node[] $args
+     */
+    private function minMaxNeedsFold(array $args): bool
+    {
+        foreach ($args as $a) {
+            $t = $a->type;
+            if ($t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT) { continue; }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * `max(a, b, …)` / `min(…)` over operands php orders by its full comparison:
+     * each pair goes through `__mc_minmax2`, whose `>` / `<` on cells is php's
+     * (arrays by size then element, strings vs numbers, null/bool). Its cell
+     * return is +1 by the return convention: the previous winner is released
+     * after each step, the operands' boxes as any cell-taking builtin drops them.
+     * @param Node[] $args
+     */
+    private function minMaxFold(array $args, bool $isMax): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        if (!isset($this->definedFns[$this->mangle('__mc_minmax2')])) {
+            $this->libcExtra['manticore___mc_minmax2'] =
+                'declare i64 @manticore___mc_minmax2(i64, i64, i64)';
+        }
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type, $args[0]);
+        $acc = $this->lastValue;
+        $count = \count($args);
+        for ($i = 1; $i < $count; $i = $i + 1) {
+            $out .= $this->emitNode($args[$i]);
+            $out .= $this->boxToCell($args[$i]->type, $args[$i]);
+            $v = $this->lastValue;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax2(i64 ' . $acc . ', i64 ' . $v
+                  . ', i64 ' . ($isMax ? '1' : '0') . ")\n";
+            $out .= $this->cellBoxTempDrop($args[$i]->type, $v, $args[$i]);
+            $out .= $i === 1
+                ? $this->cellBoxTempDrop($args[0]->type, $acc, $args[0])
+                : $this->rcReleaseReg($acc, 'cell');
+            $acc = $r;
+        }
+        $this->lastValue = $acc;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** Coerce a min/max integer-path operand to a raw i64, unboxing a cell. */

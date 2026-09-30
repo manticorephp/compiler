@@ -1,0 +1,21 @@
+int(3)
+array(3) {
+  [0]=>
+  bool(true)
+  [1]=>
+  bool(false)
+  [2]=>
+  NULL
+}
+int(1)
+array(1) {
+  [0]=>
+  int(9)
+}
+int(2)
+string(1) "a"
+int(2)
+int(5)
+int(2)
+string(3) "str"
+int(3)

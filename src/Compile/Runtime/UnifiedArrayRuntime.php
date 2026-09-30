@@ -3900,6 +3900,16 @@ final class UnifiedArrayRuntime
 
         // The element's address, then: already a box, or make one.
         $ep = $locate->call($slotFn, Type::ptr(), [$slotAddr, $key]);
+        // The static CELL element is a claim, not a guarantee: a cell-typed
+        // slot may hold a RAW-hinted buffer (`[$x, 2]` into an `array|int`
+        // param), whose words are untagged. Cellify it (in place, after
+        // ref_slot separated it) so the promoted word is a cell and the
+        // REF cell sits under a CELL hint — else every hint-decoding reader
+        // boxed the REF word as an int.
+        $locate->call('__mir_elem_encode', Type::i64(), [
+            $locate->inttoptr($locate->load(Type::i64(), $slotAddr), Type::ptr()),
+            Value::int(Type::i64(), MemoryAbi::CELL_NULL),
+        ]);
         $w = $locate->load(Type::i64(), $ep);
         $isTagged = $locate->icmp('ugt', $w, Value::int(Type::i64(), -4503599627370496));
         $nib = $locate->and_($locate->lshr($w, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));

@@ -370,12 +370,7 @@ trait InferCalls
             // uniform-kind rule in {@see EmitLlvmBuiltins::biMinMax}.
             // A single array arg is the "max of its ELEMENTS" form: the winner
             // is an erased element, so the result is a cell.
-            if (\count($args) === 1) {
-                $k0 = $args[0]->type->kind;
-                if ($k0 === Type::KIND_ARRAY || $k0 === Type::KIND_CELL || $k0 === Type::KIND_UNKNOWN) {
-                    return Type::cell();
-                }
-            }
+            if (\count($args) === 1) { return Type::cell(); }
             $allStr = \count($args) >= 2;
             $allArr = \count($args) >= 2;
             foreach ($args as $a) {
@@ -384,6 +379,14 @@ trait InferCalls
             }
             if ($allStr) { return Type::string_(); }
             if ($allArr) { return $args[0]->type; }
+            // A non-number operand takes the comparison fold, whose winner is
+            // any of the operands ({@see EmitLlvmBuiltins::minMaxNeedsFold}).
+            foreach ($args as $a) {
+                $t = $a->type;
+                if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) {
+                    return Type::cell();
+                }
+            }
             foreach ($args as $a) {
                 if ($a->type->kind === Type::KIND_FLOAT) { return Type::numericCell(); }
             }

@@ -31,3 +31,16 @@ mixedArg(['b', 'a', 'c']);
 mixedArg([2.5, 1, 3]);
 mixedArg([]);
 mixedArg(5);
+
+function lone(): void
+{
+    foreach ([static fn () => max('abc'), static fn () => min(5)] as $f) {
+        try {
+            var_dump($f());
+        } catch (\Throwable $e) {
+            echo \get_class($e), ': ', $e->getMessage(), "\n";
+        }
+    }
+}
+
+lone();

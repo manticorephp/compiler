@@ -10,3 +10,5 @@ ValueError: max(): Argument #1 ($value) must contain at least one element
 ValueError: min(): Argument #1 ($value) must contain at least one element
 TypeError: max(): Argument #1 ($value) must be of type array, int given
 TypeError: min(): Argument #1 ($value) must be of type array, int given
+TypeError: max(): Argument #1 ($value) must be of type array, string given
+TypeError: min(): Argument #1 ($value) must be of type array, int given
