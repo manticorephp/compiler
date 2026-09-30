@@ -5899,6 +5899,29 @@ trait EmitLlvmExpr
             $this->scalarStrArgTemp = $this->lastValue;
             return $out;
         }
+        // A CELL-ELEMENT array bound to a CONCRETE-element param: the callee's
+        // typed readers (array_shift, reset, array_sum, in_array, …) take its
+        // words raw, so the buffer is conformed to the claim at the binding —
+        // the same in-place `__mir_array_conform` a cell reaching that claim
+        // takes in {@see unboxCellToTypeRaw}, a no-op unless the buffer is
+        // hinted CELL at run time. The caller's own `vec[cell]` readers decode
+        // by the hint and are unaffected. A free function's param is floored to
+        // the cell element by its call sites; a CONSTRUCTOR's and an inherited
+        // method's are not, and `new Q(range(1, 3))` against `list<int> $j`
+        // stored the NaN-boxed words into the property — `array_shift($q->j)`
+        // answered int(-4222124650659839).
+        if ($pt !== null && $a->type->isArray() && $a->type->element !== null
+            && $a->type->element->kind === Type::KIND_CELL
+            && ($pt->isVec() || $pt->isAssoc()) && !$pt->isShape() && $pt->element !== null) {
+            $code = $this->elementHintCodeForType($pt->element);
+            if ($code !== null && $code !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
+                $out = $this->coerceToI64();
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $out .= '  call void @__mir_array_conform(ptr ' . $cp . ', i64 ' . (string)$code . ")\n";
+                return $out;
+            }
+        }
         if ($ak !== Type::KIND_CELL) { return ''; }
         if ($pt === null) { return ''; }
         $out = $this->unboxCellToType($pt);
