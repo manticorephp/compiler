@@ -313,6 +313,8 @@ namespace Async {
          * element-repr hazard) and pushes/pops in O(1).
          */
         public ?Task $ioNext = null;
+        /** The op of the pool job this task is parked on, or -1. Owned by the scheduler. */
+        public int $offloadOp = -1;
 
         /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
         public bool $timerActive = false;
@@ -441,6 +443,8 @@ namespace Async {
                 $what = 'done';
             } elseif ($this->state === self::FAILED) {
                 $what = 'failed(' . ($this->error === null ? '?' : \get_class($this->error)) . ')';
+            } elseif ($this->offloadOp >= 0) {
+                $what = 'offload op=' . \__mc_offload_op_name($this->offloadOp);
             } elseif ($this->ioFd >= 0) {
                 $what = ($this->ioWrite ? 'io-write fd=' : 'io-read fd=') . (string)$this->ioFd
                       . ($this->timerActive ? ' +deadline' : '');
@@ -1686,6 +1690,30 @@ namespace Async {
         private array $selWaiter = [];
         /** Parked-on-I/O task count (NOT registered-fd count: an idle fd is not work). */
         private int $ioWaiters = 0;
+        /** @var array<int, Task[]> tasks parked in waitPoolIdle(), by Resource id */
+        private array $idleWaiters = [];
+
+        /**
+         * The blocking-offload pool. Per PROCESS, not per run: its threads and pipes
+         * outlive an async() run; a fork's child (threads do not survive fork)
+         * closes the inherited pipe ends and builds its own on first use.
+         * $poolIds holds each pipe end's identity (\__mc_fd_pipe_id) from creation:
+         * a child closes an inherited number only while it still names that pipe,
+         * never a file a daemonizing child has since opened on the same number.
+         */
+        private static int $poolPid = 0;
+        private static int $poolSubR = -1;
+        private static int $poolSubmit = -1;
+        private static int $poolDoneR = -1;
+        private static int $poolDoneW = -1;
+        private static int $poolThreads = 0;
+        /** @var array<int, string> fd → pipe identity */
+        private static array $poolIds = [];
+        /** True when the pool could not start (pipe or pthread failure): run inline. */
+        private static bool $poolInline = false;
+        /** @var array<int, Task> job address → the task parked on it */
+        private array $jobTask = [];
+        private int $nOffloaded = 0;
 
         /** @var float[] binary min-heap of deadlines, parallel to tmTask */
         private array $tmDeadline = [];
@@ -1969,6 +1997,43 @@ namespace Async {
                 function (float $t): bool { return $this->selectWait($t); },
                 function (): void { $this->selectDone(); },
             );
+            \Runtime\AsyncHook::installBlocking(
+                function (int $op, int $a0, int $a1, int $a2, int $a3, int $a4): int {
+                    return $this->offload($op, $a0, $a1, $a2, $a3, $a4);
+                },
+                function (): void { $this->checkCancel(); },
+            );
+            \Runtime\AsyncHook::installIdle(
+                function (\Resource $r): void { $this->waitPoolIdle($r); },
+                function (\Resource $r): void { $this->wakePoolIdle($r); },
+            );
+        }
+
+        /**
+         * Park until no pool job uses $r. Shielded like the job park itself: the
+         * jobs it waits for always finish, and the close that follows must run.
+         */
+        public function waitPoolIdle(\Resource $r): void
+        {
+            $me = $this->running;
+            if ($me === null) { return; }
+            $me->shield = $me->shield + 1;
+            try {
+                while ($r->poolJobs > 0) {
+                    $this->idleWaiters[$r->id][] = $me;
+                    \Fiber::suspend();
+                }
+            } finally {
+                $me->shield = $me->shield - 1;
+            }
+        }
+
+        public function wakePoolIdle(\Resource $r): void
+        {
+            if (!isset($this->idleWaiters[$r->id])) { return; }
+            $waiters = $this->idleWaiters[$r->id];
+            unset($this->idleWaiters[$r->id]);
+            foreach ($waiters as $t) { $this->wake($t); }
         }
 
         private function clearNetpoller(): void
@@ -2253,6 +2318,8 @@ namespace Async {
             $out['ready'] = \count($this->ready);
             $out['io_parked'] = $this->ioWaiters;
             $out['timers'] = $this->tmLive;
+            $out['offloaded'] = $this->nOffloaded;
+            $out['pool_threads'] = self::$poolThreads;
             return $out;
         }
 
@@ -2350,6 +2417,9 @@ namespace Async {
             $task->cancelRequested = true;
             $this->nCancelled = $this->nCancelled + 1;
             if ($task === $this->running) { return; }
+            // A pool job writes into memory the task owns and cannot be stopped:
+            // the task stays parked until the job is done ({@see offload()}).
+            if ($task->offloadOp >= 0) { return; }
             $this->releaseIo($task);
             if ($task->timerActive) {
                 $task->timerActive = false;
@@ -2963,6 +3033,156 @@ namespace Async {
             $this->wakeSelect($fd);
         }
 
+        // ── the blocking-offload pool ──────────────────────────────────────
+        /** Bring the pool up in this process once. False = run covered calls inline. */
+        private static function poolUp(): bool
+        {
+            $pid = \getmypid();
+            if (self::$poolPid === $pid) { return !self::$poolInline; }
+            if (self::$poolPid !== 0) {
+                foreach (self::$poolIds as $old => $id) {
+                    if (\__mc_fd_pipe_id($old) === $id) { \Runtime\Libc\sys_close($old); }
+                }
+                self::$poolIds = [];
+                self::$poolSubR = -1;
+                self::$poolSubmit = -1;
+                self::$poolDoneR = -1;
+                self::$poolDoneW = -1;
+                self::$poolThreads = 0;
+            }
+            self::$poolPid = $pid;
+            self::$poolInline = true;
+            $n = 4;
+            $env = \getenv('MANTICORE_BLOCKING_THREADS');
+            if ($env !== false && $env !== '' && \ctype_digit((string)$env)) {
+                $n = (int)(string)$env;
+                if ($n < 1) { $n = 1; }
+                if ($n > 64) { $n = 64; }
+            }
+            $fds = \Runtime\Libc\calloc(4, 4);
+            if (\Runtime\Libc\sys_pipe($fds) !== 0) {
+                \Runtime\Libc\free($fds);
+                return false;
+            }
+            if (\Runtime\Libc\sys_pipe(\ptr_offset($fds, 8)) !== 0) {
+                \Runtime\Libc\sys_close(\peek_i32($fds, 0));
+                \Runtime\Libc\sys_close(\peek_i32($fds, 4));
+                \Runtime\Libc\free($fds);
+                return false;
+            }
+            $subR = \peek_i32($fds, 0);
+            $subW = \peek_i32($fds, 4);
+            $doneR = \peek_i32($fds, 8);
+            $doneW = \peek_i32($fds, 12);
+            \Runtime\Libc\free($fds);
+            foreach ([$subR, $subW, $doneR, $doneW] as $fd) { \__mc_fd_cloexec($fd); }
+            // Only the done READ end: the loop drains it to EAGAIN. The worker's
+            // write end stays blocking — a failed done write ends the worker.
+            \__mc_fd_nonblock($doneR);
+            $started = 0;
+            for ($i = 0; $i < $n; $i++) {
+                if (\__mc_pool_start($subR, $doneW) !== 0) { break; }
+                $started = $started + 1;
+            }
+            if ($started === 0) {
+                foreach ([$subR, $subW, $doneR, $doneW] as $fd) { \Runtime\Libc\sys_close($fd); }
+                return false;
+            }
+            self::$poolSubR = $subR;
+            self::$poolSubmit = $subW;
+            self::$poolDoneR = $doneR;
+            self::$poolDoneW = $doneW;
+            self::$poolThreads = $started;
+            self::$poolIds = [];
+            foreach ([$subR, $subW, $doneR, $doneW] as $fd) { self::$poolIds[$fd] = \__mc_fd_pipe_id($fd); }
+            self::$poolInline = false;
+            return true;
+        }
+
+        /**
+         * Run one covered libc call on the pool, parking the running task until
+         * the worker is done with it. {@see \__mc_offload()} is the caller.
+         */
+        public function offload(int $op, int $a0, int $a1, int $a2, int $a3, int $a4): int
+        {
+            if (self::$poolPid !== 0 && self::$poolPid !== \getmypid()) {
+                $this->forgetParentPool();
+            }
+            if (!self::poolUp()) {
+                return \__mc_offload_inline($op, $a0, $a1, $a2, $a3, $a4);
+            }
+            $me = $this->running;
+            $job = \__mc_offload_job($op, $a0, $a1, $a2, $a3, $a4);
+            $addr = \ptr_to_int($job);
+            $rec = \Runtime\Libc\calloc(1, 8);
+            \poke_i64($rec, 0, $addr);
+            $w = \Runtime\Libc\sys_write_ptr(self::$poolSubmit, $rec, 8);
+            \Runtime\Libc\free($rec);
+            if ($w !== 8) {
+                \Runtime\Libc\free($job);
+                return \__mc_offload_inline($op, $a0, $a1, $a2, $a3, $a4);
+            }
+            $this->nOffloaded = $this->nOffloaded + 1;
+            $this->jobTask[$addr] = $me;
+            $me->offloadOp = $op;
+            $this->ensureWatcherFd(self::$poolDoneR);
+            $this->ioWaiters = $this->ioWaiters + 1;
+            // Shielded: the job cannot be stopped and writes into memory this task
+            // owns, so the task resumes only once the worker is done with it.
+            $me->shield = $me->shield + 1;
+            try {
+                while (isset($this->jobTask[$addr])) {
+                    \Fiber::suspend();
+                }
+            } finally {
+                $me->shield = $me->shield - 1;
+                $me->offloadOp = -1;
+            }
+            $ret = \__mc_offload_job_ret($job);
+            \Runtime\Libc\free($job);
+            return $ret;
+        }
+
+        /**
+         * A fork's child inherited the parent's pool registration: the done pipe's
+         * records belong to the parent's workers and the parent's tasks. Drop the
+         * watcher from THIS reactor only (the kernel registration may be the
+         * parent's own — a shared epoll instance) and abandon the inherited parks:
+         * no worker in this process will ever finish them, so they stop counting as
+         * I/O work and a loop left with only them reports a deadlock, not a hang.
+         */
+        private function forgetParentPool(): void
+        {
+            $fd = self::$poolDoneR;
+            if ($fd >= 0 && isset($this->connWatcher[$fd])) {
+                $this->connWatcher[$fd]->forget();
+                unset($this->connWatcher[$fd]);
+                unset($this->writeArmed[$fd]);
+            }
+            $this->ioWaiters = $this->ioWaiters - \count($this->jobTask);
+            $this->jobTask = [];
+        }
+
+        /** Wake every task whose job the workers finished. Records are whole 8-byte writes. */
+        private function drainPool(): void
+        {
+            $rec = \Runtime\Libc\calloc(64, 8);
+            while (true) {
+                $n = \Runtime\Libc\read(self::$poolDoneR, $rec, 512);
+                if ($n <= 0) { break; }
+                for ($off = 0; $off + 8 <= $n; $off = $off + 8) {
+                    $addr = \peek_i64($rec, $off);
+                    if (!isset($this->jobTask[$addr])) { continue; }
+                    $t = $this->jobTask[$addr];
+                    unset($this->jobTask[$addr]);
+                    $this->ioWaiters = $this->ioWaiters - 1;
+                    $this->wake($t);
+                }
+                if ($n < 512) { break; }
+            }
+            \Runtime\Libc\free($rec);
+        }
+
         // ── the blocking step: wait for fds / the next timer, wake tasks ────
         private function pollAndTick(): void
         {
@@ -2993,6 +3213,14 @@ namespace Async {
                         // pcntl_signal_dispatch() is what consumes the signal, so we
                         // deliberately do NOT read it here.
                         $this->wakeSignalPump();
+                        continue;
+                    }
+                    if ($fd === self::$poolDoneR) {
+                        if (self::$poolPid !== \getmypid()) {
+                            $this->forgetParentPool();
+                            continue;
+                        }
+                        $this->drainPool();
                         continue;
                     }
                     $hup = $watcher->hasTriggered(\Io\Poll\Event::Error)

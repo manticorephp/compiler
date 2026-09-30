@@ -1,0 +1,26 @@
+-- plain
+mkdir again: false
+put: 4
+append: 4
+get: "one\ntwo\n"
+missing: false
+size: 100000 exists: true
+fread: 70000
+stat missing: false
+scandir: .,..,a.txt,c.bin
+unlink missing: false
+rmdir gone: false
+-- async
+mkdir again: false
+put: 4
+append: 4
+get: "one\ntwo\n"
+missing: false
+size: 100000 exists: true
+fread: 70000
+stat missing: false
+scandir: .,..,a.txt,c.bin
+unlink missing: false
+rmdir gone: false
+shared: len=400 A=200 B=200
+offloaded>0: 1

@@ -269,6 +269,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_env_count')              { return $this->biEnvCount(); }
         if ($name === '__mir_env_at')                 { return $this->biEnvAt($args); }
         if ($name === '__mir_clock_ns')               { return $this->biClockNs($args); }
+        if ($name === '__mc_pool_start')              { return $this->biPoolStart($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
@@ -2575,6 +2576,25 @@ trait EmitLlvmBuiltins
         $id = $this->lastValue;
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore_clock_ns(i64 ' . $id . ")\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * `__mc_pool_start($submitFd, $doneFd)` → starts one detached blocking-offload
+     * worker thread ({@see EmitLlvmModule::offloadRuntime}); 0 or the pthread errno.
+     * @param Node[] $args
+     */
+    private function biPoolStart(array $args): string
+    {
+        $this->rt->needsPool = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $sub = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $done = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mc_pool_start(i64 ' . $sub . ', i64 ' . $done . ")\n";
         return $this->finishI64($out, $r);
     }
 

@@ -120,6 +120,18 @@ trait EmitLlvmLocals
         return $out;
     }
 
+    /**
+     * A PHP variable's slot, allocated at entry: it starts NULL (0), as a fresh
+     * php variable does. A path that reads it before any store — the merge
+     * box-back boxing `$a` on the arm that never assigned it — otherwise read
+     * whatever the frame held: garbage under x86_64 -O2, which boxed `-128` as
+     * an object and crashed every compile that named `Http\\`.
+     */
+    private function localVarSlot(string $slot): string
+    {
+        return $this->localSlotAlloca($slot) . '  store i64 0, ptr ' . $slot . "\n";
+    }
+
     private function preallocateLocals(Node $n): string
     {
         $k = $n->kind;
@@ -128,7 +140,7 @@ trait EmitLlvmLocals
             if (!isset($this->locals->globalBacked[$n->name]) && !isset($this->locals->slots[$n->name])) {
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$n->name] = $slot;
-                $out .= $this->localSlotAlloca($slot);
+                $out .= $this->localVarSlot($slot);
             }
             return $out . $this->preallocateLocals($n->value);
         }
@@ -177,7 +189,7 @@ trait EmitLlvmLocals
                 if ($cVar !== null && !isset($this->locals->slots[$cVar])) {
                     $slot = $this->ssa->allocReg();
                     $this->locals->slots[$cVar] = $slot;
-                    $out .= $this->localSlotAlloca($slot);
+                    $out .= $this->localVarSlot($slot);
                 }
                 foreach ($this->catchBody($c) as $s) { $out .= $this->preallocateLocals($s); }
             }
@@ -211,12 +223,12 @@ trait EmitLlvmLocals
             if (!isset($this->locals->slots[$n->valueVar])) {
                 $vs = $this->ssa->allocReg();
                 $this->locals->slots[$n->valueVar] = $vs;
-                $out .= $this->localSlotAlloca($vs);
+                $out .= $this->localVarSlot($vs);
             }
             if ($n->keyVar !== null && !isset($this->locals->slots[$n->keyVar])) {
                 $ks = $this->ssa->allocReg();
                 $this->locals->slots[$n->keyVar] = $ks;
-                $out .= $this->localSlotAlloca($ks);
+                $out .= $this->localVarSlot($ks);
             }
             // The OBJECT path also holds the iterator in a synthetic local, and
             // that slot needs hoisting for the very same reason — more sharply,

@@ -390,24 +390,26 @@ trait EmitLlvmControl
      * Generator, which the dynamic protocol step then recognises), an Iterator
      * speaks for itself — so both are emitted and `instanceof` picks.
      */
-    private function emitForeachErasedIterator(\Compile\Mir\Foreach_ $fe, string $word,
-        string $sharedIter = '', string $sharedOwn = ''): string
+    private function emitForeachErasedIterator(\Compile\Mir\Foreach_ $fe, string $word): string
     {
         $subjName = '@fe.subj.' . (string)$this->iterCounter;
         $iterName = '@fe.it.' . (string)$this->iterCounter;
         $this->iterCounter = $this->iterCounter + 1;
+        $nsh = \count($this->feShared);
+        $sh = ($nsh > 0 && $this->feShared[$nsh - 1]->fe === $fe) ? $this->feShared[$nsh - 1] : null;
+        $shared = $sh !== null && $sh->aggOwnSlot !== '';
         $subjSlot = $this->ssa->allocReg();
-        $iterSlot = $sharedIter !== '' ? $sharedIter : $this->ssa->allocReg();
+        $iterSlot = $shared ? $sh->aggIterSlot : $this->ssa->allocReg();
         $this->locals->slots[$subjName] = $subjSlot;
         $this->locals->slots[$iterName] = $iterSlot;
         $out  = '  ' . $subjSlot . " = alloca i64\n";
-        if ($sharedIter === '') { $out .= '  ' . $iterSlot . " = alloca i64\n"; }
+        if (!$shared) { $out .= '  ' . $iterSlot . " = alloca i64\n"; }
         $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $iterSlot . "\n";
         // Whether the slot holds getIterator()'s result (+1, the loop's to give
         // back) or the subject itself (borrowed).
-        $ownSlot = $sharedOwn !== '' ? $sharedOwn : $this->ssa->allocReg();
-        if ($sharedOwn === '') { $out .= '  ' . $ownSlot . " = alloca i1\n"; }
+        $ownSlot = $shared ? $sh->aggOwnSlot : $this->ssa->allocReg();
+        if (!$shared) { $out .= '  ' . $ownSlot . " = alloca i1\n"; }
         $out .= '  store i1 0, ptr ' . $ownSlot . "\n";
         $aggL = $this->ssa->allocLabel('fe.agg');
         $joinL = $this->ssa->allocLabel('fe.agg.end');
@@ -433,12 +435,10 @@ trait EmitLlvmControl
         // label — so every erased foreach over an IteratorAggregate leaked it,
         // and with it the subject (php-cs-fixer: a Tokens and all its tokens
         // per erased `foreach ($tokens …)`).
-        // A shared body ({@see \Compile\Mir\ForeachSharedBody}) is emitted in
-        // the first arm, so the erased foreach pushed these slots for every arm.
-        if ($sharedIter === '') { $this->cf->pushAggIter($iterSlot, true, $ownSlot); }
+        $this->cf->pushAggIter($iterSlot, true, $ownSlot);
         $out .= $this->emitIterProtocolLoop(
             $fe, $iterSlot, $iterName, \Compile\Mir\Type::obj('Iterator'), true);
-        if ($sharedIter === '') { $this->cf->popAggIter(); }
+        $this->cf->popAggIter();
         $out .= $this->releaseAggIterSlot($iterSlot, true, $ownSlot);
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
@@ -1252,9 +1252,11 @@ trait EmitLlvmControl
         if (!$sh->bodyEmitted) {
             $sh->bodyEmitted = true;
             $out .= $sh->bodyLabel . ":\n";
+            if ($sh->aggOwnSlot !== '') { $this->cf->pushAggIter($sh->aggIterSlot, true, $sh->aggOwnSlot); }
             $this->cf->enterLoop($sh->brkLabel, $sh->contLabel);
             $out .= $this->emitNode($fe->body);
             $this->cf->leave();
+            if ($sh->aggOwnSlot !== '') { $this->cf->popAggIter(); }
             $out .= '  br label %' . $sh->contLabel . "\n";
         }
         return $out;
@@ -1353,6 +1355,17 @@ trait EmitLlvmControl
             $this->feShared[] = new \Compile\Mir\ForeachSharedBody($fe, $armSlot,
                 $this->ssa->allocLabel('fe.sh.body'), $this->ssa->allocLabel('fe.sh.cont'),
                 $this->ssa->allocLabel('fe.sh.brk'));
+            // The shared body may be emitted inside ANY arm (the first to reach
+            // it), so the Traversable arm's owned iterator is registered for the
+            // body itself: its slots exist, flag clear, before every arm.
+            if ($this->hasTraversableClasses()) {
+                $sh = $this->feShared[\count($this->feShared) - 1];
+                $sh->aggIterSlot = $this->ssa->allocReg();
+                $sh->aggOwnSlot = $this->ssa->allocReg();
+                $out .= '  ' . $sh->aggIterSlot . " = alloca i64\n";
+                $out .= '  ' . $sh->aggOwnSlot . " = alloca i1\n";
+                $out .= '  store i1 0, ptr ' . $sh->aggOwnSlot . "\n";
+            }
             // The shared body joins every arm and dispatches back to each arm's
             // step, so no arm's entry block dominates its own loop blocks any
             // more — exactly the generator-resume situation. Run the arms in
@@ -1366,18 +1379,6 @@ trait EmitLlvmControl
                 $out .= '  ' . $s0 . " = alloca i64\n" . '  ' . $s1 . " = alloca i64\n";
                 $this->locals->slots['@fe.0.' . (string)$fe->genSlotBase] = $s0;
                 $this->locals->slots['@fe.1.' . (string)$fe->genSlotBase] = $s1;
-            }
-            // The object arm's iterator slot and its "owned" flag, live — and
-            // cleared — across every arm: the shared body a return / break N
-            // leaves is emitted in the generator arm.
-            $aggIt = '';
-            $aggOwn = '';
-            if ($this->hasTraversableClasses()) {
-                $aggIt = $this->ssa->allocReg();
-                $aggOwn = $this->ssa->allocReg();
-                $out .= '  ' . $aggIt . " = alloca i64\n" . '  ' . $aggOwn . " = alloca i1\n";
-                $out .= '  store i64 0, ptr ' . $aggIt . "\n" . '  store i1 0, ptr ' . $aggOwn . "\n";
-                $this->cf->pushAggIter($aggIt, true, $aggOwn);
             }
             $out .= $this->genFrameProbeIr($word);
             $isGen = $this->genFrameReg;
@@ -1406,8 +1407,7 @@ trait EmitLlvmControl
                 $out .= '  br i1 ' . $this->objectProbeReg . ', label %' . $oArm
                       . ', label %' . $aArm . "\n";
                 $out .= $oArm . ":\n";
-                $out .= $this->emitForeachErasedIterator($fe, $word, $aggIt, $aggOwn);
-                $this->cf->popAggIter();
+                $out .= $this->emitForeachErasedIterator($fe, $word);
                 $out .= '  br label %' . $dynEnd . "\n";
             } else {
                 $out .= '  br label %' . $aArm . "\n";

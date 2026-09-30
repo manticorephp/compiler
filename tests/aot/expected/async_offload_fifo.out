@@ -1,0 +1,7 @@
+bool(true)
+tick 1
+dump names the parked call: yes
+tick 2
+tick 3
+writer done
+reader got: hello
