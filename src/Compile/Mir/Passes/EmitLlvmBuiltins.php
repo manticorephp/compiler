@@ -8752,6 +8752,23 @@ trait EmitLlvmBuiltins
             }
             return $out;
         }
+        if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS
+            && $this->propertyOffsetOrNull($arrNode->object, $arrNode->property) === null) {
+            // An ERASED receiver (`$s` a cell after `$s = 0; … $s = new S2()`)
+            // has no static slot: the relocated buffer goes back through the
+            // shared class_id writer, as the plain store does
+            // ({@see EmitLlvmObjects::emitCellStoreProperty}). The static arm
+            // below inttoptr'd the TAGGED receiver and wrote a guessed offset —
+            // `array_shift($s->j)` SIGSEGV'd storing through 0xfff8….
+            $out = $this->emitObjPtrOf($arrNode->object);
+            $objp = $this->lastValue;
+            $this->rt->needsTagged = true;
+            $cv = $this->ssa->allocReg();
+            $out .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $arr2 . ")\n";
+            $out .= '  call void ' . $this->cellPropertyWriteHelper($arrNode->property)
+                  . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
+            return $out;
+        }
         if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS) {
             $out = $this->emitNode($arrNode->object);
             $out .= $this->coerceToPtr();
