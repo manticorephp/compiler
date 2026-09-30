@@ -962,8 +962,7 @@ trait EmitLlvmLocals
         if (!$selfCopy && \Compile\Mir\VecCopyOnAssign::copies($v, $sl->name, $this->frame->mutatedVecLocals)) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
-            $cp = $this->ssa->allocReg();
-            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
+            $out .= $this->arrayValueCopyIr($src, $this->arrayRetainFlavor($v, $sl->type));
             // ★ The copy duplicates the element WORDS, not the ownership of what
             // they point at — `__mir_array_copy` is a flat buffer copy. Two
             // buffers then held one ref, and whichever released first freed a
@@ -971,11 +970,8 @@ trait EmitLlvmLocals
             // nothing ever dropped an element off a live buffer; the element
             // SLOT drop ({@see \Compile\Debug::$rcElemSlotDrop}) does, so
             // `$b = $a; $a['x'] = $new;` read FREED memory out of `$b`.
-            // The adopt that takes exactly the element refs the copy's own
-            // release gives back is inside `__mir_array_copy` itself now, by the
-            // buffer's hint.
-            $this->lastValue = $cp;
-            $this->lastValueType = 'ptr';
+            // The adopt takes exactly the element refs the copy's own release
+            // gives back ({@see arrayValueCopyIr}).
             $copiedVecLocal = true;
             // The copy is heap-owned + independent, so it is no longer an
             // arena vec alias.
@@ -997,10 +993,7 @@ trait EmitLlvmLocals
             && $v->type->isVec() && !$sl->coOwnRead) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
-            $cp = $this->ssa->allocReg();
-            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
-            $this->lastValue = $cp;
-            $this->lastValueType = 'ptr';
+            $out .= $this->arrayValueCopyIr($src, $this->arrayRetainFlavor($v, $sl->type));
             $copiedVecProp = true;
         }
         // `$m = $obj` / `$b = $s` — a second owner of a by-handle object or

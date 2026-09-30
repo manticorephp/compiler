@@ -648,6 +648,46 @@ trait EmitLlvmMemory
 
     /** Emit a retain of the rc value carried in the i64 register `$i64reg` —
      *  the exact mirror of {@see rcReleaseReg}. */
+    /**
+     * A VALUE copy of the array at `$src` (a `ptr` register) for a destination
+     * released by `$flavor`: the flat copy, then an adopt of exactly what that
+     * release gives back — by the buffer's hint when stamped, by the flavor's
+     * element kind when not, the rule {@see rcReleaseReg}'s flavored release
+     * walks by. `__mir_array_copy` adopts by hint or REPR bits, and an unstamped
+     * buffer of objects (a vec of an object union, built by appends) has
+     * neither: the copy took nothing, its `vecobj` release dropped every
+     * element, and the property still holding them freed them a second time.
+     * A repr-mode flavor (erased elements) keeps `__mir_array_copy`. Leaves the
+     * copy in `lastValue` as a `ptr`.
+     */
+    private function arrayValueCopyIr(string $src, string $flavor): string
+    {
+        $cp = $this->ssa->allocReg();
+        $this->lastValue = $cp;
+        $this->lastValueType = 'ptr';
+        $adopt = $this->adoptHelperFor($flavor);
+        if ($adopt === '') {
+            return '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $src . ")\n";
+        }
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        return '  ' . $cp . ' = call ptr @__mir_array_copy_bare(ptr ' . $src . ")\n"
+            . '  call void ' . $adopt . '(ptr ' . $cp . ")\n";
+    }
+
+    /** The adopt helper pairing a flavored array release, or '' for the
+     *  repr-mode flavors {@see arrayValueCopyIr} leaves to `__mir_array_copy`. */
+    private function adoptHelperFor(string $flavor): string
+    {
+        $f = \str_ends_with($flavor, 'own') ? \substr($flavor, 0, \strlen($flavor) - 3) : $flavor;
+        if ($f === 'vecobj' || $f === 'assocobj') { return '@__mir_array_adopt_obj'; }
+        if ($f === 'vecstr' || $f === 'assocstr') { return '@__mir_array_adopt_str'; }
+        if ($f === 'veccell' || $f === 'assoccell') { return '@__mir_array_adopt_cell'; }
+        if ($f === 'vecbuf' || $f === 'assocbuf') { return '@__mir_array_adopt_buf'; }
+        if ($this->arrFlavorSuffix($f) !== '') { return '@__mir_array_adopt_' . $this->arrFlavorSuffix($f); }
+        return '';
+    }
+
     private function rcRetainReg(string $i64reg, string $flavor): string
     {
         // Mirror of the cell branch in rcReleaseReg: raw i64, tag-dispatched,

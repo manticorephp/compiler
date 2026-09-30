@@ -1166,6 +1166,7 @@ final class UnifiedArrayRuntime
      */
     private function emitCopy(): void
     {
+        $this->emitCopyBare();
         $fn = $this->module->func('__mir_array_copy', Type::ptr());
         $arr = $fn->param(Type::ptr(), 'arr');
         $e = $fn->block('entry');
@@ -1173,17 +1174,7 @@ final class UnifiedArrayRuntime
         $go = $fn->block('go');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $go);
         $z->ret(Value::null());
-        $cap = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
-        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
-        $esz = $go->select($go->icmp('ne', $this->hashedBit($go, $flags), Value::int(Type::i64(), 0)),
-            Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE),
-            Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
-        $bytes = $go->add($go->mul($cap, $esz), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
-        $copy = $go->call('__mir_alloc_array_tagged', Type::ptr(), [$bytes]);
-        $go->call('memcpy', Type::ptr(), [$copy, $arr, $bytes]);
-        $go->store(Value::int(Type::i64(), 1), $this->hdr($go, $copy, MemoryAbi::ARRAY_RC_OFFSET));
-        $go->store(Value::int(Type::i64(), 0), $this->hdr($go, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
-        $go->store(Value::null(), $this->hdr($go, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $copy = $go->call('__mir_array_copy_bare', Type::ptr(), [$arr]);
         // A VALUE copy owns its keys and elements: its release drops them
         // whatever the source does. Adopt by the buffer's element hint — what
         // the slots actually hold, the key every flavored release walks by —
@@ -1203,6 +1194,37 @@ final class UnifiedArrayRuntime
         $byRepr->call('__mir_array_adopt', Type::void(), [$copy]);
         $byRepr->br($done);
         $done->ret($copy);
+    }
+
+    /**
+     * `__mir_array_copy_bare(src) -> ptr` — the flat buffer copy alone: header
+     * + body, fresh rc=1, index reset, and NO element adopt. A caller that
+     * knows the release flavor the copy will get adopts by THAT flavor
+     * (`__mir_array_adopt_<flavor>`, {@see EmitLlvmMemory::rcAdoptReg}), so
+     * the two walk the same elements the same way — hint when the buffer is
+     * stamped, the static flavor when it is not. NULL → NULL.
+     */
+    private function emitCopyBare(): void
+    {
+        $fn = $this->module->func('__mir_array_copy_bare', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $z = $fn->block('z');
+        $go = $fn->block('go');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $go);
+        $z->ret(Value::null());
+        $cap = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $esz = $go->select($go->icmp('ne', $this->hashedBit($go, $flags), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bytes = $go->add($go->mul($cap, $esz), Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE));
+        $copy = $go->call('__mir_alloc_array_tagged', Type::ptr(), [$bytes]);
+        $go->call('memcpy', Type::ptr(), [$copy, $arr, $bytes]);
+        $go->store(Value::int(Type::i64(), 1), $this->hdr($go, $copy, MemoryAbi::ARRAY_RC_OFFSET));
+        $go->store(Value::int(Type::i64(), 0), $this->hdr($go, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $go->store(Value::null(), $this->hdr($go, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $go->ret($copy);
     }
 
     /**
