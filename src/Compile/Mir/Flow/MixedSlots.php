@@ -153,9 +153,7 @@ final class MixedSlots
             $this->cellSeen[$name] = true;
             return;
         }
-        $ownedByRetain = $value->kind === Node::KIND_PROPERTY_ACCESS
-            || (\Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS)
-            || ($value->kind === Node::KIND_STATIC_PROP && $value->type->isVec());
+        $ownedByRetain = \Compile\Debug::$rcElemReadOwns && $value->kind === Node::KIND_ARRAY_ACCESS;
         $ownedCopy = !$boxedSlot && VecCopyOnAssign::copies($value, $name, $this->mutatedVecs);
         if (!$boxedSlot && $value->kind === Node::KIND_LOAD_LOCAL
             && InsertMemoryOps::arrayAliasCoOwns($value->type, $sl->type, $this->enums, $this->classes)) {

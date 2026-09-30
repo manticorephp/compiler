@@ -193,6 +193,10 @@ final class StoreLocal extends Node
     /** `$x = $x` on one cell slot the flow manages: a relabel that moves
      *  nothing ({@see Passes\OwnershipFlow}), so the emitter emits no store. */
     public bool $ownRelabel = false;
+    /** A hidden local that holds a property read across a call that may
+     *  overwrite the slot ({@see Passes\SpillFreshBases::coOwnHeld}): it
+     *  co-owns the value by a retain — never a copy, it is never written. */
+    public bool $coOwnRead = false;
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────

@@ -131,7 +131,6 @@ final class EmitLlvm implements EmitVisitor
     use EmitLlvmObjects;
     use EmitLlvmFiber;
     use EmitLlvmCellGuard;
-    use EmitLlvmEscape;
 
     public function name(): string { return 'emit-llvm'; }
 
@@ -491,14 +490,6 @@ final class EmitLlvm implements EmitVisitor
     /** Whether staged emission defers string globals to the body writer. */
     public bool $deferStringGlobals = false;
 
-    /** Declared return type of the function the borrow scan is walking. */
-    private ?Type $scanReturnType = null;
-
-    /** Parent of the node the borrow scan is currently judging. */
-    private ?Node $scanParent = null;
-    /** @var Node[] the ancestors of the node being scanned, outermost first */
-    private array $scanStack = [];
-
     /**
      * Write every lazily generated property-read / dynamic-method helper body
      * through `$sink`, to a FIXPOINT.
@@ -811,10 +802,8 @@ final class EmitLlvm implements EmitVisitor
         // Per-module property usage facts for the OWNERSHIP decisions (a cell
         // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
-        $this->propRawBorrow = [];
         $this->refCellPropNames = [];
         $this->globalCellVeto = [];
-        $this->propElemBorrow = [];
         $this->needsObjectVarsFn = false;
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
@@ -850,29 +839,17 @@ final class EmitLlvm implements EmitVisitor
         $this->propOwnElemVeto = [];
         $this->clonedClasses = [];
         $this->cloneClassUnknown = false;
-        // A LIBRARY's classes go into a `.sig`, so "nobody borrows this property"
-        // is not answerable here at all — veto every slot rather than reason about
-        // a module we cannot see. {@see \Compile\Mir\Module::$isLibraryModule}.
-        $this->propBorrowUnknown = $module->isLibraryModule;
         $this->moduleIsLibrary = $module->isLibraryModule;
-        $statT = \Compile\Stats::now();
-        $this->computeKeepsNoArg($module);
-        \Compile\Stats::step('  escape summaries', $statT, \count($this->escJudged), -1);
         $this->grantBagsForDynamicStores($module);
         $statT = \Compile\Stats::now();
         foreach ($module->functions as $fn) {
-            // The RETURN exemption below needs the DECLARED return type: it is
-            // what emitReturn falls back to for an unknown/cell value, and so
-            // what decides whether the return retains.
-            $this->scanReturnType = $fn->returnType;
             $this->scanCellPropStores($fn->body);
             $this->collectRefCellPropNames($fn->body);
             $decl = [];
             $alias = [];
             $this->scanGlobalCellStores($fn->body, $decl, $alias);
         }
-        \Compile\Stats::step('  borrow scan', $statT, -1, -1);
-        $this->scanReturnType = null;
+        \Compile\Stats::step('  property scan', $statT, -1, -1);
         $streaming = $this->streamIrPath !== '';
         $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';
         $bodyBytes = 0;
@@ -1927,25 +1904,6 @@ final class EmitLlvm implements EmitVisitor
     private array $cellPropArrayBase = [];
 
     /**
-     * Prop keys whose value is read somewhere that takes NO REFERENCE — the veto
-     * for release-before-overwrite on the slot ({@see propSlotDropsOldValue}).
-     *
-     * Exactly ONE read shape retains: `$x = $this->arr`, the snapshot alias in
-     * {@see EmitLlvmLocals::emitStoreLocal} — and even that one does not when the
-     * store takes the cell box-back arm, which returns before the retain. Every
-     * other read borrows the raw buffer, proven from emitted IR rather than from
-     * reading code:
-     *   - `foreach ($this->items as $it)` — no retain, no copy; the loop walks the
-     *     buffer, so freeing it in the body would pull the ground out of the walk;
-     *   - `$s = $h->items[0]` — `array_get_int` + `elem_untag` + `store`, no retain,
-     *     so the local borrows the ELEMENT and a drop of the buffer frees it too.
-     * Anything else — a call argument, a return, a store into another container —
-     * is counted as a borrow as well: this scan is a VETO, and its false positives
-     * only cost the leak we already have.
-     */
-    private array $propRawBorrow = [];
-
-    /**
      * Property NAMES a storable reference is taken to in this module
      * (`[&$o->p]`). Such a slot is promoted in place on the first `&`
      * ({@see EmitLlvmObjects::emitRefCell}): it holds `cell(REF, box)` from
@@ -2009,8 +1967,7 @@ final class EmitLlvm implements EmitVisitor
             if (!$this->isGlobalsViewName($n->name)) {
                 $decl[$n->name] = $n;
                 // A LIBRARY's superglobal cell is shared with a program this
-                // module cannot see, whose stores it cannot judge — the same
-                // refusal {@see $propBorrowUnknown} makes for a property; and
+                // module cannot see, whose stores it cannot judge; and
                 // the mirror: a program that LINKS a library shares its cells
                 // with stores the `.sig` does not describe ({@see $importsLibrary}).
                 // A `static` local is module-private and stays judged.
@@ -2215,17 +2172,6 @@ final class EmitLlvm implements EmitVisitor
      */
     private array $propOwnElem = [];
 
-    /**
-     * Prop keys read through an ELEMENT subscript somewhere — a borrow of the
-     * element, never of the buffer. Such a slot may still reclaim its BUFFER on
-     * overwrite (the `*buf` flavor: buffer + hashed keys, no element drop),
-     * which is what a whole-slot veto costs when the property is a MAP that is
-     * rebuilt over and over.
-     *
-     * @var array<string, bool>
-     */
-    private array $propElemBorrow = [];
-
     /** A site asked for `get_object_vars`' class-table walk, so the module needs
      *  the one shared body ({@see EmitLlvmBuiltins::emitObjectVarsFn}). */
     private bool $needsObjectVarsFn = false;
@@ -2377,10 +2323,6 @@ final class EmitLlvm implements EmitVisitor
      */
     private array $propOwnElemVeto = [];
 
-    /** True when this module cannot answer the borrow question at all (a library
-     *  target). Every slot then keeps its old value — the leak, never a free. */
-    private bool $propBorrowUnknown = false;
-
     /** {@see \Compile\Mir\Module::$isLibraryModule} — a module whose superglobal
      *  cells are shared with a program it cannot see ({@see scanGlobalCellStores}). */
     private bool $moduleIsLibrary = false;
@@ -2399,35 +2341,13 @@ final class EmitLlvm implements EmitVisitor
      *  class can be proven un-cloned. */
     private bool $cloneClassUnknown = false;
 
+    /**
+     * Module-wide property-store facts, one walk: which slots own one element
+     * ref per element ({@see markPropOwnElem}), which classes are cloned, and
+     * which properties are a raw array base ({@see $cellPropArrayBase}).
+     */
     private function scanCellPropStores(Node $n): void
     {
-        // Every property READ that is not the retaining snapshot alias vetoes its
-        // slot. Judged at the PARENT, because the shape that retains is a property
-        // of the parent (a StoreLocal), not of the read.
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $v = $n->value;
-            if ($v->kind === Node::KIND_PROPERTY_ACCESS && !$this->storeLocalRetainsProp($n, $v)) {
-                $this->markPropBorrow($v, "store-local value");
-            }
-            // ⚠ The VALUE's own children are judged by the VALUE, not by the
-            // store: `$x = f($this->map)` is a call, and its argument rule is the
-            // call's. Walking them here with the store's rule is what kept
-            // `InferTypes::localTypes` vetoed after the call-argument rule went
-            // in — every one of its 13 borrow marks came from this line, all of
-            // them `$merged = $this->loopMerge($saved, $this->localTypes);`.
-            // ⚠ With the STORE as the consumer. The descent has not reached
-            // $n yet, so `scanParent` still holds the store's OWN parent —
-            // judging the value against a `block` is what made
-            // {@see elemReadIsOwned} answer no for every `$x = $this->m[$k]`,
-            // the one shape it exists to exempt. The later descent reaches the
-            // same read with the right parent, but the veto is already set.
-            $savedSp = $this->scanParent;
-            $this->scanParent = $n;
-            $this->markChildBorrows($v);
-            $this->scanParent = $savedSp;
-        } else {
-            $this->markChildBorrows($n);
-        }
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             // Key by the DECLARING class (+ a bare-name global fallback when the
             // receiver is erased), so a same-named property in an unrelated class
@@ -2446,405 +2366,29 @@ final class EmitLlvm implements EmitVisitor
         }
         $base = $this->cellPropArrayBaseKey($n);
         if ($base !== null) { $this->cellPropArrayBase[$base] = true; }
-        // The elem-borrow arm needs to know its CONSUMER, and markChildBorrows
-        // only ever sees a node's direct children. One field, saved and restored
-        // around the descent, is enough — the walk is depth-first.
-        $savedParent = $this->scanParent;
-        $this->scanParent = $n;
-        $this->scanStack[] = $n;
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanCellPropStores($c);
         }
-        \array_pop($this->scanStack);
-        $this->scanParent = $savedParent;
     }
 
     /**
-     * Whether `$x = $obj->prop` takes a REFERENCE on what it reads — the ONE read
-     * shape in the tree that does, and therefore the only one that does not veto
-     * its slot.
-     *
-     * Character-for-character the `$aliasArrayProp` gate of
-     * {@see EmitLlvmLocals::emitStoreLocal}, because that is the code that emits
-     * the retain; if the two ever disagree this scan either leaks (harmless) or
-     * blesses a borrow as owned (a free of a live value).
-     *
-     * An ARRAY, a STRING and an OBJECT ({@see \Compile\Mir\AliasOwn::propReadCoOwns}).
-     * A closure env read emits NO retain the local's release would balance, so
-     * `$c = $this->cb;` leaves the local pointing at a value the slot still owns
-     * — which is exactly why such a slot may only drop when the property is read
-     * NOWHERE. And a read through the cell box-back arm does not retain either:
-     * that arm returns before ever reaching the retain.
+     * Whether `$x = $obj->prop` takes a REFERENCE on an ARRAY it reads into a
+     * RAW slot — the snapshot whose element refs the local's release pairs
+     * ({@see EmitLlvmMemory::ownElemPairFlavor}). Character-for-character the
+     * `$aliasArrayProp` gate of {@see EmitLlvmLocals::emitStoreLocal}; a
+     * box-back store boxes (or rebuilds) the array into a cell instead.
      */
     private function storeLocalRetainsProp(Node $store, Node $pa): bool
     {
         if ($store->type->kind === Type::KIND_CELL && $pa->type->kind !== Type::KIND_CELL) {
             // A SUPERGLOBAL is a module cell in every scope, and its store
             // takes its own reference — an array is copied and the copy adopts
-            // the elements ({@see EmitLlvmLocals::globalCellOwnIr}); the
-            // box-back arm this refusal is about is a plain local's.
-            // `$_SESSION = $h->data;` vetoed `H::data` and every overwrite of
-            // it leaked the whole previous array.
+            // the elements ({@see EmitLlvmLocals::globalCellOwnIr}).
             return $pa->type->isArray() && $this->isSuperglobalName($store->name);
         }
         if (\Compile\Mir\AliasOwn::propReadCoOwns($pa)) { return true; }
         return $pa->type->isArray()
             || $this->slotIsArrayHinted($pa->object, $pa->property, $pa->type);
-    }
-
-    /**
-     * Judge `$parent`'s DIRECT children: which property reads among them are
-     * borrows that must veto their slot's release-before-overwrite?
-     *
-     * ONE owner for the question, because the answer depends on the PARENT and
-     * the same parent shape shows up in two places (a bare statement, and the
-     * value of a `StoreLocal`). Three shapes take no reference on the buffer:
-     *
-     *  - the BASE of an element store. The statement cows it and {@see
-     *    EmitLlvmBuiltins::vecWriteBack} puts the (possibly reallocated) buffer
-     *    straight back into the slot with a plain `store` — no retain, no
-     *    release — so the pointer never outlives the statement. Counting it
-     *    vetoed every ACCUMULATOR property: fill `$this->map[$k] = v` in a loop
-     *    and `$this->map = []` could never drop what it overwrote, leaking the
-     *    whole previous array (25 blocks an iteration for a 12-entry map).
-     *  - the BASE of an element READ. It borrows the ELEMENT, which is a
-     *    separate allocation — reclaiming the BUFFER cannot invalidate it, only
-     *    dropping the elements could. Recorded in {@see $propElemBorrow} so the
-     *    slot still gives its buffer back (the `*buf` flavor).
-     *  - an ARRAY argument of a call. The callee holds it for the duration of
-     *    the call, and a callee that KEEPS it stores it — and a container /
-     *    property store of an array RETAINS, so the buffer is at rc >= 2 and
-     *    this slot's later drop cannot free it. ARRAY only: a string / object
-     *    property read emits no retain at all, so those keep the strict rule.
-     */
-    private function markChildBorrows(Node $parent): void
-    {
-        $k = $parent->kind;
-        if ($k === Node::KIND_STORE_ELEMENT) {
-            $base = $parent->array;
-            // The value co-own holds for an ARRAY base only: an `ArrayAccess`
-            // object base is rewritten to `$obj->offsetSet($k, $v)`
-            // ({@see EmitLlvmArrays::emitStoreElement}), a method call nobody
-            // judged whose `mixed $value` arrives as a cell; a cell / erased
-            // base may be that same object at runtime.
-            $arrayBase = $base->type->isArray();
-            foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($c === $base) { continue; }
-                if ($arrayBase && $c === $parent->value && $this->storeCoOwnsPropRead($c)) { continue; }
-                $this->markPropBorrowsIn($c, 'store-element operand');
-            }
-            return;
-        }
-        // The VALUE of a property store is RETAINED by the store — a property
-        // read is not an owned producer, so {@see EmitLlvmMemory::rcRetainByType}
-        // gives the destination a reference of its own, on either side of the
-        // cell box. The source slot may then release what it overwrites without
-        // stranding that copy. `$s->ctxBlob = $ctx->rbuf;` was the one read
-        // that vetoed `Resource::rbuf` for the whole stdlib, and with it every
-        // `$s->rbuf = ''` compaction: one read buffer per request.
-        if ($k === Node::KIND_STORE_PROPERTY && $this->propStoreDeclared($parent)) {
-            foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($c === $parent->value && $this->storeCoOwnsPropRead($c)) { continue; }
-                $this->markPropBorrowsIn($c, 'store-property operand');
-            }
-            return;
-        }
-        // An array LITERAL retains each STRING / OBJ element it is built from
-        // ({@see EmitLlvmArrays::emitArrayLit}, raw or boxed), exactly as an
-        // element store does — `[$this->pending]` is how a slot's value is
-        // handed to a suspending write as an OWNED copy.
-        if ($k === Node::KIND_ARRAY_LIT) {
-            $values = [];
-            foreach ($parent->elements as $el) { $values[] = $el->value; }
-            foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                $isValue = false;
-                foreach ($values as $v) {
-                    if ($c === $v) { $isValue = true; break; }
-                }
-                if ($isValue && $this->storeCoOwnsPropRead($c)) { continue; }
-                $this->markPropBorrowsIn($c, 'array-literal element');
-            }
-            return;
-        }
-        if ($k === Node::KIND_ARRAY_ACCESS && $parent->array->kind === Node::KIND_PROPERTY_ACCESS
-            && ($parent->array->type->isArray()
-                || $this->slotIsArrayHinted($parent->array->object, $parent->array->property, $parent->array->type))) {
-            $pa = $parent->array;
-            // An element read is a genuine BORROW — unlike a property read it
-            // emits no retain of its own (`retain_element` counts element
-            // STORES). So the veto here is load-bearing and must not simply be
-            // lifted. What CAN be lifted is the case where the CONSUMER takes a
-            // reference: the value of a StoreLocal is retained by
-            // rcRetainByType (an array-access is not an owned producer, so it
-            // is not skipped), and a returned one is retained by
-            // Ownership::returnBorrowsObj. Those two own what they read, so they cannot
-            // strand anything, and vetoing the whole DECLARING CLASS for them
-            // is what leaks every element of the slot — 9,236,608 Lexer\\Token
-            // on the Doctrine tier, against ~0 reclaims.
-            if (!$this->elemReadIsOwned($parent)) {
-                $ebKey = $this->cellPropKey($pa->object->type->class ?? '', $pa->property);
-                // Say WHY, the way {@see markPropBorrow} does for the raw veto.
-                // The veto is per SLOT and program-wide — ONE non-owning read
-                // anywhere makes every overwrite of that property release
-                // `assocbuf` and strand its elements — so "which read, and what
-                // consumes it" is the only question worth asking, and it was the
-                // one thing no trace could answer.
-                $ebWant = \getenv('MANTICORE_BORROW_TRACE');
-                if ($ebWant !== false && $ebWant !== '' && \str_contains($ebKey, $ebWant)) {
-                    $ebChain = [];
-                    $ebN = \count($this->scanStack);
-                    for ($ebI = $ebN - 1; $ebI >= 0 && $ebI >= $ebN - 4; $ebI--) {
-                        $ebChain[] = $this->scanStack[$ebI]->kind;
-                    }
-                    \error_log('ELEMBORROW ' . $ebKey . ' <- consumer '
-                        . \implode(' < ', $ebChain)
-                        . ' elem=' . $parent->type->toString()
-                        . ' line ' . (string)$parent->line);
-                }
-                $this->propElemBorrow[$ebKey] = true;
-            }
-            $idx = $parent->index;
-            if ($idx !== null) { $this->markPropBorrowsIn($idx, 'subscript index'); }
-            return;
-        }
-        if ($this->isCallLike($k)) {
-            // A callee CAN keep what it is handed, so a call operand is a
-            // borrow by default. The exception is a builtin that provably
-            // reads its argument and keeps nothing: `strlen($this->buf)` is
-            // the single most common property read there is, and it alone
-            // vetoed `Buffer\ByteBuffer::buf` for the whole program.
-            // A NAME list, like {@see EmitLlvmMemory::mutatesArg0} — the
-            // contract is php's, not our implementation's.
-            // And a `new` whose constructor keeps its arguments only through
-            // stores that RETAIN — `new Request($this->method, …)` in the
-            // parser vetoed every per-request slot of `Http\Parser`, and
-            // `new TaskGroup($cur->scope)` vetoed `Task::scope` for every
-            // program with a scope: the old value of each was never released,
-            // yet the only thing holding it after the call was the new
-            // object's own +1.
-            // ⚠ An ARRAY operand used to be exempt for EVERY callee ("held for
-            // the duration of the call, and a keeper stores it, which
-            // retains") — but a callee that PARKS holds the borrow across
-            // other tasks' stores, and the slot's release then frees the
-            // buffer under it. "For the duration of the call" is only a
-            // bound when the callee cannot suspend, which is what the
-            // keep-nothing judgement now certifies; an array operand of any
-            // other call is a borrow like the rest.
-            // Judged per ARGUMENT, and never for the receiver
-            // ({@see EmitLlvmEscape::operandHeldSafely}).
-            foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($c->kind === Node::KIND_PROPERTY_ACCESS && $this->operandHeldSafely($parent, $c)) { continue; }
-                // The closure an invoke CALLS is pinned for the call ({@see
-                // EmitLlvmCalls::invokePinsCallee}); it is not handed to anyone.
-                if ($parent instanceof \Compile\Mir\Invoke_ && $this->invokePinsCallee($parent, $c)) { continue; }
-                $this->markPropBorrowsIn($c, 'call operand of ' . (string)$k . ($k === Node::KIND_CALL ? ' ' . $parent->function : ''));
-            }
-            return;
-        }
-        // A `foreach` walks its subject as the borrow it was read as; the
-        // loop body is what could release it ({@see EmitLlvmEscape::foreachSubjectHeldSafely}).
-        if ($k === Node::KIND_FOREACH) {
-            $subj = $parent->array;
-            $held = $subj->kind === Node::KIND_PROPERTY_ACCESS && $this->foreachSubjectHeldSafely($parent);
-            foreach (\Compile\Mir\Walk::children($parent) as $c) {
-                if ($held && $c === $subj) { continue; }
-                $this->markPropBorrowsIn($c, 'node kind foreach');
-            }
-            return;
-        }
-        // A RETURN already TAKES the reference. emitReturn gates on
-        // Ownership::returnBorrowsObj and retains a borrowed property read before
-        // handing it back, so the caller owns a reference of its own and the
-        // slot may drop what it overwrites without stranding that borrow.
-        // `return $this->p;` is the shape every getter has, and the default
-        // arm below vetoed the whole DECLARING CLASS for it — which is why a
-        // class with a getter leaked every overwritten value while the same
-        // class without one was exactly flat (tools/prof/rcbalance.php,
-        // prop_ow_read vs prop_ow_noread).
-        if ($k === Node::KIND_RETURN && \Compile\Debug::$rcReturnOwns) {
-            $rv = $parent->value;
-            if ($rv !== null && $rv->kind === Node::KIND_PROPERTY_ACCESS
-                && $this->returnRetainsBorrow($rv)) {
-                return;
-            }
-        }
-        // ★★★ An operand CONSUMED INSIDE THE EXPRESSION cannot outlive the
-        // store. `$this->buf = $this->buf . $s`, `$this->block === ''`,
-        // `strlen($this->buf) - $this->pos` — every one of these reads the
-        // bytes and keeps nothing, yet each vetoed the slot for the whole
-        // class, so an overwritten string property was NEVER released. That is
-        // 1806 B per request in `http_parse`: 345.8 MB of its 362 MB peak.
-        //
-        // The shape the veto exists for is a read that ESCAPES the statement —
-        // `$s = $o->buf; $o->set(…); return $s;` — and those are STORE_LOCAL /
-        // RETURN / a container store / a call that may retain, every one of
-        // which is handled above or falls through to the default arm below.
-        // Arithmetic, comparison, concat and the bitwise operators produce a
-        // FRESH value from the bytes; none of them can hold the pointer.
-        // UNSET belongs with them for the same reason, one step further: its
-        // target is not a read at all, it is a CONSUME. Counting it as a borrow
-        // vetoed the slot's release-before-overwrite PROGRAM-WIDE, so a single
-        // `unset($this->x)` in one method made every `$o->x = …` anywhere leak
-        // what it overwrote — `FunctionTextSink::$chunks` held 126,135
-        // unreachable blocks / 93.4 MB on that one line. The element form
-        // (`unset($this->map[$k])`) mutates the buffer in place and does not
-        // escape it either; {@see $cellPropArrayBase} records that use on its
-        // own terms.
-        if ($k === Node::KIND_CONCAT || $k === Node::KIND_CMP
-            || $k === Node::KIND_ADD || $k === Node::KIND_SUB
-            || $k === Node::KIND_MUL || $k === Node::KIND_DIV
-            || $k === Node::KIND_MOD || $k === Node::KIND_NEG
-            || $k === Node::KIND_NOT || $k === Node::KIND_BITOP
-            || $k === Node::KIND_BITNOT || $k === Node::KIND_ISSET
-            || $k === Node::KIND_UNSET) {
-            return;
-        }
-        // A conditional the emitter normalizes hands out a +1 from EVERY arm
-        // ({@see EmitLlvmControl::armRetainPostBox} retains a property-read
-        // arm), so `$r === null ? null : $r->scope` is as owned as a getter's
-        // `return $this->scope`. Judged by the same predicate the emitter
-        // uses; the veto stood on `Scheduler::currentGroup()` alone and cost
-        // every program a TaskGroup per scope.
-        $ownedArms = [];
-        if (\Compile\Mir\CondOwn::isConditional($parent) && $this->condOwnsResult($parent)) {
-            $cf = $this->condFlavor($parent->type);
-            if ($cf === 'obj' || $cf === 'str') {
-                foreach (\Compile\Mir\CondOwn::arms($parent) as $arm) {
-                    if ($arm->kind === Node::KIND_PROPERTY_ACCESS
-                        && ($arm->type->kind === Type::KIND_OBJ || $arm->type->kind === Type::KIND_STRING)) {
-                        $ownedArms[] = $arm;
-                    }
-                }
-            }
-        }
-        foreach (\Compile\Mir\Walk::children($parent) as $c) {
-            foreach ($ownedArms as $arm) {
-                if ($c === $arm) { continue 2; }
-            }
-            $this->markPropBorrowsIn($c, 'node kind ' . (string)$k);
-        }
-    }
-
-    /** The node kinds that pass their operands as CALL ARGUMENTS — where an
-     *  array's pointer is handed over for the duration of the call only. */
-    private function isCallLike(string $kind): bool
-    {
-        return $kind === Node::KIND_CALL || $kind === Node::KIND_METHOD_CALL
-            || $kind === Node::KIND_STATIC_CALL || $kind === Node::KIND_INVOKE
-            || $kind === Node::KIND_NEW_OBJ;
-    }
-
-    /**
-     * Does `emitReturn` retain this borrowed property read on the way out?
-     *
-     * Mirrors {@see \Compile\Mir\Ownership::returnBorrowsObj}'s type test, with
-     * {@see \Compile\Mir\Ownership::returnOwnershipType}'s fallback spelled against the
-     * scan's own copy of the declared return type (the emit frame does not
-     * exist yet during a module-wide scan).
-     *
-     * Deliberately narrower than the emitter's predicate: OBJ and STRING only.
-     * Those are the two kinds the borrow rule was strict about — "a string /
-     * object property read emits no retain at all" — and the two the fixture
-     * proves leak. An ARRAY return retains to a DEPTH chosen from the declared
-     * type, and matching that depth against what the slot's drop gives back is
-     * the delicate accounting {@see EmitLlvm::$propOwnElem} exists for; arrays
-     * keep their existing element / call-argument exemptions and are not
-     * widened here.
-     */
-    private function returnRetainsBorrow(Node $v): bool
-    {
-        $t = $v->type;
-        $tk = $t->kind;
-        if ($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) {
-            if ($this->scanReturnType === null) { return false; }
-            $t = $this->scanReturnType;
-            $tk = $t->kind;
-        }
-        if ($tk === Type::KIND_STRING) { return true; }
-        // ⚠ ARRAY too, and its absence was the whole `Lexer\Token` leak.
-        // {@see \Compile\Mir\Ownership::returnBorrowsObj} — the code that actually
-        // emits the retain — covers OBJ, STRING and ARRAY alike (`$isArr =
-        // isVec() || isAssoc()`), so `return $this->tokens;` DOES hand the
-        // caller a reference of its own. Answering `false` here made this scan
-        // disagree with the emitter, and {@see storeLocalRetainsProp} states
-        // what a disagreement costs: it either leaks or frees a live value.
-        // This one leaked — one site, `Lexer.php:100`, vetoed the slot and
-        // stranded every token: 9.2M of them on the Doctrine tier.
-        if ($t->isVec() || $t->isAssoc()) { return true; }
-        // A closure env is counted and a borrowed one is retained on return
-        // like an object ({@see \Compile\Mir\Ownership::returnBorrowsObj}).
-        if ($tk === Type::KIND_CLOSURE) { return true; }
-        // A borrowed CELL handed back from a cell-returning function is
-        // retained by tag (emitReturn's cell arms, {@see
-        // \Compile\Mir\Ownership::returnBorrowsCell}).
-        if ($tk === Type::KIND_CELL && $v->type->kind === Type::KIND_CELL) { return true; }
-        if ($tk !== Type::KIND_OBJ) { return false; }
-        // A struct has no rc header; emitReturn refuses it, so it is not
-        // retained and the veto must stand.
-        $cls = $t->class ?? '';
-        if ($cls === '') { return false; }
-        if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
-        if ($this->isEnumClass($cls)) { return false; }
-        return true;
-    }
-
-    /**
-     * Does the CONSUMER of this element read take a reference of its own?
-     *
-     * Only two shapes are accepted, and both are proven elsewhere in the
-     * emitter rather than assumed here: the value of a StoreLocal (retained by
-     * {@see EmitLlvmMemory::rcRetainByType} — an array access is not an owned
-     * producer, so it is not skipped) and the value of a Return (retained by
-     * {@see \Compile\Mir\Ownership::returnBorrowsObj}).
-     *
-     * Narrowed to OBJ and STRING elements deliberately: an ARRAY element is
-     * retained to a DEPTH chosen from the destination type, and matching that
-     * against what the slot's drop gives back is the accounting
-     * {@see $propOwnElem} exists for. Widening it here is a separate step.
-     */
-    private function elemReadIsOwned(Node $aa): bool
-    {
-        $p = $this->scanParent;
-        if ($p === null) { return false; }
-        // A callee that keeps nothing of its arguments: the word never
-        // outlives the call, so there is nothing for a later drop to strand —
-        // no reference is claimed, which is why this stands outside the
-        // opt-in below. `\\fwrite($this->conn, $this->parts[0])` in the
-        // response outbox is the shape: its buffer-only drop stranded every
-        // part string, three per response.
-        if ($this->operandHeldSafely($p, $aa)) { return true; }
-        if (!\Compile\Debug::$rcElemOwns) { return false; }
-        $k = $aa->type->kind;
-        if ($k !== Type::KIND_OBJ && $k !== Type::KIND_STRING) { return false; }
-        if ($k === Type::KIND_OBJ) {
-            $cls = $aa->type->class ?? '';
-            if ($cls === '') { return false; }
-            if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return false; }
-            if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
-        }
-        if ($p->kind === Node::KIND_STORE_LOCAL) { return $p->value === $aa; }
-        if ($p->kind === Node::KIND_RETURN) { return $p->value === $aa; }
-        // A property and an element store co-own on the SAME terms a local
-        // does, and by the same call: {@see EmitLlvmMemory::rcRetainByType}
-        // does not treat an array access as an owned producer, so it emits
-        // the +1 ({@see EmitLlvmObjects::emitStoreProperty} either side of
-        // the cell box, {@see EmitLlvmArrays::emitStoreElemValue}).
-        if ($p->kind === Node::KIND_STORE_PROPERTY) { return $p->value === $aa; }
-        if ($p->kind === Node::KIND_STORE_ELEMENT) { return $p->value === $aa; }
-        // `isset($this->m[$k])` tests presence: the word never outlives the
-        // test, so there is nothing for a later drop to strand.
-        if ($p->kind === Node::KIND_ISSET) { return true; }
-        // A conditional the emitter NORMALIZES gives every arm a +1 of the
-        // result type ({@see EmitLlvmControl::armRetainPostBox}), so an arm
-        // is owned before any consumer sees it. Gated on condOwnsResult, not
-        // on isConditional: an unknown-typed arm is deliberately NOT covered
-        // ({@see \Compile\Mir\CondOwn}) and keeps the borrowed treatment.
-        if ($this->condOwnsResult($p)) {
-            foreach (\Compile\Mir\CondOwn::arms($p) as $arm) {
-                if ($arm === $aa) { return true; }
-            }
-        }
-        return false;
     }
 
     /**
@@ -2972,200 +2516,6 @@ final class EmitLlvm implements EmitVisitor
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             $this->scanDynamicPropStores($c, $want);
         }
-    }
-
-    /** A slot of this static type holds a scalar, never a pointer anyone
-     *  could keep. Everything else — erased, cell, array, object, string —
-     *  is tainted. */
-    private function paramNeverPointer(Type $t): bool
-    {
-        $k = $t->kind;
-        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
-            || $k === Type::KIND_BOOL || $k === Type::KIND_NULL;
-    }
-
-    /**
-     * A STRING / OBJ property read handed to a container or property store as
-     * its VALUE is co-owned by that store ({@see EmitLlvmMemory::rcRetainByType}
-     * on the raw path, {@see EmitLlvm::retainCellPayload} on the boxed one),
-     * so the read cannot be stranded by its slot's later release. The same
-     * narrowing {@see elemReadIsOwned} makes: a struct, a closure, an enum and
-     * a foreign pointer take no retain and keep the veto.
-     *
-     * An ARRAY read qualifies on the same terms: a borrowed array is never an
-     * owned producer to {@see EmitLlvmMemory::rcRetainByType}, so the raw arm
-     * retains its buffer, and the boxed arm either retains it (an erased-element
-     * array, {@see retainCellPayload}) or copies it into a fresh cell array
-     * ({@see boxToCell}). `$lh = [$c->lcount, $c->lsym]` vetoed both slots, so
-     * every `$c->lcount = $lh[0]` stranded the table it overwrote — inflate's
-     * Huffman tables, one set per `inflate_add`.
-     */
-    private function storeCoOwnsPropRead(Node $c): bool
-    {
-        if ($c->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
-        if ($c->type->isVec() || $c->type->isAssoc()) { return true; }
-        return $this->storeRetainsKind($c->type);
-    }
-
-    /** The value kinds a container / property store takes a reference on:
-     *  a string, and an object with an rc header. */
-    private function storeRetainsKind(Type $t): bool
-    {
-        $tk = $t->kind;
-        if ($tk === Type::KIND_STRING) { return true; }
-        if ($tk !== Type::KIND_OBJ) { return false; }
-        $cls = $t->class ?? '';
-        if ($cls === '' || $cls === 'Ffi\\Ptr') { return false; }
-        if ($this->isClosureClass($cls) || $this->isEnumClass($cls)) { return false; }
-        if (isset($this->classes[$cls]) && $this->classes[$cls]->isStruct) { return false; }
-        return true;
-    }
-
-    /** A property store whose destination is a DECLARED slot of a known class
-     *  — the shape whose retain arms are the two {@see storeCoOwnsPropRead}
-     *  names. A union receiver, a classless one (the bag) and an undeclared
-     *  name (`__set`) take other paths and keep the strict rule, and so does
-     *  a property with a `set` hook: {@see EmitLlvmObjects::emitStoreProperty}
-     *  hands the value to the hook as a call argument before any store. */
-    private function propStoreDeclared(\Compile\Mir\StoreProperty $n): bool
-    {
-        $rcls = $n->object->type->class ?? '';
-        if ($n->object->type->kind !== Type::KIND_OBJ || $rcls === '' || !isset($this->classes[$rcls])) {
-            return false;
-        }
-        $cd = $this->classes[$rcls];
-        if (($cd->propHooks[$n->property]['set'] ?? '') !== '') { return false; }
-        return $cd->propertyOffset($n->property) !== -1;
-    }
-
-    /** A backed enum's `from` / `tryFrom` is {@see EmitLlvmObjects::emitEnumFrom}:
-     *  an unrolled compare against the case values that yields a singleton and
-     *  keeps nothing of its argument. `Method::tryFrom($this->method)` alone
-     *  vetoed the parser's per-request method slot. Same condition as the
-     *  dispatch. */
-    private function enumFromKeepsNoArg(\Compile\Mir\StaticCall_ $n): bool
-    {
-        return isset($this->enums[$n->class]) && \count($n->args) === 1
-            && ($n->method === 'from' || $n->method === 'tryFrom');
-    }
-
-    /**
-     * Does this property store take a reference of its own on the local it
-     * stores? Mirrors the two retain arms of {@see EmitLlvmObjects::
-     * emitStoreProperty}: a boxed slot retains a STRING / OBJ payload before
-     * boxing, and a raw slot retains through {@see EmitLlvmMemory::
-     * rcRetainByType} — both by the VALUE's static kind, both refusing a
-     * struct, a closure, an enum and a foreign pointer. A cell, an erased or
-     * an array value is left to the escape rule; a receiver whose class is
-     * unknown, or that does not declare the property (the bag / `__set`
-     * paths), too.
-     */
-    private function propStoreCoOwns(\Compile\Mir\StoreProperty $n): bool
-    {
-        return $n->value->kind === Node::KIND_LOAD_LOCAL
-            && $this->propStoreDeclared($n)
-            && $this->storeRetainsKind($n->value->type);
-    }
-
-    /**
-     * Whether this builtin READS its arguments and keeps nothing — so a
-     * property read handed to it cannot outlive the call and must not veto the
-     * slot's release ({@see markPropBorrowsIn}).
-     *
-     * A NAME list on purpose, exactly like {@see EmitLlvmMemory::mutatesArg0}:
-     * the contract is php's, not our implementation's, and a name belongs here
-     * only when php's own semantics say the callee cannot retain the argument.
-     * Anything absent stays a borrow, so the conservative direction is a leak.
-     */
-    private function callKeepsNoArg(string $fn): bool
-    {
-        $p = \strrpos($fn, chr(92));
-        $bare = $p === false ? $fn : \substr($fn, $p + 1);
-        foreach ([
-            'strlen', 'mb_strlen', 'count', 'sizeof', 'ord', 'trim', 'ltrim', 'rtrim',
-            'strtolower', 'strtoupper', 'ucfirst', 'lcfirst', 'strrev', 'md5', 'sha1',
-            'crc32', 'intval', 'floatval', 'boolval', 'strval', 'is_string', 'is_int',
-            'is_float', 'is_bool', 'is_array', 'is_object', 'is_null', 'is_numeric',
-            'is_callable', 'is_iterable', 'is_scalar', 'strpos', 'stripos', 'strrpos',
-            'str_contains', 'str_starts_with', 'str_ends_with', 'substr_count',
-            'number_format', 'dechex', 'hexdec', 'decbin', 'bindec', 'decoct', 'octdec',
-            'abs', 'floor', 'ceil', 'round', 'sqrt', 'intdiv', 'json_last_error',
-            // These ALLOCATE their result — verified at the runtime body:
-            // `__mir_substr` / `__mir_str_repeat` have a single `ret` of a fresh
-            // `__mir_str_alloc` buffer and can never hand back the argument. A
-            // name whose fast path returns its input UNCHANGED must NOT be here:
-            // the result would alias the property and outlive the store.
-            // `__mir_str_explode` gives every segment its own pooled
-            // `__mir_str_alloc` + memcpy, so no piece of the subject survives
-            // in the result. It is what `Http\splitStr` delegates to, and the
-            // one call that vetoed `Headers::block` for the whole program.
-            'substr', 'mb_substr', 'str_repeat', 'explode',
-            // By-reference array MUTATORS and key probes: each edits or reads
-            // the buffer through the reference it was handed, runs no user
-            // code (the callback sorts are NOT here) and cannot park. What the
-            // list certifies is park-free + no UNCOUNTED keep: `array_push` /
-            // `array_unshift` DO keep their value arguments, through an
-            // element store that retains them. Without these the scheduler's
-            // own queues — `array_shift($this->waitQ)`, `array_pop($this->tmTask)`
-            // — read as borrows the moment an array operand stopped being exempt.
-            'array_shift', 'array_pop', 'array_push', 'array_unshift',
-            'array_key_exists', 'array_key_first', 'array_key_last',
-            'sort', 'rsort', 'ksort', 'krsort', 'asort', 'arsort',
-            // ⚠ NOT a stream write (`fwrite` / `fputs`): its stdlib body PARKS
-            // on back-pressure with the argument still borrowed, and another
-            // task's overwrite of the source slot would then free it under the
-            // parked writer. "Keeps nothing for the duration of the call" is
-            // not a fiber-safe notion for a callee that suspends.
-            // `$s[$i]` after DemoteCharLocals. An INT of one byte — the only
-            // internal desugar that reaches this scan with a property operand,
-            // and the reason a class with a `byteAt()` never released an
-            // overwritten string slot: `Buffer\ByteBuffer::buf`, 1 KB per
-            // request, 198 MB of `http_parse`.
-            '__str_byte_at',
-            // The synthesized serializer's per-property step: it walks the
-            // value into the output string and keeps nothing. Every class the
-            // program serializes — and a session serializes the object graph
-            // in `$_SESSION` — handed each of its properties to it, so none of
-            // them ever released what an overwrite replaced.
-            '__mc_ser_val',
-            // The same for `var_export`: the synthesized per-class exporter
-            // renders `$v->p` into a fresh string. It is emitted for EVERY
-            // class once anything exports an erased value, so the compiler's
-            // own `InferTypes::localTypes` was vetoed by it.
-            '__mir_var_export',
-        ] as $n) {
-            if ($n === $bare) { return true; }
-        }
-        return false;
-    }
-
-    /** Mark `$n` as a raw borrow iff it IS a property read. Deliberately NOT
-     *  recursive — {@see scanCellPropStores} already walks the tree, and every
-     *  node judges its own direct children. */
-    private function markPropBorrowsIn(Node $n, string $why = "?"): void
-    {
-        if ($n->kind === Node::KIND_PROPERTY_ACCESS) { $this->markPropBorrow($n, $why); }
-    }
-
-    /**
-     * Veto the DECLARING class's key — and the bare name only when the receiver
-     * names no class, where {@see cellPropKey} already answers the bare name and
-     * the veto has to cover every class that declares it.
-     *
-     * ⚠ Marking the bare name UNCONDITIONALLY makes this scan nearly global: the
-     * prelude and the stdlib are compiled into every module, so one borrow of any
-     * `arr` / `items` / `keys` anywhere vetoed that name for every unrelated class
-     * in the program. It read as "the analysis is just conservative" — the slot
-     * simply never dropped, silently — and it cost the whole `snap` row.
-     */
-    private function markPropBorrow(Node $pa, string $why = '?'): void
-    {
-        $key = $this->cellPropKey($pa->object->type->class ?? '', $pa->property);
-        $want = \getenv('MANTICORE_BORROW_TRACE');
-        if ($want !== false && $want !== '' && \str_contains($key, $want)) {
-            \error_log('BORROW ' . $key . ' <- ' . $why . ' line ' . (string)$pa->line);
-        }
-        $this->propRawBorrow[$key] = true;
     }
 
     /**
@@ -4178,8 +3528,7 @@ final class EmitLlvm implements EmitVisitor
      * and coalesces BY NAME across every object file that emits the class, so a
      * module-local verdict may only be used where this module is the only
      * emitter: never for an IMPORTED or PRELUDE class, and never from a LIBRARY
-     * module (which cannot see the stores in the programs that link it, and
-     * whose {@see $propBorrowUnknown} already says so).
+     * module (which cannot see the stores in the programs that link it).
      */
     /**
      * ⚠ Trace EVERY slot, not only the deepened ones. The `CLASSDROP … YES`
@@ -4213,7 +3562,7 @@ final class EmitLlvm implements EmitVisitor
         if ($this->isClosureValueType($pt)) { return 'closure'; }
         $flavor = $this->discardReleaseFlavor($pt);
         if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
-        if ($this->propBorrowUnknown || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
+        if ($this->moduleIsLibrary || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
         // A BARE `array` slot names no element type, so it gets no element-aware
         // drop: at best the repr-dispatching `__mir_array_release`, which finds
         // repr bits of zero on a CONCRETE buffer ({@see EmitLlvmArrays::

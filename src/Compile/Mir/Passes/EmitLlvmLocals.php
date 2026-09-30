@@ -684,7 +684,13 @@ trait EmitLlvmLocals
             $out .= $coOwn;
             $ownsCell = isset($this->locals->globalBacked[$sl->name])
                 && !$this->isGlobalsViewName($sl->name);
-            if ($ownsCell && $coOwn === '') {
+            // A property / static-property read co-owns what the slot boxes,
+            // exactly as the plain store below retains it: the property may be
+            // overwritten — and its old value released — while the local lives.
+            $pv = $sl->value;
+            $propRead = ($pv->kind === Node::KIND_PROPERTY_ACCESS || $pv->kind === Node::KIND_STATIC_PROP)
+                && $this->own->classifyStored($pv) > 0;
+            if (($ownsCell || $propRead) && $coOwn === '') {
                 $out .= $this->retainCellPayload($sl->value);
             }
             // An owned plain local that is NOT boxing its own value in place
@@ -988,7 +994,7 @@ trait EmitLlvmLocals
         // `$copy[] = v` mutated `B::$xs` too (`1 2` in php, `2 2` here).
         $copiedVecProp = false;
         if (($v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP)
-            && $v->type->isVec()) {
+            && $v->type->isVec() && !$sl->coOwnRead) {
             $out .= $this->coerceToPtr();
             $src = $this->lastValue;
             $cp = $this->ssa->allocReg();
@@ -1045,10 +1051,10 @@ trait EmitLlvmLocals
         // release ({@see InsertMemoryOps::isOwnedObj}, which owns exactly this
         // shape) would give back element refs the copy never took.
         $aliasStaticVecCopy = $copiedVecProp && $v->kind === Node::KIND_STATIC_PROP;
-        // `$r = $c->out` — a STRING / OBJECT property read co-owns what it reads, so the
-        // slot may drop what it overwrites ({@see \Compile\Mir\AliasOwn::
-        // propReadCoOwns}; the release half is {@see InsertMemoryOps::isOwnedObj}).
-        $aliasStrProp = \Compile\Mir\AliasOwn::propReadCoOwns($v);
+        // `$r = $c->out` — a property read of every rc kind co-owns what it
+        // reads, because the slot drops what it overwrites
+        // ({@see \Compile\Mir\Ownership::propReadCoOwns}, the release half's own predicate).
+        $aliasStrProp = $this->own->propReadCoOwns($v);
         if ($aliasObjStr || $aliasArrayProp || $aliasArrayLocal || $aliasStaticVecCopy || $aliasStrProp) {
             $out .= $this->coerceToI64();
             $aliasV = $this->lastValue;

@@ -2264,6 +2264,7 @@ trait EmitLlvmModule
 
     /** Typed reads — a base-`Node` field access resolves by OFFSET under self-host. */
     private function asLoadLocalNode(\Compile\Mir\LoadLocal $n): \Compile\Mir\LoadLocal { return $n; }
+    private function asStoreLocalNode(\Compile\Mir\StoreLocal $n): \Compile\Mir\StoreLocal { return $n; }
 
 
     /** The `ARRAY_ELEM_HINT_*` code a returned array must be conformed to, or

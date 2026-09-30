@@ -161,16 +161,12 @@ final class Debug
     public static bool $rcBaseTemp = true;
 
     /**
-     * Let a property slot drop what it overwrites even when the property was
-     * handed to a USER function, provided that function keeps none of its
-     * arguments ({@see Mir\Passes\EmitLlvm::computeKeepsNoArg}).
+     * Judge what a USER function may do to a property slot — park, write it
+     * ({@see Mir\EscapeSummaries}) — so a property read held across a call to
+     * it stays a borrow when the call can do neither.
      *
-     * The veto was a name list of BUILTINS only, so one call — `splitStr("\r\n",
-     * $this->block)` inside Http\Headers::lines() — vetoed the slot for the
-     * whole program, and every rebuild of that block leaked the old string
-     * (735 B per response on the http bench, and it never had a reader).
-     *
-     * MANTICORE_PROP_BORROW_ESCAPE=0 restores the name-list-only behaviour.
+     * MANTICORE_PROP_BORROW_ESCAPE=0 judges no body: every held read across a
+     * call that is not a listed builtin co-owns.
      */
     public static bool $propBorrowEscape = true;
 

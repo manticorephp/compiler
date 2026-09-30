@@ -244,6 +244,7 @@ final class Ownership
             // An ELEMENT read co-owns ({@see elemReadCoOwns}; the emitter half
             // is EmitLlvmLocals::elemReadCoOwn).
             if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
+            if ($this->propReadCoOwns($value)) { return true; }
             return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                 || $ck === Node::KIND_INVOKE;
         }
@@ -256,6 +257,9 @@ final class Ownership
         // borrowed, so a boxed value read out of a container is not over-
         // released. The drop itself (__mir_cell_drop) is tag-guarded, so a cell
         // holding an int/float/null is a no-op.
+        // An all-object UNION read out of a property is the same bare object
+        // pointer a plain object read is, and co-owns on the same terms.
+        if ($tk === Type::KIND_UNION) { return $this->propReadCoOwns($value); }
         if ($tk !== Type::KIND_OBJ && $tk !== Type::KIND_ARRAY
             && $tk !== Type::KIND_STRING && $tk !== Type::KIND_CELL) { return false; }
         // #[Struct] classes have no class_id/rc header (offset 0 is a
@@ -285,6 +289,7 @@ final class Ownership
                 $ck = $value->kind;
                 if ($ck === Node::KIND_CALL) { return !isset($this->ctx->externFns[$value->function]); }
                 if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
+                if ($this->propReadCoOwns($value)) { return true; }
                 return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                     || $ck === Node::KIND_INVOKE;
             }
@@ -304,10 +309,9 @@ final class Ownership
         // the struct / enum / closure / Ffi\Ptr guards above are this caller's
         // own rc-eligibility test, which AliasOwn deliberately does not make.
         if (AliasOwn::coOwns($value)) { return true; }
-        // …and a STRING / OBJECT property read and a STRING static-property read,
-        // which the emitter retains the same way ({@see AliasOwn::propReadCoOwns},
-        // {@see AliasOwn::strPropCoOwns}).
-        if (AliasOwn::propReadCoOwns($value) || AliasOwn::strPropCoOwns($value)) { return true; }
+        // …and a property / static-property read of every rc kind, which the
+        // emitter retains the same way ({@see propReadCoOwns}).
+        if ($this->propReadCoOwns($value)) { return true; }
         // A string / cell bitwise op mints its result like a concat, on the
         // heap whatever the allocKind says ({@see BitOp::mintsFresh}).
         if (BitOp::mintsFresh($value)) { return true; }
@@ -422,6 +426,28 @@ final class Ownership
         // FRESH +1 array, so it is owned exactly like a literal.
         return $k === Node::KIND_ARRAY_LIT
             || ($tk === Type::KIND_ARRAY && $k === Node::KIND_ADD);
+    }
+
+    /**
+     * Does a local that stores this property / static-property read co-own
+     * it? For every rc kind but an array (whose read is copied or retained on
+     * its own arm, below): a string, an object, a closure env, an all-object
+     * union, a cell. A property store always releases what it overwrites, so a
+     * read kept as a borrow would dangle the moment the slot is written. The
+     * emitter's retain ({@see Passes\EmitLlvmLocals::emitStoreLocal}) asks this
+     * same predicate. A `#[Struct]`, an enum ordinal and an `Ffi\Ptr` have no
+     * count to take.
+     */
+    public function propReadCoOwns(Node $v): bool
+    {
+        if (!AliasOwn::propReadCoOwns($v)) { return false; }
+        $t = $v->type;
+        $k = $t->kind;
+        if ($k === Type::KIND_UNION) { return $this->condFlavor($t) === 'obj'; }
+        if ($k !== Type::KIND_OBJ) { return true; }
+        $cls = $t->class ?? '';
+        if ($cls === 'Ffi\\Ptr' || $this->isEnumClass($cls)) { return false; }
+        return !($cls !== '' && isset($this->ctx->classes[$cls]) && $this->ctx->classes[$cls]->isStruct);
     }
 
     /**
@@ -731,7 +757,7 @@ final class Ownership
      * A builtin whose ARRAY result is a fresh allocation the caller owns
      * outright — every element minted or copied WITH a reference.
      *
-     * A NAME list, like {@see Passes\EmitLlvm::callKeepsNoArg}: a builtin has no
+     * A NAME list, like {@see EscapeSummaries::keepsNoArg}: a builtin has no
      * body for the module to answer for, and the conservative default (not
      * owned) is a LEAK of the whole array at every consumer. Anything absent
      * keeps that leak, which is the safe direction — the wrong direction here

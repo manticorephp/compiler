@@ -986,16 +986,16 @@ final class OwnershipFlow implements Pass
         if ($c > 0 && CondOwn::isConditional($v) && !$this->own->condOwnedTemp($v)) {
             $c = Ownership::BORROW;
         }
-        $ownedByRetain = $v->kind === Node::KIND_PROPERTY_ACCESS
-            || (\Compile\Debug::$rcElemReadOwns && $v->kind === Node::KIND_ARRAY_ACCESS)
-            || ($v->kind === Node::KIND_STATIC_PROP && $v->type->isVec());
+        // A property / static-property read co-owns on the box-back arm too
+        // ({@see EmitLlvmLocals::emitStoreLocal} retains its payload before the box).
+        $ownedByRetain = \Compile\Debug::$rcElemReadOwns && $v->kind === Node::KIND_ARRAY_ACCESS;
         $ownedCopy = !$boxed && VecCopyOnAssign::copies($v, $name, $this->mutatedVecs);
         if (!$boxed && $v->kind === Node::KIND_LOAD_LOCAL
             && InsertMemoryOps::arrayAliasCoOwns($v->type, $sl->type, $this->enums, $this->classes)) {
             $ownedCopy = true;
         }
-        // The merge box-back arm of the emitter returns before the retain a
-        // property / element / static-vec read owns by: such a store borrows.
+        // The merge box-back arm of the emitter returns before the retain an
+        // element read owns by: such a store borrows.
         // A CELL element read is no box-back: the general arm co-owns it.
         if (($c > 0 || $ownedCopy)
             && !($ownedByRetain && $boxed && !Ownership::cellElemReadCoOwns($v))) {

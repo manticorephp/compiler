@@ -76,17 +76,20 @@ final class AliasOwn
      * An OBJECT read the same way: `$d = $this->def; if (…) { $d = new…;
      * $this->def = $d; }` is how a lazily (re)built member is written, and the
      * borrow vetoed `$def` for the whole class — permessage-deflate's per-message
-     * context under `server_no_context_takeover` was never released. A closure
-     * env is not an object here: its reads keep their own borrowed rule.
+     * context under `server_no_context_takeover` was never released.
+     *
+     * Every other rc kind too, and a STATIC property's read the same way: a
+     * closure env, a cell, an all-object union. A property store releases what
+     * it overwrites, so no read that outlives its statement may stay a borrow.
+     * Type-only: the rc-eligibility of the class ({@see Ownership::propReadCoOwns})
+     * is the caller's.
      */
     public static function propReadCoOwns(Node $v): bool
     {
-        if ($v->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        if ($v->kind !== Node::KIND_PROPERTY_ACCESS && $v->kind !== Node::KIND_STATIC_PROP) { return false; }
         $k = $v->type->kind;
-        if ($k === Type::KIND_STRING) { return true; }
-        if ($k !== Type::KIND_OBJ) { return false; }
-        $cls = $v->type->class ?? '';
-        return $cls !== 'Closure' && !\str_starts_with($cls, '__closure_');
+        return $k === Type::KIND_STRING || $k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE
+            || $k === Type::KIND_CELL || $k === Type::KIND_UNION;
     }
 
     /**

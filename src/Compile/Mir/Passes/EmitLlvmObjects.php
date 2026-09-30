@@ -2846,11 +2846,13 @@ trait EmitLlvmObjects
             $out .= '  br i1 ' . $wt . ', label %' . $thruDone . ', label %' . $plainL . "\n";
             $out .= $plainL . ":\n";
         }
+        // Load old, store new, release old — php's order: a destructor the
+        // release runs already sees the new value in the slot.
         $drop = $this->propSlotDropsOldValue($n, $propType);
+        $old = '';
         if ($drop !== '') {
             $old = $this->ssa->allocReg();
             $out .= '  ' . $old . ' = load i64, ptr ' . $gep . "\n";
-            $out .= $this->rcReleaseReg($old, $drop);
         }
         $out .= $this->emitSlotStore(
             $gep,
@@ -2858,6 +2860,7 @@ trait EmitLlvmObjects
             $n->property,
             $val,
         );
+        if ($old !== '') { $out .= $this->rcReleaseReg($old, $drop); }
         if ($thruDone !== '') {
             $out .= '  br label %' . $thruDone . "\n" . $thruDone . ":\n";
         }
@@ -4309,7 +4312,7 @@ trait EmitLlvmObjects
 
     private function dynHoistableProp(PropertyAccess_ $pa): bool
     {
-        return $this->escPlainPropRead($pa) && $this->dynHoistableRead($pa->object);
+        return \Compile\Mir\EscapeSummaries::plainPropRead($pa, $this->classes) && $this->dynHoistableRead($pa->object);
     }
 
     private function dynHoistableElem(\Compile\Mir\ArrayAccess_ $aa): bool
@@ -5954,10 +5957,9 @@ trait EmitLlvmObjects
                 // A DECLARED slot: release what it holds and clear it. This used
                 // to be a deliberate no-op, which made `unset($o->prop)` both a
                 // leak (the value was never given back) and a php-parity bug
-                // (`isset()` kept answering true). The release runs under the
-                // SAME gate the overwrite path uses — {@see
-                // propSlotDropsOldValue} — so a slot anything else borrows keeps
-                // leaking rather than freeing under that borrow.
+                // (`isset()` kept answering true). The release takes the SAME
+                // flavor the overwrite path does ({@see propSlotDropsOldValue}),
+                // after the slot is cleared.
                 if ($ucls !== '' && isset($this->classes[$ucls])
                     && $this->classes[$ucls]->propertyOffset($upa->property) >= 0) {
                     $out .= $this->emitNode($upa->object);
@@ -5971,13 +5973,14 @@ trait EmitLlvmObjects
                     $uGep = $this->ssa->allocReg();
                     $out .= '  ' . $uGep . ' = getelementptr inbounds i8, ptr ' . $uObjP
                           . ', i64 ' . (string)$this->propertyOffset($upa->object, $upa->property) . "\n";
+                    $uOld = '';
                     if ($uDrop !== '') {
                         $uOld = $this->ssa->allocReg();
                         $out .= '  ' . $uOld . ' = load i64, ptr ' . $uGep . "\n";
-                        $out .= $this->rcReleaseReg($uOld, $uDrop);
                     }
                     $out .= $this->emitSlotStore($uGep,
                         $this->slotHolder($upa->object, $upa->property), $upa->property, '0');
+                    if ($uOld !== '') { $out .= $this->rcReleaseReg($uOld, $uDrop); }
                 }
                 // Same thing with the receiver's class ERASED — dispatch at
                 // runtime. Gate on "not a KNOWN class", never on `=== ''` — see
@@ -7571,14 +7574,24 @@ trait EmitLlvmObjects
         $m = $mc->method;
         if ($m !== 'rewind' && $m !== 'valid' && $m !== 'current' && $m !== 'key' && $m !== 'next') { return ''; }
         $obj = $mc->object;
-        if ($obj->kind !== Node::KIND_LOAD_LOCAL && $obj->kind !== Node::KIND_PROPERTY_ACCESS) { return ''; }
+        $spilled = $obj->kind === Node::KIND_STORE_LOCAL;
+        if ($obj->kind !== Node::KIND_LOAD_LOCAL && $obj->kind !== Node::KIND_PROPERTY_ACCESS && !$spilled) { return ''; }
         $ok = $obj->type->kind;
         $ocls = \strtolower(\ltrim($ok === Type::KIND_OBJ ? ($obj->type->class ?? '') : '', '\\'));
         $may = $ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN
             || ($ok === Type::KIND_OBJ && ($ocls === 'iterator' || $ocls === 'traversable'));
         if (!$may) { return ''; }
         $this->inGenArmEmit = true;
-        $out = $this->emitNode($obj);
+        $out = '';
+        $spilledStore = $obj;
+        if ($spilled) {
+            // A receiver a hidden local co-owns ({@see SpillFreshBases}): store
+            // it ONCE, then every arm reads the local — a pure receiver again.
+            $out .= $this->emitNode($obj);
+            $obj = new \Compile\Mir\LoadLocal($this->asStoreLocalNode($obj)->name, $obj->type);
+            $mc->object = $obj;
+        }
+        $out .= $this->emitNode($obj);
         $out .= $this->coerceToI64();
         $out .= $this->untagCarrierIr($this->lastValue);
         $out .= $this->genFrameProbeIr($this->lastValue);
@@ -7609,6 +7622,7 @@ trait EmitLlvmObjects
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $this->inGenArmEmit = false;
+        if ($spilled) { $mc->object = $spilledStore; }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
@@ -8595,95 +8609,53 @@ trait EmitLlvmObjects
 
     /**
      * The release flavor for the value a property store OVERWRITES, or '' when
-     * this slot must keep leaking it.
+     * the slot cannot say what it holds.
      *
-     * Every condition is a soundness condition, not a heuristic:
-     *   - RAW slots only, of a kind the rc vocabulary has a release for
-     *     ({@see EmitLlvm::discardReleaseFlavor} — '' for a #[Struct] / closure /
-     *     enum ordinal / Ffi\Ptr, which have no header to touch).
-     *     ⚠ARRAY and STRING/OBJ reach this on DIFFERENT arguments. An array
-     *     snapshot (`$saved = $this->map`) RETAINS, so a live alias holds its own
-     *     reference; a string / object property read retains NOTHING, so such a
-     *     slot may drop only when the property is read NOWHERE in the module —
-     *     which is precisely what {@see EmitLlvm::$propRawBorrow} answers, since
-     *     the scan exempts the retaining array alias and only that. Dropping a
-     *     borrowed string slot is what made the one-line version of this fix pass
-     *     gen-1 and then emit `getelementptr … ptr 19` out of gen-2.
-     *   - a boxed cell slot is excluded: the flavor would have to come from the
-     *     tag, and the box-back arm that fills such a slot takes no reference.
-     *   - the class must be declared HERE and not exported. An importing module's
-     *     borrow is invisible to this scan, and the borrow that matters is
-     *     cross-frame: `$s = $o->items[0]; $o->set([...]); return $s;` — the frame
-     *     that overwrites never reads the property at all.
-     *   - and the property must never be read in a borrowing position anywhere in
-     *     this module ({@see EmitLlvm::$propRawBorrow}).
-     * Anything unproven keeps today's behaviour, which leaks. That is the
-     * direction this codebase has already chosen everywhere else.
+     * A slot OWNS its value: every store retains (or moves) what it writes, and
+     * every read that outlives its statement co-owns — stored into a local
+     * ({@see \Compile\Mir\Ownership::propReadCoOwns}), or spilled across a call
+     * that may write the slot or suspend ({@see SpillFreshBases}). So the old
+     * value is always released. The refusals left are structural:
+     *   - a LIBRARY module ({@see EmitLlvm::$moduleIsLibrary}): its classes go
+     *     into a `.sig`, and a program compiled against an older one reads them;
+     *   - an extern class (its layout is foreign), a narrowed slot (a scalar);
+     *   - a CELL slot that is not boxed: a raw pointer whose static type claims
+     *     a tag it does not carry — `__mir_cell_drop` would dispatch on bits
+     *     that are an address;
+     *   - a value kind the rc vocabulary has no release for
+     *     ({@see EmitLlvm::discardReleaseFlavor} — '' for a #[Struct] / enum
+     *     ordinal / Ffi\Ptr).
      */
     private function propSlotDropsOldValue(\Compile\Mir\StoreProperty $n, ?Type $propType): string
     {
         $dbg = \getenv('MANTICORE_DROP_TRACE') !== false;
         $cls = $n->object->type->class ?? '';
         if ($dbg) { \error_log('DROP? ' . $cls . '::' . $n->property); }
-        if ($this->propBorrowUnknown) { if ($dbg) { \error_log('  no: library'); } return ''; }
-        // Compiler-owned MIR bodies are a deliberate lifetime exception to the
-        // conservative borrow veto below. EmitLlvm installs the current body in
-        // both FunctionDef and FunctionEmitFrame, then detaches both owners after
-        // the text is materialized. Keeping these fields leak-safe would retain
-        // the entire recursive AST graph for every emitted function. This is
-        // compiler-only: target objects never use these internal classes.
+        if ($this->moduleIsLibrary) { return $this->propDropRefused($dbg, 'library', true); }
+        // Compiler-owned MIR bodies: these internal classes can be absent from
+        // a target module's class table, which would silently disable the
+        // release exactly where it matters. The exact class-name guard is the
+        // proof, and target user objects cannot reach these compiler-only
+        // classes. Both declarations are source-level object references.
         if ($n->property === 'body'
             && ($cls === 'Compile\\Mir\\FunctionDef' || $cls === 'Compile\\Mir\\FunctionEmitFrame')) {
-            // Both declarations are source-level object references (`Block` and
-            // nullable `Node`). Do not ask inferred class metadata for the type:
-            // these internal classes can be absent from a target module's class
-            // table, which would silently disable the eviction exactly where it
-            // matters. The exact class-name guard is the proof, and target user
-            // objects cannot reach these compiler-only classes.
             if ($dbg) { \error_log('  YES compiler-body obj'); }
             return 'obj';
         }
-        if ($cls === '' || !isset($this->classes[$cls])) { if ($dbg) { \error_log('  no: class'); } return ''; }
+        if ($cls === '' || !isset($this->classes[$cls])) { return $this->propDropRefused($dbg, 'class', false); }
         $holder = $this->slotHolder($n->object, $n->property);
-        if ($holder === null || $holder->isExternClass) { if ($dbg) { \error_log('  no: holder'); } return ''; }
-        if ($holder->propertyWidth($n->property) !== 8) { if ($dbg) { \error_log('  no: width'); } return ''; }
+        if ($holder === null || $holder->isExternClass) { return $this->propDropRefused($dbg, 'holder', $holder !== null); }
+        if ($holder->propertyWidth($n->property) !== 8) { return $this->propDropRefused($dbg, 'width', false); }
         // A boxed CELL slot owns what it holds (every store takes a count, the
-        // class drop gives it back), so an overwrite gives the old one back by
-        // tag — under the same borrow veto every other slot answers to.
+        // class drop gives it back), so an overwrite gives the old one back by tag.
         if ($this->cellPropBoxed($propType, $cls, $n->property)) {
-            $ckey = $this->cellPropKey($cls, $n->property);
-            if (isset($this->propRawBorrow[$ckey]) || isset($this->propRawBorrow[$n->property])) {
-                if ($dbg) { \error_log('  no: boxed, borrowed'); }
-                return '';
-            }
             if ($dbg) { \error_log('  YES cell'); }
             return 'cell';
         }
         $t = $this->propStoreRetainType($n);
-        if ($t === null) { if ($dbg) { \error_log('  no: type'); } return ''; }
-        // A CELL slot that is NOT boxed is a raw pointer whose static type claims
-        // a tag it does not carry — `cell` is a static CLAIM, not a runtime
-        // guarantee. __mir_cell_drop would dispatch on bits that are an address.
-        if ($t->kind === Type::KIND_CELL) { if ($dbg) { \error_log('  no: cell slot'); } return ''; }
+        if ($t === null) { return $this->propDropRefused($dbg, 'type', false); }
+        if ($t->kind === Type::KIND_CELL) { return $this->propDropRefused($dbg, 'cell slot', true); }
         $key = $this->cellPropKey($cls, $n->property);
-        if (isset($this->propRawBorrow[$key]) || isset($this->propRawBorrow[$n->property])) {
-            if ($dbg) { \error_log('  no: borrowed (' . $key . ')'); }
-            return '';
-        }
-        // Borrowed ELEMENT-WISE only: the buffer itself is nobody else's, so give
-        // it back — buffer + hashed keys, elements untouched ({@see
-        // EmitLlvm::$propElemBorrow}). A map that is rebuilt every round
-        // (`$this->localTypes = $this->mergeLocals(…)`) otherwise keeps every
-        // buffer it ever had.
-        if (isset($this->propElemBorrow[$key]) || isset($this->propElemBorrow[$n->property])) {
-            // Both names resolve to `__mir_array_release_buf`, which is
-            // MODE-driven at runtime (hashed → drop the string keys, packed →
-            // nothing), so an ERASED `private array $x` slot is served too.
-            $bufFlavor = ($t->isAssoc() || $t->isVec()
-                || $this->slotIsArrayHinted($n->object, $n->property, $t)) ? 'assocbuf' : '';
-            if ($dbg) { \error_log('  ' . ($bufFlavor === '' ? 'no: elem-borrowed, not an array' : 'YES ' . $bufFlavor . ' (buffer only)')); }
-            return $bufFlavor;
-        }
         // The slot owns the closure env it holds ({@see EmitLlvm::classDropFlavorFor}).
         $flavor = $this->isClosureValueType($t) ? 'closure' : $this->discardReleaseFlavor($t);
         // The slot owns one element ref per element (every store hands it a
@@ -8702,6 +8674,15 @@ trait EmitLlvmObjects
         }
         if ($dbg) { \error_log('  YES ' . $flavor); }
         return $flavor;
+    }
+
+    /** A refusal of {@see propSlotDropsOldValue}, traced; `$residual` when the
+     *  slot may hold an rc value it now keeps (census `own.residual.prop-drop-*`). */
+    private function propDropRefused(bool $dbg, string $why, bool $residual): string
+    {
+        if ($dbg) { \error_log('  no: ' . $why); }
+        if ($residual && \Compile\Stats::$on) { \Compile\Stats::bump('own.residual.prop-drop-' . \str_replace(' ', '-', $why), 1); }
+        return '';
     }
 
     private function slotIsArrayHinted(Node $objExpr, string $prop, ?Type $propType): bool

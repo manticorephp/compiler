@@ -54,6 +54,15 @@ use Compile\Mir\Walk;
  * frees a temporary right after the read, INSIDE the statement, so
  * `echo f()->name` still runs a `__destruct` after the echo, not before it.
  *
+ * HELD PROPERTY READS: a read of a property slot hands out the slot's own
+ * word, and a store to that slot always releases what it overwrites. So a read
+ * that is still in use while something runs that may overwrite the slot or
+ * suspend — a call argument or receiver ({@see EscapeSummaries::windowMeets}
+ * on the call and every operand evaluated after it), an operand with a call to
+ * its right, a `foreach` subject across its body — co-owns: it is spilled into
+ * a hidden local in place (`f($__fb_N = $this->p)`), whose store retains it
+ * and whose `unset` after the statement gives it back ({@see spillHeldReads}).
+ *
  * Runs after the last type inference (the gate reads the result's type) and
  * before {@see InsertMemoryOps}, which must see the new stores.
  */
@@ -99,6 +108,15 @@ final class SpillFreshBases
     /** @var array<string, bool> hoisted names a reference keeps alive past the statement */
     private array $keepAlive = [];
 
+    private ?\Compile\Mir\EscapeSummaries $esc = null;
+
+    private ?\Compile\Mir\Ownership $own = null;
+
+    /** `MANTICORE_OWN_TRACE` set: name every held read no local can co-own. */
+    private bool $trace = false;
+
+    private string $fnName = '';
+
     public function run(Module $module): Module
     {
         $this->notOwned = [];
@@ -125,8 +143,15 @@ final class SpillFreshBases
         foreach ($module->enums as $name => $unused) { $this->notRc[$name] = true; }
         foreach ($module->typeDefs as $name => $unused) { $this->notRc[$name] = true; }
         $this->closureCaptures = $module->closureCaptures;
+        $statT = \Compile\Stats::now();
+        $this->esc = \Compile\Mir\EscapeSummaries::fromModule($module);
+        \Compile\Stats::step('  escape summaries', $statT, -1, -1);
+        $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
+        $want = \getenv('MANTICORE_OWN_TRACE');
+        $this->trace = $want !== false && $want !== '';
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
+            $this->fnName = $fn->name;
             $this->pinned = [];
             $this->pinWrites($fn->body, $fn->returnsByRef);
             $this->pending = [];
@@ -134,6 +159,8 @@ final class SpillFreshBases
             $fn->body->stmts = $this->stmtList($fn->body->stmts);
         }
         $this->pinned = [];
+        $this->esc = null;
+        $this->own = null;
         return $module;
     }
 
@@ -576,6 +603,12 @@ final class SpillFreshBases
         if ($k === Node::KIND_FOREACH) {
             $fe = $this->asForeach($n);
             $this->visit($fe->array);
+            if (!$fe->byRef) {
+                $held = $this->heldKeys($fe->array);
+                if ($held !== [] && $this->esc->bodyMeets($fe->body, $held)) {
+                    $fe->array = $this->coOwnHeld($fe->array);
+                }
+            }
             $fe->body->stmts = $this->stmtList($fe->body->stmts);
             return;
         }
@@ -605,6 +638,7 @@ final class SpillFreshBases
         foreach (Walk::children($n) as $c) { $this->visit($c); }
         $this->rewriteRead($n);
         $this->rewriteConsumed($n);
+        $this->spillHeldReads($n);
     }
 
     private function rewriteRead(Node $n): void
@@ -621,6 +655,248 @@ final class SpillFreshBases
             if ($this->scalarResult($n) || !$this->isFreshContainer($aa->array, 1)) { return; }
             $aa->array = $this->spill($aa->array);
         }
+    }
+
+    /**
+     * A property-read operand of `$n` still held while something evaluated
+     * after it runs — the operands to its right, and `$n` itself when it is a
+     * call — co-owns when that may overwrite the slot it came from or suspend
+     * ({@see EscapeSummaries::windowMeets}). The receiver of a method call is an
+     * operand like the arguments; so is the base of an element read.
+     */
+    private function spillHeldReads(Node $n): void
+    {
+        $ops = $this->heldOperands($n);
+        $cnt = \count($ops);
+        if ($cnt === 0) { return; }
+        $k = $n->kind;
+        // The node itself runs code after its operands: a call; a property
+        // store (a `set` hook, `__set`); an element read or store on an
+        // ArrayAccess object (`offsetGet` / `offsetSet`).
+        $consumer = ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE || $k === Node::KIND_STORE_PROPERTY
+            || $k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_ACCESS) ? $n : null;
+        for ($i = 0; $i < $cnt; $i = $i + 1) {
+            $op = $ops[$i];
+            // A write / reference chain is the slot itself, not a value read
+            // out of it — except a property store's receiver, evaluated before
+            // the value and written through once.
+            if (isset($this->pinned[\spl_object_id($op)])
+                && !($k === Node::KIND_STORE_PROPERTY && $i === 0)) { continue; }
+            $held = $this->heldKeys($op);
+            if ($held === []) { continue; }
+            $window = \array_slice($ops, $i + 1);
+            if ($consumer === null && $window === []) { continue; }
+            if (!$this->esc->windowMeets($window, $consumer, $held)) { continue; }
+            $new = $this->coOwnHeld($op);
+            if ($new !== $op) { $this->setOperand($n, $i, $new); }
+        }
+    }
+
+    /**
+     * The operands of `$n` in evaluation order, for the node kinds that hold
+     * one while evaluating another; [] for any other kind.
+     *
+     * @return Node[]
+     */
+    private function heldOperands(Node $n): array
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_NEW_OBJ) {
+            return $this->callArgs($n);
+        }
+        if ($k === Node::KIND_METHOD_CALL) {
+            $mc = $this->asMethodCall($n);
+            $out = [$mc->object];
+            foreach ($mc->args as $a) { $out[] = $a; }
+            return $out;
+        }
+        if ($k === Node::KIND_INVOKE) {
+            $iv = $this->asInvoke($n);
+            $out = [$iv->callee];
+            foreach ($iv->args as $a) { $out[] = $a; }
+            return $out;
+        }
+        if ($k === Node::KIND_CONCAT || $k === Node::KIND_CMP || $k === Node::KIND_SPACESHIP
+            || $k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
+            || $k === Node::KIND_DIV || $k === Node::KIND_MOD || $k === Node::KIND_BITOP) {
+            return Walk::children($n);
+        }
+        if ($k === Node::KIND_ARRAY_ACCESS) {
+            if (isset($this->pinned[\spl_object_id($n)])) { return []; }
+            $aa = $this->asArrayAccess($n);
+            return [$aa->array, $aa->index];
+        }
+        if ($k === Node::KIND_ARRAY_LIT) { return Walk::children($n); }
+        if ($k === Node::KIND_STORE_PROPERTY) {
+            $sp = $this->asStoreProperty($n);
+            return [$sp->object, $sp->value];
+        }
+        if ($k === Node::KIND_STORE_ELEMENT) {
+            $se = $this->asStoreElement($n);
+            return [$se->index, $se->value];
+        }
+        return [];
+    }
+
+    /** Put `$v` in operand position `$i` of `$n` ({@see heldOperands}' order). */
+    private function setOperand(Node $n, int $i, Node $v): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_NEW_OBJ) {
+            $args = $this->callArgs($n);
+            $args[$i] = $v;
+            $this->withArgs($n, $args);
+        } elseif ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_INVOKE) {
+            if ($i === 0) {
+                if ($k === Node::KIND_METHOD_CALL) { $this->asMethodCall($n)->object = $v; }
+                else { $this->asInvoke($n)->callee = $v; }
+                return;
+            }
+            $args = $this->callArgs($n);
+            $args[$i - 1] = $v;
+            $this->withArgs($n, $args);
+        } elseif ($k === Node::KIND_ARRAY_ACCESS) {
+            $aa = $this->asArrayAccess($n);
+            if ($i === 0) { $aa->array = $v; } else { $aa->index = $v; }
+        } elseif ($k === Node::KIND_STORE_PROPERTY) {
+            $sp = $this->asStoreProperty($n);
+            if ($i === 0) { $sp->object = $v; } else { $sp->value = $v; }
+        } elseif ($k === Node::KIND_STORE_ELEMENT) {
+            $se = $this->asStoreElement($n);
+            if ($i === 0) { $se->index = $v; } else { $se->value = $v; }
+        } elseif ($k === Node::KIND_ARRAY_LIT) {
+            $j = 0;
+            foreach ($this->asArrayLit($n)->elements as $el) {
+                if ($el->key !== null) {
+                    if ($j === $i) { $el->key = $v; return; }
+                    $j = $j + 1;
+                }
+                if ($j === $i) { $el->value = $v; return; }
+                $j = $j + 1;
+            }
+        } elseif ($k === Node::KIND_CONCAT) {
+            $c = $this->asConcat($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_CMP) {
+            $c = $this->asCmp($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_SPACESHIP) {
+            $c = $this->asSpaceship($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_ADD) {
+            $c = $this->asAdd($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_SUB) {
+            $c = $this->asSub($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_MUL) {
+            $c = $this->asMul($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_DIV) {
+            $c = $this->asDiv($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_MOD) {
+            $c = $this->asMod($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        } elseif ($k === Node::KIND_BITOP) {
+            $c = $this->asBitOp($n);
+            if ($i === 0) { $c->left = $v; } else { $c->right = $v; }
+        }
+    }
+
+    /**
+     * The property slots the value of `$v` hangs from, when it is a read out
+     * of one — `$this->a->b[$k]` is held by `b`, and by `a`, whose release
+     * frees the object holding `b`. [] for anything else, and for a scalar,
+     * which is a copy of the word.
+     *
+     * @return array<string, bool>
+     */
+    private function heldKeys(Node $v): array
+    {
+        $rk = $v->type->kind;
+        if ($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL
+            || $rk === Type::KIND_NULL || $rk === Type::KIND_VOID) {
+            return [];
+        }
+        /** @var array<string, bool> $keys */
+        $keys = [];
+        $cur = $v;
+        while (true) {
+            $k = $cur->kind;
+            if ($k === Node::KIND_PROPERTY_ACCESS) {
+                $pa = $this->asPropertyAccess($cur);
+                $keys[\Compile\Mir\EscapeSummaries::propKey($pa->object, $pa->property)] = true;
+                $cur = $pa->object;
+            } elseif ($k === Node::KIND_ARRAY_ACCESS) {
+                $aa = $this->asArrayAccess($cur);
+                if ($aa->array->type->kind === Type::KIND_STRING) { return []; }
+                $cur = $aa->array;
+            } else {
+                return $keys;
+            }
+        }
+    }
+
+    /**
+     * `$v` made to co-own what it reads: spilled whole when the local that
+     * stores it owns it ({@see \Compile\Mir\Ownership::classifyStored}),
+     * otherwise its nearest owned container read along the chain.
+     */
+    private function coOwnHeld(Node $v): Node
+    {
+        if ($this->own->classifyStored($v) > 0) {
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('own.prop.coOwned', 1); }
+            return $this->coOwnSpill($v);
+        }
+        // Nothing takes a count on the value itself (an erased or probed
+        // element): hold the container it lives in. For an ELEMENT that is the
+        // whole answer — while the buffer is shared, a write through the slot
+        // copies it (copy-on-write) and a release of the slot only drops the
+        // slot's own reference, so the held buffer keeps its elements. Past a
+        // PROPERTY whose value nothing co-owns, holding the object does not
+        // stop that property from being overwritten: that is the residual.
+        $crossed = false;
+        $cur = $v;
+        while (true) {
+            $k = $cur->kind;
+            $b = null;
+            if ($k === Node::KIND_PROPERTY_ACCESS) {
+                $b = $this->asPropertyAccess($cur)->object;
+            } elseif ($k === Node::KIND_ARRAY_ACCESS) {
+                $b = $this->asArrayAccess($cur)->array;
+            } else {
+                break;
+            }
+            if (!isset($this->pinned[\spl_object_id($b)]) && $this->heldKeys($b) !== []
+                && $this->own->classifyStored($b) > 0) {
+                if ($k === Node::KIND_PROPERTY_ACCESS) { $this->asPropertyAccess($cur)->object = $this->coOwnSpill($b); }
+                else { $this->asArrayAccess($cur)->array = $this->coOwnSpill($b); }
+                if ($k === Node::KIND_PROPERTY_ACCESS) { $crossed = true; }
+                if (!$crossed) {
+                    if (\Compile\Stats::$on) { \Compile\Stats::bump('own.prop.coOwned', 1); }
+                    return $v;
+                }
+                break;
+            }
+            if ($k === Node::KIND_PROPERTY_ACCESS) { $crossed = true; }
+            $cur = $b;
+        }
+        if (\Compile\Stats::$on) { \Compile\Stats::bump('own.residual.prop-held', 1); }
+        if ($this->trace) {
+            \error_log('OWN residual prop-held ' . $this->fnName . ' ' . $v->kind . ' ' . $v->type->toString()
+                . ' line ' . (string)$v->line);
+        }
+        return $v;
+    }
+
+    /** A hidden local that co-owns a property read by a retain ({@see StoreLocal::$coOwnRead}). */
+    private function coOwnSpill(Node $v): StoreLocal
+    {
+        $sl = $this->spill($v);
+        $sl->coOwnRead = true;
+        return $sl;
     }
 
     /** The emitter already drops the base of a scalar read ({@see EmitLlvm::baseTempRelease}). */
@@ -855,4 +1131,11 @@ final class SpillFreshBases
     private function asTernary(Node $n): \Compile\Mir\Ternary { return $n; }
     private function asNullCoalesce(Node $n): \Compile\Mir\NullCoalesce_ { return $n; }
     private function asMatch(Node $n): \Compile\Mir\Match_ { return $n; }
+    private function asArrayLit(Node $n): \Compile\Mir\ArrayLit { return $n; }
+    private function asConcat(Node $n): \Compile\Mir\Concat { return $n; }
+    private function asAdd(Node $n): \Compile\Mir\Add { return $n; }
+    private function asSub(Node $n): \Compile\Mir\Sub { return $n; }
+    private function asMul(Node $n): \Compile\Mir\Mul { return $n; }
+    private function asDiv(Node $n): \Compile\Mir\Div { return $n; }
+    private function asMod(Node $n): \Compile\Mir\Mod { return $n; }
 }
