@@ -5665,10 +5665,36 @@ final class EmitLlvm implements EmitVisitor
 
     /** Merge a spread source into `$slot` with PHP key semantics: string keys
      *  preserved (later duplicate overwrites), int keys renumbered. */
-    private function emitArraySpreadUnified(string $slot, Spread_ $spreadNode): string
+    private function emitArraySpreadUnified(string $slot, Spread_ $spreadNode, bool $cellVals = false): string
     {
         $sp = $spreadNode;
         $out = $this->emitNode($sp->operand);
+        // The merge copies WORDS. Into a literal whose elements are cells, a
+        // source with a concrete element type hands over raw words under a
+        // cell contract — `[...['(', [T_DOUBLE_COLON]], ...[')', ']']]` read
+        // each `)` back as the double with its pointer's bits. Rebuild such a
+        // source boxed first; the rebuild is a fresh temp, dropped once the
+        // merge has retained what it took.
+        $opT = $sp->operand->type;
+        $opElem = $opT->element;
+        $cellified = $cellVals && $opT->isArray() && $opElem !== null
+            && $opElem->kind !== Type::KIND_CELL && $opElem->kind !== Type::KIND_UNKNOWN;
+        if ($cellified) {
+            $out .= $this->emitCellifyArrayRaw($opElem);
+        } elseif ($opT->kind === Type::KIND_CELL) {
+            // A CELL operand (`...$mixed`, `...$closure()`) is the tagged word
+            // of an array only its runtime hint describes: strip the tag, and
+            // into a cell-valued literal merge a copy boxed by that hint.
+            $out .= $this->unboxCellToType(Type::vec(Type::cell()));
+            if ($cellVals) {
+                $out .= $this->coerceToPtr();
+                $cc = $this->ssa->allocReg();
+                $out .= '  ' . $cc . ' = call ptr @__mir_array_cellified_copy(ptr ' . $this->lastValue . ")\n";
+                $this->lastValue = $cc;
+                $this->lastValueType = 'ptr';
+                $cellified = true;
+            }
+        }
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
         $cur = $this->ssa->allocReg();
@@ -5676,6 +5702,11 @@ final class EmitLlvm implements EmitVisitor
         $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_spread_into(ptr ' . $cur . ', ptr ' . $src . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
+        if ($cellified) {
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $src . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $opT->isAssoc() ? 'assoccell' : 'veccell');
+        }
         return $out;
     }
 

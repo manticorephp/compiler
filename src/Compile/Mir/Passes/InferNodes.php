@@ -2104,6 +2104,11 @@ trait InferNodes
             if ($el->value->kind === Node::KIND_SPREAD) {
                 $st = $el->value->type;
                 $vt = $st->element !== null ? $st->element : Type::unknown();
+                // An array that rides a CELL was boxed element by element on
+                // its way in, so what it spreads are cells — not words of no
+                // known kind, which left `[1, ...$mixed]` a vec[unknown] that
+                // stored the 1 raw beside tagged words.
+                if ($st->kind === Type::KIND_CELL) { $vt = Type::cell(); }
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
             if ($vt->isArray() && $vt->element !== null

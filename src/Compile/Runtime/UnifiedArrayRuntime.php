@@ -135,6 +135,7 @@ final class UnifiedArrayRuntime
         $this->emitElemDecodeFast();
         $this->emitCellifyInplace();
         $this->emitElemEncode();
+        $this->emitCellifiedCopy();
         $this->emitCellToBag();
         $this->emitCellToKind();
         $this->emitArrayConform();
@@ -5259,6 +5260,32 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_array_cellified_copy(src) -> ptr` — an OWNED copy of `src` whose
+     * elements are cells: the copy co-owns the elements by the buffer's hint,
+     * then a raw-hinted buffer is cellified in place (an unstamped one is
+     * empty). What a consumer with a CELL element contract takes from an array
+     * that only its runtime hint describes — the `(object)` bag, a `...$mixed`
+     * spread into a cell-valued literal.
+     */
+    private function emitCellifiedCopy(): void
+    {
+        $fn = $this->module->func('__mir_array_cellified_copy', Type::ptr());
+        $src = $fn->param(Type::ptr(), 'src');
+        $e = $fn->block('entry');
+        $cellify = $fn->block('cellify');
+        $done = $fn->block('done');
+        $copy = $e->call('__mir_array_copy', Type::ptr(), [$src]);
+        $hint = $this->elemHint($e, $copy);
+        $e->switch_($hint, $cellify, [
+            new SwitchCase(Value::int(Type::i64(), 0), $done),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $done),
+        ]);
+        $cellify->call('__mir_array_cellify_inplace', Type::void(), [$copy, $hint]);
+        $cellify->br($done);
+        $done->ret($copy);
+    }
+
+    /**
      * `__mir_cell_to_bag(v, scalarKey) -> ptr` — the OWNED dynamic-property bag
      * `(object)$v` gives a runtime-classified value, php's rules per kind: an
      * ARRAY → a copy of it whose elements are cells (the bag is a cell channel,
@@ -5278,8 +5305,6 @@ final class UnifiedArrayRuntime
         $tagged = $fn->block('tagged');
         $chkarr = $fn->block('chkarr');
         $doarr = $fn->block('doarr');
-        $cellify = $fn->block('cellify');
-        $arrdone = $fn->block('arrdone');
         $donull = $fn->block('donull');
         $scalar = $fn->block('scalar');
         $mask = Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK);
@@ -5288,18 +5313,9 @@ final class UnifiedArrayRuntime
         $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
         $tagged->brIf($tagged->icmp('eq', $nib, Value::int(Type::i64(), 3)), $donull, $chkarr);
         $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $scalar);
-        // ARRAY: copy, co-own the elements by the buffer's hint, then cellify a
-        // raw-hinted buffer in place (an unstamped one is empty).
+        // ARRAY: a copy whose elements are cells ({@see emitCellifiedCopy}).
         $src = $doarr->inttoptr($doarr->and_($v, $mask), Type::ptr());
-        $copy = $doarr->call('__mir_array_copy', Type::ptr(), [$src]);
-        $hint = $this->elemHint($doarr, $copy);
-        $doarr->switch_($hint, $cellify, [
-            new SwitchCase(Value::int(Type::i64(), 0), $arrdone),
-            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $arrdone),
-        ]);
-        $cellify->call('__mir_array_cellify_inplace', Type::void(), [$copy, $hint]);
-        $cellify->br($arrdone);
-        $arrdone->ret($copy);
+        $doarr->ret($doarr->call('__mir_array_cellified_copy', Type::ptr(), [$src]));
         // NULL: an empty bag.
         $empty = $donull->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
         $donull->store(Value::int(Type::i64(), 0), $empty);
