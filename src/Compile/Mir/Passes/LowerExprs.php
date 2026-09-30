@@ -216,7 +216,7 @@ trait LowerExprs
             // builder; a direct call would be tree-shaken (undefined at link). The
             // single-arg `getenv($name)` stays the codegen builtin.
             if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$this->hasNamespacedGetenv()) {
-                return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
+                return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::cell()));
             }
             if ($fnBare === 'sscanf' && \count($expr->args) > 2) {
                 $s = $this->lowerExpr($expr->args[0]);

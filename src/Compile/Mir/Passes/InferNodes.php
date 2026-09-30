@@ -502,6 +502,7 @@ trait InferNodes
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
+        $this->globalCellBound = [];
         $this->arithUsedLocals = [];
         $this->refPinnedLocals = [];
         // ONE walk for the late facts — arith-used, by-ref-pinned, and which
@@ -840,6 +841,26 @@ trait InferNodes
             $gt = $this->globalVarTypes[$node->name];
             if ($gt->isArray() && $gt->element !== null
                 && $gt->element->kind !== Type::KIND_UNKNOWN) {
+                $this->localTypes[$node->name] = $gt;
+                $node->type = $gt;
+                return $node->type;
+            }
+        }
+        // A whole store into a GLOBAL whose unified element is a cell (another
+        // scope stores a second kind into it) keeps the slot's cell-element
+        // view: typing the name by the stored literal's concrete element read
+        // the int another scope stored back as a string, in THIS scope, after
+        // the call that stored it (`$g = ['a' => 'b']; setv(); $g['v']`). The
+        // buffer's element hint describes the raw words, which the cell view
+        // decodes; a call may rewrite the global anyway, so the concrete
+        // narrowing was never sound across one.
+        $globalBound = ($this->inMainBody && isset($this->mainGlobalNames[$node->name]))
+            || isset($this->globalCellBound[$node->name]);
+        if ($globalBound && isset($this->globalVarTypes[$node->name]) && $valueType->isArray()) {
+            $gt = $this->globalVarTypes[$node->name];
+            if ($gt->isArray() && $gt->element !== null
+                && $gt->element->kind === Type::KIND_CELL
+                && $gt->isAssoc() === $valueType->isAssoc()) {
                 $this->localTypes[$node->name] = $gt;
                 $node->type = $gt;
                 return $node->type;
@@ -1185,6 +1206,7 @@ trait InferNodes
         }
         $this->localTypes[$n->name] = $t;
         $this->globalBackedNames[$n->name] = true;
+        if (\str_starts_with($n->cell, '@g_')) { $this->globalCellBound[$n->name] = true; }
         $n->type = $t;
         return $t;
     }

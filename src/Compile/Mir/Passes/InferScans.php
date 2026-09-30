@@ -1380,6 +1380,12 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initTypes); }
     }
 
+    private function isSuperglobalName(string $n): bool
+    {
+        return $n === '_SERVER' || $n === '_ENV' || $n === '_GET' || $n === '_POST'
+            || $n === '_COOKIE' || $n === '_FILES' || $n === '_REQUEST' || $n === '_SESSION';
+    }
+
     private function scanGlobalTypes(Module $module): bool
     {
         if (\count($module->globalVarNames) === 0) { return false; }
@@ -1412,7 +1418,21 @@ trait InferScans
         $names = [];
         foreach ($observed as $name => $t) { $names[$name] = true; }
         foreach ($elems as $name => $t) { $names[$name] = true; }
+        // A SUPERGLOBAL is one symbol every module shares, so its layout is not
+        // this module's to infer from the stores it happens to see (a library
+        // storing an int, the application reading it): it is `array<string,
+        // mixed>`, fixed, as its seed builds it.
+        $sgT = Type::assoc(Type::string_(), Type::cell());
+        foreach ($module->globalVarNames as $gname) {
+            if (!$this->isSuperglobalName($gname)) { continue; }
+            $prevT = $this->globalVarTypes[$gname] ?? null;
+            if ($prevT === null || $prevT->exactString() !== $sgT->exactString()) {
+                $this->globalVarTypes[$gname] = $sgT;
+                $changed = true;
+            }
+        }
         foreach ($names as $name => $_) {
+            if ($this->isSuperglobalName($name)) { continue; }
             $t = $observed[$name] ?? null;
             // An array global whose element is still erased takes the element
             // joined from its appends — the `$g[] = v` shape carries the only

@@ -745,6 +745,11 @@ final class InferTypes implements Pass
      *  whole program, never a branch merge. Reset per function. */
     private array $globalBackedNames = [];
 
+    /** @var array<string,bool> the subset of {@see $globalBackedNames} bound to a
+     *  GLOBAL's module cell (`@g_*`: `global $x`, a superglobal) — the names
+     *  {@see $globalVarTypes} speaks for. Reset per function. */
+    private array $globalCellBound = [];
+
     /** @var array<string,bool> every `global $x` name in the module. In `__main`
      *  these are global-backed WITHOUT a decl node ({@see EmitLlvmModule::
      *  emitFunction}), so a top-level store to one must not undo the unified
