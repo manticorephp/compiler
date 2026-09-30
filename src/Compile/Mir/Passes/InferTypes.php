@@ -769,6 +769,11 @@ final class InferTypes implements Pass
      *  ({@see InferScans::scanRefPinnedNode}). */
     private array $refPinnedLocals = [];
 
+    /** @var array<string,string> "Cls::m" → the override body that answers a
+     *  receiver typed Cls with no body of its own, '' for none
+     *  ({@see InferScans::overrideBody}). */
+    private array $overrideBodyMemo = [];
+
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
      *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
@@ -1083,6 +1088,10 @@ final class InferTypes implements Pass
         }
         // A local handed to a `mixed &` parameter is likewise one word two
         // frames share, and the callee may make it any kind.
+        $this->rescanTargets = [];
+        if ($this->scanRefParamRetype($module)) {
+            $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
+        }
         $this->rescanTargets = [];
         if ($this->scanRefCellArgWiden($module)) {
             $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);

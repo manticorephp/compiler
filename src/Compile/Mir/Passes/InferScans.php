@@ -2503,21 +2503,148 @@ trait InferScans
         return $changed;
     }
 
+    /**
+     * A TYPED scalar by-ref param (`int &$i`) is typed on ENTRY only: php checks
+     * the hint when the call binds it, and after that `$i` is a plain reference —
+     * `$i = strpos(...)` leaves `false` in the caller's variable. A body that
+     * stores a word of another kind into it would write that word raw into a
+     * slot both frames read as the declared scalar (the cell of `int|false`
+     * read back as an int by the caller, as a float by the next loop test), so
+     * such a param is the `mixed &` case: widen it to a cell, and
+     * {@see scanRefCellArgWiden} then widens the callers' slots to match.
+     * Monotone — a widened param is no longer a scalar and is never narrowed.
+     */
+    private function scanRefParamRetype(Module $module): bool
+    {
+        $changed = false;
+        /** @var array<string, bool> $family */
+        $family = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $any = false;
+            foreach ($fn->params as $p) {
+                if ($p->byRef && !$p->variadic && $this->isScalarReprKind($p->type)) { $any = true; }
+            }
+            if (!$any) { continue; }
+            /** @var array<string, bool> $stored */
+            $stored = [];
+            $this->collectForeignScalarStores($fn->body, $fn, $stored);
+            $idx = -1;
+            foreach ($fn->params as $p) {
+                $idx = $idx + 1;
+                if (!isset($stored[$p->name])) { continue; }
+                if (!$p->byRef || $p->variadic || !$this->isScalarReprKind($p->type)) { continue; }
+                $p->type = Type::cell();
+                $this->rescanTargets[$fn->name] = true;
+                $changed = true;
+                $method = $this->methodNameOf($fn->name);
+                if ($method !== '') { $family[$method . '#' . (string)$idx] = true; }
+            }
+        }
+        // One call site reaches every override through the same slot, so the
+        // whole family of a retyped method agrees on the cell — an override that
+        // kept the raw scalar would read the caller's cell word as an int.
+        if (\count($family) === 0) { return $changed; }
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $method = $this->methodNameOf($fn->name);
+            if ($method === '') { continue; }
+            $idx = -1;
+            foreach ($fn->params as $p) {
+                $idx = $idx + 1;
+                if (!isset($family[$method . '#' . (string)$idx])) { continue; }
+                if (!$p->byRef || $p->variadic || !$this->isScalarReprKind($p->type)) { continue; }
+                $p->type = Type::cell();
+                $this->rescanTargets[$fn->name] = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** A body that answers `$method` on a receiver typed `$cls` when `$cls`
+     *  itself declares none — an interface, or an abstract declaration: the
+     *  first override among its descendants, the one the emitter takes the
+     *  call's signature from. */
+    private function overrideBody(string $cls, string $method): ?FunctionDef
+    {
+        $key = $cls . '::' . $method;
+        $name = $this->overrideBodyMemo[$key] ?? null;
+        if ($name === null) {
+            $name = '';
+            foreach ($this->classes as $cn => $cd) {
+                if ($cn === $cls || !isset($cd->methodNames[$method])) { continue; }
+                if (!isset($this->fnByName[$cn . '__' . $method])) { continue; }
+                if ($this->classImplementsT($cn, $cls)) { $name = $cn . '__' . $method; break; }
+            }
+            $this->overrideBodyMemo[$key] = $name;
+        }
+        return $name === '' ? null : ($this->fnByName[$name] ?? null);
+    }
+
+    /** The method part of a lowered method's name (`Cls__m` → `m`), '' for a
+     *  free function. */
+    private function methodNameOf(string $fnName): string
+    {
+        foreach ($this->classes as $cls => $cd) {
+            $prefix = $cls . '__';
+            if (\str_starts_with($fnName, $prefix)) {
+                $m = \substr($fnName, \strlen($prefix));
+                if (isset($cd->methodNames[$m])) { return $m; }
+            }
+        }
+        return '';
+    }
+
+    /** Whole stores into a by-ref scalar param whose value is of ANOTHER kind.
+     *  @param array<string, bool> $out */
+    private function collectForeignScalarStores(Node $n, FunctionDef $fn, array &$out): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) { return; }
+        if ($n instanceof StoreLocal) {
+            $vk = $n->value->type->kind;
+            foreach ($fn->params as $p) {
+                if ($p->name !== $n->name || !$p->byRef) { continue; }
+                if ($vk !== Type::KIND_UNKNOWN && $vk !== $p->type->kind) { $out[$p->name] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectForeignScalarStores($c, $fn, $out);
+        }
+    }
+
     /** @param array<string,bool> $names */
     private function scanRefCellArgNode(Node $n, array &$names): void
     {
+        $callee = null;
+        /** @var Node[] $args */
+        $args = [];
+        $base = 0;
         if ($n->kind === Node::KIND_CALL) {
             $callee = $this->fnByName[$n->function] ?? null;
-            if ($callee !== null) {
-                foreach ($n->args as $i => $a) {
-                    $p = $callee->params[$i] ?? null;
-                    if ($p === null || !$p->byRef) { continue; }
-                    if ($p->type->kind !== Type::KIND_CELL) { continue; }
-                    if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                        $names[$a->name] = true;
-                    } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
-                        $names[$a->target] = true;
-                    }
+            $args = $n->args;
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $sc = $n;
+            $decl = $sc->class !== '' ? $this->resolveMethodClass($sc->class, $sc->method) : '';
+            if ($decl !== '') { $callee = $this->fnByName[$decl . '__' . $sc->method] ?? null; }
+            $args = $sc->args;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $mc = $n;
+            $cls = $mc->object->type->class ?? '';
+            $decl = $cls !== '' ? $this->resolveMethodClass($cls, $mc->method) : '';
+            if ($decl !== '') { $callee = $this->fnByName[$decl . '__' . $mc->method] ?? null; }
+            if ($callee === null && $cls !== '') { $callee = $this->overrideBody($cls, $mc->method); }
+            $args = $mc->args;
+            $base = 1;
+        }
+        if ($callee !== null) {
+            foreach ($args as $i => $a) {
+                $p = $callee->params[$base + $i] ?? null;
+                if ($p === null || !$p->byRef) { continue; }
+                if ($p->type->kind !== Type::KIND_CELL) { continue; }
+                if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                    $names[$a->name] = true;
+                } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
+                    $names[$a->target] = true;
                 }
             }
         }
