@@ -370,8 +370,11 @@ trait InferCalls
             // uniform-kind rule in {@see EmitLlvmBuiltins::biMinMax}.
             // A single array arg is the "max of its ELEMENTS" form: the winner
             // is an erased element, so the result is a cell.
-            if (\count($args) === 1 && $args[0]->type->kind === Type::KIND_ARRAY) {
-                return Type::cell();
+            if (\count($args) === 1) {
+                $k0 = $args[0]->type->kind;
+                if ($k0 === Type::KIND_ARRAY || $k0 === Type::KIND_CELL || $k0 === Type::KIND_UNKNOWN) {
+                    return Type::cell();
+                }
             }
             $allStr = \count($args) >= 2;
             $allArr = \count($args) >= 2;

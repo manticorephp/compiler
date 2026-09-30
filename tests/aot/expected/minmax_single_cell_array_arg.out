@@ -1,0 +1,12 @@
+int(9)
+int(3)
+int(7)
+int(5)
+string(1) "c"
+string(1) "a"
+int(3)
+int(1)
+ValueError: max(): Argument #1 ($value) must contain at least one element
+ValueError: min(): Argument #1 ($value) must contain at least one element
+TypeError: max(): Argument #1 ($value) must be of type array, int given
+TypeError: min(): Argument #1 ($value) must be of type array, int given

@@ -2965,7 +2965,7 @@ trait EmitLlvmBuiltins
         } else {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
-            $out .= $this->boxRawElem($ev, $arrT);
+            $out .= $this->boxErasedOrRawElem($ev, $src, $arrT);
             $boxed = $this->lastValue;
             if ($this->boxRawValueBorrows($this->elemTypeOf($arrT))) {
                 $out .= $this->cellEndpointRetain($boxed);
@@ -3150,6 +3150,26 @@ trait EmitLlvmBuiltins
      * passes through untouched. Mirrors the element switch in
      * {@see emitAssocToCellArrayUnified}.
      */
+    /**
+     * As {@see boxRawElem}, but an erased / CELL element channel is decoded by
+     * the BUFFER's hint (`__mir_elem_decode`), not passed through: a cell-typed
+     * base (`array|string $v` after `$v = explode(…)`) may hold a raw-hinted
+     * buffer, and its words are untagged payloads — array_first handed the
+     * string pointer out as a denormal float.
+     */
+    private function boxErasedOrRawElem(string $ev, string $arr, Type $arrT): string
+    {
+        $elem = $this->elemTypeOf($arrT);
+        if ($elem === null || $elem->kind === Type::KIND_UNKNOWN || $elem->kind === Type::KIND_CELL) {
+            $dec = $this->ssa->allocReg();
+            $out = '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arr . ', i64 ' . $ev . ")\n";
+            $this->lastValue = $dec;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $this->boxRawValue($ev, $elem);
+    }
+
     private function boxRawElem(string $ev, Type $arrT): string
     {
         $elem = ($arrT->isVec() || $arrT->isAssoc()) ? $arrT->element : null;
@@ -3419,8 +3439,8 @@ trait EmitLlvmBuiltins
      *
      * `array_values($a)` — a fresh PACKED, re-indexed list of the source's
      * values as `vec[cell]`. Two compile-time shapes (see the dispatch):
-     *   - CELL/`mixed` source ($boxElem === null): values are ALREADY cells →
-     *     copied as-is. Fixes the stdlib mis-coerce on a cell-backed argument
+     *   - CELL/`mixed` source ($boxElem === null): values are decoded by the
+     *     source buffer's hint (a cell channel may hold a raw buffer). Fixes the stdlib mis-coerce on a cell-backed argument
      *     (bare-`array` .sig erasure), the gap that drove the array_keys builtin.
      *   - typed array source ($boxElem = the element type): each raw value is
      *     re-boxed per its kind, so a `vec[int]`/`assoc[string,string]` etc.
@@ -3464,10 +3484,16 @@ trait EmitLlvmBuiltins
         $out .= $body . ":\n";
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        // A cell source ($boxElem null) and a CELL-element typed source already
-        // carry cells; a typed source re-boxes each raw value per its kind.
+        // A cell source ($boxElem null) or a CELL-element typed source is only
+        // STATICALLY a cell channel: the buffer behind it may be raw-hinted
+        // (`$v = explode(…)` into an `array|string` param), so each word is
+        // decoded by the buffer's hint. A typed source re-boxes each raw value
+        // per its kind.
         $bv = $ev;
-        if ($boxElem !== null && $boxElem->kind !== Type::KIND_CELL) {
+        if ($boxElem === null || $boxElem->kind === Type::KIND_CELL) {
+            $bv = $this->ssa->allocReg();
+            $out .= '  ' . $bv . ' = call i64 @__mir_elem_decode(ptr ' . $src . ', i64 ' . $ev . ")\n";
+        } else {
             $bv = $this->ssa->allocReg();
             $ek = $boxElem->kind;
             if ($ek === Type::KIND_STRING) {
@@ -4390,7 +4416,11 @@ trait EmitLlvmBuiltins
         // is 3, not the array). The numeric paths below unboxed the array
         // POINTER as an int and printed a raw address; defer to the stdlib fold,
         // which compares the elements with `<` / `>` and so rides the same table.
-        if ($count === 1 && $args[0]->type->kind === Type::KIND_ARRAY) {
+        // A lone CELL / erased operand is that form too (php accepts nothing
+        // but an array there): the int path unboxed the array it holds and
+        // answered its address.
+        $k0 = $count === 1 ? $args[0]->type->kind : '';
+        if ($k0 === Type::KIND_ARRAY || $k0 === Type::KIND_CELL || $k0 === Type::KIND_UNKNOWN) {
             if (!isset($this->definedFns[$this->mangle('__mc_minmax_of')])) {
                 $this->libcExtra['manticore___mc_minmax_of'] =
                     'declare i64 @manticore___mc_minmax_of(i64, i64)';

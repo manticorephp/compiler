@@ -397,11 +397,17 @@ function __mc_array_keys_search(mixed $arr, mixed $search, bool $strict): array
  */
 function __mc_minmax_of(mixed $arr, bool $isMax): mixed
 {
+    $fn = $isMax ? 'max' : 'min';
+    if (!\is_array($arr)) {
+        throw new \TypeError($fn . '(): Argument #1 ($value) must be of type array, ' . \get_debug_type($arr) . ' given');
+    }
     /** @var mixed[] $vals */
     $vals = [];
     foreach ($arr as $v) { $vals[] = $v; }
     $n = \count($vals);
-    if ($n === 0) { return false; }
+    if ($n === 0) {
+        throw new \ValueError($fn . '(): Argument #1 ($value) must contain at least one element');
+    }
     $acc = $vals[0];
     for ($i = 1; $i < $n; $i = $i + 1) {
         $v = $vals[$i];

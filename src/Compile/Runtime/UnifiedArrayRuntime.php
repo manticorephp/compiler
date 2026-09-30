@@ -4539,7 +4539,45 @@ final class UnifiedArrayRuntime
         $src = $go->gep(Type::i8(), $arr, [$go->add(Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE), $esz)]);
         $go->call('memmove', Type::ptr(), [$dst, $src, $bytes]);
         $go->store($tail, $arr);
-        $go->ret($first);
+        // php renumbers the INTEGER keys from 0 (string keys stay) and rewinds
+        // the internal pointer. A HASHED buffer kept its old int keys: after
+        // `unset($a[0])`, `array_shift($a)` left keys 2..n where php has 0..n-2.
+        // A PACKED buffer's keys are its positions already.
+        $fp = $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $fl = $go->load(Type::i64(), $fp);
+        $go->store($go->and_($fl, Value::int(Type::i64(), ~MemoryAbi::ARRAY_PTR_FIELD_MASK)), $fp);
+        $rn = $fn->block('rn');
+        $rh = $fn->block('rhead');
+        $rb = $fn->block('rbody');
+        $ri = $fn->block('rint');
+        $rx = $fn->block('rnext');
+        $rf = $fn->block('rfin');
+        $out = $fn->block('out');
+        $go->brIf($go->icmp('ne', $this->hashedBit($go, $fl), Value::int(Type::i64(), 0)), $rn, $out);
+        $iSlot = $rn->alloca(Type::i64(), 'si');
+        $kSlot = $rn->alloca(Type::i64(), 'sk');
+        $rn->store(Value::int(Type::i64(), 0), $iSlot);
+        $rn->store(Value::int(Type::i64(), 0), $kSlot);
+        $rn->br($rh);
+        $i = $rh->load(Type::i64(), $iSlot);
+        $rh->brIf($rh->icmp('sge', $i, $tail), $rf, $rb);
+        $kind = $rb->load(Type::i64(), $this->entryAddr($rb, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $rb->brIf($rb->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $ri, $rx);
+        $k = $ri->load(Type::i64(), $kSlot);
+        $ri->store($k, $this->entryAddr($ri, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $ri->store($ri->add($k, Value::int(Type::i64(), 1)), $kSlot);
+        $ri->br($rx);
+        $rx->store($rx->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $rx->br($rh);
+        // The bucket index hashed the old int keys: drop it (rebuilt lazily).
+        // A string-keyed map keeps the index the surgical repair above fixed.
+        $kn = $rf->load(Type::i64(), $kSlot);
+        $rf->store($kn, $this->hdr($rf, $arr, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $rd = $fn->block('rdrop');
+        $rf->brIf($rf->icmp('ne', $kn, Value::int(Type::i64(), 0)), $rd, $out);
+        $rd->call('__mir_array_index_drop', Type::void(), [$arr]);
+        $rd->br($out);
+        $out->ret($first);
         $z->ret(Value::int(Type::i64(), 0));
     }
 
