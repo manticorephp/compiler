@@ -3360,12 +3360,7 @@ function cmd_dump_llvm(array $args): int {
 }
 
 function cmd_version(array $args): int {
-    $version = 'Manticore v0.11.0';
-    $description = 'The PHP AOT Compiler';
-
-    puts(sprintf('%s - %s', $version, $description));
-    puts('PHP Version: 8.5.11');
-
+    puts("manticore 0.12.0");
     return 0;
 }
 
