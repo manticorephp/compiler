@@ -1249,9 +1249,9 @@ trait InferScans
             /** @var array<string,string> $cells */
             $cells = [];
             if (!$this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) { continue; }
-            /** @var array<string,string> $initKinds */
-            $initKinds = [];
-            $this->collectPlainStaticLocals($fn->body, $active, $cells, $initKinds);
+            /** @var array<string,Type> $initTypes */
+            $initTypes = [];
+            $this->collectPlainStaticLocals($fn->body, $active, $cells, $initTypes);
             if (\count($active) === 0) { continue; }
             /** @var array<string,Type> $observed */
             $observed = [];
@@ -1259,10 +1259,36 @@ trait InferScans
             $elems = [];
             $elemBad = [];
             $strKey = [];
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            /** @var array<string,Type> $elemAll */
+            $elemAll = [];
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
             /** @var array<string,array<string,bool>> $kinds */
             $kinds = [];
             $this->collectStaticStoreKinds($fn->body, $active, $kinds);
+            // An array static whose element stores disagree with the element
+            // its initialiser gave it (`static $seen = ['k' => 'v']; $seen['n']
+            // = 1;`) holds both kinds: its element is a cell, as for a global.
+            foreach ($cells as $name => $cell) {
+                $ot = $observed[$name] ?? ($initTypes[$name] ?? null);
+                if ($ot === null) { continue; }
+                $oe = $ot->isArray() ? $ot->element : null;
+                if ($cell === '' || $oe === null
+                    || $oe->kind === Type::KIND_CELL || $oe->kind === Type::KIND_UNKNOWN) { continue; }
+                $mixed = false;
+                foreach ($elemAll as $ek => $et) {
+                    if (!\str_starts_with($ek, $name . '#')) { continue; }
+                    if (!$this->sameElemShape($oe, $et)) { $mixed = true; break; }
+                }
+                if (!$mixed) { continue; }
+                $wt = $ot->isAssoc()
+                    ? Type::assoc($ot->key ?? Type::string_(), Type::cell())
+                    : Type::vec(Type::cell());
+                $prev = $this->staticLocalTypes[$cell] ?? null;
+                if ($prev !== null && $prev->exactString() === $wt->exactString()) { continue; }
+                $this->staticLocalTypes[$cell] = $wt;
+                $this->rescanTargets[$fn->name] = true;
+                $changed = true;
+            }
             foreach ($kinds as $name => $ks) {
                 if (isset($ks[Type::KIND_UNKNOWN])) { continue; }
                 // An INITIALISED static (`static $s = '';`) is typed by its
@@ -1272,8 +1298,8 @@ trait InferScans
                 // representation for both: a cell, the initialiser boxed into
                 // it ({@see EmitLlvmObjects::emitStaticLocalDecl}). Left alone
                 // the slot was read as a raw string and held a NaN-boxed one.
-                if (isset($initKinds[$name])) {
-                    $ks[$initKinds[$name]] = true;
+                if (isset($initTypes[$name])) {
+                    $ks[$initTypes[$name]->kind] = true;
                     if (\count($ks) < 2) { continue; }
                     $cell = $cells[$name] ?? '';
                     if ($cell === '') { continue; }
@@ -1340,18 +1366,18 @@ trait InferScans
         }
     }
 
-    /** @param array<string,string> $initKinds name → its initialiser's type kind */
-    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initKinds): void
+    /** @param array<string,Type> $initTypes name → its initialiser's type */
+    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initTypes): void
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             $d = $n;
             if (!\str_starts_with($d->cell, '@g_')) {
                 $active[$d->name] = true;
                 $cells[$d->name] = $d->cell;
-                if ($d->init !== null) { $initKinds[$d->name] = $d->init->type->kind; }
+                if ($d->init !== null) { $initTypes[$d->name] = $d->init->type; }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initKinds); }
+        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initTypes); }
     }
 
     private function scanGlobalTypes(Module $module): bool
@@ -1364,6 +1390,8 @@ trait InferScans
         $elems = [];                     // var name → stored element Type
         $elemBad = [];                   // var name → element unusable
         $strKey = [];                    // var name → seen a string-keyed store
+        /** @var array<string, Type> */
+        $elemAll = [];                   // "name#kind" → an element store's Type
         foreach ($module->functions as $fn) {
             $active = [];                // names that are global-backed HERE
             $this->collectGlobalBacked($fn->body, $active);
@@ -1375,7 +1403,7 @@ trait InferScans
                 foreach ($module->globalVarNames as $gname) { $active[$gname] = true; }
             }
             if (\count($active) === 0) { continue; }
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
         }
         $changed = false;
         // A global reached ONLY by appends (`$g = []` types the empty literal
@@ -1408,6 +1436,24 @@ trait InferScans
             if ($t === null) { continue; }
             $k = $t->kind;
             if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_INT) { continue; }
+            // A CONCRETE-element array global that another scope element-stores
+            // a different kind into holds both: its element is a cell. The join
+            // above sees only whole stores, so `$_ENV` stayed assoc[string,
+            // string] under symfony's `$_ENV['SHELL_VERBOSITY'] = $int`, and
+            // the next store released the raw int 1 as a string.
+            $te = $t->isArray() ? $t->element : null;
+            if ($te !== null && $te->kind !== Type::KIND_CELL && $te->kind !== Type::KIND_UNKNOWN) {
+                $mixed = false;
+                foreach ($elemAll as $ek => $et) {
+                    if (!\str_starts_with($ek, $name . '#')) { continue; }
+                    if (!$this->sameElemShape($te, $et)) { $mixed = true; break; }
+                }
+                if ($mixed) {
+                    $t = $t->isAssoc()
+                        ? Type::assoc($t->key ?? Type::string_(), Type::cell())
+                        : Type::vec(Type::cell());
+                }
+            }
             $prev = $this->globalVarTypes[$name] ?? null;
             // The map outlives the run ({@see Module::$inferGlobalVarTypes}):
             // a same-kind type a later run narrowed (`vec[unknown]` → the

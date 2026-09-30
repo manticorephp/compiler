@@ -3018,6 +3018,12 @@ trait EmitLlvmObjects
         // cell write cells, and every read decodes one.
         if ($n->type->kind === Type::KIND_CELL && $n->init->type->kind !== Type::KIND_CELL) {
             $out .= $this->boxToCell($n->init->type, $n->init);
+        } elseif ($this->needsCellify($n->type, $n->init->type)) {
+            // A cell-ELEMENT slot ({@see InferScans::scanStaticLocalTypes})
+            // holds the concrete-element initialiser rebuilt boxed.
+            $out .= $this->emitCellifyArrayRaw($n->init->type->element ?? Type::unknown(),
+                $this->cellifySourceFlavor($n->init));
+            $out .= $this->coerceToI64();
         } else {
             $out .= $this->coerceToI64();
         }

@@ -1161,6 +1161,13 @@ trait InferNodes
                 && $this->staticLocalTypes[$n->cell]->kind === Type::KIND_CELL) {
                 $t = Type::cell();
             }
+            // Its ELEMENT stores disagree with the initialiser's element: the
+            // array's element is a cell ({@see scanStaticLocalTypes}).
+            $st = $this->staticLocalTypes[$n->cell] ?? null;
+            if ($st !== null && $st->isArray() && $t->isArray() && $st->element !== null
+                && $st->element->kind === Type::KIND_CELL) {
+                $t = $st;
+            }
         }
         // A global-backed decl (`global $g`) is hard-lowered `int`; seed its
         // unified cross-scope type ({@see scanGlobalTypes}) so a pure-read scope

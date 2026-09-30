@@ -1821,8 +1821,11 @@ final class InferTypes implements Pass
      *  @param array<string,Type> $observed
      *  @param array<string,Type> $elems
      *  @param array<string,bool> $elemBad
-     *  @param array<string,bool> $strKey */
-    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey): void
+     *  @param array<string,bool> $strKey
+     *  @param array<string,Type> $elemAll "name#kind" → one element type
+     *         stored under that kind, EVERY store included (cell and array
+     *         values too, which `$elems` leaves out) */
+    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey, array &$elemAll): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
             $s = $n;
@@ -1849,6 +1852,7 @@ final class InferTypes implements Pass
             if ($se->array->kind === Node::KIND_LOAD_LOCAL && isset($active[$se->array->name])) {
                 $name = $se->array->name;
                 $vt = $se->value->type;
+                if ($vt->kind !== Type::KIND_UNKNOWN) { $elemAll[$name . '#' . $vt->kind] = $vt; }
                 // The KEY decides vec-vs-assoc. A string key makes an
                 // assoc[string,T]; typing it a vec would read each string key as
                 // an int index and render it as its pointer (`4343328072=v`).
@@ -1874,7 +1878,7 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey);
+            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
         }
     }
 
