@@ -7929,6 +7929,16 @@ trait EmitLlvmObjects
             if ($fallback === $static) {
                 foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
             }
+        } elseif ($static !== '' && !isset($this->sigs->paramTypes[$fallback . '__' . $mc->method])) {
+            // An ABSTRACT declaration resolves the name but has no body, so it
+            // has no signature either: the by-ref mask came back empty and
+            // `$b->step($v)` through an abstract `step(int &$x)` passed the
+            // VALUE 3 where every override dereferences an address. A
+            // descendant's override answers, as an interface's implementors do.
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if ($cn !== $static && isset($this->sigs->paramTypes[$r . '__' . $mc->method])
+                    && $this->classImplementsIface($cn, $static)) { $fallback = $r; break; }
+            }
         }
         // A fully ERASED receiver (`public $defn;` with no declared type) leaves
         // $static empty, so neither branch above ran and the parameter tables
