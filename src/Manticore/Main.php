@@ -4127,7 +4127,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
         // file (they drain a Traversable, so they cannot live in the stdlib).
         // A program may call one without ever naming an SPL array class.
-        || $demand->callsAny(['iterator_to_array', 'iterator_count', 'iterator_apply']);
+        || $demand->callsAny(['iterator_to_array', 'iterator_count', 'iterator_apply'])
+        // `[...$traversable]` drains through __mc_spread_to_array, same file.
+        || $demand->maySpreadTraversable();
     // `new Fiber(...)`, a `Fiber` hint, or `Fiber::suspend(...)` all mention it.
     $useFiber = $demand->mentionsAny(['Fiber']);
     // `new \Io\Poll\Context`, a `use Io\Poll\...`, or `new StreamPollHandle` all

@@ -5679,7 +5679,23 @@ final class EmitLlvm implements EmitVisitor
         $opElem = $opT->element;
         $cellified = $cellVals && $opT->isArray() && $opElem !== null
             && $opElem->kind !== Type::KIND_CELL && $opElem->kind !== Type::KIND_UNKNOWN;
-        if ($cellified) {
+        $iterSym = $this->mangle('__mc_spread_to_array');
+        if ($opT->kind === Type::KIND_OBJ && isset($this->definedFns[$iterSym])) {
+            // A TRAVERSABLE operand (a generator, an Iterator, an aggregate) is
+            // drained by the prelude into a cell-valued array with php's spread
+            // key rules; the merge then takes that array. Handed to the merge
+            // as the object pointer, it walked the object's header as a buffer
+            // — a generator's elements vanished and an ArrayIterator looped.
+            $out .= $this->boxToCell($opT, $sp->operand);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @manticore_' . $iterSym . '(i64 ' . $this->lastValue . ")\n";
+            $pr = $this->ssa->allocReg();
+            $out .= '  ' . $pr . ' = inttoptr i64 ' . $r . " to ptr\n";
+            $this->lastValue = $pr;
+            $this->lastValueType = 'ptr';
+            $opT = Type::assoc(Type::cell(), Type::cell());
+            $cellified = true;
+        } elseif ($cellified) {
             $out .= $this->emitCellifyArrayRaw($opElem);
         } elseif ($opT->kind === Type::KIND_CELL) {
             // A CELL operand (`...$mixed`, `...$closure()`) is the tagged word

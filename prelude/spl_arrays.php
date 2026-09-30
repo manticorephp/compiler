@@ -320,6 +320,53 @@ function __mc_iter_drive_to_array(\Iterator $it, bool $preserve_keys): array
     return $out;
 }
 
+/**
+ * `[...$traversable]` inside an array literal: the Traversable drained into an
+ * array the literal's merge then takes by php's spread rules — a STRING key is
+ * kept (a later one overwrites), an INT key is renumbered. So a string key is
+ * stored as itself and an int one appended here: preserving int keys would let
+ * two equal ones (`yield 0 => a; yield 0 => b`) collapse before the merge could
+ * renumber them. The codegen calls this for a spread operand that is an object
+ * ({@see \Compile\Mir\Passes\EmitLlvm::emitArraySpreadUnified}).
+ * @return array<int|string, mixed>
+ */
+function __mc_spread_to_array(mixed $iterator): array
+{
+    if (\is_array($iterator)) { return $iterator; }
+    if ($iterator instanceof \IteratorAggregate) {
+        return __mc_spread_to_array($iterator->getIterator());
+    }
+    $it = __mc_iter_resolve($iterator);
+    if ($it !== null) { return __mc_iter_drive_spread($it); }
+    return __mc_iter_gen_spread($iterator);
+}
+
+/** {@see __mc_spread_to_array} over a concrete \Iterator. @return array<int|string, mixed> */
+function __mc_iter_drive_spread(\Iterator $it): array
+{
+    /** @var array<int|string,mixed> $out */
+    $out = [];
+    $it->rewind();
+    while ($it->valid()) {
+        $v = $it->current();
+        $k = $it->key();
+        if (\is_string($k)) { $out[(string)$k] = $v; } else { $out[] = $v; }
+        $it->next();
+    }
+    return $out;
+}
+
+/** {@see __mc_spread_to_array} over a Generator. @return array<int|string, mixed> */
+function __mc_iter_gen_spread(\Generator $g): array
+{
+    /** @var array<int|string,mixed> $out */
+    $out = [];
+    foreach ($g as $k => $v) {
+        if (\is_string($k)) { $out[(string)$k] = $v; } else { $out[] = $v; }
+    }
+    return $out;
+}
+
 /** The generator arm of iterator_to_array, behind a TYPED parameter. */
 function __mc_iter_gen_to_array(\Generator $g, bool $preserve_keys): array
 {

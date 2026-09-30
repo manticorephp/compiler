@@ -2146,6 +2146,9 @@ trait InferNodes
                 // known kind, which left `[1, ...$mixed]` a vec[unknown] that
                 // stored the 1 raw beside tagged words.
                 if ($st->kind === Type::KIND_CELL) { $vt = Type::cell(); }
+                // A Traversable operand is drained into cells
+                // ({@see EmitLlvm::emitArraySpreadUnified}).
+                if ($st->kind === Type::KIND_OBJ) { $vt = Type::cell(); }
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
             if ($vt->isArray() && $vt->element !== null
