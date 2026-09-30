@@ -860,7 +860,9 @@ trait EmitLlvmLocals
         // straight at an array's ELEMENT slot: boxing there made
         // `array_walk($m, fn (&$v) => $v = $v * 10)` write NaN-boxed words into
         // the array and print -4222124650659830 for 10.
-        if (!$this->frame->isClosure
+        // A by-ref CAPTURE is a plain shared word, not an element slot, so a
+        // closure boxes into a cell capture like any other frame.
+        if ((!$this->frame->isClosure || isset($this->frame->captureNames[$sl->name]))
             && isset($this->locals->refLocals[$sl->name])
             && isset($this->locals->slots[$sl->name])
             && ($this->locals->refParamTypes[$sl->name] ?? null) !== null

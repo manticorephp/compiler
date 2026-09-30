@@ -293,6 +293,14 @@ trait InferNodes
         $this->cellCaptureLocals = $this->byRefCaptureCellLocals[$fn->name] ?? [];
         foreach ($this->cellCaptureLocals as $name => $unused) {
             $this->localTypes[$name] = Type::cell();
+            // The closure's by-ref capture PARAM is that word too: an erased
+            // one left the emitter storing a raw string into the cell the
+            // capturing frame reads (`use (&$i)` over a retyped `int &$i`).
+            foreach ($fn->params as $cp) {
+                if ($cp->name === $name && $cp->byRef && $cp->type->kind === Type::KIND_UNKNOWN) {
+                    $cp->type = Type::cell();
+                }
+            }
         }
         // Pre-scan: refine a bare `array $p` param to vec[string] when the
         // body uses its elements as strings (`$x=$p[$i]; $x==="..."` / `$x[0]`

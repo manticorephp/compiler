@@ -779,6 +779,10 @@ final class InferTypes implements Pass
      *  ({@see InferScans::overrideBody}). */
     private array $overrideBodyMemo = [];
 
+    /** @var array<string,int> closure class → how many captures lead its
+     *  params ({@see InferScans::closureCapCounts}). */
+    private array $closureCapCount = [];
+
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
      *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
@@ -1093,13 +1097,30 @@ final class InferTypes implements Pass
         }
         // A local handed to a `mixed &` parameter is likewise one word two
         // frames share, and the callee may make it any kind.
-        $this->rescanTargets = [];
-        if ($this->scanRefParamRetype($module)) {
-            $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
-        }
-        $this->rescanTargets = [];
-        if ($this->scanRefCellArgWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
+        // A retyped `int &$i` makes its callers' slots cells, and a caller that
+        // FORWARDS its own `int &$j` there is then a retype of its own — so the
+        // two scans run together to a fixpoint (both only widen).
+        $guard = 0;
+        while ($guard < 8) {
+            $guard = $guard + 1;
+            $this->rescanTargets = [];
+            $retyped = $this->scanRefParamRetype($module);
+            if ($retyped) {
+                $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
+            }
+            $this->rescanTargets = [];
+            $widened = $this->scanRefCellArgWiden($module);
+            if ($widened) {
+                $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
+            }
+            // A retyped param captured `use (&$i)` is a cell at the capture
+            // site now, and the closure's side of that word must follow.
+            $captured = false;
+            if ($retyped && $this->scanByRefCaptureWiden($module)) {
+                $captured = true;
+                $this->inferFunctionsForScope($module, 'byref_capture');
+            }
+            if (!$retyped && !$widened && !$captured) { break; }
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
