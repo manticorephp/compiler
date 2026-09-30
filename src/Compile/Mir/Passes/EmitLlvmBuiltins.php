@@ -8751,10 +8751,8 @@ trait EmitLlvmBuiltins
             $out = $this->emitNode($arrNode->object);
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
-            $off = $this->propertyOffset($arrNode->object, $arrNode->property);
-            $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
-                  . ', i64 ' . (string)$off . "\n";
+            $out .= $this->propSlotGep($arrNode->object, $objp, $arrNode->property);
+            $g = $this->lastValue;
             $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";

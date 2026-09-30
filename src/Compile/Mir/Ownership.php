@@ -1390,12 +1390,44 @@ final class Ownership
         if ($this->ctx->classes[$cls]->propertyOffset($prop) >= 0) {
             return $this->ctx->classes[$cls];
         }
+        return $this->subclassPropHolder($cls, $prop);
+    }
+
+    /**
+     * The one subclass of `$base` that stands for every subclass declaring
+     * `$prop` — or null when none does, or when their slots DISAGREE on
+     * representation. Siblings may declare one name unrelated ways
+     * (`IntLiteral::$value` int, `Spread::$value` Expr); then no declared type
+     * is a fact, and the first declarer found was a silent wrong read, write and
+     * ownership decision. A null here sends every consumer to the class_id
+     * dispatch that boxes each holder's slot by its own type. Agreeing slots may
+     * still sit at different OFFSETS; {@see EmitLlvmObjects::subclassPropOffset}
+     * answers that separately.
+     */
+    public function subclassPropHolder(string $base, string $prop): ?ClassDef
+    {
+        $found = null;
+        $ts = '';
+        $sameType = true;
+        $allObj = true;
         foreach ($this->ctx->classes as $cd) {
-            if ($cd->name === $cls) { continue; }
-            if (!$this->classExtends($cd->name, $cls)) { continue; }
-            if ($cd->propertyOffset($prop) >= 0) { return $cd; }
+            if ($cd->name === $base) { continue; }
+            if (!$this->classExtends($cd->name, $base)) { continue; }
+            $o = $cd->propertyOffset($prop);
+            if ($o < 0) { continue; }
+            $pt = $cd->propertyTypes[$prop] ?? null;
+            $t = $pt !== null ? $pt->toString() : '';
+            if ($pt === null || $pt->kind !== Type::KIND_OBJ || isset($this->ctx->enums[$pt->class ?? ''])) {
+                $allObj = false;
+            }
+            if ($found === null) { $found = $cd; $ts = $t; continue; }
+            if ($t !== $ts) { $sameType = false; }
         }
-        return null;
+        // The same join InferTypes types the read with (subclassPropType): object
+        // slots share the raw-pointer representation and join to their union;
+        // anything else must be one type, or the read is a cell that only the
+        // per-holder dispatch can box.
+        return ($sameType || $allObj) ? $found : null;
     }
 
     /** Whether class `$name` transitively extends `$base`. */

@@ -3154,28 +3154,48 @@ final class InferTypes implements Pass
     }
 
     /**
-     * Declared type of `$prop` on some subclass of `$base`, or null.
-     * Resolves base-typed reads of a subclass-only field.
+     * Type of a base-typed read of `$prop` that only subclasses of `$base`
+     * declare, or null when none does: the JOIN of every declaration reachable
+     * from `$base`. Siblings may declare the name with unrelated types
+     * (`IntLiteral::$value` int, `Spread::$value` Expr), and the runtime object
+     * is any of them — the first declaration found typed `$expr->value` int and
+     * boxed an object pointer as an integer. Kinds that disagree join to a
+     * cell, which the emitter reads per holder class and boxes by the slot.
      */
     private function subclassPropType(string $base, string $prop): ?Type
     {
         $types = [];
-        $first = null;
         foreach ($this->classes as $cd) {
             if ($cd->name === $base) { continue; }
             if (!$this->classExtends($cd->name, $base)) { continue; }
-            if (isset($cd->propertyTypes[$prop])) {
-                $t = $cd->propertyTypes[$prop];
-                if ($first === null) { $first = $t; }
-                $types[] = $t;
-            }
+            if ($cd->propertyOffset($prop) < 0) { continue; }
+            // An untyped declaration still holds the slot: it joins as unknown.
+            $types[] = $cd->propertyTypes[$prop] ?? Type::unknown();
         }
-        if ($first === null) { return null; }
+        return $this->joinPropTypes($types);
+    }
+
+    /**
+     * Join of several declarations of one property name: all objects → their
+     * union, all the same type → that type, anything else → cell. An enum
+     * slot is no plain object pointer; it joins only with its own type. The
+     * emitter answers the same join ({@see \Compile\Mir\Ownership::subclassPropHolder}).
+     *
+     * @param Type[] $types
+     */
+    private function joinPropTypes(array $types): ?Type
+    {
+        if (\count($types) === 0) { return null; }
         $allObj = true;
         foreach ($types as $t) {
-            if ($t->kind !== Type::KIND_OBJ) { $allObj = false; break; }
+            if ($t->kind !== Type::KIND_OBJ || isset($this->enums[$t->class ?? ''])) { $allObj = false; break; }
         }
         if ($allObj) { return $this->objUnion($types); }
+        $first = $types[0];
+        $fs = $first->toString();
+        foreach ($types as $t) {
+            if ($t->toString() !== $fs) { return Type::cell(); }
+        }
         return $first;
     }
 
@@ -3201,16 +3221,16 @@ final class InferTypes implements Pass
 
     private function unionPropType(Type $u, string $prop): ?Type
     {
-        /** @var Type $found */
-        $found = null;
+        $types = [];
         foreach ($u->atoms as $atom) {
             $cd = $this->classes[$atom->class ?? ''] ?? null;
-            if ($cd === null || !isset($cd->propertyTypes[$prop])) { continue; }
-            $t = $cd->propertyTypes[$prop];
-            if ($found === null) { $found = $t; }
-            elseif ($found->kind !== $t->kind) { return null; }
+            if ($cd === null) { continue; }
+            if ($cd->propertyOffset($prop) >= 0) { $types[] = $cd->propertyTypes[$prop] ?? Type::unknown(); continue; }
+            // An arm that does not declare it may still hold it in a subclass.
+            $sub = $this->subclassPropType($cd->name, $prop);
+            if ($sub !== null) { $types[] = $sub; }
         }
-        return $found;
+        return $this->joinPropTypes($types);
     }
 
     /** Whether class `$name` transitively extends `$base`. */

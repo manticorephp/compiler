@@ -1935,6 +1935,14 @@ trait InferNodes
             $this->boxBackBeforeJumps($node->body, $node->valueVar, $elem, 0);
         }
         $kv = $node->keyVar;
+        // The KEY binding exits the loop like the value binding does, in EVERY
+        // run: the plant below is sticky, but the condition that planted it is
+        // not (a later run can see the name enter the loop raw). Without the
+        // mark such a run took an if/else's box-back pair ahead of a `continue`
+        // back out ({@see unplantAgreedBoxBacks}) while the plant's other
+        // box-backs still typed every later read a cell — a raw string key read
+        // by tag, and `$clean[$cname]` keyed by the string's ADDRESS.
+        if ($kv !== null && !$node->byRef) { $exitNames[$kv] = true; }
         if ($kv !== null && $kv !== $node->valueVar && $at->isArray() && $this->bindingExitsCell($kv)
             && self::bindBoxesByTag($keyT, $this->enums) && $this->inferFnBody !== null
             && self::readsOutsideBinders($this->inferFnBody, $kv) > 0) {

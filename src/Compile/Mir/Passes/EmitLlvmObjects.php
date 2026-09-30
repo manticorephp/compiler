@@ -1264,16 +1264,14 @@ trait EmitLlvmObjects
         // class ({@see LowerFns::finishClosure}). symfony's MicroKernelTrait
         // does exactly that — `fn &() => $this->instanceof` sits in the app
         // Kernel and is bound to a PhpFileLoader.
-        if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
+        if (!$this->propHasTypedSlot($pa->object, $pa->property)) {
             return $this->emitRawPropByClassId($pa);
         }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
-        $offset = $this->propertyOffset($pa->object, $pa->property);
-        $gep = $this->ssa->allocReg();
-        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
-              . $objPtr . ', i64 ' . (string)$offset . "\n";
+        $out .= $this->propSlotGep($pa->object, $objPtr, $pa->property);
+        $gep = $this->lastValue;
         $out .= $this->emitSlotLoad(
             $gep,
             $this->slotHolder($pa->object, $pa->property),
@@ -1893,7 +1891,17 @@ trait EmitLlvmObjects
         if ($fixed === []) { return null; }
         $out = $this->emitNode($objExpr);
         $out .= $this->cellToPtr();
-        $objPtr = $this->lastValue;
+        return $out . $this->emitPropAddrByClassIdPtr($this->lastValue, $prop);
+    }
+
+    /** {@see emitPropAddrByClassId} for an object pointer already in hand. */
+    private function emitPropAddrByClassIdPtr(string $objPtr, string $prop): string
+    {
+        $fixed = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+        }
+        $out = '';
         // One holder → its real offset, no dispatch.
         if (\count($fixed) === 1) {
             $g = $this->ssa->allocReg();
@@ -2690,7 +2698,7 @@ trait EmitLlvmObjects
         // honest answer, and it is the same one the classless receiver takes.
         // Mirrors the READ side in {@see emitPropertyAccess}; a closure rebound
         // by `Closure::bind` to a foreign scope is what makes this reachable.
-        if ($this->propertyOffsetOrNull($n->object, $n->property) === null) {
+        if (!$this->propHasTypedSlot($n->object, $n->property)) {
             return $this->emitCellStoreProperty($n);
         }
         // Amortized `$this->s .= …` — the property analogue of the local
@@ -2814,10 +2822,8 @@ trait EmitLlvmObjects
             $res = $val;
             $resTy = 'i64';
         }
-        $offset = $this->propertyOffset($n->object, $n->property);
-        $gep = $this->ssa->allocReg();
-        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
-              . $objPtr . ', i64 ' . (string)$offset . "\n";
+        $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
+        $gep = $this->lastValue;
         // Release-before-overwrite. A LOCAL slot has always dropped its previous
         // value; a property slot never has, so every rc value an overwritten
         // property leaves behind is immortal — 191.7 MB at 100k iterations of
@@ -8811,20 +8817,58 @@ trait EmitLlvmObjects
     }
 
     /**
-     * Offset of `$prop` as declared by some subclass of `$base`, or -1
-     * when no subclass declares it. Resolves base-typed reads of a
-     * subclass-only field (`$stmt->decl` where `$stmt: Stmt` but the
-     * object is a `ClassStmt`).
+     * Offset of `$prop` as declared by the subclasses of `$base`, or -1 when
+     * none declares it, their slots disagree on representation
+     * ({@see \Compile\Mir\Ownership::subclassPropHolder}), or they sit at
+     * different offsets (`Call::$args` and `MethodCall::$args` are both
+     * `Node[]`, one field apart). Resolves base-typed reads of a
+     * subclass-only field (`$stmt->decl` where `$stmt: Stmt` but the object
+     * is a `ClassStmt`).
      */
     private function subclassPropOffset(string $base, string $prop): int
     {
+        if ($this->own->subclassPropHolder($base, $prop) === null) { return -1; }
+        $off = -1;
         foreach ($this->classes as $cd) {
-            if ($cd->name === $base) { continue; }
-            if (!$this->classExtends($cd->name, $base)) { continue; }
-            $off = $cd->propertyOffset($prop);
-            if ($off >= 0) { return $off; }
+            if ($cd->name === $base || !$this->classExtends($cd->name, $base)) { continue; }
+            $o = $cd->propertyOffset($prop);
+            if ($o < 0) { continue; }
+            if ($off >= 0 && $o !== $off) { return -1; }
+            $off = $o;
         }
-        return -1;
+        return $off;
+    }
+
+    /**
+     * The slot of `$prop` in `$objPtr` as a `ptr` in lastValue: the static
+     * offset when there is one, else — a subclass-only field whose declarers
+     * agree on representation but not on offset — the class_id dispatch over
+     * the holders' own offsets ({@see emitPropAddrByClassIdPtr}). Either way the
+     * slot keeps the representation {@see slotHolder} describes.
+     */
+    private function propSlotGep(Node $objExpr, string $objPtr, string $prop): string
+    {
+        $off = $this->propertyOffsetOrNull($objExpr, $prop);
+        $gep = $this->ssa->allocReg();
+        if ($off !== null) {
+            $this->lastValue = $gep;
+            $this->lastValueType = 'ptr';
+            return '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                . ', i64 ' . (string)$off . "\n";
+        }
+        $out = $this->emitPropAddrByClassIdPtr($objPtr, $prop);
+        $out .= '  ' . $gep . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $this->lastValue = $gep;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** Whether `$prop` has a slot every consumer can treat by one declared
+     *  type — statically placed, or placed per class but agreeing on repr. */
+    private function propHasTypedSlot(Node $objExpr, string $prop): bool
+    {
+        return $this->propertyOffsetOrNull($objExpr, $prop) !== null
+            || $this->slotHolder($objExpr, $prop) !== null;
     }
 
     /** Whether class `$name` transitively extends `$base`. */
