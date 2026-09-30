@@ -822,23 +822,46 @@ final class SpillFreshBases
         }
         /** @var array<string, bool> $keys */
         $keys = [];
-        $cur = $v;
-        while (true) {
-            $k = $cur->kind;
-            if ($k === Node::KIND_PROPERTY_ACCESS) {
-                $pa = $this->asPropertyAccess($cur);
-                $keys[\Compile\Mir\EscapeSummaries::propKey($pa->object, $pa->property)] = true;
-                $cur = $pa->object;
-            } elseif ($k === Node::KIND_ARRAY_ACCESS) {
-                $aa = $this->asArrayAccess($cur);
-                if ($aa->array->type->kind === Type::KIND_STRING) { return []; }
-                $cur = $aa->array;
-            } else {
-                return $keys;
-            }
+        $this->collectHeld($v, $keys);
+        return $keys;
+    }
+
+    /**
+     * {@see heldKeys} through every node that hands its operand's word on
+     * unchanged: a same-kind cast (`(string)` of a string, `(array)` of an
+     * array), a spread's array, and a conditional the emitter does NOT
+     * normalize to +1 ({@see \Compile\Mir\Ownership::condOwnedTemp}) — each of
+     * its arms may be the value.
+     * @param array<string, bool> $keys
+     */
+    private function collectHeld(Node $v, array &$keys): void
+    {
+        $k = $v->kind;
+        if ($k === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $this->asPropertyAccess($v);
+            $keys[\Compile\Mir\EscapeSummaries::propKey($pa->object, $pa->property)] = true;
+            $this->collectHeld($pa->object, $keys);
+        } elseif ($k === Node::KIND_ARRAY_ACCESS) {
+            $aa = $this->asArrayAccess($v);
+            if ($aa->array->type->kind === Type::KIND_STRING) { return; }
+            $this->collectHeld($aa->array, $keys);
+        } elseif ($k === Node::KIND_CAST) {
+            if ($this->passThroughCast($v)) { $this->collectHeld($this->asCast($v)->operand, $keys); }
+        } elseif ($k === Node::KIND_SPREAD) {
+            $this->collectHeld($this->asSpread($v)->operand, $keys);
+        } elseif (CondOwn::isConditional($v) && !$this->own->condOwnedTemp($v)) {
+            foreach (CondOwn::arms($v) as $arm) { $this->collectHeld($arm, $keys); }
         }
     }
 
+    /** A cast that returns its operand's pointer ({@see EmitLlvmExpr::emitCast}). */
+    private function passThroughCast(Node $v): bool
+    {
+        $c = $this->asCast($v);
+        $ok = $c->operand->type->kind;
+        return ($c->target === 'string' && $ok === Type::KIND_STRING)
+            || ($c->target === 'array' && $ok === Type::KIND_ARRAY);
+    }
     /**
      * `$v` made to co-own what it reads: spilled whole when the local that
      * stores it owns it ({@see \Compile\Mir\Ownership::classifyStored}),
@@ -846,6 +869,23 @@ final class SpillFreshBases
      */
     private function coOwnHeld(Node $v): Node
     {
+        // A wrapper that hands its operand's word on: co-own what it wraps,
+        // where the co-owning local's store and release agree on the kind.
+        $k = $v->kind;
+        if ($k === Node::KIND_CAST && $this->passThroughCast($v)) {
+            $c = $this->asCast($v);
+            $c->operand = $this->coOwnHeld($c->operand);
+            return $v;
+        }
+        if ($k === Node::KIND_SPREAD) {
+            $sp = $this->asSpread($v);
+            $sp->operand = $this->coOwnHeld($sp->operand);
+            return $v;
+        }
+        if (CondOwn::isConditional($v) && !$this->own->condOwnedTemp($v)) {
+            $this->coOwnArms($v);
+            return $v;
+        }
         if ($this->own->classifyStored($v) > 0) {
             if (\Compile\Stats::$on) { \Compile\Stats::bump('own.prop.coOwned', 1); }
             return $this->coOwnSpill($v);
@@ -889,6 +929,30 @@ final class SpillFreshBases
                 . ' line ' . (string)$v->line);
         }
         return $v;
+    }
+
+    /** Co-own every held arm of a conditional that hands an arm's word on. */
+    private function coOwnArms(Node $v): void
+    {
+        $k = $v->kind;
+        if ($k === Node::KIND_TERNARY) {
+            $t = $this->asTernary($v);
+            if ($t->then === null) {
+                if ($this->heldKeys($t->cond) !== []) { $t->cond = $this->coOwnHeld($t->cond); }
+            } elseif ($this->heldKeys($t->then) !== []) {
+                $t->then = $this->coOwnHeld($t->then);
+            }
+            if ($this->heldKeys($t->else_) !== []) { $t->else_ = $this->coOwnHeld($t->else_); }
+        } elseif ($k === Node::KIND_NULLCOALESCE) {
+            $nc = $this->asNullCoalesce($v);
+            if ($this->heldKeys($nc->left) !== []) { $nc->left = $this->coOwnHeld($nc->left); }
+            if ($this->heldKeys($nc->right) !== []) { $nc->right = $this->coOwnHeld($nc->right); }
+        } elseif ($k === Node::KIND_MATCH) {
+            foreach ($this->asMatch($v)->arms as $arm) {
+                $ma = $this->asMatchArm($arm);
+                if ($this->heldKeys($ma->body) !== []) { $ma->body = $this->coOwnHeld($ma->body); }
+            }
+        }
     }
 
     /** A hidden local that co-owns a property read by a retain ({@see StoreLocal::$coOwnRead}). */
@@ -1131,6 +1195,8 @@ final class SpillFreshBases
     private function asTernary(Node $n): \Compile\Mir\Ternary { return $n; }
     private function asNullCoalesce(Node $n): \Compile\Mir\NullCoalesce_ { return $n; }
     private function asMatch(Node $n): \Compile\Mir\Match_ { return $n; }
+    private function asMatchArm(mixed $n): \Compile\Mir\MatchArm_ { return $n; }
+    private function asSpread(Node $n): \Compile\Mir\Spread_ { return $n; }
     private function asArrayLit(Node $n): \Compile\Mir\ArrayLit { return $n; }
     private function asConcat(Node $n): \Compile\Mir\Concat { return $n; }
     private function asAdd(Node $n): \Compile\Mir\Add { return $n; }

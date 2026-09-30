@@ -1588,7 +1588,6 @@ trait EmitLlvmControl
         // for the same reason; the store side re-encodes, so a value written
         // back into a raw-hinted buffer lands raw again. An ERASED element is a
         // cell too since InferTypes types it so ({@see InferNodes::inferForeach}).
-        $fvT = $this->locals->localTypes[$fe->valueVar] ?? null;
         if (($fel !== null && ($fel->kind === Type::KIND_CELL || $fel->kind === Type::KIND_UNKNOWN))
             || $fel === null
             || $fe->array->type->kind === Type::KIND_CELL

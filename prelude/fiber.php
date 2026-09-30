@@ -128,7 +128,7 @@ class Fiber
         }
         // This frame never returns: the jump below abandons its stack, so no
         // scope exit ever releases what its locals co-own.
-        unset($cb, $a);
+        unset($cb, $a, $e);
         $this->state = 3;
         $this->valueOut = null;   // a terminated fiber's resume() yields null, not the last suspend value
         \__mir_fiber_ctx_save($this->saveCtx);

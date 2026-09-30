@@ -165,10 +165,10 @@ final class Debug
      * ({@see Mir\EscapeSummaries}) — so a property read held across a call to
      * it stays a borrow when the call can do neither.
      *
-     * MANTICORE_PROP_BORROW_ESCAPE=0 judges no body: every held read across a
+     * MANTICORE_ESCAPE_SUMMARIES=0 judges no body: every held read across a
      * call that is not a listed builtin co-owns.
      */
-    public static bool $propBorrowEscape = true;
+    public static bool $escapeSummaries = true;
 
     /**
      * Give a dynamic-property BAG to a class this module stores an undeclared
@@ -661,8 +661,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
         $env = \getenv('MANTICORE_DYN_PROP_BAG');
         if ($env === '0' || $env === 'off') { self::$dynPropBag = false; }
-        $env = \getenv('MANTICORE_PROP_BORROW_ESCAPE');
-        if ($env === '0' || $env === 'off') { self::$propBorrowEscape = false; }
+        $env = \getenv('MANTICORE_ESCAPE_SUMMARIES');
+        if ($env === '0' || $env === 'off') { self::$escapeSummaries = false; }
         $env = \getenv('MANTICORE_RC_BASE_TEMP');
         if ($env === '0' || $env === 'off') { self::$rcBaseTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_OWNS');

@@ -95,23 +95,6 @@ final class EscapeSummaries
         return $prop . '|' . ($t->kind === Type::KIND_OBJ ? ($t->class ?? '') : '');
     }
 
-    /** May `$call` (its callee, not its arguments) write `$cls::$prop`? */
-    public function callWritesProp(Node $call, string $cls, string $prop): bool
-    {
-        $this->resetScratch();
-        $this->noteCall($call);
-        if ($this->ewAny) { return true; }
-        return $this->keysMeet([$prop . '|' . $cls => true], $this->ewWrites);
-    }
-
-    /** May `$call` (its callee, not its arguments) suspend? */
-    public function callMayPark(Node $call): bool
-    {
-        $this->resetScratch();
-        $this->noteCall($call);
-        return !$this->ewPark;
-    }
-
     /**
      * Can anything in `$window` (evaluated whole), or the call `$consumer`
      * itself (its callee only — its operands are in the window), park, write
@@ -177,7 +160,7 @@ final class EscapeSummaries
 
     private function compute(Module $module): void
     {
-        if (!\Compile\Debug::$propBorrowEscape) { return; }
+        if (!\Compile\Debug::$escapeSummaries) { return; }
         /** @var array<string, FunctionDef> $byName */
         $byName = [];
         /** @var string[] $names */
@@ -437,9 +420,11 @@ final class EscapeSummaries
         return false;
     }
 
-    /** Does a SUBCLASS of `$cls` declare `$prop` — a write through an
-     *  imprecise static type rather than a dynamic property? */
-    /** @param array<string, ClassDef> $classes */
+    /**
+     * Does a SUBCLASS of `$cls` declare `$prop` — a write through an
+     * imprecise static type rather than a dynamic property?
+     * @param array<string, ClassDef> $classes
+     */
     private static function subclassDeclares(array $classes, string $cls, string $prop): bool
     {
         foreach ($classes as $cd) {
