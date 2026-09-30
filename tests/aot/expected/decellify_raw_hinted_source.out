@@ -1,0 +1,8 @@
+int(2)
+int(8)
+int(-4)
+int(9223372036854775807)
+int(5)
+string(3) "yes"
+string(2) "no"
+string(3) "yes"

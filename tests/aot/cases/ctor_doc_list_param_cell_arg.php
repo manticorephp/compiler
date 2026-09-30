@@ -1,7 +1,7 @@
 <?php
-// A ctor's doc-typed `list<int>` param handed range()'s cell-element buffer:
-// the binding conforms the buffer to the claim. Before, the property claimed
-// raw ints over NaN-boxed words and every raw consumer printed them.
+// A doc-typed `list<int>` param of a ctor, an inherited method and an inherited
+// static (its late-static-binding clone) handed range()'s cell-element buffer:
+// each is a call site that floors the param, and the property stays honest.
 final class Q {
     /** @var list<int> */ public array $j;
     /** @param list<int> $j */
@@ -14,7 +14,7 @@ $r = range(1, 3); $q = new Q($r); var_dump(array_shift($q->j), $r[0]);
 $q = mk(); var_dump(array_shift($q->j) + 1);
 $q = mk(); var_dump(array_pop($q->j) + 1);
 $q = mk(); var_dump(reset($q->j) + 1, end($q->j) + 1, current($q->j) + 1);
-$q = mk(); $s = 0; foreach ($q->j as $v) { $s += $v; } var_dump($s);
+$q = mk(); $sum = 0; foreach ($q->j as $v) { $sum += $v; } var_dump($sum);
 $q = mk(); $x = array_splice($q->j, 1, 2); var_dump($x[0] + 1, $q->j[1] + 1);
 $q = mk(); array_unshift($q->j, 0); var_dump($q->j[0] + $q->j[1]);
 $q = mk(); var_dump(max($q->j), min($q->j), array_sum($q->j), in_array(2, $q->j, true), array_search(3, $q->j, true));

@@ -1238,14 +1238,18 @@ final class InferTypes implements Pass
         // to vec[TableCellStyle], so the boxed int 1 was rc-retained as an
         // object pointer. The stored type is kept whole so the assoc key shape
         // survives too.
+        // Through ANY receiver whose class is known, not only `$this`: a static
+        // factory's `$o = new static(); $o->j = $j;` fills the same slot, and
+        // left out the slot kept its `list<int>` claim over the boxed words.
         if ($n->kind === Node::KIND_STORE_PROPERTY
-            && $n->object->kind === Node::KIND_LOAD_LOCAL
-            && $n->object->name === 'this'
             && $n->value->type->isArray()
             && ($n->value->type->element->kind ?? '') === Type::KIND_CELL) {
-            $cd = $this->classes[$cls] ?? null;
+            $rcls = ($n->object->kind === Node::KIND_LOAD_LOCAL && $n->object->name === 'this')
+                ? $cls
+                : ($n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '');
+            $cd = $rcls === '' ? null : ($this->classes[$rcls] ?? null);
             if ($cd !== null && ($cd->propertyArrayHinted[$n->property] ?? false)) {
-                $this->cellElemPropsFound[$cls . '::' . $n->property] = $n->value->type;
+                $this->cellElemPropsFound[$rcls . '::' . $n->property] = $n->value->type;
             }
         }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
@@ -1625,6 +1629,23 @@ final class InferTypes implements Pass
             || $bare === 'rtrim' || $bare === 'strtolower' || $bare === 'strtoupper';
     }
 
+    /** `Owner__method` for the class in `$class`'s parent chain that declares
+     *  `$method`; `$class__method` when none does — a name no candidate has. */
+    private function declaringFn(string $class, string $method): string
+    {
+        $owner = $this->resolveMethodClass($class, $method);
+        return ($owner !== '' ? $owner : $class) . '__' . $method;
+    }
+
+    /** The late-static-binding clone an inherited call through `$scope` lands
+     *  in (`Owner__m__lsbScope`, {@see EmitLlvmObjects::lsbTarget}), or '' when
+     *  the scope declares the method itself. The clone is a function of its
+     *  own, with its own params, and its call sites are these. */
+    private function lsbFn(string $fnName, string $scope, string $method): string
+    {
+        return $fnName === $scope . '__' . $method ? '' : $fnName . '__lsb' . $scope;
+    }
+
     /**
      * @param array<string,bool> $cand
      * @param array<string,Type> $observed
@@ -1639,22 +1660,31 @@ final class InferTypes implements Pass
         // Resolve the target function name + a param-index base for each call
         // flavor. A free/static call's arg `i` maps to param `i`; an INSTANCE
         // method's args are offset by 1 (param 0 is `this`). A method whose
-        // receiver class is erased, or an inherited method (name resolves to the
-        // parent fn, not `$cls__$method`), simply won't match a candidate — a
-        // conservative no-op.
+        // receiver class is erased simply won't match a candidate. An INHERITED
+        // method or ctor is keyed by the class that DECLARES it (the fn is
+        // `Parent__m`): keyed by the receiver it matched nothing, and the
+        // param's doc claim stood over whatever that site handed it.
         $fnName = '';
         $args = null;
         $base = 0;
+        $lsbFn = '';
         if ($n->kind === Node::KIND_CALL) {
             $fnName = $n->function;
             $args = $n->args;
         } elseif ($n->kind === Node::KIND_METHOD_CALL) {
             $mc = $n;
             $cls = $mc->object->type->class ?? '';
-            if ($cls !== '') { $fnName = $cls . '__' . $mc->method; $args = $mc->args; $base = 1; }
+            if ($cls !== '') { $fnName = $this->declaringFn($cls, $mc->method); $lsbFn = $this->lsbFn($fnName, $cls, $mc->method); $args = $mc->args; $base = 1; }
         } elseif ($n->kind === Node::KIND_STATIC_CALL) {
             $sc = $n;
-            if ($sc->class !== '') { $fnName = $sc->class . '__' . $sc->method; $args = $sc->args; }
+            if ($sc->class !== '') { $fnName = $this->declaringFn($sc->class, $sc->method); $lsbFn = $this->lsbFn($fnName, $sc->class, $sc->method); $args = $sc->args; }
+        } elseif ($n->kind === Node::KIND_NEW_OBJ) {
+            // `new C(…)` is a call site of the ctor like any other. Missed, a
+            // ctor's doc-typed `list<int> $j` never saw the `vec[cell]` that
+            // `range()` hands it and kept its raw claim over a cell-hinted
+            // buffer: `array_shift($q->j)` answered the NaN-boxed word.
+            $no = $n;
+            if ($no->class !== '') { $fnName = $this->declaringFn($no->class, '__construct'); $lsbFn = $this->lsbFn($fnName, $no->class, '__construct'); $args = $no->args; $base = 1; }
         }
         if ($args !== null) {
             /** @var \Compile\Mir\Node[] $argl */
@@ -1662,6 +1692,7 @@ final class InferTypes implements Pass
             $i = 0;
             foreach ($argl as $a) {
                 $key = $fnName . '#' . (string)($base + $i);
+                if ($lsbFn !== '' && isset($cand[$lsbFn . '#' . (string)($base + $i)])) { $key = $lsbFn . '#' . (string)($base + $i); }
                 $i = $i + 1;
                 if (!isset($cand[$key]) || isset($conflict[$key])) { continue; }
                 // A self-recursive / forwarded arg whose OWN element type is

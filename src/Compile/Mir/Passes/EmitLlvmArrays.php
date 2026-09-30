@@ -2169,6 +2169,37 @@ trait EmitLlvmArrays
             $this->elemValReg = $this->lastValue;
             return $out;
         }
+        // The WHOLE-array de-cellify, as {@see EmitLlvmLocals::emitStoreLocal}
+        // does for a local: a cell-element array stored into a slot whose
+        // element is a CONCRETE-element array (`$s->ref[$name] = $mask` with
+        // `$mask` a `vec[cell]` over an `array<string, bool[]>`) is rebuilt
+        // with each element unboxed. Stored as is, the typed reader took a boxed
+        // `false` for a non-zero word — true. The rebuild MOVES the elements,
+        // so a source that keeps them (a local, a borrowed read) is copied
+        // first, and the moved-out buffer leaves bare; the rebuilt +1 is the
+        // slot's outright, so no retain follows.
+        $elT0 = $se->array->type->element ?? null;
+        if ($elT0 !== null && $this->needsDeCellify($elT0, $se->value->type)) {
+            $out .= $this->coerceToPtr();
+            $deSrc = $this->lastValue;
+            if ($this->cellifySourceFlavor($se->value) === '') {
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $deSrc . ")\n";
+                $deSrc = $cp;
+                $this->lastValue = $cp;
+                $this->lastValueType = 'ptr';
+            }
+            $out .= $this->emitCellArrayToTyped($elT0);
+            $out .= $this->coerceToI64();
+            $dv = $this->lastValue;
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $se->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            $this->elemValReg = $dv;
+            return $out;
+        }
         $dcT = $this->storeElemDeCellifyType($se);
         if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); }
         // An int (or bool) into a FLOAT slot is converted, not bit-stored —
