@@ -56,6 +56,13 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
 ### Recently completed (2026-09)
 
+- ✅ **Blocking-offload pool** — under the scheduler, regular-file I/O (`fopen` paths, `file_get_contents`/
+  `file_put_contents`, stat family, dirs, unlink/rename/mkdir/rmdir) and `getaddrinfo` run on a
+  lazy per-process thread pool (`MANTICORE_BLOCKING_THREADS`, default 4) and park the task, so
+  a slow or blocking file no longer stalls the loop. Threads run only fixed libc calls, never
+  PHP. `file_get_contents` of a FIFO now reads to EOF; `posix_mkfifo` added. Still inline:
+  `access`-based checks, `fgets`, `stream_get_contents`, `copy`, `rewinddir`, pipes, sockets.
+  `docs/async.md`.
 - ✅ **`Http\WebSocket`** — RFC 6455 server (`upgrade()` over `Http\Server`'s new
   `Response::takeover()`/`Server::onStop()` hooks) and client (`connect()`, `ws://`/
   `wss://`), plus permessage-deflate (RFC 7692, all four parameters). Superset —

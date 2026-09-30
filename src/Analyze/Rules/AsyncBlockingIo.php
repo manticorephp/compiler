@@ -9,21 +9,18 @@ use Parser\Ast\CallExpr;
 use Parser\Ast\StringLiteral;
 
 /**
- * Regular-file I/O inside an async program stops the WHOLE loop.
+ * Filesystem calls the blocking pool does NOT cover stop the WHOLE loop.
  *
- * This is not a bug being worked around — it is a property of the platform:
- * `O_NONBLOCK` is a no-op for regular files on Linux and macOS alike, and there
- * is no thread pool / aio / io_uring here. So one `file_get_contents('/big')`
- * parks every other task for the duration (measured: 15-25 ms for a 64 MB
- * page-cache-hot read). `Async\readFile()` reads the same bytes in chunks with a
- * yield between them and keeps the worst gap at ~2 ms.
- *
- * Reported only where the call is PROVABLY on the filesystem:
- *   - a literal path with no `scheme://` (`file_get_contents('https://…')` is a
- *     network fetch, and that IS async here),
- *   - the directory walkers, which have no network form at all.
- * A computed argument is left alone — guessing would make the rule noise, and a
- * lint nobody trusts gets switched off.
+ * `O_NONBLOCK` is a no-op for regular files on Linux and macOS alike. Under the
+ * scheduler most file calls run on the blocking-offload pool (docs/async.md,
+ * "Blocking calls run on a pool") — fopen/fread/fwrite, file_get_contents,
+ * file_put_contents, file(), readfile(), the stat family, the directory calls (glob included) —
+ * and the task parks while the loop keeps going. What stays inline is reported: copy()
+ * on a literal filesystem path (both ends are plain libc stdio).
+ * fgets / stream_get_contents / file_exists / is_readable are inline too, but take
+ * a handle or are a single cheap `access`, so nothing is provable from the call.
+ * A computed or `scheme://` path is left alone — guessing would make the rule
+ * noise, and a lint nobody trusts gets switched off.
  */
 final class AsyncBlockingIo
 {
@@ -41,20 +38,13 @@ final class AsyncBlockingIo
             if (!($e instanceof CallExpr)) { continue; }
             $fn = \strtolower(\ltrim($e->function, '\\'));
 
-            if ($fn === 'glob' || $fn === 'scandir' || $fn === 'readfile') {
-                $this->report($pf, $e, $fn, 'walks the filesystem');
-                continue;
-            }
-            if ($fn !== 'file_get_contents' && $fn !== 'file_put_contents' && $fn !== 'file') {
-                continue;
-            }
+            if ($fn !== 'copy') { continue; }
             if (\count($e->args) === 0) { continue; }
             $path = $e->args[0];
             if (!($path instanceof StringLiteral)) { continue; }
             $lit = $this->literalText($path);
             if (\strpos($lit, '://') !== false) { continue; }
-            $verb = $fn === 'file_put_contents' ? 'writes' : 'reads';
-            $this->report($pf, $e, $fn, $verb . " '" . $lit . "' on the filesystem");
+            $this->report($pf, $e, $fn, "reads '" . $lit . "' on the filesystem");
         }
         return $this->diags;
     }
@@ -72,12 +62,10 @@ final class AsyncBlockingIo
 
     private function report(ParsedFile $pf, CallExpr $e, string $fn, string $what): void
     {
-        $hint = $fn === 'file_get_contents' ? ' — Async\\readFile() chunks and yields'
-              : ($fn === 'file_put_contents' ? ' — Async\\writeFile() chunks and yields' : '');
         $this->diags[] = Diagnostic::warning(
             $pf->path, $e->span->line, $e->span->column, 'async.blocking-io',
-            $fn . '() ' . $what . ', which BLOCKS the whole scheduler'
-            . ' (regular files have no readiness signal on either target)' . $hint
+            $fn . '() ' . $what . ' inline, which BLOCKS the whole scheduler'
+            . ' (the blocking pool does not cover it) — Async\\readFile() + Async\\writeFile() chunk and yield'
         );
     }
 }

@@ -1131,7 +1131,7 @@ function socket_addrinfo_lookup(string $host, ?string $service = null, array $hi
         return [];
     }
     $svc = $service ?? '';
-    $rc = \Runtime\Libc\sys_getaddrinfo($host, $svc, \int_to_ptr(0), $res);
+    $rc = \__mc_getaddrinfo($host, $svc, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
         return [];

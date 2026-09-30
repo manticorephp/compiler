@@ -82,6 +82,10 @@ final class InsertMemoryOps implements Pass
     /** @var array<string, bool> locals whose only non-owning store is a
      *  string LITERAL or `null` — neither owns nor borrows. */
     private array $rcObjNeutral = [];
+    /** @var array<string, bool> names with a neutral store that leaves the slot
+     *  holding something other than a raw 0 (a boxed scalar, a string literal) —
+     *  an ARRAY release could not read that word ({@see run}). */
+    private array $rcObjNeutralNonNull = [];
 
     /** @var array<string, bool> locals given an owned value by something OTHER
      *  than a conditional. */
@@ -135,16 +139,6 @@ final class InsertMemoryOps implements Pass
     /** @var array<string, bool> names that took a raw SCALAR store. */
     private array $rcObjRawScalar = [];
 
-    /** @var array<string, bool> owned array names EVERY owned store of which is
-     *  a `__mir_array_copy` — so the name's buffer is this frame's own and
-     *  releasing it cannot free anything another owner still holds. */
-    private array $rcObjCopyOnly = [];
-
-    /** @var array<string, bool> array locals this function ELEMENT-STORES into.
-     *  A strict SUBSET of the emitter's `mutatedVecLocals` ({@see
-     *  EmitLlvmMemory}, which also counts unset / by-ref / mutating builtins),
-     *  so a name in here is one the emitter certainly copies on alias. */
-    private array $elemMutatedLocals = [];
 
     /** @var array<string, bool> names that took an ERASED array-PROPERTY read.
      *  Its retain is repr-deep (buffer only), so the element refinement below
@@ -216,6 +210,7 @@ final class InsertMemoryOps implements Pass
         $this->rcObjOrder = [];
         $this->rcObjType = [];
         $this->rcObjNeutral = [];
+        $this->rcObjNeutralNonNull = [];
         $this->rcObjPlainOwner = [];
         $this->rcObjSlotBoxed = [];
         $this->rcObjRawType = [];
@@ -227,7 +222,6 @@ final class InsertMemoryOps implements Pass
         $this->rcObjRefName = [];
         $this->collectRefNames($fn->body);
         $this->rcObjErasedProp = [];
-        $this->rcObjCopyOnly = [];
         $this->blockReason = [];
         $this->blockKind = [];
         $this->mutatedVecs = \Compile\Mir\VecCopyOnAssign::mutatedLocals($fn->body);
@@ -238,8 +232,6 @@ final class InsertMemoryOps implements Pass
         $this->feFnEnabled = \Compile\Debug::$feOnly === ''
             || \str_contains($fn->name, \Compile\Debug::$feOnly);
         $this->feOwnVeto = self::foreachOwnVetoes($fn->body, $this->enums, $this->classes);
-        $this->elemMutatedLocals = [];
-        $this->collectElemMutated($fn->body);
 
         // A PARAMETER slot is never a scope-exit release candidate. Unlike an
         // ordinary local it is NOT null-inited — it arrives holding the CALLER's
@@ -433,9 +425,7 @@ final class InsertMemoryOps implements Pass
             // directly: it carries its own rc header, and every borrowing
             // consumer — an alias store, an element / property store, a call
             // argument — takes a real +1 through
-            // {@see EmitLlvmMemory::rcRetainByType}. The SIGBUS this block was
-            // written for is an ARRAY hazard (a by-value container whose BUFFER
-            // is shared without an rc of its own); arrays keep the block.
+            // {@see EmitLlvmMemory::rcRetainByType}.
             $t = $this->rcObjType[$name] ?? null;
             if ($t !== null && $t->kind === Type::KIND_STRING) { continue; }
             if ($t !== null && $t->kind === Type::KIND_OBJ) { continue; }
@@ -443,17 +433,22 @@ final class InsertMemoryOps implements Pass
             // neutral store (a boxed scalar, null, an immortal literal) leaves
             // it nothing to over-release.
             if ($t !== null && $t->kind === Type::KIND_CELL) { continue; }
-            // …and an ARRAY every owned store of which is a COPY. The SIGBUS this
-            // block was written for is a SHARED buffer (`$conds = null; … $conds
-            // = [];`, whose buffer a live MatchArm_ still held); a copy is the
-            // one array shape with no sharing at all — `__mir_array_copy` gives
-            // the local its own rc=1 buffer, adopted at the element flavor. So
-            // the release has nothing to over-release, and without it the copy is
-            // simply lost: `$args = null; … $args = $mc->args;` in
-            // `InferScans::collectDocListKeyArgs` made FOUR copies per call
-            // against two releases, 374 843 live blocks at the peak.
+            // …and a MIXED slot, for the same reason: its release dispatches on
+            // the per-slot flag the last store left ({@see settleMixedSlots}), and
+            // a neutral store leaves the flag at "not a raw rc value".
+            if (isset($this->rcObjMixed[$name])) { continue; }
+            // …and an ARRAY. The SIGBUS this block was written for was a buffer
+            // a borrower held WITHOUT a count (`$conds = null; … $conds = [];`
+            // handed to a live MatchArm_); every array consumer now takes its
+            // own +1 — a by-value parameter, a property store, an element — and
+            // the self-build that crashed then (lowerMatch) builds itself. The
+            // block had become a pure leak: `$l = [$tok]; $l = null;` never gave
+            // the literal back, and every object in it outlived its last owner.
+            // Only a raw null: the slot then holds 0, which every array release
+            // skips. A boxed scalar left in the slot is a tagged word the array
+            // walk would dereference (`foreach ($rows as $p)` then `$p = f()`).
             if ($t !== null && $t->kind === Type::KIND_ARRAY
-                && ($this->rcObjCopyOnly[$name] ?? false)) { continue; }
+                && !isset($this->rcObjNeutralNonNull[$name])) { continue; }
             $this->rcObjBlocked[$name] = true;
             $this->noteBlock($name, "neutral", $t);
         }
@@ -1043,8 +1038,7 @@ final class InsertMemoryOps implements Pass
         // A VEC read of a STATIC property is answered with `__mir_array_copy`
         // ({@see EmitLlvmLocals::emitStoreLocal}'s $copiedVecProp — the same
         // snapshot the instance-property arm above takes), so the local holds
-        // a fresh rc=1 buffer of its own. {@see storeMakesArrayCopy} already
-        // named the pair; this half did not, so the copy was never released:
+        // a fresh rc=1 buffer of its own, and nothing released it:
         // `$out = Context::$emptyGpc; …; return $out;` in Http\Request::
         // filesArray() left one buffer behind per compat request.
         if ($k === Node::KIND_STATIC_PROP && $value->type->isVec()) {
@@ -1127,51 +1121,6 @@ final class InsertMemoryOps implements Pass
             return $sl->type;
         }
         return $sl->value->type;
-    }
-
-    /**
-     * Does the emitter answer this store with `__mir_array_copy`? The two sites
-     * that do ({@see EmitLlvmLocals::emitStoreLocal}): a mutated local-to-local
-     * array alias, and a VEC read of an instance or static property. Both hand
-     * the destination a fresh rc=1 buffer adopted at the element flavor.
-     */
-    private function storeMakesArrayCopy(StoreLocal $sl): bool
-    {
-        if ($this->copiedArrayAlias($sl)) { return true; }
-        $v = $sl->value;
-        return ($v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP)
-            && $v->type->isVec();
-    }
-
-    /**
-     * `$b = $a` where the emitter is CERTAIN to copy: an array-typed local read
-     * whose source or destination this function element-stores into.
-     *
-     * ⚠ The emitter's `mutatedVecLocals` is WIDER (unset, by-ref, array_pop &c),
-     * and that asymmetry is the safe one: every name this answers true for is in
-     * the emitter's set too, so the copy it promises really is emitted. Answering
-     * true where no copy happened would schedule a release on a SHARED buffer.
-     */
-    private function copiedArrayAlias(StoreLocal $sl): bool
-    {
-        $v = $sl->value;
-        if ($v->kind !== Node::KIND_LOAD_LOCAL) { return false; }
-        if (!$v->type->isArray()) { return false; }
-        return isset($this->elemMutatedLocals[$v->name])
-            || isset($this->elemMutatedLocals[$sl->name]);
-    }
-
-    /** Names element-stored into directly — the narrow half of the emitter's
-     *  mutation scan ({@see copiedArrayAlias} for why narrow is the safe side). */
-    private function collectElemMutated(Node $n): void
-    {
-        if ($n->kind === Node::KIND_STORE_ELEMENT) {
-            $arr = $this->storeElementBase($n);
-            if ($arr->kind === Node::KIND_LOAD_LOCAL && $arr->type->isArray()) {
-                $this->elemMutatedLocals[$arr->name] = true;
-            }
-        }
-        foreach (Walk::children($n) as $c) { $this->collectElemMutated($c); }
     }
 
     /** Read through a StoreElement-typed param so `->array` resolves the right
@@ -1763,10 +1712,6 @@ final class InsertMemoryOps implements Pass
                     $this->rcObjType[$name] = $slotType;
                 }
                 if (!CondOwn::isConditional($value)) { $this->rcObjPlainOwner[$name] = true; }
-                // Track whether EVERY owned store to this name hands it a COPY.
-                $isCopy = $ownedCopy || $this->storeMakesArrayCopy($sl);
-                if (!isset($this->rcObjCopyOnly[$name])) { $this->rcObjCopyOnly[$name] = $isCopy; }
-                elseif (!$isCopy) { $this->rcObjCopyOnly[$name] = false; }
             } elseif ($this->isRcNeutralStore($value)
                 || ($boxedSlot && $this->isNonRcScalar($value->type))) {
                 // A scalar boxed into a CELL slot is a value, not a reference:
@@ -1775,6 +1720,9 @@ final class InsertMemoryOps implements Pass
                 // Decided after the walk — a neutral store only survives when
                 // EVERY owned store to the name is a conditional.
                 $this->rcObjNeutral[$name] = true;
+                if ($boxedSlot || $value->kind === Node::KIND_STRING_CONST) {
+                    $this->rcObjNeutralNonNull[$name] = true;
+                }
             } elseif ($this->isNonRcScalar($value->type) && $this->isNonRcScalar($slotType)) {
                 // A RAW scalar owns nothing either, but only a MIXED slot can
                 // tell it from a raw pointer at release time (its flag says "not

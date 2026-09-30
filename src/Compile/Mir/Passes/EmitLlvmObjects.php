@@ -1270,6 +1270,14 @@ trait EmitLlvmObjects
         if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
             return $this->emitRawPropByClassId($pa);
         }
+        // Declared only on subclasses that disagree about its slot or its type:
+        // inference typed the read a CELL ({@see InferTypes::subclassPropType}),
+        // and no borrowed offset is right for every object that can arrive.
+        $rcls = $pa->object->type->class ?? '';
+        if ($pa->type->kind === Type::KIND_CELL && $rcls !== '' && isset($this->classes[$rcls])
+            && $this->classes[$rcls]->propertyOffset($pa->property) < 0) {
+            return $this->emitRawPropByClassId($pa);
+        }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;

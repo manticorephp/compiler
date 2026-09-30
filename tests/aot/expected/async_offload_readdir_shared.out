@@ -1,0 +1,6 @@
+readdir: 4 rounds of 3 readers, intact: 4/4
+scandir jobs: 1
+scandir: 1502 names, intact: yes
+scandir desc first: yes
+scandir missing: false
+scandir empty: .,..

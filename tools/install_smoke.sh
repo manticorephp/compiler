@@ -66,5 +66,32 @@ check "symlink from another dir" "$WORK/sym/manticore"
 # The dev-tree shape, which is the one that already worked.
 check "explicit path" "$WORK/opt/bin/manticore"
 
+# The blocking-offload pool is pay-for-use: a program that never names Async\
+# carries no worker thread code. An Async\ program is the control that the
+# symbol names still match.
+if command -v nm > /dev/null 2>&1; then
+    # nm into a file, not a pipe: grep -q exits early and pipefail turns nm's
+    # SIGPIPE into a failed match.
+    nm "$WORK/hello" > "$WORK/hello.nm" 2>/dev/null || true
+    if grep -q 'mc_pool_worker\|pthread_create' "$WORK/hello.nm"; then
+        echo "FAIL pool-free hello — links the offload pool"
+        fail=1
+    else
+        echo "PASS pool-free hello"
+    fi
+    cat > "$WORK/pooled.php" <<'PHP'
+<?php
+Async\async(function () { echo strlen((string)file_get_contents(__FILE__)) > 0 ? "y\n" : "n\n"; });
+PHP
+    if "$WORK/opt/bin/manticore" compile "$WORK/pooled.php" -o "$WORK/pooled" > "$WORK/compile.log" 2>&1 \
+        && nm "$WORK/pooled" > "$WORK/pooled.nm" 2>/dev/null \
+        && grep -q 'mc_pool_worker' "$WORK/pooled.nm"; then
+        echo "PASS async program links the offload pool"
+    else
+        echo "FAIL async program — no offload pool worker found"
+        fail=1
+    fi
+fi
+
 [ "$fail" = "0" ] || { echo "=== install_smoke: FAILED ==="; exit 1; }
 echo "=== install_smoke: ok ==="

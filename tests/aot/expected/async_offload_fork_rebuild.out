@@ -1,0 +1,4 @@
+parent: read threads=4
+child 0: ok
+child 1: ok
+parent again: read threads=4

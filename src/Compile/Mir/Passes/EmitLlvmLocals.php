@@ -120,6 +120,18 @@ trait EmitLlvmLocals
         return $out;
     }
 
+    /**
+     * A PHP variable's slot, allocated at entry: it starts NULL (0), as a fresh
+     * php variable does. A path that reads it before any store — the merge
+     * box-back boxing `$a` on the arm that never assigned it — otherwise read
+     * whatever the frame held: garbage under x86_64 -O2, which boxed `-128` as
+     * an object and crashed every compile that named `Http\\`.
+     */
+    private function localVarSlot(string $slot): string
+    {
+        return $this->localSlotAlloca($slot) . '  store i64 0, ptr ' . $slot . "\n";
+    }
+
     private function preallocateLocals(Node $n): string
     {
         $k = $n->kind;
@@ -128,7 +140,7 @@ trait EmitLlvmLocals
             if (!isset($this->locals->globalBacked[$n->name]) && !isset($this->locals->slots[$n->name])) {
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$n->name] = $slot;
-                $out .= $this->localSlotAlloca($slot);
+                $out .= $this->localVarSlot($slot);
             }
             return $out . $this->preallocateLocals($n->value);
         }
@@ -177,7 +189,7 @@ trait EmitLlvmLocals
                 if ($cVar !== null && !isset($this->locals->slots[$cVar])) {
                     $slot = $this->ssa->allocReg();
                     $this->locals->slots[$cVar] = $slot;
-                    $out .= $this->localSlotAlloca($slot);
+                    $out .= $this->localVarSlot($slot);
                 }
                 foreach ($this->catchBody($c) as $s) { $out .= $this->preallocateLocals($s); }
             }
@@ -211,12 +223,12 @@ trait EmitLlvmLocals
             if (!isset($this->locals->slots[$n->valueVar])) {
                 $vs = $this->ssa->allocReg();
                 $this->locals->slots[$n->valueVar] = $vs;
-                $out .= $this->localSlotAlloca($vs);
+                $out .= $this->localVarSlot($vs);
             }
             if ($n->keyVar !== null && !isset($this->locals->slots[$n->keyVar])) {
                 $ks = $this->ssa->allocReg();
                 $this->locals->slots[$n->keyVar] = $ks;
-                $out .= $this->localSlotAlloca($ks);
+                $out .= $this->localVarSlot($ks);
             }
             // The OBJECT path also holds the iterator in a synthetic local, and
             // that slot needs hoisting for the very same reason — more sharply,
@@ -778,16 +790,26 @@ trait EmitLlvmLocals
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->coerceToPtr();
             $deSrc = $this->lastValue;
+            // The rebuild MOVES each value out of its source without a reference
+            // of its own. A source that keeps its elements — a local, a borrowed
+            // read — is copied first (`__mir_array_copy` adopts every element),
+            // and the rebuild moves out of the copy: `$input = $out;` through
+            // array_splice's by-ref parameter left `$out`'s elements owned twice.
+            $ownedSrc = $this->cellifySourceFlavor($sl->value) !== '';
+            if (!$ownedSrc) {
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $deSrc . ")\n";
+                $deSrc = $cp;
+                $this->lastValue = $cp;
+                $this->lastValueType = 'ptr';
+            }
             $out .= $this->emitCellArrayToTyped($sl->type);
             $dv = $this->lastValue;
-            // The rebuild MOVES each value out of the source without a reference
-            // of its own, so an owned temp source leaves as a bare buffer — it
+            // …and the moved-out source leaves as a bare buffer — an owned temp
             // was never freed at all (`$t = array_values(…)` into a typed slot).
-            if ($this->cellifySourceFlavor($sl->value) !== '') {
-                $si = $this->ssa->allocReg();
-                $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
-                $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
-            }
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
             if (isset($this->locals->globalBacked[$sl->name])) {
                 // The rebuild is a fresh +1 the cell takes outright; only the
                 // predecessor is owed ({@see globalCellOwnIr}).
