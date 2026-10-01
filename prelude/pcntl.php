@@ -96,6 +96,8 @@ namespace Runtime {
 
 namespace {
 
+    use Manticore\Attr\RefOut;
+
     /**
      * Install a handler for $signal. $handler is a callable, or SIG_DFL / SIG_IGN
      * to hand the signal back to the OS. A callable is NOT run asynchronously:
