@@ -136,6 +136,11 @@ final class LoadLocal extends Node
         parent::__construct(Node::KIND_LOAD_LOCAL, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: this read is the value a container
+     *  store takes without a count of its own while the local stays live — the
+     *  `own_share` +1 is taken right here, on the word just read. Not a child. */
+    public ?MemoryOp_ $ownShare = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitLoadLocal($this);
@@ -162,6 +167,14 @@ final class StoreLocal extends Node
         parent::__construct(Node::KIND_STORE_LOCAL, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the slot's OLD
+     *  value — `drop` releases it after the new value is computed, `own_retain`
+     *  takes a +1 on it before a self-append consumes it. Not a child. */
+    public ?MemoryOp_ $ownOld = null;
+    /** `own_retain` of the value just stored: a borrowed store the flow forces
+     *  to own. Not a child. */
+    public ?MemoryOp_ $ownNew = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreLocal($this);
@@ -175,8 +188,11 @@ final class StoreLocal extends Node
 
     /** The NULL an out-parameter local starts as ({@see Passes\VivifyRefArgs}):
      *  the by-ref callee stores an owned value into the slot, so the slot owns
-     *  what it ends up holding. Declared LAST — field order is layout. */
+     *  what it ends up holding. Field order is layout: append after the last. */
     public bool $outParamInit = false;
+    /** `$x = $x` on one cell slot the flow manages: a relabel that moves
+     *  nothing ({@see Passes\OwnershipFlow}), so the emitter emits no store. */
+    public bool $ownRelabel = false;
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────
@@ -450,6 +466,20 @@ final class Return_ extends Node
         parent::__construct(Node::KIND_RETURN, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the `drop` of every local owned on
+     *  this return path, run after the value (and any finally) is evaluated.
+     *  Not children.
+     *  @var MemoryOp_[] */
+    public array $ownDrops = [];
+    /** The returned local is OWNED on this path: its reference moves to the
+     *  caller. Otherwise the return takes the +1 a borrow owes. */
+    public bool $ownMove = false;
+    /** @var array<string, bool> the locals among {@see $ownDrops} whose drop
+     *  waits for the returned WORD: the value is a conditional the return takes
+     *  no +1 on ({@see Ownership::returnArmLocals}), so the arm that ran moves to
+     *  the caller and only the others drop — decided by identity at run time. */
+    public array $ownArms = [];
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitReturn($this);
@@ -522,16 +552,17 @@ final class Block extends Node
 }
 
 /**
- * Explicit memory operation, inserted by {@see Passes\InsertMemoryOps}
- * from the allocation-kind verdict — the MemoryOps layer (contract
- * step #5). EmitLlvm *consumes* these; it never invents retain/release
- * from its feature handlers.
+ * Explicit memory operation. EmitLlvm *consumes* these; it never invents
+ * retain / release for a local from its feature handlers.
  *
- * `op`     — 'retain' | 'release' | 'cow' | 'root' | 'arena_enter' | 'arena_leave'
- * `flavor` — heap family the runtime helper dispatches on:
- *            'string' | 'vec' | 'assoc' | 'obj' | 'cell' (empty for arena scope)
- * `target` — the value the op acts on (a `LoadLocal` for scope-exit
- *            releases; null for whole-frame arena enter / leave).
+ * `op` — `arena_enter` / `arena_leave` ({@see Passes\InsertMemoryOps}: the
+ *        frame's arena scope); `drop`, `own_retain` and the registrations
+ *        `own_local` / `own_local_b` ({@see Passes\OwnershipFlow}); `own_share`
+ *        rides on a {@see LoadLocal}, never in a statement list.
+ * `flavor` — the release class the runtime helper dispatches on (the
+ *        {@see Passes\EmitLlvmMemory::rcReleaseFlavor} vocabulary; empty for
+ *        the arena scope).
+ * `target` — the local the op acts on (a `LoadLocal`; null for the arena scope).
  */
 final class MemoryOp_ extends Node
 {
@@ -1340,6 +1371,13 @@ final class Foreach_ extends Node
      *  answers — a method return, so a +1 the loop variable may co-own
      *  ({@see Passes\InsertMemoryOps::foreachValueSlotType}). Set by InferTypes. */
     public ?Type $iterValueType = null;
+
+    /** Set by {@see Passes\OwnershipFlow}: whether this loop's value binding
+     *  co-owns (the emitter retains each element), and the `drop` of the
+     *  value / key the slot holds at the head, run before each binding. */
+    public bool $ownCoOwn = false;
+    public ?MemoryOp_ $ownDropValue = null;
+    public ?MemoryOp_ $ownDropKey = null;
 
     public function accept(EmitVisitor $v): string
     {

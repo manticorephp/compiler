@@ -722,7 +722,6 @@ trait EmitLlvmObjects
                     // raw-payload by-ref param: hand over an untagged scratch
                     // slot and re-box what the ctor left. Passing the cell slot
                     // makes the ctor dereference the tag bits.
-                    $out .= $this->ownByRefArgLocal($a);
                     $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai + 1] ?? null);
                     $reboxSlots[] = $this->refBoxSlot;
                     $reboxTmps[] = $this->refBoxTmp;
@@ -730,13 +729,11 @@ trait EmitLlvmObjects
                     && $this->isByRefAddressable($a)
                     && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)) {
                     // The mirror: a concrete lvalue bound to a `mixed &$var`.
-                    $out .= $this->ownByRefArgLocal($a);
                     $out .= $this->emitByRefCellBox($a);
                     $cellBoxSlots[] = $this->refBoxSlot;
                     $cellBoxTmps[] = $this->refBoxTmp;
                     $cellBoxTypes[] = $a->type;
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
-                    $out .= $this->ownByRefArgLocal($a);
                     $out .= $this->emitByRefArg($a);
                 } elseif ($mask[$ai + 1] ?? false) {
                     $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai, $ahmask[$ai + 1] ?? false);
@@ -1267,24 +1264,14 @@ trait EmitLlvmObjects
         // class ({@see LowerFns::finishClosure}). symfony's MicroKernelTrait
         // does exactly that — `fn &() => $this->instanceof` sits in the app
         // Kernel and is bound to a PhpFileLoader.
-        if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
-            return $this->emitRawPropByClassId($pa);
-        }
-        // Declared only on subclasses that disagree about its slot or its type:
-        // inference typed the read a CELL ({@see InferTypes::subclassPropType}),
-        // and no borrowed offset is right for every object that can arrive.
-        $rcls = $pa->object->type->class ?? '';
-        if ($pa->type->kind === Type::KIND_CELL && $rcls !== '' && isset($this->classes[$rcls])
-            && $this->classes[$rcls]->propertyOffset($pa->property) < 0) {
+        if (!$this->propHasTypedSlot($pa->object, $pa->property)) {
             return $this->emitRawPropByClassId($pa);
         }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
-        $offset = $this->propertyOffset($pa->object, $pa->property);
-        $gep = $this->ssa->allocReg();
-        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
-              . $objPtr . ', i64 ' . (string)$offset . "\n";
+        $out .= $this->propSlotGep($pa->object, $objPtr, $pa->property);
+        $gep = $this->lastValue;
         $out .= $this->emitSlotLoad(
             $gep,
             $this->slotHolder($pa->object, $pa->property),
@@ -1904,7 +1891,17 @@ trait EmitLlvmObjects
         if ($fixed === []) { return null; }
         $out = $this->emitNode($objExpr);
         $out .= $this->cellToPtr();
-        $objPtr = $this->lastValue;
+        return $out . $this->emitPropAddrByClassIdPtr($this->lastValue, $prop);
+    }
+
+    /** {@see emitPropAddrByClassId} for an object pointer already in hand. */
+    private function emitPropAddrByClassIdPtr(string $objPtr, string $prop): string
+    {
+        $fixed = [];
+        foreach ($this->classes as $cd) {
+            if ($cd->propertyOffset($prop) >= 0) { $fixed[] = $cd; }
+        }
+        $out = '';
         // One holder → its real offset, no dispatch.
         if (\count($fixed) === 1) {
             $g = $this->ssa->allocReg();
@@ -2701,7 +2698,7 @@ trait EmitLlvmObjects
         // honest answer, and it is the same one the classless receiver takes.
         // Mirrors the READ side in {@see emitPropertyAccess}; a closure rebound
         // by `Closure::bind` to a foreign scope is what makes this reachable.
-        if ($this->propertyOffsetOrNull($n->object, $n->property) === null) {
+        if (!$this->propHasTypedSlot($n->object, $n->property)) {
             return $this->emitCellStoreProperty($n);
         }
         // Amortized `$this->s .= …` — the property analogue of the local
@@ -2825,10 +2822,8 @@ trait EmitLlvmObjects
             $res = $val;
             $resTy = 'i64';
         }
-        $offset = $this->propertyOffset($n->object, $n->property);
-        $gep = $this->ssa->allocReg();
-        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr '
-              . $objPtr . ', i64 ' . (string)$offset . "\n";
+        $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
+        $gep = $this->lastValue;
         // Release-before-overwrite. A LOCAL slot has always dropped its previous
         // value; a property slot never has, so every rc value an overwritten
         // property leaves behind is immortal — 191.7 MB at 100k iterations of
@@ -5739,21 +5734,11 @@ trait EmitLlvmObjects
         foreach ($n->targets as $t) {
             if ($t->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $t->name;
-                // Release the held rc value first (drops to rc 0 → __destruct),
-                // THEN zero the slot — a later scope-exit release re-loads 0 and
-                // no-ops, so no double free.
-                //
-                // Only a local that OWNS its value may be released here. The
-                // owned set is the one InsertMemoryOps built — every name it
-                // gave a scope-exit `rc_release` ({@see EmitLlvm::collectRcObjLocals},
-                // which is also what pays the entry retain for a param). A
-                // BORROWED local releases a reference it never took: `$sel =
-                // $bag->one; unset($sel);` ran Node_::__destruct while the bag
-                // still held the object, and `$bag->one->name` then read freed
-                // memory. It stayed hidden because `$c ? $bag->one : …` pays the
-                // conditional contract's +1 — until a compile-time condition
-                // folded the ternary away ({@see LowerFromAst::lowerTernary}) and
-                // left the release with nothing to balance it.
+                // A local's own value is released by the `drop` OwnershipFlow put
+                // ahead of this unset wherever the slot OWNS it (a borrowed local
+                // releases nothing: `$sel = $bag->one; unset($sel);` must not run
+                // the destructor while the bag still holds the object); the slot
+                // is zeroed below.
                 // `unset($ref)` where `$ref = &$x` breaks THAT BINDING and
                 // nothing else — php leaves `$x` untouched. Here the alias
                 // shares `$x`'s slot ({@see emitRefAlias}), so zeroing it wiped
@@ -5845,18 +5830,8 @@ trait EmitLlvmObjects
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($cell, $flavor); }
                     $out .= '  store i64 0, ptr ' . $cell . "\n";
                 } elseif (isset($this->locals->slots[$name])) {
-                    // An owned closure local drops its env like an object does.
-                    if ($flavor === '' && isset($this->frame->rcObjLocals[$name])
-                        && $this->isClosureValueType($t->type)) {
-                        $flavor = 'closure';
-                    }
-                    // A MIXED slot releases by its representation flag.
-                    if (isset($this->frame->mixedFlagSlots[$name])) {
-                        $flavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$name]);
-                    }
-                    if ($flavor !== '' && isset($this->frame->rcObjLocals[$name])) {
-                        $out .= $this->rcReleaseSlot($this->locals->slots[$name], $flavor);
-                    }
+                    // OwnershipFlow put a `drop` ahead of this unset where the
+                    // slot is owned; the zeroing below is all that is left.
                     $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
                 }
             }
@@ -6636,7 +6611,6 @@ trait EmitLlvmObjects
             ) {
                 // Cell lvalue → raw-payload by-ref param; see
                 // emitByRefCellUnboxArg. A vivified out-variable is exactly this.
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai] ?? null);
                 $argList .= 'i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
@@ -6645,14 +6619,12 @@ trait EmitLlvmObjects
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
                 // Raw lvalue → `mixed &$var` param; see emitByRefCellBox.
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellBox($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
                 $cellBoxTypes[] = $a->type;
             } elseif ($this->argIsByRef($mask, $ai, $a)) {
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
             } elseif ($mask[$ai] ?? false) {
@@ -8056,7 +8028,6 @@ trait EmitLlvmObjects
                 // slot and re-box afterwards; passing the cell slot itself makes
                 // the callee dereference the tag bits and `$obj->fill(1, $out)`
                 // read back float(6.36E-314).
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai + 1] ?? null);
                 $argList .= ', i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
@@ -8069,14 +8040,12 @@ trait EmitLlvmObjects
                 // scratch cell and put back what the callee left. Without it
                 // `PDOStatement::bindParam(mixed &$var)` read an `int 3` as
                 // float(1.5E-323) and bound that.
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellBox($a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
                 $cellBoxTypes[] = $a->type;
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
             } elseif ($mask[$ai + 1] ?? false) {
@@ -8590,16 +8559,7 @@ trait EmitLlvmObjects
      * The same walk `propertyOffset` does — the width of a slot and the offset of
      * a slot must never be read from different classes.
      */
-    private function slotHolder(Node $objExpr, string $prop): ?ClassDef
-    {
-        $cls = $objExpr->type->class ?? '';
-        if ($cls === '' || !isset($this->classes[$cls])) { return null; }
-        if ($this->classes[$cls]->propertyOffset($prop) >= 0) {
-            return $this->classes[$cls];
-        }
-        $sub = $this->subclassPropHolder($cls, $prop);
-        return $sub;
-    }
+    private function slotHolder(Node $objExpr, string $prop): ?ClassDef { return $this->own->propHolder($objExpr, $prop); }
 
     /**
      * Whether the slot behind `$objExpr->$prop` holds a RAW array pointer.
@@ -8619,7 +8579,7 @@ trait EmitLlvmObjects
      *
      * ⚠ The ONE owner of that question, for the same reason
      * {@see EmitLlvmArrays::storeElemBoxesValue} is: {@see emitStoreProperty}
-     * reads it to emit the retain and {@see EmitLlvmMemory::collectTransferredLocals}
+     * reads it to emit the retain and {@see \Compile\Mir\Ownership::containerStoreRetains}
      * reads it to decide the source local's scope-exit release. Two copies drift,
      * and a drift here is a leak (pass says borrowed, emitter retains) or a
      * double free.
@@ -8631,18 +8591,7 @@ trait EmitLlvmObjects
      * reference, and the object held a BORROWED buffer that the caller's
      * scope-exit release freed. The same store written as a method retains.
      */
-    private function propStoreRetainType(\Compile\Mir\StoreProperty $n): ?Type
-    {
-        $pcls = $n->object->type->class ?? '';
-        $propType = ($pcls !== '' && isset($this->classes[$pcls]))
-            ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
-            : null;
-        if (($propType === null || !$propType->isArray())
-            && $this->slotIsArrayHinted($n->object, $n->property, $propType)) {
-            return Type::vec(Type::unknown());
-        }
-        return $propType;
-    }
+    private function propStoreRetainType(\Compile\Mir\StoreProperty $n): ?Type { return $this->own->propStoreRetainType($n); }
 
     /**
      * The release flavor for the value a property store OVERWRITES, or '' when
@@ -8868,45 +8817,62 @@ trait EmitLlvmObjects
     }
 
     /**
-     * Offset of `$prop` as declared by some subclass of `$base`, or -1
-     * when no subclass declares it. Resolves base-typed reads of a
-     * subclass-only field (`$stmt->decl` where `$stmt: Stmt` but the
-     * object is a `ClassStmt`).
+     * Offset of `$prop` as declared by the subclasses of `$base`, or -1 when
+     * none declares it, their slots disagree on representation
+     * ({@see \Compile\Mir\Ownership::subclassPropHolder}), or they sit at
+     * different offsets (`Call::$args` and `MethodCall::$args` are both
+     * `Node[]`, one field apart). Resolves base-typed reads of a
+     * subclass-only field (`$stmt->decl` where `$stmt: Stmt` but the object
+     * is a `ClassStmt`).
      */
     private function subclassPropOffset(string $base, string $prop): int
     {
+        if ($this->own->subclassPropHolder($base, $prop) === null) { return -1; }
+        $off = -1;
         foreach ($this->classes as $cd) {
-            if ($cd->name === $base) { continue; }
-            if (!$this->classExtends($cd->name, $base)) { continue; }
-            $off = $cd->propertyOffset($prop);
-            if ($off >= 0) { return $off; }
+            if ($cd->name === $base || !$this->classExtends($cd->name, $base)) { continue; }
+            $o = $cd->propertyOffset($prop);
+            if ($o < 0) { continue; }
+            if ($off >= 0 && $o !== $off) { return -1; }
+            $off = $o;
         }
-        return -1;
+        return $off;
     }
 
-    /** The subclass whose layout `subclassPropOffset` borrows — same walk, so the
-     *  slot's WIDTH is read from the very class its OFFSET came from. */
-    private function subclassPropHolder(string $base, string $prop): ?ClassDef
+    /**
+     * The slot of `$prop` in `$objPtr` as a `ptr` in lastValue: the static
+     * offset when there is one, else — a subclass-only field whose declarers
+     * agree on representation but not on offset — the class_id dispatch over
+     * the holders' own offsets ({@see emitPropAddrByClassIdPtr}). Either way the
+     * slot keeps the representation {@see slotHolder} describes.
+     */
+    private function propSlotGep(Node $objExpr, string $objPtr, string $prop): string
     {
-        foreach ($this->classes as $cd) {
-            if ($cd->name === $base) { continue; }
-            if (!$this->classExtends($cd->name, $base)) { continue; }
-            if ($cd->propertyOffset($prop) >= 0) { return $cd; }
+        $off = $this->propertyOffsetOrNull($objExpr, $prop);
+        $gep = $this->ssa->allocReg();
+        if ($off !== null) {
+            $this->lastValue = $gep;
+            $this->lastValueType = 'ptr';
+            return '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
+                . ', i64 ' . (string)$off . "\n";
         }
-        return null;
+        $out = $this->emitPropAddrByClassIdPtr($objPtr, $prop);
+        $out .= '  ' . $gep . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $this->lastValue = $gep;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** Whether `$prop` has a slot every consumer can treat by one declared
+     *  type — statically placed, or placed per class but agreeing on repr. */
+    private function propHasTypedSlot(Node $objExpr, string $prop): bool
+    {
+        return $this->propertyOffsetOrNull($objExpr, $prop) !== null
+            || $this->slotHolder($objExpr, $prop) !== null;
     }
 
     /** Whether class `$name` transitively extends `$base`. */
-    private function classExtends(string $name, string $base): bool
-    {
-        $cur = $name;
-        while ($cur !== '' && isset($this->classes[$cur])) {
-            $p = $this->classes[$cur]->parent;
-            if ($p === $base) { return true; }
-            $cur = $p;
-        }
-        return false;
-    }
+    private function classExtends(string $name, string $base): bool { return $this->own->classExtends($name, $base); }
     /** @param array<int,string> $cases */
     private function emitAdaptiveClassIdBranch(string $cid, array $cases, string $default): string
     {

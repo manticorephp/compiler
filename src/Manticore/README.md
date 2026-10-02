@@ -11,7 +11,7 @@ The compiler self-builds via `manticore build manticore.json` (a self-contained 
 | Command | Purpose |
 |---------|---------|
 | `compile` | Full pipeline → native binary. `-o <out>` (default `a.out`). Source from files, a directory (recursive `*.php` scan), or stdin. **Analyzes by default**: `--no-analyze` skips it, `--analyze-strict` makes error-severity findings fail the compile (rc 65). |
-| `build [manticore.json]` | Cargo-like manifest build: every library target → `.o` + `.sig`, every application target → executable. |
+| `build [manticore.json]` | Cargo-like manifest build: every library target → `.o` + `.sig`, every application target → executable. **Analyzes by default**: `--no-analyze` skips it, `--analyze-strict` makes error-severity findings fail the compile (rc 65). |
 | `analyze` | Static analysis only, no codegen. `--deep` also runs the MIR type passes (repr-soundness), `--json` for editors/CI, `--baseline <f>` / `--generate-baseline <f>` to snapshot and suppress known findings. Exit 1 if any error-severity diagnostic survives. |
 | `dump-ast` | Parse first source, print AST (`Parser\Dump`). |
 | `dump-mir` | Parse + run MIR pipeline (sans EmitLlvm), print typed IR. `--prelude` includes the Exception hierarchy, `--effects` annotates inferred memory effects. |
@@ -48,7 +48,7 @@ Heterogeneous returns flatten to i64 in self-host today, so parsed args land in 
 - `--backend=<mir|ast>` → `$backend`. **Inert** — `compile_with_backend()` calls `compile_via_mir()` unconditionally, so `ast` is accepted and ignored.
 - `--emit-library` → `$emitLibrary`: build a standalone stdlib `.o` (no `@main`, no stdlib link).
 - `--prelude` / `--effects` → `dump-mir` flags.
-- `compile` and `analyze` extend the shared spec: `--no-analyze` / `--analyze-strict` on the former, `--deep` / `--json` / `--baseline` / `--generate-baseline` on the latter.
+- `compile`, `build` and `analyze` extend the shared spec: `--no-analyze` / `--analyze-strict` on the former two, `--deep` / `--json` / `--baseline` / `--generate-baseline` on the latter.
 - Unknown flag → false (rc 64).
 
 `$linkStdlib` (set when any bundled-stdlib extern was injected), `$externDecls` (collected by `cmd_compile` on the native path), and `$ffiLibs` / `$weakSyms` (captured off the emitter right after `emit()`) are internal carry-over fields, not CLI flags.

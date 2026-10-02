@@ -114,7 +114,7 @@ final class Debug
      *
      * The veto exists because a property read normally hands out a raw borrow,
      * and dropping the old value would strand it. A RETURN is not that case:
-     * `EmitLlvmModule::emitReturn` already gates on `isBorrowedObjReturn` and
+     * `EmitLlvmModule::emitReturn` already gates on `Ownership::returnRetain` and
      * retains a borrowed property read before handing it back, so the caller
      * owns a reference of its own. This is `tools/prof/propleak.php`'s stated
      * ordering — a property READ must own what it reads BEFORE a property WRITE
@@ -192,7 +192,7 @@ final class Debug
      * An element read is a real borrow (it emits no retain — `retain_element`
      * counts element STORES), so the veto is load-bearing in general. But the
      * value of a StoreLocal is retained by rcRetainByType and a returned one by
-     * isBorrowedObjReturn; those own what they read. Vetoing the DECLARING CLASS
+     * Ownership::returnBorrowsObj; those own what they read. Vetoing the DECLARING CLASS
      * for them leaks every element of the slot — `Parser::$tokens` is the case
      * that put 9,236,608 Lexer\\Token allocations against ~0 reclaims.
      *
@@ -442,6 +442,11 @@ final class Debug
      *  builds instead of by hypothesis. */
     public static string $feOnly = '';
 
+    /** BISECT ONLY: `MANTICORE_OWNFLOW_ONLY=a,b` — OwnershipFlow manages only the
+     *  functions whose name contains one of the substrings; `!a,b` manages all
+     *  but those. Unmanaged functions keep every retain and get no drop (they leak, never free). */
+    public static string $ownFlowOnly = '';
+
 
     /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
@@ -685,6 +690,8 @@ final class Debug
         if ($env !== false && $env !== '') { self::$tombRatio = (int)$env; }
         $env = \getenv('MANTICORE_FE_ONLY');
         if ($env !== false && $env !== '') { self::$feOnly = $env; }
+        $env = \getenv('MANTICORE_OWNFLOW_ONLY');
+        if ($env !== false && $env !== '') { self::$ownFlowOnly = $env; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
         if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
         $env = \getenv('MANTICORE_RC_PACK_ELEM');

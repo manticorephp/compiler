@@ -112,6 +112,14 @@ final class FunctionDef
     public string $overloadOf = '';
 
     /**
+     * A free function declared `: array` / `: ?array` with no element type: its
+     * return erases to KIND_UNKNOWN, and the word it hands back is an array
+     * (raw, or a tagged cell). Such a function returns +1 on every path, so a
+     * caller's local owns what it stores ({@see Ownership::erasedArrayReturn}).
+     */
+    public bool $returnArrayHinted = false;
+
+    /**
      * Generated from THIS module's class table (`__mir_obj_to_str` and its arms):
      * another module's body under the same name dispatches over different
      * classes, so it is emitted `internal`, never `linkonce_odr` — the stdlib's

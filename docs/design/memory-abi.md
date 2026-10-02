@@ -230,23 +230,60 @@ Ownership is **not** decided by an expression predicate any more. It is a MIR pa
 run in this order (`src/Manticore/Main.php`):
 
 ```
-InferEffects → InferAllocKind → ApplyMemoryMode → InsertMemoryOps → Verify
+InferEffects → InferAllocKind → ApplyMemoryMode → SpillFreshBases → InsertMemoryOps → OwnershipFlow → Verify
 ```
 
 - `InferEffects` — what each function does to its arguments and globals.
 - `InferAllocKind` — per-allocation verdict: arena, heap-rc, or `NoRefcount`.
 - `ApplyMemoryMode` — applies the `--memory` / `MANTICORE_MEMORY` strategy
   (`hybrid` default, `rc`, `arena`); resolved by `Compile\Mir\MemoryMode::resolve()`.
-- `InsertMemoryOps` — plants the actual retain / release / COW calls.
+- `InsertMemoryOps` — the frame's ARENA scope (`arena_enter` / `arena_leave`) only; a
+  `NoRefcount` verdict plants nothing — its value is an rc value the flow owns like any other.
+- `OwnershipFlow` — the rc LOCALS, **per program point**. A forward dataflow over
+  `Empty | Own(k) | Borrow(k)` (plus `Scalar` and `MixDead`), `k` a release class: the flavor
+  plus the slot type a drop releases by. A store takes the state `Ownership::classifyStored`
+  answers for its value against the SLOT's representation. Where `Own(k)` meets `Borrow(k)` at a
+  join the borrowed edge takes an `own_retain`; where no edge has a statement position the name
+  is FORCED (every borrowed source takes its +1 on the spot). Where two representations meet,
+  the name is dead past the join (a read there is a `Verify` failure) and each owned side is
+  dropped on its edge. The plan is written as ops the emitter executes, never re-decides:
+  `drop` of the old value on a store (`StoreLocal::$ownOld`, after the new value is computed),
+  before an `unset`, on every return (`Return_::$ownDrops`) and on the fall-through end; a
+  returned local the flow owns MOVES (`Return_::$ownMove`); a foreach binding's co-ownership
+  and the drop of what its slot still holds (`Foreach_::$ownCoOwn` / `$ownDropValue` /
+  `$ownDropKey`); one `own_local` registration per managed name.
+
+A name is managed or not as a whole — never "one flavor per name, else blocked and leaked":
+the state is per point, so a name bound to an owned value on one path and a borrowed one on
+another is exact on both. Names a reference can reach (`&`, `static`, a by-ref capture or
+foreach) are left to their storage. A local the flow owns and hands to a container that takes
+NO count of it (`Ownership::containerStoreRetains` refuses) MOVES there — holds a borrow of the
+container's reference from then on — only when nothing reads the name afterwards (no other
+read, not in a loop, no `goto`, no symbol-table reader). Otherwise the container takes its
+own +1 (`own_share`, before the statement) and the local stays owned: php's
+`$a[] = $x; unset($a); echo $x->p;` reads a live value. An array local handed to an object-producing call
+whose callee may keep it with its element refs (`Ownership::elementSharedArgs`) releases its
+buffer only (`vecbuf` / `assocbuf`).
 
 Conditional expressions are a shared contract rather than per-consumer guesswork: `?:`,
 `??`, ternary and `match` all route through `Compile\Mir\CondOwn` so the arms and their
 consumer agree on who owns the result. An emitter-only fix leaks; a pass-only fix double-frees.
 
-Returning a value transfers ownership to the caller — the returned local is dropped from the
-owning set before the expression is emitted, so scope-exit release skips it. By-reference
-binding forwards the slot to a shared cell and bypasses rc ops at the binding site; the
-underlying buffer stays owned by whichever local holds it.
+Returning a value hands the caller +1. An owned returned local moves; any other value takes
+the borrowed-return retain. A conditional the return takes no +1 on (an erased arm the
+retain cannot name) hands back one arm's reference as it stands: the pass lists those arm
+locals (`Ownership::returnArmLocals` → `Return_::$ownArms`) and the emitter drops each only
+when its slot word is not the returned word. Which +1 a return takes is ONE decision
+(`Ownership::returnRetain`) the emitter executes and the pass reads. Every function, method,
+static method or closure that DECLARES a bare `array` / `?array` return
+(`Ownership::erasedArrayReturn`, decided on the declaration and carried across `.sig` as
+`array`) returns +1 on EVERY path — a borrowed value is retained by its tag, every arm of a
+conditional is normalized — so a caller owns what such a call hands back: a local stores it
+at the `erasedarr` class (raw buffer or tagged cell, split by tag at every retain and drop),
+an argument temp or a discarded result is released after the call. A generator stores its return value in the frame
+without a retain; the frame does not release it yet. By-reference binding forwards the slot
+to a shared cell and bypasses rc ops at the binding site; the underlying buffer stays owned
+by whichever local holds it.
 
 ### Array elements belong to the buffer
 

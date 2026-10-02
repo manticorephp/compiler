@@ -947,6 +947,7 @@ trait LowerClasses
                 body: new Block([], Type::void()),
             );
             $fn->isExtern = true;
+            $fn->returnArrayHinted = $this->isBareArrayReturnHint($m->returnType);
             $module->addFunction($fn);
             $this->methodOwner[$fnName] = $decl->name;
             $sep = $m->isStatic ? '::' : '->';

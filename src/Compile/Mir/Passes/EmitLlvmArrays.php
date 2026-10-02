@@ -1797,7 +1797,7 @@ trait EmitLlvmArrays
     {
         $base = $se->array;
         if ($base->kind !== Node::KIND_LOAD_LOCAL) { return $base->type; }
-        $mo = $this->frame->rcObjLocals[$base->name] ?? null;
+        $mo = $this->frame->ownLocals[$base->name] ?? null;
         if ($mo === null) { return $base->type; }
         // A MIXED slot's recorded type is only its RAW half; the load's flow
         // type says which half this store sees.
@@ -2016,112 +2016,20 @@ trait EmitLlvmArrays
      * An UNKNOWN value is raw, and that is the one the element type must cover
      * (`$out[] = $s` off a bare-`array` property, whose caller sees `Node[]`).
      */
-    /** Both ends of this element store are erased: the value carries a cell /
-     *  unknown and the destination's element channel names no type either. Such
-     *  a store copies a WORD whose ownership nobody static can speak for, which
-     *  is precisely when the runtime tag has to. */
-    private function erasedElemCopy(StoreElement $se): bool
-    {
-        $vk = $se->value->type->kind;
-        if ($vk !== Type::KIND_CELL && $vk !== Type::KIND_UNKNOWN) { return false; }
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return true; }
-        $el = $at->element;
-        return $el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
-    }
+    /** {@see \Compile\Mir\Ownership::erasedElemCopy} */
+    private function erasedElemCopy(StoreElement $se): bool { return \Compile\Mir\Ownership::erasedElemCopy($se); }
 
-    private function storeRetainFallback(StoreElement $se): ?Type
-    {
-        if ($se->value->type->kind === Type::KIND_CELL) { return null; }
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
-        $el = $at->element;
-        if ($el !== null && ($el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN)) {
-            return null;
-        }
-        return $el;
-    }
+    /** {@see \Compile\Mir\Ownership::storeRetainFallback} */
+    private function storeRetainFallback(StoreElement $se): ?Type { return \Compile\Mir\Ownership::storeRetainFallback($se); }
 
-    /**
-     * The element type a CELL value must be UNBOXED to before it lands in a
-     * CONCRETE-element array — the per-ELEMENT analogue of the whole-array
-     * {@see needsDeCellify} reabstraction.
-     *
-     * Without it the tagged bits are stored raw into a slot whose retain /
-     * release / read all treat them as that raw type, and a later
-     * `__mir_array_retain_str` DEREFERENCES a NaN-boxed cell (a `?string`
-     * ternary — `isset($a[$k]) ? $a[$k] : null`, which `nullableOf` lifts to a
-     * cell — stored into a declared `array<string,string>`; it SIGSEGV'd the
-     * self-host in `ClassDecl::__construct`). Once unboxed the payload is a bare
-     * pointer, so the caller retains per THIS type instead of
-     * {@see storeRetainFallback}'s null (which is right only for a value that
-     * stays boxed — rc-bumping tagged bits would corrupt them).
-     *
-     * Null when nothing to do: a non-cell value, or a cell/unknown destination
-     * element (which legitimately stores the value boxed).
-     */
-    private function storeElemDeCellifyType(StoreElement $se): ?Type
-    {
-        if ($se->value->type->kind !== Type::KIND_CELL) { return null; }
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
-        $el = $at->element;
-        if ($el === null) { return null; }
-        $ek = $el->kind;
-        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { return null; }
-        return $el;
-    }
+    /** {@see \Compile\Mir\Ownership::storeElemDeCellifyType} */
+    private function storeElemDeCellifyType(StoreElement $se): ?Type { return \Compile\Mir\Ownership::storeElemDeCellifyType($se); }
 
-    /**
-     * Does a StoreElement NaN-box its value into the slot? A cell BASE (a
-     * `mixed` property / param holding the array) or a cell ELEMENT type both
-     * store boxed, and that path co-owns the payload through
-     * {@see EmitLlvm::retainCellPayload} instead of {@see rcRetainByType}.
-     *
-     * ⚠ The ONE owner of that question: {@see emitStoreElementUnified} reads it
-     * to pick the arm, and {@see EmitLlvmMemory::collectTransferredLocals} reads
-     * it to pick the matching retain predicate. Two copies drift, and a drift
-     * here is a leak (pass says borrowed, emitter retains) or a double free.
-     */
-    private function storeElemBoxesValue(StoreElement $se): bool
-    {
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL) { return true; }
-        $et = $at->element;
-        // ⚠ KNOWN GAP, deliberately NOT widened to KIND_UNKNOWN here.
-        //
-        // The READ side decodes an `unknown` element as a TAGGED cell
-        // ({@see arrayBaseToPtr}, {@see storeElemDeCellifyType} both pair
-        // UNKNOWN with CELL), while this predicate stores raw — so a container
-        // whose two ends are inferred apart disagrees about the repr. The shape
-        // that shows it: `$a = []; $f = function () use (&$a) { $a[] = 'lit'; };`
-        // leaves the outer local vec[unknown] while the closure body still sees
-        // a `string`, and `echo $a[0]` then prints the ADDRESS (var_dump says
-        // float(2.1E-314)). See tests/aot/cases/array_erased_elem_repr_gap.php.
-        //
-        // Making this arm return true for UNKNOWN was tried and does NOT work:
-        // the container's repr nibble is fixed at ALLOCATION, so boxed values in
-        // a raw-repr vec make the release path free tagged words — the self-host
-        // gen-2 compiler segfaults on its own smoke test. Closing it needs the
-        // erased element channel RETYPED to cell end-to-end, which is the parked
-        // element-repr epic, not a change to this predicate.
-        if ($et !== null && $et->kind === Type::KIND_CELL) { return true; }
-        if ($se->value->type->kind === Type::KIND_CELL && ($et === null || $et->kind === Type::KIND_UNKNOWN)) { return true; }
-        if ($se->value instanceof \Compile\Mir\Call) {
-            $fn = $se->value->function;
-            $p = \strrpos($fn, \chr(92));
-            $bare = $p === false ? $fn : \substr($fn, $p + 1);
-            if ($bare === 'key' || $bare === 'current' || $bare === 'pos') { return true; }
-        }
-        return false;
-    }
+    /** {@see \Compile\Mir\Ownership::storeElemBoxesValue} — the one owner of which store arm NaN-boxes. */
+    private function storeElemBoxesValue(StoreElement $se): bool { return \Compile\Mir\Ownership::storeElemBoxesValue($se); }
 
-    /** As {@see storeElemBoxesValue} for an array LITERAL — its `$cellVals`. */
-    private function litBoxesValues(ArrayLit $al): bool
-    {
-        $el = $al->type->element;
-        return $el !== null && $el->kind === Type::KIND_CELL;
-    }
+    /** {@see \Compile\Mir\Ownership::litBoxesValues} */
+    private function litBoxesValues(ArrayLit $al): bool { return \Compile\Mir\Ownership::litBoxesValues($al); }
 
     /**
      * The VALUE half of an element store, shared by all four arms of

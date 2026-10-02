@@ -1900,7 +1900,8 @@ final class UnifiedArrayRuntime
         $this->emitReleaseVariant('__mir_array_release', 'repr');
         // Buffer-only: drop the buffer (+ hashed string keys) but NEVER the
         // element values, ignoring the repr bits. Used for a container passed
-        // BY VALUE to a callee (elementSharedLocals) — the callee co-owns and
+        // BY VALUE to a callee whose element discipline is unproven
+        // (Ownership::elementSharedArgs) — the callee co-owns and
         // drops the shared element refs, so the caller must not (the parser
         // $args double-free).
         $this->emitReleaseVariant('__mir_array_release_buf', '');

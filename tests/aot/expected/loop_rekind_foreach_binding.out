@@ -1,0 +1,26 @@
+string(1) "x"
+object(O)#1 (1) {
+  ["i"]=>
+  int(7)
+}
+string(1) "x"
+object(O)#1 (1) {
+  ["i"]=>
+  int(2)
+}
+string(1) "x"
+big
+object(O)#1 (1) {
+  ["i"]=>
+  int(7)
+}
+object(O)#1 (1) {
+  ["i"]=>
+  int(1)
+}
+string(1) "x"
+object(O)#1 (1) {
+  ["i"]=>
+  int(9)
+}
+string(5) "small"

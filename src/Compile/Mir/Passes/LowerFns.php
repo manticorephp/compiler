@@ -221,6 +221,7 @@ trait LowerFns
         );
         $fn->isGenerator = $isGen;
         $fn->usesFuncArgs = $usesFuncArgs;
+        $fn->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
         if ($fn->isGenerator) {
             // A generator CALL returns a Generator (its frame ptr); type it so
             // foreach / InferTypes route through the iterator-protocol path.
@@ -290,7 +291,7 @@ trait LowerFns
             $fnp->cellArg = $this->paramCellArg($p) || isset($cellArgNames[$p->name]);
             $params[] = $fnp;
         }
-        return new FunctionDef(
+        $ext = new FunctionDef(
             name: $decl->name,
             params: $params,
             returnType: $this->lowerTypeHint($this->effectiveHint(
@@ -300,6 +301,8 @@ trait LowerFns
             body: new Block([], Type::void()),
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
+        $ext->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
+        return $ext;
     }
 
     /**
@@ -487,7 +490,7 @@ trait LowerFns
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null, bool $forwardsErasedArray = false): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -561,6 +564,7 @@ trait LowerFns
         );
         $clFn->isGenerator = $isGenerator;
         $clFn->usesFuncArgs = $usesFuncArgs;
+        $clFn->returnArrayHinted = $forwardsErasedArray || $this->isBareArrayReturnHint($retHint);
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
@@ -596,7 +600,7 @@ trait LowerFns
      * @param Type[]   $capTypes
      * @param Node[]   $capVals
      */
-    private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret): Node
+    private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false): Node
     {
         $id = $this->closureCounter;
         $this->closureCounter = $id + 1;
@@ -614,6 +618,7 @@ trait LowerFns
             returnType: $ret,
             body: new Block([new Return_($callNode, Type::void())], Type::void()),
         );
+        $clFn->returnArrayHinted = $forwardsErasedArray;
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         $byRef = [];

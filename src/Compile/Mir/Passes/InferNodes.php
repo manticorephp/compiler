@@ -86,6 +86,8 @@ trait InferNodes
      */
     private function inferFunction(FunctionDef $fn): void
     {
+        $this->inferFnBody = $fn->body;
+        $this->collectSharedWordLocals($fn);
         $this->cellLoopLocals = [];
         $this->tryStoreFrames = [];
         $this->floatLoopLocals = [];
@@ -1403,6 +1405,7 @@ trait InferNodes
                 // inferTernary/inferMatch.
                 if ($merged->kind === Type::KIND_UNKNOWN
                     && ($this->fnReturnUnion->kind === Type::KIND_CELL
+                        || $this->erasedJoinBoxes($this->fnReturnUnion, $rt)
                         || $rt->kind === Type::KIND_CELL
                         || ($this->isValueKind($this->fnReturnUnion) && $this->isValueKind($rt)))) {
                     // All-numeric returns (int|float) → a numeric cell so the
@@ -1585,7 +1588,11 @@ trait InferNodes
         if ($node->left->kind === Node::KIND_ARRAY_ACCESS && $node->left->shapeCheck === 1) {
             $node->left->shapeCheck = 2;
         }
+        // The fallback runs only on a null left: its bindings meet the path
+        // that skipped it.
+        $skip = $this->localTypes;
         $rt = $this->inferNode($node->right);
+        $this->localTypes = $this->joinArmLocals($skip, $skip, $skip, $skip, $this->localTypes);
         // `$a ?? throw …`: the fallback diverges (never), so the result is
         // simply the left's type — never the throw's void.
         if ($node->right->kind === Node::KIND_THROW) {
@@ -1666,19 +1673,22 @@ trait InferNodes
         // Flow-typing across the arms (short-circuit): the then-arm evaluates only
         // when `cond` holds, the else-arm only when it doesn't. This also narrows
         // the second conjunct of `A && B` (lowered to `Ternary(A, !!B, false)`),
-        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The merge below
-        // unions the arms, so no narrowing leaks past the ternary.
+        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The join below
+        // meets the arms, so no narrowing leaks past the ternary.
         if ($node->then !== null) {
             $this->narrowFromCond($node->cond);
+            $thenIn = $this->localTypes;
             $t = $this->inferNode($node->then);
         } else {
+            $thenIn = $saved;
             $t = $node->cond->type;
         }
         $thenLocals = $this->localTypes;
         $this->localTypes = $saved;
         $this->narrowFromNegatedCond($node->cond);
+        $elseIn = $this->localTypes;
         $e = $this->inferNode($node->else_);
-        $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
+        $this->localTypes = $this->joinArmLocals($saved, $thenIn, $thenLocals, $elseIn, $this->localTypes);
         // A `throw`-expression arm is `never` — it yields no value, so the
         // result type is entirely the sibling arm's (`cond ? v : throw …`).
         if ($node->then !== null && $node->then->kind === Node::KIND_THROW) {
@@ -1688,6 +1698,10 @@ trait InferNodes
         if ($node->else_->kind === Node::KIND_THROW) {
             $node->type = $t;
             return $t;
+        }
+        if ($this->erasedJoinBoxes($t, $e)) {
+            $node->type = Type::cell();
+            return $node->type;
         }
         // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value
         // branch as a NULLABLE cell so the null case renders as NULL (not the
@@ -1896,6 +1910,48 @@ trait InferNodes
         if ($node->byRef && $at->isArray() && $elem->kind === Type::KIND_CELL) {
             $this->cellLoopLocals[$node->valueVar] = true;
         }
+        // A name a loop re-kinds ({@see loopMerge}) is a cell for the whole
+        // function, but a foreach BINDING is no store: the body reads the raw
+        // element, and the slot left the loop raw while every read past it
+        // dispatched by tag — `foreach (['x'] as $v) {} foreach ($objs as $v) {}
+        // var_dump($v);` printed a string pointer as a float. Box it back on
+        // every path out of the body, as an if/else merge does
+        // ({@see planMergeShadow}) — only for a name read somewhere no loop
+        // rebinds it first.
+        // A box-back of the binding before a jump out of this loop — this
+        // plant's, or an if/else merge's ahead of its arm's break — is the
+        // slot the loop exits in, whichever run planted it.
+        /** @var array<string, bool> $exitNames */
+        $exitNames = $this->loopExitNames;
+        if (!$node->byRef) { $exitNames[$node->valueVar] = true; }
+        // The same for a name that ENTERS the loop a cell, and for the KEY
+        // binding: the loop merge keeps the entry's cell, so the slot must leave
+        // the body one — `$k = $m[1]; foreach ($h as $k => $x) {} $t = 1 + $k;`
+        // read the raw key's string pointer by tag.
+        if (!$node->byRef && $at->isArray() && $this->bindingExitsCell($node->valueVar)
+            && self::bindBoxesByTag($elem, $this->enums) && $this->inferFnBody !== null
+            && self::readsOutsideBinders($this->inferFnBody, $node->valueVar) > 0) {
+            $this->plantBoxBack($node->body, $node->valueVar, $elem);
+            $this->boxBackBeforeJumps($node->body, $node->valueVar, $elem, 0);
+        }
+        $kv = $node->keyVar;
+        // The KEY binding exits the loop like the value binding does, in EVERY
+        // run: the plant below is sticky, but the condition that planted it is
+        // not (a later run can see the name enter the loop raw). Without the
+        // mark such a run took an if/else's box-back pair ahead of a `continue`
+        // back out ({@see unplantAgreedBoxBacks}) while the plant's other
+        // box-backs still typed every later read a cell — a raw string key read
+        // by tag, and `$clean[$cname]` keyed by the string's ADDRESS.
+        if ($kv !== null && !$node->byRef) { $exitNames[$kv] = true; }
+        if ($kv !== null && $kv !== $node->valueVar && $at->isArray() && $this->bindingExitsCell($kv)
+            && self::bindBoxesByTag($keyT, $this->enums) && $this->inferFnBody !== null
+            && self::readsOutsideBinders($this->inferFnBody, $kv) > 0) {
+            $exitNames[$kv] = true;
+            $this->plantBoxBack($node->body, $kv, $keyT);
+            $this->boxBackBeforeJumps($node->body, $kv, $keyT, 0);
+        }
+        $outerExitNames = $this->loopExitNames;
+        $this->loopExitNames = $exitNames;
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
@@ -1914,6 +1970,7 @@ trait InferNodes
         }
         $this->localTypes = $merged;
         $this->popJumpFrame();
+        $this->loopExitNames = $outerExitNames;
         return Type::void();
     }
 
@@ -1986,6 +2043,7 @@ trait InferNodes
                 // numeric (int|float) match stays a numeric cell (arith-able).
                 $result = $this->unifyToCell($result, $bt);
             }
+            elseif ($this->erasedJoinBoxes($result, $bt)) { $result = Type::cell(); }
             // A `null` arm beside a value arm (`0 => null, 1 => "7"`): a nullable
             // cell, as a ternary pairs them — `unknown` returned every arm as a
             // raw word through a `mixed` return.

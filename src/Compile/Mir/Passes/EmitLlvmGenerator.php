@@ -134,7 +134,7 @@ trait EmitLlvmGenerator
             $genParamNames[$p->name] = true;
             if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
         }
-        $this->initRcObjSlots($fn->body, $genParamNames);
+        $this->initOwnSlots($fn->body, $genParamNames);
 
         // ── creator ──
         // A generator CLOSURE composes two frame mechanisms: it is invoked with
@@ -217,7 +217,6 @@ trait EmitLlvmGenerator
                       . (string)($capIndex[$name] + 1) . "\n";
                 $cv = $this->ssa->allocReg();
                 $out .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
-                $out .= $this->genParamCoOwn($name, $cv);
                 $out .= $this->genStoreAt($fr, $off, $cv);
             } elseif (isset($paramNames[$name])) {
                 // A CLOSURE generator's caller (emitInvoke) boxed every scalar
@@ -232,10 +231,8 @@ trait EmitLlvmGenerator
                     $out .= $this->unboxCellToType($pt);
                     $out .= $this->coerceToI64();
                     $pv = $this->lastValue;
-                    $out .= $this->genParamCoOwn($name, $pv);
                     $out .= $this->genStoreAt($fr, $off, $pv);
                 } else {
-                    $out .= $this->genParamCoOwn($name, '%arg.' . $name);
                     $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
                     // The frame outlives this call and reads the param later, so
                     // it must co-own it: `(new D(5))->it()` freed the receiver
@@ -262,6 +259,8 @@ trait EmitLlvmGenerator
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
+        $this->frame->erasedArrayReturn = false;
+        $this->frame->erasedCond = null;
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
         foreach ($locals as $name => $idx) {
@@ -293,6 +292,12 @@ trait EmitLlvmGenerator
         $ed = $this->ssa->allocReg();
         $out .= '  ' . $ed . " = load i64, ptr @__mir_jmp_depth\n";
         $out .= '  store i64 ' . $ed . ', ptr ' . $this->gen->entryDepthPtr . "\n";
+        $this->gen->entryArenaSp = '';
+        if ($this->locals->sjljPinAll) {
+            $this->rt->needsArena = true;
+            $this->gen->entryArenaSp = $this->ssa->allocReg();
+            $out .= '  ' . $this->gen->entryArenaSp . " = load i64, ptr @__mir_arena_sp\n";
+        }
         $st = $this->ssa->allocReg();
         $out .= '  ' . $st . ' = load i64, ptr ' . $this->gen->statePtr . "\n";
         $nYields = $this->countYields($fn->body);
@@ -366,21 +371,6 @@ trait EmitLlvmGenerator
             || $vk === Node::KIND_CLOSURE || \Compile\Mir\BitOp::mintsFresh($v);
     }
 
-    /**
-     * A param (or capture) the body owns — reassigned, or released at the end
-     * — holds the caller's BORROWED value, so the frame takes its own +1 as it
-     * seeds the slot: the entry retain {@see initRcObjSlots} gives an ordinary
-     * function, placed in the creator because the resume entry runs on every
-     * resume.
-     */
-    private function genParamCoOwn(string $name, string $val): string
-    {
-        if (isset($this->locals->refLocals[$name])) { return ''; }
-        $mo = $this->frame->rcObjLocals[$name] ?? null;
-        if ($mo === null) { return ''; }
-        $fl = $this->rcReleaseFlavor($mo);
-        return $fl === '' ? '' : $this->rcRetainReg($val, $fl);
-    }
 
     /** `store i64 <val>, ptr (base + off)` — a frame header/local write. */
     private function genStoreAt(string $base, int $off, string $val): string

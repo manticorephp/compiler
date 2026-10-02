@@ -1,0 +1,16 @@
+-- own arm
+y1
+returning
+~y
+finished
+ret x-taken
+again x-taken
+-- borrow arm
+y1
+returning
+~x-untaken
+~y
+finished
+ret param
+again param
+done

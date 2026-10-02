@@ -11,7 +11,7 @@ namespace Compile\Mir;
  * and the EmitLlvm traits (which emit the co-owner retain) answer "does the
  * destination co-own this value?". Same discipline, and the same reason, as
  * {@see CondOwn}: the two answers must be identical or the value is freed twice
- * or never.
+ * or never. The store side asks it through {@see Ownership::classifyStored}.
  *
  * Both failure modes were paid for in one session. With only the RETAIN, every
  * `$s = $x;` in a function leaked one reference per call — the shape half the
@@ -93,7 +93,7 @@ final class AliasOwn
      * The builtins whose result is a BORROW, not the +1 every other call hands
      * back: `__mir_fiber_current()` reads the running fiber out of a global its
      * owner holds. The one list the passes that own call results ask
-     * ({@see InsertMemoryOps::isOwnedObj}, SpillFreshBases, EmitLlvmModule's
+     * ({@see Ownership::classifyStored}, SpillFreshBases, EmitLlvmModule's
      * return retain).
      *
      * @return string[]

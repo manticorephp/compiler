@@ -1,0 +1,8 @@
+  %x1 = xor %t0, %t1
+  %x2 = xor %x1, %t2
+  %x3 = xor %x2, %t3
+  %x4 = xor %x3, %t4
+  %x5 = xor %x4, %t5
+  %x6 = xor %x5, %t6
+  %last = xor %x6, %t7
+ABCD!

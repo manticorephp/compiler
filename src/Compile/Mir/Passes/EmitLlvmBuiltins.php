@@ -107,7 +107,7 @@ trait EmitLlvmBuiltins
      * A user call has both halves of the ownership contract: `emitCall`
      * releases a fresh rc arg temp after the call ({@see
      * EmitLlvm::freshRcArgFlavor}) and the callee retains what it keeps
-     * ({@see EmitLlvmMemory::initRcObjSlots}). A CODEGEN BUILTIN has neither.
+     * (a store or a return of a param retains). A CODEGEN BUILTIN has neither.
      * It reads the buffer inline and returns, so `count(explode($d, $s))`
      * stranded the exploded vec on every call — and the ones that looked fine
      * (`implode`, `in_array`) were only saved by a cellify rebuild whose
@@ -1521,8 +1521,16 @@ trait EmitLlvmBuiltins
      * e.g. `uasort`'s `$arr = $new` writeback restoring the byref param's typed
      * representation). lastValue holds the source array cell/ptr on entry; the
      * boxed concrete array on exit.
+     *
+     * ⚠ OWNERSHIP. By default the rebuild MOVES each value out of the source:
+     * right for an owned temp whose bare buffer the caller then frees. `$coOwn`
+     * is for a source that keeps its elements (a named local that is released
+     * at its own scope exit): the rebuild then takes a reference per element,
+     * or both arrays release the same payload — `$astArgs = $expanded` in
+     * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
+     * and the self-built compiler crashed on `method_exists(...$pack)`.
      */
-    private function emitCellArrayToTyped(Type $arrType): string
+    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -1567,9 +1575,14 @@ trait EmitLlvmBuiltins
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
             $out .= $this->unboxCellToType($elem);
-            $out .= $this->emitCellArrayToTyped($elem);
+            $out .= $this->emitCellArrayToTyped($elem, $coOwn);
             $raw = $this->lastValue;
         } else {
+            if ($coOwn) {
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_cell_retain(i64 ' . $ev . ")\n";
+            }
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
             $out .= $this->unboxCellToType($elem);
@@ -4156,9 +4169,14 @@ trait EmitLlvmBuiltins
         // ternary null arm keeps the obj type (`$c ? new P() : null`), so both
         // is_null and is_object must runtime-check the pointer instead of
         // short-circuiting on the static obj type (which would answer null=never,
-        // object=always). is_null → ptr==0; is_object → ptr!=0.
-        if (($a->type->kind === Type::KIND_OBJ && ($kind === Type::KIND_NULL || $kind === Type::KIND_OBJ))
-            || ($a->type->kind === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
+        // object=always). is_null → ptr==0; is_object → ptr!=0. An ARRAY and a
+        // STRING are the same kind of carrier: their null rides the slot as ptr
+        // 0 (a `?array` return, `null ∪ string`, a null-seeded loop array), and
+        // `=== null` already answers it that way.
+        $ak = $a->type->kind;
+        if ((($ak === Type::KIND_OBJ || $ak === Type::KIND_ARRAY || $ak === Type::KIND_STRING)
+                && ($kind === Type::KIND_NULL || $kind === $ak))
+            || ($ak === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
@@ -4318,6 +4336,19 @@ trait EmitLlvmBuiltins
             return $out;
         }
         $k = $a->type->kind;
+        // A string or an array slot holds its null as ptr 0 ({@see biIsType}).
+        if ($k === Type::KIND_STRING || $k === Type::KIND_ARRAY) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $isN = $this->ssa->allocReg();
+            $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $isN . ', ptr ' . $this->strRef($nNull) . ', ptr '
+                  . $this->strRef($k === Type::KIND_STRING ? $nStr : $nArr) . "\n";
+            $this->lastValue = $sel;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $name = $nUnk;
         if ($k === Type::KIND_INT) { $name = $nInt; }
         elseif ($k === Type::KIND_STRING) { $name = $nStr; }
@@ -8740,10 +8771,8 @@ trait EmitLlvmBuiltins
             $out = $this->emitNode($arrNode->object);
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
-            $off = $this->propertyOffset($arrNode->object, $arrNode->property);
-            $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
-                  . ', i64 ' . (string)$off . "\n";
+            $out .= $this->propSlotGep($arrNode->object, $objp, $arrNode->property);
+            $g = $this->lastValue;
             $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";

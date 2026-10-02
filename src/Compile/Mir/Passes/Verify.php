@@ -51,6 +51,14 @@ final class Verify implements Pass
         foreach ($module->functions as $fn) {
             $this->verifyFunction($fn);
         }
+        // An ownership the flow could not settle is a build failure, never a
+        // silent choice of one release over the other ({@see OwnershipFlow}).
+        $errs = $module->ownFlowErrors;
+        if (\count($errs) > 0) {
+            $shown = \array_slice($errs, 0, 20);
+            throw new \RuntimeException('MIR.verify: ' . \implode("\n  ", $shown)
+                . (\count($errs) > 20 ? "\n  … " . (string)(\count($errs) - 20) . ' more' : ''));
+        }
         $module->markPassApplied(self::NAME);
         return $module;
     }

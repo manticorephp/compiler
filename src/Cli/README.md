@@ -45,6 +45,6 @@ exit($cli->run($argv));
 
 `Cli` and `Command` are the routing layer; `ArgParse` / `ParsedArgs` are the
 parsing layer each handler opts into. A command builds its own spec — see
-`Manticore\compile_arg_spec()`, which `compile` extends with `--no-analyze` /
+`Manticore\compile_arg_spec()`, which `compile` and `build` extend with `--no-analyze` /
 `--analyze-strict` and `analyze` extends with `--deep` / `--json` /
 `--baseline` / `--generate-baseline`.

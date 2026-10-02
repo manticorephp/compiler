@@ -15,7 +15,8 @@ namespace Compile\Mir;
  * the conditional as an owned producer, exactly like a call. That only holds if
  * the two passes agree exactly: emitter normalizes but InsertMemoryOps says
  * borrowed ⇒ the value leaks; the other way round ⇒ it is double-freed. Hence
- * one predicate, not two copies of one.
+ * one predicate, not two copies of one. Both sides reach it through
+ * {@see Ownership::condOwnedStored} / {@see Ownership::condOwnedTemp}.
  *
  * `armsCoverable` is deliberately a TYPE-ONLY test — no class tables, no
  * signatures — so both callers compute the identical answer. Each caller adds

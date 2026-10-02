@@ -653,8 +653,7 @@ final class LowerFromAst implements Pass
     }
 
     /** Name prefix of a hoisted foreach subject — the one owner of the
-     *  convention. {@see LowerStmts::hoistForeachSubject} makes them;
-     *  {@see EmitLlvmMemory::collectElementSharedLocals} reads them. */
+     *  convention. {@see LowerStmts::hoistForeachSubject} makes them. */
     public const FE_SUBJ_PREFIX = '__fe_subj_';
 
     private ?Module $module = null;
@@ -1006,6 +1005,7 @@ final class LowerFromAst implements Pass
             $this->collectInterfaceNames($ifn, $ian, $iav);
             $module->interfaceAncestors[$ifn] = \array_keys($ian);
         }
+        $this->recordMethodReturnShapes($module);
         // Reify every `Box<float>` the program's docblocks bind. Runs HERE: the
         // origin classes (and their parents) now exist, and no body has been
         // lowered yet — so a spec class is already in the class table when a body
@@ -2591,6 +2591,7 @@ final class LowerFromAst implements Pass
         );
         $mfn->isGenerator = $isGen;
         $mfn->usesFuncArgs = $usesFuncArgs;
+        $mfn->returnArrayHinted = $this->isBareArrayReturnHint($m->returnType);
         return $mfn;
     }
 
@@ -3394,7 +3395,8 @@ final class LowerFromAst implements Pass
         }
         $call = new StaticCall_($class, $method, $loads, Type::unknown(), $scope);
         $body = new Block([new Return_($call, Type::void())], Type::void());
-        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class);
+        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class,
+            $this->methodDeclaresErasedArray($class, $method));
     }
 
     /** Closure capturing `$recv` and forwarding to `$recv->$method(...)`.
@@ -3413,7 +3415,8 @@ final class LowerFromAst implements Pass
         if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
-        return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
+        return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
+            $cls !== '' && $this->methodDeclaresErasedArray($cls, $method));
     }
 
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */
@@ -5570,6 +5573,57 @@ final class LowerFromAst implements Pass
     /** @return \Parser\Ast\Param[] */
     private function methodDeclParams(\Parser\Ast\MethodDecl $m): array { return $m->params; }
     private function methodDeclReturnType(\Parser\Ast\MethodDecl $m): ?string { return $m->returnType; }
+    private function methodDeclByRef(\Parser\Ast\MethodDecl $m): bool { return $m->returnsByRef; }
+    private function methodDeclBodiless(\Parser\Ast\MethodDecl $m): bool { return $m->body === null; }
+
+    /**
+     * What a CALLER needs of a method it cannot resolve to a body: an interface
+     * or abstract declaration of a bare `array` return ({@see Module::$bareArrayMethods}),
+     * and every name some declaration returns by reference ({@see Module::$byRefMethodNames}).
+     */
+    private function recordMethodReturnShapes(Module $module): void
+    {
+        foreach ($this->classDecls as $cname => $cd0) {
+            $cd = $this->classDeclOf($cd0);
+            $cn = \ltrim((string)$cname, '\\');
+            foreach ($this->classDeclMethods($cd) as $m) {
+                $mn = \strtolower($this->methodDeclName($m));
+                if ($this->methodDeclByRef($m)) {
+                    $module->byRefMethodNames[$mn] = true;
+                    if ($this->methodDeclBodiless($m)) { $module->byRefBodiless[$cn . '::' . $mn] = true; }
+                    continue;
+                }
+                if ($this->methodDeclBodiless($m) && $this->isBareArrayReturnHint($this->methodDeclReturnType($m))) {
+                    $module->bareArrayMethods[$cn . '::' . $mn] = true;
+                }
+            }
+        }
+        foreach ($this->traitTable as $td0) {
+            foreach ($this->classDeclMethods($this->classDeclOf($td0)) as $m) {
+                if ($this->methodDeclByRef($m)) { $module->byRefMethodNames[\strtolower($this->methodDeclName($m))] = true; }
+            }
+        }
+    }
+
+    /** The method `$class` resolves `$method` to declares a bare `array` return
+     *  by value: a first-class-callable wrapper of it forwards that +1. */
+    private function methodDeclaresErasedArray(string $class, string $method): bool
+    {
+        $c = $class;
+        while ($c !== '' && isset($this->classDecls[$c])) {
+            $cd = $this->classDeclOf($this->classDecls[$c]);
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) === $method) {
+                    return !$this->methodDeclByRef($m) && $this->isBareArrayReturnHint($this->methodDeclReturnType($m));
+                }
+            }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return false;
+    }
+
+    private function classDeclOf(\Parser\Ast\ClassDecl $d): \Parser\Ast\ClassDecl { return $d; }
 
     /**
      * `[$a, $b] = $rhs` / `["k" => $v] = $rhs` — stash the RHS in a

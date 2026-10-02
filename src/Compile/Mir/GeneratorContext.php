@@ -35,6 +35,12 @@ final class GeneratorContext
      * outlives the suspension and catches an exception meant for someone else.
      */
     public string $entryDepthPtr = '';
+    /**
+     * SSA reg: the arena mark-stack depth this invocation was entered with. A
+     * generator body pushes no mark of its own, so everything above it at a
+     * catch landing belongs to frames the throw unwound; '' without a try.
+     */
+    public string $entryArenaSp = '';
 
     /** Module uses `$gen->throw($e)` → emit the per-yield injection check. */
     public bool $throwUsed = false;

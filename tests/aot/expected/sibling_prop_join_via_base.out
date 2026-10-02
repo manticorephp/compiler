@@ -1,0 +1,25 @@
+num -> int(7)
+  wrapped: int(7)
+  isset: y
+  coalesce: int(7)
+name -> string('abc')
+  wrapped: string('abc')
+  isset: y
+  coalesce: string('abc')
+spread -> Expr(name)
+  wrapped: Expr(name)
+  isset: y
+  coalesce: Expr(name)
+spread -> Expr(num)
+  wrapped: Expr(num)
+  isset: y
+  coalesce: Expr(num)
+x
+i 2
+f 2.5
+int(5) string('n') Expr(name)
+call 1,2,9,3
+meth 5,9,2
+int(4) set
+string('s') set
+IntMsg set
