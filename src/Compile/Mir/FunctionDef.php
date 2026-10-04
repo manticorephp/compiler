@@ -119,4 +119,12 @@ final class FunctionDef
      * object threw "Object of class  could not be converted".
      */
     public bool $moduleLocal = false;
+
+    /**
+     * A first-class callable `$recv->m(...)` whose receiver class lowering
+     * could not see: the method name, and the closure is a one-param
+     * placeholder until {@see Passes\ResolveMethodFcc} rebuilds it from the
+     * method's parameters. '' for every other function.
+     */
+    public string $fccMethod = '';
 }

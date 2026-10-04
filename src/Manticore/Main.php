@@ -4721,6 +4721,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $statT = \Compile\Stats::now();
         $module = (new \Compile\Mir\Passes\VivifyRefArgs())->run($module);
         \Compile\Stats::step('VivifyRefArgs', $statT, \count($module->functions), -1);
+        // A `$recv->m(...)` whose receiver lowering could not type gets the
+        // method's parameters now that inference has; InferTypes #2 below types
+        // the rebuilt body.
+        $module = (new \Compile\Mir\Passes\ResolveMethodFcc())->run($module);
         // Narrow CONCRETE, param-independent bare-`array` returns now (a literal
         // `mk(){ return ["x"=>1]; }` → assoc[string,int]) so a call-site
         // `array_filter(mk(), …)` fuses on a concrete element and its result is

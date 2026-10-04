@@ -3410,7 +3410,25 @@ final class LowerFromAst implements Pass
         // `?array`. (The `?array` return-narrowing this pass now does made the
         // arm concrete, which is what triggers the ternary's cell-lift.)
         $declParams = null;
+        // `$this` is untyped until inference, but lowering knows whose method it
+        // is in: the static class of this copy, else the declaring one. Without
+        // it `$c = $this->m(...); $c('a', 'b')` took the one-param shim below
+        // and called `m('a')` — php-cs-fixer's worker-crash callback lost its
+        // reason.
+        if ($cls === '' && $recv instanceof LoadLocal && $recv->name === 'this') {
+            $cls = $this->currentStaticClass !== '' ? $this->currentStaticClass : $this->currentLowerClass;
+        }
         if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
+        if ($declParams === null) {
+            // Any other receiver has no class before inference: the shim is a
+            // placeholder {@see ResolveMethodFcc} rebuilds from the method's own
+            // parameters once the receiver is typed.
+            [$mir, $loads] = $this->fccParamsAndArgs(null, $cls);
+            $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
+            $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
+            $this->module->functions[\count($this->module->functions) - 1]->fccMethod = $method;
+            return $node;
+        }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
