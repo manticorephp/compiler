@@ -1948,10 +1948,11 @@ trait EmitLlvmControl
     private function foreachRefTargetAddr(string $slot, Type $arrT): string
     {
         $this->feAddr = $slot;
-        $el = $arrT->isArray() ? $arrT->element : null;
-        $cellish = $arrT->kind === Type::KIND_CELL || $arrT->kind === Type::KIND_UNKNOWN
-            || $el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
-        if (!$cellish) { return ''; }
+        // The predicate the element store's write-through uses
+        // ({@see EmitLlvmArrays::elemSlotMayHoldRef}): a cell or erased element
+        // (an erased one is what a bare `array &` holds, refs included); a
+        // concrete element buffer never holds a reference box.
+        if (!$this->elemSlotMayHoldRef($arrT)) { return ''; }
         $cur = $this->ssa->allocReg();
         $istag = $this->ssa->allocReg();
         $sh = $this->ssa->allocReg();
