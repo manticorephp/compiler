@@ -1045,7 +1045,14 @@ trait EmitLlvmExpr
                 return true;
             }
             if (($na === self::EK_ARRAY) !== ($nb === self::EK_ARRAY)) {
-                return false;
+                // A raw array facing a CELL (an erased `list<T>` / array_map result
+                // holding the same arrays boxed) is comparable when the raw side's
+                // own elements ARE cells: boxing it then tells the tagged path the
+                // truth about its inner repr. `assoc[string,cell]` rows are the case.
+                $arrSide = $na === self::EK_ARRAY ? $a : $b;
+                $other = $na === self::EK_ARRAY ? $nb : $na;
+                return $other === self::EK_CELL && $i + 1 < 16 && (($arrSide >> (($i + 1) * 4)) & 15) === self::EK_CELL
+                    && ($i + 2 >= 16 || ($arrSide >> (($i + 2) * 4)) === 0);
             }
             if ($na !== self::EK_ARRAY) {
                 return true;
