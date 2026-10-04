@@ -2351,8 +2351,10 @@ trait EmitLlvmArrays
         $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type, $sgBase);
         // A REF-cell value (`$a[$k] = &$v`) REBINDS the slot: php replaces the
         // element's binding, it does not write through the reference the slot
-        // held. So the old word is neither read for write-through nor treated
-        // as a value to drop — the binding it was is simply gone from this slot.
+        // held. So the old word is never read for write-through — but the slot
+        // still gives it up: an owned value, or this slot's count on the box
+        // (`__mir_cell_drop`'s REF arm), drops by the slot's flavor like any
+        // overwrite.
         $rebinds = $se->value->kind === Node::KIND_REF_CELL;
         if ($rebinds) {
             $el = $se->array->type->element ?? null;
@@ -2365,7 +2367,7 @@ trait EmitLlvmArrays
                 );
             }
         }
-        $readsOld = !$rebinds && ($dropFlavor !== '' || $this->rt->needsRefCells);
+        $readsOld = $dropFlavor !== '' || (!$rebinds && $this->rt->needsRefCells);
         $this->elemWroteThroughRef = '';
         $next = $this->ssa->allocReg();
         if ($isAppend) {
