@@ -16,6 +16,7 @@ use Compile\Mir\If_;
 use Compile\Mir\Instanceof_;
 use Compile\Mir\Invoke_;
 use Compile\Mir\Return_;
+use Compile\Mir\Spread_;
 use Compile\Mir\Walk;
 use Compile\Mir\Type;
 
@@ -216,7 +217,8 @@ final class ResolveMethodFcc implements Pass
      * arity, no defaults, same variadic-ness); when only the by-ref modes
      * differ, the callable takes the union of the modes and dispatches on the
      * receiver's actual class, each arm calling that class's own method with
-     * its own modes.
+     * its own modes — as do by-ref implementers whose parameter TYPES differ.
+     * Implementers disagreeing on arity or defaults: {@see refPrefixForwarder}.
      *
      * @param array<string, FunctionDef> $byName
      * @param array<string, FunctionDef> $byLower
@@ -243,11 +245,13 @@ final class ResolveMethodFcc implements Pass
         $modesDiffer = false;
         $typesDiffer = false;
         foreach ($cands as $c) {
-            if (\count($c->params) !== $arity) { return null; }
+            if (\count($c->params) !== $arity) { return $this->refPrefixForwarder($fn, $module, $cands, $candClass); }
             for ($j = 1; $j < $arity; $j = $j + 1) {
                 $p = $c->params[$j];
                 $q = $first->params[$j];
-                if (($p->default !== null && $nc > 1) || $p->variadic !== $q->variadic) { return null; }
+                if (($p->default !== null && $nc > 1) || $p->variadic !== $q->variadic) {
+                    return $this->refPrefixForwarder($fn, $module, $cands, $candClass);
+                }
                 if ($p->byRef) { $anyRef = true; }
                 if ($p->byRef !== $q->byRef) { $modesDiffer = true; }
                 $pt = $p->siteRefinedFrom !== null ? $p->siteRefinedFrom : $p->type;
@@ -259,7 +263,6 @@ final class ResolveMethodFcc implements Pass
         // builtin with a same-named method): speak for it only where the
         // variadic forwarder would crash — a reference parameter.
         if ($cls === '' && !$anyRef) { return null; }
-        if ($typesDiffer && $anyRef) { return null; }
         $params = [$fn->params[0]];
         for ($j = 1; $j < $arity; $j = $j + 1) {
             $p = $first->params[$j];
@@ -273,22 +276,12 @@ final class ResolveMethodFcc implements Pass
             $np->arrayHinted = $p->arrayHinted;
             $params[] = $np;
         }
-        if (!$modesDiffer) {
+        if (!$modesDiffer && !($typesDiffer && $anyRef)) {
             $sig = new FunctionDef(name: $first->name, params: $params, returnType: $first->returnType,
                 body: $first->body, isPrelude: $first->isPrelude);
             return $this->rebuild($fn, $sig);
         }
-        // Most-derived classes first, so an override wins over its parent's arm.
-        $order = [];
-        for ($k = 0; $k < $nc; $k = $k + 1) { $order[] = $k; }
-        for ($a = 0; $a < $nc; $a = $a + 1) {
-            for ($b = $a + 1; $b < $nc; $b = $b + 1) {
-                if ($this->isA($module, $candClass[$order[$b]], $candClass[$order[$a]])
-                    && $candClass[$order[$b]] !== $candClass[$order[$a]]) {
-                    $tmp = $order[$a]; $order[$a] = $order[$b]; $order[$b] = $tmp;
-                }
-            }
-        }
+        $order = $this->derivedFirst($module, $candClass);
         $recv = $fn->params[0];
         $loads = [];
         for ($j = 1; $j < $arity; $j = $j + 1) {
@@ -311,6 +304,116 @@ final class ResolveMethodFcc implements Pass
             body: new Block($stmts, Type::void()),
             isPrelude: $fn->isPrelude,
         );
+    }
+
+    /**
+     * Candidate indexes, most-derived classes first, so an override wins over
+     * its parent's arm.
+     *
+     * @param string[] $candClass
+     * @return int[]
+     */
+    private function derivedFirst(Module $module, array $candClass): array
+    {
+        $nc = \count($candClass);
+        $order = [];
+        for ($k = 0; $k < $nc; $k = $k + 1) { $order[] = $k; }
+        for ($a = 0; $a < $nc; $a = $a + 1) {
+            for ($b = $a + 1; $b < $nc; $b = $b + 1) {
+                if ($this->isA($module, $candClass[$order[$b]], $candClass[$order[$a]])
+                    && $candClass[$order[$b]] !== $candClass[$order[$a]]) {
+                    $tmp = $order[$a]; $order[$a] = $order[$b]; $order[$b] = $tmp;
+                }
+            }
+        }
+        return $order;
+    }
+
+    /**
+     * Implementers that disagree on arity or defaults, and some of them take
+     * a parameter BY REFERENCE. The variadic forwarder would hand the callee
+     * a copy in its pack (the write never reached the caller, and a by-ref
+     * slot fed from a spread dereferenced the value). Declare the leading
+     * positions up to the last by-ref one explicitly — by reference where any
+     * implementer is — and forward the rest through the pack, so each callee
+     * still applies its own defaults to what was not supplied. Differing modes
+     * or types there dispatch on the receiver's class, each arm calling its own
+     * method. `null` (keep
+     * the variadic forwarder) when no implementer has a by-ref parameter, or
+     * when a leading position is optional or variadic somewhere: an omitted
+     * argument there cannot be told apart from a supplied one.
+     *
+     * @param FunctionDef[] $cands
+     * @param string[] $candClass
+     */
+    private function refPrefixForwarder(FunctionDef $fn, Module $module, array $cands, array $candClass): ?FunctionDef
+    {
+        $lead = 0;
+        foreach ($cands as $c) {
+            $np = \count($c->params);
+            for ($j = 1; $j < $np; $j = $j + 1) {
+                if ($c->params[$j]->byRef && $j > $lead) { $lead = $j; }
+            }
+        }
+        if ($lead === 0 || \count($fn->params) !== 2 || !$fn->params[1]->variadic) { return null; }
+        $first = $cands[0];
+        $needArms = false;
+        foreach ($cands as $c) {
+            for ($j = 1; $j <= $lead; $j = $j + 1) {
+                $p = $c->params[$j] ?? null;
+                if ($p === null || $p->variadic || $p->default !== null) { return null; }
+                if ($p->byRef !== $first->params[$j]->byRef) { $needArms = true; }
+            }
+        }
+        $params = [$fn->params[0]];
+        $loads = [];
+        for ($j = 1; $j <= $lead; $j = $j + 1) {
+            $p = $first->params[$j];
+            $t = $p->siteRefinedFrom !== null ? $p->siteRefinedFrom : $p->type;
+            $ref = false;
+            foreach ($cands as $c) {
+                $q = $c->params[$j];
+                if ($q->byRef) { $ref = true; }
+                $qt = $q->siteRefinedFrom !== null ? $q->siteRefinedFrom : $q->type;
+                if ($qt->kind !== $t->kind) { $t = Type::cell(); $needArms = true; }
+            }
+            $params[] = new Param(name: $p->name, type: $t, byRef: $ref, variadic: false, default: null);
+            $loads[] = new LoadLocal($p->name, $t);
+        }
+        $rest = $fn->params[1];
+        $params[] = $rest;
+        $recv = $fn->params[0];
+        if (!$needArms) {
+            $call = new MethodCall_(new LoadLocal($recv->name, Type::unknown()), $fn->fccMethod, $this->forwardArgs($loads, $rest), Type::unknown());
+            $stmts = [new Return_($call, Type::void())];
+        } else {
+            $stmts = [];
+            foreach ($this->derivedFirst($module, $candClass) as $k) {
+                $cn = $candClass[$k];
+                $call = new MethodCall_(new LoadLocal($recv->name, Type::obj($cn)), $fn->fccMethod, $this->forwardArgs($loads, $rest), Type::unknown());
+                $arm = new Block([new Return_($call, Type::void())], Type::void());
+                $stmts[] = new If_(new Instanceof_(new LoadLocal($recv->name, Type::unknown()), $cn), $arm, null);
+            }
+        }
+        return new FunctionDef(
+            name: $fn->name,
+            params: $params,
+            returnType: $fn->returnType,
+            body: new Block($stmts, Type::void()),
+            isPrelude: $fn->isPrelude,
+        );
+    }
+
+    /**
+     * @param LoadLocal[] $loads
+     * @return Node[]
+     */
+    private function forwardArgs(array $loads, Param $rest): array
+    {
+        $args = [];
+        foreach ($loads as $l) { $args[] = new LoadLocal($l->name, $l->type); }
+        $args[] = new Spread_(new LoadLocal($rest->name, $rest->type), Type::unknown());
+        return $args;
     }
 
     private function rebuild(FunctionDef $fn, FunctionDef $target): FunctionDef

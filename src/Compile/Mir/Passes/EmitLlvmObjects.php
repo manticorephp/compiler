@@ -7942,6 +7942,20 @@ trait EmitLlvmObjects
         if ($static === '' && $fallback === '') {
             foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
         }
+        // An ABSTRACT declaration has no body, so no signature: the site read
+        // an empty by-ref mask and handed `abstract function m(&$x)` the VALUE
+        // of `$n`, which the implementation then dereferenced. Speak the ABI of
+        // an implementation reachable from the receiver's class instead.
+        if ($fallback !== '' && $static !== '' && isset($this->classes[$static])
+            && !isset($this->sigs->paramTypes[$fallback . '__' . $mc->method])) {
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if (isset($this->sigs->paramTypes[$r . '__' . $mc->method])
+                    && $this->classImplementsIface((string)$cn, $static)) {
+                    $fallback = $r;
+                    break;
+                }
+            }
+        }
         // The fallback's signature decides how many arguments the site emits
         // ({@see faCallArgsRecv} trims the surplus), so on a receiver that is no
         // one concrete class it must be a holder that can TAKE them: the first

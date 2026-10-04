@@ -904,13 +904,13 @@ trait EmitLlvmLocals
         // the callee's write has to be self-describing or `var_dump($n)` reads
         // 42 as `float(2.08E-322)`.
         //
-        // ⛔ NOT for a CLOSURE. Its parameters are cell-typed by the uniform
-        // closure ABI rather than by any declaration, and a by-ref one points
-        // straight at an array's ELEMENT slot: boxing there made
-        // `array_walk($m, fn (&$v) => $v = $v * 10)` write NaN-boxed words into
-        // the array and print -4222124650659830 for 10.
-        if (!$this->frame->isClosure
-            && isset($this->locals->refLocals[$sl->name])
+        // A CLOSURE's cell by-ref parameter too: every invoke hands it a CELL
+        // slot — a cell lvalue's own address, or a scratch cell the caller
+        // boxed a concrete lvalue into and decodes back after the call
+        // ({@see EmitLlvmCalls::emitClosureStructInvoke},
+        // {@see EmitLlvmCalls::emitDynByRefArg}). Writing raw here turned
+        // `function (&$x) { $x = "s"; }` into a string pointer read as a double.
+        if (isset($this->locals->refLocals[$sl->name])
             && isset($this->locals->slots[$sl->name])
             && ($this->locals->refParamTypes[$sl->name] ?? null) !== null
             && $this->locals->refParamTypes[$sl->name]->kind === Type::KIND_CELL

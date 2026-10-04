@@ -2500,6 +2500,7 @@ trait InferScans
     private function scanRefCellArgWiden(Module $module): bool
     {
         $changed = false;
+        $this->refCellArgClosureCaps = $module->closureCaptures;
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude) { continue; }
             $names = [];
@@ -2515,21 +2516,89 @@ trait InferScans
         return $changed;
     }
 
+    /** @param Node[] $args */
+    private function refCellArgCandidate(array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a->kind === Node::KIND_LOAD_LOCAL || $a->kind === Node::KIND_REF_ADDR) { return true; }
+        }
+        return false;
+    }
+
+    /** The body of `$method` in the first class below `$cls` that has one. */
+    private function implementerFn(string $cls, string $method): ?\Compile\Mir\FunctionDef
+    {
+        foreach ($this->classes as $cn => $_) {
+            $c = (string)$cn;
+            if ($c === $cls || !$this->classImplementsT($c, $cls)) { continue; }
+            $decl = $this->resolveMethodClass($c, $method);
+            if ($decl === '') { continue; }
+            $fn = $this->fnByName[$decl . '__' . $method] ?? null;
+            if ($fn !== null) { return $fn; }
+        }
+        return null;
+    }
+
     /** @param array<string,bool> $names */
     private function scanRefCellArgNode(Node $n, array &$names): void
     {
-        if ($n->kind === Node::KIND_CALL) {
+        // Every call flavor whose callee is known here: a method / static call
+        // and a closure invoke share the slot exactly like a named call does.
+        // A closure takes the caller's ADDRESS for a by-ref param, so a raw
+        // local there was read as a cell (garbage); a method call boxed it into
+        // a scratch cell and unboxed it by the caller's OLD type.
+        $callee = null;
+        $args = [];
+        $base = 0;
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL) {
             $callee = $this->fnByName[$n->function] ?? null;
-            if ($callee !== null) {
-                foreach ($n->args as $i => $a) {
-                    $p = $callee->params[$i] ?? null;
-                    if ($p === null || !$p->byRef) { continue; }
-                    if ($p->type->kind !== Type::KIND_CELL) { continue; }
-                    if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                        $names[$a->name] = true;
-                    } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
-                        $names[$a->target] = true;
-                    }
+            $args = $n->args;
+        } elseif ($k === Node::KIND_METHOD_CALL) {
+            $mc = $n;
+            $cls = $mc->object->type->class ?? '';
+            $decl = $cls !== '' ? $this->resolveMethodClass($cls, $mc->method) : '';
+            if ($decl !== '') {
+                $callee = $this->fnByName[$decl . '__' . $mc->method] ?? null;
+                $args = $mc->args;
+            }
+            // An abstract / interface declaration has no body: an
+            // implementation's signature is the one the call speaks.
+            if ($callee === null && $cls !== '' && $this->refCellArgCandidate($mc->args)) {
+                $callee = $this->implementerFn($cls, $mc->method);
+                $args = $mc->args;
+            }
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            $sc = $n;
+            $decl = $sc->class !== '' ? $this->resolveMethodClass($sc->class, $sc->method) : '';
+            if ($decl !== '') {
+                $callee = $this->fnByName[$decl . '__' . $sc->method] ?? null;
+                $args = $sc->args;
+            }
+        } elseif ($k === Node::KIND_INVOKE) {
+            $iv = $n;
+            $cls = $iv->callee->type->class ?? '';
+            if ($cls !== '' && isset($this->refCellArgClosureCaps[$cls])) {
+                $callee = $this->fnByName[$cls] ?? null;
+                $args = $iv->args;
+                $base = $this->refCellArgClosureCaps[$cls];
+            }
+        }
+        if ($callee !== null) {
+            if ($k !== Node::KIND_CALL && $k !== Node::KIND_INVOKE
+                && ($callee->params[0] ?? null) !== null && $callee->params[0]->name === 'this') {
+                $base = 1;
+            }
+            $i = 0;
+            foreach ($args as $a) {
+                $p = $callee->params[$base + $i] ?? null;
+                $i = $i + 1;
+                if ($p === null || !$p->byRef) { continue; }
+                if ($p->type->kind !== Type::KIND_CELL) { continue; }
+                if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                    $names[$a->name] = true;
+                } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
+                    $names[$a->target] = true;
                 }
             }
         }

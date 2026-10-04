@@ -571,6 +571,8 @@ final class InferTypes implements Pass
      *  and the closure's capture param are recorded, and both become a CELL — the
      *  word is one slot, so it has one representation. {@see scanByRefCaptureWiden} */
     private array $byRefCaptureCellLocals = [];
+    /** @var array<string, int> closure fn name → capture count, for {@see scanRefCellArgNode} */
+    private array $refCellArgClosureCaps = [];
     /** @var array<string,bool> array locals whose element is an inner array built
      *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
      *  vec[unknown] (raw). Paired with {@see $nestedScalarStoreLocals}. */
