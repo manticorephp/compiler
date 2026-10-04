@@ -3423,7 +3423,11 @@ final class LowerFromAst implements Pass
             // Any other receiver has no class before inference: the shim is a
             // placeholder {@see ResolveMethodFcc} rebuilds from the method's own
             // parameters once the receiver is typed.
-            [$mir, $loads] = $this->fccParamsAndArgs(null, $cls);
+            // Until then (and for good on an interface / abstract / erased
+            // receiver) it forwards EVERY argument: a variadic pass-through,
+            // never an arity cut.
+            $mir = [new Param(name: '__fa', type: Type::vec(Type::cell()), byRef: false, variadic: true)];
+            $loads = [new Spread_(new LoadLocal('__fa', Type::vec(Type::cell())), Type::unknown())];
             $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
             $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
             $this->module->functions[\count($this->module->functions) - 1]->fccMethod = $method;
