@@ -5431,6 +5431,8 @@ final class EmitLlvm implements EmitVisitor
             $cls = $base->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
+        // A static property's global IS the cell holding the array pointer.
+        if ($base->kind === Node::KIND_STATIC_PROP) { return true; }
         // A NESTED container (`$a['k']` of `&$a['k'][$j]`): its element slot
         // is itself addressable, and {@see containerCellPtr} opens it.
         if ($base->kind === Node::KIND_ARRAY_ACCESS) {
@@ -5545,6 +5547,11 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValue = $scr;
             $this->lastValueType = 'ptr';
             return $out;
+        }
+        if ($base->kind === Node::KIND_STATIC_PROP) {
+            $this->lastValue = $base->global;
+            $this->lastValueType = 'ptr';
+            return '';
         }
         if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
             // The property field IS the cell holding the array pointer.

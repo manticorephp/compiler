@@ -564,6 +564,8 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
+    /** @var bool a property element type was widened by {@see scanRefElemArgWiden}: every reader re-infers */
+    private bool $refElemPropsRetyped = false;
     /** @var array<string, array<string, bool>> the {@see $forcedCellElemLocals} entries a by-ref CAPTURE proved; kept on the module across runs */
     private array $byRefCaptureElemLocals = [];
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
@@ -1113,6 +1115,13 @@ final class InferTypes implements Pass
             if ($widened) {
                 $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
             }
+            // An ELEMENT handed to a cell by-ref param makes its array a cell array.
+            $this->rescanTargets = [];
+            $this->refElemPropsRetyped = false;
+            $elemWidened = $this->scanRefElemArgWiden($module);
+            if ($elemWidened) {
+                $this->inferFunctionsForScope($module, 'byref_elem_arg', $this->refElemPropsRetyped ? null : $this->rescanTargets);
+            }
             // A retyped param captured `use (&$i)` is a cell at the capture
             // site now, and the closure's side of that word must follow.
             $captured = false;
@@ -1120,7 +1129,7 @@ final class InferTypes implements Pass
                 $captured = true;
                 $this->inferFunctionsForScope($module, 'byref_capture');
             }
-            if (!$retyped && !$widened && !$captured) { break; }
+            if (!$retyped && !$widened && !$elemWidened && !$captured) { break; }
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the

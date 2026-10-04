@@ -2648,6 +2648,146 @@ trait InferScans
         return $changed;
     }
 
+
+    /**
+     * An array ELEMENT handed to a by-ref param that is a cell (`mixed &$v`, or
+     * a typed `int &$v` retyped by {@see scanRefParamRetype}) can come back as
+     * ANY kind, and the caller writes that cell into the element's own slot. A
+     * buffer whose elements are a concrete scalar has no room for it — the
+     * stored string landed as a boxed word in a `vec[int]` and read back as
+     * garbage — so the array being addressed is a mixed array: seed its element
+     * cell, as {@see scanByRefElemWiden} does for a callee that appends. A local
+     * is widened when this scope built it from a literal, an instance property
+     * through its declared type; a closure's untyped `&$v` is a cell by the ABI
+     * alone and says nothing about what it stores, so only a retyped closure
+     * param counts.
+     */
+    private function scanRefElemArgWiden(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($fn->isPrelude || $fn->isExtern) { continue; }
+            /** @var Node[] $bases */
+            $bases = [];
+            $this->collectRefElemArgBases($fn->body, $bases);
+            if ($bases === []) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            foreach ($bases as $b) {
+                if ($b->kind === Node::KIND_LOAD_LOCAL) {
+                    if (isset($skip[$b->name]) || !isset($lits[$b->name])) { continue; }
+                    if (isset($this->byRefCellElemLocals[$fn->name][$b->name])) { continue; }
+                    $this->byRefCellElemLocals[$fn->name][$b->name] = true;
+                    $this->rescanTargets[$fn->name] = true;
+                    $changed = true;
+                } elseif ($b->kind === Node::KIND_STATIC_PROP) {
+                    if ($this->widenStaticPropElem($module, $b->global)) { $changed = true; $this->refElemPropsRetyped = true; }
+                } elseif ($b->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $cd = null;
+                    $walk = $b->object->type->class ?? '';
+                    $seen = [];
+                    while ($walk !== '' && !isset($seen[$walk])) {
+                        $seen[$walk] = true;
+                        $wd = $this->classes[$walk] ?? null;
+                        if ($wd === null) { break; }
+                        if (isset($wd->propertyTypes[$b->property])) { $cd = $wd; break; }
+                        $walk = $wd->parent;
+                    }
+                    if ($cd === null) { continue; }
+                    $cur = $cd->propertyTypes[$b->property] ?? null;
+                    if ($cur === null) { continue; }
+                    if ($cur->isArray()) {
+                        if (($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
+                        $nt = $cur->key !== null ? Type::assoc($cur->key, Type::cell()) : Type::vec(Type::cell());
+                    } elseif ($cur->kind === Type::KIND_UNKNOWN && ($cd->propertyArrayHinted[$b->property] ?? false)) {
+                        $nt = Type::vec(Type::cell());
+                    } else {
+                        continue;
+                    }
+                    if ($this->setPropType($cd, $b->property, $nt)) { $changed = true; $this->refElemPropsRetyped = true; }
+                }
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * A STATIC array property whose element is handed to a cell by-ref param:
+     * its slot is one global cell, so the declared literal default and every
+     * node reading it have to agree on cell elements. The default is built at
+     * lowering from the slot's declared type and InferTypes never sees it — the
+     * literal is retyped here, with every `StaticProp_` of that cell.
+     */
+    private function widenStaticPropElem(Module $module, string $global): bool
+    {
+        $n = \count($module->globalNames);
+        $di = -1;
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            if ($module->globalNames[$i] === $global) { $di = $i; break; }
+        }
+        if ($di < 0) { return false; }
+        $def = $module->globalDefaults[$di];
+        if ($def->kind !== Node::KIND_ARRAY_LIT || !$def->type->isArray()) { return false; }
+        if (($def->type->element->kind ?? '') === Type::KIND_CELL) { return false; }
+        $nt = $def->type->key !== null ? Type::assoc($def->type->key, Type::cell()) : Type::vec(Type::cell());
+        $def->type = $nt;
+        foreach ($module->functions as $fn) {
+            if (!$this->bodyHas($fn, Node::KIND_STATIC_PROP)) { continue; }
+            $this->retypeStaticPropCell($fn->body, $global, $nt);
+        }
+        return true;
+    }
+
+    private function retypeStaticPropCell(Node $n, string $global, Type $nt): void
+    {
+        if ($n->kind === Node::KIND_STATIC_PROP && $n->global === $global && $n->type->isArray()) { $n->type = $nt; }
+        foreach (Walk::children($n) as $c) { $this->retypeStaticPropCell($c, $global, $nt); }
+    }
+
+    /** The array operand of every `$base[$k]` argument bound to a cell by-ref param.
+     *  @param Node[] $out */
+    private function collectRefElemArgBases(Node $n, array &$out): void
+    {
+        $base = 0;
+        /** @var Node[] $args */
+        $args = [];
+        $callee = $this->byRefCallee($n, $args, $base);
+        if ($callee !== null) {
+            $viaClosure = isset($this->closureCapCount[$callee->name]);
+            foreach ($args as $i => $a) {
+                $p = $callee->params[$base + $i] ?? null;
+                if ($p === null || !$p->byRef || $p->type->kind !== Type::KIND_CELL) { continue; }
+                if ($viaClosure && !$p->retypedByRef) { continue; }
+                if ($a->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
+                $ek = $a->type->kind;
+                if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
+                $bs = $a->array;
+                if ($bs->kind === Node::KIND_LOAD_LOCAL || $bs->kind === Node::KIND_PROPERTY_ACCESS
+                    || $bs->kind === Node::KIND_STATIC_PROP) { $out[] = $bs; }
+            }
+        }
+        // `array_walk($xs, function (&$v) { $v = 'other kind'; })`: the callback
+        // rewrites each element of the walked array.
+        if ($n->kind === Node::KIND_CALL && ($n->function === 'array_walk' || $n->function === 'array_walk_recursive')
+            && \count($n->args) >= 2 && $n->args[1]->kind === Node::KIND_CLOSURE && $n->args[0]->type->isArray()) {
+            $cn = $n->args[1]->type->class ?? '';
+            $cf = $cn !== '' ? ($this->fnByName[$cn] ?? null) : null;
+            $pi = \count($n->args[1]->captures);
+            $p = $cf === null ? null : ($cf->params[$pi] ?? null);
+            $ek = $n->args[0]->type->element->kind ?? Type::KIND_UNKNOWN;
+            $bs = $n->args[0];
+            if ($p !== null && $p->byRef && $ek !== Type::KIND_CELL && $ek !== Type::KIND_UNKNOWN
+                && ($bs->kind === Node::KIND_LOAD_LOCAL || $bs->kind === Node::KIND_PROPERTY_ACCESS
+                    || $bs->kind === Node::KIND_STATIC_PROP)
+                && ($p->retypedByRef || $this->refWordForeign($cf->body, $p->name, $ek, 0))) {
+                $p->retypedByRef = true;
+                $out[] = $bs;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefElemArgBases($c, $out); }
+    }
     /** Do `$a` and `$b` share a supertype (themselves included — a parent, an
      *  interface) that has method `$m`? Then one call site can reach both. */
     private function sameMethodFamily(string $a, string $b, string $m): bool
