@@ -7977,6 +7977,17 @@ trait EmitLlvmBuiltins
             $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cd->name))) . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endL . "\n";
         }
+        // An enum without methods owns no ClassDef, only an id: its singletons
+        // still reach here through a mixed receiver (get_class, the string-
+        // conversion Error).
+        foreach ($this->enums as $ed) {
+            if ($ed->classId <= 0 || isset($this->classes[$ed->name])) { continue; }
+            $caseL = $this->ssa->allocLabel('gcf.case');
+            $caseMap[$ed->classId] = $caseL;
+            $bodies .= $caseL . ":\n";
+            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($ed->name))) . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $endL . "\n";
+        }
         $out .= $this->emitAdaptiveClassIdBranch('%gcf.cid', $caseMap, $defL) . $bodies;
         $out .= $defL . ":\n";
         $out .= '  store ptr ' . $this->strLitId($this->pool->intern('')) . ', ptr ' . $res . "\n";
