@@ -1218,6 +1218,13 @@ final class __McTok
         while ($j < $len) {
             $c = \ord($s[$j]);
             if ($c === 92 && $term >= 0) { $j = $j + 2; continue; }
+            if ($c === 92 && $term < 0 && !$raw) {
+                // Heredoc: a backslash escapes the next byte, a line break excepted
+                // (so a terminator on the next line is still seen).
+                $nb = $j + 1 < $len ? \ord($s[$j + 1]) : 10;
+                $j = ($nb === 10 || $nb === 13) ? $j + 1 : $j + 2;
+                continue;
+            }
             if ($c === $term) { break; }
             if ($term < 0 && $this->heredocEndAt($s, $len, $j) >= 0) { break; }
             if ($raw) { $j = $j + 1; continue; }
