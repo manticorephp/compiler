@@ -711,8 +711,23 @@ trait LowerFns
         }
         $callee = $this->lowerExpr($calleeAst);
         $args = [];
-        foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
-        return new Invoke_($callee, $args, Type::unknown());
+        $names = [];
+        $anyNamed = false;
+        foreach ($expr->args as $a) {
+            $args[] = $this->lowerExpr($a);
+            if ($a->kind === 'NamedArg') {
+                $names[] = $this->namedArgName($a);
+                $anyNamed = true;
+            } else {
+                $names[] = '';
+            }
+        }
+        $inv = new Invoke_($callee, $args, Type::unknown());
+        if ($anyNamed) {
+            $inv->argNames = $names;
+            $this->module->namedInvokes = true;
+        }
+        return $inv;
     }
 
     /**
