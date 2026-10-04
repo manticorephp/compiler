@@ -827,6 +827,9 @@ final class InferTypes implements Pass
     /** @var array<string, \Compile\Mir\EnumDef> */
     private array $enums = [];
 
+    /** The program's entry file, for a runtime message's `called in …`. */
+    private string $moduleSourceFile = '';
+
     /** `#[TypeDef]` value types — kept apart from {@see $classes} because they
      *  have no runtime object form. Only `$byte->value` and `$byte->method()` consult them.
      *  @var array<string, \Compile\Mir\ClassDef> */
@@ -841,6 +844,7 @@ final class InferTypes implements Pass
         $this->classes = $module->classes;
         $this->declarersIdx = [];
         $this->enums = $module->enums;
+        $this->moduleSourceFile = $module->sourceFile;
         $this->typeDefs = $module->typeDefs;
         $this->fnByName = [];
         $this->closureNodeByName = [];
@@ -1105,13 +1109,22 @@ final class InferTypes implements Pass
             $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
             $this->rescanTargets = [];
         }
-        // A fixpoint: a callee's by-ref array param retyped this round widens its
-        // callers' arrays the next ({@see InferScans::retypeByRefParamElems}).
-        $guard = 0;
-        while ($guard < 4 && $this->scanRefCellArgWiden($module)) {
+        // A true fixpoint: a callee's by-ref array param retyped this round widens
+        // its callers' arrays the next ({@see InferScans::retypeByRefParamElems}),
+        // one call-chain hop per round at worst. Every set it grows is monotone
+        // (a name or a param only ever turns cell), so it terminates; the cap is
+        // a chain longer than the module has functions, which only a bug makes,
+        // and it fails the build instead of leaving the far callers raw.
+        $rounds = 0;
+        $cap = \count($module->functions) + 8;
+        while ($this->scanRefCellArgWiden($module)) {
             $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
             $this->rescanTargets = [];
-            $guard = $guard + 1;
+            $rounds = $rounds + 1;
+            if ($rounds > $cap) {
+                throw new \RuntimeException('MIR.infer: the by-ref widening did not converge in '
+                    . (string)$cap . ' rounds — a set that should only grow changed back');
+            }
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the

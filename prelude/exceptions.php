@@ -150,6 +150,17 @@ function __mir_shape_type_error(mixed $v, string $where, string $expected): void
 }
 
 /**
+ * A typed property bound by reference to a param of another scalar type —
+ * php refuses the binding. `$head` / `$tail` frame the value's type, the one
+ * runtime part. Called from the IR ({@see \Compile\Mir\Passes\EmitLlvmLocals::
+ * byRefAddrOf}), never from PHP source.
+ */
+function __mir_byref_type_error(mixed $v, string $head, string $tail): void
+{
+    throw new TypeError($head . get_debug_type($v) . $tail);
+}
+
+/**
  * A string offset that arrived as a CELL or a STRING → the byte offset php
  * uses. Called from the IR ({@see \Compile\Mir\Passes\EmitLlvmArrays::
  * coerceStrOffset}), never from PHP source. An integer string (surrounding

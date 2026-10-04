@@ -2839,6 +2839,9 @@ trait InferScans
                 foreach ($this->refCallArgs($n) as $i => $a) {
                     $p = $callee->params[$offset + $i] ?? null;
                     if ($p === null || !$p->byRef) { continue; }
+                    if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
+                        $this->markByRefPropTypeError($n, $fname, $p, $a, $i + 1);
+                    }
                     if (isset($this->byRefElemRetyped[$fname . '#' . (string)($offset + $i)])) {
                         // The callee's by-ref array became a cell-element one;
                         // the argument's buffer is that same buffer.
@@ -2852,6 +2855,59 @@ trait InferScans
         foreach (Walk::children($n) as $c) {
             $this->scanRefCellArgNode($c, $names, $elems, $props);
         }
+    }
+
+    /**
+     * A TYPED property handed by reference to a param of ANOTHER scalar type:
+     * php refuses the binding — the coercion the param asks for would change
+     * the type of a reference the property's type also constrains — with
+     * `f(): Argument #1 ($x) must be of type string, int given, called in …`.
+     * We coerced silently. The message is fixed here; the value's
+     * `get_debug_type` is the one runtime part ({@see
+     * EmitLlvmCalls::byRefAddrOf} throws it before taking the address).
+     */
+    private function markByRefPropTypeError(Node $call, string $fname, \Compile\Mir\Param $p, Node $a, int $argNo): void
+    {
+        $pa = $a;
+        $pa->byRefTypeErrorHead = '';
+        $pa->byRefTypeErrorTail = '';
+        $pk = $p->type->kind;
+        if (!$this->isCoercibleScalarKind($pk)) { return; }
+        $cls = $pa->object->type->class ?? null;
+        if ($cls === null || $cls === '') { return; }
+        $cd = $this->classes[$cls] ?? null;
+        if ($cd === null) { return; }
+        $pm = $cd->propertyMeta[$pa->property] ?? null;
+        if ($pm === null) { return; }
+        $hint = \strtolower(\ltrim($pm->typeHint, '?'));
+        $tk = $hint === 'int' ? Type::KIND_INT : ($hint === 'float' ? Type::KIND_FLOAT
+            : ($hint === 'bool' ? Type::KIND_BOOL : ($hint === 'string' ? Type::KIND_STRING : '')));
+        if ($tk === '' || $tk === $pk) { return; }
+        $display = $this->byRefCalleeDisplay($call, $fname);
+        if ($display === '') { return; }
+        $expected = $pk === Type::KIND_INT ? 'int' : ($pk === Type::KIND_FLOAT ? 'float'
+            : ($pk === Type::KIND_BOOL ? 'bool' : 'string'));
+        $pa->byRefTypeErrorHead = $display . '(): Argument #' . (string)$argNo . ' ($' . $p->name
+            . ') must be of type ' . $expected . ', ';
+        $tail = ' given';
+        if ($call->line > 0 && $this->moduleSourceFile !== '') {
+            $tail = $tail . ', called in ' . $this->moduleSourceFile . ' on line ' . (string)$call->line;
+        }
+        $pa->byRefTypeErrorTail = $tail;
+    }
+
+    /** The name php prints for the callee of a by-ref binding error: `f`,
+     *  `C::m`, `C::__construct`; '' for a closure (php spells those by file
+     *  and line, which the binding error is not worth guessing). */
+    private function byRefCalleeDisplay(Node $call, string $fname): string
+    {
+        if ($call->kind === Node::KIND_CALL) { return $fname; }
+        if ($call->kind === Node::KIND_INVOKE) { return ''; }
+        // `Class__method`, the method's own name possibly `__`-led
+        // (`C____construct`): the FIRST separator ends the class.
+        $cut = \strpos($fname, '__');
+        if ($cut === false || $cut <= 0) { return ''; }
+        return \substr($fname, 0, $cut) . '::' . \substr($fname, $cut + 2);
     }
 
     /** A whole array argument whose buffer must hold cells: a local's (or a

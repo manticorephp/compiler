@@ -1710,6 +1710,13 @@ final class PropertyAccess_ extends Node
     {
         return [$this->object];
     }
+
+    /** Set by {@see Passes\InferScans::markByRefPropTypeError}: this TYPED
+     *  property is a by-ref argument to a param of another scalar type, which
+     *  php refuses with a TypeError — the message around `get_debug_type` of
+     *  the value. '' when the binding is fine. Field order is layout: append. */
+    public string $byRefTypeErrorHead = '';
+    public string $byRefTypeErrorTail = '';
 }
 
 /**

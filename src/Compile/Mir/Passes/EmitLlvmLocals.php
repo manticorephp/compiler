@@ -1482,6 +1482,24 @@ trait EmitLlvmLocals
      */
     private function byRefAddrOf(Node $a): ?string
     {
+        // A typed property bound to a by-ref param of another scalar type:
+        // php's TypeError, decided by {@see InferScans::markByRefPropTypeError}.
+        $pre = '';
+        if ($a->kind === Node::KIND_PROPERTY_ACCESS && $a->byRefTypeErrorHead !== '') {
+            $pre = $this->emitNode($a);
+            $pre .= $this->boxToCell($a->type, $a);
+            $v = $this->lastValue;
+            // A prelude fn takes every argument as an i64 word; it throws.
+            $pre .= '  call i64 @manticore___mir_byref_type_error(i64 ' . $v
+                  . ', i64 ptrtoint (ptr ' . $this->strRef($a->byRefTypeErrorHead) . ' to i64)'
+                  . ', i64 ptrtoint (ptr ' . $this->strRef($a->byRefTypeErrorTail) . " to i64))\n";
+        }
+        $out = $this->byRefAddrOfRaw($a);
+        return $out === null ? null : $pre . $out;
+    }
+
+    private function byRefAddrOfRaw(Node $a): ?string
+    {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
             // A GLOBAL-BACKED local — `global $x`, and every SUPERGLOBAL, which
