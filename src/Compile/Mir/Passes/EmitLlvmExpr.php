@@ -2192,13 +2192,21 @@ trait EmitLlvmExpr
     private function emitArrayUnion(Node $left, Node $right): string
     {
         $out = $this->emitNode($left);
+        // The union co-owns every element it copies: an owned temp operand
+        // (`$v + [5 => new A]`, `f() + $d`) is dead once it ran.
+        $lf = $this->mergedTempFlavor($left);
         $out .= $this->unionOperandPtr($left);
         $l = $this->lastValue;
+        $lw = $this->unionTempWord;
         $out .= $this->emitNode($right);
+        $rf = $this->mergedTempFlavor($right);
         $out .= $this->unionOperandPtr($right);
         $r = $this->lastValue;
+        $rw = $this->unionTempWord;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_array_union(ptr ' . $l . ', ptr ' . $r . ")\n";
+        if ($lf !== '') { $out .= $this->rcReleaseReg($lw, $lf); }
+        if ($rf !== '') { $out .= $this->rcReleaseReg($rw, $rf); }
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2215,9 +2223,14 @@ trait EmitLlvmExpr
     {
         $k = $op->type->kind;
         if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN) {
-            return $this->coerceToPtr();
+            $out = $this->coerceToPtr();
+            $w = $this->ssa->allocReg();
+            $this->unionTempWord = $w;
+            return $out . '  ' . $w . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         }
         $out = $this->coerceToI64();
+        // The operand as it came: a cell temp drops by its tagged word.
+        $this->unionTempWord = $this->lastValue;
         $raw = $this->ssa->allocReg();
         $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
         $this->lastValue = $raw;

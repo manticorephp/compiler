@@ -874,8 +874,11 @@ final class Ownership
         // builtin body leak its whole result: `count(array_flip($t))` and
         // `count(array_combine($k, $v))` were 22-105 MB in the ownership
         // table where the same loop over the argument alone is 1.8.
+        // An array `+` is `__mir_array_union`'s fresh buffer, a literal's twin
+        // ({@see Passes\InferAllocKind} heaps it for the same reason).
         $owned = $k === Node::KIND_NEW_OBJ
-              || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL;
+              || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+              || ($k === Node::KIND_ADD && $tk === Type::KIND_ARRAY);
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
             $owned = isset($this->ctx->moduleFns[$fn]) && !($this->ctx->returnsByRef[$fn] ?? false);

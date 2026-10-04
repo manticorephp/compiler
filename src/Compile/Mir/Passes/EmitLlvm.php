@@ -256,6 +256,8 @@ final class EmitLlvm implements EmitVisitor
      *  live. A store that wrote through displaced nothing at the SLOT, so the
      *  slot drop must skip it. */
     private string $elemWroteThroughRef = '';
+    /** The i64 word of the last {@see EmitLlvmExpr::unionOperandPtr} operand, for its temp release. */
+    private string $unionTempWord = '';
 
     // Out-slot for {@see magicMatchIr}: the IR computing the `ptr-8` magic test.
     private string $magicMatchOut = '';
