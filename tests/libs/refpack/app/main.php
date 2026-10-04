@@ -9,3 +9,10 @@ var_dump($x);
 $a = 1; $b = 2;
 \Acme\bump(10, $a, $b);
 var_dump($a, $b);
+// A library property promoted to cell elements, read and written from here.
+$bag = new \Acme\Bag();
+$bag->promote();
+var_dump($bag->names);
+$bag->names[] = 'c';
+$bag->names[1] .= '!';
+echo implode(',', $bag->names), ' ', strlen($bag->names[0]), "\n";
