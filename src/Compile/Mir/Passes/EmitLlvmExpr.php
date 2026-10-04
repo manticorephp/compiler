@@ -767,7 +767,7 @@ trait EmitLlvmExpr
         $out .= "asarray:\n";
         $out .= "  %ap = and i64 %v, 281474976710655\n";
         $out .= "  %aptr = inttoptr i64 %ap to ptr\n";
-        $out .= "  %alen = load i64, ptr %aptr\n";
+        $out .= $this->arrayLiveCountIr();
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %az = zext i1 %ane to i64\n";
         $out .= "  ret i64 %az\n";
@@ -864,7 +864,7 @@ trait EmitLlvmExpr
         $out .= "asarray:\n";
         $out .= "  %ap = and i64 %v, 281474976710655\n";
         $out .= "  %aptr = inttoptr i64 %ap to ptr\n";
-        $out .= "  %alen = load i64, ptr %aptr\n";
+        $out .= $this->arrayLiveCountIr();
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %az = uitofp i1 %ane to double\n";
         $out .= "  ret double %az\n";
@@ -1886,6 +1886,24 @@ trait EmitLlvmExpr
      * always true. A raw cell can't be tested with `icmp ne i64 v, 0` — a boxed
      * `0`/`false`/`""` has non-zero tag bits and would read truthy.
      */
+    /**
+     * `%alen` = the LIVE element count of the array at `%aptr`: the physical
+     * length minus the tombstone counter, exactly as count() reads it
+     * ({@see EmitLlvmBuiltins::biCount}). The bare length word counts every
+     * unset entry, so `$a = ['x']; unset($a[0]); if (!$a)` read the emptied
+     * array as truthy.
+     */
+    private function arrayLiveCountIr(): string
+    {
+        return "  %aphys = load i64, ptr %aptr\n"
+            . '  %aflp = getelementptr inbounds i8, ptr %aptr, i64 '
+            . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n"
+            . "  %afl = load i64, ptr %aflp\n"
+            . '  %atsh = lshr i64 %afl, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_SHIFT . "\n"
+            . '  %atomb = and i64 %atsh, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_VALUE_MASK . "\n"
+            . "  %alen = sub i64 %aphys, %atomb\n";
+    }
+
     private function taggedTruthyRuntime(): string
     {
         $out  = "\ndefine i64 @__manticore_tagged_truthy(i64 %v) {\n";
@@ -1923,7 +1941,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %anull, label %sfalse, label %aload\n";
         $out .= "aload:\n";
         $out .= "  %aptr = inttoptr i64 %ap to ptr\n";
-        $out .= "  %alen = load i64, ptr %aptr\n";
+        $out .= $this->arrayLiveCountIr();
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %ar = zext i1 %ane to i64\n";
         $out .= "  ret i64 %ar\n";
@@ -4916,6 +4934,20 @@ trait EmitLlvmExpr
             $chunks = [$this->emitNode($cellNode)];
             $chunks[] = $this->coerceToI64();
             $v = $this->lastValue;
+            // LOOSE `$m == false` is php's `!$m` — 0, null, "", "0" and an empty
+            // array all equal false. Only the strict compare tests the tag.
+            if ($op === '==' || $op === '!=') {
+                $this->rt->needsTaggedTruthy = true;
+                $t = $this->ssa->allocReg();
+                $chunks[] = '  ' . $t . ' = call i64 @__manticore_tagged_truthy(i64 ' . $v . ")\n";
+                $cmpReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($op === '==' ? 'eq' : 'ne') . ' i64 ' . $t . ", 0\n";
+                $extReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $this->lastValue = $extReg;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
+            }
             $chunks[] = $this->cellTagIr($v);
             $tag = $this->cellTagReg;
             $isBool = $this->ssa->allocReg();
@@ -4955,8 +4987,9 @@ trait EmitLlvmExpr
             if ($ak === Type::KIND_ARRAY || $ak === Type::KIND_UNKNOWN) {
                 $chunks = [$this->emitNode($arrNode)];
                 $chunks[] = $this->coerceToPtr();
-                $len = $this->ssa->allocReg();
-                $chunks[] = '  ' . $len . ' = load i64, ptr ' . $this->lastValue . "\n";
+                // The LIVE count: the length word still counts unset entries.
+                $chunks[] = $this->arrayCountFromPtrIr($this->lastValue);
+                $len = $this->lastValue;
                 $cmpReg = $this->ssa->allocReg();
                 $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $len . ", 0\n";

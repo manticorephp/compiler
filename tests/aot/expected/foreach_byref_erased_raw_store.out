@@ -1,0 +1,93 @@
+array(2) {
+  [0]=>
+  array(0) {
+  }
+  [1]=>
+  array(0) {
+  }
+}
+array(2) {
+  [0]=>
+  array(2) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+  }
+}
+array(2) {
+  [0]=>
+  string(3) "str"
+  [1]=>
+  string(3) "str"
+}
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  float(1.5)
+}
+stdClass
+array(2) {
+  ["x"]=>
+  array(1) {
+    ["a"]=>
+    int(1)
+  }
+  ["y"]=>
+  array(1) {
+    ["a"]=>
+    int(1)
+  }
+}
+array(2) {
+  [0]=>
+  array(3) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+    [2]=>
+    int(3)
+  }
+  [1]=>
+  array(3) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+    [2]=>
+    int(3)
+  }
+}
+array(2) {
+  [0]=>
+  string(4) "strq"
+  [1]=>
+  string(4) "strr"
+}
+array(2) {
+  [0]=>
+  float(2.5)
+  [1]=>
+  float(2.5)
+}
+array(2) {
+  [0]=>
+  array(1) {
+    [0]=>
+    int(7)
+  }
+  [1]=>
+  array(1) {
+    [0]=>
+    int(7)
+  }
+}

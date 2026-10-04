@@ -1536,7 +1536,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
@@ -2935,7 +2935,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $empty = $this->ssa->allocLabel('ae.empty');
