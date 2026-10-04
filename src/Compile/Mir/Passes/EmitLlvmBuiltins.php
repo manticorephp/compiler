@@ -5292,6 +5292,17 @@ trait EmitLlvmBuiltins
             $i = $j;
         }
         $argN = \count($convs);
+        // A `%s` over a non-string static type (int / float / bool / null /
+        // object) needs php's string conversion, not a pointer reinterpret:
+        // `sprintf('%s', 5)` handed libc strlen the integer 5. The runtime
+        // engine owns those conversions.
+        for ($ci = 0; $ci < $argN && $ci + 1 < \count($args); $ci = $ci + 1) {
+            if ($convs[$ci] !== 's') { continue; }
+            $ck = $args[$ci + 1]->type->kind;
+            if ($ck !== Type::KIND_STRING && $ck !== Type::KIND_CELL && $ck !== Type::KIND_UNKNOWN) {
+                return $this->biFormatRuntime($args, $toStdout);
+            }
+        }
         // A positional `%n$` spec or fewer args than conversions needs the
         // runtime {@see \__mc_format} engine (arg reordering / a missing arg is
         // "" in PHP) — the inline path can do neither, and would crash on an
