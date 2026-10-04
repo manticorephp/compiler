@@ -1490,8 +1490,12 @@ trait InferScans
                 if ($cl === null) { continue; }
                 $pn = $this->paramNameAt($cl, $idx);
                 if ($pn === '') { continue; }
-                // The captured word itself holds two different kinds.
-                if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)) {
+                // The captured word itself holds two different kinds — written by
+                // the closure, or by the ENCLOSING frame (`$e = null;` captured,
+                // then `$e = 3;` — the closure body was seeded null and read
+                // every later value as null).
+                if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)
+                    || $this->byRefCaptureDisagrees($fn, $local, $siteKind)) {
                     if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                         $this->byRefCaptureCellLocals[$fn->name][$local] = true;
                         $changed = true;

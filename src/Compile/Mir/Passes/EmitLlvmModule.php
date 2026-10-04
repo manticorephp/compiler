@@ -1001,6 +1001,7 @@ trait EmitLlvmModule
         $this->locals->refLocals = [];
         $this->locals->ownedBoxes = [];
         $this->locals->refParamTypes = [];
+        $this->locals->captureRefs = [];
         $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) {
@@ -1097,6 +1098,7 @@ trait EmitLlvmModule
             }
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
+                if ($fn->params[$pi]->byRef) { $this->locals->captureRefs[$cn] = true; }
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$cn] = $slot;
                 $bodySink->write($this->localSlotAlloca($slot));

@@ -656,9 +656,22 @@ trait EmitLlvmLocals
         // BORROW past its owner's frame: `static $c; $c = $h->name;` read
         // garbage on the next call once `$h` died.
         $cellDest = $this->locals->globalBacked[$sl->name] ?? $this->locals->slots[$sl->name] ?? '';
+        // A REFERENCE BOX is a cell slot too when this frame reads it as one: a
+        // plain local boxed for `use (&$x)` / `=&`, or a closure's by-ref
+        // capture ({@see LocalSlots::$captureRefs}). Both ends of a by-ref
+        // capture whose frames disagree are pinned cell
+        // ({@see InferScans::scanByRefCaptureWiden}), and the raw store below
+        // wrote `$e = null` as 0 and `$e = new X` as a bare pointer into a word
+        // every reader decodes by tag — `var_dump($e)` printed float(0). A
+        // declared by-ref PARAMETER keeps its own arms: its storage is the
+        // caller's, in the caller's representation.
+        $refBox = isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && (!isset($this->locals->refParamTypes[$sl->name])
+                || isset($this->locals->captureRefs[$sl->name]));
         if ($sl->type->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
-            && !isset($this->locals->refLocals[$sl->name])
+            && (!isset($this->locals->refLocals[$sl->name]) || $refBox)
             && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
             $coOwn = $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
@@ -676,11 +689,11 @@ trait EmitLlvmLocals
             // previous string on the floor.
             $v0 = $sl->value;
             $selfBox = $v0->kind === Node::KIND_LOAD_LOCAL && $v0->name === $sl->name;
-            $rebind = !$selfBox
+            $rebind = !$selfBox && !$refBox
                 && !isset($this->locals->globalBacked[$sl->name])
                 && isset($this->frame->rcObjLocals[$sl->name])
                 && !isset($this->frame->transferredLocals[$sl->name]);
-            if ($rebind && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
+            if (($rebind || ($refBox && !$selfBox)) && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
                 $out .= $this->coerceToI64();
                 $rawV = $this->lastValue;
                 $out .= $this->rcRetainByType($v0, $rawV, null, 3);
@@ -691,7 +704,7 @@ trait EmitLlvmLocals
             // its pointer under the tag, but an array may be REBUILT as a fresh
             // cell array that co-owns every element — then the raw predecessor
             // is this slot's reference to give back.
-            $mixSelf = $selfBox && $v0->type->kind === Type::KIND_ARRAY
+            $mixSelf = $selfBox && !$refBox && $v0->type->kind === Type::KIND_ARRAY
                 && isset($this->frame->mixedFlagSlots[$sl->name]);
             $oldRaw = '';
             if ($mixSelf) {
@@ -720,6 +733,17 @@ trait EmitLlvmLocals
             if ($rebind) {
                 $out .= $this->rcReleaseSlot($cellDest,
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
+            }
+            if ($refBox) {
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = load i64, ptr ' . $cellDest . "\n";
+                $p = $this->ssa->allocReg();
+                $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+                $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+                $out .= '  store i64 ' . $boxed . ', ptr ' . $p . "\n";
+                $this->lastValue = $boxed;
+                $this->lastValueType = 'i64';
+                return $out;
             }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             $this->lastValue = $boxed;
