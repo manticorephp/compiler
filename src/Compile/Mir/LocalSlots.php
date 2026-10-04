@@ -30,6 +30,11 @@ final class LocalSlots
     public array $refParamTypes = [];
     /** @var array<string, bool> by-ref param names retyped to a cell from a typed scalar ({@see \Compile\Mir\Param::$retypedByRef}) */
     public array $refParamRetyped = [];
+    /** @var array<string, true> a closure's BY-REF CAPTURE params: each slot holds
+     *  the enclosing frame's reference box for that local, so the box holds the
+     *  local's representation — unlike a declared `&$v` param, which may point
+     *  at an array element of any representation. */
+    public array $captureRefs = [];
     /** @var array<string, string> static-local / `global $x` name → global cell */
     public array $globalBacked = [];
     /** @var array<string, Type> locals captured by-ref by a closure (heap-boxed)

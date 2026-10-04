@@ -533,6 +533,10 @@ trait EmitLlvmLocals
     private function elemReadCoOwn(Node $v, ?Type $slotType = null, string $dest = ''): string
     {
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
+        // Through a pass-through `(string)`: the release half follows the cast
+        // to its operand ({@see InsertMemoryOps::isOwnedObj}), so
+        // `$l = (string)$this->m['k'];` must retain as the bare read does.
+        $v = \Compile\Mir\AliasOwn::peel($v);
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
         // THE PASS DECIDES: a plain local the plan does not own releases
         // nothing, so a retain here is one nobody gives back — php-cs-fixer's
@@ -656,9 +660,22 @@ trait EmitLlvmLocals
         // BORROW past its owner's frame: `static $c; $c = $h->name;` read
         // garbage on the next call once `$h` died.
         $cellDest = $this->locals->globalBacked[$sl->name] ?? $this->locals->slots[$sl->name] ?? '';
+        // A REFERENCE BOX is a cell slot too when this frame reads it as one: a
+        // plain local boxed for `use (&$x)` / `=&`, or a closure's by-ref
+        // capture ({@see LocalSlots::$captureRefs}). Both ends of a by-ref
+        // capture whose frames disagree are pinned cell
+        // ({@see InferScans::scanByRefCaptureWiden}), and the raw store below
+        // wrote `$e = null` as 0 and `$e = new X` as a bare pointer into a word
+        // every reader decodes by tag — `var_dump($e)` printed float(0). A
+        // declared by-ref PARAMETER keeps its own arms: its storage is the
+        // caller's, in the caller's representation.
+        $refBox = isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])
+            && (!isset($this->locals->refParamTypes[$sl->name])
+                || isset($this->locals->captureRefs[$sl->name]));
         if ($sl->type->kind === Type::KIND_CELL
             && $sl->value->type->kind !== Type::KIND_CELL
-            && !isset($this->locals->refLocals[$sl->name])
+            && (!isset($this->locals->refLocals[$sl->name]) || $refBox)
             && $cellDest !== '') {
             $out = $this->emitNode($sl->value);
             $coOwn = $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
@@ -676,11 +693,20 @@ trait EmitLlvmLocals
             // previous string on the floor.
             $v0 = $sl->value;
             $selfBox = $v0->kind === Node::KIND_LOAD_LOCAL && $v0->name === $sl->name;
-            $rebind = !$selfBox
+            $rebind = !$selfBox && !$refBox
                 && !isset($this->locals->globalBacked[$sl->name])
                 && isset($this->frame->rcObjLocals[$sl->name])
                 && !isset($this->frame->transferredLocals[$sl->name]);
-            if ($rebind && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
+            // The enclosing frame's own slot of a by-ref captured name IS the
+            // box the closure writes through ({@see ownedBoxOverwriteIr} covers
+            // only a heap box): it holds a cell it owns, so a rebind gives the
+            // predecessor back, as the closure side does.
+            $capRebind = !$selfBox && !$refBox && !$rebind
+                && !isset($this->locals->globalBacked[$sl->name])
+                && isset($this->locals->byRefCaptured[$sl->name])
+                && !isset($this->locals->ownedBoxes[$sl->name])
+                && !isset($this->locals->refLocals[$sl->name]);
+            if (($rebind || $capRebind || ($refBox && !$selfBox)) && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
                 $out .= $this->coerceToI64();
                 $rawV = $this->lastValue;
                 $out .= $this->rcRetainByType($v0, $rawV, null, 3);
@@ -691,7 +717,7 @@ trait EmitLlvmLocals
             // its pointer under the tag, but an array may be REBUILT as a fresh
             // cell array that co-owns every element — then the raw predecessor
             // is this slot's reference to give back.
-            $mixSelf = $selfBox && $v0->type->kind === Type::KIND_ARRAY
+            $mixSelf = $selfBox && !$refBox && $v0->type->kind === Type::KIND_ARRAY
                 && isset($this->frame->mixedFlagSlots[$sl->name]);
             $oldRaw = '';
             if ($mixSelf) {
@@ -720,6 +746,29 @@ trait EmitLlvmLocals
             if ($rebind) {
                 $out .= $this->rcReleaseSlot($cellDest,
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
+            }
+            if ($capRebind) {
+                $out .= $this->rcReleaseSlot($cellDest, 'cell');
+            }
+            if ($refBox) {
+                $addr = $this->ssa->allocReg();
+                $out .= '  ' . $addr . ' = load i64, ptr ' . $cellDest . "\n";
+                $p = $this->ssa->allocReg();
+                $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+                if (isset($this->locals->captureRefs[$sl->name])) {
+                    // The closure side of a by-ref capture: the box holds a cell
+                    // the pair owns; the overwritten value is released here (the
+                    // new one is already co-owned above).
+                    $oldC = $this->ssa->allocReg();
+                    $out .= '  ' . $oldC . ' = load i64, ptr ' . $p . "\n";
+                    $out .= $this->rcReleaseReg($oldC, 'cell');
+                } else {
+                    $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+                }
+                $out .= '  store i64 ' . $boxed . ', ptr ' . $p . "\n";
+                $this->lastValue = $boxed;
+                $this->lastValueType = 'i64';
+                return $out;
             }
             $out .= '  store i64 ' . $boxed . ', ptr ' . $cellDest . "\n";
             $this->lastValue = $boxed;
@@ -855,16 +904,13 @@ trait EmitLlvmLocals
         // the callee's write has to be self-describing or `var_dump($n)` reads
         // 42 as `float(2.08E-322)`.
         //
-        // ⛔ NOT for a CLOSURE. Its parameters are cell-typed by the uniform
-        // closure ABI rather than by any declaration, and a by-ref one points
-        // straight at an array's ELEMENT slot: boxing there made
-        // `array_walk($m, fn (&$v) => $v = $v * 10)` write NaN-boxed words into
-        // the array and print -4222124650659830 for 10.
-        // A by-ref CAPTURE is a plain shared word, not an element slot, so a
-        // closure boxes into a cell capture like any other frame.
-        if ((!$this->frame->isClosure || isset($this->frame->captureNames[$sl->name])
-            || isset($this->locals->refParamRetyped[$sl->name]))
-            && isset($this->locals->refLocals[$sl->name])
+        // A CLOSURE's cell by-ref parameter too: every invoke hands it a CELL
+        // slot — a cell lvalue's own address, or a scratch cell the caller
+        // boxed a concrete lvalue into and decodes back after the call
+        // ({@see EmitLlvmCalls::emitClosureStructInvoke},
+        // {@see EmitLlvmCalls::emitDynByRefArg}). Writing raw here turned
+        // `function (&$x) { $x = "s"; }` into a string pointer read as a double.
+        if (isset($this->locals->refLocals[$sl->name])
             && isset($this->locals->slots[$sl->name])
             && ($this->locals->refParamTypes[$sl->name] ?? null) !== null
             && $this->locals->refParamTypes[$sl->name]->kind === Type::KIND_CELL

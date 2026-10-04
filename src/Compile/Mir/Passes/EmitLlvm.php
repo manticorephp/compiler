@@ -690,6 +690,7 @@ final class EmitLlvm implements EmitVisitor
         $this->noDiscardMethods = $module->noDiscardMethods;
         $this->attrSiteErrors = $module->attrSiteErrors;
         $this->closureCaptures = $module->closureCaptures;
+        $this->closureRawRefUnionMemo = -1;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;

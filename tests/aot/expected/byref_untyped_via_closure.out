@@ -1,0 +1,25 @@
+int(2)
+string(2) "s2"
+int(2)
+array(1) {
+  [0]=>
+  int(2)
+}
+string(2) "1!"
+int(2)
+string(1) "s"
+int(2)
+string(3) "11!"
+array(1) {
+  [0]=>
+  int(1)
+}
+string(2) "1!"
+int(2)
+int(2)
+int(2)
+string(1) "q"
+V 2
+1
+R 2
+2

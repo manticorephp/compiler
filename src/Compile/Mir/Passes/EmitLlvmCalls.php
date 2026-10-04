@@ -347,7 +347,11 @@ trait EmitLlvmCalls
                 // take the slot address. No rc retain on a raw address.
                 $name = $c->name;
                 $capV = $this->ssa->allocReg();
-                if (isset($this->locals->refLocals[$name])) {
+                if (isset($this->locals->globalBacked[$name])) {
+                    // `global $x` / a superglobal-shared name has no frame slot: its
+                    // storage is the module cell, whose address is the reference.
+                    $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->locals->globalBacked[$name] . " to i64\n";
+                } elseif (isset($this->locals->refLocals[$name])) {
                     $out .= '  ' . $capV . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
                 } else {
                     $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->locals->slots[$name] . " to i64\n";
@@ -1556,6 +1560,7 @@ trait EmitLlvmCalls
         $dynMask = '';
         $dynFp = '';
         $refGate = 0;
+        $dynRawMask = '';
         $dynReboxSlots = [];
         $dynReboxTmps = [];
         $dynReboxBits = [];
@@ -1566,6 +1571,10 @@ trait EmitLlvmCalls
                 $out .= '  ' . $dynFp . ' = load i64, ptr ' . $struct . "\n";
                 $out .= $this->closureRefMaskChain($dynFp);
                 $dynMask = $this->lastValue;
+                if (($this->closureRawRefUnion() & $refGate) !== 0) {
+                    $out .= $this->closureRefMaskChain($dynFp, true);
+                    $dynRawMask = $this->lastValue;
+                }
             }
         }
         // A `...$arr` spread into a DYNAMIC closure (concrete __closure_N lost ⇒
@@ -1585,6 +1594,16 @@ trait EmitLlvmCalls
         $padDrops = '';
         /** @var string[] $intArgBoxes */
         $intArgBoxes = [];
+        /** @var string[] $refReboxSlots */
+        $refReboxSlots = [];
+        /** @var string[] $refReboxTmps */
+        $refReboxTmps = [];
+        /** @var string[] $refCellBoxSlots */
+        $refCellBoxSlots = [];
+        /** @var string[] $refCellBoxTmps */
+        $refCellBoxTmps = [];
+        /** @var Type[] $refCellBoxTypes */
+        $refCellBoxTypes = [];
         $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
@@ -1633,7 +1652,24 @@ trait EmitLlvmCalls
             // NaN-boxed tag bits. Without this the callee's writes vanished (a
             // silently dropped mutation) or crashed.
             if (($calleeRefs[$capCnt + $pi] ?? false)) {
-                if ($this->isByRefAddressable($a)) {
+                // The reference agrees with its target's representation, as on
+                // the named-call path: a cell lvalue to a raw-payload param is
+                // decoded into a scratch slot and re-boxed after the call, and a
+                // concrete lvalue to a CELL param is boxed into one and decoded
+                // back. Handing the raw slot to a cell param read `$n = 1` as a
+                // denormal and wrote a string pointer back as a double.
+                if ($this->isByRefAddressable($a)
+                    && $this->byRefNeedsCellUnbox($a, $calleeParams, $capCnt + $pi)) {
+                    $out .= $this->emitByRefCellUnboxArg($a, $calleeParams[$capCnt + $pi] ?? null);
+                    $refReboxSlots[] = $this->refBoxSlot;
+                    $refReboxTmps[] = $this->refBoxTmp;
+                } elseif ($this->isByRefAddressable($a)
+                    && $this->byRefNeedsCellBox($a, $calleeParams, $capCnt + $pi)) {
+                    $out .= $this->emitByRefCellBox($a);
+                    $refCellBoxSlots[] = $this->refBoxSlot;
+                    $refCellBoxTmps[] = $this->refBoxTmp;
+                    $refCellBoxTypes[] = $a->type;
+                } elseif ($this->isByRefAddressable($a)) {
                     $out .= $this->byRefAddrOf($a);
                 } else {
                     // Not an lvalue — back it with a throwaway slot so the
@@ -1652,7 +1688,7 @@ trait EmitLlvmCalls
             // nothing, since the value operand must be computed regardless (an
             // argument is evaluated exactly once, `$f($i++)` included).
             if ($dynMask !== '' && ($refGate & (1 << $pi)) !== 0) {
-                $out .= $this->emitDynByRefArg($a, $dynMask, $pi);
+                $out .= $this->emitDynByRefArg($a, $dynMask, $pi, $dynRawMask);
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
                 if ($this->dynRefTmp !== '') {
@@ -1737,6 +1773,12 @@ trait EmitLlvmCalls
         }
         $out .= $this->faPop();
         foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
+        $out .= $this->emitByRefCellRebox($refReboxSlots, $refReboxTmps);
+        $rci = 0;
+        foreach ($refCellBoxTmps as $rct) {
+            $out .= $this->emitByRefCellWriteBack($rct, $refCellBoxSlots[$rci], $refCellBoxTypes[$rci]);
+            $rci = $rci + 1;
+        }
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -2155,12 +2197,12 @@ trait EmitLlvmCalls
      * callbacks are covered), but a stdlib function that RETURNS a closure with
      * a by-ref parameter is not. Recorded as an audit limit, not papered over.
      */
-    private function closureRefMaskChain(string $fpReg): string
+    private function closureRefMaskChain(string $fpReg, bool $rawOnly = false): string
     {
         $out = '';
         $cur = '0';
         foreach ($this->closureCaptures as $cname => $capCnt) {
-            $mask = $this->closureOwnRefMask($cname, $capCnt);
+            $mask = $this->closureOwnRefMask($cname, $capCnt, $rawOnly);
             if ($mask === 0) { continue; }
             $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpReg
@@ -2370,15 +2412,36 @@ trait EmitLlvmCalls
         return false;
     }
 
-    /** Bit `i` ⟺ closure `$cname`'s CALL slot `i` (params past the captures) is by-ref. */
-    private function closureOwnRefMask(string $cname, int $capCnt): int
+    /** Union over the module's closures of {@see closureOwnRefMask} `$rawOnly`. */
+    private function closureRawRefUnion(): int
+    {
+        if ($this->closureRawRefUnionMemo >= 0) { return $this->closureRawRefUnionMemo; }
+        $u = 0;
+        foreach ($this->closureCaptures as $cname => $capCnt) {
+            $u = $u | $this->closureOwnRefMask($cname, $capCnt, true);
+        }
+        $this->closureRawRefUnionMemo = $u;
+        return $u;
+    }
+
+    private int $closureRawRefUnionMemo = -1;
+
+    /**
+     * Bit `i` ⟺ closure `$cname`'s CALL slot `i` (params past the captures) is
+     * by-ref. `$rawOnly` keeps only the by-ref slots whose param is NOT a cell —
+     * the ones that read a raw payload through the reference
+     * ({@see emitDynByRefArg}).
+     */
+    private function closureOwnRefMask(string $cname, int $capCnt, bool $rawOnly = false): int
     {
         $refs = $this->sigs->refParams[$cname] ?? [];
+        $ptypes = $this->sigs->paramTypes[$cname] ?? [];
         $mask = 0;
         $slot = 0;
         $np = \count($refs);
         for ($pi = $capCnt; $pi < $np; $pi++) {
-            if ($refs[$pi] && $slot <= 62) { $mask = $mask | (1 << $slot); }
+            $raw = !$rawOnly || ($ptypes[$pi] ?? null) === null || $ptypes[$pi]->kind !== Type::KIND_CELL;
+            if ($refs[$pi] && $raw && $slot <= 62) { $mask = $mask | (1 << $slot); }
             $slot = $slot + 1;
         }
         return $mask;
@@ -2395,7 +2458,7 @@ trait EmitLlvmCalls
      * creates whenever the mask bit turns out to be 0. A named compile error is
      * the honest answer; a silently mutated array is not.
      */
-    private function emitDynByRefArg(Node $a, string $maskReg, int $pi): string
+    private function emitDynByRefArg(Node $a, string $maskReg, int $pi, string $rawMask = ''): string
     {
         $this->dynRefSlot = '';
         $this->dynRefTmp = '';
@@ -2459,11 +2522,15 @@ trait EmitLlvmCalls
         $out .= $this->ownByRefArgLocal($a);
         $out .= $this->byRefAddrOf($a);
         $addr = $this->lastValue;
-        // A CELL lvalue cannot be handed over as-is: the callee stores a RAW
-        // value through the reference and the tag bits would be gone. Same
-        // scratch-and-rebox contract the static paths use — except the decision
-        // is a RUNTIME bit here, so the write-back is a `select` too, leaving
-        // the caller's slot untouched when the callee took the value.
+        // A CELL lvalue goes over as-is to a CELL by-ref param — that closure
+        // reads and writes the slot as a cell. Only a closure whose by-ref
+        // param is TYPED reads a raw payload through it: for that one the same
+        // scratch-and-rebox contract the static paths use, decided by a second
+        // RUNTIME bit ({@see closureOwnRefMask} `$rawOnly`), so the write-back
+        // is a `select` too, leaving the caller's slot untouched otherwise.
+        if ($a->type->kind === Type::KIND_CELL && $rawMask === '') {
+            return $out . $this->dynByRefSelect($maskReg, $pi, $addr, $val);
+        }
         if ($a->type->kind === Type::KIND_CELL) {
             $sp = $this->ssa->allocReg();
             $out .= '  ' . $sp . ' = inttoptr i64 ' . $addr . " to ptr\n";
@@ -2476,10 +2543,19 @@ trait EmitLlvmCalls
             $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
             $taddr = $this->ssa->allocReg();
             $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
-            $out .= $this->dynByRefSelect($maskReg, $pi, $taddr, $val);
+            $out .= $this->dynByRefBit($rawMask, $pi);
+            $isRaw = $this->lastIsRef;
+            $refAddr = $this->ssa->allocReg();
+            $out .= '  ' . $refAddr . ' = select i1 ' . $isRaw . ', i64 ' . $taddr . ', i64 ' . $addr . "\n";
+            $out .= $this->dynByRefSelect($maskReg, $pi, $refAddr, $val);
+            $op = $this->lastValue;
+            $both = $this->ssa->allocReg();
+            $out .= '  ' . $both . ' = and i1 ' . $this->lastIsRef . ', ' . $isRaw . "\n";
             $this->dynRefSlot = $addr;
             $this->dynRefTmp = $tmp;
-            $this->dynRefBit = $this->lastIsRef;
+            $this->dynRefBit = $both;
+            $this->lastValue = $op;
+            $this->lastValueType = 'i64';
             return $out;
         }
         // A CONCRETE lvalue cannot receive what a dynamic callee writes: the
@@ -3176,6 +3252,17 @@ trait EmitLlvmCalls
                 $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
                       . ', i64 ' . $dv . "\n";
                 $ev = $sel;
+            }
+            // A BY-REF parameter dereferences what it is handed: a VALUE from
+            // the pack crashed it. php binds the pack's element, a temporary
+            // nobody reads again — a scratch slot holding the value is that.
+            if ($fnKey !== '' && ($this->sigs->refParams[$fnKey][$k] ?? false)) {
+                $rs = $this->ssa->allocReg();
+                $out .= '  ' . $rs . " = alloca i64\n";
+                $out .= '  store i64 ' . $ev . ', ptr ' . $rs . "\n";
+                $ra = $this->ssa->allocReg();
+                $out .= '  ' . $ra . ' = ptrtoint ptr ' . $rs . " to i64\n";
+                $ev = $ra;
             }
             $regs[] = $ev;
         }
