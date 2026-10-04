@@ -147,6 +147,13 @@ final class CondOwn
         $ae = $arm->element;
         $re = $res->element;
         if ($ae === null || $re === null) { return $ae === null && $re === null; }
+        // A CELL-element result covers any element: the retain and the release
+        // both walk the elements by the BUFFER's hint nibble, and an unstamped
+        // buffer's raw words are no-ops to the tag-guarded cell walkers — the
+        // two halves agree whatever the arm holds. Refusing left the store a
+        // borrow: `$x = $c ? $this->cellMap : f()` dangled once the property
+        // was overwritten.
+        if ($re->kind === Type::KIND_CELL) { return true; }
         if ($ae->kind !== $re->kind) { return false; }
         if ($ae->kind === Type::KIND_OBJ) { return ($ae->class ?? '') === ($re->class ?? ''); }
         return true;
