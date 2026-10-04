@@ -2052,7 +2052,16 @@ trait EmitLlvmCalls
             // A closure env into a CELL param is the OBJECT cell it is: raw, the
             // callee's cell retain / drop skip it, so `fn ($f) => $f` handed
             // back an uncounted word (array_map over `Closure[]`).
-            || ($paramErased && $this->isClosureValueType($at))) {
+            || ($paramErased && $this->isClosureValueType($at))
+            // …and so is an object, and an array already riding cells (boxed
+            // by pointer, nothing rebuilt): raw, the callee's cell retain skipped
+            // it and `fn ($i) => $i` handed back an UNCOUNTED row — array_map's
+            // result shared it with the source, and a nested write through one
+            // showed in the other.
+            || ($paramErased && $this->own->condFlavor($at) === 'obj')
+            || ($paramErased && $at->isArray()
+                && ($at->element === null || $at->element->kind === Type::KIND_CELL
+                    || $at->element->kind === Type::KIND_UNKNOWN))) {
             return $this->boxToCell($at);
         }
         return $this->coerceToI64();
