@@ -2307,7 +2307,11 @@ trait EmitLlvmCalls
         $cv = $this->ssa->allocReg();
         $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
         $scalar = $pt !== null && $this->isByRefScalarParam($pt);
-        if ($scalar) {
+        // A STRING param decodes too: php coerces the argument on entry, and the
+        // bare payload of an int cell handed to `string &$s` was dereferenced
+        // as a string pointer. The rendered string is the slot's own after the
+        // re-box, as the callee's overwrite treats it.
+        if ($scalar || ($pt !== null && $pt->kind === Type::KIND_STRING)) {
             // A SCALAR out-param (`preg_replace(…, int &$count)` handed a
             // `?int &$count`): the callee reads and writes the raw int, so
             // the scratch holds the decoded value, re-boxed by type after.
@@ -2320,6 +2324,7 @@ trait EmitLlvmCalls
                 $this->lastValue = $bits;
                 $this->lastValueType = 'i64';
             }
+            $out .= $this->coerceToI64();
             $raw = $this->lastValue;
         } else {
             $raw = $this->ssa->allocReg();
@@ -2330,7 +2335,10 @@ trait EmitLlvmCalls
         // Written for EVERY scratch, scalar or not: the key is an SSA register
         // name, which the next function reuses. A stale scalar entry re-boxed
         // parse_str's nested array as an INT (`int(4387692744)`).
-        $this->byRefScalarTmps[$tmp] = $scalar ? $pt : null;
+        // A STRING / OBJECT payload re-boxes by its own kind too: boxed as
+        // `vec[cell]` a string came back as `array(24945)` and an object as an
+        // array tag over the instance.
+        $this->byRefScalarTmps[$tmp] = ($scalar || ($pt !== null && $this->isByRefPtrParam($pt))) ? $pt : null;
         $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
         $taddr = $this->ssa->allocReg();
         $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
@@ -2871,10 +2879,17 @@ trait EmitLlvmCalls
         if ($pt === null) { return false; }
         $pk = $pt->kind;
         return $pk === Type::KIND_UNKNOWN || $pk === Type::KIND_ARRAY
-            || $pk === Type::KIND_STRING || $this->isByRefScalarParam($pt);
+            || $this->isByRefPtrParam($pt) || $this->isByRefScalarParam($pt);
     }
 
-    /** @var array<string, ?Type> scratch alloca → the scalar param type it re-boxes by */
+    /** A raw string / object-pointer by-ref param: re-boxed by its own kind. */
+    private function isByRefPtrParam(Type $pt): bool
+    {
+        return $pt->kind === Type::KIND_STRING
+            || ($pt->kind === Type::KIND_OBJ && !$this->isEnumType($pt));
+    }
+
+    /** @var array<string, ?Type> scratch alloca → the scalar / string / object param type it re-boxes by */
     private array $byRefScalarTmps = [];
 
     /** A raw scalar by-ref param a cell lvalue must be decoded for. */
