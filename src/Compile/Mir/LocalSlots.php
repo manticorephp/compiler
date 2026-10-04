@@ -28,6 +28,8 @@ final class LocalSlots
      *  {@see Passes\Monomorphize} specializes a by-ref param to the caller's
      *  actual slot type precisely so this is knowable here. */
     public array $refParamTypes = [];
+    /** @var array<string, bool> by-ref param names retyped to a cell from a typed scalar ({@see \Compile\Mir\Param::$retypedByRef}) */
+    public array $refParamRetyped = [];
     /** @var array<string, string> static-local / `global $x` name → global cell */
     public array $globalBacked = [];
     /** @var array<string, Type> locals captured by-ref by a closure (heap-boxed)

@@ -564,6 +564,8 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
+    /** @var bool a property element type was widened by {@see scanRefElemArgWiden}: every reader re-infers */
+    private bool $refElemPropsRetyped = false;
     /** @var array<string, array<string, bool>> the {@see $forcedCellElemLocals} entries a by-ref CAPTURE proved; kept on the module across runs */
     private array $byRefCaptureElemLocals = [];
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
@@ -745,6 +747,11 @@ final class InferTypes implements Pass
      *  whole program, never a branch merge. Reset per function. */
     private array $globalBackedNames = [];
 
+    /** @var array<string,bool> the subset of {@see $globalBackedNames} bound to a
+     *  GLOBAL's module cell (`@g_*`: `global $x`, a superglobal) — the names
+     *  {@see $globalVarTypes} speaks for. Reset per function. */
+    private array $globalCellBound = [];
+
     /** @var array<string,bool> every `global $x` name in the module. In `__main`
      *  these are global-backed WITHOUT a decl node ({@see EmitLlvmModule::
      *  emitFunction}), so a top-level store to one must not undo the unified
@@ -768,6 +775,15 @@ final class InferTypes implements Pass
      *  so the loop-carried cell promotion must leave these names alone
      *  ({@see InferScans::scanRefPinnedNode}). */
     private array $refPinnedLocals = [];
+
+    /** @var array<string,string> "Cls::m" → the override body that answers a
+     *  receiver typed Cls with no body of its own, '' for none
+     *  ({@see InferScans::overrideBody}). */
+    private array $overrideBodyMemo = [];
+
+    /** @var array<string,int> closure class → how many captures lead its
+     *  params ({@see InferScans::closureCapCounts}). */
+    private array $closureCapCount = [];
 
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
@@ -1083,9 +1099,37 @@ final class InferTypes implements Pass
         }
         // A local handed to a `mixed &` parameter is likewise one word two
         // frames share, and the callee may make it any kind.
-        $this->rescanTargets = [];
-        if ($this->scanRefCellArgWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
+        // A retyped `int &$i` makes its callers' slots cells, and a caller that
+        // FORWARDS its own `int &$j` there is then a retype of its own — so the
+        // two scans run together to a fixpoint (both only widen).
+        $guard = 0;
+        while ($guard < 8) {
+            $guard = $guard + 1;
+            $this->rescanTargets = [];
+            $retyped = $this->scanRefParamRetype($module);
+            if ($retyped) {
+                $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
+            }
+            $this->rescanTargets = [];
+            $widened = $this->scanRefCellArgWiden($module);
+            if ($widened) {
+                $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
+            }
+            // An ELEMENT handed to a cell by-ref param makes its array a cell array.
+            $this->rescanTargets = [];
+            $this->refElemPropsRetyped = false;
+            $elemWidened = $this->scanRefElemArgWiden($module);
+            if ($elemWidened) {
+                $this->inferFunctionsForScope($module, 'byref_elem_arg', $this->refElemPropsRetyped ? null : $this->rescanTargets);
+            }
+            // A retyped param captured `use (&$i)` is a cell at the capture
+            // site now, and the closure's side of that word must follow.
+            $captured = false;
+            if ($retyped && $this->scanByRefCaptureWiden($module)) {
+                $captured = true;
+                $this->inferFunctionsForScope($module, 'byref_capture');
+            }
+            if (!$retyped && !$widened && !$elemWidened && !$captured) { break; }
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
@@ -1805,8 +1849,11 @@ final class InferTypes implements Pass
      *  @param array<string,Type> $observed
      *  @param array<string,Type> $elems
      *  @param array<string,bool> $elemBad
-     *  @param array<string,bool> $strKey */
-    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey): void
+     *  @param array<string,bool> $strKey
+     *  @param array<string,Type> $elemAll "name#kind" → one element type
+     *         stored under that kind, EVERY store included (cell and array
+     *         values too, which `$elems` leaves out) */
+    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey, array &$elemAll): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL) {
             $s = $n;
@@ -1833,6 +1880,7 @@ final class InferTypes implements Pass
             if ($se->array->kind === Node::KIND_LOAD_LOCAL && isset($active[$se->array->name])) {
                 $name = $se->array->name;
                 $vt = $se->value->type;
+                if ($vt->kind !== Type::KIND_UNKNOWN) { $elemAll[$name . '#' . $vt->kind] = $vt; }
                 // The KEY decides vec-vs-assoc. A string key makes an
                 // assoc[string,T]; typing it a vec would read each string key as
                 // an int index and render it as its pointer (`4343328072=v`).
@@ -1858,7 +1906,7 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey);
+            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
         }
     }
 

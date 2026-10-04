@@ -318,6 +318,14 @@ trait InferNodes
         $this->cellCaptureLocals = $this->byRefCaptureCellLocals[$fn->name] ?? [];
         foreach ($this->cellCaptureLocals as $name => $unused) {
             $this->localTypes[$name] = Type::cell();
+            // The closure's by-ref capture PARAM is that word too: an erased
+            // one left the emitter storing a raw string into the cell the
+            // capturing frame reads (`use (&$i)` over a retyped `int &$i`).
+            foreach ($fn->params as $cp) {
+                if ($cp->name === $name && $cp->byRef && $cp->type->kind === Type::KIND_UNKNOWN) {
+                    $cp->type = Type::cell();
+                }
+            }
         }
         // Pre-scan: refine a bare `array $p` param to vec[string] when the
         // body uses its elements as strings (`$x=$p[$i]; $x==="..."` / `$x[0]`
@@ -503,6 +511,7 @@ trait InferNodes
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
+        $this->globalCellBound = [];
         $this->arithUsedLocals = [];
         $this->refPinnedLocals = [];
         // ONE walk for the late facts — arith-used, by-ref-pinned, and which
@@ -846,6 +855,26 @@ trait InferNodes
                 return $node->type;
             }
         }
+        // A whole store into a GLOBAL whose unified element is a cell (another
+        // scope stores a second kind into it) keeps the slot's cell-element
+        // view: typing the name by the stored literal's concrete element read
+        // the int another scope stored back as a string, in THIS scope, after
+        // the call that stored it (`$g = ['a' => 'b']; setv(); $g['v']`). The
+        // buffer's element hint describes the raw words, which the cell view
+        // decodes; a call may rewrite the global anyway, so the concrete
+        // narrowing was never sound across one.
+        $globalBound = ($this->inMainBody && isset($this->mainGlobalNames[$node->name]))
+            || isset($this->globalCellBound[$node->name]);
+        if ($globalBound && isset($this->globalVarTypes[$node->name]) && $valueType->isArray()) {
+            $gt = $this->globalVarTypes[$node->name];
+            if ($gt->isArray() && $gt->element !== null
+                && $gt->element->kind === Type::KIND_CELL
+                && $gt->isAssoc() === $valueType->isAssoc()) {
+                $this->localTypes[$node->name] = $gt;
+                $node->type = $gt;
+                return $node->type;
+            }
+        }
         // Kind-alias tracking: a re-store to $name drops any stale alias; a
         // `$name = $obj->kind` binding records it so a later `$name === KIND_X`
         // narrows $obj. (Object-reassignment is caught downstream: the narrow
@@ -1162,6 +1191,13 @@ trait InferNodes
                 && $this->staticLocalTypes[$n->cell]->kind === Type::KIND_CELL) {
                 $t = Type::cell();
             }
+            // Its ELEMENT stores disagree with the initialiser's element: the
+            // array's element is a cell ({@see scanStaticLocalTypes}).
+            $st = $this->staticLocalTypes[$n->cell] ?? null;
+            if ($st !== null && $st->isArray() && $t->isArray() && $st->element !== null
+                && $st->element->kind === Type::KIND_CELL) {
+                $t = $st;
+            }
         }
         // A global-backed decl (`global $g`) is hard-lowered `int`; seed its
         // unified cross-scope type ({@see scanGlobalTypes}) so a pure-read scope
@@ -1179,6 +1215,7 @@ trait InferNodes
         }
         $this->localTypes[$n->name] = $t;
         $this->globalBackedNames[$n->name] = true;
+        if (\str_starts_with($n->cell, '@g_')) { $this->globalCellBound[$n->name] = true; }
         $n->type = $t;
         return $t;
     }
@@ -2105,6 +2142,14 @@ trait InferNodes
             if ($el->value->kind === Node::KIND_SPREAD) {
                 $st = $el->value->type;
                 $vt = $st->element !== null ? $st->element : Type::unknown();
+                // An array that rides a CELL was boxed element by element on
+                // its way in, so what it spreads are cells — not words of no
+                // known kind, which left `[1, ...$mixed]` a vec[unknown] that
+                // stored the 1 raw beside tagged words.
+                if ($st->kind === Type::KIND_CELL) { $vt = Type::cell(); }
+                // A Traversable operand is drained into cells
+                // ({@see EmitLlvm::emitArraySpreadUnified}).
+                if ($st->kind === Type::KIND_OBJ) { $vt = Type::cell(); }
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
             if ($vt->isArray() && $vt->element !== null

@@ -71,6 +71,9 @@ final class Param
      */
     public bool $elemGuessWithdrawn = false;
 
+    /** A typed scalar by-ref param ({@see Passes\InferScans::scanRefParamRetype}) widened to a cell because its body stores another kind. Unlike the uniform closure ABI cell, its callers hand it a cell slot, so even a closure boxes the stores. Declared after the constructor: property order is layout. */
+    public bool $retypedByRef = false;
+
     /**
      * The ERASED type this param had before {@see Passes\InferScans::scanCallSiteArrayElems}
      * refined its element from the call sites it could observe. A site whose

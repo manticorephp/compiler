@@ -3018,6 +3018,12 @@ trait EmitLlvmObjects
         // cell write cells, and every read decodes one.
         if ($n->type->kind === Type::KIND_CELL && $n->init->type->kind !== Type::KIND_CELL) {
             $out .= $this->boxToCell($n->init->type, $n->init);
+        } elseif ($this->needsCellify($n->type, $n->init->type)) {
+            // A cell-ELEMENT slot ({@see InferScans::scanStaticLocalTypes})
+            // holds the concrete-element initialiser rebuilt boxed.
+            $out .= $this->emitCellifyArrayRaw($n->init->type->element ?? Type::unknown(),
+                $this->cellifySourceFlavor($n->init));
+            $out .= $this->coerceToI64();
         } else {
             $out .= $this->coerceToI64();
         }
@@ -7928,6 +7934,16 @@ trait EmitLlvmObjects
             }
             if ($fallback === $static) {
                 foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
+            }
+        } elseif ($static !== '' && !isset($this->sigs->paramTypes[$fallback . '__' . $mc->method])) {
+            // An ABSTRACT declaration resolves the name but has no body, so it
+            // has no signature either: the by-ref mask came back empty and
+            // `$b->step($v)` through an abstract `step(int &$x)` passed the
+            // VALUE 3 where every override dereferences an address. A
+            // descendant's override answers, as an interface's implementors do.
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if ($cn !== $static && isset($this->sigs->paramTypes[$r . '__' . $mc->method])
+                    && $this->classImplementsIface($cn, $static)) { $fallback = $r; break; }
             }
         }
         // A fully ERASED receiver (`public $defn;` with no declared type) leaves

@@ -37,6 +37,21 @@ final class PreludeDemand
         return $this->yieldFrom;
     }
 
+    /** Any `yield`: the program defines a generator. */
+    private bool $yields = false;
+
+    /** Any `...`: a spread (or a variadic — the gate over-approximates). */
+    private bool $ellipsis = false;
+
+    /** A `...` spread could meet a Traversable operand: the program has both an
+     *  ellipsis and a generator or an iterator name. */
+    public function maySpreadTraversable(): bool
+    {
+        return $this->ellipsis && ($this->yields || $this->mentionsAny([
+            'Traversable', 'Iterator', 'IteratorAggregate', 'Generator', 'ArrayIterator', 'ArrayObject',
+        ]));
+    }
+
     /** @var array<string,bool> variable names, `$` included */
     private array $vars = [];
 
@@ -208,10 +223,13 @@ final class PreludeDemand
                 $i = $i + 1;
                 continue;
             }
-            if ($kind === TokenKind::Keyword && \strtolower($t->lexeme) === 'yield'
-                && $i + 1 < $n && \strtolower($toks[$i + 1]->lexeme) === 'from') {
-                $this->yieldFrom = true;
+            if ($kind === TokenKind::Keyword && \strtolower($t->lexeme) === 'yield') {
+                $this->yields = true;
+                if ($i + 1 < $n && \strtolower($toks[$i + 1]->lexeme) === 'from') {
+                    $this->yieldFrom = true;
+                }
             }
+            if ($kind === TokenKind::Ellipsis) { $this->ellipsis = true; }
             if ($kind !== TokenKind::Identifier) {
                 $i = $i + 1;
                 continue;

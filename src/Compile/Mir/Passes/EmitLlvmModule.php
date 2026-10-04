@@ -1001,16 +1001,19 @@ trait EmitLlvmModule
         $this->locals->refLocals = [];
         $this->locals->ownedBoxes = [];
         $this->locals->refParamTypes = [];
+        $this->locals->refParamRetyped = [];
         $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) {
                 $this->locals->refLocals[$p->name] = true;
                 $this->locals->refParamTypes[$p->name] = $p->type;
+                if ($p->retypedByRef) { $this->locals->refParamRetyped[$p->name] = true; }
             }
         }
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
         $this->frame->isClosure = false;
+        $this->frame->captureNames = [];
         $this->frame->isMain = false;
         $this->frame->isTrampoline = \Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name);
 
@@ -1041,6 +1044,9 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
+        for ($ci = 0; $ci < $capCnt; $ci = $ci + 1) {
+            $this->frame->captureNames[$fn->params[$ci]->name] = true;
+        }
         /** @var array<string, bool> $copiedParams */
         $copiedParams = [];
         // The built-in Throwable/Exception/Error hierarchy is identical

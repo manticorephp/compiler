@@ -900,7 +900,7 @@ trait EmitLlvmArrays
         $out .= '  store ptr ' . $init . ', ptr ' . $slot . "\n";
         foreach ($al->elements as $el) {
             if ($el->value->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitArraySpreadUnified($slot, $el->value);
+                $out .= $this->emitArraySpreadUnified($slot, $el->value, $cellVals);
                 continue;
             }
             if ($el->key !== null) {

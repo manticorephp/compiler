@@ -1249,9 +1249,9 @@ trait InferScans
             /** @var array<string,string> $cells */
             $cells = [];
             if (!$this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) { continue; }
-            /** @var array<string,string> $initKinds */
-            $initKinds = [];
-            $this->collectPlainStaticLocals($fn->body, $active, $cells, $initKinds);
+            /** @var array<string,Type> $initTypes */
+            $initTypes = [];
+            $this->collectPlainStaticLocals($fn->body, $active, $cells, $initTypes);
             if (\count($active) === 0) { continue; }
             /** @var array<string,Type> $observed */
             $observed = [];
@@ -1259,10 +1259,36 @@ trait InferScans
             $elems = [];
             $elemBad = [];
             $strKey = [];
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            /** @var array<string,Type> $elemAll */
+            $elemAll = [];
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
             /** @var array<string,array<string,bool>> $kinds */
             $kinds = [];
             $this->collectStaticStoreKinds($fn->body, $active, $kinds);
+            // An array static whose element stores disagree with the element
+            // its initialiser gave it (`static $seen = ['k' => 'v']; $seen['n']
+            // = 1;`) holds both kinds: its element is a cell, as for a global.
+            foreach ($cells as $name => $cell) {
+                $ot = $observed[$name] ?? ($initTypes[$name] ?? null);
+                if ($ot === null) { continue; }
+                $oe = $ot->isArray() ? $ot->element : null;
+                if ($cell === '' || $oe === null
+                    || $oe->kind === Type::KIND_CELL || $oe->kind === Type::KIND_UNKNOWN) { continue; }
+                $mixed = false;
+                foreach ($elemAll as $ek => $et) {
+                    if (!\str_starts_with($ek, $name . '#')) { continue; }
+                    if (!$this->sameElemShape($oe, $et)) { $mixed = true; break; }
+                }
+                if (!$mixed) { continue; }
+                $wt = $ot->isAssoc()
+                    ? Type::assoc($ot->key ?? Type::string_(), Type::cell())
+                    : Type::vec(Type::cell());
+                $prev = $this->staticLocalTypes[$cell] ?? null;
+                if ($prev !== null && $prev->exactString() === $wt->exactString()) { continue; }
+                $this->staticLocalTypes[$cell] = $wt;
+                $this->rescanTargets[$fn->name] = true;
+                $changed = true;
+            }
             foreach ($kinds as $name => $ks) {
                 if (isset($ks[Type::KIND_UNKNOWN])) { continue; }
                 // An INITIALISED static (`static $s = '';`) is typed by its
@@ -1272,8 +1298,8 @@ trait InferScans
                 // representation for both: a cell, the initialiser boxed into
                 // it ({@see EmitLlvmObjects::emitStaticLocalDecl}). Left alone
                 // the slot was read as a raw string and held a NaN-boxed one.
-                if (isset($initKinds[$name])) {
-                    $ks[$initKinds[$name]] = true;
+                if (isset($initTypes[$name])) {
+                    $ks[$initTypes[$name]->kind] = true;
                     if (\count($ks) < 2) { continue; }
                     $cell = $cells[$name] ?? '';
                     if ($cell === '') { continue; }
@@ -1340,18 +1366,24 @@ trait InferScans
         }
     }
 
-    /** @param array<string,string> $initKinds name → its initialiser's type kind */
-    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initKinds): void
+    /** @param array<string,Type> $initTypes name → its initialiser's type */
+    private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initTypes): void
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
             $d = $n;
             if (!\str_starts_with($d->cell, '@g_')) {
                 $active[$d->name] = true;
                 $cells[$d->name] = $d->cell;
-                if ($d->init !== null) { $initKinds[$d->name] = $d->init->type->kind; }
+                if ($d->init !== null) { $initTypes[$d->name] = $d->init->type; }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initKinds); }
+        foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initTypes); }
+    }
+
+    private function isSuperglobalName(string $n): bool
+    {
+        return $n === '_SERVER' || $n === '_ENV' || $n === '_GET' || $n === '_POST'
+            || $n === '_COOKIE' || $n === '_FILES' || $n === '_REQUEST' || $n === '_SESSION';
     }
 
     private function scanGlobalTypes(Module $module): bool
@@ -1364,6 +1396,8 @@ trait InferScans
         $elems = [];                     // var name → stored element Type
         $elemBad = [];                   // var name → element unusable
         $strKey = [];                    // var name → seen a string-keyed store
+        /** @var array<string, Type> */
+        $elemAll = [];                   // "name#kind" → an element store's Type
         foreach ($module->functions as $fn) {
             $active = [];                // names that are global-backed HERE
             $this->collectGlobalBacked($fn->body, $active);
@@ -1375,7 +1409,7 @@ trait InferScans
                 foreach ($module->globalVarNames as $gname) { $active[$gname] = true; }
             }
             if (\count($active) === 0) { continue; }
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
         }
         $changed = false;
         // A global reached ONLY by appends (`$g = []` types the empty literal
@@ -1384,7 +1418,21 @@ trait InferScans
         $names = [];
         foreach ($observed as $name => $t) { $names[$name] = true; }
         foreach ($elems as $name => $t) { $names[$name] = true; }
+        // A SUPERGLOBAL is one symbol every module shares, so its layout is not
+        // this module's to infer from the stores it happens to see (a library
+        // storing an int, the application reading it): it is `array<string,
+        // mixed>`, fixed, as its seed builds it.
+        $sgT = Type::assoc(Type::string_(), Type::cell());
+        foreach ($module->globalVarNames as $gname) {
+            if (!$this->isSuperglobalName($gname)) { continue; }
+            $prevT = $this->globalVarTypes[$gname] ?? null;
+            if ($prevT === null || $prevT->exactString() !== $sgT->exactString()) {
+                $this->globalVarTypes[$gname] = $sgT;
+                $changed = true;
+            }
+        }
         foreach ($names as $name => $_) {
+            if ($this->isSuperglobalName($name)) { continue; }
             $t = $observed[$name] ?? null;
             // An array global whose element is still erased takes the element
             // joined from its appends — the `$g[] = v` shape carries the only
@@ -1408,6 +1456,24 @@ trait InferScans
             if ($t === null) { continue; }
             $k = $t->kind;
             if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_INT) { continue; }
+            // A CONCRETE-element array global that another scope element-stores
+            // a different kind into holds both: its element is a cell. The join
+            // above sees only whole stores, so `$_ENV` stayed assoc[string,
+            // string] under symfony's `$_ENV['SHELL_VERBOSITY'] = $int`, and
+            // the next store released the raw int 1 as a string.
+            $te = $t->isArray() ? $t->element : null;
+            if ($te !== null && $te->kind !== Type::KIND_CELL && $te->kind !== Type::KIND_UNKNOWN) {
+                $mixed = false;
+                foreach ($elemAll as $ek => $et) {
+                    if (!\str_starts_with($ek, $name . '#')) { continue; }
+                    if (!$this->sameElemShape($te, $et)) { $mixed = true; break; }
+                }
+                if ($mixed) {
+                    $t = $t->isAssoc()
+                        ? Type::assoc($t->key ?? Type::string_(), Type::cell())
+                        : Type::vec(Type::cell());
+                }
+            }
             $prev = $this->globalVarTypes[$name] ?? null;
             // The map outlives the run ({@see Module::$inferGlobalVarTypes}):
             // a same-kind type a later run narrowed (`vec[unknown]` → the
@@ -2487,6 +2553,7 @@ trait InferScans
      */
     private function scanRefCellArgWiden(Module $module): bool
     {
+        $this->closureCapCounts($module);
         $changed = false;
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude) { continue; }
@@ -2503,27 +2570,444 @@ trait InferScans
         return $changed;
     }
 
+    /**
+     * A TYPED scalar by-ref param (`int &$i`) is typed on ENTRY only: php checks
+     * the hint when the call binds it, and after that `$i` is a plain reference —
+     * `$i = strpos(...)` leaves `false` in the caller's variable. A body that
+     * puts a word of another kind into it would write that word raw into a slot
+     * both frames read as the declared scalar (the cell of `int|false` read back
+     * as an int by the caller, as a float by the next loop test), so such a
+     * param is the `mixed &` case: widen it to a cell, and
+     * {@see scanRefCellArgWiden} then widens the callers' slots to match.
+     *
+     * "Puts" is any path the WORD can be rewritten through
+     * ({@see refWordForeign}): a whole store, a hand-off to a by-ref param of
+     * another representation (symfony/yaml forwards `int &$i` from
+     * parseSequence down to the parseMapping that stores `false`), and a
+     * `use (&$i)` closure whose body does either. The driver iterates this with
+     * {@see scanRefCellArgWiden} to a fixpoint, so a retype travels up a
+     * forwarding chain one hop per round. Monotone — a widened param is no
+     * longer a scalar and is never narrowed.
+     */
+    private function scanRefParamRetype(Module $module): bool
+    {
+        $this->closureCapCounts($module);
+        $changed = false;
+        /** @var array<string, string> $methodOf fn name → method name */
+        $methodOf = [];
+        /** @var array<string, string> $classOf fn name → declaring class */
+        $classOf = [];
+        foreach ($this->classes as $cn => $cd) {
+            foreach ($cd->methodNames as $mm => $unused) {
+                $fk = $cn . '__' . $mm;
+                if (isset($this->fnByName[$fk])) { $methodOf[$fk] = $mm; $classOf[$fk] = $cn; }
+            }
+        }
+        /** @var array<string, bool> $retyped "fn#idx" of every method param widened here */
+        $retyped = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $idx = -1;
+            foreach ($fn->params as $p) {
+                $idx = $idx + 1;
+                if (!$p->byRef || $p->variadic || !$this->isScalarReprKind($p->type)) { continue; }
+                if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)) { continue; }
+                $p->type = Type::cell();
+                $p->retypedByRef = true;
+                $this->rescanTargets[$fn->name] = true;
+                $changed = true;
+                if (isset($methodOf[$fn->name])) { $retyped[$fn->name . '#' . (string)$idx] = true; }
+            }
+        }
+        // One call site reaches every override through the same slot, so the
+        // override FAMILY of a retyped method agrees on the cell — an override
+        // that kept the raw scalar would read the caller's cell word as an int.
+        // The family is the methods of that name whose classes share a
+        // supertype declaring it (a parent, an interface), not every method of
+        // that name: an unrelated `t(int &$i)` keeps its raw int.
+        if (\count($retyped) === 0) { return $changed; }
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern || !isset($methodOf[$fn->name])) { continue; }
+            $m = $methodOf[$fn->name];
+            $idx = -1;
+            foreach ($fn->params as $p) {
+                $idx = $idx + 1;
+                if (!$p->byRef || $p->variadic || !$this->isScalarReprKind($p->type)) { continue; }
+                foreach ($retyped as $rk => $unused) {
+                    $cut = \strrpos($rk, '#');
+                    if ($cut === false || \substr($rk, $cut + 1) !== (string)$idx) { continue; }
+                    $rf = \substr($rk, 0, $cut);
+                    if (($methodOf[$rf] ?? '') !== $m) { continue; }
+                    if (!$this->sameMethodFamily($classOf[$fn->name], $classOf[$rf] ?? '', $m)) { continue; }
+                    $p->type = Type::cell();
+                    $this->rescanTargets[$fn->name] = true;
+                    break;
+                }
+            }
+        }
+        return $changed;
+    }
+
+
+    /**
+     * An array ELEMENT handed to a by-ref param that is a cell (`mixed &$v`, or
+     * a typed `int &$v` retyped by {@see scanRefParamRetype}) can come back as
+     * ANY kind, and the caller writes that cell into the element's own slot. A
+     * buffer whose elements are a concrete scalar has no room for it — the
+     * stored string landed as a boxed word in a `vec[int]` and read back as
+     * garbage — so the array being addressed is a mixed array: seed its element
+     * cell, as {@see scanByRefElemWiden} does for a callee that appends. A local
+     * is widened when this scope built it from a literal, an instance property
+     * through its declared type; a closure's untyped `&$v` is a cell by the ABI
+     * alone and says nothing about what it stores, so only a retyped closure
+     * param counts.
+     */
+    private function scanRefElemArgWiden(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($fn->isPrelude || $fn->isExtern) { continue; }
+            /** @var Node[] $bases */
+            $bases = [];
+            $this->collectRefElemArgBases($fn->body, $bases);
+            if ($bases === []) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            foreach ($bases as $b) {
+                if ($b->kind === Node::KIND_LOAD_LOCAL) {
+                    if (isset($skip[$b->name]) || !isset($lits[$b->name])) { continue; }
+                    if (isset($this->byRefCellElemLocals[$fn->name][$b->name])) { continue; }
+                    $this->byRefCellElemLocals[$fn->name][$b->name] = true;
+                    $this->rescanTargets[$fn->name] = true;
+                    $changed = true;
+                } elseif ($b->kind === Node::KIND_STATIC_PROP) {
+                    if ($this->widenStaticPropElem($module, $b->global)) { $changed = true; $this->refElemPropsRetyped = true; }
+                } elseif ($b->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $cd = null;
+                    $walk = $b->object->type->class ?? '';
+                    $seen = [];
+                    while ($walk !== '' && !isset($seen[$walk])) {
+                        $seen[$walk] = true;
+                        $wd = $this->classes[$walk] ?? null;
+                        if ($wd === null) { break; }
+                        if (isset($wd->propertyTypes[$b->property])) { $cd = $wd; break; }
+                        $walk = $wd->parent;
+                    }
+                    if ($cd === null) { continue; }
+                    $cur = $cd->propertyTypes[$b->property] ?? null;
+                    if ($cur === null) { continue; }
+                    if ($cur->isArray()) {
+                        if (($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
+                        $nt = $cur->key !== null ? Type::assoc($cur->key, Type::cell()) : Type::vec(Type::cell());
+                    } elseif ($cur->kind === Type::KIND_UNKNOWN && ($cd->propertyArrayHinted[$b->property] ?? false)) {
+                        $nt = Type::vec(Type::cell());
+                    } else {
+                        continue;
+                    }
+                    if ($this->setPropType($cd, $b->property, $nt)) { $changed = true; $this->refElemPropsRetyped = true; }
+                }
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * A STATIC array property whose element is handed to a cell by-ref param:
+     * its slot is one global cell, so the declared literal default and every
+     * node reading it have to agree on cell elements. The default is built at
+     * lowering from the slot's declared type and InferTypes never sees it — the
+     * literal is retyped here, with every `StaticProp_` of that cell.
+     */
+    private function widenStaticPropElem(Module $module, string $global): bool
+    {
+        $n = \count($module->globalNames);
+        $di = -1;
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            if ($module->globalNames[$i] === $global) { $di = $i; break; }
+        }
+        if ($di < 0) { return false; }
+        $def = $module->globalDefaults[$di];
+        if ($def->kind !== Node::KIND_ARRAY_LIT || !$def->type->isArray()) { return false; }
+        if (($def->type->element->kind ?? '') === Type::KIND_CELL) { return false; }
+        $nt = $def->type->key !== null ? Type::assoc($def->type->key, Type::cell()) : Type::vec(Type::cell());
+        $def->type = $nt;
+        foreach ($module->functions as $fn) {
+            if (!$this->bodyHas($fn, Node::KIND_STATIC_PROP)) { continue; }
+            $this->retypeStaticPropCell($fn->body, $global, $nt);
+        }
+        return true;
+    }
+
+    private function retypeStaticPropCell(Node $n, string $global, Type $nt): void
+    {
+        if ($n->kind === Node::KIND_STATIC_PROP && $n->global === $global && $n->type->isArray()) { $n->type = $nt; }
+        foreach (Walk::children($n) as $c) { $this->retypeStaticPropCell($c, $global, $nt); }
+    }
+
+    /** The array operand of every `$base[$k]` argument bound to a cell by-ref param.
+     *  @param Node[] $out */
+    private function collectRefElemArgBases(Node $n, array &$out): void
+    {
+        $base = 0;
+        /** @var Node[] $args */
+        $args = [];
+        $callee = $this->byRefCallee($n, $args, $base);
+        if ($callee !== null) {
+            $viaClosure = isset($this->closureCapCount[$callee->name]);
+            foreach ($args as $i => $a) {
+                $p = $callee->params[$base + $i] ?? null;
+                if ($p === null || !$p->byRef || $p->type->kind !== Type::KIND_CELL) { continue; }
+                if ($viaClosure && !$p->retypedByRef) { continue; }
+                if ($a->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
+                $ek = $a->type->kind;
+                if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
+                $bs = $a->array;
+                if ($bs->kind === Node::KIND_LOAD_LOCAL || $bs->kind === Node::KIND_PROPERTY_ACCESS
+                    || $bs->kind === Node::KIND_STATIC_PROP) { $out[] = $bs; }
+            }
+        }
+        // `array_walk($xs, function (&$v) { $v = 'other kind'; })`: the callback
+        // rewrites each element of the walked array.
+        if ($n->kind === Node::KIND_CALL && ($n->function === 'array_walk' || $n->function === 'array_walk_recursive')
+            && \count($n->args) >= 2 && $n->args[1]->kind === Node::KIND_CLOSURE && $n->args[0]->type->isArray()) {
+            $cn = $n->args[1]->type->class ?? '';
+            $cf = $cn !== '' ? ($this->fnByName[$cn] ?? null) : null;
+            $pi = \count($n->args[1]->captures);
+            $p = $cf === null ? null : ($cf->params[$pi] ?? null);
+            $ek = $n->args[0]->type->element->kind ?? Type::KIND_UNKNOWN;
+            $bs = $n->args[0];
+            if ($p !== null && $p->byRef && $ek !== Type::KIND_CELL && $ek !== Type::KIND_UNKNOWN
+                && ($bs->kind === Node::KIND_LOAD_LOCAL || $bs->kind === Node::KIND_PROPERTY_ACCESS
+                    || $bs->kind === Node::KIND_STATIC_PROP)
+                && ($p->retypedByRef || $this->refWordForeign($cf->body, $p->name, $ek, 0))) {
+                $p->retypedByRef = true;
+                $out[] = $bs;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefElemArgBases($c, $out); }
+    }
+    /** Do `$a` and `$b` share a supertype (themselves included — a parent, an
+     *  interface) that has method `$m`? Then one call site can reach both. */
+    private function sameMethodFamily(string $a, string $b, string $m): bool
+    {
+        if ($a === '' || $b === '') { return false; }
+        if ($a === $b) { return true; }
+        $sa = $this->supertypesWith($a, $m);
+        foreach ($this->supertypesWith($b, $m) as $s => $unused) {
+            if (isset($sa[$s])) { return true; }
+        }
+        return false;
+    }
+
+    /** @return array<string, bool> `$cls` and every parent / interface of it
+     *  that has method `$m` */
+    private function supertypesWith(string $cls, string $m): array
+    {
+        $out = [];
+        $seen = [];
+        $stack = [$cls];
+        while ($stack !== []) {
+            $c = \array_pop($stack);
+            if ($c === '' || isset($seen[$c])) { continue; }
+            $seen[$c] = true;
+            $cd = $this->classes[$c] ?? null;
+            if ($cd === null) { continue; }
+            if (isset($cd->methodNames[$m])) { $out[$c] = true; }
+            if ($cd->parent !== '') { $stack[] = $cd->parent; }
+            foreach ($cd->interfaces as $i) { $stack[] = $i; }
+        }
+        return $out;
+    }
+
+    /** `__closure_N` → how many captures lead its params, from every closure
+     *  literal in the module ({@see $closureCapCount}). */
+    private function closureCapCounts(Module $module): void
+    {
+        $this->closureCapCount = [];
+        foreach ($module->functions as $fn) { $this->collectClosureCaps($fn->body); }
+    }
+
+    private function collectClosureCaps(Node $n): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $cls = $n->type->class ?? '';
+            if ($cls !== '') { $this->closureCapCount[$cls] = \count($n->captures); }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectClosureCaps($c); }
+    }
+
+    /**
+     * Can the by-ref word `$name` (declared kind `$kind`) be rewritten under
+     * `$n` as a word of ANOTHER kind? A whole store of another kind; a hand-off
+     * (`$name` or `&$name`) to a by-ref param of a resolvable callee declared
+     * otherwise (a cell, or another scalar); a `use (&$name)` closure whose body
+     * does either to its capture. Depth-bounded through nested closures.
+     */
+    private function refWordForeign(Node $n, string $name, string $kind, int $depth): bool
+    {
+        if ($n instanceof StoreLocal && $n->name === $name) {
+            $vk = $n->value->type->kind;
+            if ($vk !== Type::KIND_UNKNOWN && $vk !== $kind) { return true; }
+        }
+        if ($n->kind === Node::KIND_CLOSURE) {
+            if ($depth >= 4) { return false; }
+            $cls = $n->type->class ?? '';
+            $cf = $cls !== '' ? ($this->fnByName[$cls] ?? null) : null;
+            $i = -1;
+            foreach ($n->captures as $c) {
+                $i = $i + 1;
+                if (!($n->captureByRef[$i] ?? false) || $cf === null) { continue; }
+                if ($c->kind !== Node::KIND_LOAD_LOCAL || $c->name !== $name) { continue; }
+                $pn = $this->paramNameAt($cf, $i);
+                if ($pn !== '' && $this->refWordForeign($cf->body, $pn, $kind, $depth + 1)) { return true; }
+            }
+            // The closure's own body is a different frame: only its captures
+            // (above) share this word.
+            return false;
+        }
+        $base = 0;
+        /** @var Node[] $args */
+        $args = [];
+        $callee = $this->byRefCallee($n, $args, $base);
+        if ($callee !== null) {
+            foreach ($args as $i => $a) {
+                $an = '';
+                if ($a->kind === Node::KIND_LOAD_LOCAL) { $an = $a->name; }
+                elseif ($a->kind === Node::KIND_REF_ADDR) { $an = $a->target; }
+                if ($an !== $name) { continue; }
+                $p = $callee->params[$base + $i] ?? null;
+                if ($p === null || !$p->byRef) { continue; }
+                $pk = $p->type->kind;
+                if ($pk !== Type::KIND_UNKNOWN && $pk !== $kind) { return true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->refWordForeign($c, $name, $kind, $depth)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * The body a call node binds its arguments to, when it can be named here —
+     * a function, a static or instance method (an interface / abstract
+     * receiver answers through its first override, {@see overrideBody}), a
+     * closure invoked through a variable of its own class. `$args` gets the
+     * call's arguments, `$base` the param index the first one binds to (past
+     * `$this`, past a closure's captures).
+     *
+     * @param Node[] $args
+     */
+    private function byRefCallee(Node $n, array &$args, int &$base): ?FunctionDef
+    {
+        $callee = null;
+        $base = 0;
+        if ($n->kind === Node::KIND_CALL) {
+            $callee = $this->fnByName[$n->function] ?? null;
+            $args = $n->args;
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $sc = $n;
+            $decl = $sc->class !== '' ? $this->resolveMethodClass($sc->class, $sc->method) : '';
+            if ($decl !== '') { $callee = $this->fnByName[$decl . '__' . $sc->method] ?? null; }
+            $args = $sc->args;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $mc = $n;
+            $cls = $mc->object->type->class ?? '';
+            $decl = $cls !== '' ? $this->resolveMethodClass($cls, $mc->method) : '';
+            if ($decl !== '') { $callee = $this->fnByName[$decl . '__' . $mc->method] ?? null; }
+            if ($callee === null && $cls !== '') { $callee = $this->overrideBody($cls, $mc->method); }
+            $args = $mc->args;
+            $base = 1;
+        } elseif ($n->kind === Node::KIND_INVOKE) {
+            $iv = $n;
+            $cls = $iv->callee->type->class ?? '';
+            if ($cls !== '' && isset($this->closureCapCount[$cls])) {
+                $callee = $this->fnByName[$cls] ?? null;
+                $base = $this->closureCapCount[$cls];
+            }
+            $args = $iv->args;
+        }
+        return $callee;
+    }
+
     /** @param array<string,bool> $names */
     private function scanRefCellArgNode(Node $n, array &$names): void
     {
-        if ($n->kind === Node::KIND_CALL) {
-            $callee = $this->fnByName[$n->function] ?? null;
-            if ($callee !== null) {
-                foreach ($n->args as $i => $a) {
-                    $p = $callee->params[$i] ?? null;
-                    if ($p === null || !$p->byRef) { continue; }
-                    if ($p->type->kind !== Type::KIND_CELL) { continue; }
-                    if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                        $names[$a->name] = true;
-                    } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
-                        $names[$a->target] = true;
-                    }
+        $base = 0;
+        /** @var Node[] $args */
+        $args = [];
+        $callee = $this->byRefCallee($n, $args, $base);
+        if ($callee !== null) {
+            foreach ($args as $i => $a) {
+                $p = $callee->params[$base + $i] ?? null;
+                if ($p === null || !$p->byRef) { continue; }
+                if ($p->type->kind !== Type::KIND_CELL) { continue; }
+                if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                    $names[$a->name] = true;
+                } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
+                    $names[$a->target] = true;
+                }
+            }
+        } elseif ($n->kind === Node::KIND_INVOKE && $n->callee->kind === Node::KIND_DYN_PROP) {
+            // `$o->$m(&$x)`: the name is a runtime value, so any method of the
+            // receiver's class may bind the slot — one taking it as a cell
+            // makes the caller's slot a cell.
+            $iv = $n;
+            $cls = $iv->callee->object->type->class ?? '';
+            if ($cls !== '') {
+                foreach ($iv->args as $i => $a) {
+                    $an = '';
+                    if ($a->kind === Node::KIND_LOAD_LOCAL) { $an = $a->name; }
+                    elseif ($a->kind === Node::KIND_REF_ADDR) { $an = $a->target; }
+                    if ($an === '' || isset($names[$an])) { continue; }
+                    if ($this->anyMethodTakesCellRef($cls, $i + 1)) { $names[$an] = true; }
                 }
             }
         }
         foreach (Walk::children($n) as $c) {
             $this->scanRefCellArgNode($c, $names);
         }
+    }
+
+    /** Does any method `$cls` has (declared or inherited) take param `$pi` by
+     *  reference as a cell? */
+    private function anyMethodTakesCellRef(string $cls, int $pi): bool
+    {
+        $c = $cls;
+        $seen = [];
+        while ($c !== '' && !isset($seen[$c])) {
+            $seen[$c] = true;
+            $cd = $this->classes[$c] ?? null;
+            if ($cd === null) { return false; }
+            foreach ($cd->methodNames as $mm => $unused) {
+                $fn = $this->fnByName[$c . '__' . $mm] ?? null;
+                $p = $fn === null ? null : ($fn->params[$pi] ?? null);
+                if ($p !== null && $p->byRef && $p->type->kind === Type::KIND_CELL) { return true; }
+            }
+            $c = $cd->parent;
+        }
+        return false;
+    }
+
+    /** A body that answers `$method` on a receiver typed `$cls` when `$cls`
+     *  itself declares none — an interface, or an abstract declaration: the
+     *  first override among its descendants, the one the emitter takes the
+     *  call's signature from. */
+    private function overrideBody(string $cls, string $method): ?FunctionDef
+    {
+        $key = $cls . '::' . $method;
+        $name = $this->overrideBodyMemo[$key] ?? null;
+        if ($name === null) {
+            $name = '';
+            foreach ($this->classes as $cn => $cd) {
+                if ($cn === $cls || !isset($cd->methodNames[$method])) { continue; }
+                if (!isset($this->fnByName[$cn . '__' . $method])) { continue; }
+                if ($this->classImplementsT($cn, $cls)) { $name = $cn . '__' . $method; break; }
+            }
+            $this->overrideBodyMemo[$key] = $name;
+        }
+        return $name === '' ? null : ($this->fnByName[$name] ?? null);
     }
 
     /** Mark locals used as an ARITHMETIC operand ({@see InferTypes::$arithUsedLocals}) —

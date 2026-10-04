@@ -239,6 +239,14 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
   class ships (`prelude/reflection.php`).
 - **Static properties are external-linkage globals only**, so two compilation units cannot
   disagree about one.
+- **A user `global $x` shared by a library and an application has its type inferred per
+  module.** Each module unifies only the stores it sees, so a library storing an int
+  element into an array global the application typed `array<string,string>` disagrees on
+  the buffer contract. The superglobals are pinned to `array<string, mixed>` for exactly
+  this reason; user globals crossing modules need the same (or a `.sig` record).
+- **A library base class dispatching to an application override** does not reach the
+  override (`(new AppChild)->call($x)` where `LibBase::call` invokes `$this->m($x)` runs
+  the base's `m`).
 - **Element representation is half done.** The array flags word carries an element-repr
   nibble that release / retain / COW read, but the erased element channel is not yet a cell,
   so a concrete `string[]` parameter fed a cell-element array still misreads.

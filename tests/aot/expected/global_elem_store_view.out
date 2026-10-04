@@ -1,0 +1,21 @@
+int(3)
+string(1) "b"
+array(2) {
+  ["c"]=>
+  string(1) "d"
+  ["ZZ_V"]=>
+  int(3)
+}
+int(3)
+float(1.5)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "x"
+}
+bool(true)
+int(42)
+int(42)
+string(5) "three"
+int(2)
