@@ -341,6 +341,9 @@ final class DeadStore implements Pass
             foreach ($n->args as $a) { $this->collectUses($a); }
             return;
         }
+        // A kind with no arm above (`yield`, ...) must still contribute the
+        // reads under it, or the store feeding them looks dead.
+        foreach ($n->children() as $c) { $this->collectUses($c); }
     }
 
     // ── Pass 2: drop unused pure stores ────────────────────────
