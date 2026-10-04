@@ -126,6 +126,7 @@ trait LowerFns
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $fp->refPack = $this->paramIsRefPack($p);
             // A VARIADIC pack is genuinely 0..n — its vec is the compiler's own
             // and its keys are not in question.
             $fp->docList = !$isVariadic && $this->isElemOnlyArrayDoc($effHint);
@@ -272,7 +273,7 @@ trait LowerFns
             // survives the interface `.sig`, so it is the portable signal.
             $outType = $this->docTagType($decl->docComment, '@param-out', $p->name);
             $pt = $isVariadic
-                ? Type::vec($this->lowerTypeHint($p->typeHint))
+                ? $this->variadicPackType($p)
                 : $this->lowerTypeHint($this->effectiveHint(
                     $p->typeHint,
                     $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
@@ -280,11 +281,12 @@ trait LowerFns
             $fnp = new Param(
                 name: $p->name,
                 type: $pt,
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fnp->refOut = $outType !== null || isset($refOutNames[$p->name]);
+            $fnp->refPack = $this->paramIsRefPack($p);
             // The `.sig`-carried CellArg flag (declsFromJson set $p->cellArg) is
             // the cross-module signal: a consumer sees only the interface, so this
             // is how fputcsv's element-consuming `$fields` reaches the caller.
@@ -540,6 +542,7 @@ trait LowerFns
             // argument (`$f(mk())` with `mk(): mixed`) otherwise reached the
             // COW as a tagged word.
             $cp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $cp->type->isArray();
+            $cp->refPack = $this->paramIsRefPack($p);
             $params[] = $cp;
         }
         $retType = $this->lowerTypeHint($retHint);
@@ -891,27 +894,6 @@ trait LowerFns
             'MIR.lower: free-variable scan has no rule for expression kind ' . $k);
     }
 
-    /**
-     * Lower AST call args against a known parameter signature, filling
-     * omitted trailing params with their default expression (or null),
-     * reordering named args, and packing a trailing variadic into a vec.
-     * Critical for `new`/method/static calls: the callee reads one slot
-     * per param, so an omitted obj-typed default left uninitialized makes
-     * the callee retain stack garbage.
-     * @param \Parser\Ast\Param[] $params
-     * @param \Parser\Ast\Expr[]  $astArgs
-     * @return Node[]
-     */
-    /**
-     * Lower one argument, converting a callable LITERAL into a closure when the
-     * parameter at this position is `callable`-typed. lowerCallArgs does this on
-     * its fast positional path, but every call that omits a DEFAULTED parameter
-     * lands here instead — and then a string like `"strlen"` was passed through
-     * as a plain string. The callee invokes a `callable` param through the
-     * closure ABI, so it jumped to the address of the string's own bytes:
-     * `array_filter($a, "strlen")` (three params, two arguments — symfony's
-     * InputOption constructor) crashed on the literal "strlen".
-     */
     private function paramByRefDecl(\Parser\Ast\Param $p): bool { return (bool)($p->byRef ?? false); }
 
     /**
@@ -931,6 +913,16 @@ trait LowerFns
         return $this->lowerExpr($a);
     }
 
+    /**
+     * Lower one argument, converting a callable LITERAL into a closure when the
+     * parameter at this position is `callable`-typed. lowerCallArgs does this on
+     * its fast positional path, but every call that omits a DEFAULTED parameter
+     * lands here instead — and then a string like `"strlen"` was passed through
+     * as a plain string. The callee invokes a `callable` param through the
+     * closure ABI, so it jumped to the address of the string's own bytes:
+     * `array_filter($a, "strlen")` (three params, two arguments — symfony's
+     * InputOption constructor) crashed on the literal "strlen".
+     */
     private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
     {
         if ($p !== null) {
@@ -1015,6 +1007,17 @@ trait LowerFns
         return new Block($stmts, $body->type);
     }
 
+    /**
+     * Lower AST call args against a known parameter signature, filling
+     * omitted trailing params with their default expression (or null),
+     * reordering named args, and packing a trailing variadic into a vec.
+     * Critical for `new`/method/static calls: the callee reads one slot
+     * per param, so an omitted obj-typed default left uninitialized makes
+     * the callee retain stack garbage.
+     * @param \Parser\Ast\Param[] $params
+     * @param \Parser\Ast\Expr[]  $astArgs
+     * @return Node[]
+     */
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
         $hasNamed = false;

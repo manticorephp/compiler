@@ -2506,6 +2506,7 @@ final class LowerFromAst implements Pass
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $mp->refPack = $this->paramIsRefPack($p);
             // Variadic excluded for the same reason as the free-function path:
             // the pack's keys are the compiler's own 0..n.
             $mp->docList = !$isVar && $this->isElemOnlyArrayDoc($effHint);
@@ -3363,6 +3364,7 @@ final class LowerFromAst implements Pass
                 $fp = new Param(name: $p->name, type: $t, byRef: $this->paramBindsByRef($p), variadic: (bool)($p->variadic ?? false),
                     default: $this->lowerParamDefault($p, $defaultScope));
                 $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $t->isArray();
+                $fp->refPack = $this->paramIsRefPack($p);
                 $mir[] = $fp;
                 $loads[] = new LoadLocal($p->name, $t);
             }
@@ -5385,6 +5387,12 @@ final class LowerFromAst implements Pass
     private function paramBindsByRef(\Parser\Ast\Param $p): bool
     {
         return (bool)($p->byRef ?? false) && !(bool)($p->variadic ?? false);
+    }
+
+    /** `&...$xs` — {@see \Compile\Mir\Param::$refPack}. */
+    private function paramIsRefPack(\Parser\Ast\Param $p): bool
+    {
+        return (bool)($p->byRef ?? false) && (bool)($p->variadic ?? false);
     }
     private function paramDefault(\Parser\Ast\Param $p): ?\Parser\Ast\Expr { return $p->default; }
     private function staticAccessClass(\Parser\Ast\StaticAccess $e): string { return $e->class; }

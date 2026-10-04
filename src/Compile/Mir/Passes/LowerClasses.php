@@ -927,17 +927,18 @@ trait LowerClasses
                 // lowerTypeHint unchanged — an empty string means the library
                 // erased it to unknown and the dependent must erase it too.
                 $pt = $isVariadic
-                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    ? $this->variadicPackType($p)
                     : $this->lowerTypeHint($p->typeHint);
                 $fnp = new Param(
                     name: $p->name,
                     type: $pt,
-                    byRef: (bool)($p->byRef ?? false),
+                    byRef: $this->paramBindsByRef($p),
                     variadic: $isVariadic,
                     default: $p->default !== null ? $this->lowerExpr($p->default) : null,
                 );
                 $fnp->refOut = (bool)($p->refOut ?? false);
                 $fnp->cellArg = (bool)($p->cellArg ?? false);
+                $fnp->refPack = $this->paramIsRefPack($p);
                 $params[] = $fnp;
             }
             $fn = new FunctionDef(

@@ -1,0 +1,14 @@
+{
+  "libraries": [
+    { "name": "acmerefpack", "src": "tests/libs/refpack/lib", "output": "tests/libs/refpack/.work/refpack.o" }
+  ],
+  "applications": [
+    {
+      "name": "refpackapp",
+      "src": "tests/libs/refpack/app",
+      "output": "tests/libs/refpack/.work/refpackapp",
+      "entry": "tests/libs/refpack/app/main.php",
+      "libraries": ["acmerefpack"]
+    }
+  ]
+}

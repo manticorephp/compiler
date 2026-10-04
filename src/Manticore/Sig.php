@@ -762,7 +762,7 @@ final class Sig
     {
         $out = "{\"name\":" . self::jsonStr($p->name)
             . ",\"type\":" . self::jsonStr(self::encodeType($p->type))
-            . ",\"byref\":" . ($p->byRef ? "true" : "false")
+            . ",\"byref\":" . ($p->byRef || $p->refPack ? "true" : "false")
             . ",\"refout\":" . ($p->refOut ? "true" : "false")
             . ",\"cellarg\":" . ($p->cellArg ? "true" : "false")
             . ",\"variadic\":" . ($p->variadic ? "true" : "false");
