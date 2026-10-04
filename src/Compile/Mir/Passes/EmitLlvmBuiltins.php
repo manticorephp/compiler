@@ -8946,6 +8946,16 @@ trait EmitLlvmBuiltins
                       . $parentPtr . ', i64 ' . $idx . ', i64 ' . $valI . ")\n";
             }
             $this->elemWroteThroughRef = $outerWrote;
+            // A RAW inner array written back into an ERASED parent: describe it
+            // the way the plain erased store of an array value does, or a
+            // reader of the unstamped buffer takes the pointer for an int.
+            if (!$innerCell && !$parentCell && $arrNode->array->type->isArray()
+                && ($arrNode->array->type->element === null
+                    || $arrNode->array->type->element->kind === Type::KIND_UNKNOWN)) {
+                $out .= '  call void @__mir_elem_stamp_raw(ptr ' . $parent2 . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_REPR_ARR . ")\n";
+            }
             $out .= $this->vecWriteBack($arrNode->array, $parent2, $parentCell);
             return $out;
         }
