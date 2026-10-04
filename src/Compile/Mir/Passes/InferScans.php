@@ -1259,7 +1259,9 @@ trait InferScans
             $elems = [];
             $elemBad = [];
             $strKey = [];
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            /** @var array<string,string> $aliasOf */
+            $aliasOf = [];
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey, $aliasOf);
             /** @var array<string,array<string,bool>> $kinds */
             $kinds = [];
             $this->collectStaticStoreKinds($fn->body, $active, $kinds);
@@ -1354,6 +1356,12 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->collectPlainStaticLocals($c, $active, $cells, $initKinds); }
     }
 
+    private static function isSuperglobalVar(string $n): bool
+    {
+        return $n === '_SERVER' || $n === '_ENV' || $n === '_GET' || $n === '_POST'
+            || $n === '_COOKIE' || $n === '_FILES' || $n === '_REQUEST' || $n === '_SESSION';
+    }
+
     private function scanGlobalTypes(Module $module): bool
     {
         if (\count($module->globalVarNames) === 0) { return false; }
@@ -1375,7 +1383,9 @@ trait InferScans
                 foreach ($module->globalVarNames as $gname) { $active[$gname] = true; }
             }
             if (\count($active) === 0) { continue; }
-            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey);
+            /** @var array<string,string> $aliasOf */
+            $aliasOf = [];
+            $this->collectGlobalStoreTypes($fn->body, $active, $observed, $elems, $elemBad, $strKey, $aliasOf);
         }
         $changed = false;
         // A global reached ONLY by appends (`$g = []` types the empty literal
@@ -1384,6 +1394,17 @@ trait InferScans
         $names = [];
         foreach ($observed as $name => $t) { $names[$name] = true; }
         foreach ($elems as $name => $t) { $names[$name] = true; }
+        // A superglobal shared with another module holds whatever THAT
+        // module's stores put there, at its representation: only a cell — the
+        // self-describing one — is the same in both.
+        if ($module->sharesSuperglobals) {
+            foreach ($module->globalVarNames as $gname) {
+                if (!self::isSuperglobalVar($gname)) { continue; }
+                $observed[$gname] = Type::unknown();
+                unset($elems[$gname]);
+                $names[$gname] = true;
+            }
+        }
         foreach ($names as $name => $_) {
             $t = $observed[$name] ?? null;
             // An array global whose element is still erased takes the element
@@ -1407,7 +1428,21 @@ trait InferScans
             }
             if ($t === null) { continue; }
             $k = $t->kind;
-            if ($k === Type::KIND_UNKNOWN || $k === Type::KIND_INT) { continue; }
+            // Stores of different kinds (`$cfg = null;` at the top, an array in
+            // a function) join to UNKNOWN — an erased store is never joined, so
+            // UNKNOWN here is a conflict. No one raw word holds both: the decl
+            // stayed the `int` it is lowered as, a pure-read scope read the
+            // array pointer as a number, and no store released what it
+            // overwrote. The cell is a CELL, like a `static` slot two kinds
+            // share ({@see scanStaticLocalTypes}): NaN-boxed null at link time,
+            // every store boxes ({@see InferNodes::collectCellStaticLocals}).
+            if ($k === Type::KIND_UNKNOWN) {
+                $t = Type::cell();
+                $k = Type::KIND_CELL;
+                $this->setGlobalCellDefault($module, '@g_' . $name,
+                    new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_()));
+            }
+            if ($k === Type::KIND_INT) { continue; }
             $prev = $this->globalVarTypes[$name] ?? null;
             // The map outlives the run ({@see Module::$inferGlobalVarTypes}):
             // a same-kind type a later run narrowed (`vec[unknown]` → the

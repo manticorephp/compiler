@@ -178,6 +178,13 @@ trait InferNodes
                 && $this->staticLocalTypes[$d->cell]->kind === Type::KIND_CELL) {
                 $out[$d->name] = true;
             }
+            // A `global $g` whose scopes store more than one kind is a cell in
+            // every scope ({@see InferScans::scanGlobalTypes}).
+            if (\str_starts_with($d->cell, '@g_')
+                && isset($this->globalVarTypes[$d->name])
+                && $this->globalVarTypes[$d->name]->kind === Type::KIND_CELL) {
+                $out[$d->name] = true;
+            }
             return;
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectCellStaticLocals($c, $out); }
@@ -243,17 +250,18 @@ trait InferNodes
         if ($this->bodyHas($fn, Node::KIND_REF_CELL)) {
             $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
         }
+        // A `static $x;` whose stores are scalar rides a CELL for the same
+        // reason a ref-taken slot does: its null start must stay observable
+        // ({@see InferScans::scanStaticLocalTypes}), so every store boxes. A
+        // reference alias of such a slot (`$t = &$g`) is the same slot.
+        if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
+            $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
+        }
         $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
         // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
         // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
         // box — a cell — whatever it is later assigned.
         if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectElemRefTargetsInfer($fn->body); }
-        // A `static $x;` whose stores are scalar rides a CELL for the same
-        // reason a ref-taken slot does: its null start must stay observable
-        // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
-        if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
-            $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
-        }
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
@@ -704,6 +712,7 @@ trait InferNodes
         if ($kind === Node::KIND_INVOKE)      { return $this->inferInvoke($node); }
         if ($kind === Node::KIND_INCDEC)      { return $this->inferIncDec($node); }
         if ($kind === Node::KIND_STATIC_PROP) { return $node->type; }
+        if ($kind === Node::KIND_CAUGHT_VALUE) { return $this->inferCaughtValue($node); }
         if ($kind === Node::KIND_STORE_STATIC_PROP) { return $this->inferStoreStaticProp($node); }
         if ($kind === Node::KIND_STATIC_LOCAL_DECL) { return $this->inferStaticLocalDecl($node); }
         if ($kind === Node::KIND_ISSET) { return $this->inferIsset($node); }
@@ -1063,10 +1072,6 @@ trait InferNodes
         $exit = self::stmtsDiverge($n->tryBody) ? null : $tryEnd;
         foreach ($n->catches as $c) {
             $this->localTypes = $catchEntry;
-            // Bind `$e` to the first declared catch type (obj<T>).
-            if ($c->var !== null && \count($c->types) > 0) {
-                $this->localTypes[$c->var] = Type::obj($c->types[0]);
-            }
             foreach ($c->body as $s) { $this->inferNode($s); }
             if (!self::stmtsDiverge($c->body)) {
                 $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
@@ -1150,6 +1155,25 @@ trait InferNodes
     {
         foreach ($n->targets as $t) { $this->inferNode($t); }
         return Type::void();
+    }
+
+    /**
+     * The object a `catch (A | B $e)` binds is one of its classes: their join
+     * ({@see unionTypes} — a common ancestor or interface). A join that is not
+     * an object (a class this module does not know) keeps the first class.
+     */
+    private function inferCaughtValue(\Compile\Mir\CaughtValue_ $n): Type
+    {
+        $t = null;
+        foreach ($n->types as $cls) {
+            $o = Type::obj($cls);
+            $t = $t === null ? $o : $this->unionTypes($t, $o);
+        }
+        if ($t === null || ($t->kind !== Type::KIND_OBJ && $t->kind !== Type::KIND_UNION)) {
+            $t = Type::obj(\count($n->types) > 0 ? $n->types[0] : 'Throwable');
+        }
+        $n->type = $t;
+        return $t;
     }
 
     private function inferStaticLocalDecl(StaticLocalDecl_ $n): Type

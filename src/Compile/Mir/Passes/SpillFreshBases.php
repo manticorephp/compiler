@@ -808,7 +808,8 @@ final class SpillFreshBases
     /**
      * The property slots the value of `$v` hangs from, when it is a read out
      * of one — `$this->a->b[$k]` is held by `b`, and by `a`, whose release
-     * frees the object holding `b`. [] for anything else, and for a scalar,
+     * frees the object holding `b`; `C::$s[$k]` by the static slot `C::$s`.
+     * [] for anything else, and for a scalar,
      * which is a copy of the word.
      *
      * @return array<string, bool>
@@ -841,6 +842,8 @@ final class SpillFreshBases
             $pa = $this->asPropertyAccess($v);
             $keys[\Compile\Mir\EscapeSummaries::propKey($pa->object, $pa->property)] = true;
             $this->collectHeld($pa->object, $keys);
+        } elseif ($k === Node::KIND_STATIC_PROP) {
+            $keys[\Compile\Mir\EscapeSummaries::staticKey($this->asStaticProp($v)->global)] = true;
         } elseif ($k === Node::KIND_ARRAY_ACCESS) {
             $aa = $this->asArrayAccess($v);
             if ($aa->array->type->kind === Type::KIND_STRING) { return; }
@@ -1175,6 +1178,7 @@ final class SpillFreshBases
     private function asMethodCall(Node $n): \Compile\Mir\MethodCall_ { return $n; }
     private function asInvoke(Node $n): \Compile\Mir\Invoke_ { return $n; }
     private function asPropertyAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
+    private function asStaticProp(Node $n): \Compile\Mir\StaticProp_ { return $n; }
     private function asArrayAccess(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
     private function asBitOp(Node $n): \Compile\Mir\BitOp { return $n; }
     private function asDynProp(Node $n): \Compile\Mir\DynProp_ { return $n; }

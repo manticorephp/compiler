@@ -345,6 +345,11 @@ trait EmitLlvmVisit
         return $this->emitIncDec($n);
     }
 
+    public function visitCaughtValue(\Compile\Mir\CaughtValue_ $n): string
+    {
+        return $this->emitCaughtValue();
+    }
+
     public function visitStaticProp(StaticProp_ $n): string
     {
         return $this->emitStaticProp($n);

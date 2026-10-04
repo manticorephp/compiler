@@ -3024,6 +3024,8 @@ trait EmitLlvmCalls
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
+        // A catch without a variable: nothing binds the exception it took.
+        if ($k === Node::KIND_CAUGHT_VALUE) { return $this->rcReleaseReg($this->lastValue, 'obj'); }
         // A value block discarded as a statement: its result is its last
         // statement's, which {@see visitBlock} left owned.
         if ($k === Node::KIND_BLOCK && $s->type->kind !== Type::KIND_VOID) {

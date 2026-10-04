@@ -1959,16 +1959,13 @@ trait EmitLlvmArrays
     /**
      * Is `$base` a SUPERGLOBAL cell under the ownership contract — every
      * reference it holds taken at the cell flavor and every release the `ownel`
-     * one ({@see EmitLlvmLocals::globalCellOwnIr})? A cell some store vetoed
-     * ({@see EmitLlvm::scanGlobalCellStores}) is not, and keeps the plain paths.
+     * one ({@see EmitLlvmLocals::globalCellOwnIr})?
      */
     private function superglobalCellBase(Node $base): bool
     {
         if ($base->kind !== Node::KIND_LOAD_LOCAL) { return false; }
         if (!$this->isSuperglobalName($base->name)) { return false; }
-        $cell = $this->locals->globalBacked[$base->name] ?? '';
-        if ($cell === '') { return false; }
-        return !isset($this->globalCellVeto[$cell]);
+        return ($this->locals->globalBacked[$base->name] ?? '') !== '';
     }
 
     private function cowSymbolPlain(Type $t): string

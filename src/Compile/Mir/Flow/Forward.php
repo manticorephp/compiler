@@ -774,7 +774,7 @@ final class Forward
             if ($catchHas) {
                 $head = \count($c->body) === 0 ? $n : $c->body[0];
                 $this->edge('catch', $n, $head, $i, $catchIn, $catchIn);
-                $cin = $this->lattice->catchEntry($c, $catchIn);
+                $cin = $catchIn;
             }
             $ce = $this->seq($c->body, $cin, $n);
             $norm = $this->joinOpt($norm, $ce);

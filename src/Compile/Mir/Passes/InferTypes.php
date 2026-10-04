@@ -1826,22 +1826,32 @@ final class InferTypes implements Pass
      *  @param array<string,Type> $observed
      *  @param array<string,Type> $elems
      *  @param array<string,bool> $elemBad
-     *  @param array<string,bool> $strKey */
-    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey): void
+     *  @param array<string,bool> $strKey
+     *  @param array<string,string> $aliasOf a reference alias (`$t = &$g`,
+     *    chained) → the module cell's name: a store through it is the cell's */
+    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey, array &$aliasOf): void
     {
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $ra = $n;
+            $src = $aliasOf[$ra->source] ?? $ra->source;
+            if (isset($active[$src])) { $aliasOf[$ra->target] = $src; }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
             $s = $n;
+            $gname = $aliasOf[$s->name] ?? $s->name;
             // A self-store (`$x = $x`) is a merge shadow planMergeShadow planted,
             // not a definition: its value is the slot's own hard-lowered `int`,
             // and joining that with the real store (`string ∪ int` → unknown)
             // erased the seed the scan exists to find.
             $selfStore = $s->value->kind === Node::KIND_LOAD_LOCAL && $s->value->name === $s->name;
-            if (isset($active[$s->name]) && !$selfStore) {
-                $t = $s->value->type;
+            if (isset($active[$gname]) && !$selfStore) {
+                // A store NODE typed cell over a concrete value BOXES it (a
+                // reference-taken or loop-rekinded name): the slot receives a
+                // cell, whatever the value's own type says.
+                $t = $s->type->kind === Type::KIND_CELL ? Type::cell() : $s->value->type;
                 $tk = $t->kind;
                 if ($tk !== Type::KIND_UNKNOWN) {
-                    $observed[$s->name] = isset($observed[$s->name])
-                        ? $this->unionTypes($observed[$s->name], $t)
+                    $observed[$gname] = isset($observed[$gname])
+                        ? $this->unionTypes($observed[$gname], $t)
                         : $t;
                 }
             }
@@ -1879,7 +1889,7 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey);
+            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey, $aliasOf);
         }
     }
 

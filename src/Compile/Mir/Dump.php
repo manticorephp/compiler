@@ -868,6 +868,12 @@ final class Dump implements EmitVisitor
              . ' use (' . $useLine . ')' . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
     }
 
+    public function visitCaughtValue(CaughtValue_ $n): string
+    {
+        $name = $this->allocSlot();
+        return $this->indent . $name . ' = caught_value : ' . $n->type->toString() . "\n";
+    }
+
     public function visitStaticProp(StaticProp_ $n): string
     {
         $name = $this->allocSlot();

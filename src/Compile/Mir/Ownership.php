@@ -235,6 +235,9 @@ final class Ownership
         // call return through an erased channel) stays borrowed, so nothing
         // over-releases a `Closure` this frame did not build.
         if ($value->kind === Node::KIND_CLOSURE) { return true; }
+        // The caught exception: `throw` handed `@__mir_thrown` a +1, and the
+        // catch takes it out of the slot ({@see CaughtValue_}).
+        if ($value->kind === Node::KIND_CAUGHT_VALUE) { return true; }
         $tk = $value->type->kind;
         // A `Closure`-returning method types its call `closure`, not
         // `obj<Closure>`; the same producer rule as the object arm below.
@@ -412,7 +415,11 @@ final class Ownership
         // already named the pair; this half did not, so the copy was never
         // released: `$out = Context::$emptyGpc; …; return $out;` in
         // Http\Request::filesArray() left one buffer behind per compat request.
-        if ($k === Node::KIND_STATIC_PROP && $value->type->isVec()) {
+        // An ASSOC read of one — and a vec read a held-read spill co-owns
+        // without the copy — is retained like the instance-property arm above:
+        // the static's store releases what it overwrites, so a borrow would
+        // dangle (`$m = C::$map; C::$map = [];` freed `$m`).
+        if ($k === Node::KIND_STATIC_PROP && ($value->type->isVec() || $value->type->isAssoc())) {
             return true;
         }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
@@ -827,6 +834,7 @@ final class Ownership
         // freed none. Only the LITERAL: a closure read out of a local or a
         // property is a borrow.
         if ($a->kind === Node::KIND_CLOSURE) { return 'closure'; }
+        if ($a->kind === Node::KIND_CAUGHT_VALUE) { return 'obj'; }
         // …and so is a closure a CALL hands back, under the +1 return
         // convention rcRetainByType's closure arm already reads as a transfer:
         // `$reg->on($obj->makeHook())` retained it into the registry and the

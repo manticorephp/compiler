@@ -2,7 +2,6 @@
 
 namespace Compile\Mir\Flow;
 
-use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
 
 /**
@@ -50,14 +49,6 @@ interface Lattice
      */
     public function transfer(Node $stmt, array $in): array;
 
-    /**
-     * Entry of one catch arm: `$in` is the join over the try entry and every
-     * point inside the try body; the arm binds its exception variable here.
-     *
-     * @param array<string, int> $in
-     * @return array<string, int>
-     */
-    public function catchEntry(MirCatch $c, array $in): array;
 
     /**
      * @param array<string, int> $out

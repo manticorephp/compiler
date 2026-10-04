@@ -803,7 +803,6 @@ final class EmitLlvm implements EmitVisitor
         // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
         $this->refCellPropNames = [];
-        $this->globalCellVeto = [];
         $this->needsObjectVarsFn = false;
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
@@ -845,9 +844,6 @@ final class EmitLlvm implements EmitVisitor
         foreach ($module->functions as $fn) {
             $this->scanCellPropStores($fn->body);
             $this->collectRefCellPropNames($fn->body);
-            $decl = [];
-            $alias = [];
-            $this->scanGlobalCellStores($fn->body, $decl, $alias);
         }
         \Compile\Stats::step('  property scan', $statT, -1, -1);
         $streaming = $this->streamIrPath !== '';
@@ -1932,228 +1928,6 @@ final class EmitLlvm implements EmitVisitor
     private function asPropAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
 
     /**
-     * Module cells (`@g__GET`, a `static` local's cell) whose stores do NOT all
-     * agree with the cell's declared release flavor — {@see scanGlobalCellStores}.
-     * A vetoed cell keeps the old contract (no retain, no release, no element
-     * drop, no `ownel` cow): a leak, never a free through the wrong header.
-     * @var array<string, true>
-     */
-    private array $globalCellVeto = [];
-
-    /**
-     * Pre-pass for the module-cell ownership contract
-     * ({@see EmitLlvmLocals::globalCellOwnIr}): the retain a store takes is
-     * decided from the VALUE and the release from the DECL, and the two are only
-     * a pair when every store to the cell — in EVERY function, the cell is shared
-     * — hands it a value of the decl's rc flavor. The pass makes the same
-     * demand of a frame local ({@see InsertMemoryOps} "flavor"/"repr" blocks);
-     * a cell has no pass verdict, so it is made here, module-wide, keyed by cell.
-     *
-     * Agreement, per store value:
-     *  - an rc kind whose release flavor is the decl's (arrays at the retain's
-     *    depth, {@see EmitLlvmMemory::arrayRetainFlavor} with the decl as
-     *    fallback) — or any array into a CELL-element decl, whose walker
-     *    (`__mir_cell_drop`) is tag-guarded and no-ops on a raw element;
-     *  - a cell value into a cell decl (tag-dispatched both ways);
-     *  - a fresh UNKNOWN producer (a bare-`array` call's +1 is a raw buffer);
-     *  - `null`, which the slot holds as 0 (every release helper is null-safe).
-     * Anything else — a scalar under an rc claim, a raw array under a cell
-     * claim, a cell under a raw claim, a borrowed erased word, a closure, a
-     * string where the decl says object — vetoes the cell.
-     */
-    private function scanGlobalCellStores(Node $n, array &$decl, array &$alias): void
-    {
-        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
-            if (!$this->isGlobalsViewName($n->name)) {
-                $decl[$n->name] = $n;
-                // A LIBRARY's superglobal cell is shared with a program this
-                // module cannot see, whose stores it cannot judge; and
-                // the mirror: a program that LINKS a library shares its cells
-                // with stores the `.sig` does not describe ({@see $importsLibrary}).
-                // A `static` local is module-private and stays judged.
-                if (($this->moduleIsLibrary || $this->importsLibrary)
-                    && $this->isSuperglobalName($n->name)) {
-                    $this->globalCellVeto[$n->cell] = true;
-                }
-            }
-            return;
-        }
-        if ($n->kind === Node::KIND_REF_ALIAS) {
-            // The emitter follows a CHAIN (`$s = &$_SESSION; $t = &$s; $t = v`
-            // stores into the cell), so the scan must judge through one too.
-            $src = $alias[$n->source] ?? $n->source;
-            if (isset($decl[$src])) { $alias[$n->target] = $src; }
-            return;
-        }
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
-            $name = $alias[$n->name] ?? $n->name;
-            if (isset($decl[$name])) {
-                $d = $decl[$name];
-                if (!$this->globalCellStoreAgrees($n, $d->type)) {
-                    $this->globalCellVeto[$d->cell] = true;
-                }
-            }
-            $this->scanGlobalCellStores($n->value, $decl, $alias);
-            return;
-        }
-        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
-            || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_INVOKE
-            || $n->kind === Node::KIND_NEW_OBJ) {
-            $this->scanGlobalCellByRefArgs($n, $decl, $alias);
-        }
-        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanGlobalCellStores($c, $decl, $alias); }
-    }
-
-    /**
-     * A cell handed to a BY-REF parameter ({@see EmitLlvmLocals::byRefAddrOf}
-     * answers its address) is stored by the callee at the PARAM's type, not at
-     * any value's: `fill($_GET)` with `array &$out` writes back what its own
-     * element channel makes. Judged like a store — the callee's write-back is
-     * one — against the decl's flavor. An erased or cell param agrees: its
-     * array comes back through the caller's conform
-     * ({@see EmitLlvmCalls::byRefConformKind}) or the cell scratch's unbox
-     * ({@see EmitLlvmCalls::emitByRefCellBox}) at the caller's own type.
-     *
-     * A closure's mask is index-parallel to its FULL param list, captures
-     * first ({@see EmitLlvmCalls::emitInvoke}); a DYNAMIC callee has no mask
-     * at all — every slot the module's by-ref union covers
-     * ({@see EmitLlvmCalls::closureRefGate}) may be written back by a closure
-     * this scan cannot name, so a cell handed there is vetoed. A constructor
-     * is a method call on the fresh object (`<class>____construct`, `$this`
-     * first).
-     * @param array<string, Node>   $decl
-     * @param array<string, string> $alias
-     */
-    private function scanGlobalCellByRefArgs(Node $n, array &$decl, array &$alias): void
-    {
-        // Every subclass field is read under its `kind` test — that is what
-        // narrows a `Node` here; an unnarrowed read answers nothing natively.
-        $args = [];
-        $sig = '';
-        $off = 0;
-        if ($n->kind === Node::KIND_INVOKE) {
-            $args = $n->args;
-            $fn = $n->callee->type->class ?? '';
-            if ($fn !== '' && isset($this->closureCaptures[$fn])) {
-                $sig = $fn;
-                $off = $this->closureCaptures[$fn];
-            } else {
-                $gate = $this->closureRefGate(\count($args));
-                $ai = 0;
-                foreach ($args as $a) {
-                    $slot = $ai;
-                    $ai = $ai + 1;
-                    if ($slot > 62 || ($gate & (1 << $slot)) === 0) { continue; }
-                    if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-                    $name = $alias[$a->name] ?? $a->name;
-                    if (isset($decl[$name])) { $this->globalCellVeto[$decl[$name]->cell] = true; }
-                }
-                return;
-            }
-        } elseif ($n->kind === Node::KIND_NEW_OBJ) {
-            $args = $n->args;
-            $cls = $n->bare ? '' : $this->resolveMethodClass($n->class, '__construct');
-            if ($cls === '') { return; }
-            $sig = $cls . '____construct';
-            $off = 1;
-        } elseif ($n->kind === Node::KIND_CALL) {
-            $args = $n->args;
-            $sig = $n->function;
-        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
-            $args = $n->args;
-            $cls = $this->resolveMethodClass($n->class, $n->method);
-            if ($cls === '') { $cls = $n->class; }
-            $sig = $cls . '__' . $n->method;
-        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
-            $args = $n->args;
-            $static = $n->object->type->class ?? '';
-            $cls = $this->resolveMethodClass($static, $n->method);
-            if ($cls === '') { $cls = $static; }
-            if ($cls === '' || !isset($this->classes[$cls])) {
-                foreach ($this->methodHolders($n->method) as $r) { $cls = $r; break; }
-            }
-            $sig = $cls . '__' . $n->method;
-            $off = 1;
-        }
-        $mask = $this->sigs->refParams[$sig] ?? [];
-        if ($mask === []) { return; }
-        $ptypes = $this->sigs->paramTypes[$sig] ?? [];
-        $ahmask = $this->sigs->arrayHintedParams[$sig] ?? [];
-        $ai = 0;
-        foreach ($args as $a) {
-            $pi = $ai + $off;
-            $ai = $ai + 1;
-            if (!($mask[$pi] ?? false)) { continue; }
-            if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                $name = $alias[$a->name] ?? $a->name;
-                if (isset($decl[$name])) {
-                    $d = $decl[$name];
-                    if (!$this->globalCellByRefAgrees($ptypes[$pi] ?? null, $ahmask[$pi] ?? false, $d->type)) {
-                        $this->globalCellVeto[$d->cell] = true;
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * A bare `array &$p` lowers to UNKNOWN like an untyped `&$p`; only the
-     * hint mask tells them apart. The hinted one writes back an array, conformed
-     * to the caller's element repr; the untyped one writes back anything, and
-     * a `mixed &$p` scratch is unboxed to the caller's LOAD type — neither is
-     * a proof for a cell that releases at its decl.
-     */
-    private function globalCellByRefAgrees(?Type $pt, bool $arrayHinted, Type $dt): bool
-    {
-        $declFlavor = $this->discardReleaseFlavor($dt);
-        if ($declFlavor === '' || $pt === null) { return true; }
-        $pk = $pt->kind;
-        if ($pk === Type::KIND_UNKNOWN) { return $arrayHinted && $dt->isArray(); }
-        if ($pk === Type::KIND_CELL) { return $declFlavor === 'cell'; }
-        if ($pk === Type::KIND_ARRAY) {
-            if (!$dt->isArray()) { return false; }
-            if ($declFlavor === 'veccell' || $declFlavor === 'assoccell') { return true; }
-            $pel = $pt->element;
-            if ($pel === null || $pel->kind === Type::KIND_CELL || $pel->kind === Type::KIND_UNKNOWN) {
-                return true;
-            }
-        }
-        return $this->discardReleaseFlavor($pt) === $declFlavor;
-    }
-
-    private function globalCellStoreAgrees(StoreLocal $s, Type $dt): bool
-    {
-        $declFlavor = $this->discardReleaseFlavor($dt);
-        if ($declFlavor === '') { return true; }
-        $v = $s->value;
-        $vt = $v->type;
-        $vk = $vt->kind;
-        $k = $v->kind;
-        if ($vk === Type::KIND_NULL || $k === Node::KIND_NULL_CONST) { return true; }
-        // The flow-sensitive box-back combo — a store NODE typed cell over a
-        // concrete value — BOXES the value into the cell
-        // ({@see EmitLlvmLocals::emitStoreLocal}): judged as the cell store it
-        // emits, not by the value's own kind, which never reaches the slot raw.
-        if ($vk === Type::KIND_CELL || $s->type->kind === Type::KIND_CELL) { return $declFlavor === 'cell'; }
-        if ($vk === Type::KIND_UNKNOWN) {
-            return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-                || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
-                || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
-        }
-        if ($vk === Type::KIND_ARRAY) {
-            if (!$dt->isArray()) { return false; }
-            if ($declFlavor === 'veccell' || $declFlavor === 'assoccell') { return true; }
-            return $this->arrayRetainFlavor($v, $dt) === $declFlavor;
-        }
-        if ($vk === Type::KIND_STRING) { return $declFlavor === 'str'; }
-        if ($vk === Type::KIND_OBJ || $vk === Type::KIND_UNION) {
-            if ($vk === Type::KIND_OBJ && $this->discardReleaseFlavor($vt) !== 'obj') { return false; }
-            return $declFlavor === 'obj';
-        }
-        return false;
-    }
-
-    /**
      * Prop keys whose SLOT owns one element ref per element — every store to
      * them hands the slot a reference that carries the element refs the drop
      * flavor names, so the slot's release-before-overwrite can give them back on
@@ -2323,16 +2097,8 @@ final class EmitLlvm implements EmitVisitor
      */
     private array $propOwnElemVeto = [];
 
-    /** {@see \Compile\Mir\Module::$isLibraryModule} — a module whose superglobal
-     *  cells are shared with a program it cannot see ({@see scanGlobalCellStores}). */
+    /** {@see \Compile\Mir\Module::$isLibraryModule} */
     private bool $moduleIsLibrary = false;
-
-    /**
-     * The program links a library `.o` besides the stdlib — a module whose
-     * superglobal stores the `.sig` does not carry ({@see scanGlobalCellStores}).
-     * Set by the manifest build ({@see \Manticore\build_compile_module}).
-     */
-    public bool $importsLibrary = false;
 
     /** @var array<string, bool> classes `clone`d somewhere in this module. */
     private array $clonedClasses = [];

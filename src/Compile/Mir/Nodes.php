@@ -803,6 +803,11 @@ final class Throw_ extends Node
         parent::__construct(Node::KIND_THROW, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the thrown local is Own and the
+     *  throw leaves the function, so its +1 moves into `@__mir_thrown` (no
+     *  retain). Declared LAST. */
+    public bool $ownMove = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitThrow($this);
@@ -1889,5 +1894,33 @@ final class StaticCall_ extends Node
     public function children(): array
     {
         return $this->args;
+    }
+}
+
+/**
+ * The exception a matched `catch` binds: the +1 `throw` handed into
+ * `@__mir_thrown`, taken out of the slot, which is cleared. `catch (E $e)`
+ * lowers to `StoreLocal($e, CaughtValue_)` as the arm's first statement, so the
+ * local owns the object from there like any other fresh value; a catch without
+ * a variable discards it as a statement. `$types` are the catch's accepted
+ * class names — InferTypes types the node as their join.
+ */
+final class CaughtValue_ extends Node
+{
+    /** @param string[] $types */
+    public function __construct(public array $types, Type $type)
+    {
+        parent::__construct(Node::KIND_CAUGHT_VALUE, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitCaughtValue($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }

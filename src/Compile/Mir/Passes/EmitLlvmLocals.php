@@ -1036,9 +1036,10 @@ trait EmitLlvmLocals
         // A bare `array` hint erases to KIND_UNKNOWN, so isArray() alone misses
         // exactly the declaration symfony uses (`private array $tokens = []`) —
         // ask the slot, the same way the store path does.
-        $aliasArrayProp = $v->kind === Node::KIND_PROPERTY_ACCESS
+        $aliasArrayProp = ($v->kind === Node::KIND_PROPERTY_ACCESS
             && ($v->type->isArray()
-                || $this->slotIsArrayHinted($v->object, $v->property, $v->type));
+                || $this->slotIsArrayHinted($v->object, $v->property, $v->type)))
+            || ($v->kind === Node::KIND_STATIC_PROP && $v->type->isArray() && !$copiedVecProp);
         // The copied STATIC vec snapshot takes the same adopt as the instance
         // one: the copy is a flat buffer copy, so without it the local's
         // release ({@see InsertMemoryOps::isOwnedObj}, which owns exactly this
@@ -1267,14 +1268,14 @@ trait EmitLlvmLocals
     {
         if ($this->isGlobalsViewName($sl->name)) { return ''; }
         $cell = $this->locals->globalBacked[$sl->name];
-        // The RELEASE needs the decl's flavor and every store's agreement with
-        // it ({@see EmitLlvm::scanGlobalCellStores}); a cell without either — a
-        // decl typed `int` or `null` by its initialiser, or one some store
-        // disagrees with — releases nothing, as before. The RETAIN is taken
-        // regardless: it is by the value's own kind (or by tag), so it can never
-        // free anything, and without it the cell holds a BORROW past its owner's
-        // frame — `$_SESSION = $s->data; $_SESSION['x'] = 1;` then wrote into
-        // the property's own buffer (rc 1, so the COW copied nothing).
+        // The RELEASE is by the decl's flavor: the decl is the join of every
+        // store in every scope, and a cell two kinds share is typed a CELL,
+        // whose every store boxes ({@see InferScans::scanGlobalTypes},
+        // {@see InferScans::scanStaticLocalTypes}). A decl typed `int` by its
+        // initialiser releases nothing. The RETAIN is taken regardless: without
+        // it the cell holds a BORROW past its owner's frame — `$_SESSION =
+        // $s->data; $_SESSION['x'] = 1;` then wrote into the property's own
+        // buffer (rc 1, so the COW copied nothing).
         $dt = $this->locals->globalBackedType[$sl->name] ?? null;
         $flavor = $dt === null ? '' : $this->discardReleaseFlavor($dt);
         // A closure env carries its own lifetime header, but nothing else in
@@ -1283,7 +1284,6 @@ trait EmitLlvmLocals
         // flavor here: `__mir_closure_release` self-guards on the magic, so a
         // slot that disagrees with its decl releases nothing.
         if ($flavor === '' && $dt !== null && $this->isClosureValueType($dt)) { $flavor = 'closure'; }
-        if (isset($this->globalCellVeto[$cell])) { $flavor = ''; }
         $out = '';
         $v = $sl->value;
         $vk = $v->type->kind;
@@ -1311,10 +1311,15 @@ trait EmitLlvmLocals
                 // UNKNOWN, but php checked the hint: the word IS an array
                 // buffer (or the 0 of `?array`). Stored into a module cell it
                 // must be co-owned like any borrow — `static $o; $o = $param;`
-                // otherwise kept the caller's temporary after it was freed.
-                // The cell is vetoed (a borrowed erased word), so this takes
-                // the buffer-level +1 only and nothing releases through it.
-                $out .= $this->rcRetainByType($v, $val, Type::vec(Type::unknown()), 3);
+                // otherwise kept the caller's temporary after it was freed —
+                // at the depth the decl's release gives back.
+                $out .= $this->rcRetainByType($v, $val,
+                    $flavor !== '' && $dt !== null && $dt->isArray() ? $dt : Type::vec(Type::unknown()), 3);
+            } elseif ($vk === Type::KIND_UNKNOWN && $flavor !== '') {
+                // An erased word the scopes' join never saw: co-owned by the
+                // decl, which is all that describes it (census residual).
+                if (\Compile\Stats::$on) { \Compile\Stats::bump('own.residual.global-erased', 1); }
+                $out .= $this->rcRetainByType($v, $val, $dt, 3);
             }
         }
         if ($flavor === '') { return $out; }

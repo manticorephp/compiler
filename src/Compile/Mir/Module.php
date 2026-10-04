@@ -426,6 +426,11 @@ final class Module
      *  @var string[] */
     public array $ownFlowErrors = [];
 
+    /** The superglobal cells are shared with another module — this is a
+     *  library, or a program linking one — whose stores this module's join
+     *  cannot see ({@see Passes\InferScans::scanGlobalTypes}). Declared LAST. */
+    public bool $sharesSuperglobals = false;
+
     public function markPassApplied(string $name): void
     {
         $this->passesApplied[$name] = true;

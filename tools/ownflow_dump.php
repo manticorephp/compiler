@@ -20,7 +20,6 @@ use Compile\Mir\Flow\Forward;
 use Compile\Mir\Flow\Lattice;
 use Compile\Mir\Foreach_;
 use Compile\Mir\IncDec;
-use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
 use Compile\Mir\RefAddr_;
 use Compile\Mir\RefAlias_;
@@ -134,12 +133,6 @@ final class DefinedLattice implements Lattice
                 if ($t->kind === Node::KIND_LOAD_LOCAL) { unset($in[$t->name]); }
             }
         }
-        return $in;
-    }
-
-    public function catchEntry(MirCatch $c, array $in): array
-    {
-        if ($c->var !== null) { $in[$c->var] = 1; }
         return $in;
     }
 

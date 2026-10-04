@@ -95,6 +95,13 @@ final class EscapeSummaries
         return $prop . '|' . ($t->kind === Type::KIND_OBJ ? ($t->class ?? '') : '');
     }
 
+    /** A static property's slot: its global, under a class part that meets
+     *  only itself ({@see keysMeet}). */
+    public static function staticKey(string $global): string
+    {
+        return $global . '|::';
+    }
+
     /**
      * Can anything in `$window` (evaluated whole), or the call `$consumer`
      * itself (its callee only — its operands are in the window), park, write
@@ -333,6 +340,8 @@ final class EscapeSummaries
         $k = $n->kind;
         if ($k === Node::KIND_STORE_PROPERTY) {
             $this->noteStoreProperty(self::asStoreProperty($n));
+        } elseif ($k === Node::KIND_STORE_STATIC_PROP) {
+            $this->ewWrites[self::staticKey(self::asStoreStaticProp($n)->global)] = true;
         } elseif ($k === Node::KIND_STORE_ELEMENT) {
             $this->noteWriteTarget(self::asStoreElement($n)->array);
         } elseif ($k === Node::KIND_REF_ADDR) {
@@ -496,6 +505,8 @@ final class EscapeSummaries
             $pa = self::asPropertyAccess($t);
             $this->ewWrites[self::propKey($pa->object, $pa->property)] = true;
             $this->noteWriteTarget($pa->object);
+        } elseif ($t->kind === Node::KIND_STATIC_PROP) {
+            $this->ewWrites[self::staticKey(self::asStaticProp($t)->global)] = true;
         } elseif ($t->kind === Node::KIND_ARRAY_ACCESS) {
             $this->noteWriteTarget(self::asArrayAccess($t)->array);
         } elseif ($t->kind === Node::KIND_DYN_PROP) {
@@ -853,6 +864,8 @@ final class EscapeSummaries
     // Typed reads — a base-typed `$n` resolves fields by OFFSET under self-host.
     private static function asStoreProperty(Node $n): StoreProperty { return $n; }
     private static function asStoreElement(Node $n): StoreElement { return $n; }
+    private static function asStoreStaticProp(Node $n): StoreStaticProp_ { return $n; }
+    private static function asStaticProp(Node $n): StaticProp_ { return $n; }
     private static function asStoreLocal(Node $n): StoreLocal { return $n; }
     private static function asRefAddr(Node $n): RefAddr_ { return $n; }
     private static function asRefCell(Node $n): RefCell_ { return $n; }

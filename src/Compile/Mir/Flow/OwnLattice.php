@@ -2,7 +2,6 @@
 
 namespace Compile\Mir\Flow;
 
-use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
 
 /**
@@ -111,10 +110,6 @@ final class OwnLattice implements Lattice
      *  Borrow is owed a retain before the statement */
     public array $refArgIn = [];
 
-    /** @var array<int, string> MirCatch id → its managed var */
-    public array $catchName = [];
-    /** @var array<int, int> */
-    public array $catchKey = [];
 
     /** @var array<int, string> compensation op id → name */
     public array $opName = [];
@@ -161,6 +156,10 @@ final class OwnLattice implements Lattice
     public array $retAt = [];
     /** @var array<int, array<string, int>> */
     public array $retOut = [];
+    /** @var Node[] every `throw` reached */
+    public array $thrAt = [];
+    /** @var array<int, array<string, int>> the state it throws in */
+    public array $thrOut = [];
 
     /**
      * The ONE map from an {@see \Compile\Mir\Ownership} code to a state, for a
@@ -356,18 +355,6 @@ final class OwnLattice implements Lattice
         return $in;
     }
 
-    /**
-     * @param array<string, int> $in
-     * @return array<string, int>
-     */
-    public function catchEntry(MirCatch $c, array $in): array
-    {
-        $id = \spl_object_id($c);
-        if (!isset($this->catchName[$id])) { return $in; }
-        $n = $this->catchName[$id];
-        $k = $this->catchKey[$id];
-        return $this->with($in, $n, isset($this->force[$n]) ? $k : self::borrow($k));
-    }
 
     /**
      * @param array<string, int> $out
@@ -380,7 +367,11 @@ final class OwnLattice implements Lattice
             $this->retOut[] = $out;
             return;
         }
-        if ($kind === 'throw') { return; }
+        if ($kind === 'throw') {
+            $this->thrAt[] = $at;
+            $this->thrOut[] = $out;
+            return;
+        }
         foreach ($out as $n => $o) {
             if ($o <= 0) { continue; }
             if (($joined[$n] ?? self::EMPTY) !== self::MIXDEAD) { continue; }

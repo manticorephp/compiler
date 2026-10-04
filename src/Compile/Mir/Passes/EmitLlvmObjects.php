@@ -5820,15 +5820,14 @@ trait EmitLlvmObjects
                 }
                 if (isset($this->locals->globalBacked[$name])) {
                     $cell = $this->locals->globalBacked[$name];
-                    // A module cell releases at the DECL's flavor under the
-                    // store scan's verdict ({@see EmitLlvmLocals::globalCellOwnIr}),
-                    // never at this LOAD's: `static $v = ''; if ($c) { $v = new
-                    // O; } else { unset($v); }` typed the load `string` on a
-                    // call whose cell held the object of the call before.
+                    // A module cell releases at the DECL's flavor
+                    // ({@see EmitLlvmLocals::globalCellOwnIr}), never at this
+                    // LOAD's: `static $v = ''; if ($c) { $v = new O; } else {
+                    // unset($v); }` typed the load `string` on a call whose cell
+                    // held the object of the call before.
                     if (!$this->isGlobalsViewName($name)) {
                         $dt = $this->locals->globalBackedType[$name] ?? null;
-                        $flavor = $dt === null || isset($this->globalCellVeto[$cell])
-                            ? '' : $this->discardReleaseFlavor($dt);
+                        $flavor = $dt === null ? '' : $this->discardReleaseFlavor($dt);
                     }
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($cell, $flavor); }
                     $out .= '  store i64 0, ptr ' . $cell . "\n";
@@ -6098,9 +6097,7 @@ trait EmitLlvmObjects
             $res = $this->lastValue;
             $resTy = $this->lastValueType;
             $out .= $this->boxToCell($n->value->type, $n->value);
-            $val = $this->lastValue;
-            $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
-            $this->noteCellSinkStored($val);
+            $out .= $this->storeStaticPropSlot($n->global, $this->lastValue, 'cell');
             $this->lastValue = $res;
             $this->lastValueType = $resTy;
             return $out;
@@ -6138,22 +6135,33 @@ trait EmitLlvmObjects
             $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;
         }
-        // Release-before-overwrite, AFTER the retain (a self-assignment goes
-        // 1 → 2 → 1), as an instance property and a global cell do: the slot
-        // owns what it holds, and nothing gave the previous value back —
-        // php-cs-fixer's `Tokens::clearCache()` (`self::$cache = []`) kept every
-        // file's token collection alive, ~1 MB a file.
         $drop = $box ? 'cell' : ($n->declared !== null && $dk !== Type::KIND_UNKNOWN
             ? $this->discardReleaseFlavor($n->declared) : '');
-        if ($drop !== '') {
-            $old = $this->ssa->allocReg();
-            $out .= '  ' . $old . ' = load i64, ptr ' . $n->global . "\n";
-            $out .= $this->rcReleaseReg($old, $drop);
-        }
-        $out .= '  store i64 ' . $val . ', ptr ' . $n->global . "\n";
-        $this->noteCellSinkStored($val);
+        $out .= $this->storeStaticPropSlot($n->global, $val, $drop);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * The static slot owns what it holds: the new word (already retained)
+     * goes in, then the old one is released by the SLOT's flavor — the same
+     * order as an instance property store, so a destructor the release runs
+     * sees the new value, and a self-assignment goes 1 → 2 → 1. Without it
+     * php-cs-fixer's `Tokens::clearCache()` (`self::$cache = []`) kept every
+     * file's token collection alive, ~1 MB a file.
+     */
+    private function storeStaticPropSlot(string $global, string $val, string $drop): string
+    {
+        $out = '';
+        $old = '';
+        if ($drop !== '') {
+            $old = $this->ssa->allocReg();
+            $out .= '  ' . $old . ' = load i64, ptr ' . $global . "\n";
+        }
+        $out .= '  store i64 ' . $val . ', ptr ' . $global . "\n";
+        $this->noteCellSinkStored($val);
+        if ($old !== '') { $out .= $this->rcReleaseReg($old, $drop); }
         return $out;
     }
 
@@ -7518,6 +7526,15 @@ trait EmitLlvmObjects
             if (\count($mc->args) >= 1) {
                 $out .= $this->emitNode($mc->args[0]);
                 $out .= $this->coerceToPtr();
+                // The injection becomes `@__mir_thrown`, which owns what it
+                // holds ({@see emitThrow}): a borrowed argument is retained.
+                if ($this->own->classifyTemp($mc->args[0], $this->lastCallWasBuiltin) <= 0) {
+                    $tp = $this->lastValue;
+                    $ti = $this->ssa->allocReg();
+                    $out .= '  ' . $ti . ' = ptrtoint ptr ' . $tp . " to i64\n";
+                    $out .= $this->rcRetainReg($ti, 'obj');
+                    $this->lastValue = $tp;
+                }
                 $out .= '  store ptr ' . $this->lastValue . ", ptr @__mir_gen_throw\n";
             }
             $out .= $this->genResumeCall($g);

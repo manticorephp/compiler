@@ -17,7 +17,6 @@ use Compile\Mir\If_;
 use Compile\Mir\IncDec;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\MemoryOp_;
-use Compile\Mir\MirCatch;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
 use Compile\Mir\Ownership;
@@ -148,8 +147,6 @@ final class OwnershipFlow implements Pass
     private array $insStart = [];
     /** @var array<int, MemoryOp_[]> If_ id → ops for its (new) else */
     private array $insElse = [];
-    /** @var array<int, MemoryOp_[]> MirCatch id → ops prepended to its body */
-    private array $insCatch = [];
     /** @var array<string, bool> dedupe of edge fixes */
     private array $placed = [];
     /** @var array<int, bool> ops this function inserted for compensation */
@@ -161,8 +158,6 @@ final class OwnershipFlow implements Pass
     private array $unsetById = [];
     /** @var array<int, Foreach_> */
     private array $feById = [];
-    /** @var array<int, MirCatch> */
-    private array $catchById = [];
     /** @var array<string, int> managed name → the release class it registers */
     private array $regKey = [];
     /** The function reads locals by runtime name ({@see scan}). */
@@ -247,7 +242,6 @@ final class OwnershipFlow implements Pass
         $this->storeById = [];
         $this->unsetById = [];
         $this->feById = [];
-        $this->catchById = [];
         $this->regKey = [];
         $this->aliasRetain = [];
         $this->moveLoad = [];
@@ -517,8 +511,6 @@ final class OwnershipFlow implements Pass
         $l->feKeyName = $p->feKeyName;
         $l->feKeyState = $p->feKeyState;
         $l->feKeyKey = $p->feKeyKey;
-        $l->catchName = $p->catchName;
-        $l->catchKey = $p->catchKey;
         $l->loadName = $p->loadName;
         $l->moveName = $p->moveName;
         $l->shareName = $p->shareName;
@@ -837,19 +829,6 @@ final class OwnershipFlow implements Pass
                 $lat->moveName[\spl_object_id($ll)] = $ll->name;
                 $this->moveLoad[\spl_object_id($ll)] = $ll;
             }
-        } elseif ($k === Node::KIND_TRY_CATCH) {
-            foreach (self::asTryCatch($n)->catches as $c) {
-                $v = $c->var;
-                if ($v === null || isset($this->excluded[$v])) { continue; }
-                $cls = \count($c->types) > 0 ? $c->types[0] : 'Throwable';
-                $t = Type::obj($cls);
-                $ks = $this->keyString($t);
-                if ($ks === '') { continue; }
-                $cid = \spl_object_id($c);
-                $this->catchById[$cid] = $c;
-                $lat->catchName[$cid] = $v;
-                $lat->catchKey[$cid] = $this->intern($v, $ks, $t);
-            }
         }
         foreach (Walk::children($n) as $c) { $this->scan($c, $lat); }
         $this->curStmt = $outerStmt;
@@ -1145,7 +1124,6 @@ final class OwnershipFlow implements Pass
         $this->insEnd = [];
         $this->insStart = [];
         $this->insElse = [];
-        $this->insCatch = [];
         $this->placed = [];
     }
 
@@ -1321,10 +1299,7 @@ final class OwnershipFlow implements Pass
             $tc = self::asTryCatch($n);
             $tc->tryBody = $this->spliceList($tc->tryBody);
             foreach ($tc->catches as $c) {
-                $body = $this->spliceList($c->body);
-                $cid = \spl_object_id($c);
-                if (isset($this->insCatch[$cid])) { $body = \array_merge($this->insCatch[$cid], $body); }
-                $c->body = $body;
+                $c->body = $this->spliceList($c->body);
             }
             $tc->finallyBody = $this->spliceList($tc->finallyBody);
         } elseif ($k === Node::KIND_SWITCH) {
@@ -1504,12 +1479,6 @@ final class OwnershipFlow implements Pass
             }
         }
 
-        foreach ($l->catchName as $cid => $name) {
-            if (!isset($force[$name])) { continue; }
-            $c = $this->catchById[$cid] ?? null;
-            if ($c === null) { continue; }
-            $this->insCatch[$cid][] = $this->plainRetain($name, $l->catchKey[$cid]);
-        }
 
         /** @var MemoryOp_[] $tail */
         $tail = [];
@@ -1548,6 +1517,27 @@ final class OwnershipFlow implements Pass
                 $r->ownMove = $rs > 0;
                 $this->say($r->line, $rn, $rs, $rs > 0 ? 'return moves' : 'return retains');
             }
+        }
+
+        // `throw $e` hands `@__mir_thrown` a +1. An owned local whose throw
+        // leaves the function MOVES its reference there — nothing after the
+        // throw in this frame reads or drops it. Under a `try` / `finally` of
+        // this function the local lives on in the handler, so it keeps its own
+        // and the throw retains.
+        /** @var array<int, bool> $inTry */
+        $inTry = [];
+        $this->throwsInTry($body, false, $inTry);
+        $n = \count($l->thrAt);
+        for ($i = 0; $i < $n; $i++) {
+            $at = $l->thrAt[$i];
+            if ($at->kind !== Node::KIND_THROW || isset($inTry[\spl_object_id($at)])) { continue; }
+            $t = self::asThrow($at);
+            $v = $t->value;
+            if ($v->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $tn = self::asLoadLocal($v)->name;
+            $ts = $l->thrOut[$i][$tn] ?? OwnLattice::EMPTY;
+            $t->ownMove = $ts > 0;
+            $this->say($t->line, $tn, $ts, $ts > 0 ? 'throw moves' : 'throw retains');
         }
 
         /** @var MemoryOp_[] $head */
@@ -1591,7 +1581,6 @@ final class OwnershipFlow implements Pass
             if ($l->feValState[$id] <= 0) { $borrowed[$name] = true; }
         }
         foreach ($l->feKeyName as $id => $name) { $borrowed[$name] = true; }
-        foreach ($l->catchName as $cid => $name) { $borrowed[$name] = true; }
         foreach ($this->regKey as $name => $k) {
             $list[] = new MemoryOp_(isset($borrowed[$name]) ? 'own_local_b' : 'own_local', $this->keyFlavor[$k],
                 new LoadLocal($name, $this->keyType[$k]), Type::void());
@@ -1619,6 +1608,28 @@ final class OwnershipFlow implements Pass
             . OwnLattice::show($x) . ($x > 0 ? '(' . ($this->keyClass[$x] ?? '?') . ')' : '') . ' ' . $what);
     }
 
+    /**
+     * The `throw`s a handler of this function catches or a `finally` of it
+     * runs after: every one in a try body, and in a catch arm of a try with a
+     * `finally`.
+     * @param array<int, bool> $out
+     */
+    private function throwsInTry(Node $n, bool $inTry, array &$out): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_THROW && $inTry) { $out[\spl_object_id($n)] = true; }
+        if ($k === Node::KIND_TRY_CATCH) {
+            $tc = self::asTryCatch($n);
+            foreach ($tc->tryBody as $s) { $this->throwsInTry($s, true, $out); }
+            foreach ($tc->catches as $c) {
+                foreach ($c->body as $s) { $this->throwsInTry($s, $inTry || $tc->hasFinally, $out); }
+            }
+            foreach ($tc->finallyBody as $s) { $this->throwsInTry($s, $inTry, $out); }
+            return;
+        }
+        foreach (Walk::children($n) as $c) { $this->throwsInTry($c, $inTry, $out); }
+    }
+
     // ── typed reads (a base-Node field read resolves by offset natively) ──
 
     private static function asStoreLocal(Node $n): StoreLocal { return $n; }
@@ -1635,6 +1646,7 @@ final class OwnershipFlow implements Pass
     private static function asWhile(Node $n): \Compile\Mir\While_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }
     private static function asReturn(Node $n): Return_ { return $n; }
+    private static function asThrow(Node $n): \Compile\Mir\Throw_ { return $n; }
     private static function asConcat(Node $n): Concat { return $n; }
     private static function asMemoryOp(Node $n): MemoryOp_ { return $n; }
     private static function asIncDec(Node $n): IncDec { return $n; }

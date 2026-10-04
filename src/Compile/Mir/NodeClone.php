@@ -85,6 +85,7 @@ final class NodeClone
             }
             return new LoadLocal($x->name, $n->type);
         }
+        if ($k === Node::KIND_CAUGHT_VALUE) { $x = self::asCaughtValue($n); return new \Compile\Mir\CaughtValue_($x->types, $n->type); }
         if ($k === Node::KIND_STATIC_PROP)  { $x = self::asStaticProp($n); return new StaticProp_($x->global, $n->type); }
         if ($k === Node::KIND_BREAK)        { $x = self::asBreak($n);    return new Break_($x->level); }
         if ($k === Node::KIND_CONTINUE)     { $x = self::asContinue($n); return new Continue_($x->level); }
@@ -262,6 +263,7 @@ final class NodeClone
     private static function asBool(Node $n): BoolConst { return $n; }
     private static function asLoadLocal(Node $n): LoadLocal { return $n; }
     private static function asStaticProp(Node $n): StaticProp_ { return $n; }
+    private static function asCaughtValue(Node $n): \Compile\Mir\CaughtValue_ { return $n; }
     private static function asBreak(Node $n): Break_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }
     private static function asGoto(Node $n): \Compile\Mir\Goto_ { return $n; }

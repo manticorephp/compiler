@@ -178,6 +178,20 @@ trait EmitLlvmExceptions
         $out .= ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN)
             ? $this->cellToPtr()
             : $this->coerceToPtr();
+        // `@__mir_thrown` owns what it holds, and the catch that binds it takes
+        // that +1 ({@see emitCaughtValue}): a fresh object hands its own, an
+        // owned local leaving the function moves its reference
+        // ({@see \Compile\Mir\Throw_::$ownMove}), anything else is retained.
+        $v = $n->value;
+        $moved = $n->ownMove && $v->kind === Node::KIND_LOAD_LOCAL;
+        if (!$moved && $this->own->classifyTemp($v, $this->lastCallWasBuiltin) <= 0) {
+            $tp = $this->lastValue;
+            $ti = $this->ssa->allocReg();
+            $out .= '  ' . $ti . ' = ptrtoint ptr ' . $tp . " to i64\n";
+            $out .= $this->rcRetainReg($ti, 'obj');
+            $this->lastValue = $tp;
+            $this->lastValueType = 'ptr';
+        }
         $out .= '  store ptr ' . $this->lastValue . ", ptr @__mir_thrown\n";
         $depth = $this->ssa->allocReg();
         $out .= '  ' . $depth . " = load i64, ptr @__mir_jmp_depth\n";
@@ -188,6 +202,19 @@ trait EmitLlvmExceptions
         $out .= "  unreachable\n";
         $out .= $this->emitDeadLabel();
         $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `@__mir_thrown`'s +1, taken out of the slot by the catch that matched
+     * it — the slot no longer owns it ({@see \Compile\Mir\CaughtValue_}).
+     */
+    private function emitCaughtValue(): string
+    {
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . " = load i64, ptr @__mir_thrown\n  store i64 0, ptr @__mir_thrown\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -447,7 +474,6 @@ trait EmitLlvmExceptions
             foreach ($n->catches as $c) {
                 $matchLbl = $this->ssa->allocLabel('catch_match');
                 $nextLbl = $this->ssa->allocLabel('catch_next');
-                $cVar = $this->catchVar($c);
                 $cTypes = $this->catchTypes($c);
                 if ($this->catchAcceptsAll($cTypes)) {
                     $out .= '  br label %' . $matchLbl . "\n";
@@ -457,11 +483,6 @@ trait EmitLlvmExceptions
                           . ', label %' . $nextLbl . "\n";
                 }
                 $out .= $matchLbl . ":\n";
-                if ($cVar !== null && isset($this->locals->slots[$cVar])) {
-                    $ti = $this->ssa->allocReg();
-                    $out .= '  ' . $ti . ' = ptrtoint ptr ' . $thrown . " to i64\n";
-                    $out .= '  store i64 ' . $ti . ', ptr ' . $this->locals->slots[$cVar] . "\n";
-                }
                 foreach ($this->catchBody($c) as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
                 $out .= '  br label %' . $joinLbl . "\n";
                 $out .= $nextLbl . ":\n";
