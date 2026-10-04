@@ -697,7 +697,16 @@ trait EmitLlvmLocals
                 && !isset($this->locals->globalBacked[$sl->name])
                 && isset($this->frame->rcObjLocals[$sl->name])
                 && !isset($this->frame->transferredLocals[$sl->name]);
-            if (($rebind || ($refBox && !$selfBox)) && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
+            // The enclosing frame's own slot of a by-ref captured name IS the
+            // box the closure writes through ({@see ownedBoxOverwriteIr} covers
+            // only a heap box): it holds a cell it owns, so a rebind gives the
+            // predecessor back, as the closure side does.
+            $capRebind = !$selfBox && !$refBox && !$rebind
+                && !isset($this->locals->globalBacked[$sl->name])
+                && isset($this->locals->byRefCaptured[$sl->name])
+                && !isset($this->locals->ownedBoxes[$sl->name])
+                && !isset($this->locals->refLocals[$sl->name]);
+            if (($rebind || $capRebind || ($refBox && !$selfBox)) && $coOwn === '' && \Compile\Mir\AliasOwn::coOwns($v0)) {
                 $out .= $this->coerceToI64();
                 $rawV = $this->lastValue;
                 $out .= $this->rcRetainByType($v0, $rawV, null, 3);
@@ -738,12 +747,24 @@ trait EmitLlvmLocals
                 $out .= $this->rcReleaseSlot($cellDest,
                     $this->rcReleaseFlavor($this->frame->rcObjLocals[$sl->name]));
             }
+            if ($capRebind) {
+                $out .= $this->rcReleaseSlot($cellDest, 'cell');
+            }
             if ($refBox) {
                 $addr = $this->ssa->allocReg();
                 $out .= '  ' . $addr . ' = load i64, ptr ' . $cellDest . "\n";
                 $p = $this->ssa->allocReg();
                 $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
-                $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+                if (isset($this->locals->captureRefs[$sl->name])) {
+                    // The closure side of a by-ref capture: the box holds a cell
+                    // the pair owns; the overwritten value is released here (the
+                    // new one is already co-owned above).
+                    $oldC = $this->ssa->allocReg();
+                    $out .= '  ' . $oldC . ' = load i64, ptr ' . $p . "\n";
+                    $out .= $this->rcReleaseReg($oldC, 'cell');
+                } else {
+                    $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
+                }
                 $out .= '  store i64 ' . $boxed . ', ptr ' . $p . "\n";
                 $this->lastValue = $boxed;
                 $this->lastValueType = 'i64';

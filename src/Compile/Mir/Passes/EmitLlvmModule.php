@@ -2112,6 +2112,16 @@ trait EmitLlvmModule
         $this->locals->ownedBoxes = [];
         $body .= $this->emitRefCellBoxes($fn->body, []);
         $body .= $this->emitElemRefBoxSlots($fn->body);
+        // …and `use (&$x)` at file scope: the same heap box the function
+        // prologue plants, so a store here releases what it overwrites.
+        $this->locals->byRefCaptured = [];
+        $this->locals->collectByRefCaptured($fn->body);
+        foreach ($this->locals->byRefCaptured as $bname => $_) {
+            if (!isset($this->locals->slots[$bname])) { continue; }
+            if (isset($this->locals->refLocals[$bname])) { continue; }
+            if (isset($this->locals->globalBacked[$bname])) { continue; }
+            $body .= $this->newOwnedBoxIr($bname, '0');
+        }
         // A global cell whose default is not a link-time constant (an array
         // literal on a static property) is built HERE, before any top-level
         // statement, so the first read/append sees a real array and not 0.
