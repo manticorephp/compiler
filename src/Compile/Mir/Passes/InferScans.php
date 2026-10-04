@@ -1911,7 +1911,8 @@ trait InferScans
             if ($fn->isPrelude) { continue; }
             // Nor an imported one, whose body lives in a dependency's `.o`.
             if ($fn->isExtern) { continue; }
-            if (!$this->bodyHas($fn, Node::KIND_CLOSURE) && !$this->bodyHasAnyOf($fn, $foreignCallees)) { continue; }
+            if (!$this->bodyHas($fn, Node::KIND_CLOSURE) && !$this->bodyHas($fn, Node::KIND_INVOKE)
+                && !$this->bodyHasAnyOf($fn, $foreignCallees)) { continue; }
             // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
             // caller's array and its elements already have a representation.
             $found = [];
@@ -2055,6 +2056,31 @@ trait InferScans
         return $added;
     }
 
+    /** The `__closure_N` an invoke calls when its callee's type names one,
+     *  '' when the target is not statically known. */
+    private function invokedClosureName(Node $n): string
+    {
+        $iv = $n;
+        $ct = $iv->callee->type;
+        if ($ct->kind !== Type::KIND_OBJ || $ct->class === null) { return ''; }
+        $cname = $ct->class;
+        if (!\str_starts_with($cname, '__closure_') || !isset($this->closureNodeByName[$cname])) { return ''; }
+        return $cname;
+    }
+
+    /** A node whose value is computed, never one of its operands passed on. */
+    private function makesNewValue(string $k): bool
+    {
+        return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+            || $k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
+            || $k === Node::KIND_DIV || $k === Node::KIND_MOD || $k === Node::KIND_NEG
+            || $k === Node::KIND_NOT || $k === Node::KIND_BITOP || $k === Node::KIND_BITNOT
+            || $k === Node::KIND_CONCAT || $k === Node::KIND_CMP || $k === Node::KIND_SPACESHIP
+            || $k === Node::KIND_INCDEC || $k === Node::KIND_CAST || $k === Node::KIND_INSTANCEOF
+            || $k === Node::KIND_ISSET || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_NEW_OBJ;
+    }
+
     /** The param a value expression reads, as "<param>|<0|1 via element>", or
      *  null when it reads none. @param array<string,string> $origin */
     private function originOf(Node $n, array $origin): ?string
@@ -2068,6 +2094,10 @@ trait InferScans
             $parts = \explode('|', $o);
             return $parts[0] . '|1';
         }
+        // A value COMPUTED from the param is no element of it: `$a['q'] =
+        // count($a)` stores an int into `array &$a`, and counting it as a move
+        // left the caller's string buffer holding a raw int (a SIGSEGV).
+        if ($this->makesNewValue($n->kind)) { return null; }
         foreach (Walk::children($n) as $c) {
             $o = $this->originOf($c, $origin);
             if ($o !== null) { return $o; }
@@ -2191,6 +2221,22 @@ trait InferScans
             foreach ($c->args as $a) {
                 $i = $i + 1;
                 $this->widenIfForeign($c->function . '#' . (string)$i, $a, $c->args, $foreign, $found);
+            }
+        } elseif ($n->kind === Node::KIND_INVOKE) {
+            // `$f($x)` on a closure whose type names it is a by-ref call like
+            // any other; its own params sit after its captures.
+            $cname = $this->invokedClosureName($n);
+            if ($cname !== '') {
+                $iv = $n;
+                $caps = $this->closureNodeByName[$cname]->captures;
+                $base = \count($caps);
+                // A token's index counts the captures first, as the params do.
+                $sib = \array_merge($caps, $iv->args);
+                $i = -1;
+                foreach ($iv->args as $a) {
+                    $i = $i + 1;
+                    $this->widenIfForeign($cname . '#' . (string)($base + $i), $a, $sib, $foreign, $found);
+                }
             }
         } elseif ($n->kind === Node::KIND_CLOSURE) {
             // `use (&$x)` is a by-ref writer just as much as a by-ref argument
