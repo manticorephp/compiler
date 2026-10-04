@@ -3321,12 +3321,51 @@ trait EmitLlvmCalls
         $out = '  ' . $tmp . " = alloca i64\n";
         $out .= $this->emitNode($a);
         $out .= $this->coerceToI64();
-        $out .= $this->ownRefSeed($a, $this->lastValue);
+        // An array property read through a receiver with NO static slot (`sort($o->j)`
+        // on a `mixed $o`, or on a `K|H` union local) is not addressable, so it
+        // lands here — and the callee's sort went into this scratch word and was
+        // thrown away. Seed the raw buffer instead and, after the call, write what
+        // the callee left back through the class_id property writer, the path every
+        // in-place builtin takes ({@see EmitLlvmBuiltins::vecWriteBack}).
+        // A CELL read (erased receiver) is a borrowed box: it takes a count for the
+        // callee to release and gives it back afterwards. A RAW read (union
+        // receiver) hands the slot's own reference to the callee and the writer
+        // overwrites the slot with whatever the callee left — ownership moves out
+        // and back, nothing to retain.
+        $erasedProp = $a->kind === Node::KIND_PROPERTY_ACCESS
+            && $a->object->kind === Node::KIND_LOAD_LOCAL
+            && ($arrayHinted || ($pt !== null && $pt->isArray()))
+            && $this->propertyOffsetOrNull($a->object, $a->property) === null
+            && $this->fixedPropertyHolders($a->property) !== [];
+        $seedIsCell = $erasedProp && $a->type->kind === Type::KIND_CELL;
+        if (!$erasedProp || $seedIsCell) {
+            $out .= $this->ownRefSeed($a, $this->lastValue);
+        }
+        $seedCell = $this->lastValue;
+        if ($seedIsCell) {
+            $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            $out .= $this->coerceToI64();
+        }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
         $addr = $this->ssa->allocReg();
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
         $this->lastRefSlotDrop = ($pt !== null && $this->isOmittedDefaultArg($srcArgc, $ai, $a))
             ? $this->omittedRefSlotDrop($tmp, $pt, $arrayHinted) : '';
+        if ($erasedProp) {
+            $this->rt->needsTagged = true;
+            $wb = $this->emitObjPtrOf($a->object);
+            $objp = $this->lastValue;
+            $nv = $this->ssa->allocReg();
+            $wb .= '  ' . $nv . ' = load i64, ptr ' . $tmp . "\n";
+            $np = $this->ssa->allocReg();
+            $wb .= '  ' . $np . ' = inttoptr i64 ' . $nv . " to ptr\n";
+            $cv = $this->ssa->allocReg();
+            $wb .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
+            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property)
+                 . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
+            if ($seedIsCell) { $wb .= $this->rcReleaseReg($seedCell, 'cell'); }
+            $this->lastRefSlotDrop .= $wb;
+        }
         $this->lastValue = $addr;
         $this->lastValueType = 'i64';
         return $out;

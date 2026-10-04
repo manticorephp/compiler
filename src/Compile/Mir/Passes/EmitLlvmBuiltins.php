@@ -1537,6 +1537,20 @@ trait EmitLlvmBuiltins
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
         $len = $this->ssa->allocReg();
         $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
+        // The read half of the element-channel rule: a cell-typed source may be
+        // backed by a RAW-hinted buffer (a `vec[int]` literal handed to a param
+        // its sibling call sites floored to `vec[cell]`), so each word is boxed
+        // by the buffer's own hint before it is unboxed to the target — a
+        // CELL-hinted or unstamped buffer passes through untouched. Unboxed as
+        // a cell, a raw int read as a double's bits and a raw bool as garbage.
+        // $src is the zero-word for a null source and so has a flags word.
+        $hfp = $this->ssa->allocReg();
+        $out .= '  ' . $hfp . ' = getelementptr inbounds i8, ptr ' . $src . ', i64 '
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $hfl = $this->ssa->allocReg();
+        $out .= '  ' . $hfl . ' = load i64, ptr ' . $hfp . "\n";
+        $hint = $this->ssa->allocReg();
+        $out .= '  ' . $hint . ' = and i64 ' . $hfl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
@@ -1555,8 +1569,10 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
+        $ev0 = $this->ssa->allocReg();
+        $out .= '  ' . $ev0 . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $ev = $this->ssa->allocReg();
-        $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+        $out .= '  ' . $ev . ' = call i64 @__mir_box_by_repr(i64 ' . $ev0 . ', i64 ' . $hint . ")\n";
         // Unbox the boxed cell value to the element's raw representation.
         $raw = $this->ssa->allocReg();
         if ($elem->kind === Type::KIND_ARRAY && ($elem->element->kind ?? '') !== Type::KIND_CELL) {
@@ -8794,6 +8810,23 @@ trait EmitLlvmBuiltins
             } else {
                 $out .= '  store i64 ' . $asI . ', ptr ' . $this->locals->slots[$name] . "\n";
             }
+            return $out;
+        }
+        if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS
+            && $this->propertyOffsetOrNull($arrNode->object, $arrNode->property) === null) {
+            // An ERASED receiver (`$s` a cell after `$s = 0; … $s = new S2()`)
+            // has no static slot: the relocated buffer goes back through the
+            // shared class_id writer, as the plain store does
+            // ({@see EmitLlvmObjects::emitCellStoreProperty}). The static arm
+            // below inttoptr'd the TAGGED receiver and wrote a guessed offset —
+            // `array_shift($s->j)` SIGSEGV'd storing through 0xfff8….
+            $out = $this->emitObjPtrOf($arrNode->object);
+            $objp = $this->lastValue;
+            $this->rt->needsTagged = true;
+            $cv = $this->ssa->allocReg();
+            $out .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $arr2 . ")\n";
+            $out .= '  call void ' . $this->cellPropertyWriteHelper($arrNode->property)
+                  . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
             return $out;
         }
         if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS) {
