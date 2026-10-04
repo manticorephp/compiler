@@ -872,6 +872,7 @@ final class __McTok
 
         if ($k === self::K_ID) { return $this->scanIdent($s, $len, $i, $line); }
         if ($k === self::K_DIGIT) { return $this->scanNumber($s, $len, $i, $line); }
+        if ($b === 46 && $i + 1 < $len && $this->cls(\ord($s[$i + 1])) === self::K_DIGIT) { return $this->scanNumber($s, $len, $i, $line); }
 
         // `$var`
         if ($b === 36 && $i + 1 < $len && $this->cls(\ord($s[$i + 1])) === self::K_ID) {
@@ -1040,6 +1041,33 @@ final class __McTok
         return __McTokId::T_STRING;
     }
 
+    /** End of `[0-9]+(_[0-9]+)*` at $j (== $j when no digit starts there). Hex/bin/oct bases pass $kind 16/2/8. */
+    private function digitsEnd(string $s, int $len, int $j, int $kind): int
+    {
+        $end = $j;
+        $p = $j;
+        while ($p < $len) {
+            $c = \ord($s[$p]);
+            $ok = false;
+            if ($kind === 16) { $ok = ($c >= 48 && $c <= 57) || (($c | 32) >= 97 && ($c | 32) <= 102); }
+            elseif ($kind === 2) { $ok = $c === 48 || $c === 49; }
+            elseif ($kind === 8) { $ok = $c >= 48 && $c <= 55; }
+            else { $ok = $c >= 48 && $c <= 57; }
+            if ($ok) { $p = $p + 1; $end = $p; continue; }
+            if ($c === 95 && $end === $p && $p > $j && $p + 1 < $len) {
+                $d = \ord($s[$p + 1]);
+                $nok = false;
+                if ($kind === 16) { $nok = ($d >= 48 && $d <= 57) || (($d | 32) >= 97 && ($d | 32) <= 102); }
+                elseif ($kind === 2) { $nok = $d === 48 || $d === 49; }
+                elseif ($kind === 8) { $nok = $d >= 48 && $d <= 55; }
+                else { $nok = $d >= 48 && $d <= 57; }
+                if ($nok) { $p = $p + 1; continue; }
+            }
+            break;
+        }
+        return $end;
+    }
+
     private function scanNumber(string $s, int $len, int $i, int $line): int
     {
         $j = $i;
@@ -1047,43 +1075,37 @@ final class __McTok
         $b = \ord($s[$i]);
         if ($b === 48 && $i + 1 < $len) {
             $x = \ord($s[$i + 1]) | 32;
-            if ($x === 120 || $x === 111 || $x === 98) {
-                $j = $i + 2;
-                while ($j < $len) {
-                    $c = \ord($s[$j]);
-                    $ck = $this->cls($c);
-                    if ($ck !== self::K_DIGIT && $ck !== self::K_ID && $c !== 95) { break; }
-                    $j = $j + 1;
+            $kind = $x === 120 ? 16 : ($x === 98 ? 2 : ($x === 111 ? 8 : 0));
+            if ($kind !== 0) {
+                $e = $this->digitsEnd($s, $len, $i + 2, $kind);
+                if ($e > $i + 2) {
+                    $text = \substr($s, $i, $e - $i);
+                    $id = $this->intOverflows($text) ? __McTokId::T_DNUMBER : __McTokId::T_LNUMBER;
+                    $this->push($id, $text, $line, $i);
+                    return $e;
                 }
-                $text = \substr($s, $i, $j - $i);
-                $id = $this->intOverflows($text) ? __McTokId::T_DNUMBER : __McTokId::T_LNUMBER;
-                $this->push($id, $text, $line, $i);
-                return $j;
             }
         }
-        while ($j < $len) {
-            $c = \ord($s[$j]);
-            if ($this->cls($c) === self::K_DIGIT || $c === 95) { $j = $j + 1; continue; }
-            break;
-        }
-        // DNUM is `[0-9]+ "." [0-9]*`: a trailing dot with no digit after it
+        $j = $this->digitsEnd($s, $len, $i, 10);
+        // DNUM is `LNUM? "." LNUM | LNUM "." LNUM?`: a trailing dot with no digit after it
         // still makes the literal a float (`[0., 1.]`, symfony's CpuCoreCounter).
         if ($j < $len && \ord($s[$j]) === 46) {
-            $isFloat = true;
-            $j = $j + 1;
-            while ($j < $len) {
-                $c = \ord($s[$j]);
-                if ($this->cls($c) === self::K_DIGIT || $c === 95) { $j = $j + 1; continue; }
-                break;
+            if ($j > $i) {
+                $isFloat = true;
+                $j = $j + 1;
+                $j = $this->digitsEnd($s, $len, $j, 10);
+            } else {
+                $f = $this->digitsEnd($s, $len, $j + 1, 10);
+                if ($f > $j + 1) { $isFloat = true; $j = $f; }
             }
         }
-        if ($j < $len && (\ord($s[$j]) | 32) === 101) {
+        if ($j > $i && $j < $len && (\ord($s[$j]) | 32) === 101) {
             $p = $j + 1;
             if ($p < $len && (\ord($s[$p]) === 43 || \ord($s[$p]) === 45)) { $p = $p + 1; }
-            if ($p < $len && $this->cls(\ord($s[$p])) === self::K_DIGIT) {
+            $e = $this->digitsEnd($s, $len, $p, 10);
+            if ($e > $p) {
                 $isFloat = true;
-                $j = $p;
-                while ($j < $len && $this->cls(\ord($s[$j])) === self::K_DIGIT) { $j = $j + 1; }
+                $j = $e;
             }
         }
         $text = \substr($s, $i, $j - $i);
