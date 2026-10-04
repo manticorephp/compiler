@@ -1532,6 +1532,7 @@ trait InferScans
                 if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)) {
                     if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                         $this->byRefCaptureCellLocals[$fn->name][$local] = true;
+                        $this->boxParamAtEntry($fn, $local);
                         $changed = true;
                     }
                     if (!isset($this->byRefCaptureCellLocals[$clName][$pn])) {
@@ -2054,6 +2055,40 @@ trait InferScans
             if ($this->spreadElemOrigin($c, $origin)) { $added = true; }
         }
         return $added;
+    }
+
+    /** A by-value, non-variadic param of `$fn` whose declared type is concrete. */
+    private function paramArrivesRaw(FunctionDef $fn, string $name): bool
+    {
+        foreach ($fn->params as $p) {
+            if ($p->name !== $name) { continue; }
+            if ($p->byRef || $p->variadic) { return false; }
+            $k = $p->type->kind;
+            return $k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN;
+        }
+        return false;
+    }
+
+    /**
+     * A by-value PARAM whose slot a by-ref sink made a cell still arrives in
+     * its declared representation, so the slot turns cell at one entry store:
+     * `function run(string $s) { inc($s); }` with `inc(?int &$c)` typed every
+     * read of `$s` cell while the slot held the raw string — var_dump faulted.
+     */
+    private function boxParamAtEntry(FunctionDef $fn, string $name): void
+    {
+        if (!$this->paramArrivesRaw($fn, $name)) { return; }
+        foreach ($fn->body->stmts as $s) {
+            if ($s->kind !== Node::KIND_STORE_LOCAL || $s->name !== $name) { continue; }
+            $v = $s->value;
+            if ($v->kind === Node::KIND_LOAD_LOCAL && $v->name === $name) { return; }
+        }
+        $pt = Type::cell();
+        foreach ($fn->params as $p) {
+            if ($p->name === $name) { $pt = $p->type; }
+        }
+        $entry = new \Compile\Mir\StoreLocal($name, new \Compile\Mir\LoadLocal($name, $pt), Type::cell());
+        $fn->body->stmts = \array_merge([$entry], $fn->body->stmts);
     }
 
     /** The `__closure_N` an invoke calls when its callee's type names one,
@@ -2579,6 +2614,7 @@ trait InferScans
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
+                    $this->boxParamAtEntry($fn, $local);
                     $this->rescanTargets[$fn->name] = true;
                     $changed = true;
                 }
@@ -2601,6 +2637,23 @@ trait InferScans
                         $names[$a->name] = true;
                     } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
                         $names[$a->target] = true;
+                    }
+                }
+            }
+        } elseif ($n->kind === Node::KIND_INVOKE) {
+            // A known closure's `?int &$c` is the same shared word: `$inc($s)`
+            // on a `?string $s` read the int it wrote back as a string.
+            $cname = $this->invokedClosureName($n);
+            if ($cname !== '') {
+                $iv = $n;
+                $callee = $this->fnByName[$cname] ?? null;
+                $base = \count($this->closureNodeByName[$cname]->captures);
+                if ($callee !== null) {
+                    foreach ($iv->args as $i => $a) {
+                        $p = $callee->params[$base + $i] ?? null;
+                        if ($p === null || !$p->byRef) { continue; }
+                        if ($p->type->kind !== Type::KIND_CELL) { continue; }
+                        if ($a->kind === Node::KIND_LOAD_LOCAL) { $names[$a->name] = true; }
                     }
                 }
             }

@@ -302,6 +302,9 @@ trait InferNodes
         // correction to it. {@see InferScans::scanByRefCaptureWiden}
         $this->cellCaptureLocals = $this->byRefCaptureCellLocals[$fn->name] ?? [];
         foreach ($this->cellCaptureLocals as $name => $unused) {
+            // A by-value PARAM still arrives in its declared representation;
+            // its slot turns cell at the entry store {@see boxParamAtEntry} plants.
+            if ($this->paramArrivesRaw($fn, $name)) { continue; }
             $this->localTypes[$name] = Type::cell();
         }
         // Pre-scan: refine a bare `array $p` param to vec[string] when the
