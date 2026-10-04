@@ -2619,21 +2619,6 @@ trait InferScans
     }
 
     /**
-     * A local handed to a BY-REF parameter declared CELL (`mixed &$v`) is one
-     * word the callee may rewrite as ANY kind — `retype($a)` turns an int into a
-     * string — so the caller's slot has to be a cell for that name, exactly as a
-     * by-ref CAPTURE shared with a closure is ({@see scanByRefCaptureWiden}; the
-     * same table, the same store-side retype). Without it the call boxed the
-     * raw local into a scratch cell and unboxed the result BY THE CALLER'S OLD
-     * TYPE: `$a = 5; retype($a)` read the string pointer back as an int.
-     * docs/design/value-channels.md, P5.
-     *
-     * A concrete-scalar by-ref param is the OPPOSITE pin ({@see scanRefPinnedNode});
-     * an erased (`&$v`, no hint) one is left alone — its callee writes raw words
-     * by its own static types, and widening every such caller is a repr change
-     * this scan does not make.
-     */
-    /**
      * A TYPED by-ref param the body overwrites with another kind (`function
      * f(string &$c) { $c = 7; }`): php's reference is not typed past the entry
      * coercion, so the caller's variable becomes that kind. The callee wrote
@@ -2698,6 +2683,21 @@ trait InferScans
         }
     }
 
+    /**
+     * A local handed to a BY-REF parameter declared CELL (`mixed &$v`) is one
+     * word the callee may rewrite as ANY kind — `retype($a)` turns an int into a
+     * string — so the caller's slot has to be a cell for that name, exactly as a
+     * by-ref CAPTURE shared with a closure is ({@see scanByRefCaptureWiden}; the
+     * same table, the same store-side retype). Without it the call boxed the
+     * raw local into a scratch cell and unboxed the result BY THE CALLER'S OLD
+     * TYPE: `$a = 5; retype($a)` read the string pointer back as an int.
+     * docs/design/value-channels.md, P5.
+     *
+     * A concrete-scalar by-ref param is the OPPOSITE pin ({@see scanRefPinnedNode});
+     * an erased (`&$v`, no hint) one is left alone — its callee writes raw words
+     * by its own static types, and widening every such caller is a repr change
+     * this scan does not make.
+     */
     private function scanRefCellArgWiden(Module $module): bool
     {
         $changed = false;
@@ -2707,7 +2707,8 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             $names = [];
             $elems = [];
-            $this->scanRefCellArgNode($fn->body, $names, $elems);
+            $props = [];
+            $this->scanRefCellArgNode($fn->body, $names, $elems, $props);
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
@@ -2716,54 +2717,156 @@ trait InferScans
                     $changed = true;
                 }
             }
-            if (\count($elems) === 0) { continue; }
-            $skip = [];
-            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
             foreach ($elems as $local => $unused) {
-                // A param's buffer is the caller's; its representation is not ours.
-                if (isset($skip[$local]) || isset($this->byRefCellElemLocals[$fn->name][$local])) { continue; }
+                // A by-value param converts at entry ({@see
+                // InferNodes::cellElemParamEntry}). A BY-REF one is the caller's
+                // buffer: the param itself becomes a cell-element array and its
+                // callers' arrays follow it (the sink below, next round).
+                $this->retypeByRefParamElems($fn, $local);
+                if (isset($this->byRefCellElemLocals[$fn->name][$local])) { continue; }
                 $this->byRefCellElemLocals[$fn->name][$local] = true;
                 $this->rescanTargets[$fn->name] = true;
                 $changed = true;
+            }
+            foreach ($props as $key => $unused) {
+                if ($this->widenPropElemToCell($key)) { $changed = true; }
             }
         }
         return $changed;
     }
 
+    /** A by-ref array param `$name` of `$fn` → a cell-element array, recorded so
+     *  its callers widen ({@see Module::$inferByRefElemRetyped}). */
+    private function retypeByRefParamElems(FunctionDef $fn, string $name): void
+    {
+        $idx = -1;
+        foreach ($fn->params as $p) {
+            $idx = $idx + 1;
+            if ($p->name !== $name) { continue; }
+            if (!$p->byRef || $p->variadic) { return; }
+            $pt = $p->type;
+            if (!$pt->isArray() || $pt->isShape() || $pt->element === null) { return; }
+            if ($pt->element->kind === Type::KIND_CELL) { return; }
+            $p->type = $pt->isAssoc() && $pt->key !== null ? Type::assoc($pt->key, Type::cell()) : Type::vec(Type::cell());
+            $this->byRefElemRetyped[$fn->name . '#' . (string)$idx] = true;
+            return;
+        }
+    }
+
+    /** `Class::prop` → its array element channel becomes a cell; true when it changed. */
+    private function widenPropElemToCell(string $key): bool
+    {
+        $cut = \strpos($key, '::');
+        if ($cut === false || $cut < 0) { return false; }
+        $cd = $this->classes[\substr($key, 0, $cut)] ?? null;
+        if ($cd === null) { return false; }
+        $prop = \substr($key, $cut + 2, \strlen($key) - $cut - 2);
+        $cur = $cd->propertyTypes[$prop] ?? null;
+        if ($cur === null || !$cur->isArray() || $cur->isShape()) { return false; }
+        if (($cur->element->kind ?? '') === Type::KIND_CELL) { return false; }
+        return $this->setPropType($cd, $prop, ($cur->key !== null && $cur->isAssoc())
+            ? Type::assoc($cur->key, Type::cell())
+            : Type::vec(Type::cell()));
+    }
+
+    /**
+     * The callee's mangled name for a call node of any kind, with the index of
+     * its first declared param among the callee's params (a method or ctor
+     * carries `$this` in slot 0, a closure its captures first); '' when the
+     * target is not statically known.
+     */
+    private function refCalleeOf(Node $n, int &$offset): string
+    {
+        $offset = 0;
+        if ($n->kind === Node::KIND_CALL) { return $n->function; }
+        if ($n->kind === Node::KIND_INVOKE) {
+            $cname = $this->invokedClosureName($n);
+            if ($cname !== '') { $offset = \count($this->closureNodeByName[$cname]->captures); }
+            return $cname;
+        }
+        if ($n->kind === Node::KIND_METHOD_CALL) {
+            $mc = $n;
+            $recv = $mc->object->type->class ?? '';
+            if ($recv === '') { return ''; }
+            $decl = $this->resolveMethodClass($recv, $mc->method);
+            if ($decl === '') { return ''; }
+            $offset = 1;
+            return $decl . '__' . $mc->method;
+        }
+        if ($n->kind === Node::KIND_STATIC_CALL) {
+            // A selfish instance call prepends `$this` at lowering, so the
+            // static form indexes from 0 like a free call.
+            $sc = $n;
+            $decl = $this->resolveMethodClass($sc->class, $sc->method);
+            return $decl === '' ? '' : $decl . '__' . $sc->method;
+        }
+        if ($n->kind === Node::KIND_NEW_OBJ) {
+            $no = $n;
+            $decl = $this->resolveMethodClass($no->class, '__construct');
+            if ($decl === '') { return ''; }
+            $offset = 1;
+            return $decl . '____construct';
+        }
+        return '';
+    }
+
+    /** The arguments of a call node of any kind. @return Node[] */
+    private function refCallArgs(Node $n): array
+    {
+        if ($n->kind === Node::KIND_CALL) { return $n->args; }
+        if ($n->kind === Node::KIND_INVOKE) { $iv = $n; return $iv->args; }
+        if ($n->kind === Node::KIND_METHOD_CALL) { $mc = $n; return $mc->args; }
+        if ($n->kind === Node::KIND_STATIC_CALL) { $sc = $n; return $sc->args; }
+        if ($n->kind === Node::KIND_NEW_OBJ) { $no = $n; return $no->args; }
+        return [];
+    }
+
     /**
      * @param array<string,bool> $names locals whose slot must be a cell
      * @param array<string,bool> $elems locals whose ELEMENT channel must be a cell
+     * @param array<string,bool> $props `Class::prop` whose element channel must be a cell
      */
-    private function scanRefCellArgNode(Node $n, array &$names, array &$elems): void
+    private function scanRefCellArgNode(Node $n, array &$names, array &$elems, array &$props): void
     {
-        if ($n->kind === Node::KIND_CALL) {
-            $callee = $this->fnByName[$n->function] ?? null;
+        $offset = 0;
+        $fname = $this->refCalleeOf($n, $offset);
+        if ($fname !== '') {
+            // Every call kind through one resolver: a method, static, nullsafe
+            // (a ternary over a method call) or `new` argument is the same
+            // shared word as a free call's.
+            $callee = $this->fnByName[$fname] ?? null;
             if ($callee !== null) {
-                foreach ($n->args as $i => $a) {
-                    $p = $callee->params[$i] ?? null;
+                foreach ($this->refCallArgs($n) as $i => $a) {
+                    $p = $callee->params[$offset + $i] ?? null;
                     if ($p === null || !$p->byRef) { continue; }
-                    $this->refArgSlotSink($p, $a, $names, $elems);
-                }
-            }
-        } elseif ($n->kind === Node::KIND_INVOKE) {
-            // A known closure's `?int &$c` is the same shared word: `$inc($s)`
-            // on a `?string $s` read the int it wrote back as a string.
-            $cname = $this->invokedClosureName($n);
-            if ($cname !== '') {
-                $iv = $n;
-                $callee = $this->fnByName[$cname] ?? null;
-                $base = \count($this->closureNodeByName[$cname]->captures);
-                if ($callee !== null) {
-                    foreach ($iv->args as $i => $a) {
-                        $p = $callee->params[$base + $i] ?? null;
-                        if ($p === null || !$p->byRef) { continue; }
-                        $this->refArgSlotSink($p, $a, $names, $elems);
+                    if (isset($this->byRefElemRetyped[$fname . '#' . (string)($offset + $i)])) {
+                        // The callee's by-ref array became a cell-element one;
+                        // the argument's buffer is that same buffer.
+                        $this->refArrayArgSink($a, $elems, $props);
+                        continue;
                     }
+                    $this->refArgSlotSink($p, $a, $names, $elems, $props);
                 }
             }
         }
         foreach (Walk::children($n) as $c) {
-            $this->scanRefCellArgNode($c, $names, $elems);
+            $this->scanRefCellArgNode($c, $names, $elems, $props);
+        }
+    }
+
+    /** A whole array argument whose buffer must hold cells: a local's (or a
+     *  by-value param's, or — transitively — a by-ref param's) element
+     *  channel, or a property's. @param array<string,bool> $elems @param array<string,bool> $props */
+    private function refArrayArgSink(Node $a, array &$elems, array &$props): void
+    {
+        $t = $a->type;
+        if (!$t->isArray() || $t->element === null || $t->element->kind === Type::KIND_CELL) { return; }
+        if ($a->kind === Node::KIND_LOAD_LOCAL) {
+            $elems[$a->name] = true;
+        } elseif ($a->kind === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $a;
+            $cls = $pa->object->type->class ?? null;
+            if ($cls !== null && $cls !== '') { $props[$cls . '::' . $pa->property] = true; }
         }
     }
 
@@ -2773,32 +2876,47 @@ trait InferScans
      * kind converts the caller's variable on entry (php coerces `int` to
      * "12" for `string &$x`), so the caller's slot holds the param's kind
      * afterwards: the callee read the raw int as a string pointer. Both make
-     * the slot — or, for an element, its buffer — a cell; the call then takes
-     * the cell scratch, which decodes by the param's type.
+     * the slot — or, for an element, its buffer (a local's, a by-value
+     * param's, a property's) — a cell; the call then takes the cell scratch,
+     * which decodes by the param's type. A typed PROPERTY itself is a typed
+     * reference in php: the scratch writes back through the property's own
+     * type, which is that coercion, so it needs nothing here.
      *
      * @param array<string,bool> $names
      * @param array<string,bool> $elems
+     * @param array<string,bool> $props
      */
-    private function refArgSlotSink(\Compile\Mir\Param $p, Node $a, array &$names, array &$elems): void
+    private function refArgSlotSink(\Compile\Mir\Param $p, Node $a, array &$names, array &$elems, array &$props): void
     {
         $pk = $p->type->kind;
+        $ak = $a->type->kind;
         if ($pk === Type::KIND_CELL) {
             if ($a->kind === Node::KIND_LOAD_LOCAL) {
                 $names[$a->name] = true;
-            } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
-                $names[$a->target] = true;
+                return;
             }
-            return;
+            if ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
+                $names[$a->target] = true;
+                return;
+            }
+            if ($a->kind !== Node::KIND_ARRAY_ACCESS || !$this->isCoercibleScalarKind($ak)) { return; }
+        } else {
+            if (!$this->isCoercibleScalarKind($pk)) { return; }
+            if (!$this->isCoercibleScalarKind($ak) || $ak === $pk) { return; }
+            if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                $names[$a->name] = true;
+                return;
+            }
         }
-        if (!$this->isCoercibleScalarKind($pk)) { return; }
-        $ak = $a->type->kind;
-        if (!$this->isCoercibleScalarKind($ak) || $ak === $pk) { return; }
-        if ($a->kind === Node::KIND_LOAD_LOCAL) {
-            $names[$a->name] = true;
-        } elseif ($a->kind === Node::KIND_ARRAY_ACCESS) {
-            $aa = $a;
-            $base = $aa->array;
-            if ($base->kind === Node::KIND_LOAD_LOCAL) { $elems[$base->name] = true; }
+        if ($a->kind !== Node::KIND_ARRAY_ACCESS) { return; }
+        $aa = $a;
+        $base = $aa->array;
+        if ($base->kind === Node::KIND_LOAD_LOCAL) {
+            $elems[$base->name] = true;
+        } elseif ($base->kind === Node::KIND_PROPERTY_ACCESS) {
+            $pa = $base;
+            $cls = $pa->object->type->class ?? null;
+            if ($cls !== null && $cls !== '') { $props[$cls . '::' . $pa->property] = true; }
         }
     }
 

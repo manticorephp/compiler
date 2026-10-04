@@ -271,6 +271,11 @@ final class Module
      * @var array<string, array<string, bool>>
      */
     public array $inferByRefCellElemLocals = [];
+    /** By-ref array params whose element channel became a cell because the body
+     *  hands an element to a by-ref sink of another kind ({@see
+     *  Passes\InferScans::scanRefCellArgWiden}); their callers' arrays follow.
+     *  "fn#idx" => true. @var array<string, bool> */
+    public array $inferByRefElemRetyped = [];
     /** @var array<string, array<string, bool>> by-ref CAPTURE locals that ride a cell, kept for the same reason ({@see Passes\InferScans::scanByRefCaptureWiden}) */
     public array $inferByRefCaptureCellLocals = [];
     /** @var array<string, Type> the unified type of each `global $x`, kept for the same reason ({@see Passes\InferScans::scanGlobalTypes}) */

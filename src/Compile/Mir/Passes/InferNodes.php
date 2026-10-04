@@ -450,6 +450,7 @@ trait InferNodes
                 $this->localTypes[$name] = Type::vec(Type::cell());
             }
         }
+        $this->cellElemParamEntry($fn);
         // A local a `&` points at from a STORING position is a CELL for its whole
         // lifetime — the tree's one-slot-one-representation rule, applied to the
         // one construct that can hand a slot to a holder that reads it by TAG.
@@ -1026,7 +1027,16 @@ trait InferNodes
             $keyType = isset($this->cellKeyLocals[$node->name]) ? Type::cell() : Type::string_();
             $shape = isset($this->assocLocals[$node->name])
                 ? Type::assoc($keyType, Type::cell()) : Type::vec(Type::cell());
-            $node->value->type = $shape;
+            // Only a LITERAL is re-typed — it is built where it stands. Any other
+            // concrete-element array (a typed param, a call result) already HAS
+            // its representation: re-labelling its node claimed `$p` held cells
+            // while its buffer held raw ints. The store converts it instead
+            // ({@see EmitLlvmLocals::emitStoreLocal}, forward-cellify).
+            $vel = $valueType->element;
+            if ($node->value->kind === Node::KIND_ARRAY_LIT || $vel === null
+                || $vel->kind === Type::KIND_CELL || $vel->kind === Type::KIND_UNKNOWN) {
+                $node->value->type = $shape;
+            }
             $this->localTypes[$node->name] = $shape;
             $node->type = $shape;
             return $shape;
@@ -2607,6 +2617,36 @@ trait InferNodes
     }
     /** @var array<string, bool> {@see collectRefElemBases} */
     private array $refElemBases = [];
+
+    /**
+     * A by-value array PARAM whose element channel this frame made a cell (a
+     * reference to one of its elements, a by-ref sink of another kind) still
+     * ARRIVES in its declared representation: `vec[int]` from every caller.
+     * Its slot turns cell at one entry store — the value keeps the param's
+     * type and the store rebuilds it with boxed elements (forward-cellify) —
+     * instead of every read claiming cells over a buffer of raw ints.
+     */
+    private function cellElemParamEntry(FunctionDef $fn): void
+    {
+        foreach ($fn->params as $p) {
+            if (!isset($this->cellElemLocals[$p->name]) || $p->byRef || $p->variadic) { continue; }
+            $pt = $p->type;
+            if (!$pt->isArray() || $pt->isShape() || $pt->element === null) { continue; }
+            $ek = $pt->element->kind;
+            if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
+            $this->localTypes[$p->name] = $pt;
+            $planted = false;
+            foreach ($fn->body->stmts as $st) {
+                if ($st->kind !== Node::KIND_STORE_LOCAL || $st->name !== $p->name) { continue; }
+                $v = $st->value;
+                if ($v->kind === Node::KIND_LOAD_LOCAL && $v->name === $p->name) { $planted = true; }
+            }
+            if ($planted) { continue; }
+            $cellT = $pt->isAssoc() && $pt->key !== null ? Type::assoc($pt->key, Type::cell()) : Type::vec(Type::cell());
+            $entry = new \Compile\Mir\StoreLocal($p->name, new \Compile\Mir\LoadLocal($p->name, $pt), $cellT);
+            $fn->body->stmts = \array_merge([$entry], $fn->body->stmts);
+        }
+    }
 
     private function collectRefElemBases(Node $n): void
     {

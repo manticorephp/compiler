@@ -853,6 +853,28 @@ trait EmitLlvmLocals
             $this->lastValueType = 'i64';
             return $out;
         }
+        // Forward-cellify into a frame slot ({@see needsForwardCellify}): the
+        // slot's buffer holds cells, so the value is rebuilt with each element
+        // boxed, ownership as on the by-ref out path below — the rebuild
+        // co-owns every element, an owned source dies with the walk. Stored as
+        // a fresh +1: only the predecessor is owed.
+        if ($this->needsForwardCellify($sl->type, $sl->value->type)
+            && isset($this->locals->slots[$sl->name])
+            && !isset($this->locals->refLocals[$sl->name])
+            && !isset($this->locals->globalBacked[$sl->name])) {
+            $out = $this->emitNode($sl->value);
+            $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
+            $srcFlavor = $this->cellifySourceFlavor($sl->value);
+            $this->cellifyMove = $this->litOwnsArrayElems($sl->value, $srcFlavor);
+            $out .= $this->emitCellifyArrayRaw($sl->value->type->element, $srcFlavor);
+            $out .= $this->coerceToI64();
+            $dv = $this->lastValue;
+            $out .= $this->ownOldIr($sl);
+            $out .= '  store i64 ' . $dv . ', ptr ' . $this->locals->slots[$sl->name] . "\n";
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // Forward-cellify a concrete OBJECT-element array written through a BY-REF
         // out-param. The element type is ERASED across the `.sig` (a bare `array &`
         // param encodes no element repr — {@see \Manticore\Sig::encodeType}), so

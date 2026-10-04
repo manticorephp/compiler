@@ -1,0 +1,26 @@
+array(2) {
+  [0]=>
+  string(2) "1a"
+  [1]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  string(2) "1a"
+  [1]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  string(2) "1a"
+  [1]=>
+  string(12) "now a string"
+}
+string(1) "7"
+string(2) "7a"
+array(2) {
+  [0]=>
+  int(3)
+  [1]=>
+  string(2) "4a"
+}

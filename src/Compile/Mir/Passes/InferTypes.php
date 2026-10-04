@@ -566,6 +566,8 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
+    /** @var array<string, bool> {@see Module::$inferByRefElemRetyped} */
+    private array $byRefElemRetyped = [];
     /** @var array<string, array<string, bool>> the {@see $forcedCellElemLocals} entries a by-ref CAPTURE proved; kept on the module across runs */
     private array $byRefCaptureElemLocals = [];
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
@@ -869,6 +871,7 @@ final class InferTypes implements Pass
         }
         $this->declaredReturns = $module->declaredReturnTypes;
         $this->byRefCellElemLocals = $module->inferByRefCellElemLocals;
+        $this->byRefElemRetyped = $module->inferByRefElemRetyped;
         $this->byRefCaptureCellLocals = $module->inferByRefCaptureCellLocals;
         $this->globalVarTypes = $module->inferGlobalVarTypes;
         $this->byRefCaptureElemLocals = $module->inferByRefCaptureElemLocals;
@@ -1102,8 +1105,13 @@ final class InferTypes implements Pass
             $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
             $this->rescanTargets = [];
         }
-        if ($this->scanRefCellArgWiden($module)) {
+        // A fixpoint: a callee's by-ref array param retyped this round widens its
+        // callers' arrays the next ({@see InferScans::retypeByRefParamElems}).
+        $guard = 0;
+        while ($guard < 4 && $this->scanRefCellArgWiden($module)) {
             $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
+            $this->rescanTargets = [];
+            $guard = $guard + 1;
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
@@ -1182,6 +1190,7 @@ final class InferTypes implements Pass
         }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
         $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
+        $module->inferByRefElemRetyped = $this->byRefElemRetyped;
         $module->inferByRefCaptureCellLocals = $this->byRefCaptureCellLocals;
         $module->inferGlobalVarTypes = $this->globalVarTypes;
         $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;

@@ -1639,6 +1639,22 @@ trait EmitLlvmBuiltins
             || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
     }
 
+    /** The mirror of {@see needsDeCellify}: a CONCRETE-element array value bound
+     *  to a CELL-element array slot (a local whose element a reference or a
+     *  by-ref sink promoted, a by-value param converted at entry). */
+    private function needsForwardCellify(Type $slotType, Type $valueType): bool
+    {
+        if (!$slotType->isArray() || !$valueType->isArray()) { return false; }
+        if ($slotType->isShape() || $valueType->isShape()) { return false; }
+        $se = $slotType->element;
+        $ve = $valueType->element;
+        if ($se === null || $ve === null || $se->kind !== Type::KIND_CELL) { return false; }
+        $vk = $ve->kind;
+        return $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT
+            || $vk === Type::KIND_STRING || $vk === Type::KIND_BOOL
+            || ($vk === Type::KIND_OBJ && !$this->isEnumType($ve)) || $vk === Type::KIND_ARRAY;
+    }
+
     /** A concrete OBJECT-element array being written back through a by-ref
      *  out-param whose element repr the `.sig` erased — the caller can only read
      *  cells, so box each element on store. Restricted to OBJ elements: a raw
