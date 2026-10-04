@@ -12,6 +12,8 @@ use Compile\Mir\NullConst;
 use Compile\Mir\NodeClone;
 use Compile\Mir\Param;
 use Compile\Mir\Pass;
+use Compile\Mir\If_;
+use Compile\Mir\Instanceof_;
 use Compile\Mir\Invoke_;
 use Compile\Mir\Return_;
 use Compile\Mir\Walk;
@@ -67,13 +69,12 @@ final class ResolveMethodFcc implements Pass
                 $target = $this->findMethod($module, $byName, $byLower, $cls, $fn->fccMethod);
             }
             if ($target === null) {
-                // An interface / abstract / erased receiver: no one declaration
-                // speaks, but every implementer shares the arity and by-ref-ness
-                // (php enforces it), so the callable takes the merged signature
-                // of the candidates — a variadic spread cannot carry a reference.
-                $target = $this->mergedCandidates($module, $byName, $byLower, $cls, $fn->fccMethod);
+                // An interface / abstract / erased receiver: no single declaration
+                // speaks for it (see resolveMulti).
+                $multi = $this->resolveMulti($fn, $module, $byName, $byLower, $cls, $fn->fccMethod);
+                if ($multi !== null) { $module->functions[$i] = $multi; }
+                continue;
             }
-            if ($target === null) { continue; }
             $module->functions[$i] = $this->rebuild($fn, $target);
         }
         if ($module->namedInvokes) { $this->bindNamedInvokes($module); }
@@ -206,70 +207,112 @@ final class ResolveMethodFcc implements Pass
     }
 
     /**
-     * One synthetic signature standing for every implementation of `$method`
-     * a receiver of static class `$cls` ('' = erased: every class) can reach:
-     * the longest parameter list, a parameter by-ref when any candidate takes
-     * it by reference, its type the candidates' common one (else a cell).
+     * The callable for a receiver that no single declaration speaks for (an
+     * interface, an abstract class, an erased `mixed`): `null` keeps the
+     * variadic forwarder, which passes exactly the supplied arguments and lets
+     * the actual callee apply its own defaults.
+     *
+     * A signature is materialised only where every implementer AGREES (same
+     * arity, no defaults, same variadic-ness); when only the by-ref modes
+     * differ, the callable takes the union of the modes and dispatches on the
+     * receiver's actual class, each arm calling that class's own method with
+     * its own modes.
      *
      * @param array<string, FunctionDef> $byName
      * @param array<string, FunctionDef> $byLower
      */
-    private function mergedCandidates(Module $module, array $byName, array $byLower, string $cls, string $method): ?FunctionDef
+    private function resolveMulti(FunctionDef $fn, Module $module, array $byName, array $byLower, string $cls, string $method): ?FunctionDef
     {
         /** @var FunctionDef[] $cands */
         $cands = [];
+        /** @var string[] $candClass */
+        $candClass = [];
         foreach ($module->classes as $cn => $cd) {
             if ($cls !== '' && !$this->isA($module, (string)$cn, $cls)) { continue; }
-            $hit = $this->findMethod($module, $byName, $byLower, (string)$cn, $method);
+            $key = (string)$cn . '__' . $method;
+            $hit = $byName[$key] ?? ($byLower[\strtolower($key)] ?? null);
             if ($hit === null) { continue; }
-            $dup = false;
-            foreach ($cands as $c0) { if ($c0 === $hit) { $dup = true; break; } }
-            if (!$dup) { $cands[] = $hit; }
+            $cands[] = $hit;
+            $candClass[] = (string)$cn;
         }
-        if (\count($cands) === 0) { return null; }
-        if ($cls === '') {
-            // An erased receiver may be a class this module does not declare
-            // (a builtin with a same-named method): the user candidates speak
-            // for it only where the variadic forwarder would crash — a
-            // reference parameter.
-            $anyRef = false;
-            foreach ($cands as $c3) {
-                foreach ($c3->params as $q3) { if ($q3->byRef) { $anyRef = true; } }
-            }
-            if (!$anyRef) { return null; }
-        }
-        $best = $cands[0];
-        foreach ($cands as $c1) {
-            if (\count($c1->params) > \count($best->params)) { $best = $c1; }
-        }
-        $params = [$best->params[0]];
-        $k = \count($best->params);
-        for ($j = 1; $j < $k; $j = $j + 1) {
-            $p = $best->params[$j];
-            $t = $p->siteRefinedFrom !== null ? $p->siteRefinedFrom : $p->type;
-            $ref = $p->byRef;
-            $same = true;
-            foreach ($cands as $c2) {
-                if (!isset($c2->params[$j])) { continue; }
-                $q = $c2->params[$j];
-                if ($q->byRef) { $ref = true; }
+        $nc = \count($cands);
+        if ($nc === 0) { return null; }
+        $first = $cands[0];
+        $arity = \count($first->params);
+        $anyRef = false;
+        $modesDiffer = false;
+        $typesDiffer = false;
+        foreach ($cands as $c) {
+            if (\count($c->params) !== $arity) { return null; }
+            for ($j = 1; $j < $arity; $j = $j + 1) {
+                $p = $c->params[$j];
+                $q = $first->params[$j];
+                if (($p->default !== null && $nc > 1) || $p->variadic !== $q->variadic) { return null; }
+                if ($p->byRef) { $anyRef = true; }
+                if ($p->byRef !== $q->byRef) { $modesDiffer = true; }
+                $pt = $p->siteRefinedFrom !== null ? $p->siteRefinedFrom : $p->type;
                 $qt = $q->siteRefinedFrom !== null ? $q->siteRefinedFrom : $q->type;
-                if ($qt->kind !== $t->kind) { $same = false; }
+                if ($pt->kind !== $qt->kind) { $typesDiffer = true; }
             }
-            if (!$same && !$ref) { $t = Type::cell(); }
+        }
+        // An erased receiver may be a class this module does not declare (a
+        // builtin with a same-named method): speak for it only where the
+        // variadic forwarder would crash — a reference parameter.
+        if ($cls === '' && !$anyRef) { return null; }
+        if ($typesDiffer && $anyRef) { return null; }
+        $params = [$fn->params[0]];
+        for ($j = 1; $j < $arity; $j = $j + 1) {
+            $p = $first->params[$j];
+            $t = $p->siteRefinedFrom !== null ? $p->siteRefinedFrom : $p->type;
+            if ($typesDiffer) { $t = Type::cell(); }
+            $ref = false;
+            foreach ($cands as $c) { if ($c->params[$j]->byRef) { $ref = true; } }
+            // A lone implementer's defaults ARE the callee's own.
             $np = new Param(name: $p->name, type: $t, byRef: $ref, variadic: $p->variadic,
-                default: $p->default === null ? null : NodeClone::node($p->default));
+                default: ($nc === 1 && $p->default !== null) ? NodeClone::node($p->default) : null);
             $np->arrayHinted = $p->arrayHinted;
             $params[] = $np;
         }
+        if (!$modesDiffer) {
+            $sig = new FunctionDef(name: $first->name, params: $params, returnType: $first->returnType,
+                body: $first->body, isPrelude: $first->isPrelude);
+            return $this->rebuild($fn, $sig);
+        }
+        // Most-derived classes first, so an override wins over its parent's arm.
+        $order = [];
+        for ($k = 0; $k < $nc; $k = $k + 1) { $order[] = $k; }
+        for ($a = 0; $a < $nc; $a = $a + 1) {
+            for ($b = $a + 1; $b < $nc; $b = $b + 1) {
+                if ($this->isA($module, $candClass[$order[$b]], $candClass[$order[$a]])
+                    && $candClass[$order[$b]] !== $candClass[$order[$a]]) {
+                    $tmp = $order[$a]; $order[$a] = $order[$b]; $order[$b] = $tmp;
+                }
+            }
+        }
+        $recv = $fn->params[0];
+        $loads = [];
+        for ($j = 1; $j < $arity; $j = $j + 1) {
+            $loads[] = new LoadLocal($params[$j]->name, $params[$j]->type);
+        }
+        $stmts = [];
+        foreach ($order as $k) {
+            $cn = $candClass[$k];
+            $obj = new LoadLocal($recv->name, Type::obj($cn));
+            $args = [];
+            foreach ($loads as $l) { $args[] = new LoadLocal($l->name, $l->type); }
+            $call = new MethodCall_($obj, $fn->fccMethod, $args, Type::unknown());
+            $arm = new Block([new Return_($call, Type::void())], Type::void());
+            $stmts[] = new If_(new Instanceof_(new LoadLocal($recv->name, Type::unknown()), $cn), $arm, null);
+        }
         return new FunctionDef(
-            name: $best->name,
+            name: $fn->name,
             params: $params,
-            returnType: $best->returnType,
-            body: $best->body,
-            isPrelude: $best->isPrelude,
+            returnType: $fn->returnType,
+            body: new Block($stmts, Type::void()),
+            isPrelude: $fn->isPrelude,
         );
     }
+
     private function rebuild(FunctionDef $fn, FunctionDef $target): FunctionDef
     {
         $recv = $fn->params[0];
