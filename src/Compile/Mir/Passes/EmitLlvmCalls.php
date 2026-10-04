@@ -1690,14 +1690,23 @@ trait EmitLlvmCalls
                 continue;
             }
             $out .= $this->emitNode($a);
+            $pt = $calleeParams[$capCnt + $pi] ?? null;
+            $ownsBox = $this->closureArgOwnsBox($a->type, $known ? $pt : null);
+            // An owned temp argument (`$g(new O)`, a call result, a literal, an
+            // erased array a declared-`array` callee handed back) is given back
+            // once the closure returns: a closure BORROWS its params, retaining
+            // what it keeps. A box the call site owns consumed it instead.
+            $af = $ownsBox ? '' : $this->freshRcArgFlavor($a);
             if ($packNode !== null && $a === $packNode && $packTarget !== null) {
+                // The cell-built pack is rebuilt into the typed vec, MOVING
+                // every value: its bare buffer is dead now, and the rebuilt vec
+                // is the temp the callee borrows.
+                $out .= $this->coerceToPtr();
+                $packSrc = $this->lastValue;
                 $out .= $this->emitCellArrayToTyped($packTarget);
+                $out .= '  call void @__mir_array_release_buf(ptr ' . $packSrc . ")\n";
+                $af = $this->discardReleaseFlavor($packTarget);
             }
-            // An owned temp argument (`$g(new O)`, a call result, an erased
-            // array a declared-`array` callee handed back) is given back once the
-            // closure returns: a closure BORROWS its params, retaining what it
-            // keeps. Only the erased array was, and every fresh object leaked.
-            $af = ($packNode !== null && $a === $packNode) ? '' : $this->freshRcArgFlavor($a);
             if ($af !== '') {
                 $sv = $this->lastValue;
                 $st = $this->lastValueType;
@@ -1706,15 +1715,10 @@ trait EmitLlvmCalls
                 $this->lastValue = $sv;
                 $this->lastValueType = $st;
             }
-            $pt = $calleeParams[$capCnt + $pi] ?? null;
-            // Cellify only for a KNOWN callee whose param is provably erased
-            // (a cell; {@see closureArgRepr}). A dynamic callee (`callable`) can't be gated — its
-            // param might be a TYPED array (an array_map-style callback) that
-            // needs the raw array, and cellifying it blindly corrupts the
-            // element reads (it crashes self-host). So the dynamic-callback case
-            // — a `usort($x, fn($a,$b)=>$cmp($a["k"],$b["k"]))` with an int-arith
-            // `$cmp` — is still open, pending a representation discriminator.
-            $out .= $this->closureArgRepr($a->type, $known ? $pt : null);
+            // One representation for a known and a dynamic callee
+            // ({@see closureArgRepr}); only a KNOWN cell param refines it.
+            $out .= $this->closureArgRepr($a->type, $known ? $pt : null, $a);
+            if ($ownsBox) { $erasedArgDrops .= $this->cellBoxTempDrop($a->type, $this->lastValue, $a); }
             // The box an INT arg became is this call site's own ({@see
             // EmitLlvmBuiltins::cellBoxTempDrop}): given back once the callee ran.
             if ($a->type->kind === Type::KIND_INT && $this->isCellBoxableArg($a->type)) {
@@ -1971,7 +1975,10 @@ trait EmitLlvmCalls
                 $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $pt);
             } else {
                 $out .= $this->emitNode($def);
-                $out .= $this->closureArgRepr($def->type, $pt);
+                $out .= $this->closureArgRepr($def->type, $pt, $def);
+                if ($this->closureArgOwnsBox($def->type, $pt)) {
+                    $this->lastPadDrops .= $this->cellBoxTempDrop($def->type, $this->lastValue, $def);
+                }
                 $this->lastPadArgs .= ', i64 ' . $this->lastValue;
             }
             $i = $i + 1;
@@ -2039,37 +2046,64 @@ trait EmitLlvmCalls
 
     /**
      * The uniform closure ABI's representation of one by-value argument of
-     * type `$at` already in `lastValue`: a scalar crosses as a tagged cell, a
-     * typed array is cellified only into a param `$pt` KNOWN to be a cell, and
-     * anything else crosses raw. One rule for a written argument and a padded
-     * default alike. `$pt` is null for a dynamic callee.
+     * type `$at` already in `lastValue` — ONE contract for a known and a
+     * dynamic callee, a written argument and a padded default alike:
+     *
+     *  - a scalar or string crosses as its tagged cell;
+     *  - an rc object (an object union too) and a closure value cross as the
+     *    object cell, by pointer — nothing is counted, the callee borrows;
+     *  - an array crosses as the array cell, by pointer, its element hint
+     *    stamped from the static type when the buffer has none, so a cell
+     *    reader decodes its raw words ({@see boxArrayShallow} without the
+     *    count);
+     *  - anything else (an erased word, an enum ordinal, a struct) crosses as
+     *    it is.
+     *
+     * The callee's DECLARED param decides what it reads: a cell param keeps
+     * the cell, a typed one unboxes at entry ({@see EmitLlvmModule}'s closure
+     * prologue — a scalar by tag, a pointer by mask). Raw, a `mixed` param's
+     * retain skipped the word, and `fn ($i) => $i` handed back an uncounted
+     * row that array_map's result then shared with its source.
+     *
+     * The one place the callee's param refines the box: a KNOWN cell param
+     * receiving a concrete-scalar array whose hint cannot describe it gets the
+     * rebuilt cell array ({@see boxToCell}) — the caller owns that box and
+     * drops it after the call ({@see closureArgOwnsBox}).
      */
-    private function closureArgRepr(Type $at, ?Type $pt): string
+    private function closureArgRepr(Type $at, ?Type $pt, ?Node $src = null): string
     {
-        // CELL only: the closure entry unboxes a cell param, but an `unknown`
-        // one (a bare `array` / `?array` hint) stores its word RAW and COWs it
-        // as an array pointer, so a boxed array there SIGSEGVed.
-        $paramErased = $pt !== null && $pt->kind === Type::KIND_CELL;
-        if ($this->isCellBoxableArg($at)
-            || ($paramErased && $at->isArray() && $this->hasConcreteScalarElem($at))
-            // A closure env into a CELL param is the OBJECT cell it is: raw, the
-            // callee's cell retain / drop skip it, so `fn ($f) => $f` handed
-            // back an uncounted word (array_map over `Closure[]`).
-            || ($paramErased && $this->isClosureValueType($at))
-            // …and so is an object, and an array already riding cells (boxed
-            // by pointer, nothing rebuilt): raw, the callee's cell retain skipped
-            // it and `fn ($i) => $i` handed back an UNCOUNTED row — array_map's
-            // result shared it with the source, and a nested write through one
-            // showed in the other.
-            || ($paramErased && $this->own->condFlavor($at) === 'obj')
-            || ($paramErased && $at->isArray()
-                && ($at->element === null || $at->element->kind === Type::KIND_CELL
-                    || $at->element->kind === Type::KIND_UNKNOWN))) {
+        if ($this->closureArgOwnsBox($at, $pt)) { return $this->boxToCell($at, $src); }
+        if ($this->isCellBoxableArg($at) || $this->isClosureValueType($at)
+            || $this->own->condFlavor($at) === 'obj') {
             return $this->boxToCell($at);
+        }
+        if ($at->isArray()) {
+            $el = $at->element;
+            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+                $sh = $this->boxArrayShallow($el, 'uncounted');
+                if ($sh !== null) { return $sh; }
+            }
+            $out = $this->coerceToPtr();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         return $this->coerceToI64();
     }
 
+    /**
+     * Does {@see closureArgRepr} hand a KNOWN cell param a box this call site
+     * owns (a concrete-scalar array, rebuilt or retained into its cell)? Then
+     * the source temp is consumed by the box ({@see cellifySourceFlavor}) and
+     * the box is dropped after the call ({@see cellBoxTempDrop}).
+     */
+    private function closureArgOwnsBox(Type $at, ?Type $pt): bool
+    {
+        return $pt !== null && $pt->kind === Type::KIND_CELL
+            && $at->isArray() && $this->hasConcreteScalarElem($at);
+    }
     /**
      * The module's closures a DYNAMIC invoke of `$argc` arguments may reach
      * with a default left to pad — name => capture count. Empty for a module

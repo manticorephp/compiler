@@ -1129,6 +1129,7 @@ trait EmitLlvmModule
                     // `$f(mk())` with `mk(): mixed` hands a bare-`array` param a
                     // tagged word, and the body's COW dereferenced the tag bits.
                     $bodySink->write($this->arrayHintedEntryMask($pp, $slot));
+                    $bodySink->write($this->closurePtrParamMask($pp, $slot));
                     if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $pp, true)) {
                         $bodySink->write($this->paramEntryCopyIr($pp, $slot));
                     }
@@ -2688,6 +2689,30 @@ trait EmitLlvmModule
         $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cp . " to i64\n";
         $out .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
         return $out;
+    }
+
+    /**
+     * The callee half of the uniform closure ABI ({@see EmitLlvmCalls::closureArgRepr}):
+     * every caller hands an rc object, an object union or a closure value
+     * over as its object CELL, so a param DECLARED one strips the tag on
+     * entry. The identity on a raw pointer (a direct runtime caller), so it
+     * is unconditional. An enum param keeps its ordinal (no caller boxes one).
+     */
+    private function closurePtrParamMask(\Compile\Mir\Param $p, string $slot): string
+    {
+        if ($p->byRef) { return ''; }
+        $t = $p->type;
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) {
+            if ($this->isEnumType($t)) { return ''; }
+        } elseif ($k !== Type::KIND_UNION && $k !== Type::KIND_CLOSURE) {
+            return '';
+        }
+        $rw = $this->ssa->allocReg();
+        $mk = $this->ssa->allocReg();
+        return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
+            . '  ' . $mk . ' = and i64 ' . $rw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
     }
 
     private function arrayHintedEntryMask(\Compile\Mir\Param $p, string $slot): string
