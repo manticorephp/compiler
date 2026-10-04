@@ -144,6 +144,11 @@ trait EmitLlvmModule
             $this->libcExtra['ferror'] = 'declare i32 @ferror(ptr)';
             $this->libcExtra['exit'] = 'declare void @exit(i32)';
         }
+        // The destructor registry's libc demand (see dtorRegRuntime).
+        $this->libcExtra['calloc'] = 'declare ptr @calloc(i64, i64)';
+        $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
+        $this->libcExtra['free'] = 'declare void @free(ptr)';
+        $this->libcExtra['qsort'] = 'declare void @qsort(ptr, i64, i64, ptr)';
         // The offload worker's libc demand. Same spellings as the Runtime\Libc
         // bindings of these symbols — the FFI binding check compares them.
         if ($this->rt->needsPool) {
@@ -2084,7 +2089,7 @@ trait EmitLlvmModule
         // Destructors still owed run AFTER the shutdown queue (registered next, so
         // atexit's LIFO runs it first) and BEFORE the ob drain: php's order.
         $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
-        $header .= "  call i32 @atexit(ptr @__mir_dtor_sweep)\n";
+        $header .= "  call i32 @atexit(ptr @__manticore_dtor_shutdown)\n";
         if ($this->needsErrorHandlers) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";
@@ -2138,8 +2143,38 @@ trait EmitLlvmModule
         // statement, so the first read/append sees a real array and not 0.
         $body .= $this->emitGlobalRuntimeInits();
         $body .= $this->emitNode($fn->body);
+        // The destructor sweep runs from atexit, after main's frame is gone, so a
+        // destructor that throws needs a landing pad of its own: the same base
+        // slot main installs. Uncaught there, php prints the fatal and runs no
+        // further destructor.
+        $dsh = "define void @__manticore_dtor_shutdown() {\nentry:\n";
+        if ($this->rt->needsExceptions) {
+            $dsh .= "  br label %arm\n";
+            $dsh .= "arm:\n";
+            $dsh .= "  store i64 1, ptr @__mir_jmp_depth\n";
+            $dsh .= "  %buf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
+            $dsh .= "  %sj = call i32 @_setjmp(ptr %buf)\n";
+            $dsh .= "  %caught = icmp ne i32 %sj, 0\n";
+            $dsh .= "  br i1 %caught, label %unc, label %run\n";
+            $dsh .= "unc:\n";
+            if ($this->needsErrorHandlers) {
+                // A set_exception_handler() takes the Throwable and the sweep
+                // carries on with the next destructor, as php does.
+                $dsh .= "  %e = load ptr, ptr @__mir_thrown\n";
+                $dsh .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
+                $dsh .= "  %handled = call i64 @manticore___mc_dispatch_uncaught(i64 %eb)\n";
+                $dsh .= "  %washandled = icmp ne i64 %handled, 0\n";
+                $dsh .= "  br i1 %washandled, label %arm, label %fatal\n";
+                $dsh .= "fatal:\n";
+            }
+            $dsh .= "  call void @__mir_uncaught()\n";
+            $dsh .= "  unreachable\n";
+            $dsh .= "run:\n";
+        }
+        $dsh .= "  call void @__mir_dtor_sweep()\n";
+        $dsh .= "  ret void\n}\n\n";
         $body .= "  ret i32 0\n";
-        return $header . $body . "}\n\n";
+        return $header . $body . "}\n\n" . $dsh;
     }
 
     /**

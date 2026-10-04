@@ -1423,113 +1423,261 @@ trait EmitLlvmRuntime
     }
 
     /**
-     * The registry of live objects whose class declares `__destruct`, in
-     * creation order, and the sweep that runs the destructors still owed at
-     * process end. php calls every remaining destructor at shutdown
-     * (`zend_call_destructors`), in creation order, for objects the script's
-     * scope exit never released: a static property, a function static, a cycle,
-     * anything alive at `exit()`.
+     * The registry of live objects whose class declares `__destruct`, and the
+     * sweep that runs the destructors still owed at process end. php calls every
+     * remaining destructor at shutdown (`zend_call_destructors`), in creation
+     * order, for objects the script's scope exit never released: a static
+     * property, a function static, a cycle, anything alive at `exit()`.
      *
-     * An entry leaves the list the moment its destructor starts (the drop body
-     * calls `__mir_dtor_unreg`), so a registered object is always live and
-     * undestructed. The sweep runs a destructor through the class's own drop
-     * function in one-shot "destructor only" mode (`__mir_dtor_only`, cleared by
-     * the drop body on read): members are NOT released, since other destructors
-     * may still read them. Skipped after an uncaught exception, as php does.
+     * An open-addressing table keyed by object address (`ptr`, `creation seq`),
+     * linear probing, backward-shift deletion: register and unregister are O(1)
+     * and the table is bounded by the PEAK live count, so a loop that allocates
+     * and frees a destructible object forever stays at its first 16 slots.
+     * An entry leaves the table the moment its destructor starts (the drop body
+     * calls `__mir_dtor_unreg`), so a registered object is live and undestructed.
+     *
+     * The sweep snapshots the table sorted by sequence and runs each destructor
+     * through the class's own drop function in one-shot "destructor only" mode
+     * (`__mir_dtor_only`, cleared by the drop body on read): members are NOT
+     * released, since other destructors may still read them. An entry a previous
+     * destructor already destroyed is skipped (its unregister answers false).
+     * The sweep is driven from `main`'s module ({@see emitMain}), which owns the
+     * landing pad for a destructor that throws.
      * linkonce_odr: one registry across every separately-linked object.
      */
     private function dtorRegRuntime(): string
     {
-        $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
-        $out  = "@__mir_dtor_ents = linkonce_odr global ptr null\n";
-        $out .= "@__mir_dtor_cnt = linkonce_odr global i64 0\n";
+        $out  = "@__mir_dtor_tab = linkonce_odr global ptr null\n";
+        $out .= "@__mir_dtor_live = linkonce_odr global i64 0\n";
         $out .= "@__mir_dtor_cap = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_seq = linkonce_odr global i64 0\n";
         $out .= "@__mir_dtor_only = linkonce_odr global i64 0\n";
-        $out .= "define void @__mir_dtor_reg(ptr %p) {\nentry:\n";
-        $out .= "  %cnt = load i64, ptr @__mir_dtor_cnt\n";
+        $out .= "define i64 @__mir_dtor_hash(ptr %p, i64 %mask) {\n";
+        $out .= "entry:\n";
+        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %a = lshr i64 %pi, 4\n";
+        $out .= "  %b = mul i64 %a, -7046029254386353131\n";
+        $out .= "  %c = lshr i64 %b, 32\n";
+        $out .= "  %d = and i64 %c, %mask\n";
+        $out .= "  ret i64 %d\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_dtor_ins(ptr %tab, i64 %mask, ptr %p, i64 %seq) {\n";
+        $out .= "entry:\n";
+        $out .= "  %h = call i64 @__mir_dtor_hash(ptr %p, i64 %mask)\n";
+        $out .= "  br label %probe\n";
+        $out .= "probe:\n";
+        $out .= "  %i = phi i64 [ %h, %entry ], [ %i1, %busy ]\n";
+        $out .= "  %off = shl i64 %i, 4\n";
+        $out .= "  %ep = getelementptr i8, ptr %tab, i64 %off\n";
+        $out .= "  %cur = load ptr, ptr %ep\n";
+        $out .= "  %free = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %free, label %put, label %busy\n";
+        $out .= "busy:\n";
+        $out .= "  %n = add i64 %i, 1\n";
+        $out .= "  %i1 = and i64 %n, %mask\n";
+        $out .= "  br label %probe\n";
+        $out .= "put:\n";
+        $out .= "  store ptr %p, ptr %ep\n";
+        $out .= "  %sp = getelementptr i8, ptr %ep, i64 8\n";
+        $out .= "  store i64 %seq, ptr %sp\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_dtor_reg(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %live = load i64, ptr @__mir_dtor_live\n";
         $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
-        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
-        $out .= "  br i1 %full, label %grow, label %store\n";
+        $out .= "  %l1 = add i64 %live, 1\n";
+        $out .= "  %dbl = shl i64 %l1, 1\n";
+        $out .= "  %need = icmp ugt i64 %dbl, %cap\n";
+        $out .= "  br i1 %need, label %grow, label %ins\n";
         $out .= "grow:\n";
-        $out .= "  %dbl = mul i64 %cap, 2\n";
-        $out .= "  %small = icmp slt i64 %dbl, 16\n";
-        $out .= "  %ncap = select i1 %small, i64 16, i64 %dbl\n";
-        $out .= "  %bytes = mul i64 %ncap, 8\n";
-        $out .= "  %old = load ptr, ptr @__mir_dtor_ents\n";
-        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
-        $out .= "  store ptr %nb, ptr @__mir_dtor_ents\n";
+        $out .= "  %c2 = shl i64 %cap, 1\n";
+        $out .= "  %small = icmp ult i64 %c2, 16\n";
+        $out .= "  %ncap = select i1 %small, i64 16, i64 %c2\n";
+        $out .= "  %nt = call ptr @calloc(i64 %ncap, i64 16)\n";
+        $out .= "  %old = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %nmask = sub i64 %ncap, 1\n";
+        $out .= "  br label %mv\n";
+        $out .= "mv:\n";
+        $out .= "  %j = phi i64 [ 0, %grow ], [ %j1, %mvn ]\n";
+        $out .= "  %jm = icmp ult i64 %j, %cap\n";
+        $out .= "  br i1 %jm, label %mvt, label %mvd\n";
+        $out .= "mvt:\n";
+        $out .= "  %jo = shl i64 %j, 4\n";
+        $out .= "  %jp = getelementptr i8, ptr %old, i64 %jo\n";
+        $out .= "  %je = load ptr, ptr %jp\n";
+        $out .= "  %jn = icmp eq ptr %je, null\n";
+        $out .= "  br i1 %jn, label %mvn, label %mvc\n";
+        $out .= "mvc:\n";
+        $out .= "  %jsp = getelementptr i8, ptr %jp, i64 8\n";
+        $out .= "  %jseq = load i64, ptr %jsp\n";
+        $out .= "  call void @__mir_dtor_ins(ptr %nt, i64 %nmask, ptr %je, i64 %jseq)\n";
+        $out .= "  br label %mvn\n";
+        $out .= "mvn:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %mv\n";
+        $out .= "mvd:\n";
+        $out .= "  call void @free(ptr %old)\n";
+        $out .= "  store ptr %nt, ptr @__mir_dtor_tab\n";
         $out .= "  store i64 %ncap, ptr @__mir_dtor_cap\n";
-        $out .= "  br label %store\n";
-        $out .= "store:\n";
-        $out .= "  %buf = load ptr, ptr @__mir_dtor_ents\n";
-        $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
-        $out .= "  store ptr %p, ptr %slot\n";
-        $out .= "  %c1 = add i64 %cnt, 1\n";
-        $out .= "  store i64 %c1, ptr @__mir_dtor_cnt\n";
-        $out .= "  ret void\n}\n";
-        // Newest first: short-lived objects die near the tail.
-        $out .= "define void @__mir_dtor_unreg(ptr %p) {\nentry:\n";
-        $out .= "  %cnt = load i64, ptr @__mir_dtor_cnt\n";
-        $out .= "  %buf = load ptr, ptr @__mir_dtor_ents\n";
-        $out .= "  br label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ %cnt, %entry ], [ %i1, %next ]\n";
-        $out .= "  %any = icmp sgt i64 %i, 0\n";
-        $out .= "  br i1 %any, label %test, label %done\n";
-        $out .= "test:\n";
-        $out .= "  %i1 = sub i64 %i, 1\n";
-        $out .= "  %g = getelementptr ptr, ptr %buf, i64 %i1\n";
-        $out .= "  %e = load ptr, ptr %g\n";
-        $out .= "  %hit = icmp eq ptr %e, %p\n";
-        $out .= "  br i1 %hit, label %found, label %next\n";
-        $out .= "next:\n";
-        $out .= "  br label %loop\n";
+        $out .= "  br label %ins\n";
+        $out .= "ins:\n";
+        $out .= "  %tab = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %cap2 = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %mask = sub i64 %cap2, 1\n";
+        $out .= "  %seq = load i64, ptr @__mir_dtor_seq\n";
+        $out .= "  %seq1 = add i64 %seq, 1\n";
+        $out .= "  store i64 %seq1, ptr @__mir_dtor_seq\n";
+        $out .= "  call void @__mir_dtor_ins(ptr %tab, i64 %mask, ptr %p, i64 %seq1)\n";
+        $out .= "  store i64 %l1, ptr @__mir_dtor_live\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        $out .= "define i1 @__mir_dtor_unreg(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %hole = alloca i64\n";
+        $out .= "  %jv = alloca i64\n";
+        $out .= "  %live = load i64, ptr @__mir_dtor_live\n";
+        $out .= "  %z = icmp eq i64 %live, 0\n";
+        $out .= "  br i1 %z, label %notfound, label %start\n";
+        $out .= "start:\n";
+        $out .= "  %tab = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %mask = sub i64 %cap, 1\n";
+        $out .= "  %h = call i64 @__mir_dtor_hash(ptr %p, i64 %mask)\n";
+        $out .= "  br label %probe\n";
+        $out .= "probe:\n";
+        $out .= "  %i = phi i64 [ %h, %start ], [ %i1, %step ]\n";
+        $out .= "  %off = shl i64 %i, 4\n";
+        $out .= "  %ep = getelementptr i8, ptr %tab, i64 %off\n";
+        $out .= "  %cur = load ptr, ptr %ep\n";
+        $out .= "  %isnull = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %isnull, label %notfound, label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %hit = icmp eq ptr %cur, %p\n";
+        $out .= "  br i1 %hit, label %found, label %step\n";
+        $out .= "step:\n";
+        $out .= "  %n = add i64 %i, 1\n";
+        $out .= "  %i1 = and i64 %n, %mask\n";
+        $out .= "  br label %probe\n";
         $out .= "found:\n";
-        $out .= "  store ptr null, ptr %g\n";
-        $out .= "  br label %trim\n";
-        $out .= "trim:\n";
-        $out .= "  %n = phi i64 [ %cnt, %found ], [ %n1, %pop ]\n";
-        $out .= "  %nany = icmp sgt i64 %n, 0\n";
-        $out .= "  br i1 %nany, label %peek, label %fin\n";
-        $out .= "peek:\n";
-        $out .= "  %n1 = sub i64 %n, 1\n";
-        $out .= "  %tg = getelementptr ptr, ptr %buf, i64 %n1\n";
-        $out .= "  %te = load ptr, ptr %tg\n";
-        $out .= "  %tnull = icmp eq ptr %te, null\n";
-        $out .= "  br i1 %tnull, label %pop, label %fin\n";
-        $out .= "pop:\n";
-        $out .= "  br label %trim\n";
+        $out .= "  store i64 %i, ptr %hole\n";
+        $out .= "  store i64 %i, ptr %jv\n";
+        $out .= "  br label %shift\n";
+        $out .= "shift:\n";
+        $out .= "  %j0 = load i64, ptr %jv\n";
+        $out .= "  %jn = add i64 %j0, 1\n";
+        $out .= "  %j1 = and i64 %jn, %mask\n";
+        $out .= "  store i64 %j1, ptr %jv\n";
+        $out .= "  %jo = shl i64 %j1, 4\n";
+        $out .= "  %jp = getelementptr i8, ptr %tab, i64 %jo\n";
+        $out .= "  %je = load ptr, ptr %jp\n";
+        $out .= "  %jnull = icmp eq ptr %je, null\n";
+        $out .= "  br i1 %jnull, label %fin, label %mv\n";
+        $out .= "mv:\n";
+        $out .= "  %k = call i64 @__mir_dtor_hash(ptr %je, i64 %mask)\n";
+        $out .= "  %hv = load i64, ptr %hole\n";
+        $out .= "  %le = icmp ule i64 %hv, %j1\n";
+        $out .= "  %c1 = icmp ugt i64 %k, %hv\n";
+        $out .= "  %c2 = icmp ule i64 %k, %j1\n";
+        $out .= "  %inA = and i1 %c1, %c2\n";
+        $out .= "  %inB = or i1 %c1, %c2\n";
+        $out .= "  %inr = select i1 %le, i1 %inA, i1 %inB\n";
+        $out .= "  br i1 %inr, label %shift, label %domove\n";
+        $out .= "domove:\n";
+        $out .= "  %ho = shl i64 %hv, 4\n";
+        $out .= "  %hp = getelementptr i8, ptr %tab, i64 %ho\n";
+        $out .= "  %jsp = getelementptr i8, ptr %jp, i64 8\n";
+        $out .= "  %jseq = load i64, ptr %jsp\n";
+        $out .= "  %hsp = getelementptr i8, ptr %hp, i64 8\n";
+        $out .= "  store ptr %je, ptr %hp\n";
+        $out .= "  store i64 %jseq, ptr %hsp\n";
+        $out .= "  store i64 %j1, ptr %hole\n";
+        $out .= "  br label %shift\n";
         $out .= "fin:\n";
-        $out .= "  %nf = phi i64 [ %n, %trim ], [ %n, %peek ]\n";
-        $out .= "  store i64 %nf, ptr @__mir_dtor_cnt\n";
-        $out .= "  br label %done\n";
-        $out .= "done:\n";
-        $out .= "  ret void\n}\n";
-        // atexit hook. The count is re-read each step: a destructor may create
-        // (and register) more objects.
-        $out .= "define void @__mir_dtor_sweep() {\nentry:\n";
-        $out .= "  br label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]\n";
-        $out .= "  %cnt = load i64, ptr @__mir_dtor_cnt\n";
-        $out .= "  %more = icmp slt i64 %i, %cnt\n";
-        $out .= "  br i1 %more, label %take, label %done\n";
-        $out .= "take:\n";
-        $out .= "  %buf = load ptr, ptr @__mir_dtor_ents\n";
-        $out .= "  %g = getelementptr ptr, ptr %buf, i64 %i\n";
-        $out .= "  %o = load ptr, ptr %g\n";
+        $out .= "  %hv2 = load i64, ptr %hole\n";
+        $out .= "  %ho2 = shl i64 %hv2, 4\n";
+        $out .= "  %hp2 = getelementptr i8, ptr %tab, i64 %ho2\n";
+        $out .= "  store ptr null, ptr %hp2\n";
+        $out .= "  %lv = sub i64 %live, 1\n";
+        $out .= "  store i64 %lv, ptr @__mir_dtor_live\n";
+        $out .= "  ret i1 true\n";
+        $out .= "notfound:\n";
+        $out .= "  ret i1 false\n";
+        $out .= "}\n";
+        $out .= "define i32 @__mir_dtor_cmp(ptr %a, ptr %b) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ap = getelementptr i8, ptr %a, i64 8\n";
+        $out .= "  %bp = getelementptr i8, ptr %b, i64 8\n";
+        $out .= "  %av = load i64, ptr %ap\n";
+        $out .= "  %bv = load i64, ptr %bp\n";
+        $out .= "  %lt = icmp ult i64 %av, %bv\n";
+        $out .= "  %gt = icmp ugt i64 %av, %bv\n";
+        $out .= "  %x = zext i1 %lt to i32\n";
+        $out .= "  %y = zext i1 %gt to i32\n";
+        $out .= "  %r = sub i32 %y, %x\n";
+        $out .= "  ret i32 %r\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_dtor_sweep() {\n";
+        $out .= "entry:\n";
+        $out .= "  br label %outer\n";
+        $out .= "outer:\n";
+        $out .= "  %live = load i64, ptr @__mir_dtor_live\n";
+        $out .= "  %none = icmp eq i64 %live, 0\n";
+        $out .= "  br i1 %none, label %done, label %snap\n";
+        $out .= "snap:\n";
+        $out .= "  %tab = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %bytes = shl i64 %live, 4\n";
+        $out .= "  %tmp = call ptr @malloc(i64 %bytes)\n";
+        $out .= "  br label %collect\n";
+        $out .= "collect:\n";
+        $out .= "  %i = phi i64 [ 0, %snap ], [ %i1, %cnext ]\n";
+        $out .= "  %k = phi i64 [ 0, %snap ], [ %k2, %cnext ]\n";
+        $out .= "  %more = icmp ult i64 %i, %cap\n";
+        $out .= "  br i1 %more, label %cget, label %csort\n";
+        $out .= "cget:\n";
+        $out .= "  %io = shl i64 %i, 4\n";
+        $out .= "  %ep = getelementptr i8, ptr %tab, i64 %io\n";
+        $out .= "  %e = load ptr, ptr %ep\n";
+        $out .= "  %isn = icmp eq ptr %e, null\n";
+        $out .= "  br i1 %isn, label %cskip, label %cput\n";
+        $out .= "cput:\n";
+        $out .= "  %sp = getelementptr i8, ptr %ep, i64 8\n";
+        $out .= "  %seq = load i64, ptr %sp\n";
+        $out .= "  %ko = shl i64 %k, 4\n";
+        $out .= "  %tp = getelementptr i8, ptr %tmp, i64 %ko\n";
+        $out .= "  %tsp = getelementptr i8, ptr %tp, i64 8\n";
+        $out .= "  store ptr %e, ptr %tp\n";
+        $out .= "  store i64 %seq, ptr %tsp\n";
+        $out .= "  %k1 = add i64 %k, 1\n";
+        $out .= "  br label %cnext\n";
+        $out .= "cskip:\n";
+        $out .= "  br label %cnext\n";
+        $out .= "cnext:\n";
+        $out .= "  %k2 = phi i64 [ %k, %cskip ], [ %k1, %cput ]\n";
         $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  %isn = icmp eq ptr %o, null\n";
-        $out .= "  br i1 %isn, label %cont, label %run\n";
+        $out .= "  br label %collect\n";
+        $out .= "csort:\n";
+        $out .= "  call void @qsort(ptr %tmp, i64 %k, i64 16, ptr @__mir_dtor_cmp)\n";
+        $out .= "  br label %run\n";
         $out .= "run:\n";
-        $out .= "  store ptr null, ptr %g\n";
+        $out .= "  %j = phi i64 [ 0, %csort ], [ %j1, %rnext ]\n";
+        $out .= "  %rmore = icmp ult i64 %j, %k\n";
+        $out .= "  br i1 %rmore, label %rget, label %rdone\n";
+        $out .= "rget:\n";
+        $out .= "  %jo = shl i64 %j, 4\n";
+        $out .= "  %rp = getelementptr i8, ptr %tmp, i64 %jo\n";
+        $out .= "  %o = load ptr, ptr %rp\n";
+        $out .= "  %found = call i1 @__mir_dtor_unreg(ptr %o)\n";
+        $out .= "  br i1 %found, label %rdo, label %rnext\n";
+        $out .= "rdo:\n";
         $out .= "  %rwp = getelementptr i8, ptr %o, i64 8\n";
         $out .= "  %rw = load i64, ptr %rwp\n";
         $out .= "  %rwh = add i64 %rw, 1\n";
         $out .= "  store i64 %rwh, ptr %rwp\n";
         $out .= "  %di = load i64, ptr %o\n";
         $out .= "  %dp = inttoptr i64 %di to ptr\n";
-        $out .= "  %dfp = getelementptr i8, ptr %dp, i64 " . (string)\Compile\MemoryAbi::DESCRIPTOR_DROP_FN_OFFSET . "\n";
+        $out .= "  %dfp = getelementptr i8, ptr %dp, i64 8\n";
         $out .= "  %df = load ptr, ptr %dfp\n";
         $out .= "  store i64 1, ptr @__mir_dtor_only\n";
         $out .= "  call void %df(ptr %o)\n";
@@ -1537,11 +1685,16 @@ trait EmitLlvmRuntime
         $out .= "  %rw2 = load i64, ptr %rwp\n";
         $out .= "  %rwd = sub i64 %rw2, 1\n";
         $out .= "  store i64 %rwd, ptr %rwp\n";
-        $out .= "  br label %cont\n";
-        $out .= "cont:\n";
-        $out .= "  br label %loop\n";
+        $out .= "  br label %rnext\n";
+        $out .= "rnext:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %run\n";
+        $out .= "rdone:\n";
+        $out .= "  call void @free(ptr %tmp)\n";
+        $out .= "  br label %outer\n";
         $out .= "done:\n";
-        $out .= "  ret void\n}\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
         return $out;
     }
 
@@ -2130,7 +2283,7 @@ trait EmitLlvmRuntime
                 $body .= "  %dcalled = icmp ne i64 %dcb, 0\n";
                 $body .= "  br i1 %dcalled, label %members, label %dtor\n";
                 $body .= "dtor:\n";
-                $body .= "  call void @__mir_dtor_unreg(ptr %o)\n";
+                $body .= "  call i1 @__mir_dtor_unreg(ptr %o)\n";
                 $body .= "  %dfl = and i64 %dw0, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
                 $body .= "  %dhold = or i64 %dfl, " . (string)(\Compile\MemoryAbi::DTOR_CALLED_MASK | 1) . "\n";
                 $body .= "  store i64 %dhold, ptr %dwp\n";
