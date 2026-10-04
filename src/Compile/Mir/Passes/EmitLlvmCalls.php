@@ -3322,11 +3322,47 @@ trait EmitLlvmCalls
         $out .= $this->emitNode($a);
         $out .= $this->coerceToI64();
         $out .= $this->ownRefSeed($a, $this->lastValue);
+        // An array property read through an ERASED receiver (`sort($o->j)` on a
+        // `mixed $o`) has no static slot, so it lands here — and the callee's
+        // sort went into this scratch word and was thrown away (and the word
+        // was the prop's CELL, which an `array &$arr` callee dereferenced as a
+        // buffer). Seed the raw buffer instead and, after the call, write what
+        // the callee left back through the class_id property writer, as the
+        // in-place builtins do ({@see EmitLlvmBuiltins::vecWriteBack}). The
+        // seed's reference is given back afterwards: either the callee replaced
+        // the buffer and the slot's old one is overwritten, or it did not and
+        // the seed was a second count on the same buffer.
+        $erasedProp = $a->kind === Node::KIND_PROPERTY_ACCESS
+            && $a->object->kind === Node::KIND_LOAD_LOCAL
+            && $a->type->kind === Type::KIND_CELL
+            && ($arrayHinted || ($pt !== null && $pt->isArray()))
+            && $this->propertyOffsetOrNull($a->object, $a->property) === null
+            && $this->fixedPropertyHolders($a->property) !== [];
+        $seedCell = $this->lastValue;
+        if ($erasedProp) {
+            $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            $out .= $this->coerceToI64();
+        }
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
         $addr = $this->ssa->allocReg();
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
         $this->lastRefSlotDrop = ($pt !== null && $this->isOmittedDefaultArg($srcArgc, $ai, $a))
             ? $this->omittedRefSlotDrop($tmp, $pt, $arrayHinted) : '';
+        if ($erasedProp) {
+            $this->rt->needsTagged = true;
+            $wb = $this->emitObjPtrOf($a->object);
+            $objp = $this->lastValue;
+            $nv = $this->ssa->allocReg();
+            $wb .= '  ' . $nv . ' = load i64, ptr ' . $tmp . "\n";
+            $np = $this->ssa->allocReg();
+            $wb .= '  ' . $np . ' = inttoptr i64 ' . $nv . " to ptr\n";
+            $cv = $this->ssa->allocReg();
+            $wb .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
+            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property)
+                 . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
+            $wb .= $this->rcReleaseReg($seedCell, 'cell');
+            $this->lastRefSlotDrop .= $wb;
+        }
         $this->lastValue = $addr;
         $this->lastValueType = 'i64';
         return $out;
