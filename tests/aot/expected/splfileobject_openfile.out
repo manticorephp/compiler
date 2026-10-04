@@ -1,0 +1,114 @@
+<?php
+StdinInfo::openFile
+string(4) "one
+"
+int(1)
+string(5) "two
+"
+int(2)
+string(1) "
+"
+string(4) "four"
+bool(true)
+RuntimeException: Cannot read from file P
+string(4) "one
+"
+int(0)
+string(4) "one
+"
+int(0)
+string(4) "one
+"
+int(1)
+string(5) "two
+"
+int(2)
+string(1) "
+"
+int(3)
+string(4) "four"
+int(0)
+string(3) "one"
+int(1)
+string(3) "two"
+int(2)
+string(4) "four"
+int(2)
+string(1) "
+"
+int(3)
+bool(false)
+bool(false)
+string(1) "o"
+string(1) "n"
+string(1) "e"
+string(1) "
+"
+int(1)
+int(4)
+int(0)
+string(5) "one
+t"
+int(14)
+bool(true)
+string(13) "SplFileObject"
+bool(true)
+bool(true)
+int(16)
+int(2)
+bool(true)
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(3) "c d"
+}
+array(3) {
+  [0]=>
+  string(1) "1"
+  [1]=>
+  string(1) "2"
+  [2]=>
+  string(1) "3"
+}
+array(1) {
+  [0]=>
+  string(2) "xy"
+}
+bool(false)
+0=["a","b","c d"]
+1=["1","2","3"]
+2=["xy"]
+array(3) {
+  [0]=>
+  string(1) ","
+  [1]=>
+  string(1) """
+  [2]=>
+  string(1) "\"
+}
+bool(false)
+NULL
+int(8)
+int(0)
+string(2) "a,"
+string(2) "b,"
+int(8)
+int(18)
+RuntimeException: SplFileObject::__construct(P.missing): Failed to open stream: No such file or directory
+LogicException: Cannot use SplFileObject with directories
+string(10) "php://temp"
+string(10) "php://temp"
+int(12)
+int(0)
+string(6) "hello
+"
+int(1)
+string(6) "world
+"
+bool(true)
+bool(true)
+bool(true)
+bool(true)

@@ -4119,7 +4119,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $useSplIterators = $demand->mentionsAny([
         'OuterIterator', 'RecursiveIterator', 'SeekableIterator', 'IteratorIterator', 'FilterIterator',
         'CallbackFilterIterator', 'RecursiveFilterIterator', 'RecursiveCallbackFilterIterator', 'AppendIterator',
-        'EmptyIterator', 'RecursiveIteratorIterator', 'RecursiveTreeIterator', 'SplFileInfo', 'DirectoryIterator',
+        'EmptyIterator', 'RecursiveIteratorIterator', 'RecursiveTreeIterator', 'SplFileInfo', 'SplFileObject',
+        'SplTempFileObject', 'DirectoryIterator',
         'FilesystemIterator', 'RecursiveDirectoryIterator', 'SplFixedArray', 'SplDoublyLinkedList', 'SplQueue',
         'SplStack', 'SplObjectStorage',
     ]) || $demand->usesYieldFrom();
