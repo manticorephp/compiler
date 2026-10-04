@@ -1494,6 +1494,14 @@ trait InferScans
                 // the closure, or by the ENCLOSING frame (`$e = null;` captured,
                 // then `$e = 3;` — the closure body was seeded null and read
                 // every later value as null).
+                // A name reached through `$GLOBALS['x']` keeps its module cell
+                // BOXED for the second reader ({@see EmitLlvmLocals::boxForViewSlot}):
+                // the closure sharing that word must read and write a cell too.
+                if (\in_array($local, $module->globalsViewNames, true)
+                    && !isset($this->byRefCaptureCellLocals[$clName][$pn])) {
+                    $this->byRefCaptureCellLocals[$clName][$pn] = true;
+                    $changed = true;
+                }
                 if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)
                     || $this->byRefCaptureDisagrees($fn, $local, $siteKind)) {
                     if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {

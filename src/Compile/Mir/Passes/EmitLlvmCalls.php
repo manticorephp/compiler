@@ -347,7 +347,11 @@ trait EmitLlvmCalls
                 // take the slot address. No rc retain on a raw address.
                 $name = $c->name;
                 $capV = $this->ssa->allocReg();
-                if (isset($this->locals->refLocals[$name])) {
+                if (isset($this->locals->globalBacked[$name])) {
+                    // `global $x` / a superglobal-shared name has no frame slot: its
+                    // storage is the module cell, whose address is the reference.
+                    $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->locals->globalBacked[$name] . " to i64\n";
+                } elseif (isset($this->locals->refLocals[$name])) {
                     $out .= '  ' . $capV . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
                 } else {
                     $out .= '  ' . $capV . ' = ptrtoint ptr ' . $this->locals->slots[$name] . " to i64\n";
