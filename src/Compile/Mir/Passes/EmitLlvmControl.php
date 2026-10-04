@@ -1259,6 +1259,21 @@ trait EmitLlvmControl
             $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
+        // A by-ref loop writes $v back: record whether the body left it a CELL.
+        // Registered BEFORE any arm is emitted: over an erased base the body is
+        // shared ({@see emitForeachBodyArm}) and is emitted inside whichever arm
+        // comes first, so a flag allocated in the array arm was never the one the
+        // body's stores recorded into. Only a YIELDING body cannot keep it (the
+        // alloca does not survive a resume).
+        $feFlag = '';
+        $fePrev = $this->feCellFlags[$fe->valueVar] ?? null;
+        $fePrevSet = isset($this->feCellFlagSet[$fe->valueVar]);
+        if ($fe->byRef && !$this->foreachBodyYields($fe->body) && !isset($this->locals->refLocals[$fe->valueVar])) {
+            $feFlag = $this->ssa->allocReg();
+            $out .= '  ' . $feFlag . " = alloca i64\n";
+            $this->feCellFlags[$fe->valueVar] = $feFlag;
+            unset($this->feCellFlagSet[$fe->valueVar]);
+        }
         $out .= $this->emitNode($fe->array);
         // An ERASED base (`mixed` cell, or an element read out of an untyped
         // array) is NOT known to be an array. Stripping the tag unconditionally
@@ -1404,7 +1419,13 @@ trait EmitLlvmControl
         // freed memory as soon as the body unset an element (an unset on a
         // packed buffer promotes and relocates) — symfony's
         // EventDispatcher::removeListener did exactly that on every run.
-        $live = $fe->byRef && $fe->genSlotBase < 0 && $this->unsetBaseIsWritable($fe->array);
+        // An erased base runs FRAMED too ({@see $dynGen}: slots stand in for a
+        // frame because the shared body joins every arm) and that is no reason
+        // to walk the captured buffer: only a body that YIELDS needs its state
+        // in the generator frame, where the live slots below cannot live. The
+        // framed walk wrote `$list` back into the buffer an `unset($list[$k])`
+        // had just relocated — php-cs-fixer's EventDispatcher::removeListener.
+        $live = $fe->byRef && !$this->foreachBodyYields($fe->body) && $this->unsetBaseIsWritable($fe->array);
         $liveSlot = '';
         $liveKey = '';
         if ($live) {
@@ -1546,6 +1567,12 @@ trait EmitLlvmControl
         // back into a raw-hinted buffer lands raw again. An ERASED element is a
         // cell too since InferTypes types it so ({@see InferNodes::inferForeach}).
         $fvT = $this->locals->localTypes[$fe->valueVar] ?? null;
+        // The loop variable then starts as the DECODED cell, so the `&$v`
+        // write-back must encode it again unless the body stored a raw value:
+        // a raw-hinted buffer (a `['c', 'a']` literal
+        // stored into an untyped property) got a tagged string where it keeps
+        // raw pointers, and its release freed the tag bits as an address.
+        $vDecodedCell = $fel === null || $fel->kind === Type::KIND_CELL || $fel->kind === Type::KIND_UNKNOWN;
         if (($fel !== null && ($fel->kind === Type::KIND_CELL || $fel->kind === Type::KIND_UNKNOWN))
             || $fel === null
             || $fe->array->type->kind === Type::KIND_CELL
@@ -1679,26 +1706,12 @@ trait EmitLlvmControl
             $out .= $this->foreachVarStore($fe->keyVar, $kp,
                 $keyIsCell ? Type::cell() : $fe->array->type->key);
         }
-        // A by-ref loop writes $v back: record whether the body left it a CELL.
-        $feFlag = '';
-        $feFlagUsed = false;
-        $fePrev = $this->feCellFlags[$fe->valueVar] ?? null;
-        $fePrevSet = isset($this->feCellFlagSet[$fe->valueVar]);
-        if ($fe->byRef && $fe->genSlotBase < 0 && !isset($this->locals->refLocals[$fe->valueVar])) {
-            $feFlag = $this->ssa->allocReg();
-            $out .= '  ' . $feFlag . " = alloca i64\n";
-            $out .= '  store i64 0, ptr ' . $feFlag . "\n";
-            $this->feCellFlags[$fe->valueVar] = $feFlag;
-            unset($this->feCellFlagSet[$fe->valueVar]);
+        // The loop's own store left a cell exactly when it decoded one.
+        if ($feFlag !== '') {
+            $out .= '  store i64 ' . ($vDecodedCell ? '1' : '0') . ', ptr ' . $feFlag . "\n";
         }
         $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, false);
-        if ($feFlag !== '') {
-            $feFlagUsed = isset($this->feCellFlagSet[$fe->valueVar]);
-            if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
-            else { $this->feCellFlags[$fe->valueVar] = $fePrev; }
-            if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
-            else { unset($this->feCellFlagSet[$fe->valueVar]); }
-        }
+        $feFlagUsed = $feFlag !== '' && ($vDecodedCell || isset($this->feCellFlagSet[$fe->valueVar]));
 
         $out .= $stepLabel . ":\n";
         if ($framed && $fe->byRef) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
@@ -1764,6 +1777,12 @@ trait EmitLlvmControl
         }
 
         $this->cf->leave();
+        if ($feFlag !== '') {
+            if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
+            else { $this->feCellFlags[$fe->valueVar] = $fePrev; }
+            if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
+            else { unset($this->feCellFlagSet[$fe->valueVar]); }
+        }
         // Rejoin the generator arm of the erased-base classify above.
         if ($dynEnd !== '') {
             $out .= '  br label %' . $dynEnd . "\n";
