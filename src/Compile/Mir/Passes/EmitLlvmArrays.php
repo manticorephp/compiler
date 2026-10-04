@@ -2577,6 +2577,13 @@ trait EmitLlvmArrays
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
             if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor, $next); }
         }
+        // A boxed store into a level that did not exist yet: the cow of an absent
+        // nested level is NULL, `__mir_elem_encode` has no buffer to stamp, and
+        // the set/append below mints the buffer — so it comes back unstamped
+        // with a cell inside, and a typed reader trusts the raw claim.
+        if ($boxVal && $se->array->kind === Node::KIND_ARRAY_ACCESS) {
+            $out .= $this->emitElemHintStamp($next, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
+        }
         // Stamp the element repr on the persisted buffer ($next may be a
         // realloced / promoted / deimmortalised buffer) so the plain repr
         // release/retain/cow drop/co-own this erased array's raw elements.
