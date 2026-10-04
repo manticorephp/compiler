@@ -533,6 +533,10 @@ trait EmitLlvmLocals
     private function elemReadCoOwn(Node $v, ?Type $slotType = null, string $dest = ''): string
     {
         if (!\Compile\Debug::$rcElemReadOwns) { return ''; }
+        // Through a pass-through `(string)`: the release half follows the cast
+        // to its operand ({@see InsertMemoryOps::isOwnedObj}), so
+        // `$l = (string)$this->m['k'];` must retain as the bare read does.
+        $v = \Compile\Mir\AliasOwn::peel($v);
         if ($v->kind !== Node::KIND_ARRAY_ACCESS) { return ''; }
         // THE PASS DECIDES: a plain local the plan does not own releases
         // nothing, so a retain here is one nobody gives back — php-cs-fixer's
