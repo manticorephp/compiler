@@ -63,8 +63,12 @@ executable that imports its dependencies' `.sig` and links their `.o`).
 
 `name`, `src`, `output`, `exclude` — same as above. A library is compiled with
 `--emit-library`: a standalone `.o` with **no `main()`**, plus `<output>.sig`.
+It declares the stdlib's functions (so a call into the stdlib — its own or a
+prelude body's — is an extern reference resolved when the application links the
+stdlib), and an application that links any library links the stdlib too.
 A library marked `"runtime": true` is the bundled stdlib — built, but treated as
-the always-on runtime rather than a normal dependency (see below).
+the always-on runtime rather than a normal dependency (see below); it declares
+nothing from itself. The CLI spelling is `compile --emit-library --runtime`.
 
 ### Two independent opt-outs: `"stdlib"` and `"libraries"`
 

@@ -1136,6 +1136,28 @@ function thinlto_link_flags(): string {
  * {@see CompileArgs::$externClassDecls} / `$externClassMeta` — for a PROGRAM
  * only, never for a build of the stdlib itself, which declares them.
  */
+/**
+ * Append the bundled stdlib's function declarations to
+ * {@see CompileArgs::$externDecls} — the one place both build routes (the
+ * manifest's {@see build_compile_module} and the CLI's `compile`) decide it.
+ * Every target declares them, a LIBRARY included: its `.o` is resolved at the
+ * final link, where the stdlib is linked too, but an undeclared stdlib call
+ * would compile into a `Call to undefined function` trap instead of an extern
+ * reference. Only the stdlib itself (`$runtime`) declares nothing. Types are
+ * imported for an application only (a library exports its own).
+ * False when the `.sig` was refused (the reason is already printed).
+ */
+function import_stdlib_decls(bool $emitLibrary, bool $runtime): bool
+{
+    if ($runtime) { return true; }
+    foreach (collect_stdlib_extern_decls(!$emitLibrary) as $d) { CompileArgs::$externDecls[] = $d; }
+    if (CompileArgs::$sigError !== '') {
+        dprint(CompileArgs::$sigError);
+        return false;
+    }
+    return true;
+}
+
 function collect_stdlib_extern_decls(bool $withTypes = false): array
 {
     /** @var \Parser\Ast\FunctionDecl[] $decls */
@@ -1490,6 +1512,28 @@ function dump_resolved_sources(array $paths): void
  *
  * @param string[] $names sorted trap names
  */
+/**
+ * Report the calls nothing defines — compiled into a runtime throw rather than
+ * a link error ({@see \Compile\Mir\Passes\EmitLlvmCalls::emitCall}) — and refuse
+ * a LIBRARY that carries one: its `.o` outlives this build and is linked by
+ * every later program. Shared by the manifest build and the CLI `compile`.
+ * False when the target must not be written.
+ * @param string[] $traps
+ */
+function undefined_traps_ok(array $traps, bool $emitLibrary, string $output): bool
+{
+    if (\count($traps) === 0) { return true; }
+    \sort($traps);
+    dprint("build: undefined-function traps (" . (string)\count($traps) . "): " . \implode(", ", $traps));
+    dump_undefined_traps($traps);
+    if ($emitLibrary && !CompileArgs::$allowUndefinedTraps) {
+        dprint("build: refusing to write " . $output
+            . " with undefined-function traps (pass --allow-undefined-traps to override)");
+        return false;
+    }
+    return true;
+}
+
 function dump_undefined_traps(array $names): void
 {
     $out = \getenv("MANTICORE_DUMP_TRAPS");
@@ -1595,9 +1639,9 @@ final class CompileArgs
     public const AUTO_SPLIT_PART_BYTES = 10485760;
 
     /**
-     * `--emit-library` — build the bundled stdlib as a standalone `.o`
-     * (no `@main`, no stdlib linking). Used by bin/compile / bin/build to
-     * produce `lib/manticore_stdlib.o` once after the compiler is built.
+     * `--emit-library` — build a standalone library `.o` (no `@main`, no
+     * stdlib linking; it declares the stdlib and is resolved at the final
+     * link). With `--runtime` it is the bundled stdlib itself.
      */
     public static bool $emitLibrary = false;
 
@@ -1706,6 +1750,9 @@ final class CompileArgs
      * program imports them ({@see collect_stdlib_extern_decls}).
      */
     public static bool $exportTypes = true;
+
+    /** `--runtime` (CLI) — the library being built is the bundled stdlib. */
+    public static bool $runtimeLibrary = false;
 }
 
 /**
@@ -1718,7 +1765,7 @@ final class CompileArgs
 /**
  * The compile/dump option spec, shared by every command that takes them:
  *   -o <out> · --memory=<rc|arena|hybrid> · --backend=<mir|ast> · -O<level>
- *   --prelude · --effects · --emit-library · --keep-ir
+ *   --prelude · --effects · --emit-library · --runtime · --keep-ir
  * All value forms (`-o out`, `-O2`, `--memory=rc`, `--memory rc`) are accepted;
  * positionals (files) may appear in any position.
  *
@@ -1733,6 +1780,8 @@ function compile_arg_spec(): array {
         "prelude" => \Cli\ArgParse::FLAG,
         "effects" => \Cli\ArgParse::FLAG,
         "emit-library" => \Cli\ArgParse::FLAG,
+        "runtime" => \Cli\ArgParse::FLAG,
+        "allow-undefined-traps" => \Cli\ArgParse::FLAG,
         "keep-ir" => \Cli\ArgParse::FLAG,
         "j" => \Cli\ArgParse::VALUE,
     ];
@@ -1764,6 +1813,11 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool {
     CompileArgs::$dumpPrelude = $p->flag("prelude");
     CompileArgs::$dumpEffects = $p->flag("effects");
     if ($p->flag("emit-library")) { CompileArgs::$emitLibrary = true; }
+    // `--runtime` with `--emit-library`: this library IS the bundled stdlib —
+    // the manifest's `"runtime": true` — so it imports no stdlib declarations
+    // and exports no types ({@see import_stdlib_decls}).
+    if ($p->flag("runtime")) { CompileArgs::$runtimeLibrary = true; CompileArgs::$exportTypes = false; }
+    if ($p->flag("allow-undefined-traps")) { CompileArgs::$allowUndefinedTraps = true; }
     if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
     $jobs = $p->value("j", "");
     if ($jobs !== "") {
@@ -1978,17 +2032,13 @@ function cmd_compile(array $args): int {
     }
     // Collect bundled-stdlib signatures here (native path: the libc file
     // bindings resolve to real syscalls). compile_via_mir consumes them via
-    // the static. Skipped when building stdlib.o itself.
-    if (!CompileArgs::$emitLibrary) {
-        $sigT = \Compile\Stats::now();
-        CompileArgs::$externDecls = collect_stdlib_extern_decls(true);
-        \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
-            \count(CompileArgs::$externDecls), -1);
-        if (CompileArgs::$sigError !== '') {
-            dprint(CompileArgs::$sigError);
-            return 65;
-        }
-    }
+    // the static. A library declares them too; only the stdlib itself
+    // (`--runtime`) does not.
+    $sigT = \Compile\Stats::now();
+    CompileArgs::$externDecls = [];
+    if (!import_stdlib_decls(CompileArgs::$emitLibrary, CompileArgs::$runtimeLibrary)) { return 65; }
+    \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
+        \count(CompileArgs::$externDecls), -1);
     // NOTE: the bundled PHP stdlib is NOT prepended here. Merging the whole
     // stdlib into every user program both bloats output and crashes the
     // compiler on some stdlib+user combinations (the "stdlib as guest"
@@ -2720,13 +2770,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // bodies, so nothing is specialised from them; the strong stdlib symbol
     // still wins over any `linkonce_odr` prelude copy at link time.
     $splitLibrary = $emitLibrary && (int)(\getenv("MANTICORE_SPLIT_JOBS") ?: "0") >= 2;
-    if ($withStdlib || $splitLibrary) {
-        foreach (collect_stdlib_extern_decls(!$emitLibrary) as $d) { CompileArgs::$externDecls[] = $d; }
-        if (CompileArgs::$sigError !== '') {
-            dprint(CompileArgs::$sigError);
-            return 65;
-        }
-    }
+    if (!import_stdlib_decls($emitLibrary, !($withStdlib || $splitLibrary))) { return 65; }
     $keep = CompileArgs::$keepIr;
     $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
@@ -2793,20 +2837,7 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // GENERATION BEHIND its source produces for a name it does not know yet —
     // silently, which is why "this needed a cold seed" used to be discovered by
     // a crash instead of by the build. Name it, in a line a driver can parse.
-    if (\count($undefTraps) > 0) {
-        \sort($undefTraps);
-        $names = \implode(", ", $undefTraps);
-        dprint("build: undefined-function traps (" . (string)\count($undefTraps)
-            . "): " . $names);
-        dump_undefined_traps($undefTraps);
-        // For a LIBRARY the stub is written to a `.o` that outlives this build
-        // and is linked by every later program, so refuse it by default.
-        if ($emitLibrary && !CompileArgs::$allowUndefinedTraps) {
-            dprint("build: refusing to write " . $output
-                . " with undefined-function traps (pass --allow-undefined-traps to override)");
-            return 65;
-        }
-    }
+    if (!undefined_traps_ok($undefTraps, $emitLibrary, $output)) { return 65; }
     // The staging path was selected before lowering/emission so streamed LLVM
     // can be written directly to the final .ll path. Under --keep-ir it sits next
     // to the target; otherwise it is pid-derived and removed after a successful
@@ -4987,6 +5018,11 @@ function compile_via_mir(array $sources, array $paths = []): ?string {
         // scope — the cc step below runs long after emission.
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
+        // The CLI route's library gets the manifest route's preflight.
+        if (!undefined_traps_ok(\array_keys($emit->undefinedCalls), CompileArgs::$emitLibrary, CompileArgs::$output)) {
+            $emit = null;
+            return null;
+        }
         // The MIR and the emitter are SPENT: `$ir` is either the whole module's
         // text or, for a staged build, the marker naming the file it was written
         // to. Everything below this line is clang, and clang is where the peak
@@ -5444,11 +5480,9 @@ function build_cache_key(array $sources, array $paths, string $output, bool $emi
     array $linkObjs, string $linkFlags, bool $withStdlib): string
 {
     $parts = [
-        'manticore-build-cache-v1',
+        'manticore-build-cache-v2',
         'target=' . $output,
-        'artifact=' . build_cache_file_stamp($output),
         'library=' . ($emitLibrary ? '1' : '0'),
-        'artifact-sig=' . ($emitLibrary ? build_cache_file_stamp($output . '.sig') : ''),
         'stdlib=' . ($withStdlib ? '1' : '0'),
         'link=' . $linkFlags,
         'opt=' . clang_opt_level() . clang_tuning_flags(),
@@ -5472,6 +5506,13 @@ function build_cache_key(array $sources, array $paths, string $output, bool $emi
     }
     $prelude = (string)(\getenv('MANTICORE_PRELUDE') ?: '');
     $parts[] = 'prelude=' . $prelude;
+    // A target that imports the stdlib's declarations ({@see import_stdlib_decls})
+    // compiles them into its `.o`: a changed stdlib signature must miss.
+    if ($withStdlib) {
+        $stdSig = find_stdlib_sig();
+        $stdBytes = $stdSig === '' ? null : read_file($stdSig);
+        $parts[] = 'stdlib-sig:' . ($stdBytes === null ? 'none' : \hash('sha256', $stdBytes));
+    }
     return \hash('sha256', \implode("\n", $parts));
 }
 
@@ -5491,7 +5532,18 @@ function build_cache_hit(array $sources, array $paths, string $output, bool $emi
     $stamp = read_file($stampPath);
     if ($stamp === null) { return false; }
     return $stamp === build_cache_key($sources, $paths, $output, $emitLibrary,
-        $linkObjs, $linkFlags, $withStdlib);
+        $linkObjs, $linkFlags, $withStdlib) . "\n" . build_cache_artifact_stamp($output, $emitLibrary);
+}
+
+/**
+ * The artifact the cached build wrote, as it stood right AFTER that build. Kept
+ * out of {@see build_cache_key}: the key is computed BEFORE the build (lower_module
+ * consumes the sources), when the artifact is still the previous one or absent,
+ * so a key that carried it could never match the next run — the cache never hit.
+ */
+function build_cache_artifact_stamp(string $output, bool $emitLibrary): string
+{
+    return build_cache_file_stamp($output) . '|' . ($emitLibrary ? build_cache_file_stamp($output . '.sig') : '');
 }
 
 function build_cache_store(array $sources, array $paths, string $output, bool $emitLibrary,
@@ -5501,7 +5553,7 @@ function build_cache_store(array $sources, array $paths, string $output, bool $e
     if ($dir === '') { return; }
     if (!file_exists($dir)) { @mkdir($dir, 0777, true); }
     $stampPath = build_cache_stamp_path($output);
-    write_file($stampPath, $precomputedKey !== '' ? $precomputedKey
+    write_file($stampPath, ($precomputedKey !== '' ? $precomputedKey
         : build_cache_key($sources, $paths, $output, $emitLibrary,
-            $linkObjs, $linkFlags, $withStdlib));
+            $linkObjs, $linkFlags, $withStdlib)) . "\n" . build_cache_artifact_stamp($output, $emitLibrary));
 }
