@@ -5612,8 +5612,16 @@ trait EmitLlvmBuiltins
         for ($k = 1; $k <= $count; $k = $k + 1) {
             $el = $args[$k];
             $out .= $this->emitNode($el);
-            $out .= $this->retainCellPayload($el);
-            $out .= $this->boxToCell($el->type);
+            if ($el->type->kind === Type::KIND_OBJ || $el->type->kind === Type::KIND_CLOSURE) {
+                // The formatter lives in the stdlib object, which knows no user
+                // class: convert HERE, where __toString resolves (or php's Error
+                // for an object without one). The fresh string moves into the pack.
+                $out .= $this->coerceToStr($el);
+                $out .= $this->boxToCell(Type::string_());
+            } else {
+                $out .= $this->retainCellPayload($el);
+                $out .= $this->boxToCell($el->type);
+            }
             $val = $this->lastValue;
             $off = $hdr + ($k - 1) * $esz;
             $p = $this->ssa->allocReg();
