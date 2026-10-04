@@ -107,15 +107,26 @@ trait InferScans
 
     /**
      * An inherited property is ONE slot seen through several classes, and each
-     * ClassDef carries its own copy of the slot's type. A retype found through
-     * one class (the `$this->j = $j` store in the parent's method, keyed by the
-     * parent) must reach every class sharing the slot, or a read through the
-     * subclass keeps the old claim: `$sub->set(range(1, 3))` celled `Base::$j`
-     * while `array_shift($sub->j)` still read `list<int>` raw. The same slot
-     * means the same name at the same ordinal — a redeclared private is not it.
+     * ClassDef carries its own copy of the slot's type. A WIDENING to cells
+     * found through one class (the `$this->j = $j` store in the parent's
+     * method, keyed by the parent) must reach every class sharing the slot, or
+     * a read through the subclass keeps the old claim: `$sub->set(range(1, 3))`
+     * celled `Base::$j` while `array_shift($sub->j)` still read `list<int>`
+     * raw. The same slot means the same name at the same ordinal — a
+     * redeclared private is not it.
+     *
+     * Only the cell claim travels, and it is the JOIN: cell is the top of every
+     * element repr, so a sibling whose own stores are concrete still reads its
+     * words right through the hint. A NARROWING (a ctor arg adopted, an array
+     * assign) never does — it is one subclass's evidence, and handed to its
+     * siblings the first one's element became everyone's claim: `new B([false,
+     * true])` made `A::$x`, filled with floats, read `bool(false)`.
      */
     private function setInheritedPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): void
     {
+        $tCell = $t->kind === Type::KIND_CELL
+            || ($t->isArray() && ($t->element->kind ?? '') === Type::KIND_CELL);
+        if (!$tCell) { return; }
         $idx = \array_search($prop, $cd->propertyNames, true);
         if ($idx === false) { return; }
         $root = $cd;
@@ -136,7 +147,14 @@ trait InferScans
                 if ($up === null) { break; }
                 $c = $up;
             }
-            if ($shares) { $other->propertyTypes[$prop] = $t; }
+            if (!$shares) { continue; }
+            $cur = $other->propertyTypes[$prop] ?? null;
+            if ($cur !== null && ($cur->kind === Type::KIND_CELL
+                || ($cur->isArray() && ($cur->element->kind ?? '') === Type::KIND_CELL))) { continue; }
+            // Keep the sibling's own key shape; only its element joins to cell.
+            $other->propertyTypes[$prop] = ($t->isArray() && $cur !== null && $cur->isArray() && $cur->key !== null)
+                ? Type::assoc($cur->key, Type::cell())
+                : $t;
         }
     }
 
