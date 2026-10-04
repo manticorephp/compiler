@@ -895,6 +895,8 @@ trait EmitLlvmControl
     private function armRetainPostBox(Node $res, Node $arm, string $i64reg): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
+        // {@see armCoerce} rebuilt it: a fresh +1 already.
+        if (\Compile\Mir\Ownership::needsCellify($res->type, $arm->type)) { return ''; }
         $flavor = $this->condResFlavor($res);
         if ($flavor === '' || $flavor === 'cell') { return ''; }
         if ($this->armIsFresh($arm, $flavor)) { return ''; }
@@ -934,6 +936,22 @@ trait EmitLlvmControl
         if ($this->condResFlavor($res) !== 'cell') { return ''; }
         if ($this->armIsFresh($arm, 'cell')) { return ''; }
         return $this->retainCellPayload($arm);
+    }
+
+    /**
+     * An arm of a non-cell conditional, onto the i64 carrier. A concrete-element
+     * array arm under a CELL-element result (the arms' element join,
+     * {@see InferNodes::armArrayJoin}) is rebuilt into a fresh cell buffer first,
+     * so the buffer IS what the result's type claims; the rebuild is the arm's
+     * +1 ({@see armRetainPostBox} skips it). `lastValue` holds the arm's value.
+     */
+    private function armCoerce(Node $res, Node $arm): string
+    {
+        $out = '';
+        if (\Compile\Mir\Ownership::needsCellify($res->type, $arm->type)) {
+            $out .= $this->emitCellifyArrayRaw($arm->type->element, $this->cellifySourceFlavor($arm));
+        }
+        return $out . $this->coerceToI64();
     }
 
     private function emitTernary(Ternary $n): string
@@ -978,7 +996,7 @@ trait EmitLlvmControl
                 $out .= $this->armRetainPreBox($n, $thenArm);
                 $out .= $this->boxToCell($t->then->type, $t->then);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $t->then);
             }
             $thenVal = $this->lastValue;
         } elseif ($wantCell) {
@@ -999,7 +1017,7 @@ trait EmitLlvmControl
             $out .= $this->armRetainPreBox($n, $t->else_);
             $out .= $this->boxToCell($t->else_->type, $t->else_);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($n, $t->else_);
         }
         $elseVal = $this->lastValue;
         $out .= $this->armRetainPostBox($n, $t->else_, $elseVal);
@@ -2187,7 +2205,7 @@ trait EmitLlvmControl
                 $out .= $this->armRetainPreBox($n, $arm->body);
                 $out .= $this->boxToCell($arm->body->type, $arm->body);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $arm->body);
             }
             $out .= $this->armRetainPostBox($n, $arm->body, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";

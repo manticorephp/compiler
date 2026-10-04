@@ -1394,16 +1394,19 @@ trait InferScans
         $names = [];
         foreach ($observed as $name => $t) { $names[$name] = true; }
         foreach ($elems as $name => $t) { $names[$name] = true; }
-        // A superglobal shared with another module holds whatever THAT
-        // module's stores put there, at its representation: only a cell — the
-        // self-describing one — is the same in both.
-        if ($module->sharesSuperglobals) {
-            foreach ($module->globalVarNames as $gname) {
-                if (!self::isSuperglobalVar($gname)) { continue; }
-                $observed[$gname] = Type::unknown();
-                unset($elems[$gname]);
-                $names[$gname] = true;
-            }
+        // A superglobal is ONE slot shared by every module of the program — a
+        // library `.o` declares it, the application defines it — so its
+        // representation cannot be any one module's join of its own stores
+        // (the same rule as a `linkonce_odr` body: never specialise a shared
+        // symbol from module-local information). It is always a CELL, the
+        // self-describing representation every module agrees on. A user
+        // `global $x` cell is a strong per-module definition: a second module
+        // naming it is a duplicate-symbol link error, so it is never shared.
+        foreach ($module->globalVarNames as $gname) {
+            if (!self::isSuperglobalVar($gname)) { continue; }
+            $observed[$gname] = Type::unknown();
+            unset($elems[$gname]);
+            $names[$gname] = true;
         }
         foreach ($names as $name => $_) {
             $t = $observed[$name] ?? null;

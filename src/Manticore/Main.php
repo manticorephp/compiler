@@ -1601,9 +1601,6 @@ final class CompileArgs
      */
     public static bool $emitLibrary = false;
 
-    /** The manifest build links a dependency library `.o` into this program. */
-    public static bool $importsLibrary = false;
-
     /**
      * `--allow-undefined-traps` — permit a LIBRARY target to ship calls the
      * emitter compiled into a "Call to undefined function" throw
@@ -2707,7 +2704,6 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
 function build_compile_module(array &$sources, string $output, bool $emitLibrary, array $linkObjs, string $linkFlags = '', bool $withStdlib = false, array $paths = []): int
 {
     CompileArgs::$emitLibrary = $emitLibrary;
-    CompileArgs::$importsLibrary = !$emitLibrary && \count($linkObjs) > 0;
     // Ensure the output directory exists — a fresh checkout has no `lib/` (it is
     // a build artifact), and clang/cc cannot create the parent on write. Covers
     // any manifest target dir, not just the stdlib's `lib/`.
@@ -4611,7 +4607,6 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->includeCli = $useCli;
         // Library targets carry the extra bookkeeping their `.sig` exports.
         $lower->emitLibrary = CompileArgs::$emitLibrary && CompileArgs::$exportTypes;
-        $lower->sharesSuperglobals = CompileArgs::$emitLibrary || CompileArgs::$importsLibrary;
         $lower->exportRuntimeTypes = CompileArgs::$emitLibrary && !CompileArgs::$exportTypes;
         $lower->externClassDecls = CompileArgs::$externClassDecls;
         $lower->runtimeClassNames = CompileArgs::$runtimeClassNames;

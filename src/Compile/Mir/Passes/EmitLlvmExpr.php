@@ -2635,7 +2635,7 @@ trait EmitLlvmExpr
                 // the whole assoc `mk()` returned, once per call.
                 $out .= $this->boxToCell($nc->left->type, $nc->left);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $nc->left);
             }
             $leftVal = $this->lastValue;
             $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
@@ -2647,7 +2647,7 @@ trait EmitLlvmExpr
                 $out .= $this->armRetainPreBox($n, $nc->right);
                 $out .= $this->boxToCell($nc->right->type, $nc->right);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $nc->right);
             }
             $rightVal = $this->lastValue;
             $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
@@ -2711,9 +2711,12 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
             $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         } else {
-            $leftVal = $lv;
-            $out .= $this->armRetainPostBox($n, $nc->left, $lv);
-            $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
+            $this->lastValue = $lv;
+            $this->lastValueType = 'i64';
+            $out .= $this->armCoerce($n, $nc->left);
+            $leftVal = $this->lastValue;
+            $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
+            $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
@@ -2722,7 +2725,7 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPreBox($n, $nc->right);
             $out .= $this->boxToCell($nc->right->type, $nc->right);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($n, $nc->right);
         }
         $rightVal = $this->lastValue;
         $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
@@ -2816,8 +2819,12 @@ trait EmitLlvmExpr
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
             // The kept value is a raw property load — always a borrow.
-            $out .= $this->armRetainPostBox($nc, $leafPa, $cur);
-            $out .= '  store i64 ' . $cur . ', ptr ' . $res . "\n";
+            $this->lastValue = $cur;
+            $this->lastValueType = 'i64';
+            $out .= $this->armCoerce($nc, $leafPa);
+            $kept = $this->lastValue;
+            $out .= $this->armRetainPostBox($nc, $leafPa, $kept);
+            $out .= '  store i64 ' . $kept . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
@@ -2826,7 +2833,7 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPreBox($nc, $nc->right);
             $out .= $this->boxToCell($nc->right->type);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($nc, $nc->right);
         }
         $out .= $this->armRetainPostBox($nc, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";

@@ -586,9 +586,6 @@ final class LowerFromAst implements Pass
      */
     public bool $emitLibrary = false;
 
-    /** {@see \Compile\Mir\Module::$sharesSuperglobals} */
-    public bool $sharesSuperglobals = false;
-
     /**
      * Building the bundled runtime library (`runtime: true`, the stdlib): it
      * exports the php-visible classes it defines ({@see isPublicRuntimeType}) and
@@ -714,7 +711,6 @@ final class LowerFromAst implements Pass
         // before they register globals; a vendor library must import app-owned
         // superglobal cells rather than define duplicate @g__* symbols.
         $module->isLibraryModule = $this->emitLibrary;
-        $module->sharesSuperglobals = $this->sharesSuperglobals;
         $this->lowerSourceFile = $module->sourceFile;
         // Built-in Exception hierarchy (parsed prelude) is lowered like
         // any user class, so `throw` / `catch` / `getMessage` resolve

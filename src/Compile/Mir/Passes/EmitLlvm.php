@@ -3189,6 +3189,11 @@ final class EmitLlvm implements EmitVisitor
     private function elemSlotDropFlavor(Type $arrType, bool $cellElemOwned = false): string
     {
         if (!\Compile\Debug::$rcElemSlotDrop) { return ''; }
+        // A CELL base (a superglobal, a global two kinds share) holds an array
+        // whose element representation only its buffer knows: the old word is
+        // decoded by the buffer's HINT ({@see EmitLlvmArrays::elemSlotReleaseIr}),
+        // and an unstamped buffer's raw word is a no-op to the cell drop.
+        if ($arrType->kind === Type::KIND_CELL) { return 'cell'; }
         if (!$arrType->isVec() && !$arrType->isAssoc()) { return ''; }
         $el = $arrType->element;
         if ($el === null) { return ''; }

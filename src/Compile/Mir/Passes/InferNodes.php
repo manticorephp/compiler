@@ -1632,6 +1632,8 @@ trait InferNodes
         // the left's type (the historic behaviour).
         if ($lt->kind === Type::KIND_NULL) {
             $node->type = $rt;
+        } elseif ($this->armArrayJoin($lt, $rt) !== null) {
+            $node->type = $this->armArrayJoin($lt, $rt);
         } elseif ($lt->kind === Type::KIND_UNKNOWN
             && $rt->kind !== Type::KIND_NULL && $rt->kind !== Type::KIND_UNKNOWN) {
             $node->type = $rt;
@@ -1688,6 +1690,35 @@ trait InferNodes
         $this->localTypes[$node->name] = Type::int_();
         $node->type = Type::int_();
         return Type::int_();
+    }
+
+    /**
+     * The join of two ARRAY arms of a conditional (ternary, `??`, `match`) that
+     * agree on keyed-ness but not on the element representation —
+     * `$c ? $this->cellMap : f()` with `f(): array<string, V>`. Taking one arm's
+     * type claimed `assoc[string, cell]` over a buffer that may hold raw object
+     * pointers. The result is a CELL-element array, and the emitter rebuilds
+     * every concrete-element arm into a real cell buffer
+     * ({@see EmitLlvmControl::armCoerce}), so the claim is the runtime truth.
+     * Null when the arms agree, either element is unknown (no evidence), or the
+     * keys differ (the key join is its own rule).
+     */
+    private function armArrayJoin(Type $a, Type $b): ?Type
+    {
+        if (!$a->isArray() || !$b->isArray()) { return null; }
+        if ($a->isAssoc() !== $b->isAssoc()) { return null; }
+        $ae = $a->element;
+        $be = $b->element;
+        if ($ae === null || $be === null) { return null; }
+        if ($ae->kind === Type::KIND_UNKNOWN || $be->kind === Type::KIND_UNKNOWN) { return null; }
+        if ($ae->kind === $be->kind) { return null; }
+        if ($a->isAssoc()) {
+            $ak = $a->key;
+            $bk = $b->key;
+            if ($ak === null || $bk === null || $ak->kind !== $bk->kind) { return null; }
+            return Type::assoc($ak, Type::cell());
+        }
+        return Type::vec(Type::cell());
     }
 
     private function inferTernary(Ternary $node): Type
@@ -1768,6 +1799,7 @@ trait InferNodes
         // well would erase a `vec[int]` / `vec[string]` pair to unknown.
         elseif ($t->isArray() && $e->isArray()
             && ($t->key !== null) !== ($e->key !== null)) { $node->type = $t->unionWith($e); }
+        elseif ($this->armArrayJoin($t, $e) !== null) { $node->type = $this->armArrayJoin($t, $e); }
         elseif ($t->kind === $e->kind)        { $node->type = $t; }
         elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
             && $e->kind === Type::KIND_UNKNOWN) {
@@ -2057,7 +2089,9 @@ trait InferNodes
             if ($arm->body->kind !== Node::KIND_THROW) {
                 $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
             }
+            $arrJoin = $first ? null : $this->armArrayJoin($result, $bt);
             if ($first) { $result = $bt; $first = false; }
+            elseif ($arrJoin !== null) { $result = $arrJoin; }
             elseif ($result->kind === $bt->kind) { /* keep */ }
             elseif ($result->kind === Type::KIND_CELL || $bt->kind === Type::KIND_CELL
                 || ($this->isValueKind($result) && $this->isValueKind($bt))) {
