@@ -1195,7 +1195,16 @@ trait EmitLlvmLocals
         if ($pt === null || isset($this->locals->aliasLocals[$name])
             || isset($this->locals->ownedBoxes[$name])) { return ''; }
         $flavor = $this->discardReleaseFlavor($pt);
-        if ($flavor === '') { return ''; }
+        if ($flavor === '') {
+            // The one refusal the design keeps: an erased parameter names no
+            // representation for the old word, so it is left to leak.
+            $k = $pt->kind;
+            if (\Compile\Stats::$on && $k !== Type::KIND_INT && $k !== Type::KIND_FLOAT
+                && $k !== Type::KIND_BOOL && $k !== Type::KIND_NULL && !$this->isEnumType($pt)) {
+                \Compile\Stats::bump('own.residual.byref-erased', 1);
+            }
+            return '';
+        }
         $old = $this->ssa->allocReg();
         $out = '  ' . $old . ' = load i64, ptr ' . $slotPtr . "\n";
         $diff = $this->ssa->allocReg();
