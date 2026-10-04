@@ -2494,14 +2494,14 @@ final class LowerFromAst implements Pass
                 $outType ?? $this->docTagType($m->docComment, '@param', $p->name),
             );
             $pt = $isVar
-                ? Type::vec($this->lowerTypeHint($p->typeHint))
+                ? $this->variadicPackType($p)
                 : $this->lowerParamType($effHint);
             if ($magicName && $pi === 0) { $pt = Type::string_(); }
             if ($magicArgs && $pi === 1) { $pt = Type::vec(Type::cell()); }
             $mp = new Param(
                 name: $p->name,
                 type: $pt,
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: $isVar,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
@@ -3358,9 +3358,9 @@ final class LowerFromAst implements Pass
             $dp = $declParams;
             foreach ($dp as $p) {
                 $t = ($p->variadic ?? false)
-                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    ? $this->variadicPackType($p)
                     : $this->lowerParamType($p->typeHint);
-                $fp = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
+                $fp = new Param(name: $p->name, type: $t, byRef: $this->paramBindsByRef($p), variadic: (bool)($p->variadic ?? false),
                     default: $this->lowerParamDefault($p, $defaultScope));
                 $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $t->isArray();
                 $mir[] = $fp;
@@ -5367,6 +5367,25 @@ final class LowerFromAst implements Pass
     private function namedArgValue(\Parser\Ast\NamedArg $a): \Parser\Ast\Expr { return $a->value; }
     private function paramName(\Parser\Ast\Param $p): string { return $p->name; }
     private function paramVariadic(\Parser\Ast\Param $p): bool { return (bool)($p->variadic ?? false); }
+
+    /**
+     * `&...$xs` is a by-VALUE pack whose elements are REFERENCES: the caller
+     * packs `[&$a, &$b]` ({@see defaultFillArgs}), so the pack is a cell vec
+     * and the param itself binds nothing by reference. As a by-ref pack of
+     * values the callee's writes landed in a throwaway and vanished.
+     */
+    private function variadicPackType(\Parser\Ast\Param $p): Type
+    {
+        if ((bool)($p->byRef ?? false)) { return Type::vec(Type::cell()); }
+        return Type::vec($this->lowerTypeHint($p->typeHint));
+    }
+
+    /** Whether a declared param binds its argument by reference (a variadic
+     *  pack never does — its ELEMENTS do, {@see variadicPackType}). */
+    private function paramBindsByRef(\Parser\Ast\Param $p): bool
+    {
+        return (bool)($p->byRef ?? false) && !(bool)($p->variadic ?? false);
+    }
     private function paramDefault(\Parser\Ast\Param $p): ?\Parser\Ast\Expr { return $p->default; }
     private function staticAccessClass(\Parser\Ast\StaticAccess $e): string { return $e->class; }
     private function staticAccessName(\Parser\Ast\StaticAccess $e): string { return $e->name; }

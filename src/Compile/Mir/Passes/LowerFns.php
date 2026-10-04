@@ -116,12 +116,12 @@ trait LowerFns
                 $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
             );
             $pt = $isVariadic
-                ? Type::vec($this->lowerTypeHint($p->typeHint))
+                ? $this->variadicPackType($p)
                 : $this->lowerParamType($effHint);
             $fp = new Param(
                 name: $p->name,
                 type: $pt,
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
@@ -526,9 +526,9 @@ trait LowerFns
                 // read the raw bits and a string arg renders as its pointer. A
                 // variadic is ONE vec param, as for a named function.
                 type: ($p->variadic ?? false)
-                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    ? $this->variadicPackType($p)
                     : $this->lowerParamType($p->typeHint),
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: (bool)($p->variadic ?? false),
                 // The call site pads an omitted trailing param from this: the
                 // closure ABI carries no arity, so without it the entry read
@@ -912,6 +912,25 @@ trait LowerFns
      * `array_filter($a, "strlen")` (three params, two arguments — symfony's
      * InputOption constructor) crashed on the literal "strlen".
      */
+    private function paramByRefDecl(\Parser\Ast\Param $p): bool { return (bool)($p->byRef ?? false); }
+
+    /**
+     * One argument of a by-ref variadic pack: a reference to the caller's
+     * variable, property or element (`[&$x]`, the array-literal ref cell), so
+     * a write through `$xs[$i]` or a by-ref `foreach` over the pack reaches it.
+     * Anything else is no lvalue and php refuses it; it rides as a value.
+     */
+    private function lowerRefPackElem(\Parser\Ast\Expr $a): Node
+    {
+        $k = $a->kind;
+        if (\Compile\Debug::$refCells && ($k === 'Variable' || $k === 'PropertyAccess' || $k === 'ArrayAccess')) {
+            $lv = $this->lowerExpr($a);
+            $this->module->hasRefCells = true;
+            return new \Compile\Mir\RefCell_($lv, Type::cell());
+        }
+        return $this->lowerExpr($a);
+    }
+
     private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
     {
         if ($p !== null) {
@@ -1006,11 +1025,13 @@ trait LowerFns
         $np = \count($params);
         if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
             $vidx = $np - 1;
+            $refPack = $this->paramByRefDecl($params[$vidx]);
             $out = [];
             $packed = [];
             $i = 0;
             foreach ($astArgs as $a) {
                 if ($i < $vidx) { $out[] = $this->lowerArgForParam($params[$i] ?? null, $a); }
+                elseif ($refPack) { $packed[] = new ArrayElement_(null, $this->lowerRefPackElem($a)); }
                 else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
                 $i = $i + 1;
             }

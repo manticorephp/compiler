@@ -1797,7 +1797,9 @@ trait EmitLlvmControl
             $wv = $this->ssa->allocReg();
             $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
             $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->feAddr . "\n";
+            $wb = $this->lastValue;
+            $out .= $this->foreachRefTargetAddr($this->feAddr, $fe->array->type);
+            $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
             $np = $this->ssa->allocReg();
             $out .= '  ' . $np . ' = add i64 ' . $pos . ", 1\n";
             $out .= '  store i64 ' . $np . ', ptr ' . $iSlot . "\n";
@@ -1809,7 +1811,9 @@ trait EmitLlvmControl
                 $wv = $this->ssa->allocReg();
                 $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
                 $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $arr, $wv, $fe->array->type->element);
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $wAddr . "\n";
+                $wb = $this->lastValue;
+                $out .= $this->foreachRefTargetAddr($wAddr, $fe->array->type);
+                $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
             }
             $si2 = $this->ssa->allocReg();
             $out .= '  ' . $si2 . ' = add i64 ' . $si . ", 1\n";
@@ -1930,6 +1934,43 @@ trait EmitLlvmControl
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
         $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
+        return $out;
+    }
+
+    /**
+     * Where a by-ref foreach writes `$v` back: the element slot, or — when the
+     * slot holds a REFERENCE cell (a `&...$xs` pack, `[&$a, &$b]`) — the box it
+     * points at, so the write reaches the bound variable and the binding stays.
+     * Writing the slot replaced the reference with the value and lost the
+     * write. Only a slot that holds cells can hold a reference; any other
+     * buffer keeps the plain slot. Leaves the address in {@see $feAddr}.
+     */
+    private function foreachRefTargetAddr(string $slot, Type $arrT): string
+    {
+        $this->feAddr = $slot;
+        $el = $arrT->isArray() ? $arrT->element : null;
+        $cellish = $arrT->kind === Type::KIND_CELL || $arrT->kind === Type::KIND_UNKNOWN
+            || $el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
+        if (!$cellish) { return ''; }
+        $cur = $this->ssa->allocReg();
+        $istag = $this->ssa->allocReg();
+        $sh = $this->ssa->allocReg();
+        $nib = $this->ssa->allocReg();
+        $isr = $this->ssa->allocReg();
+        $both = $this->ssa->allocReg();
+        $mask = $this->ssa->allocReg();
+        $boxp = $this->ssa->allocReg();
+        $dst = $this->ssa->allocReg();
+        $out  = '  ' . $cur . ' = load i64, ptr ' . $slot . "\n";
+        $out .= '  ' . $istag . ' = icmp ugt i64 ' . $cur . ", -4503599627370496\n";
+        $out .= '  ' . $sh . ' = lshr i64 ' . $cur . ", 48\n";
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $out .= '  ' . $isr . ' = icmp eq i64 ' . $nib . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_REF . "\n";
+        $out .= '  ' . $both . ' = and i1 ' . $istag . ', ' . $isr . "\n";
+        $out .= '  ' . $mask . ' = and i64 ' . $cur . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= '  ' . $boxp . ' = inttoptr i64 ' . $mask . " to ptr\n";
+        $out .= '  ' . $dst . ' = select i1 ' . $both . ', ptr ' . $boxp . ', ptr ' . $slot . "\n";
+        $this->feAddr = $dst;
         return $out;
     }
 
