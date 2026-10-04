@@ -1559,6 +1559,16 @@ trait EmitLlvmCalls
         $dynReboxSlots = [];
         $dynReboxTmps = [];
         $dynReboxBits = [];
+        /** @var string[] $invReboxSlots */
+        $invReboxSlots = [];
+        /** @var string[] $invReboxTmps */
+        $invReboxTmps = [];
+        /** @var string[] $invBoxSlots */
+        $invBoxSlots = [];
+        /** @var string[] $invBoxTmps */
+        $invBoxTmps = [];
+        /** @var Type[] $invBoxTypes */
+        $invBoxTypes = [];
         if (!$known) {
             $refGate = $this->closureRefGate(\count($iv->args));
             if ($refGate !== 0) {
@@ -1634,7 +1644,22 @@ trait EmitLlvmCalls
             // NaN-boxed tag bits. Without this the callee's writes vanished (a
             // silently dropped mutation) or crashed.
             if (($calleeRefs[$capCnt + $pi] ?? false)) {
-                if ($this->isByRefAddressable($a)) {
+                // A cell lvalue handed to a raw-typed by-ref param, or a raw
+                // lvalue to a cell param: the same scratch-and-write-back the
+                // named-call path takes ({@see emitByRefCellUnboxArg},
+                // {@see emitByRefCellBox}) — handing over the slot itself made
+                // `$f($cellLocal)` on `array &$a` dereference the tag bits.
+                $rpi = $capCnt + $pi;
+                if ($this->isByRefAddressable($a) && $this->byRefNeedsCellUnbox($a, $calleeParams, $rpi)) {
+                    $out .= $this->emitByRefCellUnboxArg($a, $calleeParams[$rpi] ?? null);
+                    $invReboxSlots[] = $this->refBoxSlot;
+                    $invReboxTmps[] = $this->refBoxTmp;
+                } elseif ($this->isByRefAddressable($a) && $this->byRefNeedsCellBox($a, $calleeParams, $rpi)) {
+                    $out .= $this->emitByRefCellBox($a);
+                    $invBoxSlots[] = $this->refBoxSlot;
+                    $invBoxTmps[] = $this->refBoxTmp;
+                    $invBoxTypes[] = $a->type;
+                } elseif ($this->isByRefAddressable($a)) {
                     $out .= $this->byRefAddrOf($a);
                 } else {
                     // Not an lvalue — back it with a throwaway slot so the
@@ -1749,6 +1774,12 @@ trait EmitLlvmCalls
         $out .= $this->faPop();
         foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
+        $out .= $this->emitByRefCellRebox($invReboxSlots, $invReboxTmps);
+        $bi = 0;
+        foreach ($invBoxTmps as $btmp) {
+            $out .= $this->emitByRefCellWriteBack($btmp, $invBoxSlots[$bi], $invBoxTypes[$bi]);
+            $bi = $bi + 1;
+        }
         $out .= $erasedArgDrops;
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
@@ -2422,6 +2453,10 @@ trait EmitLlvmCalls
 
         $pure = ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->slots[$a->name]))
             || ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$a->name]))
+            // A module cell (a global, a superglobal, a `static`) is a slot like
+            // a frame local's: its address is free and a CELL one takes the
+            // scratch below, not the raw slot.
+            || ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->globalBacked[$a->name]))
             || ($a->kind === Node::KIND_PROPERTY_ACCESS && $this->isByRefAddressable($a));
         if (!$pure) {
             if ($this->isByRefAddressable($a)) {
