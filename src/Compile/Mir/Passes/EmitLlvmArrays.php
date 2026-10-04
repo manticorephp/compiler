@@ -1845,6 +1845,7 @@ trait EmitLlvmArrays
             if ($this->isEnumClass($cls)) { return null; }
             return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
         }
+        if ($this->own->objUnionElem($el)) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ; }
         return null;
     }
 

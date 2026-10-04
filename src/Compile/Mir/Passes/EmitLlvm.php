@@ -3213,12 +3213,14 @@ final class EmitLlvm implements EmitVisitor
         // bisect hook that attributed the cluster to one flavor in three
         // builds instead of three branches.
         $only = \Compile\Debug::$elemDropKinds;
+        $objUnion = $this->own->objUnionElem($el);
         if ($only !== '') {
-            $tag = $k === Type::KIND_OBJ ? 'obj'
+            $tag = $k === Type::KIND_OBJ || $objUnion ? 'obj'
                 : ($k === Type::KIND_STRING ? 'str'
                 : ($k === Type::KIND_ARRAY ? 'arr' : 'other'));
             if (!\str_contains($only, $tag)) { return ''; }
         }
+        if ($objUnion) { return 'obj'; }
         return $this->discardReleaseFlavor($el);
     }
 

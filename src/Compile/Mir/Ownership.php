@@ -900,6 +900,17 @@ final class Ownership
      * enum / Ffi\Ptr member has no rc header, and rc-managing one writes into
      * the allocator's metadata).
      */
+    /**
+     * An element of an all-rc-object UNION (`[$c ? new A : new C]`): it rides
+     * a bare object pointer ({@see condFlavor}), so its buffer is owned, hinted
+     * and dropped exactly as an `obj` element's. Answered '' it was the repr
+     * walk over bits no producer stamps — every element leaked.
+     */
+    public function objUnionElem(Type $el): bool
+    {
+        return $el->kind === Type::KIND_UNION && $this->condFlavor($el) === 'obj';
+    }
+
     public function condFlavor(Type $t): string
     {
         if ($t->kind !== Type::KIND_UNION) { return $this->releaseFlavor($t); }
@@ -974,6 +985,7 @@ final class Ownership
             $el = $t->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'veccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'vec' . $this->elemObjFlavor($el); }
+            if ($el !== null && $this->objUnionElem($el)) { return 'vecobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'vecstr'; }
             // A concrete scalar element (int/float/bool/null) has nothing to
             // drop → buffer-only, skipping the repr-bit read. Only an ERASED
@@ -985,6 +997,7 @@ final class Ownership
             $el = $t->element;
             if ($el !== null && $el->kind === Type::KIND_CELL) { return 'assoccell'; }
             if ($el !== null && $el->kind === Type::KIND_OBJ) { return 'assoc' . $this->elemObjFlavor($el); }
+            if ($el !== null && $this->objUnionElem($el)) { return 'assocobj'; }
             if ($el !== null && $el->kind === Type::KIND_STRING) { return 'assocstr'; }
             if ($el !== null && self::isNonRcScalarKind($el->kind)) { return 'assocbuf'; }
             return 'assoc';

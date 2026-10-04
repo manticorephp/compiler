@@ -6033,7 +6033,10 @@ trait EmitLlvmExpr
         // A CLOSURE is boxed like an object ({@see boxToCell}): left out, a
         // `\Closure` return or argument read out of a cell element handed the
         // tagged word on as the closure pointer.
-        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE) {
+        // An object UNION is the bare object pointer `obj<C>` is ({@see boxToCell}
+        // boxes both by box_object): left out, a cell stored into a `vec[A|C]`
+        // slot kept its tag bits under an `obj` hint.
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE || $pk === Type::KIND_UNION) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
