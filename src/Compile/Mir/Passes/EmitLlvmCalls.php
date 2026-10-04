@@ -1693,13 +1693,16 @@ trait EmitLlvmCalls
             if ($packNode !== null && $a === $packNode && $packTarget !== null) {
                 $out .= $this->emitCellArrayToTyped($packTarget);
             }
-            // An erased array a declared-`array` callee handed back is a +1 temp:
-            // given back once the closure returns.
-            if ($this->freshRcArgFlavor($a) === \Compile\Mir\Ownership::ERASED_ARR) {
+            // An owned temp argument (`$g(new O)`, a call result, an erased
+            // array a declared-`array` callee handed back) is given back once the
+            // closure returns: a closure BORROWS its params, retaining what it
+            // keeps. Only the erased array was, and every fresh object leaked.
+            $af = ($packNode !== null && $a === $packNode) ? '' : $this->freshRcArgFlavor($a);
+            if ($af !== '') {
                 $sv = $this->lastValue;
                 $st = $this->lastValueType;
                 $out .= $this->coerceToI64();
-                $erasedArgDrops .= $this->rcReleaseReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
+                $erasedArgDrops .= $this->rcReleaseReg($this->lastValue, $af);
                 $this->lastValue = $sv;
                 $this->lastValueType = $st;
             }
