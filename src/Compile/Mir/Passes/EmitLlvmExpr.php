@@ -664,7 +664,18 @@ trait EmitLlvmExpr
         $out .= "    i64 4, label %asptr\n";
         $out .= "    i64 6, label %asfloat\n";
         $out .= "    i64 7, label %asarray\n";
+        $out .= "    i64 8, label %asobj\n";
         $out .= "  ]\n";
+        // An object: this body is shared by every module, so it cannot name the
+        // program's classes. The main module publishes its `__mir_obj_to_str` in
+        // the hook ({@see emitMain}); none = no __toString class anywhere.
+        $out .= "asobj:\n";
+        $out .= "  %oh = load ptr, ptr @__mir_obj_to_str_hook\n";
+        $out .= "  %ohn = icmp eq ptr %oh, null\n";
+        $out .= "  br i1 %ohn, label %asint, label %ohcall\n";
+        $out .= "ohcall:\n";
+        $out .= "  %os = call ptr %oh(i64 %v)\n";
+        $out .= "  ret ptr %os\n";
         $out .= "asint:\n";
         $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  %is = call ptr @__mir_int_to_str(i64 %i)\n";

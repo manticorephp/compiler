@@ -1452,6 +1452,9 @@ trait EmitLlvmRuntime
         $out .= "@__mir_dtor_cap = linkonce_odr global i64 0\n";
         $out .= "@__mir_dtor_seq = linkonce_odr global i64 0\n";
         $out .= "@__mir_dtor_only = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_done = linkonce_odr global i64 0\n";
+        $out .= "@__mir_obj_to_str_hook = linkonce_odr global ptr null\n";
+        $out .= "@__mir_dtor_inh = linkonce_odr global i64 0\n";
         $out .= "define i64 @__mir_dtor_hash(ptr %p, i64 %mask) {\n";
         $out .= "entry:\n";
         $out .= "  %pi = ptrtoint ptr %p to i64\n";

@@ -212,6 +212,21 @@ function __mc_dispatch_uncaught(mixed $e): bool
     return true;
 }
 
+/**
+ * The destructor sweep's dispatch: php keeps the handler installed across
+ * destructors, so EVERY throwing destructor reaches it (the main-script path
+ * above is one-shot).
+ */
+function __mc_dispatch_uncaught_keep(mixed $e): bool
+{
+    $n = \count(__McErrors::$exceptionHandlers);
+    if ($n === 0) { return false; }
+    $cb = __McErrors::$exceptionHandlers[$n - 1];
+    if ($cb === null) { return false; }
+    __mc_call_exception_handler($cb, $e);
+    return true;
+}
+
 /** Read or set the error_reporting mask. */
 function error_reporting(mixed $error_level = null): int
 {

@@ -1,0 +1,7 @@
+end
+T1 dtor
+handler: boom1
+T2 dtor
+handler: boom2
+T3 dtor
+handler: boom3

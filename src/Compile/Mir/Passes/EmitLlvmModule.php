@@ -2086,6 +2086,9 @@ trait EmitLlvmModule
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_ob_shutdown)\n";
         }
+        if ($this->hasObjToStr) {
+            $header .= "  store ptr @manticore___mir_obj_to_str, ptr @__mir_obj_to_str_hook\n";
+        }
         // Destructors still owed run AFTER the shutdown queue (registered next, so
         // atexit's LIFO runs it first) and BEFORE the ob drain: php's order.
         $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
@@ -2148,6 +2151,14 @@ trait EmitLlvmModule
         // slot main installs. Uncaught there, php prints the fatal and runs no
         // further destructor.
         $dsh = "define void @__manticore_dtor_shutdown() {\nentry:\n";
+        // Once: exit() inside a destructor re-enters libc's exit, which runs this
+        // hook again — that nested run must not resume the sweep (php stops).
+        $dsh .= "  %dn = load i64, ptr @__mir_dtor_done\n";
+        $dsh .= "  %dd = icmp ne i64 %dn, 0\n";
+        $dsh .= "  br i1 %dd, label %out, label %first\n";
+        $dsh .= "out:\n  ret void\n";
+        $dsh .= "first:\n";
+        $dsh .= "  store i64 1, ptr @__mir_dtor_done\n";
         if ($this->rt->needsExceptions) {
             $dsh .= "  br label %arm\n";
             $dsh .= "arm:\n";
@@ -2162,7 +2173,14 @@ trait EmitLlvmModule
                 // carries on with the next destructor, as php does.
                 $dsh .= "  %e = load ptr, ptr @__mir_thrown\n";
                 $dsh .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
-                $dsh .= "  %handled = call i64 @manticore___mc_dispatch_uncaught(i64 %eb)\n";
+                // A handler that throws itself is fatal, not a second dispatch.
+                $dsh .= "  %inh = load i64, ptr @__mir_dtor_inh\n";
+                $dsh .= "  %inhn = icmp ne i64 %inh, 0\n";
+                $dsh .= "  br i1 %inhn, label %fatal, label %disp\n";
+                $dsh .= "disp:\n";
+                $dsh .= "  store i64 1, ptr @__mir_dtor_inh\n";
+                $dsh .= "  %handled = call i64 @manticore___mc_dispatch_uncaught_keep(i64 %eb)\n";
+                $dsh .= "  store i64 0, ptr @__mir_dtor_inh\n";
                 $dsh .= "  %washandled = icmp ne i64 %handled, 0\n";
                 $dsh .= "  br i1 %washandled, label %arm, label %fatal\n";
                 $dsh .= "fatal:\n";
