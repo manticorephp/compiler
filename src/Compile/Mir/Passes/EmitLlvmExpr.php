@@ -2101,7 +2101,7 @@ trait EmitLlvmExpr
         // which is also what makes InferAllocKind/InsertMemoryOps own+release
         // the fresh result.
         if ($intOp === 'add' && $self->type->kind === Type::KIND_ARRAY) {
-            return $this->emitArrayUnion($left, $right);
+            return $this->emitArrayUnion($left, $right, $self->type);
         }
         $isFloat = $self->type->kind === Type::KIND_FLOAT;
         $target = $isFloat ? 'double' : 'i64';
@@ -2189,7 +2189,7 @@ trait EmitLlvmExpr
      * operand that arrives as a CELL (an erased/`mixed` local holding an array)
      * is unboxed by coerceToPtr, so a boxed and a raw side union alike.
      */
-    private function emitArrayUnion(Node $left, Node $right): string
+    private function emitArrayUnion(Node $left, Node $right, Type $resultType): string
     {
         $out = $this->emitNode($left);
         // The union co-owns every element it copies: an owned temp operand
@@ -2204,7 +2204,9 @@ trait EmitLlvmExpr
         $r = $this->lastValue;
         $rw = $this->unionTempWord;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_array_union(ptr ' . $l . ', ptr ' . $r . ")\n";
+        // The result co-owns its elements the way its owner releases them.
+        $sym = '@__mir_array_union' . $this->ownerVariantSuffix($this->discardReleaseFlavor($resultType));
+        $out .= '  ' . $reg . ' = call ptr ' . $sym . '(ptr ' . $l . ', ptr ' . $r . ")\n";
         if ($lf !== '') { $out .= $this->rcReleaseReg($lw, $lf); }
         if ($rf !== '') { $out .= $this->rcReleaseReg($rw, $rf); }
         $this->lastValue = $reg;

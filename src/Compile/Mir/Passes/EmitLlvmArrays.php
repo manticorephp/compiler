@@ -903,6 +903,7 @@ trait EmitLlvmArrays
         // disagrees, and never re-stamp it after — the merge may have
         // cellified it.
         $litHint = $this->elementHintCodeForType($al->type->element);
+        $this->unstampedElemCensus($al->type->element, $litHint);
         $hasSpread = false;
         foreach ($al->elements as $el) {
             if ($el->value->kind === Node::KIND_SPREAD) { $hasSpread = true; }
@@ -1097,6 +1098,7 @@ trait EmitLlvmArrays
         // (symfony's Table rows are a concrete `vec[string]` read as cells).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
         $litHint = $this->elementHintCodeForType($al->type->element);
+        $this->unstampedElemCensus($al->type->element, $litHint);
         if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($arr, $litHint); }
         if (!$cellVals && $this->closureLiteral($al)) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CLO); }
         $this->lastValue = $arr;
@@ -1826,6 +1828,23 @@ trait EmitLlvmArrays
      * ride raw, exactly as it does today. A scalar has a code too: a raw int
      * found through a cell channel is otherwise a tag-0 word.
      */
+    /**
+     * Census `own.residual.elem-unstamped`: a literal whose element type owns
+     * an rc value yet names no hint leaves its buffer undescribed, and every
+     * copy of it then adopts by repr bits nobody stamped while its typed owner
+     * releases by flavor — the pairing {@see EmitLlvmMemory::arrayValueCopyIr}
+     * relies on. Expected 0: the all-object union was the last such producer.
+     */
+    private function unstampedElemCensus(?Type $el, ?int $hint): void
+    {
+        if (!\Compile\Stats::$on || $hint !== null || $el === null) { return; }
+        $k = $el->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN || $this->isClosureValueType($el)) { return; }
+        $f = $this->discardReleaseFlavor($el);
+        if ($f === '' || $f === 'buf') { return; }
+        \Compile\Stats::bump('own.residual.elem-unstamped', 1);
+    }
+
     private function elementHintCodeForType(?Type $el): ?int
     {
         if ($el === null) { return null; }

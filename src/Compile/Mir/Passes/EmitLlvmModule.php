@@ -2673,9 +2673,15 @@ trait EmitLlvmModule
             // be tag-inspected (a large/neg int could look boxed).
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
         } else {
+            // The copy is the frame's own, released by the param's type: its
+            // LEAF level adopts by that type's flavor (the levels above are
+            // fresh inner copies the outer owns outright).
             $depth = $this->arrayCopyDepth($p->type);
             if ($depth < 0) { $depth = 0; }
-            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+            $leaf = $p->type;
+            for ($d = 0; $d < $depth && $leaf->element !== null; $d = $d + 1) { $leaf = $leaf->element; }
+            $sym = '@__mir_array_copy_deep' . $this->ownerVariantSuffix($this->discardReleaseFlavor($leaf));
+            $out .= '  ' . $cp . ' = call ptr ' . $sym . '(ptr ' . $lp
                   . ', i64 ' . (string)$depth . ")\n";
         }
         $ci = $this->ssa->allocReg();

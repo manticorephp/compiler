@@ -677,6 +677,18 @@ trait EmitLlvmMemory
 
     /** The adopt helper pairing a flavored array release, or '' for the
      *  repr-mode flavors {@see arrayValueCopyIr} leaves to `__mir_array_copy`. */
+    /**
+     * The `_<flavor>` suffix of the runtime merge / copy variant whose result
+     * an owner of release flavor `$flavor` holds (`__mir_array_union_obj`,
+     * `__mir_array_copy_deep_arrstr`, …) — '' for the repr-mode owner. The
+     * same pairing as {@see arrayValueCopyIr}'s adopt.
+     */
+    private function ownerVariantSuffix(string $flavor): string
+    {
+        $adopt = $this->adoptHelperFor($flavor);
+        return $adopt === '' ? '' : \substr($adopt, \strlen('@__mir_array_adopt'));
+    }
+
     private function adoptHelperFor(string $flavor): string
     {
         $f = \str_ends_with($flavor, 'own') ? \substr($flavor, 0, \strlen($flavor) - 3) : $flavor;

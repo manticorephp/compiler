@@ -121,7 +121,14 @@ final class UnifiedArrayRuntime
         $this->emitRefBoxAppend();
         $this->emitDerefCell();
         $this->emitValueAt();
-        $this->emitArrayUnion();
+        // `+` and the param-entry copies, once per OWNER flavor: the result
+        // adopts exactly the way its owner releases ({@see adoptSymbol}).
+        foreach (self::ownerFlavors() as $of) {
+            $sfx = $of === 'repr' ? '' : '_' . ($of === '' ? 'buf' : $of);
+            if ($of !== 'repr') { $this->emitAdoptFor($of); }
+            $this->emitArrayUnion('__mir_array_union' . $sfx, $of);
+            $this->emitCopyDeep('__mir_array_copy_deep' . $sfx, $of);
+        }
         $this->emitKeyAt();
         $this->emitKeyCellAt();
         $this->emitPtrGet();
@@ -161,7 +168,6 @@ final class UnifiedArrayRuntime
         $this->emitUnsetInt();
         $this->emitUnsetAt();
         $this->emitCopy();
-        $this->emitCopyDeep();
         $this->emitCopyCells();
         $this->emitHashStr();
         $this->emitStrCanonInt();
@@ -1228,21 +1234,31 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_array_copy_deep(arr, depth) -> ptr` — a value copy that clones
-     * `depth` nested VEC levels. depth 0 is the flat `__mir_array_copy` (a
-     * scalar/string/obj leaf element is correctly shared). depth>0 recurses into
+     * `__mir_array_copy_deep[_<flavor>](arr, depth) -> ptr` — a value copy that
+     * clones `depth` nested VEC levels. depth 0 is the flat copy (a
+     * scalar/string/obj leaf element is correctly shared); depth>0 recurses into
      * each element (an inner vec) so `$x[0][] = …` on the copy can't reach the
-     * caller's inner buffer. Element order is the packed slot order (0..len);
-     * used only for VEC arrays (the copy-on-entry restricts to them). NULL→NULL.
+     * caller's inner buffer. Used only for VEC arrays (the copy-on-entry
+     * restricts to them). NULL→NULL.
+     *
+     * Ownership: the LEAF level adopts its elements by the owner's flavor
+     * ({@see copyAdopting}) — the param releases the copy by its declared type,
+     * so the copy must co-own by that same type, hint first. An intermediate
+     * level is copied BARE: each of its words is replaced by a fresh inner copy
+     * the outer one owns outright, and the source's inner buffers are left as
+     * they were (the old adopt-then-`release_buf` pair assumed the adopt had
+     * counted them, which an unstamped buffer did not).
      */
-    private function emitCopyDeep(): void
+    private function emitCopyDeep(string $symbol, string $flavor): void
     {
-        $fn = $this->module->func('__mir_array_copy_deep', Type::ptr());
+        $fn = $this->module->func($symbol, Type::ptr());
         $arr = $fn->param(Type::ptr(), 'arr');
         $depth = $fn->param(Type::i64(), 'depth');
         $e = $fn->block('entry');
         $z = $fn->block('z');
         $go = $fn->block('go');
+        $leaf = $fn->block('leaf');
+        $inner = $fn->block('inner');
         $head = $fn->block('head');
         $body = $fn->block('body');
         $ret = $fn->block('ret');
@@ -1253,12 +1269,15 @@ final class UnifiedArrayRuntime
         // Compact tombstones out of the source so the copy has no holes and the
         // per-element deep-copy walk visits only live entries.
         $go->call('__mir_array_live_len', Type::i64(), [$arr]);
-        $copy0 = $go->call('__mir_array_copy', Type::ptr(), [$arr]);
         $copySlot = $go->alloca(Type::ptr(), 'copy');
-        $go->store($copy0, $copySlot);
         $iSlot = $go->alloca(Type::i64(), 'i');
         $go->store(Value::int(Type::i64(), 0), $iSlot);
-        $go->brIf($go->icmp('sle', $depth, Value::int(Type::i64(), 0)), $ret, $head);
+        $go->brIf($go->icmp('sle', $depth, Value::int(Type::i64(), 0)), $leaf, $inner);
+
+        $leaf->ret($this->copyAdopting($leaf, $arr, $flavor));
+
+        $inner->store($inner->call('__mir_array_copy_bare', Type::ptr(), [$arr]), $copySlot);
+        $inner->br($head);
 
         $hc = $head->load(Type::ptr(), $copySlot);
         $len = $head->load(Type::i64(), $hc);   // logical length at offset 0
@@ -1269,11 +1288,7 @@ final class UnifiedArrayRuntime
         $bi = $body->load(Type::i64(), $iSlot);
         $v = $body->call('__mir_array_value_at', Type::i64(), [$bc, $bi]);
         $vp = $body->inttoptr($v, Type::ptr());
-        $v2 = $body->call('__mir_array_copy_deep', Type::ptr(),
-            [$vp, $body->sub($depth, Value::int(Type::i64(), 1))]);
-        // The outer copy's adopt took a count on the original inner buffer;
-        // its copy takes that slot.
-        $body->call('__mir_array_release_buf', Type::void(), [$vp]);
+        $v2 = $body->call($symbol, Type::ptr(), [$vp, $body->sub($depth, Value::int(Type::i64(), 1))]);
         $v2i = $body->ptrtoint($v2, Type::i64());
         $nc = $body->call('__mir_array_set_int', Type::ptr(), [$bc, $bi, $v2i]);
         $body->store($nc, $copySlot);
@@ -1281,6 +1296,98 @@ final class UnifiedArrayRuntime
         $body->br($head);
 
         $ret->ret($ret->load(Type::ptr(), $copySlot));
+    }
+
+    /**
+     * The owner flavors a merge / param copy is emitted for: the element
+     * flavors `__mir_array_adopt_*` exists for, '' (buffer only) and 'repr'
+     * (an erased owner, released by the repr bits).
+     *
+     * @return string[]
+     */
+    private static function ownerFlavors(): array
+    {
+        $out = ['repr', '', 'obj', 'str', 'cell'];
+        foreach (self::nestedFlavors() as $n) { $out[] = $n; }
+        return $out;
+    }
+
+    /**
+     * A value copy of `$src` that co-owns its keys and elements the way an
+     * owner of release flavor `$flavor` will drop them: the bare copy plus
+     * `__mir_array_adopt_<flavor>` (hint first, the flavor when unstamped) —
+     * {@see EmitLlvmMemory::arrayValueCopyIr}'s rule. 'repr' keeps
+     * `__mir_array_copy`'s hint-or-repr adopt, which is an erased owner's.
+     *
+     * A buffer that describes itself by its ownership REPR alone (no hint —
+     * a closure buffer's REPR_CLO) adopts by that repr, not by the owner's
+     * static flavor: a `vec[cell]`-typed `$closures + [...]` adopted its raw
+     * closure words as cells (a no-op) and the source's release then freed
+     * them under the result.
+     */
+    private function copyAdopting(Block $b, Value $src, string $flavor): Value
+    {
+        if ($flavor === 'repr') { return $b->call('__mir_array_copy', Type::ptr(), [$src]); }
+        $cp = $b->call('__mir_array_copy_bare', Type::ptr(), [$src]);
+        $b->call('__mir_array_adopt_for_' . ($flavor === '' ? 'buf' : $flavor), Type::void(), [$cp]);
+        return $cp;
+    }
+
+    /**
+     * `__mir_array_adopt_for_<flavor>(arr)` — {@see copyAdopting}'s adopt:
+     * the repr walk for a buffer that names no hint but a repr, the flavored
+     * adopt (hint first, then the flavor) otherwise.
+     */
+    private function emitAdoptFor(string $flavor): void
+    {
+        $sfx = $flavor === '' ? 'buf' : $flavor;
+        $fn = $this->module->func('__mir_array_adopt_for_' . $sfx, Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $rb = $fn->block('by_repr');
+        $fb = $fn->block('by_flavor');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $flavor === '' ? $fb : $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $byRepr = $chk->and_(
+            $chk->icmp('eq', $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK)), Value::int(Type::i64(), 0)),
+            $chk->icmp('ne', $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)), Value::int(Type::i64(), 0)));
+        $chk->brIf($byRepr, $rb, $fb);
+        $rb->call('__mir_array_adopt', Type::void(), [$arr]);
+        $rb->br($done);
+        $fb->call('__mir_array_adopt_' . $sfx, Type::void(), [$arr]);
+        $fb->br($done);
+        $done->retVoid();
+    }
+
+    /**
+     * Co-own one word of `$arr` copied into a buffer whose owner releases by
+     * `$flavor` — the per-element step of `__mir_array_adopt_<flavor>`
+     * ({@see emitRetainVariant}): the source's hint when stamped, the owner's
+     * flavor when not. 'repr' is the erased owner's hint-or-repr.
+     */
+    private function emitRetainForOwner(FunctionDef $fn, Block $b, Value $v, Value $arr, string $flavor, string $tag): Block
+    {
+        if ($flavor === 'repr') { return $this->emitRetainByHintOrRepr($fn, $b, $v, $arr, $tag); }
+        // A buffer-only owner drops nothing, so it co-owns nothing.
+        if ($flavor === '') { return $b; }
+        $flags = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        // Hint first; a repr-only buffer (closures) by its repr; else the flavor.
+        $reprOnly = $b->and_(
+            $b->icmp('eq', $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK)), Value::int(Type::i64(), 0)),
+            $b->icmp('ne', $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)), Value::int(Type::i64(), 0)));
+        $rb = $fn->block('ro_repr_' . $tag);
+        $fb = $fn->block('ro_flav_' . $tag);
+        $jb = $fn->block('ro_join_' . $tag);
+        $b->brIf($reprOnly, $rb, $fb);
+        $rb->call('__mir_retain_by_repr', Type::void(), [$v, $rb->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK))]);
+        $rb->br($jb);
+        {
+            $fb = $this->emitRetainValue($fn, $fb, $v, $flavor, 'ro' . $tag, $this->ownedElemHint($fb, $flags, $flavor));
+        }
+        $fb->br($jb);
+        return $jb;
     }
 
     /**
@@ -1310,9 +1417,9 @@ final class UnifiedArrayRuntime
         return $bl->select($bl->icmp('ne', $bl->load(Type::i64(), $boxSlot), Value::int(Type::i64(), 0)), $boxed, $v);
     }
 
-    private function emitArrayUnion(): void
+    private function emitArrayUnion(string $symbol, string $flavor): void
     {
-        $fn = $this->module->func('__mir_array_union', Type::ptr());
+        $fn = $this->module->func($symbol, Type::ptr());
         $a = $fn->param(Type::ptr(), 'a');
         $b = $fn->param(Type::ptr(), 'b');
         $e = $fn->block('entry');
@@ -1329,12 +1436,12 @@ final class UnifiedArrayRuntime
 
         // A null left side yields a copy of the right (and null+null → null).
         $e->brIf($e->icmp('eq', $a, Value::null()), $za, $go);
-        $za->ret($za->call('__mir_array_copy', Type::ptr(), [$b]));
+        $za->ret($this->copyAdopting($za, $b, $flavor));
 
         // live_len compacts tombstones out of BOTH sides first, so the walk sees
         // a clean 0..len range and the copy carries no holes.
         $na = $go->call('__mir_array_live_len', Type::i64(), [$a]);
-        $res0 = $go->call('__mir_array_copy', Type::ptr(), [$a]);
+        $res0 = $this->copyAdopting($go, $a, $flavor);
         $resSlot = $go->alloca(Type::ptr(), 'res');
         $go->store($res0, $resSlot);
         $nb = $go->call('__mir_array_live_len', Type::i64(), [$b]);
@@ -1399,7 +1506,7 @@ final class UnifiedArrayRuntime
             [$sres, $skp, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $strk->brIf($strk->icmp('ne', $shas, Value::int(Type::i64(), 0)), $next, $sset);
         $sv = $sset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
-        $sset = $this->emitRetainByHintOrRepr($fn, $sset, $sv, $b, 'us');
+        $sset = $this->emitRetainForOwner($fn, $sset, $sv, $b, $flavor, 'us');
         $sv = $this->unionBoxB($sset, $sv, $hb, $boxSlot);
         // The key string gains a second owner (the result's entry).
         $sset->call('__mir_rc_retain_str', Type::void(), [$skp]);
@@ -1415,7 +1522,7 @@ final class UnifiedArrayRuntime
         $ihas = $intk->call('__mir_array_isset_int', Type::i64(), [$ires, $ik]);
         $intk->brIf($intk->icmp('ne', $ihas, Value::int(Type::i64(), 0)), $next, $iset);
         $iv = $iset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
-        $iset = $this->emitRetainByHintOrRepr($fn, $iset, $iv, $b, 'ui');
+        $iset = $this->emitRetainForOwner($fn, $iset, $iv, $b, $flavor, 'ui');
         $iv = $this->unionBoxB($iset, $iv, $hb, $boxSlot);
         $inew = $iset->call('__mir_array_set_int', Type::ptr(),
             [$iset->load(Type::ptr(), $resSlot), $ik, $iv]);
@@ -1457,7 +1564,9 @@ final class UnifiedArrayRuntime
 
         // Compact the source first (no holes in the copy / the cell walk).
         $go->call('__mir_array_live_len', Type::i64(), [$arr]);
-        $copy0 = $go->call('__mir_array_copy', Type::ptr(), [$arr]);
+        // Its owner is a `vec[cell]` / `assoc[*,cell]` param, released by the
+        // cell flavor: adopt by that ({@see copyAdopting}).
+        $copy0 = $this->copyAdopting($go, $arr, 'cell');
         $copySlot = $go->alloca(Type::ptr(), 'copy');
         $go->store($copy0, $copySlot);
         $iSlot = $go->alloca(Type::i64(), 'i');
