@@ -898,6 +898,16 @@ trait EmitLlvmArrays
         $init = $this->ssa->allocReg();
         $out .= '  ' . $init . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
         $out .= '  store ptr ' . $init . ', ptr ' . $slot . "\n";
+        // A spread merges words the literal did not write: describe the buffer
+        // BEFORE it, so `__mir_array_spread_into` converts a source whose hint
+        // disagrees, and never re-stamp it after — the merge may have
+        // cellified it.
+        $litHint = $this->elementHintCodeForType($al->type->element);
+        $hasSpread = false;
+        foreach ($al->elements as $el) {
+            if ($el->value->kind === Node::KIND_SPREAD) { $hasSpread = true; }
+        }
+        if ($hasSpread && $litHint !== null) { $out .= $this->emitElemHintStamp($init, $litHint); }
         foreach ($al->elements as $el) {
             if ($el->value->kind === Node::KIND_SPREAD) {
                 $out .= $this->emitArraySpreadUnified($slot, $el->value);
@@ -953,8 +963,7 @@ trait EmitLlvmArrays
         // Self-describe a cell-valued literal, and record the element SHAPE for
         // every rc-shaped one (see emitArrayLitDirect).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
-        $litHint = $this->elementHintCodeForType($al->type->element);
-        if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($res, $litHint); }
+        if ($litHint !== null && $count > 0 && !$hasSpread) { $out .= $this->emitElemHintStamp($res, $litHint); }
         if (!$cellVals && $this->closureLiteral($al)) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CLO); }
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';

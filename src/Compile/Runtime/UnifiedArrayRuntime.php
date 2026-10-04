@@ -4381,9 +4381,30 @@ final class UnifiedArrayRuntime
         $end = $fn->block('sp_end');
         $dSlot = $e->alloca(Type::ptr(), 'd');
         $iSlot = $e->alloca(Type::i64(), 'i');
+        $vSlot = $e->alloca(Type::i64(), 'v');
         $e->store($dst, $dSlot);
         $e->store(Value::int(Type::i64(), 0), $iSlot);
-        $e->brIf($e->icmp('eq', $src, Value::null()), $end, $cond);
+        $prep = $fn->block('sp_prep');
+        $adopt = $fn->block('sp_adopt');
+        $e->brIf($e->icmp('eq', $src, Value::null()), $end, $prep);
+        // An EMPTY, undescribed destination (an erased literal's buffer) takes
+        // the source's words verbatim, so it takes the source's hint and
+        // ownership repr with them — as `__mir_array_union` does for an empty
+        // left side. Left at 0 it held them under no description and its
+        // release dropped none of them.
+        $dfp = $this->hdr($prep, $dst, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $dfl = $prep->load(Type::i64(), $dfp);
+        $sfl = $prep->load(Type::i64(), $this->hdr($prep, $src, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $hintM = Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK);
+        $zero0 = Value::int(Type::i64(), 0);
+        $undesc = $prep->and_(
+            $prep->icmp('eq', $prep->and_($dfl, $hintM), $zero0),
+            $prep->icmp('ne', $prep->and_($sfl, $hintM), $zero0));
+        $prep->brIf($prep->and_($undesc, $prep->icmp('eq', $prep->load(Type::i64(), $dst), $zero0)), $adopt, $cond);
+        $descM = MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK;
+        $adopt->store($adopt->or_($adopt->and_($dfl, Value::int(Type::i64(), ~$descM)),
+            $adopt->and_($sfl, Value::int(Type::i64(), $descM))), $dfp);
+        $adopt->br($cond);
         // live_len compacts out tombstones so the merge walks only live entries.
         $len = $cond->call('__mir_array_live_len', Type::i64(), [$src]);
         $i = $cond->load(Type::i64(), $iSlot);
@@ -4394,6 +4415,28 @@ final class UnifiedArrayRuntime
         // ({@see Debug::$rcBufferOnly}); the words were copied, not their
         // counts. The spread's result released every element it never took.
         $body = $this->emitRetainByHintOrRepr($fn, $body, $val, $src, 'sp');
+        // Two DESCRIBED buffers whose hints disagree (an `obj` source spread
+        // into a cell literal, a cell source into an `obj` one): a raw copy
+        // would leave words the destination's hint misreads — its release then
+        // drops nothing, or drops a raw pointer as a cell. The source word is
+        // boxed by its own hint (the count it carries is the cell's, a wide
+        // int becomes the destination's own box) and stored the way
+        // `__mir_elem_encode` stores any cell, cellifying a raw destination.
+        $body->store($val, $vSlot);
+        $hd = $body->and_($body->load(Type::i64(), $this->hdr($body, $body->load(Type::ptr(), $dSlot), MemoryAbi::ARRAY_FLAGS_OFFSET)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $hs = $this->decodeHint($body, $src);
+        $mism = $body->and_(
+            $body->and_($body->icmp('ne', $hd, Value::int(Type::i64(), 0)), $body->icmp('ne', $hs, Value::int(Type::i64(), 0))),
+            $body->icmp('ne', $hd, $hs));
+        $conv = $fn->block('sp_conv');
+        $put = $fn->block('sp_put');
+        $body->brIf($mism, $conv, $put);
+        $boxed = $conv->call('__mir_box_by_repr', Type::i64(), [$val, $hs]);
+        $conv->store($conv->call('__mir_elem_encode', Type::i64(), [$conv->load(Type::ptr(), $dSlot), $boxed]), $vSlot);
+        $conv->br($put);
+        $body = $put;
+        $val = $body->load(Type::i64(), $vSlot);
         $flags = $body->load(Type::i64(), $this->hdr($body, $src, MemoryAbi::ARRAY_FLAGS_OFFSET));
         // packed (flags==0) → implicit int key → renumber; hashed → check KIND
         $body->brIf($body->icmp('eq', $this->hashedBit($body, $flags), Value::int(Type::i64(), 0)), $doInt, $isStr);

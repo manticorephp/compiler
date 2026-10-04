@@ -719,7 +719,10 @@ final class Ownership
         // operand, a builtin argument and a cast each stranded the payload.
         if (CondOwn::isConditional($n)) { return $this->condOwnedTemp($n); }
         $k = $n->kind;
-        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        // A closure / callable INVOKE returns under the same +1 convention
+        // ({@see returnBorrowsObj} and {@see keyTempRelease} already read it as
+        // fresh): `[...$closure()]` stranded the whole array it spread.
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) { return true; }
         // `+ - *` over a numeric cell run {@see Passes\EmitLlvmExpr::emitTaggedArith}:
         // the helper boxes a NEW cell on every path, a counted heap box past the
         // inline int form.

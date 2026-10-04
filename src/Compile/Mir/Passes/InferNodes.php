@@ -2234,7 +2234,11 @@ trait InferNodes
             $vt = $this->inferNode($el->value);
             if ($el->value->kind === Node::KIND_SPREAD) {
                 $st = $el->value->type;
-                $vt = $st->element !== null ? $st->element : Type::unknown();
+                // A CELL operand (`[...$closure()]`, `[...$mixed]`) hands over
+                // elements of any kind, each tagged: the literal rides cells too,
+                // or its release reads the merged words by no description.
+                $vt = $st->element !== null ? $st->element
+                    : ($st->kind === Type::KIND_CELL ? Type::cell() : Type::unknown());
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
             if ($vt->isArray() && $vt->element !== null

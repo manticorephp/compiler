@@ -3436,6 +3436,20 @@ final class EmitLlvm implements EmitVisitor
     private function freshRcArgFlavor(Node $a): string { return $this->own->tempArgFlavor($a, $this->lastCallWasBuiltin); }
 
     /**
+     * Release flavor of an owned temp array a MERGE consumed — a spread source,
+     * a union operand — or '' for a borrow. The merge co-owned every element it
+     * copied, so the temp goes whole. Not {@see freshRcArgFlavor}'s buffer-only
+     * answer for a literal of arrays: that one holds only while each inner
+     * array is a call argument released on its own, and a merge operand's
+     * elements were transferred into the literal.
+     */
+    private function mergedTempFlavor(Node $a): string
+    {
+        if ($a->kind === Node::KIND_ARRAY_LIT) { return $this->discardReleaseFlavor($a->type); }
+        return $this->freshRcArgFlavor($a);
+    }
+
+    /**
      * Release flavor for the SOURCE of a cellify rebuild
      * ({@see EmitLlvmBuiltins::emitAssocToCellArrayUnified}), or '' to leave it
      * alone.
@@ -4334,6 +4348,18 @@ final class EmitLlvm implements EmitVisitor
     {
         $sp = $spreadNode;
         $out = $this->emitNode($sp->operand);
+        // The merge co-owns every element it copies, so an owned temp source
+        // (`[...f()]`, `[...$closure()]`) is dead once it ran — nothing else
+        // ever held it.
+        $flavor = $this->mergedTempFlavor($sp->operand);
+        $word = '';
+        if ($sp->operand->type->kind === Type::KIND_CELL) {
+            // A cell operand carries its tag bits: read raw, the merge walked
+            // the tagged word as a buffer header.
+            $out .= $this->coerceToI64();
+            $word = $this->lastValue;
+            $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+        }
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
         $cur = $this->ssa->allocReg();
@@ -4341,6 +4367,13 @@ final class EmitLlvm implements EmitVisitor
         $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_spread_into(ptr ' . $cur . ', ptr ' . $src . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
+        if ($flavor !== '') {
+            if ($word === '') {
+                $word = $this->ssa->allocReg();
+                $out .= '  ' . $word . ' = ptrtoint ptr ' . $src . " to i64\n";
+            }
+            $out .= $this->rcReleaseReg($word, $flavor);
+        }
         return $out;
     }
 
