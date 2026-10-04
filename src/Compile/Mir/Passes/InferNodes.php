@@ -199,6 +199,31 @@ trait InferNodes
         }
     }
 
+    /**
+     * Seed a local array whose ELEMENT is a cell (mixed stores, a null element,
+     * a cell-valued store, an element reference, a by-ref appending callee):
+     * `vec[cell]` / `assoc[K, cell]` from its first read.
+     *
+     * Not a CELL PARAM slot (`array|string $x`, `mixed $x`): the caller boxed
+     * that argument, so on every path no store takes the slot holds a tagged
+     * word, and retyping it to an array read the tag as a buffer pointer —
+     * `if (is_string($x)) { $x = [1, null]; } count($x)` folded is_string to
+     * false and answered `-268435340`. The element-cell fact is about the ARRAY
+     * the slot holds, which a cell slot already decodes by tag.
+     */
+    private function seedCellElemLocal(string $name): void
+    {
+        $pt = $this->currentParamTypes[$name] ?? null;
+        if ($pt !== null && $pt->kind === Type::KIND_CELL) { return; }
+        $this->cellElemLocals[$name] = true;
+        if (isset($this->assocLocals[$name])) {
+            $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+            $this->localTypes[$name] = Type::assoc($key, Type::cell());
+        } else {
+            $this->localTypes[$name] = Type::vec(Type::cell());
+        }
+    }
+
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
@@ -371,13 +396,7 @@ trait InferNodes
             // away for the WHOLE function, defeating {@see inferStoreElement}'s
             // constant-key preservation.
             if (($this->localTypes[$name] ?? null)?->isShape()) { continue; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         // A store of an already-CELL value into a local array makes its element a
         // cell — one store is enough, and the pre-inference coarseValueClass scan
@@ -386,13 +405,7 @@ trait InferNodes
         // every read of the local as the cell it really holds.
         foreach ($this->forcedCellElemLocals[$fn->name] ?? [] as $name => $unused) {
             if (isset($this->recordLocals[$name])) { continue; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         // A local handed BY-REF to a callee that APPENDS a foreign element
         // ({@see scanByRefElemWiden}). Unlike the store-driven force above this
@@ -411,13 +424,7 @@ trait InferNodes
         foreach ($this->refElemBases as $name => $unused) {
             unset($this->recordLocals[$name]);
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         foreach ($this->byRefCellElemLocals[$fn->name] ?? [] as $name => $unused) {
             unset($this->recordLocals[$name]);
@@ -427,13 +434,7 @@ trait InferNodes
             // shape — without this `['a'=>1]` re-emerges as a vec[cell] and the
             // string key lands under a positional index.
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         // A local a `&` points at from a STORING position is a CELL for its whole
         // lifetime — the tree's one-slot-one-representation rule, applied to the

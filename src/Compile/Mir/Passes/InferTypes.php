@@ -1547,24 +1547,17 @@ final class InferTypes implements Pass
             $rp = $this->paramOfElemRef($n->right, $cand);
             if ($lp !== '') { $this->strParamsFound[$lp] = true; }
             if ($rp !== '') { $this->strParamsFound[$rp] = true; }
-        } elseif ($k === Node::KIND_ARRAY_ACCESS) {
-            // `$x[$i]` where $x is an element-local → $x is a string (char
-            // subscript), so its param is vec[string].
-            //
-            // ONLY for an INT-ish subscript. php has no string offset by string
-            // key — `$s['id']` is a TypeError, so a STRING index is proof of the
-            // opposite: `$x` is an array. Reading it as evidence for vec[string]
-            // retyped symfony's `$namespaces` (an assoc of assocs, whose
-            // call-site refinement legitimately conflicts and leaves the param
-            // bare) to vec[string], so `$namespace['id']` compiled to a char
-            // offset and `list` printed a raw tagged word where the namespace
-            // name belonged.
-            if ($n->array->kind === Node::KIND_LOAD_LOCAL
-                && !$this->isStringOperand($n->index)) {
-                $nm = $n->array->name;
-                if (isset($this->elemLocalOf[$nm])) { $this->strParamsFound[$this->elemLocalOf[$nm]] = true; }
-            }
         } elseif ($k === Node::KIND_CAST) {
+            // A SUBSCRIPT of an element (`$x[$i]`, $x an element-local) is no
+            // evidence either way: a string offset and a list-of-tuples read
+            // look the same. It used to guess vec[string], and a guess no call
+            // site refutes (the argument arrives erased through an interface)
+            // is final — sebastian/diff's `foreach ($diff as $entry) { if (0
+            // === $entry[1]) …` read every `[line, type]` tuple as a string,
+            // so `$entry[1]` was a char and php-cs-fixer --diff printed one
+            // empty hunk. A STRING key was already known to prove an array
+            // (symfony's `$namespace['id']`).
+            //
             // `(string)$elem` — the element is used in a string context.
             if ($n->target === 'string') {
                 $p = $this->paramOfElemRef($n->operand, $cand);
