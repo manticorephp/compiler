@@ -1001,11 +1001,13 @@ trait EmitLlvmModule
         $this->locals->refLocals = [];
         $this->locals->ownedBoxes = [];
         $this->locals->refParamTypes = [];
+        $this->locals->refParamRetyped = [];
         $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) {
                 $this->locals->refLocals[$p->name] = true;
                 $this->locals->refParamTypes[$p->name] = $p->type;
+                if ($p->retypedByRef) { $this->locals->refParamRetyped[$p->name] = true; }
             }
         }
         $this->frame->returnsByRef = $fn->returnsByRef;

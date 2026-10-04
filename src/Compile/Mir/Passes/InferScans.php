@@ -2613,6 +2613,7 @@ trait InferScans
                 if (!$p->byRef || $p->variadic || !$this->isScalarReprKind($p->type)) { continue; }
                 if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)) { continue; }
                 $p->type = Type::cell();
+                $p->retypedByRef = true;
                 $this->rescanTargets[$fn->name] = true;
                 $changed = true;
                 if (isset($methodOf[$fn->name])) { $retyped[$fn->name . '#' . (string)$idx] = true; }
