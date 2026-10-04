@@ -1482,7 +1482,15 @@ trait EmitLlvmExpr
         $out .= "mixnum:\n";
         $out .= "  %msv = select i1 %as, i64 %a, i64 %b\n";
         $out .= "  %msn = call i1 @__mir_cell_numeric(i64 %msv)\n";
-        $out .= "  br i1 %msn, label %fcmp, label %strcmp\n";
+        $out .= "  br i1 %msn, label %fcmp, label %mixnan\n";
+        // A NAN against a non-numeric string is uncomparable in BOTH orders
+        // (zend_compare's DOUBLE/STRING arms answer 1 before any strcmp).
+        $out .= "mixnan:\n";
+        $out .= "  %mov = select i1 %as, i64 %b, i64 %a\n";
+        $out .= "  %mod = call double @__manticore_tagged_to_double(i64 %mov)\n";
+        $out .= "  %monan = fcmp uno double %mod, %mod\n";
+        $out .= "  br i1 %monan, label %mixun, label %strcmp\n";
+        $out .= "mixun:\n  ret i64 1\n";
         $out .= "icmp:\n";
         $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
         $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
@@ -1494,9 +1502,11 @@ trait EmitLlvmExpr
         $out .= "fcmp:\n";
         $out .= "  %da = call double @__manticore_tagged_to_double(i64 %a)\n";
         $out .= "  %db = call double @__manticore_tagged_to_double(i64 %b)\n";
+        // ZEND_THREEWAY_COMPARE: equal 0, less -1, anything else — a NAN on
+        // either side — 1 (uncomparable), not the 0 that made NAN "equal".
         $out .= "  %flt = fcmp olt double %da, %db\n";
-        $out .= "  %fgt = fcmp ogt double %da, %db\n";
-        $out .= "  %fsel = select i1 %fgt, i64 1, i64 0\n";
+        $out .= "  %feq = fcmp oeq double %da, %db\n";
+        $out .= "  %fsel = select i1 %feq, i64 0, i64 1\n";
         $out .= "  %fres = select i1 %flt, i64 -1, i64 %fsel\n";
         $out .= "  ret i64 %fres\n";
         $out .= "}\n";
@@ -1730,7 +1740,15 @@ trait EmitLlvmExpr
         $out .= "  %asez = zext i1 %ase to i64\n  ret i64 %asez\n";
         $out .= "chkstr2:\n";
         $out .= "  %isstr = icmp eq i64 %ta, 4\n";
-        $out .= "  br i1 %isstr, label %scmp, label %raw\n";
+        $out .= "  br i1 %isstr, label %scmp, label %chkflt\n";
+        // Two FLOATS by value: `NAN === NAN` is false in php (and `0.0 === -0.0`
+        // true) — the words compared raw said the opposite of both.
+        $out .= "chkflt:\n";
+        $out .= "  %isflt = icmp eq i64 %ta, 6\n";
+        $out .= "  br i1 %isflt, label %flts, label %raw\n";
+        $out .= "flts:\n";
+        $out .= "  %fa = call double @__manticore_tagged_to_double(i64 %a)\n  %fb = call double @__manticore_tagged_to_double(i64 %b)\n";
+        $out .= "  %fe = fcmp oeq double %fa, %fb\n  %fez = zext i1 %fe to i64\n  ret i64 %fez\n";
         $out .= "scmp:\n";
         $out .= "  %pa = and i64 %a, 281474976710655\n  %ppa = inttoptr i64 %pa to ptr\n";
         $out .= "  %pb = and i64 %b, 281474976710655\n  %ppb = inttoptr i64 %pb to ptr\n";
@@ -4294,6 +4312,29 @@ trait EmitLlvmExpr
      * juggles). Two arrays whose element representation the runtime can't
      * normalize keep the old pointer answer rather than guess.
      */
+    /** A raw number / bool operand of `<=>` as its php truth value, i64 0/1
+     *  (a NAN is true, as `(bool)NAN` is); lastValue ← it. */
+    private function spaceshipBoolWord(string $v, string $vt, string $kind): string
+    {
+        $b = $this->ssa->allocReg();
+        if ($vt === 'double' || $kind === Type::KIND_FLOAT) {
+            $out = '  ' . $b . ' = fcmp une double ' . $v . ", 0.0\n";
+        } elseif ($vt === 'i1') {
+            $this->lastValue = $v;
+            $z = $this->ssa->allocReg();
+            $this->lastValue = $z;
+            $this->lastValueType = 'i64';
+            return '  ' . $z . ' = zext i1 ' . $v . " to i64\n";
+        } else {
+            $out = '  ' . $b . ' = icmp ne i64 ' . $v . ", 0\n";
+        }
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $b . " to i64\n";
+        $this->lastValue = $z;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitSpaceship(\Compile\Mir\Spaceship $n): string
     {
         $out = $this->emitNode($n->left);
@@ -4335,6 +4376,16 @@ trait EmitLlvmExpr
         $lRawNum = $lk === Type::KIND_INT || $lk === Type::KIND_BOOL || $lk === Type::KIND_FLOAT;
         $rRawNum = $rk === Type::KIND_INT || $rk === Type::KIND_BOOL || $rk === Type::KIND_FLOAT;
         if ($lRawNum && $rRawNum) {
+            // A bool beside a number compares as two BOOLS (`true <=> 5` is 0,
+            // `false <=> 0.0` is 0): php converts the number, not the bool.
+            if (($lk === Type::KIND_BOOL) !== ($rk === Type::KIND_BOOL)) {
+                $out .= $this->spaceshipBoolWord($l, $lt, $lk);
+                $l = $this->lastValue; $lt = 'i64';
+                $out .= $this->spaceshipBoolWord($r, $rt, $rk);
+                $r = $this->lastValue; $rt = 'i64';
+                $lk = Type::KIND_BOOL;
+                $rk = Type::KIND_BOOL;
+            }
             $useF = $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT
                 || $lt === 'double' || $rt === 'double';
             if ($useF) {
@@ -4344,10 +4395,13 @@ trait EmitLlvmExpr
                 if ($rt !== 'double') { $rd = $this->ssa->allocReg(); $out .= '  ' . $rd . ' = sitofp i64 ' . $r . " to double\n"; }
                 $lt2 = $this->ssa->allocReg();
                 $out .= '  ' . $lt2 . ' = fcmp olt double ' . $ld . ', ' . $rd . "\n";
+                // php's ZEND_THREEWAY_COMPARE: `a == b ? 0 : (a < b ? -1 : 1)`,
+                // so a NAN on either side is UNCOMPARABLE, 1 — not the 0 an
+                // `ogt` test gave (which made `NAN <=> 1.0` "equal").
                 $gt = $this->ssa->allocReg();
-                $out .= '  ' . $gt . ' = fcmp ogt double ' . $ld . ', ' . $rd . "\n";
+                $out .= '  ' . $gt . ' = fcmp oeq double ' . $ld . ', ' . $rd . "\n";
                 $sel = $this->ssa->allocReg();
-                $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 1, i64 0' . "\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 0, i64 1' . "\n";
                 $res = $this->ssa->allocReg();
                 $out .= '  ' . $res . ' = select i1 ' . $lt2 . ', i64 -1, i64 ' . $sel . "\n";
                 $this->lastValue = $res;
@@ -5606,6 +5660,18 @@ trait EmitLlvmExpr
             }
         }
 
+        // An ORDERING with a bool on exactly one side compares two BOOLS:
+        // `true < 5` is false (both true), `false < -3` is true. The raw
+        // carriers ordered the number instead. (eq/ne took the tagged table.)
+        if (!$isEq && !$isNe && (($lk === Type::KIND_BOOL) !== ($rk === Type::KIND_BOOL))
+            && isset($rawScalar[$lk]) && isset($rawScalar[$rk])) {
+            $chunks[] = $this->spaceshipBoolWord($l, $lt, $lk);
+            $l = $this->lastValue; $lt = 'i64';
+            $chunks[] = $this->spaceshipBoolWord($r, $rt, $rk);
+            $r = $this->lastValue; $rt = 'i64';
+            $lk = Type::KIND_BOOL;
+            $rk = Type::KIND_BOOL;
+        }
         return $this->emitNumericCmpTail($c, \implode('', $chunks), $l, $r, $lt, $rt, $lk, $rk, $isEq, $isNe);
     }
     /**

@@ -484,6 +484,8 @@ trait LowerExprs
                 return $this->lowerFcc($expr->function);
             }
             $callee = $this->resolveCallName($expr->function);
+            $mm = $this->minMaxSpreadCall($callee, $expr->args);
+            if ($mm !== null) { return $this->lowerExpr($mm); }
             $savedPost = $this->pendingCallPost;
             $this->pendingCallPost = [];
             $args = $this->lowerCallArgs($callee, $expr->args);

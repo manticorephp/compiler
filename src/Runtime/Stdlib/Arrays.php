@@ -384,11 +384,23 @@ function __mc_array_keys_search(mixed $arr, mixed $search, bool $strict): array
 }
 
 /**
+ * Whether an int survives the round trip through a double — php's rule for
+ * letting an int take part in the dedicated double compare of min/max
+ * (`zend_dval_to_lval_silent((double) $v) == $v`); a larger one is compared
+ * by the generic path instead.
+ */
+function __mc_minmax_exact(int $v): bool
+{
+    $d = (float)$v;
+    return $d >= -9.2233720368547758E18 && $d < 9.2233720368547758E18 && (int)$d === $v;
+}
+
+/**
  * `min($arr)` / `max($arr)` — the smallest / largest ELEMENT of a single array
- * argument (PHP's one-arg form; two or more operands compare against each other
- * in the codegen builtin instead). `$arr` is `mixed` so the foreach yields CELL
- * values — a bare-`array` param leaves them raw, and the comparison would read a
- * boxed element by bits. The builtin boxes the argument for it.
+ * argument, php's `zend_hash_minmax`: the running winner is replaced when
+ * `winner <=> element` is `> 0` (min) / `< 0` (max). `$arr` is `mixed` so the
+ * foreach yields CELL values — a bare-`array` param leaves them raw, and the
+ * comparison would read a boxed element by bits. The builtin boxes the argument.
  *
  * The accumulator is seeded from the first ELEMENT, never from `null`: a
  * `null|T` local types as NON-null, so the return coercion boxed an
@@ -411,37 +423,94 @@ function __mc_minmax_of(mixed $arr, bool $isMax): mixed
     $acc = $vals[0];
     for ($i = 1; $i < $n; $i = $i + 1) {
         $v = $vals[$i];
-        if ($isMax) {
-            if ($v > $acc) { $acc = $v; }
-        } else {
-            if ($v < $acc) { $acc = $v; }
-        }
+        $c = $acc <=> $v;
+        if ($isMax ? $c < 0 : $c > 0) { $acc = $v; }
     }
     return $acc;
 }
 
 /**
- * One step of an n-ary `max(a, b, …)` / `min(…)` whose operands are not all
- * numbers: php's own `>` / `<` over two cells, the EARLIER operand kept on a
- * tie (php replaces the winner only on a strict compare).
+ * A direct two-argument `max($l, $r)` / `min($l, $r)` whose operands are not
+ * all ints / floats / strings: php's FRAMELESS body. Two numbers (an int only
+ * when it is exact as a double) compare as doubles — `max` keeps the left when
+ * `l >= r`, `min` when `l < r`, so a tie or a NAN hands back the RIGHT for
+ * `min` and the NAN side decides for `max`; anything else by `<=>` the same way.
  * @return mixed
  */
-function __mc_minmax2(mixed $a, mixed $b, bool $isMax): mixed
+function __mc_minmax2(mixed $l, mixed $r, bool $isMax): mixed
 {
-    if ($isMax) {
-        return $b > $a ? $b : $a;
+    if ((\is_int($l) || \is_float($l)) && (\is_int($r) || \is_float($r))) {
+        if (\is_int($l) && \is_int($r)) {
+            if ($isMax) { return $l >= $r ? $l : $r; }
+            return $l < $r ? $l : $r;
+        }
+        if ((\is_float($l) || __mc_minmax_exact($l)) && (\is_float($r) || __mc_minmax_exact($r))) {
+            $ld = (float)$l;
+            $rd = (float)$r;
+            if ($isMax) { return $ld >= $rd ? $l : $r; }
+            return $ld < $rd ? $l : $r;
+        }
     }
-    return $b < $a ? $b : $a;
+    $c = $l <=> $r;
+    if ($isMax) { return $c >= 0 ? $l : $r; }
+    return $c < 0 ? $l : $r;
 }
 
 /**
- * `min(...$pack)` / `max(...$pack)`: the argument list the pack stands for.
- * One element is the single-array form (its ELEMENTS compete, and a non-array
- * is php's TypeError downstream); two or more compete themselves. Returned as
- * the one argument {@see __mc_minmax_of} folds.
+ * `max(a, b, c, …)` / `min(…)` — and any spread call, which never takes the
+ * frameless body — over a list of two or more: php's variadic loop. An int
+ * first operand runs the int compare, a float one (or an int meeting an exact
+ * float) the double compare, and the first operand neither covers switches to
+ * `<=>` for the rest; each replaces the winner only on a STRICT win.
+ * @param mixed[] $args
  * @return mixed
  */
-function __mc_minmax_unpack(mixed $pack, string $fn): mixed
+function __mc_minmax_n(array $args, bool $isMax): mixed
+{
+    $n = \count($args);
+    $acc = $args[0];
+    $mode = \is_int($acc) ? 0 : (\is_float($acc) ? 1 : 2);
+    $lv = \is_int($acc) ? $acc : 0;
+    $dv = \is_float($acc) ? $acc : 0.0;
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $v = $args[$i];
+        if ($mode === 0) {
+            if (\is_int($v)) {
+                if ($isMax ? $lv < $v : $lv > $v) { $lv = $v; $acc = $v; }
+                continue;
+            }
+            if (\is_float($v) && __mc_minmax_exact($lv)) {
+                $dv = (float)$lv;
+                $mode = 1;
+            } else {
+                $mode = 2;
+            }
+        }
+        if ($mode === 1) {
+            if (\is_float($v)) {
+                if ($isMax ? $dv < $v : $dv > $v) { $dv = $v; $acc = $v; }
+                continue;
+            }
+            if (\is_int($v) && __mc_minmax_exact($v)) {
+                $fv = (float)$v;
+                if ($isMax ? $dv < $fv : $dv > $fv) { $dv = $fv; $acc = $v; }
+                continue;
+            }
+            $mode = 2;
+        }
+        $c = $v <=> $acc;
+        if ($isMax ? $c > 0 : $c < 0) { $acc = $v; }
+    }
+    return $acc;
+}
+
+/**
+ * `min(...$pack)` / `max(...$pack)`: one element is the single-array form over
+ * THAT element (a non-array is php's TypeError), two or more are the variadic
+ * loop, none is php's ArgumentCountError.
+ * @return mixed
+ */
+function __mc_minmax_spread(mixed $pack, string $fn): mixed
 {
     /** @var mixed[] $vals */
     $vals = [];
@@ -451,9 +520,9 @@ function __mc_minmax_unpack(mixed $pack, string $fn): mixed
         throw new \ArgumentCountError($fn . '() expects at least 1 argument, 0 given');
     }
     if ($n === 1) {
-        return $vals[0];
+        return __mc_minmax_of($vals[0], $fn === 'max');
     }
-    return $vals;
+    return __mc_minmax_n($vals, $fn === 'max');
 }
 
 /**

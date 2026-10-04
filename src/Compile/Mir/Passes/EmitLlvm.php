@@ -1685,9 +1685,15 @@ final class EmitLlvm implements EmitVisitor
         $out .= "entry:\n";
         // snprintf into a stack scratch, then size the heap result exactly.
         $out .= "  %tmp = alloca [40 x i8]\n";
-        $out .= "  %n32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %tmp, i64 40, ptr @.fmt.pg, double %v)\n";
+        // `%G`, not `%g`: php spells the non-finite values `INF` / `-INF` /
+        // `NAN` (C's `%g` says `inf` / `nan`, and `"abc" <=> INF` then
+        // compared the wrong bytes). A NaN is printed unsigned whatever its sign
+        // bit — x86 makes `INF - INF` a NEGATIVE NaN, php still says `NAN`.
+        $out .= "  %isnan = fcmp uno double %v, %v\n";
+        $out .= "  %vp = select i1 %isnan, double 0x7FF8000000000000, double %v\n";
+        $out .= "  %n32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %tmp, i64 40, ptr @.fmt.pg, double %vp)\n";
         $out .= "  %n = sext i32 %n32 to i64\n";
-        $out .= "  %ep = call ptr @memchr(ptr %tmp, i32 101, i64 %n)\n";   // 'e'
+        $out .= "  %ep = call ptr @memchr(ptr %tmp, i32 69, i64 %n)\n";   // 'E'
         $out .= "  %hase = icmp ne ptr %ep, null\n";
         $out .= "  br i1 %hase, label %sci, label %dec\n";
         // Decimal (the common case): copy the scratch out verbatim, including
@@ -4937,7 +4943,9 @@ final class EmitLlvm implements EmitVisitor
     private function cmpPredicateF(string $op): string
     {
         if ($op === '==' || $op === '===') { return 'oeq'; }
-        if ($op === '!=' || $op === '!==') { return 'one'; }
+        // `une`, not `one`: `NAN != x` is TRUE in php — the negation of an
+        // ordered `==` — and `one` is false whenever a NAN is involved.
+        if ($op === '!=' || $op === '!==') { return 'une'; }
         if ($op === '<')  { return 'olt'; }
         if ($op === '<=') { return 'ole'; }
         if ($op === '>')  { return 'ogt'; }

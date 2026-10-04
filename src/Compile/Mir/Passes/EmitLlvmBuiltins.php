@@ -4394,22 +4394,9 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  min ($pred slt) / max ($pred sgt), n-ary. */
     private function biMinMax(array $args, string $pred): string
     {
-        // A float operand needs a numeric compare that preserves the winner's
-        // own type (PHP: max(1, 2.5) === 2.5, max(3, 1.5) === 3). Box each
-        // operand, compare as doubles, select the winning boxed cell — the
-        // result is a numericCell ({@see builtinReturnType}). All-int / all-cell
-        // args keep the unchanged integer-compare path.
-        // Non-numeric operands: PHP orders strings and arrays too, and min/max
-        // must hand back a value of that TYPE. The int path below unboxed an
-        // array POINTER as an int, so `max([1,2],[1,3])` printed a raw address.
-        // Arrays go through the chain-carrying array compare, NOT tagged_compare
-        // — the latter's array arm assumes cell elements, and a `vec[int]` holds
-        // raw ones. {@see InferCalls} min/max return type mirrors these rules.
         $allStr = true;
-        $allArr = true;
         foreach ($args as $a) {
             if ($a->type->kind !== Type::KIND_STRING) { $allStr = false; }
-            if ($a->type->kind !== Type::KIND_ARRAY)  { $allArr = false; }
         }
         $count = \count($args);
         // ONE array argument is the "max of its ELEMENTS" form (`max([1,2,3])`
@@ -4442,43 +4429,28 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'i64';
             return $out;
         }
-        // Two or more operands compare against each other.
-        if ($allArr && $count >= 2) {
-            $chains = [];
-            $chainsOk = true;
-            foreach ($args as $a) {
-                $ch = $this->elemChainOf($a->type->element);
-                if ($ch === self::EK_NONE) { $chainsOk = false; break; }
-                $chains[] = $ch;
-            }
-            if ($chainsOk) {
-                $this->rt->needsTaggedCompare = true;
-                $fpred = $pred === 'sgt' ? 'sgt' : 'slt';
-                $out = $this->emitNode($args[0]);
-                $out .= $this->coerceToPtr();
-                $acc = $this->lastValue;
-                $accChain = $chains[0];
-                for ($i = 1; $i < $count; $i = $i + 1) {
-                    $out .= $this->emitNode($args[$i]);
-                    $out .= $this->coerceToPtr();
-                    $v = $this->lastValue;
-                    $c = $this->ssa->allocReg();
-                    $out .= '  ' . $c . ' = call i64 @__mir_array_compare(ptr ' . $v . ', i64 ' . $chains[$i]
-                          . ', ptr ' . $acc . ', i64 ' . $accChain . ")\n";
-                    $cmp = $this->ssa->allocReg();
-                    $out .= '  ' . $cmp . ' = icmp ' . $fpred . ' i64 ' . $c . ", 0\n";
-                    $sel = $this->ssa->allocReg();
-                    $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', ptr ' . $v . ', ptr ' . $acc . "\n";
-                    $acc = $sel;
-                }
-                $this->lastValue = $acc;
-                $this->lastValueType = 'ptr';
-                return $out;
-            }
+        // Two or more operands. php has TWO algorithms and they disagree on
+        // ties and on NAN: a direct two-argument call runs the FRAMELESS body
+        // (`max`: `lhs >= rhs ? lhs : rhs`, `min`: `lhs < rhs ? lhs : rhs`), and
+        // three or more run the variadic loop (replace only on a strict win).
+        // Only operands whose order is plain machine arithmetic stay inline —
+        // all ints, all floats, all strings; everything else (a cell, null, a
+        // bool, an array, an int beside a float — php's exactness rule for
+        // large ints) is php's comparison in the stdlib. {@see InferCalls}
+        // mirrors the result types.
+        $allInt = true;
+        $allFloat = true;
+        foreach ($args as $a) {
+            if ($a->type->kind !== Type::KIND_INT) { $allInt = false; }
+            if ($a->type->kind !== Type::KIND_FLOAT) { $allFloat = false; }
         }
-        if ($allStr && $count >= 2) {
+        $isMax = $pred === 'sgt';
+        if ($allFloat) { return $this->minMaxFloats($args, $isMax); }
+        if ($allStr) {
             $this->rt->needsTaggedCompare = true;
-            $fpred = $pred === 'sgt' ? 'sgt' : 'slt';
+            // sgt/slt = the variadic loop's strict win; a two-argument `min`
+            // takes the RIGHT operand unless the left is strictly smaller.
+            $fpred = $isMax ? 'sgt' : ($count === 2 ? 'sle' : 'slt');
             $out = $this->emitNode($args[0]);
             $out .= $this->shallowBoxToCell($args[0]->type);
             $acc = $this->lastValue;
@@ -4504,59 +4476,16 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'ptr';
             return $out;
         }
-        // Any operand that is not a NUMBER (a cell that may hold an array or a
-        // string, a bool, null, an object, or a string next to an int) is
-        // ordered by php's full comparison, pairwise through the stdlib — the
-        // int path below unboxed an array operand and answered its ADDRESS
-        // (`max($a, 2)` with `array|int $a`). {@see InferCalls} types it cell.
-        if ($this->minMaxNeedsFold($args)) {
-            return $this->minMaxFold($args, $pred === 'sgt');
+        if (!$allInt) {
+            return $count === 2 ? $this->minMaxFold2($args, $isMax) : $this->minMaxFoldN($args, $isMax);
         }
-        $anyFloat = false;
-        foreach ($args as $a) {
-            if ($a->type->kind === Type::KIND_FLOAT) { $anyFloat = true; break; }
-        }
-        if ($anyFloat) {
-            $this->rt->needsTagged = true;
-            $this->rt->needsTaggedToFloat = true;
-            $fpred = $pred === 'sgt' ? 'ogt' : 'olt';
-            $out = $this->emitNode($args[0]);
-            $out .= $this->boxToCell($args[0]->type);
-            $acc = $this->lastValue;
-            $accd = $this->ssa->allocReg();
-            $out .= '  ' . $accd . ' = call double @__manticore_tagged_to_double(i64 ' . $acc . ")\n";
-            $count = \count($args);
-            for ($i = 1; $i < $count; $i = $i + 1) {
-                $out .= $this->emitNode($args[$i]);
-                $out .= $this->boxToCell($args[$i]->type);
-                $v = $this->lastValue;
-                $vd = $this->ssa->allocReg();
-                $out .= '  ' . $vd . ' = call double @__manticore_tagged_to_double(i64 ' . $v . ")\n";
-                $cmp = $this->ssa->allocReg();
-                $out .= '  ' . $cmp . ' = fcmp ' . $fpred . ' double ' . $vd . ', ' . $accd . "\n";
-                $sel = $this->ssa->allocReg();
-                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', i64 ' . $v . ', i64 ' . $acc . "\n";
-                $seld = $this->ssa->allocReg();
-                $out .= '  ' . $seld . ' = select i1 ' . $cmp . ', double ' . $vd . ', double ' . $accd . "\n";
-                $acc = $sel;
-                $accd = $seld;
-            }
-            $this->lastValue = $acc;
-            $this->lastValueType = 'i64';
-            return $out;
-        }
-        // Integer compare. A CELL operand (e.g. a `?int`/numericCell arg like
-        // `$offset + $length` in array_slice) carries its int NaN-boxed — its raw
-        // i64 is meaningless in an icmp, so unbox it first (else min/max returns a
-        // boxed cell read back as a garbage negative). `finishI64` keeps the
-        // result a plain int (all-int path — no float operand).
+        // All ints: equal ints are the same value, so the tie rule is moot.
         $out = $this->emitNode($args[0]);
-        $out .= $this->minMaxOperandI64($args[0]);
+        $out .= $this->coerceToI64();
         $acc = $this->lastValue;
-        $count = \count($args);
         for ($i = 1; $i < $count; $i = $i + 1) {
             $out .= $this->emitNode($args[$i]);
-            $out .= $this->minMaxOperandI64($args[$i]);
+            $out .= $this->coerceToI64();
             $v = $this->lastValue;
             $cmp = $this->ssa->allocReg();
             $out .= '  ' . $cmp . ' = icmp ' . $pred . ' i64 ' . $v . ', ' . $acc . "\n";
@@ -4568,33 +4497,47 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * Whether an n-ary min/max leaves the numeric paths for the comparison
-     * fold: some operand is not an int or a float. A numeric cell counts as
-     * not: it may hold null or a bool (`?int`), which php orders as a bool
-     * (`max(null, -5)` is -5), not as 0. Callers have
-     * already taken the all-string and all-array forms. Mirrored by
-     * {@see InferCalls} (`min`/`max` return type).
+     * All-float min/max, php's own double compares: two arguments are the
+     * frameless body (`max`: keep the left when `l >= r`; `min`: keep the left
+     * when `l < r` — a NAN on either side hands back the RIGHT), three or more
+     * the variadic loop (replace when `acc < v` / `acc > v`, a NAN never wins
+     * nor loses). Ordered fcmp is false on NAN, which is exactly C's `<`.
      * @param Node[] $args
      */
-    private function minMaxNeedsFold(array $args): bool
+    private function minMaxFloats(array $args, bool $isMax): string
     {
-        foreach ($args as $a) {
-            $t = $a->type;
-            if ($t->kind === Type::KIND_INT || $t->kind === Type::KIND_FLOAT) { continue; }
-            return true;
+        $count = \count($args);
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceDoubleOperand($args[0]);
+        $acc = $this->lastValue;
+        for ($i = 1; $i < $count; $i = $i + 1) {
+            $out .= $this->emitNode($args[$i]);
+            $out .= $this->coerceDoubleOperand($args[$i]);
+            $v = $this->lastValue;
+            $cmp = $this->ssa->allocReg();
+            $sel = $this->ssa->allocReg();
+            if ($count === 2) {
+                $out .= '  ' . $cmp . ' = fcmp ' . ($isMax ? 'oge' : 'olt') . ' double ' . $acc . ', ' . $v . "\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', double ' . $acc . ', double ' . $v . "\n";
+            } else {
+                $out .= '  ' . $cmp . ' = fcmp ' . ($isMax ? 'olt' : 'ogt') . ' double ' . $acc . ', ' . $v . "\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', double ' . $v . ', double ' . $acc . "\n";
+            }
+            $acc = $sel;
         }
-        return false;
+        $this->lastValue = $acc;
+        $this->lastValueType = 'double';
+        return $out;
     }
 
     /**
-     * `max(a, b, …)` / `min(…)` over operands php orders by its full comparison:
-     * each pair goes through `__mc_minmax2`, whose `>` / `<` on cells is php's
-     * (arrays by size then element, strings vs numbers, null/bool). Its cell
-     * return is +1 by the return convention: the previous winner is released
-     * after each step, the operands' boxes as any cell-taking builtin drops them.
+     * `max(a, b)` / `min(a, b)` over operands php orders by its full
+     * comparison: the stdlib `__mc_minmax2` is php's frameless two-argument
+     * body. Its cell return is +1 by the return convention; the operands'
+     * boxes are dropped as any cell-taking builtin drops them.
      * @param Node[] $args
      */
-    private function minMaxFold(array $args, bool $isMax): string
+    private function minMaxFold2(array $args, bool $isMax): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsRc = true;
@@ -4605,35 +4548,57 @@ trait EmitLlvmBuiltins
         }
         $out = $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type, $args[0]);
-        $acc = $this->lastValue;
-        $count = \count($args);
-        for ($i = 1; $i < $count; $i = $i + 1) {
-            $out .= $this->emitNode($args[$i]);
-            $out .= $this->boxToCell($args[$i]->type, $args[$i]);
-            $v = $this->lastValue;
-            $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax2(i64 ' . $acc . ', i64 ' . $v
-                  . ', i64 ' . ($isMax ? '1' : '0') . ")\n";
-            $out .= $this->cellBoxTempDrop($args[$i]->type, $v, $args[$i]);
-            $out .= $i === 1
-                ? $this->cellBoxTempDrop($args[0]->type, $acc, $args[0])
-                : $this->rcReleaseReg($acc, 'cell');
-            $acc = $r;
-        }
-        $this->lastValue = $acc;
+        $l = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->boxToCell($args[1]->type, $args[1]);
+        $rv = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax2(i64 ' . $l . ', i64 ' . $rv
+              . ', i64 ' . ($isMax ? '1' : '0') . ")\n";
+        $out .= $this->cellBoxTempDrop($args[1]->type, $rv, $args[1]);
+        $out .= $this->cellBoxTempDrop($args[0]->type, $l, $args[0]);
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }
 
-    /** Coerce a min/max integer-path operand to a raw i64, unboxing a cell. */
-    private function minMaxOperandI64(Node $a): string
+    /**
+     * Three or more operands php orders by its full comparison: collected into
+     * a fresh cell list (each element co-owned, the operand boxes dropped) and
+     * folded by `__mc_minmax_n`, php's variadic loop. The list is dropped after
+     * the call; the +1 winner is the caller's.
+     * @param Node[] $args
+     */
+    private function minMaxFoldN(array $args, bool $isMax): string
     {
-        $out = $this->coerceToI64();
-        if ($a->type->kind !== Type::KIND_CELL) { return $out; }
         $this->rt->needsTagged = true;
-        $u = $this->ssa->allocReg();
-        $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
-        $this->lastValue = $u;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        if (!isset($this->definedFns[$this->mangle('__mc_minmax_n')])) {
+            $this->libcExtra['manticore___mc_minmax_n'] =
+                'declare i64 @manticore___mc_minmax_n(i64, i64)';
+        }
+        $count = \count($args);
+        $cur = $this->ssa->allocReg();
+        $out = '  ' . $cur . ' = call ptr @__mir_array_alloc(i64 ' . $count . ")\n";
+        foreach ($args as $a) {
+            $out .= $this->emitNode($a);
+            $out .= $this->boxToCell($a->type, $a);
+            $v = $this->lastValue;
+            $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
+            $nx = $this->ssa->allocReg();
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $v . ")\n";
+            $out .= $this->cellBoxTempDrop($a->type, $v, $a);
+            $cur = $nx;
+        }
+        $out .= $this->emitElemHintStamp($cur, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
+        $list = $this->ssa->allocReg();
+        $out .= '  ' . $list . ' = call i64 @__manticore_box_array(ptr ' . $cur . ")\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax_n(i64 ' . $list
+              . ', i64 ' . ($isMax ? '1' : '0') . ")\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $list . ")\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }

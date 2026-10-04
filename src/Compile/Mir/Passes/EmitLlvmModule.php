@@ -206,7 +206,7 @@ trait EmitLlvmModule
                 . (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC . ", i64 0, i64 0, i64 0, i64 "
                 . (string)\Compile\MemoryAbi::IMMORTAL_ARRAY_RC . ", i64 0, i64 0, ptr null }, align 8\n";
         }
-        $out .= "@.fmt.pg = private unnamed_addr constant [6 x i8] c\"%.14g\\00\", align 1\n";
+        $out .= "@.fmt.pg = private unnamed_addr constant [6 x i8] c\"%.14G\\00\", align 1\n";
         $out .= "@.fmt.x = private unnamed_addr constant [5 x i8] c\"%llx\\00\", align 1\n";
         // var_dump of a typed float: shortest round-trip (`%.*g` probed) wrapped
         // in `float(...)`.

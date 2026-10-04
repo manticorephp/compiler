@@ -362,35 +362,25 @@ trait InferCalls
             return Type::int_();
         }
         if ($n === '__ugt') { return Type::bool_(); }
-        // min/max: a float operand makes the result a numericCell (the winner's
-        // own type is preserved — {@see EmitLlvmBuiltins::biMinMax}); else int.
         if ($n === 'min' || $n === 'max') {
-            // PHP orders strings and arrays too, and returns a value of that
-            // TYPE — `max([1,2],[1,3])` is an array, not an int. Mirrors the
-            // uniform-kind rule in {@see EmitLlvmBuiltins::biMinMax}.
-            // A single array arg is the "max of its ELEMENTS" form: the winner
-            // is an erased element, so the result is a cell.
+            // Mirrors {@see EmitLlvmBuiltins::biMinMax}: one argument is the
+            // array form (an erased element); all ints / all floats / all
+            // strings compare inline and keep that type; anything else is
+            // php's comparison in the stdlib, whose winner is any operand.
             if (\count($args) === 1) { return Type::cell(); }
-            $allStr = \count($args) >= 2;
-            $allArr = \count($args) >= 2;
+            $allStr = true;
+            $allFloat = true;
+            $allInt = true;
             foreach ($args as $a) {
-                if ($a->type->kind !== Type::KIND_STRING) { $allStr = false; }
-                if ($a->type->kind !== Type::KIND_ARRAY)  { $allArr = false; }
+                $k = $a->type->kind;
+                if ($k !== Type::KIND_STRING) { $allStr = false; }
+                if ($k !== Type::KIND_FLOAT) { $allFloat = false; }
+                if ($k !== Type::KIND_INT) { $allInt = false; }
             }
+            if ($allInt) { return Type::int_(); }
+            if ($allFloat) { return Type::float_(); }
             if ($allStr) { return Type::string_(); }
-            if ($allArr) { return $args[0]->type; }
-            // A non-number operand takes the comparison fold, whose winner is
-            // any of the operands ({@see EmitLlvmBuiltins::minMaxNeedsFold}).
-            foreach ($args as $a) {
-                $t = $a->type;
-                if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) {
-                    return Type::cell();
-                }
-            }
-            foreach ($args as $a) {
-                if ($a->type->kind === Type::KIND_FLOAT) { return Type::numericCell(); }
-            }
-            return Type::int_();
+            return Type::cell();
         }
         // pow / `**`: php answers an int for int operands only when the exponent
         // is non-negative (`2 ** -1` is 0.5). A constant exponent decides it
