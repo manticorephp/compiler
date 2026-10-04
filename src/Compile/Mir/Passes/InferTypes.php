@@ -1098,6 +1098,10 @@ final class InferTypes implements Pass
         // A local handed to a `mixed &` parameter is likewise one word two
         // frames share, and the callee may make it any kind.
         $this->rescanTargets = [];
+        if ($this->scanByRefParamRetype($module)) {
+            $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
+            $this->rescanTargets = [];
+        }
         if ($this->scanRefCellArgWiden($module)) {
             $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
         }

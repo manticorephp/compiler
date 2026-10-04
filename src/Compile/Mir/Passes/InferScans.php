@@ -2106,7 +2106,7 @@ trait InferScans
      */
     private function boxParamAtEntry(FunctionDef $fn, string $name): void
     {
-        if (!$this->paramArrivesRaw($fn, $name)) { return; }
+        if ($fn->isExtern || !$this->paramArrivesRaw($fn, $name)) { return; }
         foreach ($fn->body->stmts as $s) {
             if ($s->kind !== Node::KIND_STORE_LOCAL || $s->name !== $name) { continue; }
             $v = $s->value;
@@ -2633,13 +2633,81 @@ trait InferScans
      * by its own static types, and widening every such caller is a repr change
      * this scan does not make.
      */
+    /**
+     * A TYPED by-ref param the body overwrites with another kind (`function
+     * f(string &$c) { $c = 7; }`): php's reference is not typed past the entry
+     * coercion, so the caller's variable becomes that kind. The callee wrote
+     * the raw int into the caller's string slot (SIGSEGV on the next read).
+     * The param becomes a cell — the callee's stores box, and the callers'
+     * slots follow it through {@see scanRefCellArgWiden}, the `mixed &` rule.
+     *
+     * Only a CONCRETE stored kind counts (a cell value is already either), and
+     * a null into a pointer-shaped param is that param's own null.
+     */
+    private function scanByRefParamRetype(Module $module): bool
+    {
+        $changed = false;
+        foreach ($module->functions as $fn) {
+            if ($fn->isPrelude || $fn->isExtern) { continue; }
+            /** @var array<string, int> $cand */
+            $cand = [];
+            $idx = -1;
+            foreach ($fn->params as $p) {
+                $idx = $idx + 1;
+                if (!$p->byRef || $p->variadic) { continue; }
+                $k = $p->type->kind;
+                if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
+                    || $k === Type::KIND_STRING || ($k === Type::KIND_OBJ && !isset($this->enums[$p->type->class ?? '']))) {
+                    $cand[$p->name] = $idx;
+                }
+            }
+            if (\count($cand) === 0) { continue; }
+            /** @var array<string, bool> $hit */
+            $hit = [];
+            $this->collectForeignParamStores($fn->body, $fn, $cand, $hit);
+            foreach ($hit as $pname => $unused) {
+                $param = $fn->params[$cand[$pname]];
+                $param->type = Type::cell();
+                $this->byRefCaptureCellLocals[$fn->name][$pname] = true;
+                $this->rescanTargets[$fn->name] = true;
+                if (\Compile\Stats::$on) { \Compile\Stats::bump('infer.byref.retype', 1); }
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** @param array<string, int> $cand @param array<string, bool> $hit */
+    private function collectForeignParamStores(Node $n, FunctionDef $fn, array $cand, array &$hit): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) { return; }
+        if ($n->kind === Node::KIND_STORE_LOCAL && isset($cand[$n->name]) && !isset($hit[$n->name])) {
+            $pt = $fn->params[$cand[$n->name]]->type;
+            $vk = $n->value->type->kind;
+            $pk = $pt->kind;
+            $concrete = $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT || $vk === Type::KIND_BOOL
+                || $vk === Type::KIND_STRING || $vk === Type::KIND_OBJ || $vk === Type::KIND_NULL
+                || $n->value->type->isArray();
+            $ownNull = $vk === Type::KIND_NULL && ($pk === Type::KIND_STRING || $pk === Type::KIND_OBJ);
+            if ($concrete && !$ownNull && $vk !== $pk) {
+                $hit[$n->name] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->collectForeignParamStores($c, $fn, $cand, $hit);
+        }
+    }
+
     private function scanRefCellArgWiden(Module $module): bool
     {
         $changed = false;
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude) { continue; }
+            // An imported body lives in a dependency's `.o`, not ours to retype.
+            if ($fn->isExtern) { continue; }
             $names = [];
-            $this->scanRefCellArgNode($fn->body, $names);
+            $elems = [];
+            $this->scanRefCellArgNode($fn->body, $names, $elems);
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
@@ -2648,12 +2716,25 @@ trait InferScans
                     $changed = true;
                 }
             }
+            if (\count($elems) === 0) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            foreach ($elems as $local => $unused) {
+                // A param's buffer is the caller's; its representation is not ours.
+                if (isset($skip[$local]) || isset($this->byRefCellElemLocals[$fn->name][$local])) { continue; }
+                $this->byRefCellElemLocals[$fn->name][$local] = true;
+                $this->rescanTargets[$fn->name] = true;
+                $changed = true;
+            }
         }
         return $changed;
     }
 
-    /** @param array<string,bool> $names */
-    private function scanRefCellArgNode(Node $n, array &$names): void
+    /**
+     * @param array<string,bool> $names locals whose slot must be a cell
+     * @param array<string,bool> $elems locals whose ELEMENT channel must be a cell
+     */
+    private function scanRefCellArgNode(Node $n, array &$names, array &$elems): void
     {
         if ($n->kind === Node::KIND_CALL) {
             $callee = $this->fnByName[$n->function] ?? null;
@@ -2661,12 +2742,7 @@ trait InferScans
                 foreach ($n->args as $i => $a) {
                     $p = $callee->params[$i] ?? null;
                     if ($p === null || !$p->byRef) { continue; }
-                    if ($p->type->kind !== Type::KIND_CELL) { continue; }
-                    if ($a->kind === Node::KIND_LOAD_LOCAL) {
-                        $names[$a->name] = true;
-                    } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
-                        $names[$a->target] = true;
-                    }
+                    $this->refArgSlotSink($p, $a, $names, $elems);
                 }
             }
         } elseif ($n->kind === Node::KIND_INVOKE) {
@@ -2681,15 +2757,55 @@ trait InferScans
                     foreach ($iv->args as $i => $a) {
                         $p = $callee->params[$base + $i] ?? null;
                         if ($p === null || !$p->byRef) { continue; }
-                        if ($p->type->kind !== Type::KIND_CELL) { continue; }
-                        if ($a->kind === Node::KIND_LOAD_LOCAL) { $names[$a->name] = true; }
+                        $this->refArgSlotSink($p, $a, $names, $elems);
                     }
                 }
             }
         }
         foreach (Walk::children($n) as $c) {
-            $this->scanRefCellArgNode($c, $names);
+            $this->scanRefCellArgNode($c, $names, $elems);
         }
+    }
+
+    /**
+     * One by-ref argument against its param. A CELL param may leave any kind
+     * in the slot. A TYPED scalar/string param handed a DIFFERENT concrete
+     * kind converts the caller's variable on entry (php coerces `int` to
+     * "12" for `string &$x`), so the caller's slot holds the param's kind
+     * afterwards: the callee read the raw int as a string pointer. Both make
+     * the slot — or, for an element, its buffer — a cell; the call then takes
+     * the cell scratch, which decodes by the param's type.
+     *
+     * @param array<string,bool> $names
+     * @param array<string,bool> $elems
+     */
+    private function refArgSlotSink(\Compile\Mir\Param $p, Node $a, array &$names, array &$elems): void
+    {
+        $pk = $p->type->kind;
+        if ($pk === Type::KIND_CELL) {
+            if ($a->kind === Node::KIND_LOAD_LOCAL) {
+                $names[$a->name] = true;
+            } elseif ($a->kind === Node::KIND_REF_ADDR && $a->target !== '') {
+                $names[$a->target] = true;
+            }
+            return;
+        }
+        if (!$this->isCoercibleScalarKind($pk)) { return; }
+        $ak = $a->type->kind;
+        if (!$this->isCoercibleScalarKind($ak) || $ak === $pk) { return; }
+        if ($a->kind === Node::KIND_LOAD_LOCAL) {
+            $names[$a->name] = true;
+        } elseif ($a->kind === Node::KIND_ARRAY_ACCESS) {
+            $aa = $a;
+            $base = $aa->array;
+            if ($base->kind === Node::KIND_LOAD_LOCAL) { $elems[$base->name] = true; }
+        }
+    }
+
+    private function isCoercibleScalarKind(string $k): bool
+    {
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT
+            || $k === Type::KIND_BOOL || $k === Type::KIND_STRING;
     }
 
     /** Mark locals used as an ARITHMETIC operand ({@see InferTypes::$arithUsedLocals}) —
