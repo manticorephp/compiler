@@ -733,6 +733,7 @@ trait EmitLlvmModule
         $out .= $this->profileRuntime();
         $out .= $this->shutdownRuntime();
         $out .= $this->obShutdownRuntime();
+        $out .= $this->dtorRegRuntime();
         $out .= $this->allocRuntime();
         if ($this->rt->needsOutBuf) {
             $out .= $this->outBufRuntime();
@@ -2080,6 +2081,10 @@ trait EmitLlvmModule
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_ob_shutdown)\n";
         }
+        // Destructors still owed run AFTER the shutdown queue (registered next, so
+        // atexit's LIFO runs it first) and BEFORE the ob drain: php's order.
+        $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+        $header .= "  call i32 @atexit(ptr @__mir_dtor_sweep)\n";
         if ($this->needsErrorHandlers) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";

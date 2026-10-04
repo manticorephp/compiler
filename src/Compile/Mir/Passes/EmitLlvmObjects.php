@@ -62,7 +62,16 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** Allocation + the shutdown registry entry for a class that declares `__destruct`. */
     private function emitObjAllocInit(?\Compile\Mir\ClassDef $cd): string
+    {
+        $out = $this->emitObjAllocInitRaw($cd);
+        if ($cd !== null && !$cd->isStruct && $this->resolveMethodClass($cd->name, '__destruct') !== '') {
+            $out .= '  call void @__mir_dtor_reg(ptr ' . $this->lastValue . ")\n";
+        }
+        return $out;
+    }
+    private function emitObjAllocInitRaw(?\Compile\Mir\ClassDef $cd): string
     {
         $size = $cd === null ? 16 : $cd->instanceSize();
         $isStruct = $cd !== null && $cd->isStruct;
@@ -1060,6 +1069,9 @@ trait EmitLlvmObjects
         $rcGep = $this->ssa->allocReg();
         $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $new . ", i64 1\n";
         $out .= '  store i64 1, ptr ' . $rcGep . "\n";
+        if ($this->resolveMethodClass($cd->name, '__destruct') !== '') {
+            $out .= '  call void @__mir_dtor_reg(ptr ' . $new . ")\n";
+        }
         // Copy each property slot; co-own rc-managed values (shallow copy).
         foreach ($cd->propertyNames as $pname) {
             $off = $cd->propertyOffset($pname);

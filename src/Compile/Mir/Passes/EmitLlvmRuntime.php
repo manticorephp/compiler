@@ -1423,6 +1423,129 @@ trait EmitLlvmRuntime
     }
 
     /**
+     * The registry of live objects whose class declares `__destruct`, in
+     * creation order, and the sweep that runs the destructors still owed at
+     * process end. php calls every remaining destructor at shutdown
+     * (`zend_call_destructors`), in creation order, for objects the script's
+     * scope exit never released: a static property, a function static, a cycle,
+     * anything alive at `exit()`.
+     *
+     * An entry leaves the list the moment its destructor starts (the drop body
+     * calls `__mir_dtor_unreg`), so a registered object is always live and
+     * undestructed. The sweep runs a destructor through the class's own drop
+     * function in one-shot "destructor only" mode (`__mir_dtor_only`, cleared by
+     * the drop body on read): members are NOT released, since other destructors
+     * may still read them. Skipped after an uncaught exception, as php does.
+     * linkonce_odr: one registry across every separately-linked object.
+     */
+    private function dtorRegRuntime(): string
+    {
+        $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
+        $out  = "@__mir_dtor_ents = linkonce_odr global ptr null\n";
+        $out .= "@__mir_dtor_cnt = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_cap = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_only = linkonce_odr global i64 0\n";
+        $out .= "define void @__mir_dtor_reg(ptr %p) {\nentry:\n";
+        $out .= "  %cnt = load i64, ptr @__mir_dtor_cnt\n";
+        $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
+        $out .= "  br i1 %full, label %grow, label %store\n";
+        $out .= "grow:\n";
+        $out .= "  %dbl = mul i64 %cap, 2\n";
+        $out .= "  %small = icmp slt i64 %dbl, 16\n";
+        $out .= "  %ncap = select i1 %small, i64 16, i64 %dbl\n";
+        $out .= "  %bytes = mul i64 %ncap, 8\n";
+        $out .= "  %old = load ptr, ptr @__mir_dtor_ents\n";
+        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
+        $out .= "  store ptr %nb, ptr @__mir_dtor_ents\n";
+        $out .= "  store i64 %ncap, ptr @__mir_dtor_cap\n";
+        $out .= "  br label %store\n";
+        $out .= "store:\n";
+        $out .= "  %buf = load ptr, ptr @__mir_dtor_ents\n";
+        $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
+        $out .= "  store ptr %p, ptr %slot\n";
+        $out .= "  %c1 = add i64 %cnt, 1\n";
+        $out .= "  store i64 %c1, ptr @__mir_dtor_cnt\n";
+        $out .= "  ret void\n}\n";
+        // Newest first: short-lived objects die near the tail.
+        $out .= "define void @__mir_dtor_unreg(ptr %p) {\nentry:\n";
+        $out .= "  %cnt = load i64, ptr @__mir_dtor_cnt\n";
+        $out .= "  %buf = load ptr, ptr @__mir_dtor_ents\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ %cnt, %entry ], [ %i1, %next ]\n";
+        $out .= "  %any = icmp sgt i64 %i, 0\n";
+        $out .= "  br i1 %any, label %test, label %done\n";
+        $out .= "test:\n";
+        $out .= "  %i1 = sub i64 %i, 1\n";
+        $out .= "  %g = getelementptr ptr, ptr %buf, i64 %i1\n";
+        $out .= "  %e = load ptr, ptr %g\n";
+        $out .= "  %hit = icmp eq ptr %e, %p\n";
+        $out .= "  br i1 %hit, label %found, label %next\n";
+        $out .= "next:\n";
+        $out .= "  br label %loop\n";
+        $out .= "found:\n";
+        $out .= "  store ptr null, ptr %g\n";
+        $out .= "  br label %trim\n";
+        $out .= "trim:\n";
+        $out .= "  %n = phi i64 [ %cnt, %found ], [ %n1, %pop ]\n";
+        $out .= "  %nany = icmp sgt i64 %n, 0\n";
+        $out .= "  br i1 %nany, label %peek, label %fin\n";
+        $out .= "peek:\n";
+        $out .= "  %n1 = sub i64 %n, 1\n";
+        $out .= "  %tg = getelementptr ptr, ptr %buf, i64 %n1\n";
+        $out .= "  %te = load ptr, ptr %tg\n";
+        $out .= "  %tnull = icmp eq ptr %te, null\n";
+        $out .= "  br i1 %tnull, label %pop, label %fin\n";
+        $out .= "pop:\n";
+        $out .= "  br label %trim\n";
+        $out .= "fin:\n";
+        $out .= "  %nf = phi i64 [ %n, %trim ], [ %n, %peek ]\n";
+        $out .= "  store i64 %nf, ptr @__mir_dtor_cnt\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n}\n";
+        // atexit hook. The count is re-read each step: a destructor may create
+        // (and register) more objects.
+        $out .= "define void @__mir_dtor_sweep() {\nentry:\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]\n";
+        $out .= "  %cnt = load i64, ptr @__mir_dtor_cnt\n";
+        $out .= "  %more = icmp slt i64 %i, %cnt\n";
+        $out .= "  br i1 %more, label %take, label %done\n";
+        $out .= "take:\n";
+        $out .= "  %buf = load ptr, ptr @__mir_dtor_ents\n";
+        $out .= "  %g = getelementptr ptr, ptr %buf, i64 %i\n";
+        $out .= "  %o = load ptr, ptr %g\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %isn = icmp eq ptr %o, null\n";
+        $out .= "  br i1 %isn, label %cont, label %run\n";
+        $out .= "run:\n";
+        $out .= "  store ptr null, ptr %g\n";
+        $out .= "  %rwp = getelementptr i8, ptr %o, i64 8\n";
+        $out .= "  %rw = load i64, ptr %rwp\n";
+        $out .= "  %rwh = add i64 %rw, 1\n";
+        $out .= "  store i64 %rwh, ptr %rwp\n";
+        $out .= "  %di = load i64, ptr %o\n";
+        $out .= "  %dp = inttoptr i64 %di to ptr\n";
+        $out .= "  %dfp = getelementptr i8, ptr %dp, i64 " . (string)\Compile\MemoryAbi::DESCRIPTOR_DROP_FN_OFFSET . "\n";
+        $out .= "  %df = load ptr, ptr %dfp\n";
+        $out .= "  store i64 1, ptr @__mir_dtor_only\n";
+        $out .= "  call void %df(ptr %o)\n";
+        $out .= "  store i64 0, ptr @__mir_dtor_only\n";
+        $out .= "  %rw2 = load i64, ptr %rwp\n";
+        $out .= "  %rwd = sub i64 %rw2, 1\n";
+        $out .= "  store i64 %rwd, ptr %rwp\n";
+        $out .= "  br label %cont\n";
+        $out .= "cont:\n";
+        $out .= "  br label %loop\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
+    /**
      * Per-class object destructors + a class_id dispatch, used by
      * `__mir_rc_release` to recursively release an object's obj-typed
      * properties before freeing it. Struct classes and struct-typed
@@ -1985,12 +2108,29 @@ trait EmitLlvmRuntime
                 // it. A second rc → 0 skips the destructor (bit 62).
                 $rcMask = (string)\Compile\MemoryAbi::RC_MASK;
                 $dtorBit = (string)\Compile\MemoryAbi::DTOR_CALLED_MASK;
+                // Shutdown sweep (@__mir_dtor_sweep): destructor only, one shot,
+                // members and storage untouched.
+                $body .= "  %dsm = load i64, ptr @__mir_dtor_only\n";
+                $body .= "  store i64 0, ptr @__mir_dtor_only\n";
+                $body .= "  %dso = icmp ne i64 %dsm, 0\n";
+                $body .= "  br i1 %dso, label %sweepd, label %dchk\n";
+                $body .= "sweepd:\n";
+                $body .= "  %swp = getelementptr i8, ptr %o, i64 8\n";
+                $body .= "  %sw0 = load i64, ptr %swp\n";
+                $body .= "  %sw1 = or i64 %sw0, " . (string)\Compile\MemoryAbi::DTOR_CALLED_MASK . "\n";
+                $body .= "  store i64 %sw1, ptr %swp\n";
+                $body .= '  %swi = ptrtoint ptr %o to i64' . "\n";
+                $body .= '  %swr = call i64 @manticore_' . $this->mangle($dtorCls)
+                       . '____destruct(i64 %swi)' . "\n";
+                $body .= "  ret void\n";
+                $body .= "dchk:\n";
                 $body .= "  %dwp = getelementptr i8, ptr %o, i64 8\n";
                 $body .= "  %dw0 = load i64, ptr %dwp\n";
                 $body .= "  %dcb = and i64 %dw0, " . $dtorBit . "\n";
                 $body .= "  %dcalled = icmp ne i64 %dcb, 0\n";
                 $body .= "  br i1 %dcalled, label %members, label %dtor\n";
                 $body .= "dtor:\n";
+                $body .= "  call void @__mir_dtor_unreg(ptr %o)\n";
                 $body .= "  %dfl = and i64 %dw0, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
                 $body .= "  %dhold = or i64 %dfl, " . (string)(\Compile\MemoryAbi::DTOR_CALLED_MASK | 1) . "\n";
                 $body .= "  store i64 %dhold, ptr %dwp\n";

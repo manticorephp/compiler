@@ -293,6 +293,13 @@ restoration get out of sync.
 Release recurses directly, so a long ownership chain (a linked list) can still exhaust the
 stack. Iterative release via a worklist is open work.
 
+**Shutdown sweep.** A class that declares `__destruct` registers each instance in
+`@__mir_dtor_ents` (creation order) at `new`/`clone`; the drop body unregisters it as
+its destructor starts. An `atexit` hook (`@__mir_dtor_sweep`, after the
+`register_shutdown_function` queue, before the output-buffer drain) runs the destructors still
+owed (statics, cycles, anything alive at `exit()`) through the class's drop function in
+one-shot destructor-only mode (`@__mir_dtor_only`): members and storage stay intact.
+
 ## 7. Cycle collector
 
 Synchronous Bacon–Rajan, **in tree**, emitted as LLVM IR by
