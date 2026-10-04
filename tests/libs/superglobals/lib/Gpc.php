@@ -10,5 +10,5 @@ final class Gpc
 
     public static function keys(): string { return \implode(',', \array_keys($_GET)); }
 
-    public static function reset(int $i): void { $_GET = ['lib' . $i => \str_repeat('l', 64)]; }
+    public static function reset(int $i): void { $_GET = ['lib' . ($i % 3) => \str_repeat('l', 200) . $i]; }
 }

@@ -226,14 +226,7 @@ function __mir_str_offset_form(string $k): int
     if ($digits === 0 && !$hadZero) { return 2; }
     if ($digits > 19) { return 2; }
     if ($digits === 19) {
-        // Digit by digit, not strcmp(): this prelude body is compiled into a
-        // LIBRARY too, which imports no stdlib declarations, and an unresolved
-        // strcmp there became a `Call to undefined function` trap.
-        $lim = '9223372036854775808';
-        $cmp = 0;
-        for ($d = 0; $d < 19 && $cmp === 0; $d++) {
-            $cmp = \ord($k[$start + $d]) - \ord($lim[$d]);
-        }
+        $cmp = \strcmp(\substr($k, $start, 19), '9223372036854775808');
         if ($cmp > 0 || ($cmp === 0 && !$neg)) { return 2; }
     }
     if ($i < $n && $k[$i] === '.') { return 2; }

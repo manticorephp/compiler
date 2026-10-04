@@ -265,6 +265,14 @@ bash tools/install_smoke.sh > "$MC_LOGDIR/install_smoke.log" 2>&1
 install_rc=$?
 tail -5 "$MC_LOGDIR/install_smoke.log"
 
+# A library and the application linking it share every superglobal slot: one
+# representation in both modules, every overwrite released once.
+echo
+echo "=== tools/libsuperglobal_smoke.sh (a superglobal shared by a library and its app) ==="
+bash tools/libsuperglobal_smoke.sh > "$MC_LOGDIR/libsuperglobal.log" 2>&1
+lib_rc=$?
+tail -5 "$MC_LOGDIR/libsuperglobal.log"
+
 echo
 suite_rc=0
 if [ "$MC_SUITE" != "1" ]; then
@@ -308,8 +316,8 @@ fi
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc ==="
-    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] || exit 1
+    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc ==="
+    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] || exit 1
     exit 0
 fi
 
@@ -334,6 +342,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc difftest=$diff_rc fixpoint=$fix_rc ==="
-[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc difftest=$diff_rc fixpoint=$fix_rc ==="
+[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0

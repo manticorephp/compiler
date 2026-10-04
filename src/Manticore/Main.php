@@ -2709,11 +2709,18 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // any manifest target dir, not just the stdlib's `lib/`.
     system("mkdir -p \"$(dirname \"" . $output . "\")\"");
     // Always-on stdlib runtime: merge its externs alongside any user-library
-    // externs the caller already set. Applications use this unconditionally;
-    // a library needs the same declarations only for opt-in split assembly,
-    // because its `.o` is deliberately unresolved and linked by the app.
+    // externs the caller already set — for an application AND for a library
+    // target (every one but the stdlib itself, which passes $withStdlib false).
+    // A library's `.o` is deliberately left unresolved and linked into the app
+    // together with the stdlib, but an unresolved call is only an EXTERN
+    // reference when it is declared: undeclared, the emitter compiled every
+    // stdlib call a library's prelude bodies make (`__mir_str_offset_form` →
+    // strcmp) into a `Call to undefined function` trap, and the trap preflight
+    // below refused every library that touched one. The declarations carry no
+    // bodies, so nothing is specialised from them; the strong stdlib symbol
+    // still wins over any `linkonce_odr` prelude copy at link time.
     $splitLibrary = $emitLibrary && (int)(\getenv("MANTICORE_SPLIT_JOBS") ?: "0") >= 2;
-    if (($withStdlib && !$emitLibrary) || $splitLibrary) {
+    if ($withStdlib || $splitLibrary) {
         foreach (collect_stdlib_extern_decls(!$emitLibrary) as $d) { CompileArgs::$externDecls[] = $d; }
         if (CompileArgs::$sigError !== '') {
             dprint(CompileArgs::$sigError);
@@ -2871,7 +2878,10 @@ function build_compile_module(array &$sources, string $output, bool $emitLibrary
     // Link the bundled stdlib.o when a stdlib function was actually referenced
     // (lower_module sets linkStdlib from the injected externs) — a program that
     // touches no stdlib function links nothing extra.
-    if ($withStdlib && CompileArgs::$linkStdlib) {
+    // A linked library may reference the stdlib where this program does not
+    // ({@see $withStdlib} above), so a program with library dependencies links
+    // it too.
+    if ($withStdlib && (CompileArgs::$linkStdlib || \count($linkObjs) > 0)) {
         $stdObj = find_stdlib_object();
         if ($stdObj !== "") { $linkExtra = $linkExtra . " " . $stdObj; }
         // Same requirements the single-file `compile` path picks up, from the
@@ -3330,15 +3340,18 @@ function build_manifest_libraries(array $libs, bool $appsOnly): int
         CompileArgs::$externConstants = [];
         CompileArgs::$exportTypes =
             !(isset($lib["runtime"]) && (string)$lib["runtime"] === "1");
-        if (build_cache_hit($sources, $paths, $output, true, [], "", false)) {
+        // Every library but the stdlib itself declares the stdlib's functions
+        // ({@see build_compile_module}).
+        $libStdlib = CompileArgs::$exportTypes;
+        if (build_cache_hit($sources, $paths, $output, true, [], "", $libStdlib)) {
             dprint("build: cache hit library " . $name);
             $rc = 0;
         } else {
             // Preserve the cache identity before lower_module releases source
             // contents through its reference parameter.
-            $cacheKey = build_cache_key($sources, $paths, $output, true, [], "", false);
-            $rc = build_compile_module($sources, $output, true, [], "", false, $paths);
-            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", false, $cacheKey); }
+            $cacheKey = build_cache_key($sources, $paths, $output, true, [], "", $libStdlib);
+            $rc = build_compile_module($sources, $output, true, [], "", $libStdlib, $paths);
+            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", $libStdlib, $cacheKey); }
         }
         CompileArgs::$exportTypes = true;
         if ($rc !== 0) { return $rc; }

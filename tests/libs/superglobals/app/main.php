@@ -11,3 +11,14 @@ for ($i = 0; $i < 3; $i++) {
     $_GET = ['fresh' => $i];
 }
 echo \Acme\Gpc::keys(), ' ', $_GET['fresh'], "\n";
+
+// Every store releases what it overwrites, on both sides of the boundary.
+for ($i = 0; $i < 2000; $i++) { \Acme\Gpc::reset($i); $_GET = ['fresh' => $i]; }
+$b = memory_get_usage();
+for ($i = 0; $i < 50000; $i++) {
+    \Acme\Gpc::reset($i);
+    $_GET['app'] = \str_repeat('a', 200) . $i;
+    $_GET = ['fresh' => \str_repeat('f', 200) . $i];
+}
+$g = memory_get_usage() - $b;
+echo $g < 2 * 1024 * 1024 ? 'growth ok' : 'growth=' . round($g / 1048576, 1) . 'MB', "\n";
