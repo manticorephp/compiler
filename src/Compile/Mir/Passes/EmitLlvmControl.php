@@ -1815,14 +1815,20 @@ trait EmitLlvmControl
         $f = $this->ssa->allocReg();
         $out .= '  ' . $f . ' = load i64, ptr ' . $flag . "\n";
         $c = $this->ssa->allocReg();
-        $out .= '  ' . $c . ' = icmp ne i64 ' . $f . ", 0\n";
+        $cellElT = $elT === null || $elT->kind === Type::KIND_CELL || $elT->kind === Type::KIND_UNKNOWN;
+        // Flag: 0 = raw word for a raw buffer, 1 = a decoded cell, else the
+        // element-hint code of a RAW value the body stored. A cell element
+        // buffer takes every one of them as a cell, never a bare payload.
+        $out .= '  ' . $c . ' = icmp ' . ($cellElT ? 'ne' : 'eq') . ' i64 ' . $f . ', ' . ($cellElT ? '0' : '1') . "\n";
         $encL = $this->ssa->allocLabel('fe.enc');
         $joinL = $this->ssa->allocLabel('fe.encj');
         $out .= '  br i1 ' . $c . ', label %' . $encL . ', label %' . $joinL . "\n";
         $out .= $encL . ":\n";
         if ($elT === null || $elT->kind === Type::KIND_CELL || $elT->kind === Type::KIND_UNKNOWN) {
+            $bx = $this->ssa->allocReg();
+            $out .= '  ' . $bx . ' = call i64 @__mir_box_by_repr(i64 ' . $word . ', i64 ' . $f . ")\n";
             $e = $this->ssa->allocReg();
-            $out .= '  ' . $e . ' = call i64 @__mir_elem_encode(ptr ' . $arr . ', i64 ' . $word . ")\n";
+            $out .= '  ' . $e . ' = call i64 @__mir_elem_encode(ptr ' . $arr . ', i64 ' . $bx . ")\n";
         } else {
             $this->lastValue = $word;
             $this->lastValueType = 'i64';
