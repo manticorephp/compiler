@@ -361,6 +361,30 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->findRefCellProps($c, $out); }
     }
 
+    /**
+     * A STORABLE reference to an element of an array PROPERTY (`[&$o->a[$k]]`,
+     * an `&...$xs` argument) promotes that element into a reference box, so
+     * the property's element channel is a cell — the property analogue of
+     * {@see InferNodes::collectRefElemBases}. `$r = &$o->a[$k]` is not one: it
+     * binds the local to the slot's address in the slot's own representation.
+     */
+    private function findRefElemProps(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\RefCell_ && $n->refSource->kind === Node::KIND_ARRAY_ACCESS) {
+            $src = $n->refSource;
+            $b = $src;
+            $guard = 0;
+            while ($b instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) { $b = $b->array; $guard = $guard + 1; }
+            if ($b instanceof \Compile\Mir\PropertyAccess_) {
+                $cls = $b->object->type->class ?? null;
+                if ($cls !== null && $cls !== '' && !isset($this->cellElemPropsFound[$cls . '::' . $b->property])) {
+                    $this->cellElemPropsFound[$cls . '::' . $b->property] = true;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->findRefElemProps($c); }
+    }
+
     private function scanCellElemProps(Module $module): void
     {
         $this->cellElemPropsFound = [];
@@ -374,6 +398,11 @@ trait InferScans
             }
             if ($cls === '') { continue; }
             $this->findCellElemStores($fn->body, $cls);
+        }
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            if (!$this->bodyHas($fn, Node::KIND_REF_CELL)) { continue; }
+            $this->findRefElemProps($fn->body);
         }
         foreach ($this->cellElemPropsFound as $key => $seen) {
             $cut = \strpos($key, '::');

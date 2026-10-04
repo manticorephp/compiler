@@ -420,7 +420,9 @@ trait InferNodes
         // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
         // a raw string pointer.
         $this->refElemBases = [];
-        if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectRefElemBases($fn->body); }
+        if ($this->bodyHas($fn, Node::KIND_REF_ADDR) || $this->bodyHas($fn, Node::KIND_REF_CELL)) {
+            $this->collectRefElemBases($fn->body);
+        }
         foreach ($this->refElemBases as $name => $unused) {
             unset($this->recordLocals[$name]);
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
@@ -2608,8 +2610,15 @@ trait InferNodes
 
     private function collectRefElemBases(Node $n): void
     {
-        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
-            $b = $n->lvalue;
+        // A STORABLE reference to an element (`[&$a[$k]]`, an `&...$xs` pack
+        // argument) promotes it exactly as `$r = &$a[$k]` does: the slot then
+        // holds a reference box, so the whole buffer is a cell channel. Left
+        // typed, `string[]` refused the program at emit.
+        $src = null;
+        if ($n instanceof \Compile\Mir\RefAddr_) { $src = $n->lvalue; }
+        elseif ($n instanceof \Compile\Mir\RefCell_) { $src = $n->refSource; }
+        if ($src !== null && $src->kind === Node::KIND_ARRAY_ACCESS) {
+            $b = $src;
             $guard = 0;
             while ($b instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) {
                 $b = $b->array;
