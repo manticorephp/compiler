@@ -4934,6 +4934,20 @@ trait EmitLlvmExpr
             $chunks = [$this->emitNode($cellNode)];
             $chunks[] = $this->coerceToI64();
             $v = $this->lastValue;
+            // LOOSE `$m == false` is php's `!$m` — 0, null, "", "0" and an empty
+            // array all equal false. Only the strict compare tests the tag.
+            if ($op === '==' || $op === '!=') {
+                $this->rt->needsTaggedTruthy = true;
+                $t = $this->ssa->allocReg();
+                $chunks[] = '  ' . $t . ' = call i64 @__manticore_tagged_truthy(i64 ' . $v . ")\n";
+                $cmpReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($op === '==' ? 'eq' : 'ne') . ' i64 ' . $t . ", 0\n";
+                $extReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $this->lastValue = $extReg;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
+            }
             $chunks[] = $this->cellTagIr($v);
             $tag = $this->cellTagReg;
             $isBool = $this->ssa->allocReg();
