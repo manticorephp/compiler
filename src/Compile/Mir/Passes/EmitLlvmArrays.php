@@ -512,6 +512,8 @@ trait EmitLlvmArrays
 
     /** @var array{node: ArrayAccess_, arr: string, key: string, word: string}|null */
     private ?array $coalescePre = null;
+    /** The address register of the last {@see emitLookupWord} probe. */
+    private string $lookupAddr = '';
 
     /** Set by {@see emitStrOffsetBase} for the probe string fetch it is about to
      *  emit; read and cleared at the top of that fetch. */

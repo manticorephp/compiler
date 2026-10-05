@@ -5910,7 +5910,33 @@ final class UnifiedArrayRuntime
         $next = $fn->block('next');
         $hit = $fn->block('hit');
         $z = $fn->block('z');
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $canon = $fn->block('canon');
+        $canonInt = $fn->block('canon_int');
+        $fb = $fn->block('first_byte');
+        $outSlot = $e->alloca(Type::i64(), 'canon_out');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $fb);
+        // php normalises a canonical decimal string key to an INT key, so
+        // `$h['5']` finds `[5 => …]` (and a packed `$l['1']` finds `[1 => …]`).
+        // A literal key was folded at lowering (haveHash != 0) and a key that
+        // cannot start a number (first byte not a digit or '-') bails after one
+        // load, so the common string probe pays a byte compare.
+        $nn = $fn->block('key_nonnull');
+        $fb->brIf($fb->icmp('eq', $key, Value::null()), $chk, $nn);
+        $nn2 = $fn->block('key_probe');
+        $nn->brIf($nn->icmp('eq', $haveHash, Value::int(Type::i64(), 0)), $nn2, $chk);
+        $b1 = $nn2->load(Type::i8(), $key);
+        $d1 = $nn2->and_($nn2->icmp('uge', $b1, Value::int(Type::i8(), 48)), $nn2->icmp('ule', $b1, Value::int(Type::i8(), 57)));
+        $m1 = $nn2->icmp('eq', $b1, Value::int(Type::i8(), 45));
+        $nn2->brIf($nn2->or_($d1, $m1), $canon, $chk);
+        $cr = $canon->call('__mir_str_canon_int', Type::i64(), [$key, $outSlot]);
+        $canon->brIf($canon->icmp('ne', $cr, Value::int(Type::i64(), 0)), $canonInt, $chk);
+        $cv = $canonInt->load(Type::i64(), $outSlot);
+        // A dynamic string key is stored un-normalised by set_str, so a miss on the
+        // int side still falls through to the string probe: both spellings are found.
+        $ci = $canonInt->call('__mir_array_lookup_int', Type::ptr(), [$arr, $cv]);
+        $cihit = $fn->block('canon_hit');
+        $canonInt->brIf($canonInt->icmp('ne', $ci, $miss), $cihit, $chk);
+        $cihit->ret($ci);
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');

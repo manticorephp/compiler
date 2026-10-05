@@ -3585,8 +3585,45 @@ final class EmitLlvm implements EmitVisitor
      * Emit one node. The node picks its own visit method (double dispatch) —
      * this used to be a chain of up to 64 `kind ===` tests walked on every node.
      */
+    /**
+     * Operands of a `??` already evaluated into registers — the base and key of
+     * `$o[k()] ?? d` on a string / ArrayAccess / erased base, where the presence
+     * test and the read are emitted by DIFFERENT paths that each emit their
+     * operand nodes. {@see emitNode} answers such a node with its register, so
+     * the expression runs once. A pre-evaluated node reads as BORROWED to every
+     * release predicate (the consumers must not free what the second one reads);
+     * the `??` emitter gives the temps back itself once both arms are done.
+     * @var Node[]
+     */
+    private array $preEvalNodes = [];
+    /** @var string[] */
+    private array $preEvalRegs = [];
+    /** @var string[] */
+    private array $preEvalTypes = [];
+
+    private function preEvalIndex(Node $n): int
+    {
+        foreach ($this->preEvalNodes as $i => $p) {
+            if ($p === $n) { return $i; }
+        }
+        return -1;
+    }
+
+    private function isPreEvaluated(Node $n): bool
+    {
+        return $this->preEvalNodes !== [] && $this->preEvalIndex($n) >= 0;
+    }
+
     private function emitNode(Node $n): string
     {
+        if ($this->preEvalNodes !== []) {
+            $pi = $this->preEvalIndex($n);
+            if ($pi >= 0) {
+                $this->lastValue = $this->preEvalRegs[$pi];
+                $this->lastValueType = $this->preEvalTypes[$pi];
+                return '';
+            }
+        }
         if ($this->irCensus) { return $this->emitNodeCensus($n); }
         $out = $n->accept($this);
         if ($this->cellGuard) { $this->markCellCalleeResult($n); }
@@ -3996,6 +4033,7 @@ final class EmitLlvm implements EmitVisitor
     /** Release a fresh (owned) concat operand temp; '' for a borrow. */
     private function concatTempRelease(Node $op, string $ptr): string
     {
+        if ($this->isPreEvaluated($op)) { return ''; }
         $tk = $op->type->kind;
         if ($tk === Type::KIND_INT || $tk === Type::KIND_FLOAT
             || $tk === Type::KIND_BOOL) {
@@ -4032,6 +4070,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function isFreshStringTemp(Node $node): bool
     {
+        if ($this->isPreEvaluated($node)) { return false; }
         if ($node->type->kind !== Type::KIND_STRING) { return false; }
         $k = $node->kind;
         // A conditional (ternary / `?:` / `??` / match) hands out +1 from EVERY
@@ -4115,6 +4154,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function keyTempRelease(Node $index, string $key, bool $keyIsCell): string
     {
+        if ($this->isPreEvaluated($index)) { return ''; }
         if (!$keyIsCell) { return $this->concatTempRelease($index, $key); }
         $k = $index->kind;
         if ($k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
@@ -4171,6 +4211,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function isFreshCellTemp(Node $n): bool
     {
+        if ($this->isPreEvaluated($n)) { return false; }
         if ($n->type->kind !== Type::KIND_CELL) { return false; }
         // A normalized conditional hands out +1 from every arm ({@see
         // EmitLlvmControl::armRetainPreBox} retains the borrowed one), so a
@@ -4735,6 +4776,7 @@ final class EmitLlvm implements EmitVisitor
 
     private function freshRcArgFlavor(Node $a): string
     {
+        if ($this->isPreEvaluated($a)) { return ''; }
         // A normalized conditional is +1 from every arm, so a borrowed-arg temp
         // must be released after the call like any other fresh producer. Tested
         // first: its result type may be a UNION (which the obj/array gate below

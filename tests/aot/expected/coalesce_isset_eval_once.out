@@ -10,3 +10,21 @@ string(1) "b"
 string(1) "q"
 exists(x) bool(true)
 exists(x) get(x) int(7)
+sb si string(1) "b"
+sb string(1) "q"
+ob ok exists(x) get(x) int(7)
+eb kint(4)
+eb kstring(1) "z"
+eb kstring(1) "z"
+int(9)
+bool(true)
+bool(true)
+bool(true)
+string(1) "a"
+string(1) "a"
+bool(false)
+string(1) "m"
+bool(true)
+int(20)
+bool(true)
+int(-3659174697238528)

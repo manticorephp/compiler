@@ -5394,15 +5394,24 @@ trait EmitLlvmObjects
      */
     private function emitErasedIssetElem(\Compile\Mir\ArrayAccess_ $aa): string
     {
-        $out = $this->emitNode($aa->array);
-        $out .= $this->coerceToI64();
-        $cv = $this->lastValue;
         $keyIsCell = $this->keyRidesCellChannel($aa->index);
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
-        $out .= $this->emitNode($aa->index);
-        $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
-        $key = $this->lastValue;
+        $out = '';
+        $keyFirst = $aa->array->kind === Node::KIND_LOAD_LOCAL;
+        if ($keyFirst) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        }
+        $out .= $this->emitNode($aa->array);
+        $out .= $this->coerceToI64();
+        $cv = $this->lastValue;
+        if (!$keyFirst) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        }
 
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -5518,10 +5527,36 @@ trait EmitLlvmObjects
         }
         $w = $this->ssa->allocReg();
         $out .= '  ' . $w . ' = load i64, ptr ' . $p . "\n";
+        $this->lookupAddr = $p;
         $this->lastValue = $w;
         $this->lastValueType = 'i64';
         return $out;
     }
+
+    /**
+     * `isset`/`??` presence of the last {@see emitLookupWord} probe into lastValue
+     * (i64 0|1). A buffer that can hold boxed cells stores NULL as the boxed NULL
+     * word, so the word is tested against it (a present NULL is unset). A RAW int
+     * element is any i64 — its bits may even equal the boxed NULL — so there
+     * presence is the ADDRESS: not the miss word. A base a by-ref / global view
+     * can reach may have been cellified under its int claim, and keeps the word test.
+     */
+    private function lookupPresent(\Compile\Mir\ArrayAccess_ $aa, string $word): string
+    {
+        $el = $aa->array->type->element;
+        $nn = $this->ssa->allocReg();
+        if ($el !== null && $el->kind === Type::KIND_INT && !$this->elemMayBeCellified($aa->array)) {
+            $out = '  ' . $nn . ' = icmp ne ptr ' . $this->lookupAddr . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
+        } else {
+            $out = '  ' . $nn . ' = icmp ne i64 ' . $word . ', ' . \Compile\MemoryAbi::CELL_NULL . "\n";
+        }
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $nn . " to i64\n";
+        $this->lastValue = $z;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitIssetTarget(Node $t): string
     {
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
@@ -5551,18 +5586,29 @@ trait EmitLlvmObjects
                 return $this->emitErasedIssetElem($aa);
             }
             if ($aa->array->type->kind !== Type::KIND_STRING) {
-                $out = $this->emitNode($aa->array);
+                $keyIsCell = $this->keyRidesCellChannel($aa->index);
+                $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+                    || $aa->index->kind === Node::KIND_STRING_CONST;
+                // php evaluates the key BEFORE it fetches a plain variable base:
+                // `isset($a[f()])` where f() reassigns $a reads the new array.
+                $keyFirst = $aa->array->kind === Node::KIND_LOAD_LOCAL;
+                $out = '';
+                if ($keyFirst) {
+                    $out .= $this->emitNode($aa->index);
+                    $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+                    $key = $this->lastValue;
+                }
+                $out .= $this->emitNode($aa->array);
                 // A `mixed`/cell base (a json_decode value) — and an ERASED one,
                 // which may hold the very same boxed word — carries the array
                 // pointer NaN-boxed ({@see EmitLlvmArrays::arrayBaseToPtr}).
                 $out .= $this->arrayBaseToPtr($aa->array->type);
                 $arr = $this->lastValue;
-                $keyIsCell = $this->keyRidesCellChannel($aa->index);
-                $keyIsString = $aa->index->type->kind === Type::KIND_STRING
-                    || $aa->index->kind === Node::KIND_STRING_CONST;
-                $out .= $this->emitNode($aa->index);
-                $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
-                $key = $this->lastValue;
+                if (!$keyFirst) {
+                    $out .= $this->emitNode($aa->index);
+                    $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+                    $key = $this->lastValue;
+                }
                 $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
                 $val = $this->lastValue;
                 // PHP isset()/`??` treat a PRESENT-but-NULL value as unset, and the
@@ -5576,13 +5622,7 @@ trait EmitLlvmObjects
                 if ($keyIsCell || $keyIsString) {
                     $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                 }
-                $nn = $this->ssa->allocReg();
-                $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n"; // != box_null
-                $rr = $this->ssa->allocReg();
-                $out .= '  ' . $rr . ' = zext i1 ' . $nn . " to i64\n";
-                $this->lastValue = $rr;
-                $this->lastValueType = 'i64';
-                return $out;
+                return $out . $this->lookupPresent($aa, $val);
             }
             // String receiver: isset($s[$i]) — the binary-safe length lives in
             // the header (at ptr-16), NOT at ptr (that's the first data byte),
