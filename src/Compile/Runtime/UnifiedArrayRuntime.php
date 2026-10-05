@@ -146,6 +146,7 @@ final class UnifiedArrayRuntime
         $this->emitCellToBag();
         $this->emitCellToKind();
         $this->emitArrayConform();
+        $this->emitArrayConformInner();
         $this->emitArrayIsList();
         $this->emitArrayReindexInplace();
         $this->emitElemUntagKind();
@@ -5221,6 +5222,72 @@ final class UnifiedArrayRuntime
         $withRepr = $stamp->or_($reprCleared, $newRepr);
         $stamp->store($stamp->select($hasRepr, $withRepr, $hinted), $fp);
         $stamp->retVoid();
+    }
+
+    /**
+     * `__mir_array_conform_inner(arr, kind)` — {@see emitArrayConform} one level
+     * down: every element of `arr` that is an ARRAY buffer is conformed to the
+     * inner claim `kind`. `arr` itself must already speak raw words (conform it
+     * to the ARR kind first). The nested half of a call binding: an erased or
+     * cell-element `array<string, list<bool>>` built from boxed reads handed to
+     * a `@param array<string, bool[]>` kept its inner buffers CELL-hinted, and
+     * the callee read a boxed `false` raw — true.
+     */
+    private function emitArrayConformInner(): void
+    {
+        $fn = $this->module->func('__mir_array_conform_inner', Type::void());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $e = $fn->block('entry');
+        $walk = $fn->block('walk');
+        $phead = $fn->block('phead');
+        $pbody = $fn->block('pbody');
+        $hhead = $fn->block('hhead');
+        $hbody = $fn->block('hbody');
+        $hlive = $fn->block('hlive');
+        $hadv = $fn->block('hadv');
+        $done = $fn->block('done');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $walk);
+        $done->retVoid();
+        $flags = $walk->load(Type::i64(), $this->hdr($walk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $walk->load(Type::i64(), $arr);
+        $iSlot = $walk->alloca(Type::i64(), 'cii');
+        $walk->store(Value::int(Type::i64(), 0), $iSlot);
+        $walk->brIf($walk->icmp('ne', $this->hashedBit($walk, $flags), Value::int(Type::i64(), 0)), $hhead, $phead);
+
+        $pi = $phead->load(Type::i64(), $iSlot);
+        $phead->brIf($phead->icmp('sge', $pi, $len), $done, $pbody);
+        $pw = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
+        $pbody = $this->emitConformInnerOne($fn, $pbody, $pw, $kind, 'p');
+        $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
+        $pbody->br($phead);
+
+        $hi = $hhead->load(Type::i64(), $iSlot);
+        $hhead->brIf($hhead->icmp('sge', $hi, $len), $done, $hbody);
+        $ek = $hbody->load(Type::i64(), $this->entryAddr($hbody, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $hbody->brIf($hbody->icmp('eq', $ek, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED)), $hadv, $hlive);
+        $hw = $hlive->load(Type::i64(), $this->entryAddr($hlive, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $hlive = $this->emitConformInnerOne($fn, $hlive, $hw, $kind, 'h');
+        $hlive->br($hadv);
+        $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
+        $hadv->br($hhead);
+    }
+
+    /** Conform the element word `$w` when it is an array buffer; returns the
+     *  continuation block. */
+    private function emitConformInnerOne(FunctionDef $fn, Block $b, Value $w, Value $kind, string $tag): Block
+    {
+        $chk = $fn->block('ci_chk_' . $tag);
+        $go = $fn->block('ci_go_' . $tag);
+        $join = $fn->block('ci_join_' . $tag);
+        $p = $b->and_($w, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK));
+        $b->brIf($b->icmp('ugt', $p, Value::int(Type::i64(), 65535)), $chk, $join);
+        $pp = $chk->inttoptr($p, Type::ptr());
+        $t = $chk->load(Type::i64(), $chk->gep(Type::i8(), $pp, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]));
+        $chk->brIf($chk->icmp('eq', $t, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_MAGIC)), $go, $join);
+        $go->call('__mir_array_conform', Type::void(), [$pp, $kind]);
+        $go->br($join);
+        return $join;
     }
 
     /**

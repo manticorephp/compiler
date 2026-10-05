@@ -6038,15 +6038,54 @@ trait EmitLlvmExpr
             $this->scalarStrArgTemp = $this->lastValue;
             return $out;
         }
-        if ($ak !== Type::KIND_CELL) { return ''; }
+        if ($ak !== Type::KIND_CELL) { return $this->nestedArgConform($a->type, $pt); }
         if ($pt === null) { return ''; }
         $out = $this->unboxCellToType($pt);
+        $out .= $this->nestedArgConform($a->type, $pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
         // leaves a `double` behind (the tag has to be read to get a real value
         // out of the cell) — carry it over as its bit pattern, or the call site
         // emits `i64 %d` for a double-typed register and clang rejects the
         // module. Every other kind already leaves an i64 and this is a no-op.
         return $out . $this->coerceToI64();
+    }
+
+    /**
+     * An array argument whose INNER buffers the caller cannot vouch for (its
+     * element is erased or a cell, at the outer or the nested level) bound to a
+     * param claiming a concrete nested element — `@param array<string, bool[]>`
+     * fed an `assoc[string, unknown]` built from boxed reads: the callee reads
+     * the inner words raw, and a boxed `false` is true. Conform the argument to
+     * the claim in place, both levels ({@see \Compile\Runtime\UnifiedArrayRuntime::emitArrayConform},
+     * a no-op on a buffer not hinted CELL), as a typed return already is. One
+     * level is the existing call-binding rebuild's; this is the level below.
+     * lastValue (the array word) is left as it was.
+     */
+    private function nestedArgConform(Type $at, ?Type $pt): string
+    {
+        if ($pt === null || !$at->isArray() || $at->isShape()) { return ''; }
+        if ((!$pt->isVec() && !$pt->isAssoc()) || $pt->isShape()) { return ''; }
+        $el = $pt->element;
+        if ($el === null || (!$el->isVec() && !$el->isAssoc()) || $el->isShape() || $el->element === null) { return ''; }
+        $outerCode = $this->elementHintCodeForType($el);
+        $innerCode = $this->elementHintCodeForType($el->element);
+        if ($outerCode === null || $innerCode === null
+            || $innerCode === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return ''; }
+        $ae = $at->element;
+        $loose = static fn (?Type $t): bool => $t === null || $t->kind === Type::KIND_UNKNOWN || $t->kind === Type::KIND_CELL;
+        if (!$loose($ae) && !($ae->isArray() && $loose($ae->element))) { return ''; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out = $this->coerceToI64();
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $out .= '  call void @__mir_array_conform(ptr ' . $p . ', i64 ' . (string)$outerCode . ")\n";
+        $out .= '  call void @__mir_array_conform_inner(ptr ' . $p . ', i64 ' . (string)$innerCode . ")\n";
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
     }
 
     /**
