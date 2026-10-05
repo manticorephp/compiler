@@ -338,7 +338,6 @@ final class UnifiedArrayRuntime
      * unset and both backshift loops — or a key is inserted at one slot and
      * hunted at another, which is a silent miss, not a crash.
      */
-
     private function intBucketHash(Block $b, Value $k): Value
     {
         $f = $b->xor_($k, $b->lshr($k, Value::int(Type::i64(), 12)));
@@ -887,8 +886,8 @@ final class UnifiedArrayRuntime
      * `__mir_array_index_build(arr) -> void` — (re)build the open-addressed
      * bucket index over the current HASHED entries. `nbuckets` = next power
      * of two >= max(16, len*2); each bucket holds `(h32 << 32) | (entry_index + 1)`
-     * (0 = empty, see {@see packBucket}). DELETED entries are skipped. Int keys hash to themselves
-     * (dense after promote); string keys via FNV.
+     * (0 = empty, see {@see packBucket}). DELETED entries are skipped. h32 is the low
+     * 32 bits of the key hash ({@see intBucketHash} for an int key, FNV for a string).
      */
     private function emitIndexBuild(): void
     {
@@ -994,7 +993,7 @@ final class UnifiedArrayRuntime
         $pscan->brIf($pscan->icmp('eq', $bv, Value::int(Type::i64(), 0)), $pput, $pstep);
         $pstep->store($pstep->and_($pstep->add($s, Value::int(Type::i64(), 1)), $mask), $sSlot);
         $pstep->br($pscan);
-        // Store entry_index + 1 at the empty slot.
+        // Store the packed bucket word (h32 << 32 | entry_index + 1) at the empty slot.
         $sput = $pput->load(Type::i64(), $sSlot);
         $putAddr = $pput->gep(Type::i64(), $buckets, [$sput]);
         $pput->store($this->packBucket($pput, $pput->load(Type::i64(), $hSlot), $pput->add($i, Value::int(Type::i64(), 1))), $putAddr);
@@ -1172,7 +1171,7 @@ final class UnifiedArrayRuntime
     /**
      * `__mir_array_copy(src) -> ptr` — unconditional value copy (PHP array
      * value semantics) of a unified array, preserving mode. Flat memcpy of
-     * header + body (packed cap*8 / hashed cap*24), fresh rc=1, index reset.
+     * header + body (packed cap*8 / hashed cap*24), fresh rc=1, index duplicated.
      * Replaces `__mir_vec_copy` at the `$b = $a` / property-snapshot sites
      * under --array=unified (the vec-layout copy would read the wrong size
      * and miss the elements at the 56-byte unified header). Element values
@@ -1199,7 +1198,7 @@ final class UnifiedArrayRuntime
         $go->store(Value::int(Type::i64(), 0), $this->hdr($go, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $go->store(Value::null(), $this->hdr($go, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
         // The copy holds the same entries at the same positions, so the source's
-        // bucket index (entry_index + 1 per slot) is valid for it verbatim:
+        // bucket index ((h32 << 32) | entry_index + 1 per slot) is valid for it verbatim:
         // duplicate it instead of leaving the copy to rebuild on its first lookup.
         $srcNb = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $srcBk = $go->load(Type::ptr(), $this->hdr($go, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
