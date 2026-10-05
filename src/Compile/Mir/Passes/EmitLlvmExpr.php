@@ -2650,6 +2650,58 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /** `$arr[$k] ?? d` over a statically-typed array base: the shape that probes once. */
+    private function coalesceFusable(Node $left): bool
+    {
+        if ($left->kind !== Node::KIND_ARRAY_ACCESS) { return false; }
+        $bk = $left->array->type->kind;
+        if ($bk === Type::KIND_STRING || $bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) { return false; }
+        if ($bk === Type::KIND_OBJ) { return false; }
+        return true;
+    }
+
+    /**
+     * Evaluate the base and key of `$a[$k] ?? d` ONCE, probe once, and leave
+     * `present` (i64 0|1) in lastValue and the operands in {@see $coalescePre}
+     * for {@see emitArrayAccessUnified}. The found word is a BORROW of the
+     * element, like the one a plain `$a[$k]` read takes, so the left arm keeps
+     * the retain path of its ordinary read ({@see armRetainPreBox}).
+     */
+    private function emitCoalesceArrayLookup(\Compile\Mir\ArrayAccess_ $aa): string
+    {
+        $out = $this->emitNode($aa->array);
+        $out .= $this->arrayBaseToPtr($aa->array->type);
+        $arr = $this->lastValue;
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        $out .= $this->emitNode($aa->index);
+        $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+        $key = $this->lastValue;
+        $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
+        $word = $this->lastValue;
+        $nn = $this->ssa->allocReg();
+        $out .= '  ' . $nn . ' = icmp ne i64 ' . $word . ", -3659174697238528\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $nn . " to i64\n";
+        $this->coalescePre = ['node' => $aa, 'arr' => $arr, 'key' => $key, 'word' => $word];
+        $this->lastValue = $z;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** The right arm of a fused `??`: no element was read, so give back the key and base temps. */
+    private function coalesceMissRelease(Node $left, array $pre): string
+    {
+        $out = '';
+        $ki = $left->index;
+        $keyIsCell = $this->keyRidesCellChannel($ki);
+        $keyIsString = $ki->type->kind === Type::KIND_STRING || $ki->kind === Node::KIND_STRING_CONST;
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($ki, $pre['key'], $keyIsCell);
+        }
+        return $out . $this->baseTempRelease($left->array, $pre['arr'], true, Type::int_());
+    }
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
         $nc = $n;
@@ -2675,14 +2727,24 @@ trait EmitLlvmExpr
             $wantCell = $n->type->kind === Type::KIND_CELL;
             $res = $this->ssa->allocReg();
             $out = '  ' . $res . " = alloca i64\n";
+            $fused = $this->coalesceFusable($nc->left);
             // `$s[$k] ?? d` on a STRING is not isset: php throws for an array /
             // object key and warns on `"1x"` ({@see EmitLlvmArrays::coerceStrOffset}).
             $lft = $nc->left;
             $this->strOffsetCoalesce = $lft instanceof \Compile\Mir\ArrayAccess_
                 && $lft->array->type->kind === Type::KIND_STRING;
-            $out .= $this->emitIssetTarget($nc->left);
+            if ($fused) {
+                // One probe, base and key evaluated once: the left arm reads the
+                // word it found, the right arm gives the temps back.
+                $out .= $this->emitCoalesceArrayLookup($nc->left);
+                $pre = $this->coalescePre;
+                $present = $this->lastValue;
+            } else {
+                $out .= $this->emitIssetTarget($nc->left);
+                $pre = null;
+                $present = $this->lastValue;
+            }
             $this->strOffsetCoalesce = false;
-            $present = $this->lastValue;
             $bit = $this->ssa->allocReg();
             $out .= '  ' . $bit . ' = icmp ne i64 ' . $present . ", 0\n";
             $useL = $this->ssa->allocLabel('nc.left');
@@ -2690,7 +2752,9 @@ trait EmitLlvmExpr
             $end  = $this->ssa->allocLabel('nc.end');
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
+            $this->coalescePre = $pre;
             $out .= $this->emitNode($nc->left);
+            $this->coalescePre = null;
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->left);
                 // The arm NODE goes with the type: a concrete-element array is
@@ -2707,6 +2771,7 @@ trait EmitLlvmExpr
             $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
+            if ($pre !== null) { $out .= $this->coalesceMissRelease($nc->left, $pre); }
             $out .= $this->emitNode($nc->right);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->right);
