@@ -300,6 +300,20 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * Bucket word: `(h32 << 32) | (entry_index + 1)`, 0 = empty. h32 is the low
+     * 32 bits of the key's hash, so the slot's HOME is `h32 & mask` (the index
+     * has < 2^32 slots: nbuckets is a power of two >= 2*len, and an array of
+     * 2^31 entries is past the 24-byte-entry address-space limits anyway) and a
+     * backshift needs neither the entry nor a re-hash. A probe compares the tag
+     * before it loads the entry. EVERY bucket site goes through this layout.
+     */
+    private function packBucket(Block $b, Value $hash, Value $idxPlus1): Value
+    {
+        $tag = $b->and_($hash, Value::int(Type::i64(), 4294967295));
+        return $b->or_($b->shl($tag, Value::int(Type::i64(), 32)), $idxPlus1);
+    }
+
+    /**
      * Bucket home for an INT key. The key ITSELF is a terrible open-addressing
      * hash: sequential keys (`$v[0..n]`, the shape every list has) land in one
      * contiguous run, and backshift deletion has to walk to the END of that run
@@ -324,19 +338,7 @@ final class UnifiedArrayRuntime
      * unset and both backshift loops — or a key is inserted at one slot and
      * hunted at another, which is a silent miss, not a crash.
      */
-    /**
-     * Bucket word: `(h32 << 32) | (entry_index + 1)`, 0 = empty. h32 is the low
-     * 32 bits of the key's hash, so the slot's HOME is `h32 & mask` (the index
-     * has < 2^32 slots: nbuckets is a power of two >= 2*len, and an array of
-     * 2^31 entries is past the 24-byte-entry address-space limits anyway) and a
-     * backshift needs neither the entry nor a re-hash. A probe compares the tag
-     * before it loads the entry. EVERY bucket site goes through this layout.
-     */
-    private function packBucket(Block $b, Value $hash, Value $idxPlus1): Value
-    {
-        $tag = $b->and_($hash, Value::int(Type::i64(), 4294967295));
-        return $b->or_($b->shl($tag, Value::int(Type::i64(), 32)), $idxPlus1);
-    }
+
     private function intBucketHash(Block $b, Value $k): Value
     {
         $f = $b->xor_($k, $b->lshr($k, Value::int(Type::i64(), 12)));

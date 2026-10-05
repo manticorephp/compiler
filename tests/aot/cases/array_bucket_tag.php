@@ -45,3 +45,18 @@ array_pop($q); array_shift($q);
 $bad = 0;
 for ($i = 1; $i < 1999; $i++) { if ($q["k$i"] !== $i) { $bad++; } }
 echo "popshift bad=$bad count=", count($q), "\n";
+// keys sharing the 32-bit bucket tag: string pair + int keys with equal tag and home
+$ik = [5, 5 + 2 ** 44, 5 + 2 ** 45, 5 - 2 ** 44, 5 + 2 ** 50];
+$sk = ['key_0012275', 'key_0086553'];
+$t = [];
+for ($i = 0; $i < 40; $i++) { $t["pad$i"] = $i; }
+foreach ($ik as $n => $k) { $t[$k] = "i$n"; }
+foreach ($sk as $n => $k) { $t[$k] = "s$n"; }
+$all = array_merge($ik, $sk);
+unset($t[$ik[1]], $t[$sk[0]]);
+foreach ($all as $k) { echo isset($t[$k]) ? 1 : 0; }
+echo "\n";
+$t[$ik[1]] = 'again'; $t[$sk[0]] = 'again';
+$u = $t;
+unset($u[$ik[2]], $u[$sk[1]]);
+foreach ([$t, $u] as $m) { foreach ($all as $k) { echo $m[$k] ?? '-', ','; } echo "\n"; }
