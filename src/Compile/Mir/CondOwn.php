@@ -15,7 +15,8 @@ namespace Compile\Mir;
  * the conditional as an owned producer, exactly like a call. That only holds if
  * the two passes agree exactly: emitter normalizes but InsertMemoryOps says
  * borrowed ⇒ the value leaks; the other way round ⇒ it is double-freed. Hence
- * one predicate, not two copies of one.
+ * one predicate, not two copies of one. Both sides reach it through
+ * {@see Ownership::condOwnedStored} / {@see Ownership::condOwnedTemp}.
  *
  * `armsCoverable` is deliberately a TYPE-ONLY test — no class tables, no
  * signatures — so both callers compute the identical answer. Each caller adds
@@ -146,6 +147,13 @@ final class CondOwn
         $ae = $arm->element;
         $re = $res->element;
         if ($ae === null || $re === null) { return $ae === null && $re === null; }
+        // A concrete-element arm under a CELL-element result is REBUILT into a
+        // fresh cell buffer by the emitter ({@see Passes\EmitLlvmControl::armCoerce}
+        // — the same test, {@see Ownership::needsCellify}), so it is a +1 of the
+        // result's own representation. Refusing left the store a borrow:
+        // `$x = $c ? $this->cellMap : f()` dangled once the property was
+        // overwritten.
+        if ($re->kind === Type::KIND_CELL && $ae->kind !== Type::KIND_UNKNOWN) { return true; }
         if ($ae->kind !== $re->kind) { return false; }
         if ($ae->kind === Type::KIND_OBJ) { return ($ae->class ?? '') === ($re->class ?? ''); }
         return true;

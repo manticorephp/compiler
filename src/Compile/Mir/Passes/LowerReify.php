@@ -543,12 +543,14 @@ trait LowerReify
         } else {
             $stmts[] = new \Compile\Mir\Return_($call, Type::void());
         }
-        return new FunctionDef(
+        $thunk = new FunctionDef(
             name: $spec . '__' . $method . '$erased',
             params: $params,
             returnType: $base->returnType,
             body: new \Compile\Mir\Block($stmts, Type::void()),
         );
+        $thunk->returnArrayHinted = $base->returnArrayHinted;
+        return $thunk;
     }
 
     /**

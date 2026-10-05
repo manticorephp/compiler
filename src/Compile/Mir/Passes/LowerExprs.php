@@ -515,7 +515,7 @@ trait LowerExprs
             // collide with other subclasses' same-named fields at different
             // offsets, so read them through a typed param (T5 pattern) — else
             // a garbage class/name misses the enum table and falls through to
-            // the "unsupported expression" throw (uncaught → longjmp crash).
+            // the "unsupported expression" throw (uncaught → fatal).
             $saClass = $this->staticAccessClass($expr);
             $saName = $this->staticAccessName($expr);
             // `Class::class` / `self::class` / `parent::class` → the fully

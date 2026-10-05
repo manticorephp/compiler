@@ -116,16 +116,17 @@ trait LowerFns
                 $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
             );
             $pt = $isVariadic
-                ? Type::vec($this->lowerTypeHint($p->typeHint))
+                ? $this->variadicPackType($p)
                 : $this->lowerParamType($effHint);
             $fp = new Param(
                 name: $p->name,
                 type: $pt,
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $fp->refPack = $this->paramIsRefPack($p);
             // A VARIADIC pack is genuinely 0..n — its vec is the compiler's own
             // and its keys are not in question.
             $fp->docList = !$isVariadic && $this->isElemOnlyArrayDoc($effHint);
@@ -221,6 +222,7 @@ trait LowerFns
         );
         $fn->isGenerator = $isGen;
         $fn->usesFuncArgs = $usesFuncArgs;
+        $fn->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
         if ($fn->isGenerator) {
             // A generator CALL returns a Generator (its frame ptr); type it so
             // foreach / InferTypes route through the iterator-protocol path.
@@ -271,7 +273,7 @@ trait LowerFns
             // survives the interface `.sig`, so it is the portable signal.
             $outType = $this->docTagType($decl->docComment, '@param-out', $p->name);
             $pt = $isVariadic
-                ? Type::vec($this->lowerTypeHint($p->typeHint))
+                ? $this->variadicPackType($p)
                 : $this->lowerTypeHint($this->effectiveHint(
                     $p->typeHint,
                     $outType ?? $this->docTagType($decl->docComment, '@param', $p->name),
@@ -279,18 +281,19 @@ trait LowerFns
             $fnp = new Param(
                 name: $p->name,
                 type: $pt,
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fnp->refOut = $outType !== null || isset($refOutNames[$p->name]);
+            $fnp->refPack = $this->paramIsRefPack($p);
             // The `.sig`-carried CellArg flag (declsFromJson set $p->cellArg) is
             // the cross-module signal: a consumer sees only the interface, so this
             // is how fputcsv's element-consuming `$fields` reaches the caller.
             $fnp->cellArg = $this->paramCellArg($p) || isset($cellArgNames[$p->name]);
             $params[] = $fnp;
         }
-        return new FunctionDef(
+        $ext = new FunctionDef(
             name: $decl->name,
             params: $params,
             returnType: $this->lowerTypeHint($this->effectiveHint(
@@ -300,6 +303,8 @@ trait LowerFns
             body: new Block([], Type::void()),
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
+        $ext->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
+        return $ext;
     }
 
     /**
@@ -487,7 +492,7 @@ trait LowerFns
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null, bool $forwardsErasedArray = false): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -523,9 +528,9 @@ trait LowerFns
                 // read the raw bits and a string arg renders as its pointer. A
                 // variadic is ONE vec param, as for a named function.
                 type: ($p->variadic ?? false)
-                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    ? $this->variadicPackType($p)
                     : $this->lowerParamType($p->typeHint),
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: (bool)($p->variadic ?? false),
                 // The call site pads an omitted trailing param from this: the
                 // closure ABI carries no arity, so without it the entry read
@@ -537,6 +542,7 @@ trait LowerFns
             // argument (`$f(mk())` with `mk(): mixed`) otherwise reached the
             // COW as a tagged word.
             $cp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $cp->type->isArray();
+            $cp->refPack = $this->paramIsRefPack($p);
             $params[] = $cp;
         }
         $retType = $this->lowerTypeHint($retHint);
@@ -561,6 +567,7 @@ trait LowerFns
         );
         $clFn->isGenerator = $isGenerator;
         $clFn->usesFuncArgs = $usesFuncArgs;
+        $clFn->returnArrayHinted = $forwardsErasedArray || $this->isBareArrayReturnHint($retHint);
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
@@ -596,7 +603,7 @@ trait LowerFns
      * @param Type[]   $capTypes
      * @param Node[]   $capVals
      */
-    private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret): Node
+    private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false): Node
     {
         $id = $this->closureCounter;
         $this->closureCounter = $id + 1;
@@ -614,6 +621,7 @@ trait LowerFns
             returnType: $ret,
             body: new Block([new Return_($callNode, Type::void())], Type::void()),
         );
+        $clFn->returnArrayHinted = $forwardsErasedArray;
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         $byRef = [];
@@ -901,17 +909,25 @@ trait LowerFns
             'MIR.lower: free-variable scan has no rule for expression kind ' . $k);
     }
 
+    private function paramByRefDecl(\Parser\Ast\Param $p): bool { return (bool)($p->byRef ?? false); }
+
     /**
-     * Lower AST call args against a known parameter signature, filling
-     * omitted trailing params with their default expression (or null),
-     * reordering named args, and packing a trailing variadic into a vec.
-     * Critical for `new`/method/static calls: the callee reads one slot
-     * per param, so an omitted obj-typed default left uninitialized makes
-     * the callee retain stack garbage.
-     * @param \Parser\Ast\Param[] $params
-     * @param \Parser\Ast\Expr[]  $astArgs
-     * @return Node[]
+     * One argument of a by-ref variadic pack: a reference to the caller's
+     * variable, property or element (`[&$x]`, the array-literal ref cell), so
+     * a write through `$xs[$i]` or a by-ref `foreach` over the pack reaches it.
+     * Anything else is no lvalue and php refuses it; it rides as a value.
      */
+    private function lowerRefPackElem(\Parser\Ast\Expr $a): Node
+    {
+        $k = $a->kind;
+        if (\Compile\Debug::$refCells && ($k === 'Variable' || $k === 'PropertyAccess' || $k === 'ArrayAccess')) {
+            $lv = $this->lowerExpr($a);
+            $this->module->hasRefCells = true;
+            return new \Compile\Mir\RefCell_($lv, Type::cell());
+        }
+        return $this->lowerExpr($a);
+    }
+
     /**
      * Lower one argument, converting a callable LITERAL into a closure when the
      * parameter at this position is `callable`-typed. lowerCallArgs does this on
@@ -1006,6 +1022,17 @@ trait LowerFns
         return new Block($stmts, $body->type);
     }
 
+    /**
+     * Lower AST call args against a known parameter signature, filling
+     * omitted trailing params with their default expression (or null),
+     * reordering named args, and packing a trailing variadic into a vec.
+     * Critical for `new`/method/static calls: the callee reads one slot
+     * per param, so an omitted obj-typed default left uninitialized makes
+     * the callee retain stack garbage.
+     * @param \Parser\Ast\Param[] $params
+     * @param \Parser\Ast\Expr[]  $astArgs
+     * @return Node[]
+     */
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
         $hasNamed = false;
@@ -1016,11 +1043,13 @@ trait LowerFns
         $np = \count($params);
         if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
             $vidx = $np - 1;
+            $refPack = $this->paramByRefDecl($params[$vidx]);
             $out = [];
             $packed = [];
             $i = 0;
             foreach ($astArgs as $a) {
                 if ($i < $vidx) { $out[] = $this->lowerArgForParam($params[$i] ?? null, $a); }
+                elseif ($refPack) { $packed[] = new ArrayElement_(null, $this->lowerRefPackElem($a)); }
                 else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
                 $i = $i + 1;
             }

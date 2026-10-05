@@ -86,6 +86,8 @@ trait InferNodes
      */
     private function inferFunction(FunctionDef $fn): void
     {
+        $this->inferFnBody = $fn->body;
+        $this->collectSharedWordLocals($fn);
         $this->cellLoopLocals = [];
         $this->tryStoreFrames = [];
         $this->floatLoopLocals = [];
@@ -174,6 +176,13 @@ trait InferNodes
             if (!\str_starts_with($d->cell, '@g_')
                 && isset($this->staticLocalTypes[$d->cell])
                 && $this->staticLocalTypes[$d->cell]->kind === Type::KIND_CELL) {
+                $out[$d->name] = true;
+            }
+            // A `global $g` whose scopes store more than one kind is a cell in
+            // every scope ({@see InferScans::scanGlobalTypes}).
+            if (\str_starts_with($d->cell, '@g_')
+                && isset($this->globalVarTypes[$d->name])
+                && $this->globalVarTypes[$d->name]->kind === Type::KIND_CELL) {
                 $out[$d->name] = true;
             }
             return;
@@ -266,17 +275,18 @@ trait InferNodes
         if ($this->bodyHas($fn, Node::KIND_REF_CELL)) {
             $this->collectRefCellLocals($fn->body, $this->refCellLocalsCur);
         }
+        // A `static $x;` whose stores are scalar rides a CELL for the same
+        // reason a ref-taken slot does: its null start must stay observable
+        // ({@see InferScans::scanStaticLocalTypes}), so every store boxes. A
+        // reference alias of such a slot (`$t = &$g`) is the same slot.
+        if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
+            $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
+        }
         $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
         // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
         // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
         // box — a cell — whatever it is later assigned.
         if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectElemRefTargetsInfer($fn->body); }
-        // A `static $x;` whose stores are scalar rides a CELL for the same
-        // reason a ref-taken slot does: its null start must stay observable
-        // ({@see InferScans::scanStaticLocalTypes}), so every store boxes.
-        if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
-            $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
-        }
         foreach ($fn->params as $p) {
             // A MIXED-REPRESENTATION union param (`string|array`, `object|string`)
             // arrives NaN-BOXED — the call site emits __manticore_box_array /
@@ -317,6 +327,9 @@ trait InferNodes
         // correction to it. {@see InferScans::scanByRefCaptureWiden}
         $this->cellCaptureLocals = $this->byRefCaptureCellLocals[$fn->name] ?? [];
         foreach ($this->cellCaptureLocals as $name => $unused) {
+            // A by-value PARAM still arrives in its declared representation;
+            // its slot turns cell at the entry store {@see boxParamAtEntry} plants.
+            if ($this->paramArrivesRaw($fn, $name)) { continue; }
             $this->localTypes[$name] = Type::cell();
             // The closure's by-ref capture PARAM is that word too: an erased
             // one left the emitter storing a raw string into the cell the
@@ -428,7 +441,9 @@ trait InferNodes
         // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
         // a raw string pointer.
         $this->refElemBases = [];
-        if ($this->bodyHas($fn, Node::KIND_REF_ADDR)) { $this->collectRefElemBases($fn->body); }
+        if ($this->bodyHas($fn, Node::KIND_REF_ADDR) || $this->bodyHas($fn, Node::KIND_REF_CELL)) {
+            $this->collectRefElemBases($fn->body);
+        }
         foreach ($this->refElemBases as $name => $unused) {
             unset($this->recordLocals[$name]);
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
@@ -444,6 +459,7 @@ trait InferNodes
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
             $this->seedCellElemLocal($name);
         }
+        $this->cellElemParamEntry($fn);
         // A local a `&` points at from a STORING position is a CELL for its whole
         // lifetime — the tree's one-slot-one-representation rule, applied to the
         // one construct that can hand a slot to a holder that reads it by TAG.
@@ -712,6 +728,7 @@ trait InferNodes
         if ($kind === Node::KIND_INVOKE)      { return $this->inferInvoke($node); }
         if ($kind === Node::KIND_INCDEC)      { return $this->inferIncDec($node); }
         if ($kind === Node::KIND_STATIC_PROP) { return $node->type; }
+        if ($kind === Node::KIND_CAUGHT_VALUE) { return $this->inferCaughtValue($node); }
         if ($kind === Node::KIND_STORE_STATIC_PROP) { return $this->inferStoreStaticProp($node); }
         if ($kind === Node::KIND_STATIC_LOCAL_DECL) { return $this->inferStaticLocalDecl($node); }
         if ($kind === Node::KIND_ISSET) { return $this->inferIsset($node); }
@@ -1040,7 +1057,16 @@ trait InferNodes
             $keyType = isset($this->cellKeyLocals[$node->name]) ? Type::cell() : Type::string_();
             $shape = isset($this->assocLocals[$node->name])
                 ? Type::assoc($keyType, Type::cell()) : Type::vec(Type::cell());
-            $node->value->type = $shape;
+            // Only a LITERAL is re-typed — it is built where it stands. Any other
+            // concrete-element array (a typed param, a call result) already HAS
+            // its representation: re-labelling its node claimed `$p` held cells
+            // while its buffer held raw ints. The store converts it instead
+            // ({@see EmitLlvmLocals::emitStoreLocal}, forward-cellify).
+            $vel = $valueType->element;
+            if ($node->value->kind === Node::KIND_ARRAY_LIT || $vel === null
+                || $vel->kind === Type::KIND_CELL || $vel->kind === Type::KIND_UNKNOWN) {
+                $node->value->type = $shape;
+            }
             $this->localTypes[$node->name] = $shape;
             $node->type = $shape;
             return $shape;
@@ -1091,10 +1117,6 @@ trait InferNodes
         $exit = self::stmtsDiverge($n->tryBody) ? null : $tryEnd;
         foreach ($n->catches as $c) {
             $this->localTypes = $catchEntry;
-            // Bind `$e` to the first declared catch type (obj<T>).
-            if ($c->var !== null && \count($c->types) > 0) {
-                $this->localTypes[$c->var] = Type::obj($c->types[0]);
-            }
             foreach ($c->body as $s) { $this->inferNode($s); }
             if (!self::stmtsDiverge($c->body)) {
                 $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
@@ -1178,6 +1200,25 @@ trait InferNodes
     {
         foreach ($n->targets as $t) { $this->inferNode($t); }
         return Type::void();
+    }
+
+    /**
+     * The object a `catch (A | B $e)` binds is one of its classes: their join
+     * ({@see unionTypes} — a common ancestor or interface). A join that is not
+     * an object (a class this module does not know) keeps the first class.
+     */
+    private function inferCaughtValue(\Compile\Mir\CaughtValue_ $n): Type
+    {
+        $t = null;
+        foreach ($n->types as $cls) {
+            $o = Type::obj($cls);
+            $t = $t === null ? $o : $this->unionTypes($t, $o);
+        }
+        if ($t === null || ($t->kind !== Type::KIND_OBJ && $t->kind !== Type::KIND_UNION)) {
+            $t = Type::obj(\count($n->types) > 0 ? $n->types[0] : 'Throwable');
+        }
+        $n->type = $t;
+        return $t;
     }
 
     private function inferStaticLocalDecl(StaticLocalDecl_ $n): Type
@@ -1441,6 +1482,7 @@ trait InferNodes
                 // inferTernary/inferMatch.
                 if ($merged->kind === Type::KIND_UNKNOWN
                     && ($this->fnReturnUnion->kind === Type::KIND_CELL
+                        || $this->erasedJoinBoxes($this->fnReturnUnion, $rt)
                         || $rt->kind === Type::KIND_CELL
                         || ($this->isValueKind($this->fnReturnUnion) && $this->isValueKind($rt)))) {
                     // All-numeric returns (int|float) → a numeric cell so the
@@ -1623,7 +1665,11 @@ trait InferNodes
         if ($node->left->kind === Node::KIND_ARRAY_ACCESS && $node->left->shapeCheck === 1) {
             $node->left->shapeCheck = 2;
         }
+        // The fallback runs only on a null left: its bindings meet the path
+        // that skipped it.
+        $skip = $this->localTypes;
         $rt = $this->inferNode($node->right);
+        $this->localTypes = $this->joinArmLocals($skip, $skip, $skip, $skip, $this->localTypes);
         // `$a ?? throw …`: the fallback diverges (never), so the result is
         // simply the left's type — never the throw's void.
         if ($node->right->kind === Node::KIND_THROW) {
@@ -1639,6 +1685,8 @@ trait InferNodes
         // the left's type (the historic behaviour).
         if ($lt->kind === Type::KIND_NULL) {
             $node->type = $rt;
+        } elseif ($this->armArrayJoin($lt, $rt) !== null) {
+            $node->type = $this->armArrayJoin($lt, $rt);
         } elseif ($lt->kind === Type::KIND_UNKNOWN
             && $rt->kind !== Type::KIND_NULL && $rt->kind !== Type::KIND_UNKNOWN) {
             $node->type = $rt;
@@ -1697,6 +1745,35 @@ trait InferNodes
         return Type::int_();
     }
 
+    /**
+     * The join of two ARRAY arms of a conditional (ternary, `??`, `match`) that
+     * agree on keyed-ness but not on the element representation —
+     * `$c ? $this->cellMap : f()` with `f(): array<string, V>`. Taking one arm's
+     * type claimed `assoc[string, cell]` over a buffer that may hold raw object
+     * pointers. The result is a CELL-element array, and the emitter rebuilds
+     * every concrete-element arm into a real cell buffer
+     * ({@see EmitLlvmControl::armCoerce}), so the claim is the runtime truth.
+     * Null when the arms agree, either element is unknown (no evidence), or the
+     * keys differ (the key join is its own rule).
+     */
+    private function armArrayJoin(Type $a, Type $b): ?Type
+    {
+        if (!$a->isArray() || !$b->isArray()) { return null; }
+        if ($a->isAssoc() !== $b->isAssoc()) { return null; }
+        $ae = $a->element;
+        $be = $b->element;
+        if ($ae === null || $be === null) { return null; }
+        if ($ae->kind === Type::KIND_UNKNOWN || $be->kind === Type::KIND_UNKNOWN) { return null; }
+        if ($ae->kind === $be->kind) { return null; }
+        if ($a->isAssoc()) {
+            $ak = $a->key;
+            $bk = $b->key;
+            if ($ak === null || $bk === null || $ak->kind !== $bk->kind) { return null; }
+            return Type::assoc($ak, Type::cell());
+        }
+        return Type::vec(Type::cell());
+    }
+
     private function inferTernary(Ternary $node): Type
     {
         $this->inferNode($node->cond);
@@ -1704,19 +1781,22 @@ trait InferNodes
         // Flow-typing across the arms (short-circuit): the then-arm evaluates only
         // when `cond` holds, the else-arm only when it doesn't. This also narrows
         // the second conjunct of `A && B` (lowered to `Ternary(A, !!B, false)`),
-        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The merge below
-        // unions the arms, so no narrowing leaks past the ternary.
+        // so `A === ($x->kind===KIND_X)` types `$x` inside B. The join below
+        // meets the arms, so no narrowing leaks past the ternary.
         if ($node->then !== null) {
             $this->narrowFromCond($node->cond);
+            $thenIn = $this->localTypes;
             $t = $this->inferNode($node->then);
         } else {
+            $thenIn = $saved;
             $t = $node->cond->type;
         }
         $thenLocals = $this->localTypes;
         $this->localTypes = $saved;
         $this->narrowFromNegatedCond($node->cond);
+        $elseIn = $this->localTypes;
         $e = $this->inferNode($node->else_);
-        $this->localTypes = $this->mergeLocals($thenLocals, $this->localTypes);
+        $this->localTypes = $this->joinArmLocals($saved, $thenIn, $thenLocals, $elseIn, $this->localTypes);
         // A `throw`-expression arm is `never` — it yields no value, so the
         // result type is entirely the sibling arm's (`cond ? v : throw …`).
         if ($node->then !== null && $node->then->kind === Node::KIND_THROW) {
@@ -1726,6 +1806,10 @@ trait InferNodes
         if ($node->else_->kind === Node::KIND_THROW) {
             $node->type = $t;
             return $t;
+        }
+        if ($this->erasedJoinBoxes($t, $e)) {
+            $node->type = Type::cell();
+            return $node->type;
         }
         // A nullsafe desugar (`$o?->prop`) pairs its null arm with the value
         // branch as a NULLABLE cell so the null case renders as NULL (not the
@@ -1768,6 +1852,7 @@ trait InferNodes
         // well would erase a `vec[int]` / `vec[string]` pair to unknown.
         elseif ($t->isArray() && $e->isArray()
             && ($t->key !== null) !== ($e->key !== null)) { $node->type = $t->unionWith($e); }
+        elseif ($this->armArrayJoin($t, $e) !== null) { $node->type = $this->armArrayJoin($t, $e); }
         elseif ($t->kind === $e->kind)        { $node->type = $t; }
         elseif (($t->kind === Type::KIND_OBJ || $t->kind === Type::KIND_UNION)
             && $e->kind === Type::KIND_UNKNOWN) {
@@ -1934,6 +2019,48 @@ trait InferNodes
         if ($node->byRef && $at->isArray() && $elem->kind === Type::KIND_CELL) {
             $this->cellLoopLocals[$node->valueVar] = true;
         }
+        // A name a loop re-kinds ({@see loopMerge}) is a cell for the whole
+        // function, but a foreach BINDING is no store: the body reads the raw
+        // element, and the slot left the loop raw while every read past it
+        // dispatched by tag — `foreach (['x'] as $v) {} foreach ($objs as $v) {}
+        // var_dump($v);` printed a string pointer as a float. Box it back on
+        // every path out of the body, as an if/else merge does
+        // ({@see planMergeShadow}) — only for a name read somewhere no loop
+        // rebinds it first.
+        // A box-back of the binding before a jump out of this loop — this
+        // plant's, or an if/else merge's ahead of its arm's break — is the
+        // slot the loop exits in, whichever run planted it.
+        /** @var array<string, bool> $exitNames */
+        $exitNames = $this->loopExitNames;
+        if (!$node->byRef) { $exitNames[$node->valueVar] = true; }
+        // The same for a name that ENTERS the loop a cell, and for the KEY
+        // binding: the loop merge keeps the entry's cell, so the slot must leave
+        // the body one — `$k = $m[1]; foreach ($h as $k => $x) {} $t = 1 + $k;`
+        // read the raw key's string pointer by tag.
+        if (!$node->byRef && $at->isArray() && $this->bindingExitsCell($node->valueVar)
+            && self::bindBoxesByTag($elem, $this->enums) && $this->inferFnBody !== null
+            && self::readsOutsideBinders($this->inferFnBody, $node->valueVar) > 0) {
+            $this->plantBoxBack($node->body, $node->valueVar, $elem);
+            $this->boxBackBeforeJumps($node->body, $node->valueVar, $elem, 0);
+        }
+        $kv = $node->keyVar;
+        // The KEY binding exits the loop like the value binding does, in EVERY
+        // run: the plant below is sticky, but the condition that planted it is
+        // not (a later run can see the name enter the loop raw). Without the
+        // mark such a run took an if/else's box-back pair ahead of a `continue`
+        // back out ({@see unplantAgreedBoxBacks}) while the plant's other
+        // box-backs still typed every later read a cell — a raw string key read
+        // by tag, and `$clean[$cname]` keyed by the string's ADDRESS.
+        if ($kv !== null && !$node->byRef) { $exitNames[$kv] = true; }
+        if ($kv !== null && $kv !== $node->valueVar && $at->isArray() && $this->bindingExitsCell($kv)
+            && self::bindBoxesByTag($keyT, $this->enums) && $this->inferFnBody !== null
+            && self::readsOutsideBinders($this->inferFnBody, $kv) > 0) {
+            $exitNames[$kv] = true;
+            $this->plantBoxBack($node->body, $kv, $keyT);
+            $this->boxBackBeforeJumps($node->body, $kv, $keyT, 0);
+        }
+        $outerExitNames = $this->loopExitNames;
+        $this->loopExitNames = $exitNames;
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }
@@ -1952,6 +2079,7 @@ trait InferNodes
         }
         $this->localTypes = $merged;
         $this->popJumpFrame();
+        $this->loopExitNames = $outerExitNames;
         return Type::void();
     }
 
@@ -2014,7 +2142,9 @@ trait InferNodes
             if ($arm->body->kind !== Node::KIND_THROW) {
                 $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
             }
+            $arrJoin = $first ? null : $this->armArrayJoin($result, $bt);
             if ($first) { $result = $bt; $first = false; }
+            elseif ($arrJoin !== null) { $result = $arrJoin; }
             elseif ($result->kind === $bt->kind) { /* keep */ }
             elseif ($result->kind === Type::KIND_CELL || $bt->kind === Type::KIND_CELL
                 || ($this->isValueKind($result) && $this->isValueKind($bt))) {
@@ -2024,6 +2154,7 @@ trait InferNodes
                 // numeric (int|float) match stays a numeric cell (arith-able).
                 $result = $this->unifyToCell($result, $bt);
             }
+            elseif ($this->erasedJoinBoxes($result, $bt)) { $result = Type::cell(); }
             // A `null` arm beside a value arm (`0 => null, 1 => "7"`): a nullable
             // cell, as a ternary pairs them — `unknown` returned every arm as a
             // raw word through a `mixed` return.
@@ -2533,10 +2664,47 @@ trait InferNodes
     /** @var array<string, bool> {@see collectRefElemBases} */
     private array $refElemBases = [];
 
+    /**
+     * A by-value array PARAM whose element channel this frame made a cell (a
+     * reference to one of its elements, a by-ref sink of another kind) still
+     * ARRIVES in its declared representation: `vec[int]` from every caller.
+     * Its slot turns cell at one entry store — the value keeps the param's
+     * type and the store rebuilds it with boxed elements (forward-cellify) —
+     * instead of every read claiming cells over a buffer of raw ints.
+     */
+    private function cellElemParamEntry(FunctionDef $fn): void
+    {
+        foreach ($fn->params as $p) {
+            if (!isset($this->cellElemLocals[$p->name]) || $p->byRef || $p->variadic) { continue; }
+            $pt = $p->type;
+            if (!$pt->isArray() || $pt->isShape() || $pt->element === null) { continue; }
+            $ek = $pt->element->kind;
+            if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
+            $this->localTypes[$p->name] = $pt;
+            $planted = false;
+            foreach ($fn->body->stmts as $st) {
+                if ($st->kind !== Node::KIND_STORE_LOCAL || $st->name !== $p->name) { continue; }
+                $v = $st->value;
+                if ($v->kind === Node::KIND_LOAD_LOCAL && $v->name === $p->name) { $planted = true; }
+            }
+            if ($planted) { continue; }
+            $cellT = $pt->isAssoc() && $pt->key !== null ? Type::assoc($pt->key, Type::cell()) : Type::vec(Type::cell());
+            $entry = new \Compile\Mir\StoreLocal($p->name, new \Compile\Mir\LoadLocal($p->name, $pt), $cellT);
+            $fn->body->stmts = \array_merge([$entry], $fn->body->stmts);
+        }
+    }
+
     private function collectRefElemBases(Node $n): void
     {
-        if ($n instanceof \Compile\Mir\RefAddr_ && $n->lvalue->kind === Node::KIND_ARRAY_ACCESS) {
-            $b = $n->lvalue;
+        // A STORABLE reference to an element (`[&$a[$k]]`, an `&...$xs` pack
+        // argument) promotes it exactly as `$r = &$a[$k]` does: the slot then
+        // holds a reference box, so the whole buffer is a cell channel. Left
+        // typed, `string[]` refused the program at emit.
+        $src = null;
+        if ($n instanceof \Compile\Mir\RefAddr_) { $src = $n->lvalue; }
+        elseif ($n instanceof \Compile\Mir\RefCell_) { $src = $n->refSource; }
+        if ($src !== null && $src->kind === Node::KIND_ARRAY_ACCESS) {
+            $b = $src;
             $guard = 0;
             while ($b instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) {
                 $b = $b->array;

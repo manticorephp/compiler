@@ -139,7 +139,19 @@ trait EmitLlvmVisit
 
     public function visitLoadLocal(LoadLocal $n): string
     {
-        return $this->emitLoadLocal($n);
+        $out = $this->emitLoadLocal($n);
+        // A container store takes this word without a count while the local
+        // stays live: its +1, taken on the slot that still holds the word read.
+        $mo = $n->ownShare;
+        if ($mo === null) { return $out; }
+        $slot = $this->ownOpSlot($mo);
+        if ($slot === '') { return $out; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out .= $this->ownRetainSlot($slot, $mo);
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
     }
 
     public function visitStoreLocal(StoreLocal $n): string
@@ -288,6 +300,7 @@ trait EmitLlvmVisit
             if (!$isValue || $i !== $last) {
                 $fragment .= $this->emitDiscardedCallRelease($s);
             }
+            if (!$isValue) { $fragment .= $this->liveByRefSyncIr($s); }
             if ($chunks === null) {
                 $out .= $fragment;
                 if (\strlen($out) >= 65536) {
@@ -334,6 +347,11 @@ trait EmitLlvmVisit
     public function visitIncDec(IncDec $n): string
     {
         return $this->emitIncDec($n);
+    }
+
+    public function visitCaughtValue(\Compile\Mir\CaughtValue_ $n): string
+    {
+        return $this->emitCaughtValue();
     }
 
     public function visitStaticProp(StaticProp_ $n): string
@@ -479,21 +497,17 @@ trait EmitLlvmVisit
         return $this->emitDoWhile($n);
     }
 
-    // A `break`/`continue` out of a try skips the fall-through pop exactly as a
-    // `return` does — and from a loop it leaks a jmp slot per ITERATION. Hand
-    // back every slot opened inside the target loop before branching.
-    // …and it leaves every IteratorAggregate foreach strictly inside its target.
+    // A `break`/`continue` leaves every IteratorAggregate foreach strictly
+    // inside its target.
     public function visitBreak(Break_ $n): string
     {
         return $this->releaseAggItersLeftBy($n->level)
-             . $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
              . '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitContinue(Continue_ $n): string
     {
         return $this->releaseAggItersLeftBy($n->level)
-             . $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
              . '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 

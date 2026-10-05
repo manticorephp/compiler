@@ -27,6 +27,7 @@ final class ApplyMemoryMode implements Pass
 {
     /** Narrow to the concrete class so a field read uses ITS offsets. */
     private static function asRefCell(Node $n): RefCell_ { return $n; }
+    private static function asForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 
     public const NAME = 'apply-memory-mode';
 
@@ -78,23 +79,43 @@ final class ApplyMemoryMode implements Pass
      * outer iteration does not bound an inner loop running 300 000 times, so a
      * node is safe only when the loop DIRECTLY around it resets.
      *
-     * Verdicts are computed over the whole tree BEFORE anything is demoted:
-     * demotion only ever removes arena allocations, so evaluating first keeps
-     * the answer independent of the order loops are visited.
+     * Verdicts are computed over the whole tree BEFORE anything is demoted, and
+     * then again on the demoted stamps until nothing changes: a verdict reads
+     * the stamps ({@see \Compile\Mir\ArenaContext::canResetPerIteration} admits
+     * a local only when its stores are arena allocations), so demoting an inner
+     * loop can turn an outer yes into a no — and the emitter, which asks the
+     * same question on the final stamps, must get the answer this pass acted on.
+     * Demotion only turns ARENA into RC_HEAP, so the loop terminates.
      */
     private function unconfineUnresettableLoops(\Compile\Mir\FunctionDef $fn): void
     {
         if ($this->mode === MemoryMode::RC) {
             return;   // nothing was routed to the arena in the first place
         }
-        $loops = [];
-        $this->collectLoopVerdicts($fn->body, $fn, $loops);
-        if (\count($loops) === 0) {
+        // A generator frame outlives every invocation of its resume body: its
+        // `arena_enter` mark would sit on the ONE frame mark stack across each
+        // yield, above frames that return meanwhile, and its values in the ONE
+        // bump arena under their restores. The stack must hold only marks of
+        // frames live on the native call stack, so nothing in a generator is
+        // arena (its loops never reset either, {@see \Compile\Mir\ArenaContext::canResetPerIteration}).
+        if ($fn->isGenerator) {
+            $this->demote($fn->body, [], false);
             return;
         }
-        $this->demote($fn->body, $loops, true);
-        $this->unarenaMutatedAcrossReset($fn, $loops);
+        do {
+            $loops = [];
+            $this->collectLoopVerdicts($fn->body, $fn, $loops);
+            if (\count($loops) === 0) {
+                return;
+            }
+            $this->demoted = false;
+            $this->demote($fn->body, $loops, true);
+            $this->unarenaMutatedAcrossReset($fn, $loops);
+        } while ($this->demoted);
     }
+
+    /** A stamp changed in this round of {@see unconfineUnresettableLoops}. */
+    private bool $demoted = false;
 
     /**
      * Take an allocation OUT of the arena when a resetting loop mutates the
@@ -210,6 +231,7 @@ final class ApplyMemoryMode implements Pass
     {
         if ($v->allocKind === AllocationKind::ARENA) {
             $v->allocKind = AllocationKind::RC_HEAP;
+            $this->demoted = true;
         }
         if ($v->kind === Node::KIND_TERNARY) {
             if ($v->then !== null) { $this->unarena($v->then); }
@@ -249,35 +271,50 @@ final class ApplyMemoryMode implements Pass
     private function loopResets(Node $n, \Compile\Mir\FunctionDef $fn): bool
     {
         $arena = new \Compile\Mir\ArenaContext();
+        /** @var array<string, bool> $params */
+        $params = [];
+        foreach ($fn->params as $p) { $params[$p->name] = true; }
         $k = $n->kind;
         if ($k === Node::KIND_FOREACH) {
-            if ($n->byRef) { return false; }
-            return $arena->canResetPerIteration(null, $n->body, null, $fn->body, $fn->isGenerator);
+            return $arena->canResetForeach(self::asForeach($n), $fn->body, $fn->isGenerator, $params);
         }
         if ($k === Node::KIND_FOR) {
-            return $arena->canResetPerIteration($n->cond, $n->body, $n->step, $fn->body, $fn->isGenerator);
+            return $arena->canResetPerIteration($n->cond, $n->body, $n->step, $fn->body, $fn->isGenerator, $params);
         }
-        return $arena->canResetPerIteration($n->cond, $n->body, null, $fn->body, $fn->isGenerator);
+        return $arena->canResetPerIteration($n->cond, $n->body, null, $fn->body, $fn->isGenerator, $params);
     }
 
     /**
-     * Walk with "the loop directly around here resets" threaded down, demoting
-     * every Arena stamp that arrives with it false.
+     * Walk with "what reclaims an allocation here" threaded down, demoting every
+     * Arena stamp that arrives with it false. A loop's pre-save parts (a `for`
+     * init, a foreach iterable) run outside its reset window and keep the
+     * enclosing answer; its window (condition, body, step) is reclaimed by its
+     * own per-iteration and exit restores — and, when a `break N` / `continue N`
+     * / `goto` can leave past that exit restore, ALSO needs the enclosing answer
+     * ({@see \Compile\Mir\ArenaContext::reclaimsOwnWindow}). The emitter's
+     * {@see \Compile\Mir\ArenaContext::holdsArena} check reads the same split.
      *
      * @param array<int, array{0:Node,1:bool}> $loops
      */
     private function demote(Node $n, array $loops, bool $reclaimed): void
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_FOR || $k === Node::KIND_WHILE
-            || $k === Node::KIND_DOWHILE || $k === Node::KIND_FOREACH) {
-            $reclaimed = false;
+        if (\Compile\Mir\ArenaContext::isLoop($n)) {
+            $own = false;
             foreach ($loops as $pair) {
-                if ($pair[0] === $n) { $reclaimed = $pair[1]; break; }
+                if ($pair[0] === $n) { $own = $pair[1]; break; }
             }
+            foreach (\Compile\Mir\ArenaContext::preSaveParts($n) as $c) {
+                $this->demote($c, $loops, $reclaimed);
+            }
+            $window = $own && ($reclaimed || \Compile\Mir\ArenaContext::reclaimsOwnWindow($n));
+            foreach (\Compile\Mir\ArenaContext::windowParts($n) as $c) {
+                $this->demote($c, $loops, $window);
+            }
+            return;
         }
         if (!$reclaimed && $n->allocKind === AllocationKind::ARENA) {
             $n->allocKind = AllocationKind::RC_HEAP;
+            $this->demoted = true;
         }
         foreach (Walk::children($n) as $c) {
             $this->demote($c, $loops, $reclaimed);

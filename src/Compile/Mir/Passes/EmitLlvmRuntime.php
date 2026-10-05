@@ -1246,6 +1246,21 @@ trait EmitLlvmRuntime
         $out .= "fin:\n";
         $out .= "  ret void\n";
         $out .= "}\n";
+        // unwind: a try landing pops the marks of the frames a throw skipped
+        // (their `leave` never ran) and rewinds to the first one's entry.
+        $out .= "define void @__mir_arena_unwind(i64 %sp0) {\n";
+        $out .= "entry:\n";
+        $out .= "  %sp = load i64, ptr @__mir_arena_sp\n";
+        $out .= "  %more = icmp sgt i64 %sp, %sp0\n";
+        $out .= "  br i1 %more, label %pop, label %done\n";
+        $out .= "pop:\n";
+        $out .= "  %sp1 = add i64 %sp0, 1\n";
+        $out .= "  store i64 %sp1, ptr @__mir_arena_sp\n";
+        $out .= "  call void @__mir_arena_leave()\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
         if ($this->rt->needsArenaReset) {
             // Per-loop iteration reset: save the bump position before the
             // loop, restore it at the top of each iteration so confined

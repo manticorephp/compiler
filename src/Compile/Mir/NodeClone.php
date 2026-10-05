@@ -85,6 +85,7 @@ final class NodeClone
             }
             return new LoadLocal($x->name, $n->type);
         }
+        if ($k === Node::KIND_CAUGHT_VALUE) { $x = self::asCaughtValue($n); return new \Compile\Mir\CaughtValue_($x->types, $n->type); }
         if ($k === Node::KIND_STATIC_PROP)  { $x = self::asStaticProp($n); return new StaticProp_($x->global, $n->type); }
         if ($k === Node::KIND_BREAK)        { $x = self::asBreak($n);    return new Break_($x->level); }
         if ($k === Node::KIND_CONTINUE)     { $x = self::asContinue($n); return new Continue_($x->level); }
@@ -115,8 +116,8 @@ final class NodeClone
         // ── Statements / expressions with children ────────────────
         if ($k === Node::KIND_ECHO)   { $x = self::asEcho($n);   return new Echo_(self::nodes($x->exprs), $n->type); }
         if ($k === Node::KIND_RETURN) { $x = self::asReturn($n); return new Return_($x->value === null ? null : self::node($x->value), $n->type); }
-        if ($k === Node::KIND_CALL)   { $x = self::asCall($n);   return new Call($x->function, self::nodes($x->args), $n->type); }
-        if ($k === Node::KIND_INVOKE) { $x = self::asInvoke($n); return new Invoke_(self::node($x->callee), self::nodes($x->args), $n->type); }
+        if ($k === Node::KIND_CALL)   { $x = self::asCall($n);   $c = new Call($x->function, self::nodes($x->args), $n->type); $c->ownLive = $x->ownLive; return $c; }
+        if ($k === Node::KIND_INVOKE) { $x = self::asInvoke($n); $c = new Invoke_(self::node($x->callee), self::nodes($x->args), $n->type); $c->ownLive = $x->ownLive; return $c; }
         // Shallow: clones the Closure_ NODE, reusing the underlying `__closure_N`
         // FunctionDef (same `id` / `->class`). Correct when the enclosing clone
         // does NOT need its own closure fn (Phase A callable-dim specialization,
@@ -175,9 +176,15 @@ final class NodeClone
         // argument, so a rebuild drops it unless it is copied here — a cloned
         // `new` (Monomorphize, InlineClosures) would otherwise hand the ctor the
         // PADDED arity instead of what the source wrote.
-        if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; $c->srcArgc = $x->srcArgc; return $c; }
+        if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; $c->srcArgc = $x->srcArgc; $c->ownLive = $x->ownLive; return $c; }
         if ($k === Node::KIND_NEW_DYN_OBJ) { $d = $n; $c = new NewDynObj(self::node($d->classExpr), self::nodes($d->args), $n->type); $c->srcArgc = $d->srcArgc; return $c; }
-        if ($k === Node::KIND_PROPERTY_ACCESS) { $x = self::asPropertyAccess($n); return new PropertyAccess_(self::node($x->object), $x->property, $n->type); }
+        if ($k === Node::KIND_PROPERTY_ACCESS) {
+            $x = self::asPropertyAccess($n);
+            $c = new PropertyAccess_(self::node($x->object), $x->property, $n->type);
+            $c->byRefTypeErrorHead = $x->byRefTypeErrorHead;
+            $c->byRefTypeErrorTail = $x->byRefTypeErrorTail;
+            return $c;
+        }
         if ($k === Node::KIND_STORE_PROPERTY) { $x = self::asStoreProperty($n); return new StoreProperty(self::node($x->object), $x->property, self::node($x->value), $n->type, $x->bypassHook); }
         if ($k === Node::KIND_DYN_PROP) {
             $x = self::asDynProp($n);
@@ -186,8 +193,8 @@ final class NodeClone
             return $d;
         }
         if ($k === Node::KIND_STORE_DYN_PROP) { $x = self::asStoreDynProp($n); return new StoreDynProp_(self::node($x->object), self::node($x->name), self::node($x->value), $n->type); }
-        if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); return new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); }
-        if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); return new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); }
+        if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); $c = new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); $c->ownLive = $x->ownLive; return $c; }
+        if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); $c = new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); $c->ownLive = $x->ownLive; return $c; }
         if ($k === Node::KIND_CLONE) {
             $x = self::asClone($n);
             $wp = [];
@@ -262,6 +269,7 @@ final class NodeClone
     private static function asBool(Node $n): BoolConst { return $n; }
     private static function asLoadLocal(Node $n): LoadLocal { return $n; }
     private static function asStaticProp(Node $n): StaticProp_ { return $n; }
+    private static function asCaughtValue(Node $n): \Compile\Mir\CaughtValue_ { return $n; }
     private static function asBreak(Node $n): Break_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }
     private static function asGoto(Node $n): \Compile\Mir\Goto_ { return $n; }

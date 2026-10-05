@@ -94,6 +94,8 @@ abstract class Node
 
     public const KIND_MEMORY_OP = 'memory_op';
 
+    public const KIND_CAUGHT_VALUE = 'caught_value';
+
 
     /**
      * Double dispatch to the emitter: the node picks the visit method, so the

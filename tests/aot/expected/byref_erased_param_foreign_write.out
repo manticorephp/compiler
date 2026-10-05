@@ -1,0 +1,28 @@
+array(3) {
+  ["a"]=>
+  string(1) "x"
+  ["b"]=>
+  string(1) "y"
+  ["q"]=>
+  int(2)
+}
+array(4) {
+  ["a"]=>
+  string(1) "x"
+  ["b"]=>
+  string(1) "y"
+  ["q"]=>
+  int(2)
+  [0]=>
+  float(4.5)
+}
+array(4) {
+  [0]=>
+  string(2) "s1"
+  [1]=>
+  string(2) "s2"
+  ["q"]=>
+  int(2)
+  [2]=>
+  float(4.5)
+}

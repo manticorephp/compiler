@@ -1,0 +1,14 @@
+string(str) integer(7)
+integer(1) integer(2)
+a=V(obj) n=V(seven) 
+integer(1)
+V(obj) V(seven)
+string(str) integer(7)
+a=integer(1) n=integer(2) 
+V(obj)
+V(v0) V(v1)
+0=V(v0) 1=V(v1) 2
+string(s0) string(s1)
+0=string(s0) 1=string(s1) 2
+string(s0) string(s1)
+0=integer(10) 1=integer(11) 2

@@ -302,6 +302,7 @@ trait InferNarrow
             Node::KIND_CALL => \Compile\Mir\Call::class,
             Node::KIND_BLOCK => \Compile\Mir\Block::class,
             Node::KIND_MEMORY_OP => \Compile\Mir\MemoryOp_::class,
+            Node::KIND_CAUGHT_VALUE => \Compile\Mir\CaughtValue_::class,
             Node::KIND_CMP => \Compile\Mir\Cmp::class,
             Node::KIND_IF => \Compile\Mir\If_::class,
             Node::KIND_WHILE => \Compile\Mir\While_::class,

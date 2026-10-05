@@ -1,0 +1,2 @@
+function d
+  LogicException: Forward: loop did not converge

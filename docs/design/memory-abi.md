@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **11** (v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **16** (v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -198,6 +198,15 @@ live above it: an unmasked `flags >> 8` reads the pointer as tombstones, and
 the array on every `foreach` and every `count`. Compaction resets both fields, which is why
 `and flags, 255` (`ARRAY_FLAGS_LOW_MASK`) is still the right reset.
 
+**Bucket index** (v16). `buckets` holds `n_buckets` i64 words (a power of two, linear
+probing, 0 = empty slot). A used word is `(h32 << 32) | (entry_index + 1)`: `h32` is the low
+32 bits of the key hash, so a probe rejects a colliding slot and a delete's backward shift
+finds a slot's home without loading the entry or re-hashing its key. The int key hash is
+`(k ^ (k >> 12)) * golden`; the string hash is `__mir_array_hash_str`. The index is trusted,
+not validated, so a library built with another hash or word format misses keys in the
+arrays it built. A value copy (`__mir_array_copy_bare`) holds the same entries at the same
+positions and duplicates the source's index verbatim instead of resetting it.
+
 `IMMORTAL_ARRAY_RC = 1 << 62` is baked into the empty-array singleton. It is deliberately
 **not** `-1`: COW's `sle rc, 1` and release's `sle rc, 0` must both stay false, and the
 string immortal encoding would make COW mutate the shared singleton and release free it
@@ -230,23 +239,60 @@ Ownership is **not** decided by an expression predicate any more. It is a MIR pa
 run in this order (`src/Manticore/Main.php`):
 
 ```
-InferEffects → InferAllocKind → ApplyMemoryMode → InsertMemoryOps → Verify
+InferEffects → InferAllocKind → ApplyMemoryMode → SpillFreshBases → InsertMemoryOps → OwnershipFlow → Verify
 ```
 
 - `InferEffects` — what each function does to its arguments and globals.
 - `InferAllocKind` — per-allocation verdict: arena, heap-rc, or `NoRefcount`.
 - `ApplyMemoryMode` — applies the `--memory` / `MANTICORE_MEMORY` strategy
   (`hybrid` default, `rc`, `arena`); resolved by `Compile\Mir\MemoryMode::resolve()`.
-- `InsertMemoryOps` — plants the actual retain / release / COW calls.
+- `InsertMemoryOps` — the frame's ARENA scope (`arena_enter` / `arena_leave`) only; a
+  `NoRefcount` verdict plants nothing — its value is an rc value the flow owns like any other.
+- `OwnershipFlow` — the rc LOCALS, **per program point**. A forward dataflow over
+  `Empty | Own(k) | Borrow(k)` (plus `Scalar` and `MixDead`), `k` a release class: the flavor
+  plus the slot type a drop releases by. A store takes the state `Ownership::classifyStored`
+  answers for its value against the SLOT's representation. Where `Own(k)` meets `Borrow(k)` at a
+  join the borrowed edge takes an `own_retain`; where no edge has a statement position the name
+  is FORCED (every borrowed source takes its +1 on the spot). Where two representations meet,
+  the name is dead past the join (a read there is a `Verify` failure) and each owned side is
+  dropped on its edge. The plan is written as ops the emitter executes, never re-decides:
+  `drop` of the old value on a store (`StoreLocal::$ownOld`, after the new value is computed),
+  before an `unset`, on every return (`Return_::$ownDrops`) and on the fall-through end; a
+  returned local the flow owns MOVES (`Return_::$ownMove`); a foreach binding's co-ownership
+  and the drop of what its slot still holds (`Foreach_::$ownCoOwn` / `$ownDropValue` /
+  `$ownDropKey`); one `own_local` registration per managed name.
+
+A name is managed or not as a whole — never "one flavor per name, else blocked and leaked":
+the state is per point, so a name bound to an owned value on one path and a borrowed one on
+another is exact on both. Names a reference can reach (`&`, `static`, a by-ref capture or
+foreach) are left to their storage. A local the flow owns and hands to a container that takes
+NO count of it (`Ownership::containerStoreRetains` refuses) MOVES there — holds a borrow of the
+container's reference from then on — only when nothing reads the name afterwards (no other
+read, not in a loop, no `goto`, no symbol-table reader). Otherwise the container takes its
+own +1 (`own_share`, before the statement) and the local stays owned: php's
+`$a[] = $x; unset($a); echo $x->p;` reads a live value. An array local handed to an object-producing call
+whose callee may keep it with its element refs (`Ownership::elementSharedArgs`) releases its
+buffer only (`vecbuf` / `assocbuf`).
 
 Conditional expressions are a shared contract rather than per-consumer guesswork: `?:`,
 `??`, ternary and `match` all route through `Compile\Mir\CondOwn` so the arms and their
 consumer agree on who owns the result. An emitter-only fix leaks; a pass-only fix double-frees.
 
-Returning a value transfers ownership to the caller — the returned local is dropped from the
-owning set before the expression is emitted, so scope-exit release skips it. By-reference
-binding forwards the slot to a shared cell and bypasses rc ops at the binding site; the
-underlying buffer stays owned by whichever local holds it.
+Returning a value hands the caller +1. An owned returned local moves; any other value takes
+the borrowed-return retain. A conditional the return takes no +1 on (an erased arm the
+retain cannot name) hands back one arm's reference as it stands: the pass lists those arm
+locals (`Ownership::returnArmLocals` → `Return_::$ownArms`) and the emitter drops each only
+when its slot word is not the returned word. Which +1 a return takes is ONE decision
+(`Ownership::returnRetain`) the emitter executes and the pass reads. Every function, method,
+static method or closure that DECLARES a bare `array` / `?array` return
+(`Ownership::erasedArrayReturn`, decided on the declaration and carried across `.sig` as
+`array`) returns +1 on EVERY path — a borrowed value is retained by its tag, every arm of a
+conditional is normalized — so a caller owns what such a call hands back: a local stores it
+at the `erasedarr` class (raw buffer or tagged cell, split by tag at every retain and drop),
+an argument temp or a discarded result is released after the call. A generator stores its return value in the frame
+without a retain; the frame does not release it yet. By-reference binding forwards the slot
+to a shared cell and bypasses rc ops at the binding site; the underlying buffer stays owned
+by whichever local holds it.
 
 ### Array elements belong to the buffer
 
@@ -365,6 +411,37 @@ Invariants worth stating out loud:
 * `MANTICORE_DEBUG_VERIFY=1` poisons word +8 of a freed block (cleared on alloc)
   and aborts by name on a double free — libc used to catch those for us, and a
   pooled double free would otherwise just cycle a free list, silently.
+
+## 7b. Exception object (ABI v15, carried into v16)
+
+A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.php`).
+`@__mc_throw(obj)` mallocs one exception object per raise and hands it to
+`_Unwind_RaiseException`:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | `exception_class` = `MemoryAbi::EXC_CLASS` (`"MNTCPHP\0"`) |
+| 8 | 8 | `exception_cleanup` = null (the landing pad frees the object) |
+| 16 | 8 | `private_1` (unwinder) |
+| 24 | 8 | `private_2` (unwinder) |
+| 32 | 8 | payload: the Throwable's address, owning one reference |
+
+`EXC_HEADER_SIZE` = 32 (the `_Unwind_Exception` header on every 64-bit target),
+`EXC_PAYLOAD_OFFSET` = 32, `EXC_SIZE` = 48.
+
+- Personality `@__mc_personality` (own, so no binary links a C++ runtime) reads only the
+  LSDA call-site table: action ≠ 0 is a PHP catch pad (`catch ptr @__mc_typeinfo`) and
+  takes only `EXC_CLASS`; action 0 is a cleanup pad and runs for any exception.
+- Every catch pad starts with `@__mc_eh_catch(ex)`: the payload moves into `@__mir_thrown`
+  (which then owns the +1, as before) and the exception object is freed. A rethrow — no
+  catch matched, or a finally re-raising — is a fresh `@__mc_throw`.
+- When the search phase finds no catch pad, `_Unwind_RaiseException` returns having
+  unwound nothing, and `@__mc_throw` calls the uncaught fatal through
+  `@__mc_uncaught_fn` (set by `@main`).
+- Link: Darwin's libSystem carries the unwinder; Linux links `-static-libgcc`
+  (libgcc_eh.a), so no `libgcc_s.so` dependency is added.
+- Fiber context (64 B, `EmitLlvmFiber`): the five arena globals at 0..39, bytes
+  40..55 unused (they held the setjmp try-slot stack before v15), `@__mir_thrown` at 56.
 
 ## 8. Debug and verification
 

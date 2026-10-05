@@ -529,44 +529,21 @@ trait EmitLlvmModule
             $out .= $this->fiberRuntime();
         }
         if ($this->rt->needsExceptions) {
-            // setjmp/longjmp exception runtime. 16 nested-try slots ×
-            // 512B jmp_buf. The slot stride must exceed the platform's jmp_buf:
-            // macOS arm64 writes 192B, but glibc aarch64 `setjmp` is
-            // `__sigsetjmp(env, 1)` — it saves the 128B signal mask on top of the
-            // 176B register area = ~312B. A 256B stride let slot N's setjmp clobber
-            // the head of slot N+1 (and the tail of slot N-1's saved buffer),
-            // corrupting the base setjmp so a longjmp restored garbage and the
-            // try-depth ran away → spurious "Maximum try nesting (16)". 512 clears
-            // every libc; uniform (no per-OS) — a per-OS minimum belongs to the
-            // target-abi epic. @thrown holds the in-flight exception ptr.
-            // linkonce_odr (NOT internal): exception state is touched by
-            // linkonce_odr runtime helpers; at -O2 those inline into both
-            // user.o + stdlib.o. Per-.o internal copies would split the
-            // jmp/thrown state. These coalesce to one address on both ld64 and GNU
-            // ld — the copies are ONLY safe because @main initialises depth:=1 and
-            // installs the base landing pad. A program that never throws in its own
-            // code but links stdlib.o (which CAN throw) still needs that init, so
-            // the main module force-enables `needsExceptions` (see emit()); without
-            // it a stdlib throw read an uninitialised depth 0 → slot -1 → bogus
-            // "Maximum try nesting" fatal (latent on macOS, where stdlib rarely
-            // throws on the passing paths).
-            $out .= "@__mir_jmp_stack = linkonce_odr global [8192 x i8] zeroinitializer\n";
-            // The active try-slot stack base. Defaults to @__mir_jmp_stack; a
-            // running Fiber swaps it to its own buffer so fiber/main tries at the
-            // same depth don't share a jmp_buf ({@see EmitLlvmFiber}, jmpBufExpr).
-            $out .= "@__mir_jmp_base = linkonce_odr global ptr @__mir_jmp_stack\n";
-            $out .= "@__mir_jmp_depth = linkonce_odr global i64 0\n";
+            // Zero-cost exception runtime ({@see \Compile\Runtime\UnwindRuntime}).
+            // @__mir_thrown holds the exception a catch pad just took off the
+            // unwinder, until the catch binds it or a finally parks it.
+            // linkonce_odr (NOT internal): the stdlib.o and the user .o share
+            // one slot, and one `@__mc_uncaught_fn` — the fatal @main installs.
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
-            $out .= $this->emitJmpSlotGuard();
+            $out .= \Compile\Runtime\UnwindRuntime::ir();
             // `$gen->throw($e)` pending injection: non-null = throw at the
             // next yield resume point (the suspended `yield` expression raises).
             if ($this->gen->throwUsed) {
                 $out .= "@__mir_gen_throw = linkonce_odr global ptr null\n";
             }
-            // Top-level fatal for an UNCAUGHT throw. @main installs a base
-            // setjmp at slot 0 (depth starts at 1 → user tries take slots 1+);
-            // a throw that unwinds past every try longjmps here. Without it a
-            // depth-0 throw computes slot -1 → OOB jmp_buf → UB longjmp. Emitted
+            // Top-level fatal for an UNCAUGHT throw: @main stores it into
+            // `@__mc_uncaught_fn`, which `@__mc_throw` calls when the unwinder's
+            // search phase finds no catch pad on the stack. Emitted
             // ONLY in the module that owns @main (the user program): its class
             // switch is module-specific, so a linkonce_odr copy in stdlib.o
             // (different class table) would be an ODR mismatch.
@@ -974,15 +951,16 @@ trait EmitLlvmModule
         $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;
-        $this->frame->retExitLabel = '';
-        $this->frame->retExitSlot = '';
-        $this->frame->retExempt = [];
         $this->arena->vecAllocated = false;
         $this->arena->vecLocals = [];
+        $this->arena->tryMarkCur = [];
+        $this->arena->tryMarkUsed = [];
+        $this->arena->tryMarkArmed = [];
+        $this->arena->tryMarkOpen = [];
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
         $this->locals->globalBackedType = [];
-        $this->locals->sjljPinAll = false;
+        $this->locals->hasTry = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
         $this->arrayHintedRefParams = [];
@@ -995,7 +973,7 @@ trait EmitLlvmModule
         if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
-        $this->locals->collectSjljPins($fn->body);
+        $this->locals->collectHasTry($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
         // same `@g_x` cell so writes are visible inside functions.
         if ($fn->name === '__main') {
@@ -1053,11 +1031,11 @@ trait EmitLlvmModule
         $capCnt = $this->closureCaptures[$fn->name] ?? -1;
         $isClosure = $capCnt >= 0;
         $this->frame->isClosure = $isClosure;
+        $this->frame->erasedArrayReturn = \Compile\Mir\Ownership::erasedArrayReturn($fn);
+        $this->frame->erasedCond = null;
         for ($ci = 0; $ci < $capCnt; $ci = $ci + 1) {
             $this->frame->captureNames[$fn->params[$ci]->name] = true;
         }
-        /** @var array<string, bool> $copiedParams */
-        $copiedParams = [];
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -1099,7 +1077,7 @@ trait EmitLlvmModule
             // per-module counters (`__closure_N`); without internal linkage a
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
-            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1144,8 +1122,8 @@ trait EmitLlvmModule
                     // `$f(mk())` with `mk(): mixed` hands a bare-`array` param a
                     // tagged word, and the body's COW dereferenced the tag bits.
                     $bodySink->write($this->arrayHintedEntryMask($pp, $slot));
+                    $bodySink->write($this->closurePtrParamMask($pp, $slot));
                     if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $pp, true)) {
-                        $copiedParams[$cn] = true;
                         $bodySink->write($this->paramEntryCopyIr($pp, $slot));
                     }
                 }
@@ -1158,7 +1136,7 @@ trait EmitLlvmModule
                 $first = false;
                 $paramSig .= 'i64 %arg.' . $p->name;
             }
-            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1202,7 +1180,6 @@ trait EmitLlvmModule
                 // keeps aliasing the caller. The copy is the frame's own +1,
                 // released at scope exit ({@see VecCopyOnAssign::paramCopiedOnEntry}).
                 if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $p, false)) {
-                    $copiedParams[$p->name] = true;
                     $bodySink->write($this->paramEntryCopyIr($p, $slot));
                 }
             }
@@ -1211,7 +1188,7 @@ trait EmitLlvmModule
         $paramTypes = [];
         foreach ($fn->params as $p) { $paramNames[$p->name] = true; $paramTypes[$p->name] = $p->type; }
         $bodySink->write($this->preallocateLocals($fn->body));
-        $bodySink->write($this->initRcObjSlots($fn->body, $paramNames, $copiedParams));
+        $bodySink->write($this->initOwnSlots($fn->body, $paramNames));
         // ⚠ Whatever this prologue gains, {@see emitMain} needs too. Top-level
         // code is a function like any other to the language and unlike any other
         // to this file, and a prologue step added to only one of the two is
@@ -1289,8 +1266,7 @@ trait EmitLlvmModule
         // caller reads the result by tag, so raw 0 decoded as float and
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
         $bodySink->write($this->emitOwnedBoxReleases([]));
-        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n");
-        $bodySink->write($this->emitSharedReturnExit() . '}');
+        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n}");
         $body = $bodySink->finish() . "\n\n";
         // Do not keep the per-invocation chunk array alive through the return
         // boundary. Doctrine emits tens of thousands of functions; explicit
@@ -1932,45 +1908,13 @@ trait EmitLlvmModule
     }
 
     /**
-     * `@__mir_jmp_slot` — slot → byte offset into `@__mir_jmp_stack`, fataling
-     * when the slot is out of range instead of returning an offset that setjmp
-     * would write 192 bytes past the end of.
-     *
-     * Linkage is left to {@see EmitLlvm::linkonceRuntime}, which promotes every
-     * `define` in the preamble to linkonce_odr — an explicit `internal` here
-     * would come out as the invalid `define linkonce_odr internal`. Coalescing
-     * is safe: the body is a pure function of its argument and identical in
-     * every module, exactly like the neighbouring runtime helpers.
+     * `@__mir_uncaught()` — the top-level fatal an uncaught throw ends in
+     * (`@__mc_throw` calls it through `@__mc_uncaught_fn`, which @main sets).
+     * Renders PHP's `PHP Fatal error:  Uncaught <Class>: <message>` to stderr
+     * and exits 255. Class name comes from a runtime class_id switch; the
+     * message is the Throwable's first property (`message`, same offset for
+     * every Throwable).
      */
-    private function emitJmpSlotGuard(): string
-    {
-        $this->libcExtra['exit'] = 'declare void @exit(i32)';
-        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
-        $msg = 'PHP Fatal error:  Maximum try nesting level (16) exceeded';
-        $len = \strlen($msg) + 2; // + "\n" + NUL
-        $out = '@.fmt.jmpof = private unnamed_addr constant [' . (string)$len . ' x i8] c"'
-             . $msg . '\0A\00", align 1' . "\n";
-        $out .= "define i64 @__mir_jmp_slot(i64 %s) {\nentry:\n";
-        $out .= "  %lo = icmp slt i64 %s, 0\n";
-        $out .= "  %hi = icmp sge i64 %s, 16\n";
-        $out .= "  %bad = or i1 %lo, %hi\n";
-        $out .= "  br i1 %bad, label %oflow, label %ok\n";
-        $out .= "oflow:\n";
-        // fd 2 bypasses stdout's stdio buffer; drain it so the fatal line does
-        // not overtake output that logically came first. Emitted only when the
-        // module actually has a funnel — a program with no output has nothing
-        // to drain, and referencing the helper would be an undefined symbol
-        // that link_stubs.sh would quietly resolve to `return 0`.
-        if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
-        $out .= "  %p = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.jmpof)\n";
-        $out .= "  call void @exit(i32 255)\n";
-        $out .= "  unreachable\n";
-        $out .= "ok:\n";
-        $out .= "  %o = mul i64 %s, 512\n"; // slot stride — must exceed glibc's ~312B setjmp; see @__mir_jmp_stack
-        $out .= "  ret i64 %o\n}\n";
-        return $out;
-    }
-
     private function emitUncaughtHandler(): string
     {
         $this->libcExtra['exit'] = 'declare void @exit(i32)';
@@ -2043,8 +1987,10 @@ trait EmitLlvmModule
         $out .= "print:\n";
         $out .= '  %m = phi ptr [ ' . $empty . ', %named ], [ %msgf, %msg ]' . "\n";
         // Drain stdout before the fd-2 fatal line, so what the program printed
-        // before throwing still comes first. {@see emitJmpSlotGuard} for why
-        // this is conditional.
+        // before throwing still comes first. Only when the module has a funnel:
+        // a program with no output has nothing to drain, and referencing the
+        // helper would be an undefined symbol link_stubs.sh quietly resolves
+        // to `return 0`.
         if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
         $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.uncaught, ptr %cname, ptr %m)\n";
         $out .= "  call void @exit(i32 255)\n";
@@ -2056,20 +2002,12 @@ trait EmitLlvmModule
     {
         $this->rt->needsCliArgv = true;
         $this->frame->isMain = true;
-        $header = "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n";
+        $header = "define i32 @main(i32 %argc, ptr %argv)"
+            . $this->personalityClause() . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
-            // Install the base landing pad: depth 1 reserves slot 0 for this
-            // catch-all, so user tries take slots 1+ and a throw that escapes
-            // them all unwinds here instead of computing an OOB slot -1.
-            $header .= "  store i64 1, ptr @__mir_jmp_depth\n";
-            $header .= "  %__basebuf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
-            $header .= "  %__basesj = call i32 @_setjmp(ptr %__basebuf)\n";
-            $header .= "  %__caught = icmp ne i32 %__basesj, 0\n";
-            $header .= "  br i1 %__caught, label %__uncaught, label %__run\n";
-            $header .= "__uncaught:\n";
-            $header .= "  call void @__mir_uncaught()\n";
-            $header .= "  unreachable\n";
-            $header .= "__run:\n";
+            // A throw no catch pad takes ends in the uncaught fatal: `@__mc_throw`
+            // calls it through this hook, which the stdlib.o copy shares.
+            $header .= "  store ptr @__mir_uncaught, ptr @__mc_uncaught_fn\n";
         }
         if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $header .= "  call i32 @atexit(ptr @__manticore_profile_dump)\n";
@@ -2126,7 +2064,7 @@ trait EmitLlvmModule
             $header .= '  store ptr ' . $tf . ", ptr @__mir_cc_trace_fn\n";
         }
         $body = $this->preallocateLocals($fn->body);
-        $body .= $this->initRcObjSlots($fn->body);
+        $body .= $this->initOwnSlots($fn->body);
         // Top-level code takes references too — `$refs = [&$a];` at file scope
         // is the shape the corpus actually hits first. See the note at the
         // matching line in the ordinary function emitter.
@@ -2149,10 +2087,10 @@ trait EmitLlvmModule
         $body .= $this->emitGlobalRuntimeInits();
         $body .= $this->emitNode($fn->body);
         // The destructor sweep runs from atexit, after main's frame is gone, so a
-        // destructor that throws needs a landing pad of its own: the same base
-        // slot main installs. Uncaught there, php prints the fatal and runs no
-        // further destructor.
-        $dsh = "define void @__manticore_dtor_shutdown() {\nentry:\n";
+        // destructor that throws needs a landing pad of its own. Uncaught there,
+        // php prints the fatal and runs no further destructor.
+        $dsh = "define void @__manticore_dtor_shutdown()"
+            . ($this->rt->needsExceptions ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n";
         // Once: exit() inside a destructor re-enters libc's exit, which runs this
         // hook again — that nested run must not resume the sweep (php stops).
         $dsh .= "  %dn = load i64, ptr @__mir_dtor_done\n";
@@ -2164,11 +2102,11 @@ trait EmitLlvmModule
         if ($this->rt->needsExceptions) {
             $dsh .= "  br label %arm\n";
             $dsh .= "arm:\n";
-            $dsh .= "  store i64 1, ptr @__mir_jmp_depth\n";
-            $dsh .= "  %buf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
-            $dsh .= "  %sj = call i32 @_setjmp(ptr %buf)\n";
-            $dsh .= "  %caught = icmp ne i32 %sj, 0\n";
-            $dsh .= "  br i1 %caught, label %unc, label %run\n";
+            $dsh .= "  invoke void @__mir_dtor_sweep() to label %swept unwind label %lp\n";
+            $dsh .= "swept:\n";
+            $dsh .= "  ret void\n";
+            $dsh .= \Compile\Runtime\UnwindRuntime::catchPad('lp', '%l', '%lx', '%lo');
+            $dsh .= "  br label %unc\n";
             $dsh .= "unc:\n";
             if ($this->needsErrorHandlers) {
                 // A set_exception_handler() takes the Throwable and the sweep
@@ -2181,18 +2119,19 @@ trait EmitLlvmModule
                 $dsh .= "  br i1 %inhn, label %fatal, label %disp\n";
                 $dsh .= "disp:\n";
                 $dsh .= "  store i64 1, ptr @__mir_dtor_inh\n";
-                $dsh .= "  %handled = call i64 @manticore___mc_dispatch_uncaught_keep(i64 %eb)\n";
+                $dsh .= "  %handled = invoke i64 @manticore___mc_dispatch_uncaught_keep(i64 %eb) to label %dispok unwind label %lp\n";
+                $dsh .= "dispok:\n";
                 $dsh .= "  store i64 0, ptr @__mir_dtor_inh\n";
                 $dsh .= "  %washandled = icmp ne i64 %handled, 0\n";
                 $dsh .= "  br i1 %washandled, label %arm, label %fatal\n";
                 $dsh .= "fatal:\n";
             }
             $dsh .= "  call void @__mir_uncaught()\n";
-            $dsh .= "  unreachable\n";
-            $dsh .= "run:\n";
+            $dsh .= "  unreachable\n}\n\n";
+        } else {
+            $dsh .= "  call void @__mir_dtor_sweep()\n";
+            $dsh .= "  ret void\n}\n\n";
         }
-        $dsh .= "  call void @__mir_dtor_sweep()\n";
-        $dsh .= "  ret void\n}\n\n";
         $body .= "  ret i32 0\n";
         return $header . $body . "}\n\n" . $dsh;
     }
@@ -2219,28 +2158,76 @@ trait EmitLlvmModule
     }
 
     /**
-     * Release every owned RcHeap obj local of the current function except the ones the
-     * returned VALUE may alias (their ownership transfers to the caller). Slots are
-     * null-inited, so releasing an unassigned one is a no-op.
+     * The {@see OwnershipFlow} return path: the drop of every local the flow
+     * owns here ({@see Return_::$ownDrops}) but the one the return MOVES —
+     * `$moved`, the owned local that is the whole returned value, unless the
+     * return rebuilt it into a fresh cell array (then the source is dropped).
+     * An `$arms` name is dropped only when the returned word `$val` is not the
+     * one its slot holds ({@see retLeave}).
      *
-     * @param array<string,bool> $exempt {@see returnedLocalNames()}
+     * @param array<string,bool> $arms
      */
-    private function emitRcReturnCleanup(array $exempt): string
+    private function ownReturnIr(Return_ $r, string $moved, array $arms, string $val): string
     {
         $out = '';
-        foreach ($this->frame->rcObjLocals as $name => $mo) {
-            if (isset($exempt[$name])) { continue; }
-            if (isset($this->frame->transferredLocals[$name])) { continue; }
-            // A boxed local's slot holds the BOX, registered here before the
-            // prologue boxed it. Its value goes with the box's last holder
-            // ({@see emitOwnedBoxReleases}); releasing the slot handed the box
-            // address to the string release, which decremented malloc's header.
-            if (isset($this->locals->refLocals[$name])) { continue; }
-            if (!isset($this->locals->slots[$name])) { continue; }
-            $out .= $this->rcReleaseSlot($this->locals->slots[$name], $this->rcReleaseFlavor($mo));
+        $vm = '';
+        $taken = '';
+        foreach ($r->ownDrops as $d) {
+            $t = $d->target;
+            if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $name = $this->asLoadLocalNode($t)->name;
+            if ($name === $moved) { continue; }
+            $slot = $this->ownOpSlot($d);
+            if ($slot === '') { continue; }
+            if (!isset($arms[$name]) || $val === '') {
+                $out .= $this->ownDropIr($slot, $d);
+                continue;
+            }
+            // The arm that ran IS the returned word (payload bits: the value may
+            // have been boxed since): that one moves, once; every other drops.
+            if ($vm === '') {
+                $vm = $this->ssa->allocReg();
+                $out .= '  ' . $vm . ' = and i64 ' . $val . ", 281474976710655\n";
+            }
+            $w = $this->ssa->allocReg();
+            $wm = $this->ssa->allocReg();
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = load i64, ptr ' . $slot . "\n";
+            $out .= '  ' . $wm . ' = and i64 ' . $w . ", 281474976710655\n";
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $wm . ', ' . $vm . "\n";
+            if ($taken !== '') {
+                $fresh = $this->ssa->allocReg();
+                $nt = $this->ssa->allocReg();
+                $or = $this->ssa->allocReg();
+                $out .= '  ' . $nt . ' = xor i1 ' . $taken . ", true\n";
+                $out .= '  ' . $fresh . ' = and i1 ' . $eq . ', ' . $nt . "\n";
+                $out .= '  ' . $or . ' = or i1 ' . $taken . ', ' . $eq . "\n";
+                $eq = $fresh;
+                $taken = $or;
+            } else {
+                $taken = $eq;
+            }
+            $dropL = $this->ssa->allocLabel('ret.armdrop');
+            $keepL = $this->ssa->allocLabel('ret.armkeep');
+            $out .= '  br i1 ' . $eq . ', label %' . $keepL . ', label %' . $dropL . "\n";
+            $out .= $dropL . ":\n" . $this->ownDropIr($slot, $d) . '  br label %' . $keepL . "\n";
+            $out .= $keepL . ":\n";
         }
-        return $this->releaseAggItersLeftBy(0) . $out . $this->emitOwnedBoxReleases($exempt);
+        return $out;
     }
+
+    /**
+     * A return's leave sequence: {@see OwnershipFlow}'s drops ({@see
+     * ownReturnIr}), then `$leave`. The pass decided every drop; the ones in
+     * {@see Return_::$ownArms} wait for the returned word `$val`, compared here.
+     */
+    private function retLeave(Return_ $r, string $moved, string $val, string $leave): string
+    {
+        // Every open IteratorAggregate foreach gives its iterator back first.
+        $aggs = $this->gen->inGenerator ? '' : $this->releaseAggItersLeftBy(0);
+        return $aggs . $this->ownReturnIr($r, $moved, $r->ownArms, $val) . $leave;
+    }
+
 
     /**
      * The i64 a value-less return yields. A closure/trampoline hands back a BOXED
@@ -2296,18 +2283,20 @@ trait EmitLlvmModule
 
     /** Typed reads — a base-`Node` field access resolves by OFFSET under self-host. */
     private function asLoadLocalNode(\Compile\Mir\LoadLocal $n): \Compile\Mir\LoadLocal { return $n; }
+    private function asStoreLocalNode(\Compile\Mir\StoreLocal $n): \Compile\Mir\StoreLocal { return $n; }
 
 
     /** The `ARRAY_ELEM_HINT_*` code a returned array must be conformed to, or
      *  null: the declared return names a concrete raw element and the value's
-     *  own static element is a cell or erased (or the value is a cell). */
+     *  own static element is a cell or erased. A CELL / UNKNOWN value is not
+     *  conformed here: its unbox ({@see unboxCellToType}) already did, and a
+     *  second conform is a second walk of the buffer. */
     private function returnConformKind(Type $vt): ?int
     {
         $rt = $this->frame->returnType;
         if ($rt === null || !($rt->isVec() || $rt->isAssoc()) || $rt->isShape() || $rt->element === null) { return null; }
         $code = $this->elementHintCodeForType($rt->element);
         if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return null; }
-        if ($vt->kind === Type::KIND_CELL || $vt->kind === Type::KIND_UNKNOWN) { return $code; }
         if (!($vt->isVec() || $vt->isAssoc())) { return null; }
         $ve = $vt->element;
         return ($ve === null || $ve->kind === Type::KIND_CELL || $ve->kind === Type::KIND_UNKNOWN) ? $code : null;
@@ -2355,44 +2344,29 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
+            $out .= $this->retLeave($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
+                ? $this->asLoadLocalNode($v)->name : '', $v !== null ? $this->lastValue : '', '');
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
-            // Same slot hand-back as {@see finishReturn} — this branch exits
-            // before it, so a `return` inside a generator's try leaked one slot
-            // per call until the depth hit the 16-slot wall. The reload comes
-            // from the frame: a `yield` in the try means the resume switch
-            // branched past the block that defined the entry reg.
-            $out .= $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
-        // Drop every owned RcHeap obj local on this return path, except
-        // the one being returned (ownership transfers to the caller). The
-        // trailing fall-through release covers paths with no `return`.
-        //
-        // RELEASES FIRST, arena_leave AFTER — the order the fall-through
-        // cleanup already uses. A local that was arena-allocated still carries
-        // a release here; before the bulk free its header reads as arena and
-        // the release is a no-op, but AFTER the bulk free the header is freed
-        // memory, so the release read garbage and handed libmalloc a pointer it
-        // never allocated ("pointer being freed was not allocated", abort). It
-        // took a function with both an arena-confined string local and an early
-        // `return` — sprintf() with a non-literal format was one.
-        // Drop every owned RcHeap obj local on this return path, except the one
-        // being returned (ownership transfers to the caller). The trailing
-        // fall-through release covers paths with no `return`. The exempt SET
-        // drives the cleanup; `$returnedLocal` answers a different question
-        // ("is this a bare passthrough of a borrowed obj local?") and stays
-        // restricted to a direct `return $x;`.
+        // OwnershipFlow's drops run after the value ({@see retLeave}), and
+        // RELEASES FIRST, arena_leave AFTER — the order the fall-through cleanup
+        // uses: after the bulk free an arena-confined local's header is freed
+        // memory, and a release then handed libmalloc a pointer it never
+        // allocated. `$returnedLocal` is the local that MOVES to the caller (the
+        // flow owns it here); any other returned value is retained below.
         $returnedLocal = ($v !== null && $v->kind === Node::KIND_LOAD_LOCAL)
             ? $this->asLoadLocalNode($v)->name : null;
+        if (!$r->ownMove) { $returnedLocal = null; }
         // A REBUILT return hands back a fresh cell array, not the local — so the
         // "ownership transfers to the caller" exemption does not apply and the
         // local must be dropped like any other. `function mk(): mixed { $v = [];
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
-        $this->frame->retExempt = $exempt;
-        $leave = $this->emitRcReturnCleanup($exempt);
+        $ownMoved = ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '';
+        $leave = $this->emitOwnedBoxReleases($exempt);
         // Close the frame arena before every exit, so confined values
         // are freed on the path actually taken (the plan's trailing
         // arena_leave only covers fall-through). The return value is
@@ -2403,7 +2377,7 @@ trait EmitLlvmModule
         // allocated.
         $leave .= $this->frame->hasArena ? "  call void @__mir_arena_leave()\n" : '';
         if ($v === null) {
-            return $this->finishReturn('', $this->implicitReturnValue(), $leave);
+            return $this->finishReturn('', $this->implicitReturnValue(), $this->retLeave($r, $ownMoved, '', $leave));
         }
         // By-ref return: yield the *address* of the returned lvalue as i64.
         // `return $n` (a by-ref param forwards its held address, a plain local
@@ -2412,10 +2386,21 @@ trait EmitLlvmModule
         if ($this->frame->returnsByRef) {
             $addrIr = $this->byRefAddrOf($v);
             if ($addrIr !== null) {
-                return $this->finishReturn($addrIr, $this->lastValue, $leave);
+                return $this->finishReturn($addrIr, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
             }
         }
+        // An erased-array return normalizes every arm of a conditional it hands
+        // back to +1 ({@see condOwnsResult}); the pass drops every owned local.
+        if ($this->own->returnCondNormalized($v, $this->frame->erasedArrayReturn) && !$this->own->condOwnedTemp($v)) {
+            $this->frame->erasedCond = $v;
+        }
+        // The +1 this return takes — ONE decision, the pass reads the same one
+        // ({@see \Compile\Mir\Ownership::returnRetain}); the branches below execute it.
+        $retKind = $this->own->returnRetain($v, $this->frame->returnType,
+            $this->frame->isClosure || $this->frame->isTrampoline, $this->frame->erasedArrayReturn,
+            $returnedLocal !== null && isset($this->frame->ownLocals[$returnedLocal]));
         $out = $this->emitNode($v);
+        $this->frame->erasedCond = null;
         // Uniform closure ABI: a closure returns a scalar as a tagged cell, so a
         // dynamic `callable` caller reads it by tag and a known caller unboxes to
         // the sig's concrete type ({@see emitInvoke}). Arrays/objects ride raw
@@ -2430,14 +2415,14 @@ trait EmitLlvmModule
         // normal path below, which unboxes a cell to the declared type.
         $rawRet = $this->frame->returnType !== null && $v->type->kind === Type::KIND_CELL
             && ($this->frame->returnType->kind === Type::KIND_OBJ || $this->frame->returnType->isArray());
-        if (($this->frame->isClosure || $this->frame->isTrampoline) && !$rawRet && $this->isCellBoxableArg($v->type)) {
+        if (($this->frame->isClosure || $this->frame->isTrampoline) && !$rawRet && \Compile\Mir\Ownership::cellBoxableKind($v->type)) {
             // The same +1 the `: mixed` path below takes: a BORROWED string
             // (`return $o->n;`) boxed as-is handed the caller a cell over a
             // buffer the object still owned, and the caller's release freed it
             // — the next `.=` on the property wrote into freed memory.
-            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+            if ($retKind === \Compile\Mir\Ownership::RET_CELL_PAYLOAD) {
                 $out .= $this->retainCellPayload($v);
-            } elseif ($v->type->kind === Type::KIND_CELL && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+            } elseif ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
                 // …and a borrowed CELL (`return $this->mixed;`), by tag.
                 $this->rt->needsRc = true;
                 $this->rt->needsStrRc = true;
@@ -2445,7 +2430,7 @@ trait EmitLlvmModule
                 $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
             }
             $out .= $this->boxToCell($v->type, $v);
-            return $this->finishReturn($out, $this->lastValue, $leave);
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
         }
         // An UNKNOWN-typed closure return is a raw scalar from the compiler's
         // integer-arithmetic-on-cells path (`$x * 2` where $x is a plain cell
@@ -2461,9 +2446,19 @@ trait EmitLlvmModule
         // raw int and leaves a tagged word alone.
         if (($this->frame->isClosure || $this->frame->isTrampoline) && $v->type->kind === Type::KIND_UNKNOWN) {
             $this->rt->needsTagged = true;
+            if ($retKind === \Compile\Mir\Ownership::RET_ERASED) {
+                // A borrowed erased array of an erased-array closure takes its +1
+                // by tag before it is boxed.
+                $sv = $this->lastValue;
+                $st = $this->lastValueType;
+                $out .= $this->coerceToI64();
+                $out .= $this->rcRetainReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
+                $this->lastValue = $sv;
+                $this->lastValueType = $st;
+            }
             $out .= ($this->lastValueType === 'double' || $this->lastValueType === 'ptr')
                 ? $this->boxLastByRepr() : $this->boxUnknownShallowIr();
-            return $this->finishReturn($out, $this->lastValue, $leave);
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
         }
         // The declared return is a CELL-element array but this arm still holds a
         // CONCRETE-element one: the arms disagreed (`return [false,'loc']` beside
@@ -2471,14 +2466,14 @@ trait EmitLlvmModule
         // `vec[cell]` and every arm must actually BE cell-element — otherwise the
         // reader unboxes this arm's raw string pointers by tag. Rebuild it with
         // each element boxed, left raw (an array slot travels raw).
-        if ($this->needsCellify($this->frame->returnType, $v->type)) {
+        if (\Compile\Mir\Ownership::needsCellify($this->frame->returnType, $v->type)) {
             $out .= $this->emitCellifyArrayRaw($v->type->element, $this->cellifySourceFlavor($v));
             // The rebuild is a FRESH array (+1, owned by the caller — no retain,
             // unlike a borrowed passthrough), but it leaves a raw `ptr`: the ABI
             // returns a uniform i64, so it rides the carrier like every other
             // pointer return.
             $out .= $this->coerceToI64();
-            return $this->finishReturn($out, $this->lastValue, $leave);
+            return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
         }
         // A `mixed` / union (cell) return boxes the value to a tagged
         // cell unless it already is one.
@@ -2491,9 +2486,9 @@ trait EmitLlvmModule
             // retainCellPayload}). Without this a `: mixed`/union fn returning a
             // string PARAM (`__mc_ini_value` → `$v`) hands back a cell over a
             // buffer the caller's arg temp then frees → the assoc scramble /
-            // borrowed-buffer UAF. Gated by isBorrowedObjReturn so owned
+            // borrowed-buffer UAF. Gated by Ownership::returnBorrowsObj so owned
             // producers (call/new/concat/owned-local) keep their fresh +1.
-            if ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+            if ($retKind === \Compile\Mir\Ownership::RET_CELL_PAYLOAD) {
                 $out .= $this->retainCellPayload($v);
             }
             // An UNKNOWN value may ALREADY be a tagged cell (an element read out
@@ -2503,16 +2498,21 @@ trait EmitLlvmModule
                 // discarded result would free a payload this function only
                 // BORROWED. retainCellPayload can't see it (an unknown names no
                 // rc kind), so retain by runtime tag — a no-op for a scalar cell.
-                if ($this->isBorrowedCellReturn($v, $returnedLocal)) {
+                if ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
+                    // By a probe-boxed copy: the erased word may be a raw buffer,
+                    // which the tag retain alone leaves uncounted.
                     $this->rt->needsRc = true;
                     $this->rt->needsStrRc = true;
                     $out .= $this->coerceToI64();
+                    $sv = $this->lastValue;
+                    $out .= $this->boxUnknownShallowIr();
                     $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+                    $this->lastValue = $sv;
+                    $this->lastValueType = 'i64';
                 }
-                $out .= $this->coerceToI64();
-                $raw = $this->lastValue;
+                // The probe, as for every other erased word crossing into a
+                // cell: a raw buffer int-boxed read back as an integer.
                 $out .= $this->boxUnknownShallowIr();
-                $out .= $this->retainIfProbeBoxed($raw, $this->lastValue);
             } else {
                 // `$v` so a rebuilt concrete-element array releases its source.
                 $out .= $this->boxToCell($v->type, $v);
@@ -2521,14 +2521,11 @@ trait EmitLlvmModule
             // A BORROWED cell handed back from a `: mixed` fn — `return
             // self::$stack[$n-1]` off a `/** @var array<int,mixed> */` static
             // prop. The value is already a cell so the boxing branch above never
-            // ran, and isBorrowedObjReturn names no rc kind for a cell, so
+            // ran, and Ownership::returnBorrowsObj names no rc kind for a cell, so
             // nothing retained it: the caller's `__mir_cell_drop` of a DISCARDED
             // result then freed an element still in the array (use-after-free on
             // the next read). Retain by runtime tag — a no-op for a scalar cell.
-            if ($this->frame->returnType !== null
-                && $this->frame->returnType->kind === Type::KIND_CELL
-                && $v->type->kind === Type::KIND_CELL
-                && $this->isBorrowedCellReturn($v, $returnedLocal)) {
+            if ($retKind === \Compile\Mir\Ownership::RET_CELL_TAG) {
                 $this->rt->needsRc = true;
                 $this->rt->needsStrRc = true;
                 $out .= $this->coerceToI64();
@@ -2600,15 +2597,19 @@ trait EmitLlvmModule
             // reference. Owned producers (`new`, call return) and
             // owned-local transfers are already +1. The declared return type
             // is the fallback: it is what the CALLER assumes ({@see
-            // ownershipReturnType}).
-            if ($this->callHandsBorrow($v)) {
+            // Ownership::returnOwnershipType}).
+            if ($retKind === \Compile\Mir\Ownership::RET_OBJ) {
                 // rcRetainByType reads every call as a +1 transfer.
                 $out .= $this->rcRetainReg($this->lastValue, 'obj');
-            } elseif ($this->isBorrowedObjReturn($v, $returnedLocal)) {
+            } elseif ($retKind === \Compile\Mir\Ownership::RET_TYPED) {
                 $out .= $this->rcRetainByType($v, $this->lastValue, $this->frame->returnType);
+            } elseif ($retKind === \Compile\Mir\Ownership::RET_ERASED) {
+                // An erased array handed back as it stands — a raw buffer or a
+                // tagged cell — takes its +1 by tag: the caller owns what it stores.
+                $out .= $this->rcRetainReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
             }
         }
-        return $this->finishReturn($out, $this->lastValue, $leave);
+        return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
     }
 
     /**
@@ -2628,108 +2629,14 @@ trait EmitLlvmModule
             }
             $this->cf->restoreFinally($saved);
         }
-        // A `return` out of a try branches past the fall-through pop, so the
-        // try's jmp slot would stay claimed for the rest of the PROCESS (the
-        // depth is a global). Give it back — after the finallys above, which run
-        // inside the try region and manage their own depth.
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);
-        $jmp = $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
-        if ($jmp === '' && $this->sharedReturnOk()) {
-            if ($this->frame->retExitLabel === '') {
-                $this->frame->retExitLabel = $this->ssa->allocLabel('ret.exit');
-                $this->frame->retExitSlot = $this->ssa->allocReg();
-                $this->frame->retExitArena = $this->frame->hasArena;
-                $out .= $this->localSlotAlloca($this->frame->retExitSlot);
-            }
-            if ($this->frame->retExitArena === $this->frame->hasArena) {
-                // The shared epilogue runs where no loop is open, so the
-                // IteratorAggregate foreach iterators THIS return leaves are
-                // released here, on its own path.
-                return $out . $this->releaseAggItersLeftBy(0)
-                    . $this->nullReturnedSlots($this->frame->retExempt)
-                    . '  store i64 ' . $valReg . ', ptr ' . $this->frame->retExitSlot . "\n"
-                    . '  br label %' . $this->frame->retExitLabel . "\n" . $this->emitDeadLabel();
-            }
-        }
-        return $out . $leave . $jmp
+        return $out . $leave
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 
-    /**
-     * Every `return` of a function used to carry its own copy of the scope-exit
-     * cleanup — one release per owned local — so a function with 29 returns and
-     * 100 string locals emitted 2 900 releases (8% of the compiler's own IR). A
-     * return outside every `try` instead stores its value and branches to ONE
-     * epilogue ({@see emitSharedReturnExit}). The locals it hands back are
-     * nulled first, which is exactly the exemption: their slots were null-inited
-     * or retained on entry, and a release of 0 is a no-op in every flavor.
-     * Frames with reference boxes keep the per-return cleanup: theirs depends on
-     * the exemption in ways a nulled slot does not express.
-     */
-    private function sharedReturnOk(): bool
-    {
-        return !$this->frame->isMain && !$this->gen->inGenerator && !$this->frame->returnsByRef
-            && !$this->locals->sjljPinAll
-            && $this->locals->ownedBoxes === [] && $this->locals->elemRefBoxes === [];
-    }
 
-    /** @param array<string, bool> $exempt */
-    private function nullReturnedSlots(array $exempt): string
-    {
-        $out = '';
-        foreach ($exempt as $name => $unused) {
-            if (!isset($this->frame->rcObjLocals[$name])) { continue; }
-            if (isset($this->frame->transferredLocals[$name])) { continue; }
-            if (isset($this->locals->refLocals[$name])) { continue; }
-            if (!isset($this->locals->slots[$name])) { continue; }
-            $out .= '  store i64 0, ptr ' . $this->locals->slots[$name] . "\n";
-        }
-        return $out;
-    }
-
-    private function emitSharedReturnExit(): string
-    {
-        if ($this->frame->retExitLabel === '') { return ''; }
-        $out = $this->frame->retExitLabel . ":\n" . $this->emitRcReturnCleanup([]);
-        if ($this->frame->retExitArena) { $out .= "  call void @__mir_arena_leave()\n"; }
-        $v = $this->ssa->allocReg();
-        return $out . '  ' . $v . ' = load i64, ptr ' . $this->frame->retExitSlot . "\n"
-            . '  ret i64 ' . $v . "\n";
-    }
-
-    /**
-     * The type the CALLER will assume for the returned value.
-     *
-     * A read out of an element-type-erased array (`return $a[$i]` where `$a` is
-     * a bare-`array` param) types the expression UNKNOWN/CELL, but the caller
-     * takes ownership per the fn's DECLARED return type. Deciding the +1 from
-     * the erased expression type makes the two sides disagree: the callee skips
-     * the retain while the caller still releases, freeing an object the array
-     * still owns (double-free → SIGTRAP). So ownership follows the declared type
-     * whenever the expression's own type carries none.
-     */
-    private function ownershipReturnType(Node $v): Type
-    {
-        $tk = $v->type->kind;
-        if ($tk !== Type::KIND_UNKNOWN && $tk !== Type::KIND_CELL) { return $v->type; }
-        if ($this->frame->returnType === null) { return $v->type; }
-        return $this->frame->returnType;
-    }
-
-    /**
-     * A CELL-element array slot receiving a CONCRETE-element array value — the
-     * cellify boundary ({@see EmitLlvmBuiltins::emitCellifyArrayRaw}). The exact
-     * mirror of the de-cellify direction {@see EmitLlvmBuiltins::needsDeCellify}
-     * plants at a store.
-     *
-     * Both sides must be arrays of the SAME shape (vec/vec, assoc/assoc): the
-     * rebuild walks keys, so a vec↔assoc pair is not a repr change but a shape
-     * change, which no arm of a return join produces. An `unknown` element is
-     * NOT cellified — nothing is known to box, and an erased array must stay raw
-     * (the `cow2` carve-out).
-     */
     /**
      * Does {@see emitReturn} REBUILD the returned array into a fresh cell array?
      * True for every arm below that reaches
@@ -2746,128 +2653,13 @@ trait EmitLlvmModule
         $el = $t->element;
         if ($el === null || $el->kind === Type::KIND_CELL
             || $el->kind === Type::KIND_UNKNOWN) { return false; }
-        if ($this->needsCellify($this->frame->returnType, $t)) { return true; }
+        if (\Compile\Mir\Ownership::needsCellify($this->frame->returnType, $t)) { return true; }
         $rt = $this->frame->returnType;
         if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
         return ($this->frame->isClosure || $this->frame->isTrampoline)
-            && $this->isCellBoxableArg($t);
+            && \Compile\Mir\Ownership::cellBoxableKind($t);
     }
 
-    private function needsCellify(?Type $slot, ?Type $val): bool
-    {
-        if ($slot === null || $val === null) { return false; }
-        if (!$slot->isArray() || !$val->isArray()) { return false; }
-        if ($slot->isAssoc() !== $val->isAssoc()) { return false; }
-        $se = $slot->element;
-        $ve = $val->element;
-        if ($se === null || $ve === null) { return false; }
-        if ($se->kind !== Type::KIND_CELL) { return false; }
-        return $ve->kind !== Type::KIND_CELL && $ve->kind !== Type::KIND_UNKNOWN;
-    }
-
-    /** Whether an obj/vec return value is a borrowed reference (needs +1). */
-    /**
-     * Whether an UNKNOWN-typed value returned as a cell is BORROWED — the same
-     * producer test {@see isBorrowedObjReturn} applies, minus the type test it
-     * cannot make (an `unknown` names no rc kind, so that predicate always said
-     * "not borrowed" and the caller's cell_drop freed a live array element).
-     */
-    private function isBorrowedCellReturn(Node $v, ?string $returnedLocal): bool
-    {
-        $k = $v->kind;
-        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
-            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
-            || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
-            || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST
-            || \Compile\Mir\BitOp::mintsFresh($v)) {
-            return false; // owned producer (+1 already) or immortal
-        }
-        // `(object)$v` is owned on every path ({@see EmitLlvmExpr::emitCast}).
-        if ($v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
-        if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->frame->rcObjLocals[$returnedLocal])) {
-            return false; // transfer of an owned local
-        }
-        // A normalized conditional is +1 from whichever arm ran — the same
-        // sentence {@see isBorrowedObjReturn} has always carried, and the cell
-        // half was missing it. `: string|false` returning `$c ? substr(…) : false`
-        // is THE union idiom, and every call of one leaked its whole payload:
-        // the arm's fresh +1, plus this retain, against the caller's single
-        // drop. 12.3 → 43.8 MB over 200k→800k calls, flat once the retain goes.
-        if ($this->condOwnsResult($v)) { return false; }
-        // A numeric op's cell is minted by its helper ({@see EmitLlvm::isFreshCellTemp}).
-        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
-            && $v->type->isNumericCell()) { return false; }
-        return true;
-    }
-
-    /**
-     * The one call that is NOT a +1: `__mir_fiber_current()` reads the running
-     * fiber out of a global the fiber's owner holds ({@see
-     * InsertMemoryOps::isOwnedObj} refuses to own it for that reason). Returned
-     * as it stood, `Fiber::getCurrent()` handed its caller a borrow under the
-     * +1 convention, so a caller that owns the result — a local, a spilled
-     * `Fiber::getCurrent() !== null` operand — freed the live fiber.
-     */
-    private function callHandsBorrow(Node $v): bool
-    {
-        return $v instanceof \Compile\Mir\Call && \Compile\Mir\AliasOwn::builtinHandsBorrow($v->function);
-    }
-
-    private function isBorrowedObjReturn(Node $v, ?string $returnedLocal): bool
-    {
-        $t = $this->ownershipReturnType($v);
-        $tk = $t->kind;
-        // vec AND assoc: both are one rc'd buffer. Testing only isVec() (an
-        // array that is NOT string-keyed) left a borrowed ASSOC return at +0
-        // while every caller assumed +1 — `$t = $p->all(); count($t)` read a
-        // buffer the object still owned and had already freed.
-        $isArr = $t->isVec() || $t->isAssoc();
-        if ($tk !== Type::KIND_OBJ && !$isArr
-            && $tk !== Type::KIND_STRING && $tk !== Type::KIND_CLOSURE) { return false; }
-        // A closure is NOT excluded: its env is counted, and the caller owns
-        // what a call returns ({@see InsertMemoryOps::isOwnedObj}), so a
-        // borrowed one (`return $this->handler;`) is retained like an object.
-        if ($tk === Type::KIND_OBJ && $this->objTypeIsStruct($t)) { return false; }
-        $k = $v->kind;
-        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
-            || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
-            || \Compile\Mir\BitOp::mintsFresh($v)) {
-            return false; // owned producer — already +1
-        }
-        // A normalized conditional is +1 from whichever arm ran; a second retain
-        // here would hand the caller two references and free none.
-        if ($this->condOwnsResult($v)) { return false; }
-        if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
-        // A fresh stdClass from `(object)$arr` is +1 like a `new`.
-        if ($tk === Type::KIND_OBJ && $v instanceof \Compile\Mir\Cast && $v->target === 'object') { return false; }
-        if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
-        // A concat is an owned +1; a literal is immortal — neither needs a
-        // borrow retain. (rcRetainByType also no-ops these, but short-
-        // circuit here so the convention reads clearly.)
-        if ($tk === Type::KIND_STRING
-            && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return false; }
-        // …and so is a `(string)` cast of an int or a float: __mir_int_to_str /
-        // __mir_float_to_str mint a fresh rc=1 buffer. Judged a BORROW, the
-        // return took a second retain and the caller's single release left it at
-        // rc 1 — `return (string)$v;` leaked EVERY string it ever produced, which
-        // is `__mc_json_enc`'s int arm and 100% of that walker's scalar output.
-        // Third of the three predicates that have to agree about a cast:
-        // {@see Passes\InsertMemoryOps::isOwnedObj} schedules the local's
-        // release, {@see EmitLlvm::isFreshStringTemp} frees a fresh argument,
-        // and this one decides the RETURN convention.
-        if ($tk === Type::KIND_STRING && $k === Node::KIND_CAST) {
-            $ok = $v->operand->type->kind;
-            if ($ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
-                || $ok === Type::KIND_CELL) { return false; }
-        }
-        if ($k === Node::KIND_LOAD_LOCAL && $returnedLocal !== null
-            && isset($this->frame->rcObjLocals[$returnedLocal])) {
-            return false; // transfer of an owned local
-        }
-        return true; // param / alias / property / array read — borrow
-    }
 
     /**
      * Strip a NaN tag off a by-value bare-`array` param on entry: its slot is
@@ -2897,9 +2689,15 @@ trait EmitLlvmModule
             // be tag-inspected (a large/neg int could look boxed).
             $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_cells(ptr ' . $lp . ")\n";
         } else {
+            // The copy is the frame's own, released by the param's type: its
+            // LEAF level adopts by that type's flavor (the levels above are
+            // fresh inner copies the outer owns outright).
             $depth = $this->arrayCopyDepth($p->type);
             if ($depth < 0) { $depth = 0; }
-            $out .= '  ' . $cp . ' = call ptr @__mir_array_copy_deep(ptr ' . $lp
+            $leaf = $p->type;
+            for ($d = 0; $d < $depth && $leaf->element !== null; $d = $d + 1) { $leaf = $leaf->element; }
+            $sym = '@__mir_array_copy_deep' . $this->ownerVariantSuffix($this->discardReleaseFlavor($leaf));
+            $out .= '  ' . $cp . ' = call ptr ' . $sym . '(ptr ' . $lp
                   . ', i64 ' . (string)$depth . ")\n";
         }
         $ci = $this->ssa->allocReg();
@@ -2908,9 +2706,35 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /**
+     * The callee half of the uniform closure ABI ({@see EmitLlvmCalls::closureArgRepr}):
+     * every caller hands an rc object, an object union or a closure value
+     * over as its object CELL, so a param DECLARED one strips the tag on
+     * entry. The identity on a raw pointer (a direct runtime caller), so it
+     * is unconditional. An enum param keeps its ordinal (no caller boxes one).
+     */
+    private function closurePtrParamMask(\Compile\Mir\Param $p, string $slot): string
+    {
+        if ($p->byRef) { return ''; }
+        $t = $p->type;
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) {
+            if ($this->isEnumType($t)) { return ''; }
+        } elseif ($k !== Type::KIND_UNION && $k !== Type::KIND_CLOSURE) {
+            return '';
+        }
+        $rw = $this->ssa->allocReg();
+        $mk = $this->ssa->allocReg();
+        return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
+            . '  ' . $mk . ' = and i64 ' . $rw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . '  store i64 ' . $mk . ', ptr ' . $slot . "\n";
+    }
+
     private function arrayHintedEntryMask(\Compile\Mir\Param $p, string $slot): string
     {
-        if ($p->byRef || !$p->arrayHinted || $p->type->kind === Type::KIND_CELL) { return ''; }
+        // A variadic pack is an array whatever its declaration says (the
+        // forwarding `__fa` of an unresolved first-class callable has no hint).
+        if ($p->byRef || !($p->arrayHinted || $p->variadic) || $p->type->kind === Type::KIND_CELL) { return ''; }
         $rw = $this->ssa->allocReg();
         $mk = $this->ssa->allocReg();
         return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"

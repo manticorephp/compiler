@@ -701,6 +701,16 @@ trait LowerTypes
         return $low === 'array';
     }
 
+    /** A RETURN hint the +1 erased-array convention covers
+     *  ({@see \Compile\Mir\Ownership::erasedArrayReturn}): a bare `array`,
+     *  nullable (`?array`, `array|null`) or not. */
+    private function isBareArrayReturnHint(?string $hint): bool
+    {
+        if ($hint === null) { return false; }
+        $low = \strtolower(\str_replace(' ', '', \ltrim($hint, '?\\')));
+        return $low === 'array' || $low === 'array|null' || $low === 'null|array';
+    }
+
     /**
      * Whether `$hint` is an ELEMENT-ONLY array doc form — `T[]` or `array<V>`
      * with a single type argument.

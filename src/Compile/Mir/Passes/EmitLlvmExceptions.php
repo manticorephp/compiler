@@ -5,13 +5,17 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
 use Compile\Mir\Type;
+use Compile\Runtime\UnwindRuntime;
 
 /**
  * Exception emitters extracted from {@see EmitLlvm}: throw / try-catch /
- * rethrow, the setjmp landing-pad machinery (incl. the `$jmpScratch` trait
- * property), MirCatch field accessors, and catch-class matching (class-id
- * chains, descendant sets). Pure $this-bound; behaviour unchanged. Split out
- * 2026-06-08 (needs the trait-property merge in LowerFromAst).
+ * rethrow, MirCatch field accessors, and catch-class matching (class-id
+ * chains, descendant sets).
+ *
+ * Zero-cost unwinding ({@see UnwindRuntime}): a throw is `@__mc_throw`, and
+ * every call inside a try region that may unwind is an `invoke` whose unwind
+ * edge is the region's landing pad ({@see ehInvokeRegion}). A try costs
+ * nothing until something throws.
  */
 trait EmitLlvmExceptions
 {
@@ -25,141 +29,159 @@ trait EmitLlvmExceptions
     /** @return Node[] */
     private function catchBody(MirCatch $c): array { return $c->body; }
 
-    /**
-     * `@__mir_jmp_stack + slot*512` as a ptr SSA. Appends IR to $out-by-return.
-     *
-     * The slot→offset step goes through `@__mir_jmp_slot`, which FATALS on an
-     * out-of-range slot rather than letting setjmp scribble past the stack (glibc
-     * writes ~312B, so an out-of-range slot lands on @__mir_jmp_depth /
-     * @__mir_thrown / @__manticore_argc / @__manticore_argv — corruption that
-     * surfaces far from its cause). It is tiny, so -O2 inlines it back to the
-     * compare + `mul` this used to be. Stride is defined in @__mir_jmp_slot.
-     */
-    private function jmpBufExpr(string $slotReg): string
+    /** The `invoke` result prefix (`%r = ` or '') of the line {@see ehCallRest} just accepted. */
+    private string $ehLhs = '';
+    /** The Throwable the last {@see ehPad} took off the unwinder. */
+    private string $ehPadObj = '';
+
+    /** ` personality …` for the `define` of a function that holds a landing pad. */
+    private function personalityClause(): string
     {
-        $off = $this->ssa->allocReg();
-        $base = $this->ssa->allocReg();
-        $this->jmpScratch = $this->ssa->allocReg();
-        $ir = '  ' . $off . ' = call i64 @__mir_jmp_slot(i64 ' . $slotReg . ")\n";
-        // Indirect through @__mir_jmp_base (defaults to @__mir_jmp_stack) so a
-        // running Fiber can point the try-slot stack at its OWN buffer — without
-        // it a fiber try and a main try at the same nesting depth alias one
-        // jmp_buf. Non-fiber programs never move the base, so this is one extra
-        // load over the old direct @__mir_jmp_stack reference.
-        $ir .= '  ' . $base . ' = load ptr, ptr @__mir_jmp_base' . "\n";
-        $ir .= '  ' . $this->jmpScratch . ' = getelementptr inbounds i8, ptr ' . $base . ', i64 ' . $off . "\n";
-        return $ir;
+        return $this->locals->hasTry ? UnwindRuntime::PERSONALITY : '';
     }
-    private string $jmpScratch = '';
-    private string $tryDepthScratch = '';
 
-    /**
-     * The try regions a `yield` is lexically inside, innermost LAST. Only ever
-     * non-empty inside a generator.
-     *
-     * A generator's `setjmp` is taken in the invocation that ENTERS the try, and
-     * that stack frame is gone the moment the yield returns to the consumer. So on
-     * resume the buffer describes a dead frame, and `@__mir_jmp_depth` belongs to
-     * whoever called `resume()`/`throw()` — not to us. Every resume point inside a
-     * try therefore re-arms its landing pad in the CURRENT frame
-     * ({@see rearmGeneratorTrys}), and this is the list of what to re-arm.
-     *
-     * THREE PARALLEL ARRAYS, not a list of tuples: a heterogeneous literal
-     * (`[string, int, string]`) unions to an erased element type natively, and the
-     * reads come back as garbage — the compiler segfaulted on the first program
-     * with a yield inside a try. Scalars in lockstep is the idiom this tree already
-     * uses for the same reason ({@see Scheduler::$tmDeadline}/$tmTask).
-     * @var string[] */
-    private array $genTryLabel = [];
-    /** @var int[] */
-    private array $genTrySlot = [];
-    /** @var string[] */
-    private array $genTryDepthReg = [];
-
-    /**
-     * Give a try's jmp slot back before jumping out of it. `$depthReg` is the
-     * pre-try depth ({@see ControlFlow::returnDepthReg}); '' means the jump
-     * crosses no try, so the depth was never bumped and there is nothing to do.
-     *
-     * Routed through {@see tryReloadDepth} for the same reason the fall-through
-     * and catch pops are: inside a generator the entry SSA reg is bypassed by
-     * the resume switch, so the value has to come back from the frame slot.
-     */
-    private function restoreJmpDepth(string $depthReg, int $genSlot): string
+    /** A PHP catch pad at `$label`; the Throwable lands in {@see $ehPadObj}. */
+    private function ehPad(string $label): string
     {
-        if ($depthReg === '') { return ''; }
-        $ir = $this->tryReloadDepth($genSlot, $depthReg);
-        return $ir . '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
+        $lp = $this->ssa->allocReg();
+        $ex = $this->ssa->allocReg();
+        $this->ehPadObj = $this->ssa->allocReg();
+        return UnwindRuntime::catchPad($label, $lp, $ex, $this->ehPadObj);
     }
 
     /**
-     * Re-arm every enclosing try's landing pad at a generator resume point,
-     * outermost first, and leave `@__mir_jmp_depth` describing the innermost.
+     * Route every call in `$text` that may unwind to the landing pad `$pad`:
+     * `call` becomes `invoke … to label %k unwind label %pad` and the rest of
+     * the block continues at the fresh `k:`.
      *
-     * Without this a resumed generator runs its try body with a `jmp_buf` captured
-     * by a `setjmp` in the invocation that ENTERED the try — a frame destroyed when
-     * the yield returned — and with the CONSUMER's `@__mir_jmp_depth`. Both halves
-     * bite: `$gen->throw()` landed in whatever try the consumer happened to be in
-     * (php runs the generator's own catch), and with no consumer try it longjmp'd
-     * into the dead frame, which arm64 tolerates and x86_64 turns into a SIGSEGV as
-     * soon as the catch body allocates dynamically — which a virtual dispatch does.
-     *
-     * The re-taken `setjmp` writes the same slot the try used, so a later `throw`
-     * from anywhere in the body still finds it by depth.
+     * `$text` is one try region's IR, starting at a label. A nested try already
+     * rewrote its own body to ITS pad, so what is still a `call` here — the
+     * inner catch dispatch, catch and finally bodies — is exactly what this
+     * region protects. Splitting a block moves its terminator to the last
+     * continuation, so every `phi` in the region that names the split block as
+     * a predecessor is retargeted to it ({@see ehPhiRetarget}); nothing outside
+     * the region can name a block inside it, since a try is a statement.
      */
-    private function rearmGeneratorTrys(): string
+    private function ehInvokeRegion(string $text, string $pad): string
     {
-        $out = '';
-        $n = \count($this->genTryLabel);
+        $lines = \explode("\n", $text);
+        $n = \count($lines);
+        $cur = '';
+        /** @var array<string, string> */
+        $last = [];
+        $split = false;
         for ($i = 0; $i < $n; $i = $i + 1) {
-            $lbl = $this->genTryLabel[$i];
-            // Slots are taken from the CURRENT top of the jmp stack, not from the
-            // depth the try was originally entered at: that index belongs to the
-            // invocation that has since returned, and by now it may be a LIVE try
-            // of the consumer — or of another generator, which is exactly how an
-            // exception ended up in a different generator's catch. The frame slot is
-            // rewritten so the catch and the normal exit restore what we borrowed.
-            $d = $this->ssa->allocReg();
-            $out .= '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
-            $out .= $this->tryStoreDepth($this->genTrySlot[$i], $d);
-            $out .= $this->jmpBufExpr($d);
-            $buf = $this->jmpScratch;
-            $nd = $this->ssa->allocReg();
-            $out .= '  ' . $nd . ' = add i64 ' . $d . ", 1\n";
-            $out .= '  store i64 ' . $nd . ", ptr @__mir_jmp_depth\n";
-            $sj = $this->ssa->allocReg();
-            $out .= '  ' . $sj . ' = call i32 @_setjmp(ptr ' . $buf . ")\n";
-            $ok = $this->ssa->allocReg();
-            $cont = $this->ssa->allocLabel('gen.rearm');
-            $out .= '  ' . $ok . ' = icmp eq i32 ' . $sj . ", 0\n";
-            $out .= '  br i1 ' . $ok . ', label %' . $cont . ', label %' . $lbl . "\n";
-            $out .= $cont . ":\n";
+            $l = $lines[$i];
+            $len = \strlen($l);
+            if ($len === 0) { continue; }
+            if ($l[0] !== ' ') {
+                if ($l[$len - 1] === ':' && $l[0] !== ';') { $cur = \substr($l, 0, $len - 1); }
+                continue;
+            }
+            $rest = $this->ehCallRest($l);
+            if ($rest === '') { continue; }
+            $k = $this->ssa->allocLabel('eh.c');
+            $lines[$i] = '  ' . $this->ehLhs . 'invoke ' . $rest . ' to label %' . $k
+                . ' unwind label %' . $pad . "\n" . $k . ':';
+            if ($cur !== '') { $last[$cur] = $k; }
+            $split = true;
         }
-        return $out;
+        if (!$split) { return $text; }
+        if ($last !== []) {
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                if (\strpos($lines[$i], ' = phi ') !== false) {
+                    $lines[$i] = $this->ehPhiRetarget($lines[$i], $last);
+                }
+            }
+        }
+        return \implode("\n", $lines);
     }
 
-    /** Stash a try depth-snapshot into the generator frame slot (no-op outside
-     *  a generator / when no slot). The frame survives a yield suspension. */
-    private function tryStoreDepth(int $slot, string $val): string
+    /**
+     * The `call` operand text (`<ty> <callee>(<args>) …`) of an instruction line
+     * that may unwind, or '' to leave the line alone; the result prefix goes
+     * to {@see $ehLhs}.
+     *
+     * Kept as `call`: intrinsics, inline asm, a named callee outside the PHP
+     * namespaces (libc, FFI C symbols — no PHP throw starts there), and the
+     * runtime helpers {@see ehNounwind} lists. Everything else — a PHP
+     * function, a runtime helper that can reach user code (a release that runs
+     * a destructor, a reflective call), an indirect call — is an invoke.
+     */
+    private function ehCallRest(string $l): string
     {
-        if ($slot < 0 || !$this->gen->inGenerator) { return ''; }
-        $off = self::GEN_HEADER + 8 * $slot;
-        $p = $this->ssa->allocReg();
-        return '  ' . $p . ' = getelementptr inbounds i8, ptr %frame, i64 '
-             . (string)$off . "\n  store i64 " . $val . ', ptr ' . $p . "\n";
+        $body = \substr($l, 2);
+        $lhs = '';
+        if ($body !== '' && $body[0] === '%') {
+            $eq = \strpos($body, ' = ');
+            if ($eq === false) { return ''; }
+            $lhs = \substr($body, 0, $eq + 3);
+            $body = \substr($body, $eq + 3);
+        }
+        if (\str_starts_with($body, 'tail call ')) { $body = \substr($body, 5); }
+        if (!\str_starts_with($body, 'call ')) { return ''; }
+        $rest = \substr($body, 5);
+        $at = \strpos($rest, '@');
+        $pc = \strpos($rest, '%');
+        $ai = $at === false ? -1 : $at;
+        $pi = $pc === false ? -1 : $pc;
+        $p = $ai;
+        if ($p < 0 || ($pi >= 0 && $pi < $p)) { $p = $pi; }
+        if ($p < 0) { return ''; }
+        $asm = \strpos($rest, ' asm ');
+        if ($asm !== false && $asm < $p) { return ''; }
+        if ($rest[$p] === '@') {
+            $q = \strpos($rest, '(', $p);
+            if ($q === false) { return ''; }
+            $callee = \substr($rest, $p, $q - $p);
+            if (!\str_starts_with($callee, '@manticore_') && !\str_starts_with($callee, '@__')) { return ''; }
+            if ($this->ehNounwind($callee)) { return ''; }
+        }
+        $this->ehLhs = $lhs;
+        return $rest;
     }
 
-    /** Reload a try depth-snapshot; leaves the value reg in {@see
-     *  $tryDepthScratch}. Falls back to the entry SSA outside a generator. */
-    private function tryReloadDepth(int $slot, string $fallback): string
+    /** Runtime helpers that never run user code and never throw. */
+    private function ehNounwind(string $callee): bool
     {
-        if ($slot < 0 || !$this->gen->inGenerator) { $this->tryDepthScratch = $fallback; return ''; }
-        $off = self::GEN_HEADER + 8 * $slot;
-        $p = $this->ssa->allocReg();
-        $v = $this->ssa->allocReg();
-        $this->tryDepthScratch = $v;
-        return '  ' . $p . ' = getelementptr inbounds i8, ptr %frame, i64 '
-             . (string)$off . "\n  " . $v . ' = load i64, ptr ' . $p . "\n";
+        return $callee === '@__mc_eh_catch'
+            || $callee === '@__mir_elem_untag'
+            || \str_starts_with($callee, '@__mir_arena_')
+            || \str_starts_with($callee, '@__mir_rc_retain')
+            || \str_starts_with($callee, '@__manticore_box_');
+    }
+
+    /**
+     * `$line` (a `phi`) with every incoming block that {@see ehInvokeRegion}
+     * split renamed to its last continuation.
+     * @param array<string, string> $last
+     */
+    private function ehPhiRetarget(string $line, array $last): string
+    {
+        // An incoming block is the `%name` after the last comma of a pair, right
+        // before its `]` — both `[ v, %b ]` and `[v, %b]` are emitted. A value
+        // never sits there, so no bracket matching is needed.
+        $out = '';
+        $p = 0;
+        $len = \strlen($line);
+        while ($p < $len) {
+            $cm = \strpos($line, ', %', $p);
+            if ($cm === false) { break; }
+            $s = $cm + 3;
+            $e = $s;
+            while ($e < $len && $line[$e] !== ']' && $line[$e] !== ' ' && $line[$e] !== ',') { $e = $e + 1; }
+            $f = $e;
+            while ($f < $len && $line[$f] === ' ') { $f = $f + 1; }
+            $lab = \substr($line, $s, $e - $s);
+            $out .= \substr($line, $p, $s - $p);
+            if ($f < $len && $line[$f] === ']' && isset($last[$lab])) {
+                $out .= $last[$lab];
+            } else {
+                $out .= $lab;
+            }
+            $p = $e;
+        }
+        return $out . \substr($line, $p);
     }
 
     private function emitThrow(\Compile\Mir\Throw_ $n): string
@@ -178,16 +200,36 @@ trait EmitLlvmExceptions
         $out .= ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN)
             ? $this->cellToPtr()
             : $this->coerceToPtr();
-        $out .= '  store ptr ' . $this->lastValue . ", ptr @__mir_thrown\n";
-        $depth = $this->ssa->allocReg();
-        $out .= '  ' . $depth . " = load i64, ptr @__mir_jmp_depth\n";
-        $slot = $this->ssa->allocReg();
-        $out .= '  ' . $slot . ' = sub i64 ' . $depth . ", 1\n";
-        $out .= $this->jmpBufExpr($slot);
-        $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
-        $out .= "  unreachable\n";
+        // The exception object owns what it carries, and the catch that binds it
+        // takes that +1 ({@see emitCaughtValue}): a fresh object hands its own, an
+        // owned local leaving the function moves its reference
+        // ({@see \Compile\Mir\Throw_::$ownMove}), anything else is retained.
+        $v = $n->value;
+        $moved = $n->ownMove && $v->kind === Node::KIND_LOAD_LOCAL;
+        if (!$moved && $this->own->classifyTemp($v, $this->lastCallWasBuiltin) <= 0) {
+            $tp = $this->lastValue;
+            $ti = $this->ssa->allocReg();
+            $out .= '  ' . $ti . ' = ptrtoint ptr ' . $tp . " to i64\n";
+            $out .= $this->rcRetainReg($ti, 'obj');
+            $this->lastValue = $tp;
+            $this->lastValueType = 'ptr';
+        }
+        $out .= $this->emitRethrowAt($this->lastValue);
         $out .= $this->emitDeadLabel();
         $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `@__mir_thrown`'s +1, taken out of the slot by the catch that matched
+     * it — the slot no longer owns it ({@see \Compile\Mir\CaughtValue_}).
+     */
+    private function emitCaughtValue(): string
+    {
+        $r = $this->ssa->allocReg();
+        $out = '  ' . $r . " = load i64, ptr @__mir_thrown\n  store i64 0, ptr @__mir_thrown\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -202,25 +244,97 @@ trait EmitLlvmExceptions
              . '  store i64 ' . $b . ", ptr @__mir_bt_depth\n";
     }
 
+    /**
+     * Open a try region's arena landing: a throw skips the `arena_leave` of
+     * every frame it unwinds and the exit restore of every resetting loop it
+     * leaves, and whatever those would have reclaimed piles up once per throw
+     * when no enclosing loop resets. The landing ({@see arenaTryLandingIr})
+     * pops the skipped frames' marks back to the depth sampled at try entry,
+     * and rewinds to the landing mark a resetting loop in the region armed
+     * ({@see EmitLlvm::arenaArmTryMark}). The reg to hold that depth. In a
+     * generator it is the depth its resume body was entered with
+     * ({@see \Compile\Mir\GeneratorContext::$entryArenaSp}), not one sampled at
+     * the try: a yield inside it hands the mark stack to the consumer between
+     * try entry and landing, and a generator pushes no mark of its own.
+     */
+    private function arenaTryEnter(): string
+    {
+        $this->rt->needsArena = true;
+        $this->arena->tryMarkCur[] = $this->ssa->allocReg();
+        $this->arena->tryMarkUsed[] = $this->ssa->allocReg();
+        $this->arena->tryMarkArmed[] = 0;
+        $this->arena->tryMarkOpen[] = 0;
+        return $this->gen->inGenerator ? $this->gen->entryArenaSp : $this->ssa->allocReg();
+    }
+
+    /** The landing's arena reclaim, for the innermost open region. */
+    private function arenaTryLandingIr(string $spReg): string
+    {
+        if ($spReg === '') { return ''; }
+        $out = '  call void @__mir_arena_unwind(i64 ' . $spReg . ")\n";
+        $k = \count($this->arena->tryMarkCur) - 1;
+        if ($this->arena->tryMarkArmed[$k] === 0) { return $out; }
+        $mp = $this->arena->tryMarkUsed[$k];
+        $u = $this->ssa->allocReg();
+        $on = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $rl = $this->ssa->allocLabel('try_arena');
+        $jl = $this->ssa->allocLabel('try_arena_done');
+        $out .= '  ' . $u . ' = load i64, ptr ' . $mp . "\n";
+        $out .= '  ' . $on . ' = icmp sge i64 ' . $u . ", 0\n";
+        $out .= '  br i1 ' . $on . ', label %' . $rl . ', label %' . $jl . "\n";
+        $out .= $rl . ":\n";
+        $out .= '  ' . $c . ' = load ptr, ptr ' . $this->arena->tryMarkCur[$k] . "\n";
+        $out .= '  call void @__mir_arena_restore(ptr ' . $c . ', i64 ' . $u . ")\n";
+        $out .= '  store i64 -1, ptr ' . $mp . "\n";
+        $out .= '  br label %' . $jl . "\n";
+        $out .= $jl . ":\n";
+        return $out;
+    }
+
+    /** Close the innermost region's arena landing; the mark's allocas and
+     *  initial disarm when a loop armed it, for the try's entry. */
+    private function arenaTryLeave(): string
+    {
+        $k = \count($this->arena->tryMarkCur) - 1;
+        $cur = $this->arena->tryMarkCur[$k];
+        $used = $this->arena->tryMarkUsed[$k];
+        $armed = $this->arena->tryMarkArmed[$k];
+        \array_pop($this->arena->tryMarkCur);
+        \array_pop($this->arena->tryMarkUsed);
+        \array_pop($this->arena->tryMarkArmed);
+        \array_pop($this->arena->tryMarkOpen);
+        if ($armed === 0) { return ''; }
+        return '  ' . $cur . " = alloca ptr\n"
+            . '  ' . $used . " = alloca i64\n"
+            . '  store i64 -1, ptr ' . $used . "\n";
+    }
+
     private function emitTryCatch(\Compile\Mir\TryCatch_ $n): string
     {
         $this->rt->needsExceptions = true;
         $hasFinally = $n->hasFinally;
+        $hasCatch = \count($n->catches) > 0;
         $endLbl = $this->ssa->allocLabel('try_end');
         $finLbl = $hasFinally ? $this->ssa->allocLabel('try_fin') : '';
         $joinLbl = $hasFinally ? $finLbl : $endLbl;
+        $tryLbl = $this->ssa->allocLabel('try_body');
+        $catchLbl = $hasCatch ? $this->ssa->allocLabel('try_catch') : '';
+        $finPadLbl = $hasFinally ? $this->ssa->allocLabel('try_finpad') : '';
 
         $out = '';
-        // Save the backtrace depth at try entry; a caught throw longjmps past
-        // the per-call bt_pop()s, so the catch restores it (else the stack keeps
-        // the unwound frames and later traces grow). alloca survives setjmp.
+        $markInit = '';
+        $spReg = $this->arenaTryEnter();
+        if ($spReg !== '' && !$this->gen->inGenerator) { $out .= '  ' . $spReg . " = load i64, ptr @__mir_arena_sp\n"; }
+        // Save the backtrace depth at try entry; a caught throw unwinds past
+        // the per-call bt_pop()s, so the landing pad restores it (else the stack
+        // keeps the unwound frames and later traces grow).
         $btSlot = '';
         if ($this->rt->needsBacktrace) {
-            // In a generator the snapshot lives in a FRAME CELL, for the reason
-            // the pending slots below already spell out: this alloca sits in
-            // whatever block the `try` occupies, the restore reads it from the
-            // catch landing pad, and the resume switch re-enters past the
-            // former — so the alloca dominates neither use.
+            // In a generator the snapshot lives in a FRAME CELL: this alloca sits
+            // in whatever block the `try` occupies, the restore reads it from the
+            // landing pad, and the resume switch re-enters past the former — so
+            // the alloca dominates neither use.
             // `Instruction does not dominate all uses` out of symfony/cache's
             // doDeleteYieldTags, whose try sits inside an `if` inside a loop.
             if ($this->gen->inGenerator && $n->genBtSlot >= 0
@@ -252,166 +366,68 @@ trait EmitLlvmExceptions
             }
             $out .= '  store i64 0, ptr ' . $pendFlag . "\n";
             $out .= '  store ptr null, ptr ' . $pendVal . "\n";
+            // A `return` inside the try / catch bodies must run this finally
+            // before exiting the function — make the finally body visible to
+            // emitReturn. Popped before the finally's own emission (the finally
+            // is not self-protected).
+            $this->cf->pushFinally($n->finallyBody);
         }
+        $out .= '  br label %' . $tryLbl . "\n";
 
-        // Outer buf (finally only) — routes escapes through finally.
-        $outerCatchLbl = '';
-        if ($hasFinally) {
-            $outerCatchLbl = $this->ssa->allocLabel('try_outercatch');
-            $bodyLbl = $this->ssa->allocLabel('try_outerbody');
-            $od = $this->ssa->allocReg();
-            $out .= '  ' . $od . " = load i64, ptr @__mir_jmp_depth\n";
-            // The finally form burns TWO slots (outer + inner), so $od — not the
-            // inner $idb — is this region's pre-try depth.
-            $this->cf->pushTryDepth($od, $n->genOuterSlot);
-            $out .= $this->tryStoreDepth($n->genOuterSlot, $od);
-            $out .= $this->jmpBufExpr($od);
-            $outerBuf = $this->jmpScratch;
-            $nd = $this->ssa->allocReg();
-            $out .= '  ' . $nd . ' = add i64 ' . $od . ", 1\n";
-            $out .= '  store i64 ' . $nd . ", ptr @__mir_jmp_depth\n";
-            $osj = $this->ssa->allocReg();
-            $out .= '  ' . $osj . ' = call i32 @_setjmp(ptr ' . $outerBuf . ")\n";
-            $oc = $this->ssa->allocReg();
-            $out .= '  ' . $oc . ' = icmp eq i32 ' . $osj . ", 0\n";
-            $out .= '  br i1 ' . $oc . ', label %' . $bodyLbl . ', label %' . $outerCatchLbl . "\n";
-            $out .= $bodyLbl . ":\n";
-        }
+        // The try body. Its calls unwind to the catch pad, or — catchless — to
+        // the finally pad.
+        $region = $tryLbl . ":\n";
+        foreach ($n->tryBody as $s) { $region .= $this->emitNode($s); $region .= $this->emitDiscardedCallRelease($s); }
+        $region .= '  br label %' . $joinLbl . "\n";
 
-        // Inner buf — try body / catch dispatch.
-        $idb = $this->ssa->allocReg();
-        $out .= '  ' . $idb . " = load i64, ptr @__mir_jmp_depth\n";
-        if (!$hasFinally) { $this->cf->pushTryDepth($idb, $n->genDepthSlot); }
-        $out .= $this->tryStoreDepth($n->genDepthSlot, $idb);
-        $out .= $this->jmpBufExpr($idb);
-        $innerBuf = $this->jmpScratch;
-        $ind = $this->ssa->allocReg();
-        $out .= '  ' . $ind . ' = add i64 ' . $idb . ", 1\n";
-        $out .= '  store i64 ' . $ind . ", ptr @__mir_jmp_depth\n";
-        $sj = $this->ssa->allocReg();
-        $out .= '  ' . $sj . ' = call i32 @_setjmp(ptr ' . $innerBuf . ")\n";
-        $tryLbl = $this->ssa->allocLabel('try_body');
-        $hasCatch = \count($n->catches) > 0;
-        // No catch but finally present: an inner throw must still record
-        // the pending exception so finally re-throws it afterwards.
-        $catchlessFin = (!$hasCatch && $hasFinally);
         if ($hasCatch) {
-            $catchLbl = $this->ssa->allocLabel('try_catch');
-        } elseif ($catchlessFin) {
-            $catchLbl = $this->ssa->allocLabel('try_catchless');
-        } else {
-            $catchLbl = $joinLbl;
-        }
-        $cnd = $this->ssa->allocReg();
-        $out .= '  ' . $cnd . ' = icmp eq i32 ' . $sj . ", 0\n";
-        $out .= '  br i1 ' . $cnd . ', label %' . $tryLbl . ', label %' . $catchLbl . "\n";
-
-        // A `return` inside the try / catch bodies must run this finally before
-        // exiting the function — make the finally body visible to emitReturn.
-        // Popped before the finally's own emission (the finally is not
-        // self-protected).
-        if ($hasFinally) { $this->cf->pushFinally($n->finallyBody); }
-
-        // Try body — pop inner depth on normal exit.
-        $out .= $tryLbl . ":\n";
-        // A yield in this body suspends with the setjmp above belonging to a frame
-        // that dies on the way out; every resume point re-arms it. {@see $genTryStack}
-        $pushed = 0;
-        if ($this->gen->inGenerator) {
-            if ($hasFinally) {
-                $this->genTryLabel[] = $outerCatchLbl;
-                $this->genTrySlot[] = $n->genOuterSlot;
-                $this->genTryDepthReg[] = $od;
-                $pushed = $pushed + 1;
-            }
-            if ($hasCatch || $catchlessFin) {
-                $this->genTryLabel[] = $catchLbl;
-                $this->genTrySlot[] = $n->genDepthSlot;
-                $this->genTryDepthReg[] = $idb;
-                $pushed = $pushed + 1;
-            }
-        }
-        foreach ($n->tryBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
-        while ($pushed > 0) {
-            \array_pop($this->genTryLabel);
-            \array_pop($this->genTrySlot);
-            \array_pop($this->genTryDepthReg);
-            $pushed = $pushed - 1;
-        }
-        $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
-        $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
-        if ($hasFinally) {
-            // Success path: clear pending so finally doesn't rethrow.
-            $out .= '  store i64 0, ptr ' . $pendFlag . "\n";
-        }
-        $out .= '  br label %' . $joinLbl . "\n";
-
-        if ($catchlessFin) {
-            $out .= $catchLbl . ":\n";
-            $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
-            $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
-            $out .= $this->btRestore($btSlot);
-            $clt = $this->ssa->allocReg();
-            $out .= '  ' . $clt . " = load ptr, ptr @__mir_thrown\n";
-            $out .= '  store ptr ' . $clt . ', ptr ' . $pendVal . "\n";
-            $out .= '  store i64 1, ptr ' . $pendFlag . "\n";
-            $out .= '  br label %' . $joinLbl . "\n";
-        }
-
-        // Catch dispatch.
-        if ($hasCatch) {
-            $out .= $catchLbl . ":\n";
-            $out .= $this->tryReloadDepth($n->genDepthSlot, $idb);
-            $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
-            $out .= $this->btRestore($btSlot);
-            $thrown = $this->ssa->allocReg();
-            $out .= '  ' . $thrown . " = load ptr, ptr @__mir_thrown\n";
-            $out .= $this->emitLoadClassId($thrown);
+            $region = $this->ehInvokeRegion($region, $catchLbl);
+            $region .= $this->ehPad($catchLbl);
+            $thrown = $this->ehPadObj;
+            $region .= $this->btRestore($btSlot);
+            $region .= $this->arenaTryLandingIr($spReg);
+            if (!$hasFinally) { $markInit = $this->arenaTryLeave(); }
+            $region .= $this->emitLoadClassId($thrown);
             $cid = $this->classIdReg;
             foreach ($n->catches as $c) {
                 $matchLbl = $this->ssa->allocLabel('catch_match');
                 $nextLbl = $this->ssa->allocLabel('catch_next');
-                $cVar = $this->catchVar($c);
                 $cTypes = $this->catchTypes($c);
                 if ($this->catchAcceptsAll($cTypes)) {
-                    $out .= '  br label %' . $matchLbl . "\n";
+                    $region .= '  br label %' . $matchLbl . "\n";
                 } else {
-                    $out .= $this->classIdInChain($cid, $this->catchClassIds($cTypes));
-                    $out .= '  br i1 ' . $this->ccScratch . ', label %' . $matchLbl
+                    $region .= $this->classIdInChain($cid, $this->catchClassIds($cTypes));
+                    $region .= '  br i1 ' . $this->ccScratch . ', label %' . $matchLbl
                           . ', label %' . $nextLbl . "\n";
                 }
-                $out .= $matchLbl . ":\n";
-                if ($cVar !== null && isset($this->locals->slots[$cVar])) {
-                    $ti = $this->ssa->allocReg();
-                    $out .= '  ' . $ti . ' = ptrtoint ptr ' . $thrown . " to i64\n";
-                    $out .= '  store i64 ' . $ti . ', ptr ' . $this->locals->slots[$cVar] . "\n";
-                }
-                foreach ($this->catchBody($c) as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
-                $out .= '  br label %' . $joinLbl . "\n";
-                $out .= $nextLbl . ":\n";
+                $region .= $matchLbl . ":\n";
+                foreach ($this->catchBody($c) as $s) { $region .= $this->emitNode($s); $region .= $this->emitDiscardedCallRelease($s); }
+                $region .= '  br label %' . $joinLbl . "\n";
+                $region .= $nextLbl . ":\n";
             }
-            // No catch matched — rethrow through the next outer buf.
-            $out .= $this->emitRethrowAt();
+            // No catch matched — raise it again from here: the finally pad below
+            // (when there is one) or the next frame out.
+            $region .= $this->emitRethrowAt($thrown);
         }
 
-        // Finally. Pop first — the finally body is not protected by itself, and
-        // a `return` inside it must not re-inline this same finally.
-        if ($hasFinally) {
+        if (!$hasFinally) {
+            $out .= $region;
+        } else {
+            // Finally. Pop first — the finally body is not protected by itself, and
+            // a `return` inside it must not re-inline this same finally.
             $this->cf->popFinally();
-            $out .= $outerCatchLbl . ":\n";
-            // Record the in-flight exception for rethrow after finally.
-            $oce = $this->ssa->allocReg();
-            $out .= '  ' . $oce . " = load ptr, ptr @__mir_thrown\n";
-            $out .= '  store ptr ' . $oce . ', ptr ' . $pendVal . "\n";
+            // An exception out of the try body (catchless) or out of a catch body
+            // runs the finally, then goes on up.
+            $out .= $this->ehInvokeRegion($region, $finPadLbl);
+            $out .= $this->ehPad($finPadLbl);
+            $out .= $this->btRestore($btSlot);
+            $out .= $this->arenaTryLandingIr($spReg);
+            $markInit = $this->arenaTryLeave();
+            $out .= '  store ptr ' . $this->ehPadObj . ', ptr ' . $pendVal . "\n";
             $out .= '  store i64 1, ptr ' . $pendFlag . "\n";
             $out .= '  br label %' . $finLbl . "\n";
 
             $out .= $finLbl . ":\n";
-            // Done with the outer buf either way: depth back to the entry depth
-            // ($od). In a generator the snapshot is reloaded from the frame (a
-            // yield in the try bypasses the entry SSA via the resume switch).
-            $out .= $this->tryReloadDepth($n->genOuterSlot, $od);
-            $out .= '  store i64 ' . $this->tryDepthScratch . ", ptr @__mir_jmp_depth\n";
             foreach ($n->finallyBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
             $rethrowLbl = $this->ssa->allocLabel('try_rethrow');
             $pf = $this->ssa->allocReg();
@@ -422,32 +438,20 @@ trait EmitLlvmExceptions
             $out .= $rethrowLbl . ":\n";
             $sv = $this->ssa->allocReg();
             $out .= '  ' . $sv . ' = load ptr, ptr ' . $pendVal . "\n";
-            $out .= '  store ptr ' . $sv . ", ptr @__mir_thrown\n";
-            $out .= $this->emitRethrowAt();
+            $out .= $this->emitRethrowAt($sv);
         }
 
         $out .= $endLbl . ":\n";
-        // Region closed: an escape emitted after this point belongs to an outer
-        // try (or to none), and must not restore to this one's depth.
-        $this->cf->popTryDepth();
+        $out = $markInit . $out;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
     }
 
-    /** longjmp through the current topmost buf (depth-1). */
-    private function emitRethrowAt(): string
+    /** Raise the Throwable `$objReg` (a `ptr`, owning its +1). Ends the block. */
+    private function emitRethrowAt(string $objReg): string
     {
-        $d = $this->ssa->allocReg();
-        $out = '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
-        $s = $this->ssa->allocReg();
-        $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
-        $out .= $this->jmpBufExpr($s);
-        $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
-        $out .= "  unreachable\n";
-        // No dead label: a basic-block label always follows this in
-        // emitTryCatch, which starts the next block on its own.
-        return $out;
+        return '  call void @__mc_throw(ptr ' . $objReg . ")\n  unreachable\n";
     }
 
     private string $ccScratch = '';

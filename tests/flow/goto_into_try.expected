@@ -1,0 +1,16 @@
+function h
+  L4 goto: {n}
+  L5 try_catch: unreachable
+    try
+      L5 label: {n}
+      L5 store_local: {n}
+      L5 echo: {n,x}
+    finally
+      L5 echo: {n}
+  L6 echo: {n}
+  L7 return: {n}
+edges
+  goto @L4 goto <- L4 goto: {n} -> {n}
+  finally @L5 try_catch <- L5 echo: {n,x} -> {n}
+  finally @L5 try_catch <- -: {n} -> {n}
+  return @L7 return <- L7 return: {n} -> {n}

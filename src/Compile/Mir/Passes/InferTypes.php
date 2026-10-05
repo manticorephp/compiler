@@ -62,6 +62,8 @@ use Compile\Mir\StoreDynProp_;
 use Compile\Mir\Sub;
 use Compile\Mir\Type;
 use Compile\Mir\While_;
+use Compile\Mir\Break_;
+use Compile\Mir\Continue_;
 
 /**
  * Intra-procedural type-inference pass.
@@ -564,8 +566,8 @@ final class InferTypes implements Pass
      *  literal keeps per-field types, and the callee is about to write a field
      *  the record has no slot repr for. {@see scanByRefElemWiden} */
     private array $byRefCellElemLocals = [];
-    /** @var bool a property element type was widened by {@see scanRefElemArgWiden}: every reader re-infers */
-    private bool $refElemPropsRetyped = false;
+    /** @var array<string, bool> {@see Module::$inferByRefElemRetyped} */
+    private array $byRefElemRetyped = [];
     /** @var array<string, array<string, bool>> the {@see $forcedCellElemLocals} entries a by-ref CAPTURE proved; kept on the module across runs */
     private array $byRefCaptureElemLocals = [];
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
@@ -628,6 +630,13 @@ final class InferTypes implements Pass
      *  Discovered during inference (a call's kind isn't knowable to a pre-scan),
      *  so a promotion re-runs the function — see inferFunction. */
     private array $cellLoopLocals = [];
+    /** The body of the function being inferred ({@see InferNodes::inferForeach}'s
+     *  read-past-the-loop test). */
+    private ?Block $inferFnBody = null;
+    /** @var array<string, bool> foreach bindings boxed back on every path out
+     *  of the loop being inferred ({@see boxBackBeforeJumps}): an arm's box-back
+     *  before its jump serves that loop, never an if/else pair to unplant. */
+    private array $loopExitNames = [];
     /** Open `try` bodies, innermost last: the first type each saw per name
      *  ({@see noteTryStore}). @var array<int, array<string, Type>> */
     private array $tryStoreFrames = [];
@@ -776,14 +785,15 @@ final class InferTypes implements Pass
      *  ({@see InferScans::scanRefPinnedNode}). */
     private array $refPinnedLocals = [];
 
+    /** @var array<string,bool> the current function's names whose slot is a word
+     *  another frame writes too: a by-ref param, a by-ref capture param, a local
+     *  a closure here captures by reference ({@see collectSharedWordLocals}). */
+    private array $sharedWordLocals = [];
+
     /** @var array<string,string> "Cls::m" → the override body that answers a
      *  receiver typed Cls with no body of its own, '' for none
      *  ({@see InferScans::overrideBody}). */
     private array $overrideBodyMemo = [];
-
-    /** @var array<string,int> closure class → how many captures lead its
-     *  params ({@see InferScans::closureCapCounts}). */
-    private array $closureCapCount = [];
 
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
@@ -827,6 +837,9 @@ final class InferTypes implements Pass
     /** @var array<string, \Compile\Mir\EnumDef> */
     private array $enums = [];
 
+    /** The program's entry file, for a runtime message's `called in …`. */
+    private string $moduleSourceFile = '';
+
     /** `#[TypeDef]` value types — kept apart from {@see $classes} because they
      *  have no runtime object form. Only `$byte->value` and `$byte->method()` consult them.
      *  @var array<string, \Compile\Mir\ClassDef> */
@@ -841,6 +854,7 @@ final class InferTypes implements Pass
         $this->classes = $module->classes;
         $this->declarersIdx = [];
         $this->enums = $module->enums;
+        $this->moduleSourceFile = $module->sourceFile;
         $this->typeDefs = $module->typeDefs;
         $this->fnByName = [];
         $this->closureNodeByName = [];
@@ -871,6 +885,7 @@ final class InferTypes implements Pass
         }
         $this->declaredReturns = $module->declaredReturnTypes;
         $this->byRefCellElemLocals = $module->inferByRefCellElemLocals;
+        $this->byRefElemRetyped = $module->inferByRefElemRetyped;
         $this->byRefCaptureCellLocals = $module->inferByRefCaptureCellLocals;
         $this->globalVarTypes = $module->inferGlobalVarTypes;
         $this->byRefCaptureElemLocals = $module->inferByRefCaptureElemLocals;
@@ -895,7 +910,7 @@ final class InferTypes implements Pass
         $this->scanAssocProps($module);
         // Module pre-scan: a getter `M(): T { return $this->prop[$i]; }`
         // reveals that `prop` is a vec[T]. Without the element type the
-        // borrowed-element return isn't +1-retained (isBorrowedObjReturn
+        // borrowed-element return isn't +1-retained (Ownership::returnBorrowsObj
         // sees `unknown`), so the caller over-releases the shared element —
         // e.g. peek() freeing the Parser token vec out from under itself.
         // Module pre-scan: an array property that ever receives a MIXED/cell
@@ -1099,14 +1114,22 @@ final class InferTypes implements Pass
         }
         // A local handed to a `mixed &` parameter is likewise one word two
         // frames share, and the callee may make it any kind.
-        // A retyped `int &$i` makes its callers' slots cells, and a caller that
-        // FORWARDS its own `int &$j` there is then a retype of its own — so the
-        // two scans run together to a fixpoint (both only widen).
-        $guard = 0;
-        while ($guard < 8) {
-            $guard = $guard + 1;
+        // A true fixpoint over the two by-ref scans, which only ever widen: a
+        // retyped `int &$i` makes its callers' slots cells
+        // ({@see InferScans::scanRefCellArgWiden}), a caller that FORWARDS its
+        // own `int &$j` there is then a retype of its own
+        // ({@see InferScans::scanByRefParamRetype}), and a callee's by-ref array
+        // param retyped this round widens its callers' arrays the next
+        // ({@see InferScans::retypeByRefParamElems}) — one call-chain hop per
+        // round at worst. Every set it grows is monotone (a name or a param only
+        // ever turns cell), so it terminates; the cap is a chain longer than the
+        // module has functions, which only a bug makes, and it fails the build
+        // instead of leaving the far callers raw.
+        $rounds = 0;
+        $cap = \count($module->functions) + 8;
+        while (true) {
             $this->rescanTargets = [];
-            $retyped = $this->scanRefParamRetype($module);
+            $retyped = $this->scanByRefParamRetype($module);
             if ($retyped) {
                 $this->inferFunctionsForScope($module, 'byref_param_retype', $this->rescanTargets);
             }
@@ -1115,21 +1138,17 @@ final class InferTypes implements Pass
             if ($widened) {
                 $this->inferFunctionsForScope($module, 'byref_cell_arg', $this->rescanTargets);
             }
-            // An ELEMENT handed to a cell by-ref param makes its array a cell array.
             $this->rescanTargets = [];
-            $this->refElemPropsRetyped = false;
-            $elemWidened = $this->scanRefElemArgWiden($module);
-            if ($elemWidened) {
-                $this->inferFunctionsForScope($module, 'byref_elem_arg', $this->refElemPropsRetyped ? null : $this->rescanTargets);
-            }
             // A retyped param captured `use (&$i)` is a cell at the capture
             // site now, and the closure's side of that word must follow.
-            $captured = false;
-            if ($retyped && $this->scanByRefCaptureWiden($module)) {
-                $captured = true;
-                $this->inferFunctionsForScope($module, 'byref_capture');
+            $captured = $retyped && $this->scanByRefCaptureWiden($module);
+            if ($captured) { $this->inferFunctionsForScope($module, 'byref_capture'); }
+            if (!$retyped && !$widened && !$captured) { break; }
+            $rounds = $rounds + 1;
+            if ($rounds > $cap) {
+                throw new \RuntimeException('MIR.infer: the by-ref widening did not converge in '
+                    . (string)$cap . ' rounds — a set that should only grow changed back');
             }
-            if (!$retyped && !$widened && !$elemWidened && !$captured) { break; }
         }
         // Post-inference: a constructor argument that is a known vec/assoc
         // reveals the destination property's container kind even when the
@@ -1208,6 +1227,7 @@ final class InferTypes implements Pass
         }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
         $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
+        $module->inferByRefElemRetyped = $this->byRefElemRetyped;
         $module->inferByRefCaptureCellLocals = $this->byRefCaptureCellLocals;
         $module->inferGlobalVarTypes = $this->globalVarTypes;
         $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
@@ -1883,22 +1903,32 @@ final class InferTypes implements Pass
      *  @param array<string,bool> $strKey
      *  @param array<string,Type> $elemAll "name#kind" → one element type
      *         stored under that kind, EVERY store included (cell and array
-     *         values too, which `$elems` leaves out) */
-    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey, array &$elemAll): void
+     *         values too, which `$elems` leaves out)
+     *  @param array<string,string> $aliasOf a reference alias (`$t = &$g`,
+     *    chained) → the module cell's name: a store through it is the cell's */
+    private function collectGlobalStoreTypes(Node $n, array $active, array &$observed, array &$elems, array &$elemBad, array &$strKey, array &$elemAll, array &$aliasOf): void
     {
-        if ($n->kind === Node::KIND_STORE_LOCAL) {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $ra = $n;
+            $src = $aliasOf[$ra->source] ?? $ra->source;
+            if (isset($active[$src])) { $aliasOf[$ra->target] = $src; }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
             $s = $n;
+            $gname = $aliasOf[$s->name] ?? $s->name;
             // A self-store (`$x = $x`) is a merge shadow planMergeShadow planted,
             // not a definition: its value is the slot's own hard-lowered `int`,
             // and joining that with the real store (`string ∪ int` → unknown)
             // erased the seed the scan exists to find.
             $selfStore = $s->value->kind === Node::KIND_LOAD_LOCAL && $s->value->name === $s->name;
-            if (isset($active[$s->name]) && !$selfStore) {
-                $t = $s->value->type;
+            if (isset($active[$gname]) && !$selfStore) {
+                // A store NODE typed cell over a concrete value BOXES it (a
+                // reference-taken or loop-rekinded name): the slot receives a
+                // cell, whatever the value's own type says.
+                $t = $s->type->kind === Type::KIND_CELL ? Type::cell() : $s->value->type;
                 $tk = $t->kind;
                 if ($tk !== Type::KIND_UNKNOWN) {
-                    $observed[$s->name] = isset($observed[$s->name])
-                        ? $this->unionTypes($observed[$s->name], $t)
+                    $observed[$gname] = isset($observed[$gname])
+                        ? $this->unionTypes($observed[$gname], $t)
                         : $t;
                 }
             }
@@ -1937,7 +1967,7 @@ final class InferTypes implements Pass
             }
         }
         foreach (Walk::children($n) as $ch) {
-            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey, $elemAll);
+            $this->collectGlobalStoreTypes($ch, $active, $observed, $elems, $elemBad, $strKey, $elemAll, $aliasOf);
         }
     }
 
@@ -2237,10 +2267,7 @@ final class InferTypes implements Pass
             // in the next foreach; `'abc'` vs `[1,2]` printed a pointer. Box both
             // arms so the slot is uniformly tagged. Two arms of one kind (two
             // arrays, two objects) agree on the raw repr and stay raw.
-            $tOk = $this->cellCarries($tT) || ($tT->kind === Type::KIND_NULL && $this->nullBoxesWith($oT));
-            $oOk = $this->cellCarries($oT) || ($oT->kind === Type::KIND_NULL && $this->nullBoxesWith($tT));
-            if (!$tOk || !$oOk) { continue; }
-            if ($tT->kind === $oT->kind) { continue; }
+            if (!$this->joinDisagrees($tT, $oT) || $this->sharedWordErased($name, $tT, $oT)) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             // A static / global-backed slot has ONE repr, its decl's (the join of
             // every store, {@see InferNodes::inferStaticLocalDecl}); a box-back
@@ -2289,6 +2316,11 @@ final class InferTypes implements Pass
             $ti = self::boxBackIndex($then, $name);
             $ei = self::boxBackIndex($else, $name);
             if ($ti < 0 || $ei < 0) { continue; }
+            // A box-back before a loop-leaving jump serves the LOOP (the slot a
+            // re-kinded loop variable exits in), not this if/else pair.
+            if (isset($this->loopExitNames[$name])
+                && (self::boxBackEnd($then) !== \count($then->stmts)
+                    || self::boxBackEnd($else) !== \count($else->stmts))) { continue; }
             $tT = self::boxBackValueType($then->stmts[$ti]);
             $oT = self::boxBackValueType($else->stmts[$ei]);
             if ($tT->kind !== $oT->kind) { continue; }
@@ -2378,6 +2410,89 @@ final class InferTypes implements Pass
         // appended behind it kept the slot boxed by accident.
         $st->declaredType = $dest;
         return $st;
+    }
+
+    /** Does a foreach binding `$name` leave its loop in a cell slot — a name a
+     *  loop re-kinds, or one that enters this loop a cell? */
+    private function bindingExitsCell(string $name): bool
+    {
+        if (isset($this->cellLoopLocals[$name])) { return true; }
+        $t = $this->localTypes[$name] ?? null;
+        return $t !== null && $t->kind === Type::KIND_CELL;
+    }
+
+    /** How many reads of local `$name` sit under `$n` outside every foreach
+     *  that binds it (whose body reads its own binding). */
+    private static function readsOutsideBinders(Node $n, string $name): int
+    {
+        if ($n instanceof Foreach_ && ($n->valueVar === $name || $n->keyVar === $name)) {
+            return self::readsOutsideBinders($n->array, $name);
+        }
+        $c = ($n instanceof LoadLocal && $n->name === $name) ? 1 : 0;
+        foreach (Walk::children($n) as $ch) { $c = $c + self::readsOutsideBinders($ch, $name); }
+        return $c;
+    }
+
+    /**
+     * The box-back of `$name` before every `break` / `continue` under `$n` that
+     * leaves the loop whose body `$n` is: `$depth` loops / switches in between,
+     * so such a jump's level is `$depth + 1`. Idempotent across re-inference.
+     */
+    private function boxBackBeforeJumps(Node $n, string $name, Type $concrete, int $depth): void
+    {
+        if ($n instanceof Block) {
+            $out = [];
+            $changed = false;
+            foreach ($n->stmts as $i => $s) {
+                if (($s instanceof Break_ || $s instanceof Continue_) && $s->level === $depth + 1) {
+                    $prev = $i > 0 ? $n->stmts[$i - 1] : null;
+                    if (!($prev instanceof StoreLocal && $prev->name === $name && $prev->value instanceof LoadLocal
+                        && $prev->value->name === $name)) {
+                        $out[] = $this->boxBackStore($name, $concrete);
+                        $changed = true;
+                    }
+                }
+                $out[] = $s;
+            }
+            if ($changed) { $n->stmts = $out; }
+        }
+        $inner = $n instanceof While_ || $n instanceof For_ || $n instanceof DoWhile_
+            || $n instanceof Foreach_ || $n instanceof Switch_;
+        if ($n instanceof Switch_) {
+            foreach ($n->arms as $arm) {
+                $b = new Block($arm->body, Type::void());
+                $this->boxBackBeforeJumps($b, $name, $concrete, $depth + 1);
+                $arm->body = $b->stmts;
+            }
+            return;
+        }
+        if ($n instanceof TryCatch_) {
+            $b = new Block($n->tryBody, Type::void());
+            $this->boxBackBeforeJumps($b, $name, $concrete, $depth);
+            $n->tryBody = $b->stmts;
+            foreach ($n->catches as $c) {
+                $cb = new Block($c->body, Type::void());
+                $this->boxBackBeforeJumps($cb, $name, $concrete, $depth);
+                $c->body = $cb->stmts;
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->boxBackBeforeJumps($c, $name, $concrete, $inner ? $depth + 1 : $depth);
+        }
+    }
+
+    /** An element kind a binding boxes by TAG alone — no rebuild, no ordinal:
+     *  a scalar, a string, a plain object.
+     *  @param array<string, \Compile\Mir\EnumDef> $enums */
+    private static function bindBoxesByTag(Type $t, array $enums): bool
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
+            || $k === Type::KIND_STRING) { return true; }
+        if ($k !== Type::KIND_OBJ) { return false; }
+        $c = $t->class ?? '';
+        return $c !== '' && !isset($enums[$c]) && $c !== 'Closure' && !\str_starts_with($c, '__closure_');
     }
 
     /** Append the box-back to an arm — BEFORE a trailing `break`/`continue`:
@@ -2700,6 +2815,19 @@ final class InferTypes implements Pass
                 }
                 continue;
             }
+            // A `null` seed the body still assigns an ERASED value once the
+            // re-run typed the slot from it: nothing made the body concrete, so
+            // the value is erased for real, and its null is no raw 0 — an erased
+            // 0 is an int 0 ({@see joinDisagrees}). The name is a cell.
+            if ($bt->kind === Type::KIND_UNKNOWN && isset($this->nullLoopLocals[$name])
+                && $this->nullLoopLocals[$name]->kind === Type::KIND_UNKNOWN
+                && !isset($this->refPinnedLocals[$name]) && !isset($this->sharedWordLocals[$name])) {
+                unset($this->nullLoopLocals[$name]);
+                $out[$name] = Type::cell();
+                $this->cellLoopLocals[$name] = true;
+                $this->loopPromoGrew = true;
+                continue;
+            }
             // A NON-numeric kind change across the back-edge (`$x = 0;` then
             // `$x = getenv(…)` in the body) has no raw i64 repr that both sides
             // agree on: unionWith collapses it to `unknown`, which reads back as
@@ -2747,7 +2875,7 @@ final class InferTypes implements Pass
             // an array entry the body leaves a cell (the if/else box-back inside
             // the body produces exactly that), a string the body turns into an
             // array, an object into an int.
-            if (!$this->joinDisagrees($st, $bt)) { continue; }
+            if (!$this->joinDisagrees($st, $bt) || $this->sharedWordErased($name, $st, $bt)) { continue; }
             if (isset($this->refPinnedLocals[$name])) { continue; }
             $out[$name] = Type::cell();
             if (!isset($this->cellLoopLocals[$name])) {
@@ -2774,16 +2902,64 @@ final class InferTypes implements Pass
     {
         $out = $this->mergeLocals($a, $b);
         foreach ($a as $name => $at) {
-            if (!isset($b[$name]) || !$this->joinDisagrees($at, $b[$name])) { continue; }
-            if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
-                || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { continue; }
-            $out[$name] = Type::cell();
-            if (!isset($this->cellLoopLocals[$name])) {
-                $this->cellLoopLocals[$name] = true;
-                $this->loopPromoGrew = true;
-            }
+            if (!isset($b[$name])) { continue; }
+            if ($this->pinDisagreeing($name, $at, $b[$name])) { $out[$name] = Type::cell(); }
         }
         return $out;
+    }
+
+    /**
+     * Where the alternative paths of an EXPRESSION meet — a ternary's arms
+     * (`&&`, `||`, `and`, `or` and `?:` lower to one), `??`'s fallback against
+     * the path that skips it — the {@see joinLocals} discipline: an arm has no
+     * statement tail to plant a box-back on, so a name an arm REBINDS to a
+     * representation the other path does not share is a cell for the whole
+     * function. A guard's narrowing is not a rebind: a name whose kind leaves
+     * the arm as it entered it holds the value it held before the arms.
+     *
+     * @param array<string, Type> $pre  the map before either arm, un-narrowed
+     * @param array<string, Type> $aIn
+     * @param array<string, Type> $aOut
+     * @param array<string, Type> $bIn
+     * @param array<string, Type> $bOut
+     * @return array<string, Type>
+     */
+    private function joinArmLocals(array $pre, array $aIn, array $aOut, array $bIn, array $bOut): array
+    {
+        $out = $this->mergeLocals($aOut, $bOut);
+        foreach ($aOut as $name => $at) {
+            if (!isset($bOut[$name])) { continue; }
+            $bt = $bOut[$name];
+            if ($at->kind === $bt->kind) { continue; }
+            $ea = self::armBinding($name, $pre, $aIn, $at);
+            $eb = self::armBinding($name, $pre, $bIn, $bt);
+            if ($this->pinDisagreeing($name, $ea, $eb)) { $out[$name] = Type::cell(); }
+        }
+        return $out;
+    }
+
+    /** The type `$name` reaches an expression join with from one arm: its
+     *  pre-arm type when the arm left the kind it entered with (only narrowed),
+     *  else what the arm bound.
+     *  @param array<string, Type> $pre @param array<string, Type> $in */
+    private static function armBinding(string $name, array $pre, array $in, Type $out): Type
+    {
+        if (isset($pre[$name]) && isset($in[$name]) && $in[$name]->kind === $out->kind) { return $pre[$name]; }
+        return $out;
+    }
+
+    /** Pin `$name` a cell for the whole function when two paths hold it in
+     *  representations with no raw word in common ({@see joinDisagrees}). */
+    private function pinDisagreeing(string $name, Type $a, Type $b): bool
+    {
+        if (!$this->joinDisagrees($a, $b) || $this->sharedWordErased($name, $a, $b)) { return false; }
+        if (isset($this->refPinnedLocals[$name]) || isset($this->globalBackedNames[$name])
+            || ($this->inMainBody && isset($this->mainGlobalNames[$name]))) { return false; }
+        if (!isset($this->cellLoopLocals[$name])) {
+            $this->cellLoopLocals[$name] = true;
+            $this->loopPromoGrew = true;
+        }
+        return true;
     }
 
     private function resetJumpState(): void
@@ -2898,14 +3074,79 @@ final class InferTypes implements Pass
         }
     }
 
+    /** An ERASED side of a join on a word another frame shares is that frame's
+     *  raw write, not an erased value: the word's representation is what the
+     *  two frames agree on ({@see InferScans::scanByRefCaptureWiden}), and one
+     *  frame boxing it alone hands the other a tagged word it reads raw. */
+    private function sharedWordErased(string $name, Type $a, Type $b): bool
+    {
+        return isset($this->sharedWordLocals[$name])
+            && ($a->kind === Type::KIND_UNKNOWN || $b->kind === Type::KIND_UNKNOWN);
+    }
+
+    private function collectSharedWordLocals(FunctionDef $fn): void
+    {
+        $this->sharedWordLocals = [];
+        foreach ($fn->params as $p) {
+            if ($p->byRef) { $this->sharedWordLocals[$p->name] = true; }
+        }
+        $cl = $this->closureNodeByName[$fn->name] ?? null;
+        if ($cl !== null) {
+            $n = \count($cl->captures);
+            for ($i = 0; $i < $n; $i++) {
+                if (!($cl->captureByRef[$i] ?? false)) { continue; }
+                $pn = $this->paramNameAt($fn, $i);
+                if ($pn !== '') { $this->sharedWordLocals[$pn] = true; }
+            }
+        }
+        $this->collectRefCapturedLocals($fn->body);
+    }
+
+    private function collectRefCapturedLocals(Node $n): void
+    {
+        if ($n instanceof Closure_) {
+            $i = 0;
+            foreach ($n->captures as $c) {
+                if (($n->captureByRef[$i] ?? false) && $c instanceof LoadLocal) {
+                    $this->sharedWordLocals[$c->name] = true;
+                }
+                $i = $i + 1;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectRefCapturedLocals($c); }
+    }
+
     /** Two reprs of one slot with no raw word in common — the pairs
      *  {@see loopMerge} and {@see planMergeShadow} box. */
     private function joinDisagrees(Type $a, Type $b): bool
     {
         if ($a->kind === $b->kind) { return false; }
+        // An ERASED value (a bare-`array` result, an unknown receiver's return)
+        // beside a scalar, a string, an object or a cell shares no raw word with
+        // it either — the join typed `unknown` read a string as an array. The
+        // erased side boxes by its runtime repr. Beside another ARRAY it rides
+        // the same raw buffer word and stays raw.
+        // A NULL beside it is no exception: an erased word of 0 is an int 0,
+        // so the null has to be a tagged null for `is_null` to answer it.
+        if ($a->kind === Type::KIND_UNKNOWN || $b->kind === Type::KIND_UNKNOWN) {
+            $o = $a->kind === Type::KIND_UNKNOWN ? $b : $a;
+            return $o->kind === Type::KIND_NULL || ($this->cellCarries($o) && !$o->isArray());
+        }
         if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
         if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
         return $this->cellCarries($a) && $this->cellCarries($b);
+    }
+
+    /** A VALUE join (ternary arms, match arms, returns) of an ERASED value with
+     *  a sibling it shares no raw word with ({@see joinDisagrees}): a null, a
+     *  scalar, a string, a cell. The result is a cell; the erased arm boxes by
+     *  its runtime repr. An object sibling is not one: there the UNKNOWN arm is
+     *  the not-yet-inferred bottom the arm-deference rules resolve. */
+    private function erasedJoinBoxes(Type $a, Type $b): bool
+    {
+        if ($a->kind !== Type::KIND_UNKNOWN && $b->kind !== Type::KIND_UNKNOWN) { return false; }
+        $o = $a->kind === Type::KIND_UNKNOWN ? $b : $a;
+        return $o->kind !== Type::KIND_OBJ && $this->joinDisagrees($a, $b);
     }
 
     /** A kind a cell carries by its tag: a scalar, a string, an array, an
@@ -3001,44 +3242,49 @@ final class InferTypes implements Pass
     }
 
     /**
-     * Declared type of `$prop` on some subclass of `$base`, or null.
-     * Resolves base-typed reads of a subclass-only field.
+     * Type of a base-typed read of `$prop` that only subclasses of `$base`
+     * declare, or null when none does: the JOIN of every declaration reachable
+     * from `$base`. Siblings may declare the name with unrelated types
+     * (`IntLiteral::$value` int, `Spread::$value` Expr), and the runtime object
+     * is any of them — the first declaration found typed `$expr->value` int and
+     * boxed an object pointer as an integer. Kinds that disagree join to a
+     * cell, which the emitter reads per holder class and boxes by the slot.
      */
     private function subclassPropType(string $base, string $prop): ?Type
     {
         $types = [];
-        $first = null;
-        $offset = null;
-        $sameOffset = true;
         foreach ($this->classes as $cd) {
             if ($cd->name === $base) { continue; }
             if (!$this->classExtends($cd->name, $base)) { continue; }
-            if (isset($cd->propertyTypes[$prop])) {
-                $t = $cd->propertyTypes[$prop];
-                if ($first === null) { $first = $t; }
-                $types[] = $t;
-                $off = $cd->propertyOffset($prop);
-                if ($offset === null) { $offset = $off; } elseif ($off !== $offset) { $sameOffset = false; }
-            }
+            if ($cd->propertyOffset($prop) < 0) { continue; }
+            // An untyped declaration still holds the slot: it joins as unknown.
+            $types[] = $cd->propertyTypes[$prop] ?? Type::unknown();
         }
-        if ($first === null) { return null; }
-        // Subclasses that lay the property out differently, or type it
-        // differently, have no one static read: the value is whatever the
-        // object in hand holds. A CELL, read per class_id
-        // ({@see EmitLlvmObjects::emitRawPropByClassId}). Borrowing the first
-        // holder's type read `$expr->value` of a Spread as IntLiteral's int —
-        // an object handed on without its count, freed twice.
-        if (!$sameOffset) { return Type::cell(); }
+        return $this->joinPropTypes($types);
+    }
+
+    /**
+     * Join of several declarations of one property name: all objects → their
+     * union, all the same type → that type, anything else → cell. An enum
+     * slot is no plain object pointer; it joins only with its own type. The
+     * emitter answers the same join ({@see \Compile\Mir\Ownership::subclassPropHolder}).
+     *
+     * @param Type[] $types
+     */
+    private function joinPropTypes(array $types): ?Type
+    {
+        if (\count($types) === 0) { return null; }
         $allObj = true;
-        $allSame = true;
-        $firstS = $first->toString();
         foreach ($types as $t) {
-            if ($t->kind !== Type::KIND_OBJ) { $allObj = false; }
-            if ($t->toString() !== $firstS) { $allSame = false; }
+            if ($t->kind !== Type::KIND_OBJ || isset($this->enums[$t->class ?? ''])) { $allObj = false; break; }
         }
-        if ($allSame) { return $first; }
         if ($allObj) { return $this->objUnion($types); }
-        return Type::cell();
+        $first = $types[0];
+        $fs = $first->toString();
+        foreach ($types as $t) {
+            if ($t->toString() !== $fs) { return Type::cell(); }
+        }
+        return $first;
     }
 
     /**
@@ -3063,16 +3309,16 @@ final class InferTypes implements Pass
 
     private function unionPropType(Type $u, string $prop): ?Type
     {
-        /** @var Type $found */
-        $found = null;
+        $types = [];
         foreach ($u->atoms as $atom) {
             $cd = $this->classes[$atom->class ?? ''] ?? null;
-            if ($cd === null || !isset($cd->propertyTypes[$prop])) { continue; }
-            $t = $cd->propertyTypes[$prop];
-            if ($found === null) { $found = $t; }
-            elseif ($found->kind !== $t->kind) { return null; }
+            if ($cd === null) { continue; }
+            if ($cd->propertyOffset($prop) >= 0) { $types[] = $cd->propertyTypes[$prop] ?? Type::unknown(); continue; }
+            // An arm that does not declare it may still hold it in a subclass.
+            $sub = $this->subclassPropType($cd->name, $prop);
+            if ($sub !== null) { $types[] = $sub; }
         }
-        return $found;
+        return $this->joinPropTypes($types);
     }
 
     /** Whether class `$name` transitively extends `$base`. */

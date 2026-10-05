@@ -1,0 +1,28 @@
+2
+array(2) {
+  ["k"]=>
+  string(1) "v"
+  ["m"]=>
+  string(1) "w"
+}
+string(3) "p-x"
+array(2) {
+  ["k"]=>
+  string(3) "p-v"
+  ["m"]=>
+  string(1) "w"
+}
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(20)
+  [2]=>
+  int(3)
+}
+array(2) {
+  [0]=>
+  string(3) "q-a"
+  [1]=>
+  string(1) "b"
+}
