@@ -1,0 +1,16 @@
+float(0.1)
+float(-2.5)
+float(3)
+float(0)
+float(4.5)
+float(2.5)
+float(-3)
+string(5) "1.500"
+string(5) "0.250"
+float(10)
+float(1.5)
+int(2)
+int(7)
+float(2.3)
+float(0.75)
+float(2)
