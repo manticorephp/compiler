@@ -281,14 +281,14 @@ trait EmitLlvmArrays
 
     /**
      * `$fixed[$i]` on a SplFixedArray whose `offsetGet` is the prelude's own,
-     * with an INT index: read `__data[$i]` in place when `0 <= $i < __size`,
+     * with an INT index: load the buffer's cell word in place when in range,
      * else call `offsetGet` (which throws php's error). php-cs-fixer's `Tokens`
      * is a SplFixedArray and `$tokens[$i]` is its hottest expression; in Zend
      * it is C.
      *
      * The result is a BORROW, as every element read is: the node is an
      * ArrayAccess_, and every consumer — the ownership plan, argument and
-     * receiver temps, returns — reads it as one. `__data` keeps the word alive,
+     * receiver temps, returns — reads it as one. The buffer keeps the word alive,
      * so the call arm gives its +1 straight back. Handing out the call's +1
      * instead leaked every token each `$tokens[$i]->…` touched.
      * null when the shape does not apply.
@@ -301,9 +301,8 @@ trait EmitLlvmArrays
         if ($ik !== Type::KIND_INT && $ik !== Type::KIND_CELL) { return null; }
         $cd = $this->classes[$cls] ?? null;
         if ($cd === null) { return null; }
-        $dataOff = $cd->propertyOffset('__data');
-        $sizeOff = $cd->propertyOffset('__size');
-        if ($dataOff < 0 || $sizeOff < 0) { return null; }
+        $bufOff = $cd->propertyOffset('__mcbuf');
+        if ($bufOff < 0) { return null; }
         // The receiver is read twice (the test, the slow call): a plain local only.
         if ($aa->array->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($aa->index)) { return null; }
         $out = $this->emitNode($aa->array);
@@ -330,27 +329,18 @@ trait EmitLlvmArrays
         }
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
-        $sp = $this->ssa->allocReg();
-        $out .= '  ' . $sp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$sizeOff . "\n";
-        $size = $this->ssa->allocReg();
-        $out .= '  ' . $size . ' = load i64, ptr ' . $sp . "\n";
-        $inb = $this->ssa->allocReg();
-        $out .= '  ' . $inb . ' = icmp ult i64 ' . $idx . ', ' . $size . "\n";
+        $data = '';
+        $inb = '';
+        $out .= $this->nbufProbe($obj, $bufOff, $idx, $data, $inb);
         $fastL = $this->ssa->allocLabel('sfa.fast');
         $slowL = $this->ssa->allocLabel('sfa.slow');
         $endL = $this->ssa->allocLabel('sfa.end');
         $out .= '  br i1 ' . $inb . ', label %' . $fastL . ', label %' . $slowL . "\n";
         $out .= $fastL . ":\n";
-        $dp = $this->ssa->allocReg();
-        $out .= '  ' . $dp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$dataOff . "\n";
-        $di = $this->ssa->allocReg();
-        $out .= '  ' . $di . ' = load i64, ptr ' . $dp . "\n";
-        $data = $this->ssa->allocReg();
-        $out .= '  ' . $data . ' = inttoptr i64 ' . $di . " to ptr\n";
-        $w = $this->ssa->allocReg();
-        $out .= '  ' . $w . ' = call i64 @__mir_array_get_int(ptr ' . $data . ', i64 ' . $idx . ")\n";
+        $ep = $this->ssa->allocReg();
+        $out .= '  ' . $ep . ' = getelementptr inbounds i64, ptr ' . $data . ', i64 ' . $idx . "\n";
         $cv = $this->ssa->allocReg();
-        $out .= '  ' . $cv . ' = call i64 @__mir_elem_decode(ptr ' . $data . ', i64 ' . $w . ")\n";
+        $out .= '  ' . $cv . ' = load i64, ptr ' . $ep . "\n";
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
         $out .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
@@ -414,9 +404,8 @@ trait EmitLlvmArrays
     {
         $cd = $this->classes['SplFixedArray'] ?? null;
         if ($cd === null) { return null; }
-        $dataOff = $cd->propertyOffset('__data');
-        $sizeOff = $cd->propertyOffset('__size');
-        if ($dataOff < 0 || $sizeOff < 0) { return null; }
+        $bufOff = $cd->propertyOffset('__mcbuf');
+        if ($bufOff < 0) { return null; }
         $parts = \explode(', ', $argList);
         if (\count($parts) !== 3) { return null; }
         $regs = [];
@@ -431,56 +420,24 @@ trait EmitLlvmArrays
         $this->rt->needsStrRc = true;
         $intHdr = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $r = fn (): string => $this->ssa->allocReg();
-        $obj = $r(); $hi = $r(); $isInt = $r(); $sh = $r(); $iv = $r(); $sp = $r(); $size = $r();
-        $inb = $r(); $ok1 = $r();
+        $obj = $r(); $hi = $r(); $isInt = $r(); $sh = $r(); $iv = $r(); $sel = $r();
         $out = '  ' . $obj . ' = inttoptr i64 ' . $thisW . " to ptr\n";
         $out .= '  ' . $hi . ' = and i64 ' . $idxW . ", -281474976710656\n";
         $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ', ' . $intHdr . "\n";
         $out .= '  ' . $sh . ' = shl i64 ' . $idxW . ", 16\n";
         $out .= '  ' . $iv . ' = ashr i64 ' . $sh . ", 16\n";
-        $out .= '  ' . $sp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$sizeOff . "\n";
-        $out .= '  ' . $size . ' = load i64, ptr ' . $sp . "\n";
-        $out .= '  ' . $inb . ' = icmp ult i64 ' . $iv . ', ' . $size . "\n";
-        $out .= '  ' . $ok1 . ' = and i1 ' . $isInt . ', ' . $inb . "\n";
-        $chkL = $this->ssa->allocLabel('sfaset.chk');
+        // A non-int index maps to -1, which fails the unsigned range test.
+        $out .= '  ' . $sel . ' = select i1 ' . $isInt . ', i64 ' . $iv . ", i64 -1\n";
+        $data = '';
+        $inb = '';
+        $out .= $this->nbufProbe($obj, $bufOff, $sel, $data, $inb);
         $fastL = $this->ssa->allocLabel('sfaset.fast');
         $slowL = $this->ssa->allocLabel('sfaset.slow');
         $endL = $this->ssa->allocLabel('sfaset.end');
-        $out .= '  br i1 ' . $ok1 . ', label %' . $chkL . ', label %' . $slowL . "\n";
-        $out .= $chkL . ":\n";
-        $dp = $r(); $dw = $r(); $data = $r(); $nn = $r(); $rcp = $r(); $rc = $r(); $one = $r();
-        $fp = $r(); $fl = $r(); $hm = $r(); $cellH = $r(); $hsh = $r(); $packed = $r(); $len = $r(); $inl = $r();
-        $a1 = $r(); $a2 = $r(); $a3 = $r(); $a4 = $r();
-        $out .= '  ' . $dp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$dataOff . "\n";
-        $out .= '  ' . $dw . ' = load i64, ptr ' . $dp . "\n";
-        $out .= '  ' . $data . ' = inttoptr i64 ' . $dw . " to ptr\n";
-        $out .= '  ' . $nn . ' = icmp ne i64 ' . $dw . ", 0\n";
-        $out .= '  ' . $rcp . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_RC_OFFSET . "\n";
-        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
-        // Only dereference a non-null buffer: select a harmless address first.
-        $safe = $r(); $safeRc = $r(); $safeFl = $r(); $safeLen = $r();
-        $out .= '  ' . $safe . ' = select i1 ' . $nn . ', ptr ' . $data . ", ptr @__mir_zero_word\n";
-        $out .= '  ' . $safeRc . ' = select i1 ' . $nn . ', ptr ' . $rcp . ", ptr @__mir_zero_word\n";
-        $out .= '  ' . $safeFl . ' = select i1 ' . $nn . ', ptr ' . $fp . ", ptr @__mir_zero_word\n";
-        $out .= '  ' . $rc . ' = load i64, ptr ' . $safeRc . "\n";
-        $out .= '  ' . $one . ' = icmp eq i64 ' . $rc . ", 1\n";
-        $out .= '  ' . $fl . ' = load i64, ptr ' . $safeFl . "\n";
-        $out .= '  ' . $hm . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
-        $out .= '  ' . $cellH . ' = icmp eq i64 ' . $hm . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
-        $out .= '  ' . $hsh . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
-        $out .= '  ' . $packed . ' = icmp eq i64 ' . $hsh . ", 0\n";
-        $out .= '  ' . $len . ' = load i64, ptr ' . $safe . "\n";
-        $out .= '  ' . $inl . ' = icmp ult i64 ' . $iv . ', ' . $len . "\n";
-        $out .= '  ' . $a1 . ' = and i1 ' . $nn . ', ' . $one . "\n";
-        $out .= '  ' . $a2 . ' = and i1 ' . $a1 . ', ' . $cellH . "\n";
-        $out .= '  ' . $a3 . ' = and i1 ' . $a2 . ', ' . $packed . "\n";
-        $out .= '  ' . $a4 . ' = and i1 ' . $a3 . ', ' . $inl . "\n";
-        $out .= '  br i1 ' . $a4 . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= '  br i1 ' . $inb . ', label %' . $fastL . ', label %' . $slowL . "\n";
         $out .= $fastL . ":\n";
-        $off = $r(); $off2 = $r(); $slot = $r(); $old = $r();
-        $out .= '  ' . $off . ' = mul i64 ' . $iv . ", 8\n";
-        $out .= '  ' . $off2 . ' = add i64 ' . $off . ', ' . (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE . "\n";
-        $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . $off2 . "\n";
+        $slot = $r(); $old = $r();
+        $out .= '  ' . $slot . ' = getelementptr inbounds i64, ptr ' . $data . ', i64 ' . $sel . "\n";
         $out .= '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
         $out .= '  call void @__mir_cell_retain(i64 ' . $valW . ")\n";
         $out .= '  store i64 ' . $valW . ', ptr ' . $slot . "\n";
