@@ -185,11 +185,15 @@ final class OwnershipFlow implements Pass
         $this->errors = [];
         $refMasks = [];
         $refVariadic = [];
+        // One '0'/'1' per param, a STRING: a map of nested bool arrays handed to
+        // the constructor below is typed `vec[vec[…]]` by the previous compiler
+        // generation, which then read every mask as all-by-ref — and the
+        // compiler it built released borrowed captures at exit.
         foreach ($module->functions as $fn) {
-            $mask = [];
+            $mask = '';
             $tail = false;
             foreach ($fn->params as $p) {
-                $mask[] = $p->byRef;
+                $mask .= $p->byRef ? '1' : '0';
                 $tail = $p->variadic && $p->byRef;
             }
             $refMasks[$fn->name] = $mask;
@@ -898,6 +902,10 @@ final class OwnershipFlow implements Pass
             $ll = self::asLoadLocal($a);
             if (isset($this->excluded[$ll->name])) { continue; }
             $lid = \spl_object_id($ll);
+            if ($this->trace) {
+                \error_log('OWNFLOW ' . $this->fnName . ': REFARG ' . $ll->name . ' line ' . (string)$call->line
+                    . ' ' . $call->kind . ($call->kind === Node::KIND_CALL ? ' ' . self::asCall($call)->function : ''));
+            }
             $lat->refArgName[$lid] = $ll->name;
             $lat->refArgAt[$lid] = $this->curStmt;
             $this->refArgLoad[$lid] = $ll;

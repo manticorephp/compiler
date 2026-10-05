@@ -34,7 +34,7 @@ final class MixedSlots
     private array $enums;
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes;
-    /** @var array<string, bool[]> fn name → per-param by-ref mask */
+    /** @var array<string, string> fn name → per-param by-ref mask, one '0'/'1' per param */
     private array $refMasks;
     /** @var array<string, bool> fn name → its variadic tail is by-ref */
     private array $refVariadic;
@@ -62,7 +62,7 @@ final class MixedSlots
     /**
      * @param array<string, \Compile\Mir\EnumDef> $enums
      * @param array<string, \Compile\Mir\ClassDef> $classes
-     * @param array<string, bool[]> $refMasks
+     * @param array<string, string> $refMasks
      * @param array<string, bool> $refVariadic
      * @param array<string, int> $closureCaptureCount
      */
@@ -352,12 +352,12 @@ final class MixedSlots
             return $out;
         }
         $mask = $this->refMasks[$fn];
-        $cnt = \count($mask);
+        $cnt = \strlen($mask);
         $tail = $this->refVariadic[$fn] ?? false;
         $i = 0;
         foreach ($args as $a) {
             $p = $i + $offset;
-            $byRef = $p < $cnt ? $mask[$p] : false;
+            $byRef = $p < $cnt && $mask[$p] === '1';
             if (!$byRef && $tail && $p >= $cnt - 1) { $byRef = true; }
             if ($byRef) { $out[] = $a; }
             $i = $i + 1;
