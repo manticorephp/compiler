@@ -1404,6 +1404,15 @@ trait EmitLlvmBuiltins
             $ep = '';
             $out .= $this->emitEnumSingletonPtr((string)$elem->class, $ev, $ep);
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
+        } elseif ($ek === Type::KIND_UNION && $this->own->condFlavor($elem) === 'obj') {
+            // An all-object UNION element is a bare object pointer like `obj<C>`:
+            // boxed and co-owned the same way. It fell to `box_int` below, so
+            // the rebuilt array (`[...$v, ...$u]` over a `list<A|C>`) dropped a
+            // count it never took and freed `$u`'s object while `$y` held it.
+            $elemRetain = 'obj';
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_OBJ || $ek === Type::KIND_CLOSURE) {
             // discardReleaseFlavor answers '' for the header-less classes (a
             // #[Struct] / enum ordinal / Ffi\Ptr) — never rc-touch those. A
