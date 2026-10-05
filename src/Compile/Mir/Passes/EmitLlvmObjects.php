@@ -5398,7 +5398,7 @@ trait EmitLlvmObjects
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         $out = '';
-        $keyFirst = $aa->array->kind === Node::KIND_LOAD_LOCAL;
+        $keyFirst = $this->keyBeforeBase($aa->array);
         if ($keyFirst) {
             $out .= $this->emitNode($aa->index);
             $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
@@ -5611,7 +5611,7 @@ trait EmitLlvmObjects
                     || $aa->index->kind === Node::KIND_STRING_CONST;
                 // php evaluates the key BEFORE it fetches a plain variable base:
                 // `isset($a[f()])` where f() reassigns $a reads the new array.
-                $keyFirst = $aa->array->kind === Node::KIND_LOAD_LOCAL;
+                $keyFirst = $this->keyBeforeBase($aa->array);
                 $out = '';
                 if ($keyFirst) {
                     $out .= $this->emitNode($aa->index);

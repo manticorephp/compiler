@@ -2661,6 +2661,30 @@ trait EmitLlvmExpr
     }
 
     /**
+     * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
+     * fetch): a variable, a property, a static property or an element of one.
+     * A call base (`f()[$k]`) runs first.
+     */
+    private function keyBeforeBase(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STATIC_PROP) {
+            return true;
+        }
+        if ($n instanceof \Compile\Mir\PropertyAccess_) {
+            return $this->keyBeforeBase($n->object);
+        }
+        if ($n instanceof \Compile\Mir\ArrayAccess_) {
+            // An inner key that can run code keeps its source order.
+            $ik = $n->index->kind;
+            if ($ik !== Node::KIND_LOAD_LOCAL && $ik !== Node::KIND_INT_CONST && $ik !== Node::KIND_STRING_CONST) {
+                return false;
+            }
+            return $this->keyBeforeBase($n->array);
+        }
+        return false;
+    }
+
+    /**
      * Evaluate the base and key of `$a[$k] ?? d` ONCE, probe once, and leave
      * `present` (i64 0|1) in lastValue and the operands in {@see $coalescePre}
      * for {@see emitArrayAccessUnified}. The found word is a BORROW of the
@@ -2673,7 +2697,7 @@ trait EmitLlvmExpr
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         // The key before a plain variable base, as php fetches it ({@see emitIssetTarget}).
-        $keyFirst = $aa->array->kind === Node::KIND_LOAD_LOCAL;
+        $keyFirst = $this->keyBeforeBase($aa->array);
         $out = '';
         if ($keyFirst) {
             $out .= $this->emitNode($aa->index);
@@ -2777,7 +2801,7 @@ trait EmitLlvmExpr
         $out = '';
         $kReg = ''; $kType = ''; $kRel = '';
         $bReg = ''; $bType = ''; $bRel = ''; $bFlavor = '';
-        if ($base->kind === Node::KIND_LOAD_LOCAL) {
+        if ($this->keyBeforeBase($base)) {
             $out .= $this->preEvalKey($aa->index, $keyIsCell, $keyIsString);
             $kReg = $this->peReg; $kType = $this->peType; $kRel = $this->peRel;
             $out .= $this->preEvalBase($base, $isStr);
