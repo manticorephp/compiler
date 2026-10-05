@@ -41,6 +41,7 @@ clean finish before trusting anything.
 bash tests/aot/run.sh                # AOT suite: cases/*.php + expected/*.out, auto-discovered
 bash tests/aot/run.sh -k <substr>    # filter cases (do this first — the full suite is minutes)
 bash tests/aot/run.sh -j 0           # all cores (note: `-j 0` is two args)
+bash tests/aot/xfail.sh              # known-bug repros (tests/aot/repro): XFAIL = still open, XPASS = fixed, promote it
 bash tools/difftest.sh               # byte parity vs the `php` interpreter over the corpus
 bash tools/selfhost_fixpoint.sh      # gen2 IR == gen3 IR, self-host suite, rebuild stability
 bash tools/install_smoke.sh          # an INSTALLED compiler (on $PATH, behind a symlink) finds its own lib/

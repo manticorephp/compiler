@@ -3,6 +3,13 @@
 Not part of the suite (no `expected/`, so `run.sh` skips them) — these are the smallest
 programs that still show a bug we have NOT fixed. Keep them building.
 
+`bash tests/aot/xfail.sh [-k <substr>] [-j 0] [-v]` runs every `<name>.php` here that has
+the php oracle output beside it as `<name>.expected`, and inverts the verdict: `XFAIL`
+is a bug still open, `XPASS` is one that got fixed and fails the run until the repro
+is promoted (`git mv` into `cases/` + `expected/<name>.out`) and its issue closed.
+A repro names its issue in a comment — `// issue: #123` — and the issue body carries
+the same source. No `.expected` (a superset repro with no Zend oracle) ⇒ `SKIP`.
+
 ## w4/ — the W4 value-channel producers (EMPTY: the epic is closed)
 
 One repro per producer that stores a RAW word into a `cell` channel, with the php
