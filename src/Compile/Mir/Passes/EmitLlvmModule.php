@@ -2422,7 +2422,15 @@ trait EmitLlvmModule
         // (boxToCell would rebuild an array) — they fall through to the normal
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
-        if (($this->frame->isClosure || $this->frame->isTrampoline) && $this->isCellBoxableArg($v->type)) {
+        //
+        // A CELL value under a declared OBJECT / ARRAY return is not one of
+        // those scalars: the caller reads that return raw, so the tagged word
+        // handed back as-is was released through its tag bits (SIGSEGV in
+        // `(function ($s): P { return unserialize($s); })(…)`). It takes the
+        // normal path below, which unboxes a cell to the declared type.
+        $rawRet = $this->frame->returnType !== null && $v->type->kind === Type::KIND_CELL
+            && ($this->frame->returnType->kind === Type::KIND_OBJ || $this->frame->returnType->isArray());
+        if (($this->frame->isClosure || $this->frame->isTrampoline) && !$rawRet && $this->isCellBoxableArg($v->type)) {
             // The same +1 the `: mixed` path below takes: a BORROWED string
             // (`return $o->n;`) boxed as-is handed the caller a cell over a
             // buffer the object still owned, and the caller's release freed it
