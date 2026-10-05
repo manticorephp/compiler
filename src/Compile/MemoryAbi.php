@@ -18,8 +18,12 @@ final class MemoryAbi
 {
     /**
      * Bump on any layout / encoding change.
+     *
+     * v15: int bucket hash changed: (k ^ k>>12) * golden. The bucket index is
+     * trusted, not validated, so a library built with the old hash would miss
+     * int keys in the arrays it built.
      */
-    public const VERSION = 14;
+    public const VERSION = 15;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
