@@ -3466,6 +3466,24 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /**
+     * Give back the SOURCE of a de-cellify rebuild that co-owned every element
+     * ({@see EmitLlvmBuiltins::emitCellArrayToTyped} with `$coOwn`): an owned
+     * temp (`$flavor` from {@see cellifySourceFlavor}) drops whole by its flavor,
+     * a borrow is left alone. Never a MOVE: an owned temp is a +1, not a sole
+     * owner — a co-owned property read and a ternary over one hand over the
+     * property's own buffer, and a move out of it plus a bare-buffer drop left
+     * each element counted once by two arrays (the self-built compiler freed
+     * `InferTypes::$localTypes`' Types through `$this->jumpConts[$i] = $c ?
+     * joinLocals(…) : $this->localTypes`). `$ptr` holds the source pointer.
+     */
+    private function decellifyFromTemp(string $ptr, string $flavor): string
+    {
+        if ($flavor === '') { return ''; }
+        $si = $this->ssa->allocReg();
+        return '  ' . $si . ' = ptrtoint ptr ' . $ptr . " to i64\n" . $this->rcReleaseReg($si, $flavor);
+    }
+
+    /**
      * Release flavor for the SOURCE of a cellify rebuild
      * ({@see EmitLlvmBuiltins::emitAssocToCellArrayUnified}), or '' to leave it
      * alone.

@@ -869,18 +869,17 @@ trait EmitLlvmLocals
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
             $out .= $this->coerceToPtr();
             $deSrc = $this->lastValue;
-            // An owned temp is MOVED out of: its values change hands and it
-            // leaves as a bare buffer — it was never freed at all
-            // (`$t = array_values(…)` into a typed slot). Any other source keeps
-            // its elements and releases them itself, so the rebuild co-owns.
+            // The rebuild always CO-OWNS each element, and an owned temp is then
+            // given back whole by its own flavor (`$t = array_values(…)` into a
+            // typed slot). An owned temp is a +1, not a sole owner: a co-owned
+            // property read, or a ternary arm over one, shares its buffer with
+            // the property, so moving the elements out and dropping a bare
+            // buffer left the property's elements counted once for two arrays
+            // ({@see decellifyFromTemp}).
             $deFlavor = $this->cellifySourceFlavor($sl->value);
-            $out .= $this->emitCellArrayToTyped($sl->type, $deFlavor === '');
+            $out .= $this->emitCellArrayToTyped($sl->type, true);
             $dv = $this->lastValue;
-            if ($deFlavor !== '') {
-                $si = $this->ssa->allocReg();
-                $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
-                $out .= $this->rcReleaseReg($si, $sl->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
-            }
+            $out .= $this->decellifyFromTemp($deSrc, $deFlavor);
             if (isset($this->locals->globalBacked[$sl->name])) {
                 // The rebuild is a fresh +1 the cell takes outright; only the
                 // predecessor is owed ({@see globalCellOwnIr}).
