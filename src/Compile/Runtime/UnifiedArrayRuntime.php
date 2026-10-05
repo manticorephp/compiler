@@ -313,11 +313,12 @@ final class UnifiedArrayRuntime
      * stayed flat at 0.03 s because FNV spreads them. php is O(1) (it chains
      * instead of probing, so the identity hash costs it nothing).
      *
-     * Multiply by the 64-bit golden ratio, wrapping, then xor-fold the high half
-     * into the low bits (`m ^ (m >> 32)`). The product alone leaves the low n
-     * bits a function of only the low n key bits, so a key stride of 2^n
-     * (`$i * 4096`) piled every key into one probe run (1.1 us per lookup at
-     * 4096 keys); the fold mixes the well-scrambled high bits back down.
+     * Fold `k >> 12` into the key (identity for keys below 4096, so a sequential
+     * list scatters exactly as the plain multiply did), then multiply by the
+     * 64-bit golden ratio, wrapping. An ODD multiplier is a bijection modulo any
+     * power of two, but the product's low n bits depend only on the key's low n
+     * bits, so a stride of 2^n (`$i * 4096`) piled every key into one probe run
+     * (1.1 us per lookup at 4096 keys); the pre-fold brings the high bits down.
      *
      * The trade is real and measured: a SPARSE int build+read (1M `$v[$i * 7]`
      * writes then reads) goes 0.02 s -> 0.07 s, because the identity hash walked
@@ -332,8 +333,8 @@ final class UnifiedArrayRuntime
      */
     private function intBucketHash(Block $b, Value $k): Value
     {
-        $m = $b->mulWrap($k, Value::int(Type::i64(), -7046029254386353131));   // 0x9E3779B97F4A7C15
-        return $b->xor_($m, $b->lshr($m, Value::int(Type::i64(), 32)));
+        $f = $b->xor_($k, $b->lshr($k, Value::int(Type::i64(), 12)));
+        return $b->mulWrap($f, Value::int(Type::i64(), -7046029254386353131));   // 0x9E3779B97F4A7C15
     }
 
     /**
