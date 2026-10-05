@@ -287,6 +287,11 @@ trait LowerPrelude
             $ws = \Parser\Parser::parseSource("<?php\n" . $this->wsSrc);
             foreach ($ws->statements as $s) { $stmts[] = $s; }
         }
+        // Manticore\Ds — braced namespace, names nothing outside the core.
+        if ($this->dsSrc !== '') {
+            $ds = \Parser\Parser::parseSource("<?php\n" . $this->dsSrc);
+            foreach ($ds->statements as $s) { $stmts[] = $s; }
+        }
         return $stmts;
     }
 
@@ -612,7 +617,7 @@ trait LowerPrelude
                 $cd = $this->classTable[$cname];
                 $props = $cd->propertyNames;
                 $disp = $cd->display();
-                $head = 'O:' . (string)strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+                $head = 'O:' . (string)strlen($disp) . ':"' . $disp . '":';
                 $entries = '';
                 foreach ($props as $p) {
                     $key = $this->serPropKey($cname, $p);
@@ -684,7 +689,7 @@ trait LowerPrelude
             $props = $cd->propertyNames;
             $disp = $cd->display();
             $helper = '__mc_ser_object_arm_' . (string)$arm;
-            $head = 'O:' . (string)strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+            $head = 'O:' . (string)strlen($disp) . ':"' . $disp . '":';
             $entries = '';
             foreach ($props as $p) {
                 $key = $this->serPropKey($cname, $p);
@@ -764,7 +769,7 @@ trait LowerPrelude
             $cd = $this->classTable[$cname];
             $props = $cd->propertyNames;
             $disp = $cd->display();
-            $head = 'O:' . (string)\strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+            $head = 'O:' . (string)\strlen($disp) . ':"' . $disp . '":';
             $entries = '';
             foreach ($props as $p) {
                 $key = $this->serPropKey($cname, $p);
