@@ -105,7 +105,7 @@ function unpack(string $format, string $string, int $offset = 0): mixed
         $k = 0;
         while ($k < $repeat) {
             if ($pos + $size > $slen) { break; }
-            $v = __mc_unpack_int($string, $pos, $code);
+            $v = __mc_unpack_num($string, $pos, $code);
             $pos = $pos + $size;
             $k = $k + 1;
             // An unnamed group yields INT keys 1..N (a string "1" would not
@@ -156,7 +156,89 @@ function __mc_unpack_size(string $code): int
     if ($code === "s" || $code === "S" || $code === "v" || $code === "n") { return 2; }
     if ($code === "l" || $code === "L" || $code === "V" || $code === "N" || $code === "i" || $code === "I") { return 4; }
     if ($code === "q" || $code === "Q" || $code === "J" || $code === "P") { return 8; }
+    if ($code === "e" || $code === "E" || $code === "d") { return 8; }
+    if ($code === "g" || $code === "G" || $code === "f") { return 4; }
     return 0;
+}
+
+/** The integer code that reads the same bytes as float code `$code` ('' for a
+ *  non-float code): `d`/`f` are the machine order, little-endian on every
+ *  supported target. */
+function __mc_float_carrier(string $code): string
+{
+    if ($code === "e" || $code === "d") { return "P"; }
+    if ($code === "E") { return "J"; }
+    if ($code === "g" || $code === "f") { return "V"; }
+    if ($code === "G") { return "N"; }
+    return "";
+}
+
+/** One fixed-width number at `$pos`: an int, or a float for the float codes. */
+function __mc_unpack_num(string $s, int $pos, string $code): mixed
+{
+    $carrier = __mc_float_carrier($code);
+    if ($carrier === "") { return __mc_unpack_int($s, $pos, $code); }
+    $bits = __mc_unpack_int($s, $pos, $carrier);
+    if ($carrier === "P" || $carrier === "J") { return __mc_bits_f64($bits); }
+    return __mc_bits_f32($bits);
+}
+
+/** The double whose IEEE-754 binary64 pattern is `$b`. */
+function __mc_bits_f64(int $b): float
+{
+    $neg = (($b >> 63) & 1) === 1;
+    $e = ($b >> 52) & 2047;
+    $m = $b & 4503599627370495;
+    if ($e === 2047) {
+        if ($m !== 0) { return \NAN; }
+        return $neg ? -\INF : \INF;
+    }
+    if ($e === 0) {
+        // Subnormal: m * 2^-1074, scaled in two exact steps.
+        $v = ((float)$m * (2.0 ** -537)) * (2.0 ** -537);
+    } else {
+        $v = (1.0 + (float)$m * (2.0 ** -52)) * (2.0 ** ($e - 1023));
+    }
+    return $neg ? -$v : $v;
+}
+
+/** The double equal to the IEEE-754 binary32 value whose pattern is `$b`. */
+function __mc_bits_f32(int $b): float
+{
+    $neg = (($b >> 31) & 1) === 1;
+    $e = ($b >> 23) & 255;
+    $m = $b & 8388607;
+    if ($e === 255) {
+        if ($m !== 0) { return \NAN; }
+        return $neg ? -\INF : \INF;
+    }
+    if ($e === 0) {
+        $v = (float)$m * (2.0 ** -149);
+    } else {
+        $v = (1.0 + (float)$m * (2.0 ** -23)) * (2.0 ** ($e - 127));
+    }
+    return $neg ? -$v : $v;
+}
+
+/** The IEEE-754 binary32 pattern of `$v` rounded to nearest, ties to even. */
+function __mc_f32_bits(float $v): int
+{
+    $sign = ((__float_bits($v) >> 63) & 1) << 31;
+    if (\is_nan($v)) { return 2143289344; }
+    if ($v === 0.0) { return $sign; }
+    $a = \abs($v);
+    if ($a >= 3.4028235677973366e38) { return $sign | 2139095040; }
+    $e = (int)\floor(\log($a, 2.0));
+    if (2.0 ** $e > $a) { $e = $e - 1; } elseif (2.0 ** ($e + 1) <= $a) { $e = $e + 1; }
+    if ($e < -126) { $e = -126; }
+    $q = $a / (2.0 ** ($e - 23));
+    $f = \floor($q);
+    $d = $q - $f;
+    if ($d > 0.5 || ($d === 0.5 && \fmod($f, 2.0) === 1.0)) { $f = $f + 1.0; }
+    $n = (int)$f;
+    if ($n === 16777216) { $n = 8388608; $e = $e + 1; }
+    if ($n < 8388608) { return $sign | $n; }
+    return $sign | (($e + 127) << 23) | ($n - 8388608);
 }
 
 /** One fixed-width integer at `$pos`, decoded per `$code`. */
@@ -195,7 +277,8 @@ function __mc_unpack_int(string $s, int $pos, string $code): int
  * take a hex string, `x` emits a NUL byte, and the integer codes write their
  * fixed width in the endianness the code names. `*` means "as many as the
  * arguments supply" for the integer codes and "the argument's own length" for
- * the string ones. Float codes are unimplemented here, exactly as in unpack.
+ * the string ones. The float codes (`e`/`E`/`d` binary64, `g`/`G`/`f` binary32) write the
+ * value's IEEE-754 pattern through the integer code of the same byte order.
  */
 function pack(string $format, mixed ...$values): string
 {
@@ -255,6 +338,7 @@ function pack(string $format, mixed ...$values): string
         }
         $size = __mc_unpack_size($code);
         if ($size === 0) { return ""; }
+        $carrier = __mc_float_carrier($code);
         $rep = 1;
         if ($star) {
             $rep = \count($values) - $vi;
@@ -263,6 +347,20 @@ function pack(string $format, mixed ...$values): string
         }
         $k = 0;
         while ($k < $rep) {
+            if ($carrier !== "") {
+                // Narrowed by is_*: a bare `(float)` over the mixed element
+                // reads a float cell's bits as an int.
+                $raw = $values[$vi] ?? 0.0;
+                $fv = 0.0;
+                if (\is_float($raw)) { $fv = $raw; }
+                elseif (\is_int($raw)) { $fv = (float)$raw; }
+                elseif (\is_string($raw)) { $fv = (float)$raw; }
+                elseif (\is_bool($raw)) { $fv = $raw ? 1.0 : 0.0; }
+                $vi = $vi + 1;
+                $out = $out . __mc_pack_int($size === 8 ? __float_bits($fv) : __mc_f32_bits($fv), $carrier, $size);
+                $k = $k + 1;
+                continue;
+            }
             $v = (int)($values[$vi] ?? 0);
             $vi = $vi + 1;
             $out = $out . __mc_pack_int($v, $code, $size);

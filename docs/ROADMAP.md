@@ -112,7 +112,7 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
   Not implemented, each with a named throw: `CURLFile`/`CURLOPT_MIMEPOST` multipart,
   the `*_BLOB` options, `CURLMOPT_PUSHFUNCTION`, and a real `CURLINFO_CERTINFO`.
   Every float `CURLINFO` is read through its `_T` sibling — this build cannot read a
-  C `double` out of memory (no `peek_f64`, no bitcast builtin, no `unpack('d')`), which
+  C `double` out of memory (no `peek_f64`, no bitcast builtin; `unpack('d')` over bytes read out works), which
   is the one gap worth closing if a caller ever needs a genuine double from C.
 - **`Http\` — an HTTP/1.1 server** (`docs/http.md`). A handler is
   `callable(Request): Response`; one process serves many requests at once, and php's
