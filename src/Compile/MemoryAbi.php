@@ -25,7 +25,7 @@ final class MemoryAbi
      * `(h32 << 32) | (entry_index + 1)` (h32 = low 32 bits of the key hash), not
      * a bare `entry_index + 1`.
      */
-    public const VERSION = 15;
+    public const VERSION = 16;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -978,4 +978,28 @@ final class MemoryAbi
     public const OFFLOAD_OP_OPEN = 17;
     public const OFFLOAD_OP_READDIR_NAME = 18;
     public const OFFLOAD_OP_SCANDIR = 19;
+
+    /**
+     * Native fixed-width buffer (SplFixedArray, Manticore\Ds\*): a malloc'd
+     * block reached through an int handle (its address).
+     * [len i64 | cap i64 | kind i32 | flags i32 | data…]; element width by
+     * kind (BIT packs 64 per i64 word; CELL = one 8-byte cell word that the
+     * slot owns). Slots in [len, cap) are zero / null cells.
+     */
+    public const BUF_LEN_OFFSET = 0;
+    public const BUF_CAP_OFFSET = 8;
+    public const BUF_KIND_OFFSET = 16;
+    public const BUF_FLAGS_OFFSET = 20;
+    public const BUF_DATA_OFFSET = 24;
+    public const BUF_KIND_I8 = 1;
+    public const BUF_KIND_I16 = 2;
+    public const BUF_KIND_I32 = 3;
+    public const BUF_KIND_I64 = 4;
+    public const BUF_KIND_U8 = 5;
+    public const BUF_KIND_U16 = 6;
+    public const BUF_KIND_U32 = 7;
+    public const BUF_KIND_F32 = 8;
+    public const BUF_KIND_F64 = 9;
+    public const BUF_KIND_BIT = 10;
+    public const BUF_KIND_CELL = 11;
 }

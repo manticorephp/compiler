@@ -171,6 +171,8 @@ public bool $needsClosureRc = false;
      * every site.
      */
     public bool $needsIsaDyn = false;
+    /** The native fixed-width buffer runtime ({@see RuntimeLibrary::nbuf}). */
+    public bool $needsBuf = false;
 
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union

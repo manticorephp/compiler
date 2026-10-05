@@ -4228,4 +4228,724 @@ final class RuntimeLibrary
         $out .= "  ret i64 %r\n}\n";
         return $out;
     }
+
+    /**
+     * The native fixed-width buffer runtime (`__mc_nbuf_*` builtins;
+     * SplFixedArray, Manticore\Ds\*). Layout: {@see \Compile\MemoryAbi}
+     * `BUF_*`. A handle is the block address as an i64; an op that may
+     * reallocate returns the new handle. Every slot past `len` and inside
+     * `cap` stays zero (a null cell for CELL), so growing is a length store.
+     * A CELL slot owns its word: stores retain, removals drop, a read
+     * (`get_c`) hands out a +1.
+     */
+    public function nbuf(): string
+    {
+        $ir = '
+define i64 @__mir_nbuf_w(i64 %k) {
+entry:
+  switch i64 %k, label %w8 [
+    i64 {I8}, label %w1
+    i64 {U8}, label %w1
+    i64 {I16}, label %w2
+    i64 {U16}, label %w2
+    i64 {I32}, label %w4
+    i64 {U32}, label %w4
+    i64 {F32}, label %w4
+    i64 {BIT}, label %w0
+  ]
+w0:
+  ret i64 0
+w1:
+  ret i64 1
+w2:
+  ret i64 2
+w4:
+  ret i64 4
+w8:
+  ret i64 8
+}
+
+define i64 @__mir_nbuf_bytes(i64 %k, i64 %n) {
+entry:
+  %bit = icmp eq i64 %k, {BIT}
+  br i1 %bit, label %b, label %r
+b:
+  %a = add i64 %n, 63
+  %s = lshr i64 %a, 6
+  %m = shl i64 %s, 3
+  ret i64 %m
+r:
+  %w = call i64 @__mir_nbuf_w(i64 %k)
+  %x = mul i64 %n, %w
+  ret i64 %x
+}
+
+define i64 @__mir_nbuf_kindof(i64 %h) {
+entry:
+  %p = inttoptr i64 %h to ptr
+  %kp = getelementptr inbounds i8, ptr %p, i64 {KIND}
+  %k32 = load i32, ptr %kp
+  %k = zext i32 %k32 to i64
+  ret i64 %k
+}
+
+define ptr @__mir_nbuf_data(i64 %h) {
+entry:
+  %p = inttoptr i64 %h to ptr
+  %d = getelementptr inbounds i8, ptr %p, i64 {DATA}
+  ret ptr %d
+}
+
+define void @__mir_nbuf_nulls(i64 %h, i64 %from, i64 %to) {
+entry:
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  br label %loop
+loop:
+  %i = phi i64 [ %from, %entry ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %to
+  br i1 %c, label %body, label %done
+body:
+  %sp = getelementptr inbounds i64, ptr %d, i64 %i
+  store i64 {NULL}, ptr %sp
+  %i2 = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define void @__mir_nbuf_drops(i64 %h, i64 %from, i64 %to) {
+entry:
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  br label %loop
+loop:
+  %i = phi i64 [ %from, %entry ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %to
+  br i1 %c, label %body, label %done
+body:
+  %sp = getelementptr inbounds i64, ptr %d, i64 %i
+  %old = load i64, ptr %sp
+  store i64 {NULL}, ptr %sp
+  call void @__mir_cell_drop(i64 %old)
+  %i2 = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define void @__mir_nbuf_clear(i64 %h, i64 %from, i64 %to) {
+entry:
+  %ge = icmp sge i64 %from, %to
+  br i1 %ge, label %done, label %go
+go:
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  switch i64 %k, label %raw [
+    i64 {CELL}, label %cell
+    i64 {BIT}, label %bloop
+  ]
+cell:
+  call void @__mir_nbuf_drops(i64 %h, i64 %from, i64 %to)
+  br label %done
+bloop:
+  %i = phi i64 [ %from, %go ], [ %i2, %bloop ]
+  call void @__mir_nbuf_set_i(i64 %h, i64 %i, i64 0)
+  %i2 = add i64 %i, 1
+  %c = icmp slt i64 %i2, %to
+  br i1 %c, label %bloop, label %done
+raw:
+  %w = call i64 @__mir_nbuf_w(i64 %k)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %off = mul i64 %from, %w
+  %p = getelementptr inbounds i8, ptr %d, i64 %off
+  %n = sub i64 %to, %from
+  %nb = mul i64 %n, %w
+  call ptr @memset(ptr %p, i32 0, i64 %nb)
+  br label %done
+done:
+  ret void
+}
+
+define i64 @__mir_nbuf_alloc(i64 %k, i64 %len) {
+entry:
+  %small = icmp slt i64 %len, 4
+  %cap = select i1 %small, i64 4, i64 %len
+  %db = call i64 @__mir_nbuf_bytes(i64 %k, i64 %cap)
+  %tot = add i64 %db, {DATA}
+  %p = call ptr @calloc(i64 1, i64 %tot)
+  store i64 %len, ptr %p
+  %cp = getelementptr inbounds i8, ptr %p, i64 {CAP}
+  store i64 %cap, ptr %cp
+  %kp = getelementptr inbounds i8, ptr %p, i64 {KIND}
+  %k32 = trunc i64 %k to i32
+  store i32 %k32, ptr %kp
+  %h = ptrtoint ptr %p to i64
+  %isc = icmp eq i64 %k, {CELL}
+  br i1 %isc, label %cell, label %done
+cell:
+  call void @__mir_nbuf_nulls(i64 %h, i64 0, i64 %cap)
+  br label %done
+done:
+  ret i64 %h
+}
+
+define void @__mir_nbuf_free(i64 %h) {
+entry:
+  %z = icmp eq i64 %h, 0
+  br i1 %z, label %done, label %go
+go:
+  %p = inttoptr i64 %h to ptr
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %isc = icmp eq i64 %k, {CELL}
+  br i1 %isc, label %cell, label %fr
+cell:
+  %len = load i64, ptr %p
+  call void @__mir_nbuf_drops(i64 %h, i64 0, i64 %len)
+  br label %fr
+fr:
+  call void @free(ptr %p)
+  br label %done
+done:
+  ret void
+}
+
+define i64 @__mir_nbuf_len(i64 %h) {
+entry:
+  %z = icmp eq i64 %h, 0
+  br i1 %z, label %zero, label %go
+zero:
+  ret i64 0
+go:
+  %p = inttoptr i64 %h to ptr
+  %len = load i64, ptr %p
+  ret i64 %len
+}
+
+define i64 @__mir_nbuf_grow(i64 %h, i64 %need) {
+entry:
+  %p = inttoptr i64 %h to ptr
+  %cp = getelementptr inbounds i8, ptr %p, i64 {CAP}
+  %cap = load i64, ptr %cp
+  %ok = icmp sge i64 %cap, %need
+  br i1 %ok, label %keep, label %re
+keep:
+  ret i64 %h
+re:
+  %dbl = shl i64 %cap, 1
+  %big = icmp sgt i64 %need, %dbl
+  %ncap = select i1 %big, i64 %need, i64 %dbl
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %ob = call i64 @__mir_nbuf_bytes(i64 %k, i64 %cap)
+  %nb = call i64 @__mir_nbuf_bytes(i64 %k, i64 %ncap)
+  %tot = add i64 %nb, {DATA}
+  %np = call ptr @realloc(ptr %p, i64 %tot)
+  %ncp = getelementptr inbounds i8, ptr %np, i64 {CAP}
+  store i64 %ncap, ptr %ncp
+  %nd = getelementptr inbounds i8, ptr %np, i64 {DATA}
+  %tail = getelementptr inbounds i8, ptr %nd, i64 %ob
+  %tn = sub i64 %nb, %ob
+  call ptr @memset(ptr %tail, i32 0, i64 %tn)
+  %nh = ptrtoint ptr %np to i64
+  %isc = icmp eq i64 %k, {CELL}
+  br i1 %isc, label %cell, label %out
+cell:
+  call void @__mir_nbuf_nulls(i64 %nh, i64 %cap, i64 %ncap)
+  br label %out
+out:
+  ret i64 %nh
+}
+
+define i64 @__mir_nbuf_resize(i64 %h, i64 %n) {
+entry:
+  %p = inttoptr i64 %h to ptr
+  %len = load i64, ptr %p
+  %gr = icmp sgt i64 %n, %len
+  br i1 %gr, label %grow, label %shrink
+grow:
+  %nh = call i64 @__mir_nbuf_grow(i64 %h, i64 %n)
+  %np = inttoptr i64 %nh to ptr
+  store i64 %n, ptr %np
+  ret i64 %nh
+shrink:
+  call void @__mir_nbuf_clear(i64 %h, i64 %n, i64 %len)
+  store i64 %n, ptr %p
+  ret i64 %h
+}
+
+define i64 @__mir_nbuf_get_i(i64 %h, i64 %i) {
+entry:
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  switch i64 %k, label %q [
+    i64 {I8}, label %s8
+    i64 {I16}, label %s16
+    i64 {I32}, label %s32
+    i64 {U8}, label %u8
+    i64 {U16}, label %u16
+    i64 {U32}, label %u32
+    i64 {BIT}, label %bit
+  ]
+s8:
+  %p1 = getelementptr inbounds i8, ptr %d, i64 %i
+  %v1 = load i8, ptr %p1
+  %r1 = sext i8 %v1 to i64
+  ret i64 %r1
+s16:
+  %p2 = getelementptr inbounds i16, ptr %d, i64 %i
+  %v2 = load i16, ptr %p2
+  %r2 = sext i16 %v2 to i64
+  ret i64 %r2
+s32:
+  %p3 = getelementptr inbounds i32, ptr %d, i64 %i
+  %v3 = load i32, ptr %p3
+  %r3 = sext i32 %v3 to i64
+  ret i64 %r3
+u8:
+  %p5 = getelementptr inbounds i8, ptr %d, i64 %i
+  %v5 = load i8, ptr %p5
+  %r5 = zext i8 %v5 to i64
+  ret i64 %r5
+u16:
+  %p6 = getelementptr inbounds i16, ptr %d, i64 %i
+  %v6 = load i16, ptr %p6
+  %r6 = zext i16 %v6 to i64
+  ret i64 %r6
+u32:
+  %p7 = getelementptr inbounds i32, ptr %d, i64 %i
+  %v7 = load i32, ptr %p7
+  %r7 = zext i32 %v7 to i64
+  ret i64 %r7
+bit:
+  %wi = lshr i64 %i, 6
+  %bp = getelementptr inbounds i64, ptr %d, i64 %wi
+  %wv = load i64, ptr %bp
+  %bi = and i64 %i, 63
+  %sh = lshr i64 %wv, %bi
+  %b = and i64 %sh, 1
+  ret i64 %b
+q:
+  %p4 = getelementptr inbounds i64, ptr %d, i64 %i
+  %v4 = load i64, ptr %p4
+  ret i64 %v4
+}
+
+define void @__mir_nbuf_set_i(i64 %h, i64 %i, i64 %v) {
+entry:
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  switch i64 %k, label %q [
+    i64 {I8}, label %b8
+    i64 {U8}, label %b8
+    i64 {I16}, label %b16
+    i64 {U16}, label %b16
+    i64 {I32}, label %b32
+    i64 {U32}, label %b32
+    i64 {BIT}, label %bit
+  ]
+b8:
+  %p1 = getelementptr inbounds i8, ptr %d, i64 %i
+  %t1 = trunc i64 %v to i8
+  store i8 %t1, ptr %p1
+  ret void
+b16:
+  %p2 = getelementptr inbounds i16, ptr %d, i64 %i
+  %t2 = trunc i64 %v to i16
+  store i16 %t2, ptr %p2
+  ret void
+b32:
+  %p3 = getelementptr inbounds i32, ptr %d, i64 %i
+  %t3 = trunc i64 %v to i32
+  store i32 %t3, ptr %p3
+  ret void
+bit:
+  %wi = lshr i64 %i, 6
+  %bp = getelementptr inbounds i64, ptr %d, i64 %wi
+  %wv = load i64, ptr %bp
+  %bi = and i64 %i, 63
+  %mask = shl i64 1, %bi
+  %inv = xor i64 %mask, -1
+  %on = or i64 %wv, %mask
+  %off = and i64 %wv, %inv
+  %nz = icmp ne i64 %v, 0
+  %nw = select i1 %nz, i64 %on, i64 %off
+  store i64 %nw, ptr %bp
+  ret void
+q:
+  %p4 = getelementptr inbounds i64, ptr %d, i64 %i
+  store i64 %v, ptr %p4
+  ret void
+}
+
+define double @__mir_nbuf_get_f(i64 %h, i64 %i) {
+entry:
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %is32 = icmp eq i64 %k, {F32}
+  br i1 %is32, label %f32, label %f64
+f32:
+  %p1 = getelementptr inbounds float, ptr %d, i64 %i
+  %v1 = load float, ptr %p1
+  %r1 = fpext float %v1 to double
+  ret double %r1
+f64:
+  %p2 = getelementptr inbounds double, ptr %d, i64 %i
+  %v2 = load double, ptr %p2
+  ret double %v2
+}
+
+define void @__mir_nbuf_set_f(i64 %h, i64 %i, double %v) {
+entry:
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %is32 = icmp eq i64 %k, {F32}
+  br i1 %is32, label %f32, label %f64
+f32:
+  %p1 = getelementptr inbounds float, ptr %d, i64 %i
+  %t1 = fptrunc double %v to float
+  store float %t1, ptr %p1
+  ret void
+f64:
+  %p2 = getelementptr inbounds double, ptr %d, i64 %i
+  store double %v, ptr %p2
+  ret void
+}
+
+define i64 @__mir_nbuf_get_c(i64 %h, i64 %i) {
+entry:
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %sp = getelementptr inbounds i64, ptr %d, i64 %i
+  %v = load i64, ptr %sp
+  call void @__mir_cell_retain(i64 %v)
+  ret i64 %v
+}
+
+define void @__mir_nbuf_set_c(i64 %h, i64 %i, i64 %v) {
+entry:
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %sp = getelementptr inbounds i64, ptr %d, i64 %i
+  call void @__mir_cell_retain(i64 %v)
+  %old = load i64, ptr %sp
+  store i64 %v, ptr %sp
+  call void @__mir_cell_drop(i64 %old)
+  ret void
+}
+
+define i64 @__mir_nbuf_insert(i64 %h0, i64 %at, i64 %cnt) {
+entry:
+  %pos = icmp sgt i64 %cnt, 0
+  br i1 %pos, label %go, label %nop
+nop:
+  ret i64 %h0
+go:
+  %p0 = inttoptr i64 %h0 to ptr
+  %len = load i64, ptr %p0
+  %nl = add i64 %len, %cnt
+  %h = call i64 @__mir_nbuf_grow(i64 %h0, i64 %nl)
+  %p = inttoptr i64 %h to ptr
+  store i64 %nl, ptr %p
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %end = add i64 %at, %cnt
+  %isbit = icmp eq i64 %k, {BIT}
+  %jstart = sub i64 %len, 1
+  br i1 %isbit, label %bl, label %raw
+raw:
+  %w = call i64 @__mir_nbuf_w(i64 %k)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %so = mul i64 %at, %w
+  %src = getelementptr inbounds i8, ptr %d, i64 %so
+  %do = mul i64 %end, %w
+  %dst = getelementptr inbounds i8, ptr %d, i64 %do
+  %tn = sub i64 %len, %at
+  %tb = mul i64 %tn, %w
+  call ptr @memmove(ptr %dst, ptr %src, i64 %tb)
+  %isc = icmp eq i64 %k, {CELL}
+  br i1 %isc, label %cgap, label %rgap
+cgap:
+  call void @__mir_nbuf_nulls(i64 %h, i64 %at, i64 %end)
+  br label %done
+rgap:
+  %gb = mul i64 %cnt, %w
+  call ptr @memset(ptr %src, i32 0, i64 %gb)
+  br label %done
+bl:
+  %j = phi i64 [ %jstart, %go ], [ %j2, %bb ]
+  %c = icmp sge i64 %j, %at
+  br i1 %c, label %bb, label %bz
+bb:
+  %bv = call i64 @__mir_nbuf_get_i(i64 %h, i64 %j)
+  %t = add i64 %j, %cnt
+  call void @__mir_nbuf_set_i(i64 %h, i64 %t, i64 %bv)
+  %j2 = sub i64 %j, 1
+  br label %bl
+bz:
+  call void @__mir_nbuf_clear(i64 %h, i64 %at, i64 %end)
+  br label %done
+done:
+  ret i64 %h
+}
+
+define void @__mir_nbuf_remove(i64 %h, i64 %at, i64 %cnt) {
+entry:
+  %pos = icmp sgt i64 %cnt, 0
+  br i1 %pos, label %go, label %nop
+nop:
+  ret void
+go:
+  %p = inttoptr i64 %h to ptr
+  %len = load i64, ptr %p
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %end = add i64 %at, %cnt
+  %nl = sub i64 %len, %cnt
+  %isc = icmp eq i64 %k, {CELL}
+  switch i64 %k, label %mv [
+    i64 {CELL}, label %cdrop
+    i64 {BIT}, label %bl
+  ]
+cdrop:
+  call void @__mir_nbuf_drops(i64 %h, i64 %at, i64 %end)
+  br label %mv
+mv:
+  %w = call i64 @__mir_nbuf_w(i64 %k)
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  %do = mul i64 %at, %w
+  %dst = getelementptr inbounds i8, ptr %d, i64 %do
+  %so = mul i64 %end, %w
+  %src = getelementptr inbounds i8, ptr %d, i64 %so
+  %tn = sub i64 %len, %end
+  %tb = mul i64 %tn, %w
+  call ptr @memmove(ptr %dst, ptr %src, i64 %tb)
+  br i1 %isc, label %ctail, label %rtail
+ctail:
+  call void @__mir_nbuf_nulls(i64 %h, i64 %nl, i64 %len)
+  br label %fin
+rtail:
+  %to = mul i64 %nl, %w
+  %tp = getelementptr inbounds i8, ptr %d, i64 %to
+  %gb = mul i64 %cnt, %w
+  call ptr @memset(ptr %tp, i32 0, i64 %gb)
+  br label %fin
+bl:
+  %j = phi i64 [ %at, %go ], [ %j2, %bb ]
+  %c = icmp slt i64 %j, %nl
+  br i1 %c, label %bb, label %bz
+bb:
+  %f = add i64 %j, %cnt
+  %bv = call i64 @__mir_nbuf_get_i(i64 %h, i64 %f)
+  call void @__mir_nbuf_set_i(i64 %h, i64 %j, i64 %bv)
+  %j2 = add i64 %j, 1
+  br label %bl
+bz:
+  call void @__mir_nbuf_clear(i64 %h, i64 %nl, i64 %len)
+  br label %fin
+fin:
+  store i64 %nl, ptr %p
+  ret void
+}
+
+define void @__mir_nbuf_copy(i64 %dst, i64 %da, i64 %src, i64 %sa, i64 %cnt) {
+entry:
+  %pos = icmp sgt i64 %cnt, 0
+  br i1 %pos, label %go, label %fin
+go:
+  %k = call i64 @__mir_nbuf_kindof(i64 %dst)
+  %dd = call ptr @__mir_nbuf_data(i64 %dst)
+  %isc = icmp eq i64 %k, {CELL}
+  switch i64 %k, label %raw [
+    i64 {CELL}, label %el
+    i64 {BIT}, label %el
+  ]
+raw:
+  %w = call i64 @__mir_nbuf_w(i64 %k)
+  %sd = call ptr @__mir_nbuf_data(i64 %src)
+  %do = mul i64 %da, %w
+  %dp = getelementptr inbounds i8, ptr %dd, i64 %do
+  %so = mul i64 %sa, %w
+  %sp = getelementptr inbounds i8, ptr %sd, i64 %so
+  %nb = mul i64 %cnt, %w
+  call ptr @memmove(ptr %dp, ptr %sp, i64 %nb)
+  br label %fin
+el:
+  %same = icmp eq i64 %dst, %src
+  %after = icmp sgt i64 %da, %sa
+  %desc = and i1 %same, %after
+  %last = sub i64 %cnt, 1
+  %start = select i1 %desc, i64 %last, i64 0
+  %step = select i1 %desc, i64 -1, i64 1
+  br label %loop
+loop:
+  %j = phi i64 [ %start, %el ], [ %j2, %next ]
+  %n = phi i64 [ 0, %el ], [ %n2, %next ]
+  %more = icmp slt i64 %n, %cnt
+  br i1 %more, label %body, label %fin
+body:
+  %si = add i64 %sa, %j
+  %di = add i64 %da, %j
+  br i1 %isc, label %cel, label %bel
+cel:
+  %cv = call i64 @__mir_nbuf_get_c(i64 %src, i64 %si)
+  %slot = getelementptr inbounds i64, ptr %dd, i64 %di
+  %old = load i64, ptr %slot
+  store i64 %cv, ptr %slot
+  call void @__mir_cell_drop(i64 %old)
+  br label %next
+bel:
+  %bv = call i64 @__mir_nbuf_get_i(i64 %src, i64 %si)
+  call void @__mir_nbuf_set_i(i64 %dst, i64 %di, i64 %bv)
+  br label %next
+next:
+  %j2 = add i64 %j, %step
+  %n2 = add i64 %n, 1
+  br label %loop
+fin:
+  ret void
+}
+
+define void @__mir_nbuf_move(i64 %h, i64 %from, i64 %to, i64 %cnt) {
+entry:
+  call void @__mir_nbuf_copy(i64 %h, i64 %to, i64 %h, i64 %from, i64 %cnt)
+  ret void
+}
+
+define void @__mir_nbuf_fill_i(i64 %h, i64 %v, i64 %from, i64 %to) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ %from, %entry ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %to
+  br i1 %c, label %body, label %done
+body:
+  call void @__mir_nbuf_set_i(i64 %h, i64 %i, i64 %v)
+  %i2 = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define void @__mir_nbuf_fill_f(i64 %h, double %v, i64 %from, i64 %to) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ %from, %entry ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %to
+  br i1 %c, label %body, label %done
+body:
+  call void @__mir_nbuf_set_f(i64 %h, i64 %i, double %v)
+  %i2 = add i64 %i, 1
+  br label %loop
+done:
+  ret void
+}
+
+define i64 @__mir_nbuf_find_i(i64 %h, i64 %v, i64 %from) {
+entry:
+  %len = call i64 @__mir_nbuf_len(i64 %h)
+  br label %loop
+loop:
+  %i = phi i64 [ %from, %entry ], [ %i2, %next ]
+  %c = icmp slt i64 %i, %len
+  br i1 %c, label %body, label %miss
+body:
+  %e = call i64 @__mir_nbuf_get_i(i64 %h, i64 %i)
+  %eq = icmp eq i64 %e, %v
+  br i1 %eq, label %hit, label %next
+next:
+  %i2 = add i64 %i, 1
+  br label %loop
+hit:
+  ret i64 %i
+miss:
+  ret i64 -1
+}
+
+define i64 @__mir_nbuf_find_f(i64 %h, double %v, i64 %from) {
+entry:
+  %len = call i64 @__mir_nbuf_len(i64 %h)
+  br label %loop
+loop:
+  %i = phi i64 [ %from, %entry ], [ %i2, %next ]
+  %c = icmp slt i64 %i, %len
+  br i1 %c, label %body, label %miss
+body:
+  %e = call double @__mir_nbuf_get_f(i64 %h, i64 %i)
+  %eq = fcmp oeq double %e, %v
+  br i1 %eq, label %hit, label %next
+next:
+  %i2 = add i64 %i, 1
+  br label %loop
+hit:
+  ret i64 %i
+miss:
+  ret i64 -1
+}
+
+define i64 @__mir_nbuf_clone(i64 %h) {
+entry:
+  %z = icmp eq i64 %h, 0
+  br i1 %z, label %zero, label %go
+zero:
+  ret i64 0
+go:
+  %p = inttoptr i64 %h to ptr
+  %len = load i64, ptr %p
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
+  %n = call i64 @__mir_nbuf_alloc(i64 %k, i64 %len)
+  %nb = call i64 @__mir_nbuf_bytes(i64 %k, i64 %len)
+  %sd = call ptr @__mir_nbuf_data(i64 %h)
+  %nd = call ptr @__mir_nbuf_data(i64 %n)
+  call ptr @memmove(ptr %nd, ptr %sd, i64 %nb)
+  %isc = icmp eq i64 %k, {CELL}
+  br i1 %isc, label %loop, label %done
+loop:
+  %i = phi i64 [ 0, %go ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %len
+  br i1 %c, label %body, label %done
+body:
+  %sp = getelementptr inbounds i64, ptr %nd, i64 %i
+  %v = load i64, ptr %sp
+  call void @__mir_cell_retain(i64 %v)
+  %i2 = add i64 %i, 1
+  br label %loop
+done:
+  ret i64 %n
+}
+';
+        /** @var array<string, string> $sub */
+        $sub = [
+            '{CAP}' => (string)\Compile\MemoryAbi::BUF_CAP_OFFSET,
+            '{KIND}' => (string)\Compile\MemoryAbi::BUF_KIND_OFFSET,
+            '{DATA}' => (string)\Compile\MemoryAbi::BUF_DATA_OFFSET,
+            '{NULL}' => (string)\Compile\MemoryAbi::CELL_NULL,
+            '{I8}' => (string)\Compile\MemoryAbi::BUF_KIND_I8,
+            '{I16}' => (string)\Compile\MemoryAbi::BUF_KIND_I16,
+            '{I32}' => (string)\Compile\MemoryAbi::BUF_KIND_I32,
+            '{U8}' => (string)\Compile\MemoryAbi::BUF_KIND_U8,
+            '{U16}' => (string)\Compile\MemoryAbi::BUF_KIND_U16,
+            '{U32}' => (string)\Compile\MemoryAbi::BUF_KIND_U32,
+            '{F32}' => (string)\Compile\MemoryAbi::BUF_KIND_F32,
+            '{BIT}' => (string)\Compile\MemoryAbi::BUF_KIND_BIT,
+            '{CELL}' => (string)\Compile\MemoryAbi::BUF_KIND_CELL,
+        ];
+        foreach ($sub as $from => $to) { $ir = \str_replace($from, $to, $ir); }
+        return $ir;
+    }
+
+    /**
+     * The shape of the `__mc_nbuf_<op>` builtin: one letter per operand
+     * (i int, f float, c cell), then the result (v void). '' — not one.
+     */
+    public static function nbufSig(string $op): string
+    {
+        if ($op === 'get_i' || $op === 'alloc' || $op === 'resize') { return 'iii'; }
+        if ($op === 'set_i' || $op === 'remove') { return 'iiiv'; }
+        if ($op === 'get_f') { return 'iif'; }
+        if ($op === 'set_f') { return 'iifv'; }
+        if ($op === 'get_c') { return 'iic'; }
+        if ($op === 'set_c') { return 'iicv'; }
+        if ($op === 'len' || $op === 'clone') { return 'ii'; }
+        if ($op === 'free') { return 'iv'; }
+        if ($op === 'insert' || $op === 'find_i') { return 'iiii'; }
+        if ($op === 'find_f') { return 'ifii'; }
+        if ($op === 'move' || $op === 'fill_i') { return 'iiiiv'; }
+        if ($op === 'fill_f') { return 'ifiiv'; }
+        if ($op === 'copy') { return 'iiiiiv'; }
+        return '';
+    }
 }

@@ -446,6 +446,10 @@ trait EmitLlvmBuiltins
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
         if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
+        if (\strncmp($name, '__mc_nbuf_', 10) === 0) {
+            $nbufSig = \Compile\Mir\RuntimeLibrary::nbufSig(\substr($name, 10));
+            if (\strlen($nbufSig) === \count($args) + 1) { return $this->biNbuf(\substr($name, 10), $nbufSig, $args); }
+        }
         if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
         if ($name === 'current' && \count($args) === 1) { return $this->biArrayCursor($args, 'current'); }
@@ -2868,6 +2872,57 @@ trait EmitLlvmBuiltins
         $out .= '  call void @__mir_array_reindex_inplace(ptr ' . $p . ")\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_nbuf_<op>` — one native fixed-width buffer op ({@see
+     * \Compile\Mir\RuntimeLibrary::nbuf}); the stdlib bodies of the same names
+     * (src/Runtime/Stdlib/Buf.php) are the bootstrap twins. `$sig`: {@see
+     * \Compile\Mir\RuntimeLibrary::nbufSig}. A cell operand is retained by
+     * the runtime when it is kept; a cell result is the caller's +1.
+     * @param Node[] $args
+     */
+    private function biNbuf(string $op, string $sig, array $args): string
+    {
+        $this->rt->needsBuf = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $n = \count($args);
+        $out = '';
+        $list = '';
+        $after = '';
+        for ($i = 0; $i < $n; $i++) {
+            $a = $args[$i];
+            $c = $sig[$i];
+            if ($i > 0) { $list .= ', '; }
+            if ($c === 'f') {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceTo('double');
+                $list .= 'double ' . $this->lastValue;
+            } elseif ($c === 'c') {
+                $out .= $this->emitNode($a);
+                $out .= $this->boxToCell($a->type, $a);
+                $list .= 'i64 ' . $this->lastValue;
+                $after .= $this->cellBoxTempDrop($a->type, $this->lastValue, $a);
+            } else {
+                $out .= $this->emitIntArg($a);
+                $list .= 'i64 ' . $this->lastValue;
+            }
+        }
+        $ret = $sig[$n];
+        $call = 'call ' . ($ret === 'v' ? 'void' : ($ret === 'f' ? 'double' : 'i64')) . ' @__mir_nbuf_' . $op . '(' . $list . ")\n";
+        if ($ret === 'v') {
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out . '  ' . $call . $after;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = ' . $call . $after;
+        $this->lastValue = $r;
+        $this->lastValueType = $ret === 'f' ? 'double' : 'i64';
+        if ($ret === 'c') { $this->markCellBoxed($r); }
         return $out;
     }
 
