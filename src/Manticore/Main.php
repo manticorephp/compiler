@@ -5535,7 +5535,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
-    $useBacktrace = $demand->callsAnyMethod(['getTrace', 'getTraceAsString', 'getLine', 'getFile'])
+    $useBacktrace = $demand->callsAnyMethod(['getTrace', 'getTraceAsString'])
         || $demand->calls('debug_backtrace');
     // PreludeDemand has scanned every input source and is no longer needed after
     // the gates above. Its release drops the token-derived maps and, critically,
