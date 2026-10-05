@@ -58,6 +58,7 @@ final class IntlListFormatter
 
     public function __clone()
     {
+        $this->__mcFmt = 0;
         throw new \Error("Trying to clone an uncloneable object of class IntlListFormatter");
     }
 
