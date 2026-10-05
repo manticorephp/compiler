@@ -1,6 +1,5 @@
 <?php
 // An element write `$m[0] = 9` on a mixed value holding an ArrayAccess object crashes (SIGBUS) instead of calling offsetSet
-// issue: #95
 final class A implements ArrayAccess {
     /** @var array<int, int> */
     private array $d = [0, 0, 0];

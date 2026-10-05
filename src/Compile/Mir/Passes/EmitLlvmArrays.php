@@ -961,7 +961,7 @@ trait EmitLlvmArrays
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $arrL . ":\n";
-            $out .= $this->emitStoreElementUnified($se);
+            $out .= $this->emitStoreElementErased($se);
             $out .= '  br label %' . $endL . "\n";
             $out .= $endL . ":\n";
             $this->lastValue = '0';
@@ -978,7 +978,59 @@ trait EmitLlvmArrays
             if ($fast !== null) { return $fast; }
             return $this->emitMethodCall($mc);
         }
-        return $this->emitStoreElementUnified($se);
+        return $this->emitStoreElementErased($se);
+    }
+
+    /**
+     * `$erased[$k] = $v` — the array store, behind one test when the base is
+     * a cell LOCAL that may hold an ArrayAccess object at run time: an object
+     * (tag 8) is `$base->offsetSet($k, $v)` on its runtime class. The array
+     * store took the object for a buffer header and wrote through it (SIGBUS).
+     * Each arm evaluates the key and the value once; only one arm runs.
+     */
+    private function emitStoreElementErased(StoreElement $se): string
+    {
+        $bk = $se->array->type->kind;
+        if (($bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN)
+            || $se->array->kind !== Node::KIND_LOAD_LOCAL
+            || !isset($this->locals->slots[$se->array->name])
+            || isset($this->locals->refLocals[$se->array->name])
+            || isset($this->locals->globalBacked[$se->array->name])
+            || !$this->moduleHasArrayAccess()) {
+            return $this->emitStoreElementUnified($se);
+        }
+        $slot = $this->locals->slots[$se->array->name];
+        $cur = $this->ssa->allocReg();
+        $out = '  ' . $cur . ' = load i64, ptr ' . $slot . "\n";
+        $out .= $this->cellTagIr($cur);
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        $objL = $this->ssa->allocLabel('eset.obj');
+        $arrL = $this->ssa->allocLabel('eset.arr');
+        $endL = $this->ssa->allocLabel('eset.end');
+        $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
+        $out .= $objL . ":\n";
+        $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$se->index, $se->value], Type::void());
+        $out .= $this->emitMethodCall($mc);
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $arrL . ":\n";
+        $out .= $this->emitStoreElementUnified($se);
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private int $hasArrayAccessMemo = 0;
+
+    /** Whether any class of this module implements ArrayAccess. */
+    private function moduleHasArrayAccess(): bool
+    {
+        if ($this->hasArrayAccessMemo === 0) {
+            $this->hasArrayAccessMemo = $this->cloneImplementers('ArrayAccess') !== [] ? 1 : 2;
+        }
+        return $this->hasArrayAccessMemo === 1;
     }
 
     /**
