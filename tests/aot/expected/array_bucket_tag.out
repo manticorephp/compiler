@@ -1,0 +1,11 @@
+after unset bad=0 count=6666
+reinsert sum=16658334 count=10000
+cow bad=0 m=10000 c=5000
+ok 1
+int bad=0 sum=66663333 count=10000
+1001
+prefix bad=0
+popshift bad=0 count=1998
+1011101
+i0,again,i2,i3,i4,again,s1,
+i0,again,-,i3,i4,again,-,

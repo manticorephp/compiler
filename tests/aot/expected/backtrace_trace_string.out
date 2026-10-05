@@ -1,0 +1,23 @@
+#0 /Users/taras/var/projects/manticore-hot/tests/aot/cases/backtrace_trace_string.php(4): B::t()
+#1 /Users/taras/var/projects/manticore-hot/tests/aot/cases/backtrace_trace_string.php(3): A->m()
+#2 /Users/taras/var/projects/manticore-hot/tests/aot/cases/backtrace_trace_string.php(9): A::s()
+#3 /Users/taras/var/projects/manticore-hot/tests/aot/cases/backtrace_trace_string.php(12): chain()
+#4 {main}
+RuntimeException: boom in FILE:7
+Stack trace:
+#0 FILE(4): B::t()
+#1 FILE(3): A->m()
+#2 FILE(9): A::s()
+#3 FILE(12): chain()
+#4 {main}
+4
+0 t B :: 4
+1 m A -> 3
+2 s A :: 9
+3 chain - - 12
+inner 5
+nested 5
+#0 /Users/taras/var/projects/manticore-hot/tests/aot/cases/backtrace_trace_string.php(36): outer()
+#1 {main}
+1
+4

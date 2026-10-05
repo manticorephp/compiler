@@ -470,6 +470,17 @@ trait EmitLlvmExpr
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r2 = call i64 @__mir_array_get_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
 
+        $out .= "define ptr @__mir_array_lookup_cell(ptr %arr, i64 %k) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
+        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
+        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
+        $out .= "  br i1 %isstr, label %s, label %i\n";
+        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
+        $out .= "  %r1 = call ptr @__mir_array_lookup_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret ptr %r1\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
+        $out .= "  %r2 = call ptr @__mir_array_lookup_int(ptr %arr, i64 %ki)\n  ret ptr %r2\n}\n\n";
         $out .= "define i64 @__mir_array_isset_cell(ptr %arr, i64 %k) {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
@@ -520,7 +531,7 @@ trait EmitLlvmExpr
         $out .= "  %isstr = icmp eq i64 %tag, 4\n";
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret ptr %arr\n";
+        $out .= "  %r3 = call ptr @__mir_array_unset_str_at(ptr %arr, ptr %kp)\n  ret ptr %r3\n";
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r = call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)\n  ret ptr %r\n}\n";
 
@@ -2654,6 +2665,194 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /** `$arr[$k] ?? d` over a statically-typed array base: the shape that probes once. */
+    private function coalesceFusable(Node $left): bool
+    {
+        if ($left->kind !== Node::KIND_ARRAY_ACCESS) { return false; }
+        $bk = $left->array->type->kind;
+        if ($bk === Type::KIND_STRING || $bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) { return false; }
+        if ($bk === Type::KIND_OBJ) { return false; }
+        return true;
+    }
+
+    /**
+     * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
+     * fetch): a variable, a property, a static property or an element of one.
+     * A call base (`f()[$k]`) runs first.
+     */
+    private function keyBeforeBase(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STATIC_PROP) {
+            return true;
+        }
+        if ($n instanceof \Compile\Mir\PropertyAccess_) {
+            return $this->keyBeforeBase($n->object);
+        }
+        if ($n instanceof \Compile\Mir\ArrayAccess_) {
+            // An inner key that can run code keeps its source order.
+            $ik = $n->index->kind;
+            if ($ik !== Node::KIND_LOAD_LOCAL && $ik !== Node::KIND_INT_CONST && $ik !== Node::KIND_STRING_CONST) {
+                return false;
+            }
+            return $this->keyBeforeBase($n->array);
+        }
+        return false;
+    }
+
+    /**
+     * Evaluate the base and key of `$a[$k] ?? d` ONCE, probe once, and leave
+     * `present` (i64 0|1) in lastValue and the operands in {@see $coalescePre}
+     * for {@see emitArrayAccessUnified}. The found word is a BORROW of the
+     * element, like the one a plain `$a[$k]` read takes, so the left arm keeps
+     * the retain path of its ordinary read ({@see armRetainPreBox}).
+     */
+    private function emitCoalesceArrayLookup(\Compile\Mir\ArrayAccess_ $aa): string
+    {
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        // The key before a plain variable base, as php fetches it ({@see emitIssetTarget}).
+        $keyFirst = $this->keyBeforeBase($aa->array);
+        $out = '';
+        if ($keyFirst) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        }
+        $out .= $this->emitNode($aa->array);
+        $out .= $this->arrayBaseToPtr($aa->array->type);
+        $arr = $this->lastValue;
+        if (!$keyFirst) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        }
+        $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
+        $word = $this->lastValue;
+        $out .= $this->lookupPresent($aa, $word);
+        $this->coalescePre = ['node' => $aa, 'arr' => $arr, 'key' => $key, 'word' => $word];
+        return $out;
+    }
+
+    private string $peReg = '';
+    private string $peType = '';
+    private string $peRel = '';
+    private string $peFlavor = '';
+    private string $peRelKey = '';
+    /** @var array<string, mixed> */
+    private array $peBase = [];
+
+    private function popPreEval(int $mark): void
+    {
+        while (\count($this->preEvalNodes) > $mark) {
+            \array_pop($this->preEvalNodes);
+            \array_pop($this->preEvalRegs);
+            \array_pop($this->preEvalTypes);
+        }
+    }
+
+    /** Evaluate a `??` key into a register for {@see $preEvalNodes}; the release of a fresh temp goes to {@see $peRel}. */
+    private function preEvalKey(Node $idx, bool $keyIsCell, bool $keyIsString): string
+    {
+        $out = $this->emitNode($idx);
+        if ($keyIsString) { $out .= $this->coerceToPtr(); }
+        elseif ($keyIsCell) { $out .= $this->coerceToI64(); }
+        $this->peReg = $this->lastValue;
+        $this->peType = $this->lastValueType;
+        $this->peRel = ($keyIsCell || $keyIsString) ? $this->keyTempRelease($idx, $this->lastValue, $keyIsCell) : '';
+        return $out;
+    }
+
+    private function preEvalBase(Node $base, bool $isStr): string
+    {
+        if ($isStr) {
+            $out = $this->emitStrOffsetBase($base);
+            $out .= $this->coerceToPtr();
+            $this->peReg = $this->lastValue;
+            $this->peType = 'ptr';
+            $this->peRel = $this->freeStrTemp($base, $this->lastValue);
+            $this->peFlavor = '';
+            return $out;
+        }
+        $out = $this->emitNode($base);
+        $out .= $this->coerceToI64();
+        $this->peReg = $this->lastValue;
+        $this->peType = 'i64';
+        $this->peFlavor = $this->freshRcArgFlavor($base);
+        $this->peRel = '';
+        return $out;
+    }
+
+    /**
+     * The base temp release of a pre-evaluated `??`, generated afresh per arm (the
+     * helper allocates registers, so one text cannot serve two arms).
+     * @param array<string, mixed> $b
+     */
+    private function peBaseRelease(array $b, bool $found): string
+    {
+        if ($found && !$b['independent']) { return ''; }
+        if ($b['text'] !== '') { return $b['text']; }
+        if ($b['flavor'] !== '') { return $this->rcReleaseReg($b['reg'], $b['flavor']); }
+        return '';
+    }
+
+    /**
+     * `$base[$key] ?? d` over a string, an ArrayAccess object or an erased base:
+     * evaluate the base and the key once, php's way round (the key first when the
+     * base is a plain variable), register both for {@see emitNode}, and leave the
+     * temp releases in {@see $peRelKey} / {@see $peBase}.
+     * The found arm gives the base back only where the read result cannot borrow
+     * from it (a string char and an offsetGet result are independent; an erased
+     * array element is not, so a non-scalar result keeps the old leak-not-free).
+     */
+    private function emitCoalescePreEval(\Compile\Mir\ArrayAccess_ $aa): string
+    {
+        $base = $aa->array;
+        $bk = $base->type->kind;
+        $isStr = $bk === Type::KIND_STRING;
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        $out = '';
+        $kReg = ''; $kType = ''; $kRel = '';
+        $bReg = ''; $bType = ''; $bRel = ''; $bFlavor = '';
+        if ($this->keyBeforeBase($base)) {
+            $out .= $this->preEvalKey($aa->index, $keyIsCell, $keyIsString);
+            $kReg = $this->peReg; $kType = $this->peType; $kRel = $this->peRel;
+            $out .= $this->preEvalBase($base, $isStr);
+            $bReg = $this->peReg; $bType = $this->peType; $bRel = $this->peRel; $bFlavor = $this->peFlavor;
+        } else {
+            $out .= $this->preEvalBase($base, $isStr);
+            $bReg = $this->peReg; $bType = $this->peType; $bRel = $this->peRel; $bFlavor = $this->peFlavor;
+            $out .= $this->preEvalKey($aa->index, $keyIsCell, $keyIsString);
+            $kReg = $this->peReg; $kType = $this->peType; $kRel = $this->peRel;
+        }
+        $this->preEvalNodes[] = $base;
+        $this->preEvalRegs[] = $bReg;
+        $this->preEvalTypes[] = $bType;
+        $this->preEvalNodes[] = $aa->index;
+        $this->preEvalRegs[] = $kReg;
+        $this->preEvalTypes[] = $kType;
+        $rk = $aa->type->kind;
+        $independent = $isStr || $bk === Type::KIND_OBJ
+            || $rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL;
+        $this->peRelKey = $kRel;
+        $this->peBase = ['text' => $bRel, 'flavor' => $bFlavor, 'reg' => $bReg, 'independent' => $independent];
+        return $out;
+    }
+
+    /** The right arm of a fused `??`: no element was read, so give back the key and base temps. */
+    private function coalesceMissRelease(Node $left, array $pre): string
+    {
+        $out = '';
+        $ki = $left->index;
+        $keyIsCell = $this->keyRidesCellChannel($ki);
+        $keyIsString = $ki->type->kind === Type::KIND_STRING || $ki->kind === Node::KIND_STRING_CONST;
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($ki, $pre['key'], $keyIsCell);
+        }
+        return $out . $this->baseTempRelease($left->array, $pre['arr'], true, Type::int_());
+    }
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
         $nc = $n;
@@ -2679,14 +2878,34 @@ trait EmitLlvmExpr
             $wantCell = $n->type->kind === Type::KIND_CELL;
             $res = $this->ssa->allocReg();
             $out = '  ' . $res . " = alloca i64\n";
+            $fused = $this->coalesceFusable($nc->left);
+            $peMark = 0;
+            $peRelKey = '';
+            $peBase = [];
             // `$s[$k] ?? d` on a STRING is not isset: php throws for an array /
             // object key and warns on `"1x"` ({@see EmitLlvmArrays::coerceStrOffset}).
             $lft = $nc->left;
             $this->strOffsetCoalesce = $lft instanceof \Compile\Mir\ArrayAccess_
                 && $lft->array->type->kind === Type::KIND_STRING;
-            $out .= $this->emitIssetTarget($nc->left);
+            if ($fused) {
+                // One probe, base and key evaluated once: the left arm reads the
+                // word it found, the right arm gives the temps back.
+                $out .= $this->emitCoalesceArrayLookup($nc->left);
+                $pre = $this->coalescePre;
+                $present = $this->lastValue;
+            } else {
+                // A string / ArrayAccess / erased base: the presence test and the
+                // read are emitted by different paths, so evaluate the operands
+                // ONCE into registers both consume ({@see $preEvalNodes}).
+                $peMark = \count($this->preEvalNodes);
+                $out .= $this->emitCoalescePreEval($nc->left);
+                $peRelKey = $this->peRelKey;
+                $peBase = $this->peBase;
+                $out .= $this->emitIssetTarget($nc->left);
+                $pre = null;
+                $present = $this->lastValue;
+            }
             $this->strOffsetCoalesce = false;
-            $present = $this->lastValue;
             $bit = $this->ssa->allocReg();
             $out .= '  ' . $bit . ' = icmp ne i64 ' . $present . ", 0\n";
             $useL = $this->ssa->allocLabel('nc.left');
@@ -2694,7 +2913,13 @@ trait EmitLlvmExpr
             $end  = $this->ssa->allocLabel('nc.end');
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
+            $this->coalescePre = $pre;
             $out .= $this->emitNode($nc->left);
+            $this->coalescePre = null;
+            if (!$fused) {
+                $this->popPreEval($peMark);
+                $out .= $peRelKey . $this->peBaseRelease($peBase, true);
+            }
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->left);
                 // The arm NODE goes with the type: a concrete-element array is
@@ -2711,6 +2936,8 @@ trait EmitLlvmExpr
             $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
+            if ($pre !== null) { $out .= $this->coalesceMissRelease($nc->left, $pre); }
+            if (!$fused) { $out .= $peRelKey . $this->peBaseRelease($peBase, false); }
             $out .= $this->emitNode($nc->right);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->right);

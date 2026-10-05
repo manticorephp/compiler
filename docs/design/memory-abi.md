@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **15** (v15: zero-cost exception object, §7b; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **16** (v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -197,6 +197,15 @@ live above it: an unmasked `flags >> 8` reads the pointer as tombstones, and
 `__mir_array_live_len` compacts whenever that is non-zero — so a moved cursor would compact
 the array on every `foreach` and every `count`. Compaction resets both fields, which is why
 `and flags, 255` (`ARRAY_FLAGS_LOW_MASK`) is still the right reset.
+
+**Bucket index** (v16). `buckets` holds `n_buckets` i64 words (a power of two, linear
+probing, 0 = empty slot). A used word is `(h32 << 32) | (entry_index + 1)`: `h32` is the low
+32 bits of the key hash, so a probe rejects a colliding slot and a delete's backward shift
+finds a slot's home without loading the entry or re-hashing its key. The int key hash is
+`(k ^ (k >> 12)) * golden`; the string hash is `__mir_array_hash_str`. The index is trusted,
+not validated, so a library built with another hash or word format misses keys in the
+arrays it built. A value copy (`__mir_array_copy_bare`) holds the same entries at the same
+positions and duplicates the source's index verbatim instead of resetting it.
 
 `IMMORTAL_ARRAY_RC = 1 << 62` is baked into the empty-array singleton. It is deliberately
 **not** `-1`: COW's `sle rc, 1` and release's `sle rc, 0` must both stay false, and the
@@ -403,7 +412,7 @@ Invariants worth stating out loud:
   and aborts by name on a double free — libc used to catch those for us, and a
   pooled double free would otherwise just cycle a free list, silently.
 
-## 7b. Exception object (ABI v15)
+## 7b. Exception object (ABI v15, carried into v16)
 
 A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.php`).
 `@__mc_throw(obj)` mallocs one exception object per raise and hands it to

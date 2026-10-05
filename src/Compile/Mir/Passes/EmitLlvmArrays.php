@@ -510,6 +510,13 @@ trait EmitLlvmArrays
      *  by the isset arm ({@see coerceStrOffset} 'coalesce'). */
     private bool $strOffsetCoalesce = false;
 
+    /** @var array{node: ArrayAccess_, arr: string, key: string, word: string}|null */
+    private ?array $coalescePre = null;
+    /** The address register of the last {@see emitLookupWord} probe. */
+    private string $lookupAddr = '';
+    /** The array register of the last {@see emitLookupWord} probe. */
+    private string $lookupArr = '';
+
     /** Set by {@see emitStrOffsetBase} for the probe string fetch it is about to
      *  emit; read and cleared at the top of that fetch. */
     private bool $strOffsetSpine = false;
@@ -1533,21 +1540,38 @@ trait EmitLlvmArrays
 
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
     {
-        $out = $this->emitNode($aa->array);
-        // A `mixed`/cell base (e.g. a nested value out of json_decode) — and an
-        // ERASED one, which may hold the very same boxed word — carries the
-        // array pointer NaN-boxed ({@see arrayBaseToPtr}).
-        $out .= $this->arrayBaseToPtr($aa->array->type);
-        $arrPtr = $this->lastValue;
+        // `$a[$k] ?? d` probed the key already ({@see emitCoalesceArrayLookup}):
+        // base, key and the found word arrive evaluated, and only the decode below
+        // runs. Consumed here so nothing nested can see it.
+        $pre = $this->coalescePre;
+        $this->coalescePre = null;
+        if ($pre !== null && $pre['node'] !== $aa) { $pre = null; }
+        $out = '';
+        if ($pre === null) {
+            $out = $this->emitNode($aa->array);
+            // A `mixed`/cell base (e.g. a nested value out of json_decode) — and an
+            // ERASED one, which may hold the very same boxed word — carries the
+            // array pointer NaN-boxed ({@see arrayBaseToPtr}).
+            $out .= $this->arrayBaseToPtr($aa->array->type);
+            $arrPtr = $this->lastValue;
+        } else {
+            $arrPtr = $pre['arr'];
+        }
         // A `mixed`/cell index (int-OR-string at runtime) → dispatch helper.
         $keyIsCell = $this->keyRidesCellChannel($aa->index);
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
-        $out .= $this->emitNode($aa->index);
-        $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
-        $key = $this->lastValue;
-        $reg = $this->ssa->allocReg();
-        if ($keyIsCell) {
+        if ($pre === null) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        } else {
+            $key = $pre['key'];
+        }
+        $reg = $pre !== null ? $pre['word'] : $this->ssa->allocReg();
+        if ($pre !== null) {
+            // the word came from the probe
+        } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
         } elseif ($keyIsString) {

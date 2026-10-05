@@ -414,7 +414,9 @@ trait EmitLlvmModule
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %ok = icmp sgt i64 %d, 0\n";
-            $out .= "  %im = sub i64 %d, " . (string)(1 + \Compile\Debug::$btTopSkip) . "\n";
+            $out .= "  %dc0 = icmp slt i64 %d, 4096\n";
+            $out .= "  %dc = select i1 %dc0, i64 %d, i64 4096\n";
+            $out .= "  %im = sub i64 %dc, " . (string)(1 + \Compile\Debug::$btTopSkip) . "\n";
             $out .= "  %ok2 = icmp sge i64 %im, 0\n";
             $out .= "  %okb = and i1 %ok, %ok2\n";
             $out .= "  %i = select i1 %okb, i64 %im, i64 0\n";

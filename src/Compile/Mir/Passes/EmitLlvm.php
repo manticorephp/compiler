@@ -1866,8 +1866,16 @@ final class EmitLlvm implements EmitVisitor
         return $out;
     }
 
+    /** `$dst = min($depth, 4096)`: frames past the ring were counted, never stored. */
+    private function btClamp(string $dst, string $depth): string
+    {
+        $c = $this->ssa->allocReg();
+        return '  ' . $c . ' = icmp slt i64 ' . $depth . ", 4096\n"
+             . '  ' . $dst . ' = select i1 ' . $c . ', i64 ' . $depth . ", i64 4096\n";
+    }
+
     /** Overwrite the top backtrace frame's name (index depth-1) with `$disp`,
-     *  guarded on depth>0. Emitted at a method's entry so the frame carries
+     *  guarded on 0<depth<=4096 (a frame past the ring was never stored). Emitted at a method's entry so the frame carries
      *  the exact "Class->method" / "Class::method" the callee knows. */
     private function btNameFix(string $disp): string
     {
@@ -1875,6 +1883,11 @@ final class EmitLlvm implements EmitVisitor
         $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
         $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp sgt i64 ' . $d . ", 0\n";
+        $c2 = $this->ssa->allocReg();
+        $out .= '  ' . $c2 . ' = icmp sle i64 ' . $d . ", 4096\n";
+        $c3 = $this->ssa->allocReg();
+        $out .= '  ' . $c3 . ' = and i1 ' . $c . ', ' . $c2 . "\n";
+        $c = $c3;
         $set = $this->ssa->allocLabel('btfix.set');
         $end = $this->ssa->allocLabel('btfix.end');
         $out .= '  br i1 ' . $c . ', label %' . $set . ', label %' . $end . "\n" . $set . ":\n";
@@ -2560,8 +2573,45 @@ final class EmitLlvm implements EmitVisitor
      * Emit one node. The node picks its own visit method (double dispatch) —
      * this used to be a chain of up to 64 `kind ===` tests walked on every node.
      */
+    /**
+     * Operands of a `??` already evaluated into registers — the base and key of
+     * `$o[k()] ?? d` on a string / ArrayAccess / erased base, where the presence
+     * test and the read are emitted by DIFFERENT paths that each emit their
+     * operand nodes. {@see emitNode} answers such a node with its register, so
+     * the expression runs once. A pre-evaluated node reads as BORROWED to every
+     * release predicate (the consumers must not free what the second one reads);
+     * the `??` emitter gives the temps back itself once both arms are done.
+     * @var Node[]
+     */
+    private array $preEvalNodes = [];
+    /** @var string[] */
+    private array $preEvalRegs = [];
+    /** @var string[] */
+    private array $preEvalTypes = [];
+
+    private function preEvalIndex(Node $n): int
+    {
+        foreach ($this->preEvalNodes as $i => $p) {
+            if ($p === $n) { return $i; }
+        }
+        return -1;
+    }
+
+    private function isPreEvaluated(Node $n): bool
+    {
+        return $this->preEvalNodes !== [] && $this->preEvalIndex($n) >= 0;
+    }
+
     private function emitNode(Node $n): string
     {
+        if ($this->preEvalNodes !== []) {
+            $pi = $this->preEvalIndex($n);
+            if ($pi >= 0) {
+                $this->lastValue = $this->preEvalRegs[$pi];
+                $this->lastValueType = $this->preEvalTypes[$pi];
+                return '';
+            }
+        }
         if ($this->irCensus) { return $this->emitNodeCensus($n); }
         $out = $n->accept($this);
         if ($this->cellGuard) { $this->markCellCalleeResult($n); }
@@ -2965,6 +3015,7 @@ final class EmitLlvm implements EmitVisitor
     /** Release a fresh (owned) concat operand temp; '' for a borrow. */
     private function concatTempRelease(Node $op, string $ptr): string
     {
+        if ($this->isPreEvaluated($op)) { return ''; }
         $tk = $op->type->kind;
         if ($tk === Type::KIND_INT || $tk === Type::KIND_FLOAT
             || $tk === Type::KIND_BOOL) {
@@ -2994,7 +3045,7 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /** {@see \Compile\Mir\Ownership::tempStrOwned} */
-    private function isFreshStringTemp(Node $node): bool { return $this->own->tempStrOwned($node); }
+    private function isFreshStringTemp(Node $node): bool { return !$this->isPreEvaluated($node) && $this->own->tempStrOwned($node); }
 
     private function isStrCharRead(Node $n): bool { return \Compile\Mir\Ownership::isStrCharRead($n); }
 
@@ -3013,6 +3064,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function keyTempRelease(Node $index, string $key, bool $keyIsCell): string
     {
+        if ($this->isPreEvaluated($index)) { return ''; }
         if (!$keyIsCell) { return $this->concatTempRelease($index, $key); }
         $k = $index->kind;
         if ($k !== Node::KIND_CALL && $k !== Node::KIND_METHOD_CALL
@@ -3054,7 +3106,7 @@ final class EmitLlvm implements EmitVisitor
     }
     /** Release `$ptr` iff `$node` is a fresh owned string temp; else ''. */
     /** {@see \Compile\Mir\Ownership::tempCellOwned} */
-    private function isFreshCellTemp(Node $n): bool { return $this->own->tempCellOwned($n, $this->lastCallWasBuiltin); }
+    private function isFreshCellTemp(Node $n): bool { return !$this->isPreEvaluated($n) && $this->own->tempCellOwned($n, $this->lastCallWasBuiltin); }
 
     /**
      * Result reg of an {@see EmitLlvmBuiltins::emitPtrArg} operand that was a
@@ -3443,7 +3495,7 @@ final class EmitLlvm implements EmitVisitor
     private function builtinMintsOwnedArray(string $fn): bool { return \Compile\Mir\Ownership::builtinMintsOwnedArray($fn); }
 
     /** {@see \Compile\Mir\Ownership::tempArgFlavor} */
-    private function freshRcArgFlavor(Node $a): string { return $this->own->tempArgFlavor($a, $this->lastCallWasBuiltin); }
+    private function freshRcArgFlavor(Node $a): string { return $this->isPreEvaluated($a) ? '' : $this->own->tempArgFlavor($a, $this->lastCallWasBuiltin); }
 
     /**
      * Release flavor of an owned temp array a MERGE consumed — a spread source,
@@ -3807,8 +3859,7 @@ final class EmitLlvm implements EmitVisitor
         if (!$this->rt->needsBacktrace) { return ''; }
         $fn = $this->frame->name;
         if ($fn === '') {
-            return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
-                 . ', i64 ' . (string)$line . ")\n";
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '');
         }
         // Relative to the function's first traced line, which lives in ONE
         // global per function: a line inserted above a function moves that
@@ -3820,14 +3871,56 @@ final class EmitLlvm implements EmitVisitor
             $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 '
                 . (string)$line . "\n";
         }
-        return '  call void @__mir_bt_push_rel(ptr ' . $this->strLitId($this->pool->intern($display))
-             . ', ptr @.btl.' . $this->mangle($fn) . ', i64 ' . (string)($line - $this->btBaseLine[$fn]) . ")\n";
+        return $this->btPushInline(
+            $this->strLitId($this->pool->intern($display)),
+            (string)($line - $this->btBaseLine[$fn]),
+            '@.btl.' . $this->mangle($fn),
+        );
+    }
+
+    /** The ring push inlined: store name+line at [depth] only while depth < 4096
+     *  (frames past the ring are counted, never stored), then bump depth. With
+     *  `$base`, the line is that global plus `$line` (a delta). */
+    private function btPushInline(string $nameLit, string $line, string $base): string
+    {
+        $d = $this->ssa->allocReg();
+        $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp slt i64 ' . $d . ", 4096\n";
+        $st = $this->ssa->allocLabel('btpush.st');
+        $inc = $this->ssa->allocLabel('btpush.inc');
+        $out .= '  br i1 ' . $ok . ', label %' . $st . ', label %' . $inc . "\n" . $st . ":\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . ' = ptrtoint ptr ' . $nameLit . " to i64\n";
+        $np = $this->ssa->allocReg();
+        $out .= '  ' . $np . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 ' . $d . "\n";
+        $out .= '  store i64 ' . $ni . ', ptr ' . $np . "\n";
+        $ln = $line;
+        if ($base !== '') {
+            $b = $this->ssa->allocReg();
+            $out .= '  ' . $b . ' = load i64, ptr ' . $base . "\n";
+            $ln = $this->ssa->allocReg();
+            $out .= '  ' . $ln . ' = add i64 ' . $b . ', ' . $line . "\n";
+        }
+        $lp = $this->ssa->allocReg();
+        $out .= '  ' . $lp . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 ' . $d . "\n";
+        $out .= '  store i64 ' . $ln . ', ptr ' . $lp . "\n";
+        $out .= '  br label %' . $inc . "\n" . $inc . ":\n";
+        $d1 = $this->ssa->allocReg();
+        $out .= '  ' . $d1 . ' = add i64 ' . $d . ", 1\n";
+        $out .= '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
+        return $out;
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
     private function btPop(): string
     {
-        return $this->rt->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
+        if (!$this->rt->needsBacktrace) { return ''; }
+        $d = $this->ssa->allocReg();
+        $d1 = $this->ssa->allocReg();
+        return '  ' . $d . " = load i64, ptr @__mir_bt_depth\n"
+             . '  ' . $d1 . ' = sub i64 ' . $d . ", 1\n"
+             . '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
     }
 
     /**
@@ -4007,15 +4100,17 @@ final class EmitLlvm implements EmitVisitor
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
+        $dm = $this->ssa->allocReg();
+        $out .= $this->btClamp($dm, $dep);
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
-        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $dep . ")\n";
+        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $dm . ")\n";
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
         $i0 = $this->ssa->allocReg();
-        $out .= '  ' . $i0 . ' = sub i64 ' . $dep . ", 1\n";
+        $out .= '  ' . $i0 . ' = sub i64 ' . $dm . ", 1\n";
         $out .= '  store i64 ' . $i0 . ', ptr ' . $iSlot . "\n";
         $cond = $this->ssa->allocLabel('bt.cond');
         $body = $this->ssa->allocLabel('bt.body');

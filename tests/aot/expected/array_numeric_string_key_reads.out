@@ -1,0 +1,27 @@
+5: true 'x' true 'x'
+05: false 'miss' false NULL
+ 5: false 'miss' false NULL
+-0: false 'miss' false NULL
+0: true 'z' true 'z'
+-7: true 'neg' true 'neg'
+-07: false 'miss' false NULL
+5.0: false 'miss' false NULL
+a: true 'str' true 'str'
+9223372036854775808: false 'miss' false NULL
+0: true 'v0' true 'v0'
+3: true 'v1' true 'v1'
+117: true 'v39' true 'v39'
+118: false 'miss' false NULL
+03: false 'miss' false NULL
+20 set true
+int(2)
+bool(false)
+int(30)
+5 => {"6":"y","a":1}
+05 => {"6":"y","a":1}
+ 6 => {"6":"y","a":1}
+a => {"6":"y"}
+int(39)
+bool(false)
+bool(false)
+bool(false)

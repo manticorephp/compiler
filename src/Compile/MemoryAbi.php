@@ -18,8 +18,17 @@ final class MemoryAbi
 {
     /**
      * Bump on any layout / encoding change.
+     *
+     * v16: both v15 lineages at once — the int bucket hash is
+     * (k ^ k>>12) * golden and a bucket word is `(h32 << 32) | (entry_index + 1)`
+     * (h32 = low 32 bits of the key hash), not a bare `entry_index + 1`; the
+     * bucket index is trusted, not validated, so a library built with the old
+     * hash or word would miss keys in the arrays it built. AND the exception
+     * object is the zero-cost `_Unwind_Exception` header + Throwable pointer
+     * (`EXC_*`, docs/design/memory-abi.md §7b). Either v15 alone is a
+     * different layout, so neither may link with a v16 object.
      */
-    public const VERSION = 15;
+    public const VERSION = 16;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -80,6 +89,16 @@ final class MemoryAbi
      * pointer. {@see LowerClasses} registers this constant for those cells.
      */
     public const CELL_NULL = -3659174697238528;
+
+    /**
+     * The MISS word of `__mir_array_lookup_{int,str,cell}`: those return the
+     * ADDRESS of an element's value word, and on a miss the address of this
+     * global, which holds {@see CELL_NULL}. A caller loads the word and tests it
+     * against CELL_NULL — one test for "absent" and "present but NULL" (both are
+     * unset to `isset` and `??`). The address, not a value, is the sentinel
+     * because a raw int element can hold any i64. Never store through it.
+     */
+    public const ARRAY_LOOKUP_MISS_SYMBOL = '__mir_array_miss_word';
 
     /** `0xFFF8000000000000`: OR'd onto a raw object pointer, the OBJECT cell
      *  that carries it — what an `object`-hinted PHP parameter expects when

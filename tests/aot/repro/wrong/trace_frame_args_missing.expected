@@ -1,0 +1,3 @@
+#0 /Users/taras/var/projects/manticore-hot/tests/aot/repro/wrong/trace_frame_args_missing.php(4): A->m(7)
+#1 /Users/taras/var/projects/manticore-hot/tests/aot/repro/wrong/trace_frame_args_missing.php(5): chain(7)
+#2 {main}
