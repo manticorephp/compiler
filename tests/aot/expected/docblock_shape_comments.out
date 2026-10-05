@@ -1,0 +1,6 @@
+env: dev, debug: 1, max: 500
+string(3) "dev"
+bool(true)
+env: prod, debug: 0, max: 1000
+string(4) "prod"
+bool(false)

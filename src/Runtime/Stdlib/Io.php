@@ -537,8 +537,12 @@ function __mc_wait_write(\Resource $s): int
 function __mc_stream_send_retry(\Resource $s, string $data, int $n): int
 {
     if ($s->kind === \Resource::KIND_SOCKET) {
+        // MSG_DONTWAIT for the same reason as the read side
+        // ({@see __mc_stream_recv_into}): a full send buffer on a BLOCKING-mode
+        // socket parked the process in send(2) instead of this task.
+        $dontWait = \__mc_sock_const(20);
         while (true) {
-            $sent = \__mc_transport_send($s, $data, $n);
+            $sent = \Runtime\Libc\sys_send($s->addr, $data, $n, $dontWait);
             if ($sent > 0) {
                 return $sent;
             }
@@ -607,9 +611,18 @@ function __mc_stream_recv_into(\Resource $s, \Ffi\Ptr $buf, int $want): int
     // wait-then-one-recv shape below, so a spurious wake's EWOULDBLOCK read as
     // EOF with $eof left false — the caller could not tell a truncated read
     // from a closed one.
+    //
+    // MSG_DONTWAIT, not the fd's O_NONBLOCK: a BLOCKING-mode socket
+    // (stream_socket_pair()'s ends, anything never passed to
+    // stream_set_blocking(false)) otherwise blocked the whole PROCESS in this
+    // recv — every other task stalled until that one peer spoke. The flag makes
+    // this one call non-blocking without touching the shared file description,
+    // so the stream stays in the mode php reports and a forked peer holding the
+    // same fd is unaffected.
     if ($s->kind === \Resource::KIND_SOCKET && \Runtime\AsyncHook::active()) {
+        $dontWait = \__mc_sock_const(20);
         while (true) {
-            $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, 0);
+            $got = \Runtime\Libc\sys_recv($s->addr, $buf, $want, $dontWait);
             if ($got > 0) {
                 return $got;
             }

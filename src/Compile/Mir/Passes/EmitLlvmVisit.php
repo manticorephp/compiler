@@ -171,8 +171,11 @@ trait EmitLlvmVisit
         if ($ff !== '') {
             $fk = InsertMemoryOps::slotStoredType($n)->kind;
             $isCell = $fk === Type::KIND_CELL || $fk === Type::KIND_UNKNOWN;
-            if ($isCell) { $this->feCellFlagSet[$n->name] = true; }
-            $out .= '  store i64 ' . ($isCell ? '1' : '0') . ', ptr ' . $ff . "\n";
+            // 1 = a cell; a raw value records its element-hint code so the
+            // write-back can box it for a CELL buffer ({@see foreachWriteBackEncode}).
+            $fc = $isCell ? 1 : ($this->elementHintCodeForType(InsertMemoryOps::slotStoredType($n)) ?? 0);
+            if ($fc !== 0) { $this->feCellFlagSet[$n->name] = true; }
+            $out .= '  store i64 ' . $fc . ', ptr ' . $ff . "\n";
         }
         $this->checkCellSink('store_local', $n->type, $n, $n->value);
         return $out;

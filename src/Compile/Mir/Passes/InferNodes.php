@@ -208,6 +208,31 @@ trait InferNodes
         }
     }
 
+    /**
+     * Seed a local array whose ELEMENT is a cell (mixed stores, a null element,
+     * a cell-valued store, an element reference, a by-ref appending callee):
+     * `vec[cell]` / `assoc[K, cell]` from its first read.
+     *
+     * Not a CELL PARAM slot (`array|string $x`, `mixed $x`): the caller boxed
+     * that argument, so on every path no store takes the slot holds a tagged
+     * word, and retyping it to an array read the tag as a buffer pointer —
+     * `if (is_string($x)) { $x = [1, null]; } count($x)` folded is_string to
+     * false and answered `-268435340`. The element-cell fact is about the ARRAY
+     * the slot holds, which a cell slot already decodes by tag.
+     */
+    private function seedCellElemLocal(string $name): void
+    {
+        $pt = $this->currentParamTypes[$name] ?? null;
+        if ($pt !== null && $pt->kind === Type::KIND_CELL) { return; }
+        $this->cellElemLocals[$name] = true;
+        if (isset($this->assocLocals[$name])) {
+            $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
+            $this->localTypes[$name] = Type::assoc($key, Type::cell());
+        } else {
+            $this->localTypes[$name] = Type::vec(Type::cell());
+        }
+    }
+
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
@@ -306,6 +331,14 @@ trait InferNodes
             // its slot turns cell at the entry store {@see boxParamAtEntry} plants.
             if ($this->paramArrivesRaw($fn, $name)) { continue; }
             $this->localTypes[$name] = Type::cell();
+            // The closure's by-ref capture PARAM is that word too: an erased
+            // one left the emitter storing a raw string into the cell the
+            // capturing frame reads (`use (&$i)` over a retyped `int &$i`).
+            foreach ($fn->params as $cp) {
+                if ($cp->name === $name && $cp->byRef && $cp->type->kind === Type::KIND_UNKNOWN) {
+                    $cp->type = Type::cell();
+                }
+            }
         }
         // Pre-scan: refine a bare `array $p` param to vec[string] when the
         // body uses its elements as strings (`$x=$p[$i]; $x==="..."` / `$x[0]`
@@ -384,13 +417,7 @@ trait InferNodes
             // away for the WHOLE function, defeating {@see inferStoreElement}'s
             // constant-key preservation.
             if (($this->localTypes[$name] ?? null)?->isShape()) { continue; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         // A store of an already-CELL value into a local array makes its element a
         // cell — one store is enough, and the pre-inference coarseValueClass scan
@@ -399,13 +426,7 @@ trait InferNodes
         // every read of the local as the cell it really holds.
         foreach ($this->forcedCellElemLocals[$fn->name] ?? [] as $name => $unused) {
             if (isset($this->recordLocals[$name])) { continue; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         // A local handed BY-REF to a callee that APPENDS a foreign element
         // ({@see scanByRefElemWiden}). Unlike the store-driven force above this
@@ -426,13 +447,7 @@ trait InferNodes
         foreach ($this->refElemBases as $name => $unused) {
             unset($this->recordLocals[$name]);
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         foreach ($this->byRefCellElemLocals[$fn->name] ?? [] as $name => $unused) {
             unset($this->recordLocals[$name]);
@@ -442,13 +457,7 @@ trait InferNodes
             // shape — without this `['a'=>1]` re-emerges as a vec[cell] and the
             // string key lands under a positional index.
             if (isset($this->recordLitLocals[$name])) { $this->assocLocals[$name] = true; }
-            $this->cellElemLocals[$name] = true;
-            if (isset($this->assocLocals[$name])) {
-                $key = isset($this->cellKeyLocals[$name]) ? Type::cell() : Type::string_();
-                $this->localTypes[$name] = Type::assoc($key, Type::cell());
-            } else {
-                $this->localTypes[$name] = Type::vec(Type::cell());
-            }
+            $this->seedCellElemLocal($name);
         }
         $this->cellElemParamEntry($fn);
         // A local a `&` points at from a STORING position is a CELL for its whole
@@ -518,6 +527,7 @@ trait InferNodes
         $this->fnReturnUnion = null;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
+        $this->globalCellBound = [];
         $this->arithUsedLocals = [];
         $this->refPinnedLocals = [];
         // ONE walk for the late facts — arith-used, by-ref-pinned, and which
@@ -857,6 +867,26 @@ trait InferNodes
             $gt = $this->globalVarTypes[$node->name];
             if ($gt->isArray() && $gt->element !== null
                 && $gt->element->kind !== Type::KIND_UNKNOWN) {
+                $this->localTypes[$node->name] = $gt;
+                $node->type = $gt;
+                return $node->type;
+            }
+        }
+        // A whole store into a GLOBAL whose unified element is a cell (another
+        // scope stores a second kind into it) keeps the slot's cell-element
+        // view: typing the name by the stored literal's concrete element read
+        // the int another scope stored back as a string, in THIS scope, after
+        // the call that stored it (`$g = ['a' => 'b']; setv(); $g['v']`). The
+        // buffer's element hint describes the raw words, which the cell view
+        // decodes; a call may rewrite the global anyway, so the concrete
+        // narrowing was never sound across one.
+        $globalBound = ($this->inMainBody && isset($this->mainGlobalNames[$node->name]))
+            || isset($this->globalCellBound[$node->name]);
+        if ($globalBound && isset($this->globalVarTypes[$node->name]) && $valueType->isArray()) {
+            $gt = $this->globalVarTypes[$node->name];
+            if ($gt->isArray() && $gt->element !== null
+                && $gt->element->kind === Type::KIND_CELL
+                && $gt->isAssoc() === $valueType->isAssoc()) {
                 $this->localTypes[$node->name] = $gt;
                 $node->type = $gt;
                 return $node->type;
@@ -1202,6 +1232,13 @@ trait InferNodes
                 && $this->staticLocalTypes[$n->cell]->kind === Type::KIND_CELL) {
                 $t = Type::cell();
             }
+            // Its ELEMENT stores disagree with the initialiser's element: the
+            // array's element is a cell ({@see scanStaticLocalTypes}).
+            $st = $this->staticLocalTypes[$n->cell] ?? null;
+            if ($st !== null && $st->isArray() && $t->isArray() && $st->element !== null
+                && $st->element->kind === Type::KIND_CELL) {
+                $t = $st;
+            }
         }
         // A global-backed decl (`global $g`) is hard-lowered `int`; seed its
         // unified cross-scope type ({@see scanGlobalTypes}) so a pure-read scope
@@ -1219,6 +1256,7 @@ trait InferNodes
         }
         $this->localTypes[$n->name] = $t;
         $this->globalBackedNames[$n->name] = true;
+        if (\str_starts_with($n->cell, '@g_')) { $this->globalCellBound[$n->name] = true; }
         $n->type = $t;
         return $t;
     }
@@ -2234,11 +2272,15 @@ trait InferNodes
             $vt = $this->inferNode($el->value);
             if ($el->value->kind === Node::KIND_SPREAD) {
                 $st = $el->value->type;
-                // A CELL operand (`[...$closure()]`, `[...$mixed]`) hands over
-                // elements of any kind, each tagged: the literal rides cells too,
-                // or its release reads the merged words by no description.
-                $vt = $st->element !== null ? $st->element
-                    : ($st->kind === Type::KIND_CELL ? Type::cell() : Type::unknown());
+                $vt = $st->element !== null ? $st->element : Type::unknown();
+                // An array that rides a CELL was boxed element by element on
+                // its way in, so what it spreads are cells — not words of no
+                // known kind, which left `[1, ...$mixed]` a vec[unknown] that
+                // stored the 1 raw beside tagged words.
+                if ($st->kind === Type::KIND_CELL) { $vt = Type::cell(); }
+                // A Traversable operand is drained into cells
+                // ({@see EmitLlvm::emitArraySpreadUnified}).
+                if ($st->kind === Type::KIND_OBJ) { $vt = Type::cell(); }
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
             if ($vt->isArray() && $vt->element !== null

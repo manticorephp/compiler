@@ -1151,6 +1151,11 @@ final class Closure_ extends Node
 
 final class Invoke_ extends Node
 {
+    /** Index-parallel to {@see $args}: the name of a named argument, '' for a
+     *  positional one. Empty when the call has none. Bound by
+     *  {@see Passes\ResolveMethodFcc} once the callee closure is known. */
+    public array $argNames = [];
+
     /** @param Node[] $args */
     public function __construct(
         public Node $callee,

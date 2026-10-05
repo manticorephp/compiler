@@ -142,6 +142,7 @@ final class UnifiedArrayRuntime
         $this->emitElemDecodeFast();
         $this->emitCellifyInplace();
         $this->emitElemEncode();
+        $this->emitCellifiedCopy();
         $this->emitCellToBag();
         $this->emitCellToKind();
         $this->emitArrayConform();
@@ -4032,6 +4033,16 @@ final class UnifiedArrayRuntime
 
         // The element's address, then: already a box, or make one.
         $ep = $locate->call($slotFn, Type::ptr(), [$slotAddr, $key]);
+        // The static CELL element is a claim, not a guarantee: a cell-typed
+        // slot may hold a RAW-hinted buffer (`[$x, 2]` into an `array|int`
+        // param), whose words are untagged. Cellify it (in place, after
+        // ref_slot separated it) so the promoted word is a cell and the
+        // REF cell sits under a CELL hint — else every hint-decoding reader
+        // boxed the REF word as an int.
+        $locate->call('__mir_elem_encode', Type::i64(), [
+            $locate->inttoptr($locate->load(Type::i64(), $slotAddr), Type::ptr()),
+            Value::int(Type::i64(), MemoryAbi::CELL_NULL),
+        ]);
         $w = $locate->load(Type::i64(), $ep);
         $isTagged = $locate->icmp('ugt', $w, Value::int(Type::i64(), -4503599627370496));
         $nib = $locate->and_($locate->lshr($w, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
@@ -4714,7 +4725,45 @@ final class UnifiedArrayRuntime
         $src = $go->gep(Type::i8(), $arr, [$go->add(Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE), $esz)]);
         $go->call('memmove', Type::ptr(), [$dst, $src, $bytes]);
         $go->store($tail, $arr);
-        $go->ret($first);
+        // php renumbers the INTEGER keys from 0 (string keys stay) and rewinds
+        // the internal pointer. A HASHED buffer kept its old int keys: after
+        // `unset($a[0])`, `array_shift($a)` left keys 2..n where php has 0..n-2.
+        // A PACKED buffer's keys are its positions already.
+        $fp = $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET);
+        $fl = $go->load(Type::i64(), $fp);
+        $go->store($go->and_($fl, Value::int(Type::i64(), ~MemoryAbi::ARRAY_PTR_FIELD_MASK)), $fp);
+        $rn = $fn->block('rn');
+        $rh = $fn->block('rhead');
+        $rb = $fn->block('rbody');
+        $ri = $fn->block('rint');
+        $rx = $fn->block('rnext');
+        $rf = $fn->block('rfin');
+        $out = $fn->block('out');
+        $go->brIf($go->icmp('ne', $this->hashedBit($go, $fl), Value::int(Type::i64(), 0)), $rn, $out);
+        $iSlot = $rn->alloca(Type::i64(), 'si');
+        $kSlot = $rn->alloca(Type::i64(), 'sk');
+        $rn->store(Value::int(Type::i64(), 0), $iSlot);
+        $rn->store(Value::int(Type::i64(), 0), $kSlot);
+        $rn->br($rh);
+        $i = $rh->load(Type::i64(), $iSlot);
+        $rh->brIf($rh->icmp('sge', $i, $tail), $rf, $rb);
+        $kind = $rb->load(Type::i64(), $this->entryAddr($rb, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $rb->brIf($rb->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $ri, $rx);
+        $k = $ri->load(Type::i64(), $kSlot);
+        $ri->store($k, $this->entryAddr($ri, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $ri->store($ri->add($k, Value::int(Type::i64(), 1)), $kSlot);
+        $ri->br($rx);
+        $rx->store($rx->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $rx->br($rh);
+        // The bucket index hashed the old int keys: drop it (rebuilt lazily).
+        // A string-keyed map keeps the index the surgical repair above fixed.
+        $kn = $rf->load(Type::i64(), $kSlot);
+        $rf->store($kn, $this->hdr($rf, $arr, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $rd = $fn->block('rdrop');
+        $rf->brIf($rf->icmp('ne', $kn, Value::int(Type::i64(), 0)), $rd, $out);
+        $rd->call('__mir_array_index_drop', Type::void(), [$arr]);
+        $rd->br($out);
+        $out->ret($first);
         $z->ret(Value::int(Type::i64(), 0));
     }
 
@@ -5434,6 +5483,32 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_array_cellified_copy(src) -> ptr` — an OWNED copy of `src` whose
+     * elements are cells: the copy co-owns the elements by the buffer's hint,
+     * then a raw-hinted buffer is cellified in place (an unstamped one is
+     * empty). What a consumer with a CELL element contract takes from an array
+     * that only its runtime hint describes — the `(object)` bag, a `...$mixed`
+     * spread into a cell-valued literal.
+     */
+    private function emitCellifiedCopy(): void
+    {
+        $fn = $this->module->func('__mir_array_cellified_copy', Type::ptr());
+        $src = $fn->param(Type::ptr(), 'src');
+        $e = $fn->block('entry');
+        $cellify = $fn->block('cellify');
+        $done = $fn->block('done');
+        $copy = $e->call('__mir_array_copy', Type::ptr(), [$src]);
+        $hint = $this->elemHint($e, $copy);
+        $e->switch_($hint, $cellify, [
+            new SwitchCase(Value::int(Type::i64(), 0), $done),
+            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $done),
+        ]);
+        $cellify->call('__mir_array_cellify_inplace', Type::void(), [$copy, $hint]);
+        $cellify->br($done);
+        $done->ret($copy);
+    }
+
+    /**
      * `__mir_cell_to_bag(v, scalarKey) -> ptr` — the OWNED dynamic-property bag
      * `(object)$v` gives a runtime-classified value, php's rules per kind: an
      * ARRAY → a copy of it whose elements are cells (the bag is a cell channel,
@@ -5453,8 +5528,6 @@ final class UnifiedArrayRuntime
         $tagged = $fn->block('tagged');
         $chkarr = $fn->block('chkarr');
         $doarr = $fn->block('doarr');
-        $cellify = $fn->block('cellify');
-        $arrdone = $fn->block('arrdone');
         $donull = $fn->block('donull');
         $scalar = $fn->block('scalar');
         $mask = Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK);
@@ -5463,18 +5536,9 @@ final class UnifiedArrayRuntime
         $nib = $tagged->and_($tagged->lshr($v, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
         $tagged->brIf($tagged->icmp('eq', $nib, Value::int(Type::i64(), 3)), $donull, $chkarr);
         $chkarr->brIf($chkarr->icmp('eq', $nib, Value::int(Type::i64(), 7)), $doarr, $scalar);
-        // ARRAY: copy, co-own the elements by the buffer's hint, then cellify a
-        // raw-hinted buffer in place (an unstamped one is empty).
+        // ARRAY: a copy whose elements are cells ({@see emitCellifiedCopy}).
         $src = $doarr->inttoptr($doarr->and_($v, $mask), Type::ptr());
-        $copy = $doarr->call('__mir_array_copy', Type::ptr(), [$src]);
-        $hint = $this->elemHint($doarr, $copy);
-        $doarr->switch_($hint, $cellify, [
-            new SwitchCase(Value::int(Type::i64(), 0), $arrdone),
-            new SwitchCase(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL), $arrdone),
-        ]);
-        $cellify->call('__mir_array_cellify_inplace', Type::void(), [$copy, $hint]);
-        $cellify->br($arrdone);
-        $arrdone->ret($copy);
+        $doarr->ret($doarr->call('__mir_array_cellified_copy', Type::ptr(), [$src]));
         // NULL: an empty bag.
         $empty = $donull->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
         $donull->store(Value::int(Type::i64(), 0), $empty);

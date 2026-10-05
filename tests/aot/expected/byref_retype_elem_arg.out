@@ -1,0 +1,62 @@
+array(2) {
+  [0]=>
+  string(2) "x1"
+  [1]=>
+  string(2) "x2"
+}
+array(2) {
+  [0]=>
+  int(5)
+  [1]=>
+  string(2) "x6"
+}
+array(2) {
+  [0]=>
+  string(2) "m7"
+  [1]=>
+  string(2) "s8"
+}
+array(2) {
+  [0]=>
+  string(2) "c1"
+  [1]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(2) "a2"
+}
+array(2) {
+  [0]=>
+  string(2) "x1"
+  [1]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  int(3)
+  [1]=>
+  string(2) "x4"
+}
+array(1) {
+  ["k"]=>
+  string(2) "x1"
+}
+array(3) {
+  [0]=>
+  string(1) "s"
+  [1]=>
+  string(1) "s"
+  [2]=>
+  string(1) "s"
+}
+array(3) {
+  [0]=>
+  int(10)
+  [1]=>
+  int(20)
+  [2]=>
+  int(30)
+}

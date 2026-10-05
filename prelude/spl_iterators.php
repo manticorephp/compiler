@@ -561,6 +561,7 @@ class SplFileInfo implements Stringable
 {
     private string $__path;
     private string $__infoClass = SplFileInfo::class;
+    private string $__fileClass = SplFileObject::class;
 
     public function __construct(string $filename)
     {
@@ -654,6 +655,17 @@ class SplFileInfo implements Stringable
         return new $c($this->getPath());
     }
 
+    public function openFile(string $mode = 'r', bool $useIncludePath = false, $context = null): SplFileObject
+    {
+        $c = $this->__fileClass;
+        return new $c($this->__path, $mode, $useIncludePath, $context);
+    }
+
+    public function setFileClass(string $class = SplFileObject::class): void
+    {
+        $this->__fileClass = $class;
+    }
+
     public function setInfoClass(string $class = SplFileInfo::class): void
     {
         $this->__infoClass = $class;
@@ -677,6 +689,383 @@ class SplFileInfo implements Stringable
             throw new RuntimeException('SplFileInfo::' . $method . '(): stat failed for ' . $this->__path);
         }
         return $v;
+    }
+}
+
+/**
+ * php's ext/spl SplFileObject over a plain stream, state machine for state
+ * machine with spl_directory.c: `$__line` is `current_line` (null = none read),
+ * `$__row` the READ_CSV `current_zval`, `$__num` `current_line_num`.
+ */
+class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIterator
+{
+    public const DROP_NEW_LINE = 1;
+    public const READ_AHEAD = 2;
+    public const SKIP_EMPTY = 4;
+    public const READ_CSV = 8;
+
+    private ?\Resource $__fp = null;
+    private ?string $__line = null;
+    /** @var array<int, string|null>|null */
+    private ?array $__row = null;
+    private int $__num = 0;
+    private int $__flags = 0;
+    private int $__maxLen = 0;
+    private string $__sep = ',';
+    private string $__enc = '"';
+    private string $__esc = '\\';
+    private string $__name;
+
+    public function __construct(string $filename, string $mode = 'r', bool $useIncludePath = false, $context = null)
+    {
+        parent::__construct($filename);
+        $this->__name = $filename;
+        $this->__open($filename, $mode);
+    }
+
+    /** spl_filesystem_file_open: php's own warning text, thrown. */
+    protected function __open(string $filename, string $mode): void
+    {
+        if ($filename !== '' && \is_dir($filename)) {
+            throw new LogicException('Cannot use SplFileObject with directories');
+        }
+        $fp = $filename === '' ? false : @\fopen($filename, $mode);
+        if ($fp === false) {
+            $why = \file_exists($filename) ? 'Permission denied' : 'No such file or directory';
+            throw new RuntimeException('SplFileObject::__construct(' . $filename . '): Failed to open stream: ' . $why);
+        }
+        $this->__fp = $fp;
+    }
+
+    private function __stream(): \Resource
+    {
+        $fp = $this->__fp;
+        if ($fp === null) {
+            throw new Error('Object not initialized');
+        }
+        return $fp;
+    }
+
+    private function __freeLine(): void
+    {
+        $this->__line = null;
+        $this->__row = null;
+    }
+
+    /** spl_filesystem_file_read_ex */
+    private function __readEx(bool $silent, int $lineAdd, bool $csv): bool
+    {
+        $fp = $this->__stream();
+        $this->__freeLine();
+        if (\feof($fp)) {
+            if (!$silent) {
+                throw new RuntimeException('Cannot read from file ' . $this->__name);
+            }
+            return false;
+        }
+        $buf = $this->__maxLen > 0 ? \fgets($fp, $this->__maxLen + 1) : \fgets($fp);
+        if ($buf === false) {
+            $this->__line = '';
+        } else {
+            $s = (string)$buf;
+            if (!$csv && ($this->__flags & self::DROP_NEW_LINE) !== 0) {
+                $n = \strlen($s);
+                if ($n > 0 && $s[$n - 1] === "\n") {
+                    $n--;
+                    if ($n > 0 && $s[$n - 1] === "\r") { $n--; }
+                    $s = \substr($s, 0, $n);
+                }
+            }
+            $this->__line = $s;
+        }
+        $this->__num += $lineAdd;
+        return true;
+    }
+
+    /** spl_filesystem_file_read */
+    private function __read(bool $silent, bool $csv): bool
+    {
+        return $this->__readEx($silent, $this->__line !== null ? 1 : 0, $csv);
+    }
+
+    private function __lineEmpty(): bool
+    {
+        $l = (string)$this->__line;
+        if ($l === '') { return true; }
+        return ($this->__flags & self::READ_CSV) !== 0 && ($this->__flags & self::DROP_NEW_LINE) !== 0
+            && ($l === "\n" || $l === "\r\n");
+    }
+
+    /** spl_filesystem_file_read_csv — a quoted field may span lines, as in fgetcsv(). */
+    private function __readCsv(string $sep, string $enc, string $esc, bool $silent): bool
+    {
+        do {
+            if (!$this->__read($silent, true)) { return false; }
+        } while ($this->__lineEmpty() && ($this->__flags & self::SKIP_EMPTY) !== 0);
+        $buf = (string)$this->__line;
+        $e = $enc === '' ? '"' : $enc[0];
+        $x = $esc === '' ? '' : $esc[0];
+        if (\__mc_csv_open_quote($buf, $e, $x)) {
+            $parts = [$buf];
+            $fp = $this->__stream();
+            while (true) {
+                $next = \fgets($fp);
+                if ($next === false) { break; }
+                $parts[] = (string)$next;
+                if (!\__mc_csv_open_quote(\implode('', $parts), $e, $x)) { break; }
+            }
+            $buf = \implode('', $parts);
+        }
+        $this->__row = \str_getcsv($buf, $sep, $enc, $esc);
+        return true;
+    }
+
+    /** spl_filesystem_file_read_line_ex */
+    private function __readLineEx(bool $silent): bool
+    {
+        if (($this->__flags & self::READ_CSV) !== 0) {
+            return $this->__readCsv($this->__sep, $this->__enc, $this->__esc, $silent);
+        }
+        return $this->__read($silent, false);
+    }
+
+    /** spl_filesystem_file_read_line */
+    private function __readLine(bool $silent): bool
+    {
+        $ok = $this->__readLineEx($silent);
+        while (($this->__flags & self::SKIP_EMPTY) !== 0 && $ok && $this->__lineEmpty()) {
+            $this->__freeLine();
+            $ok = $this->__readLineEx($silent);
+        }
+        return $ok;
+    }
+
+    public function rewind(): void
+    {
+        if (!\rewind($this->__stream())) {
+            throw new RuntimeException('Cannot rewind file ' . $this->__name);
+        }
+        $this->__freeLine();
+        $this->__num = 0;
+        if (($this->__flags & self::READ_AHEAD) !== 0) {
+            $this->__readLine(true);
+        }
+    }
+
+    public function eof(): bool
+    {
+        return \feof($this->__stream());
+    }
+
+    public function valid(): bool
+    {
+        if (($this->__flags & self::READ_AHEAD) !== 0) {
+            return $this->__line !== null || $this->__row !== null;
+        }
+        return $this->__fp !== null && !\feof($this->__fp);
+    }
+
+    public function fgets(): string
+    {
+        $this->__readEx(false, 1, false);
+        return (string)$this->__line;
+    }
+
+    public function getCurrentLine(): string
+    {
+        return $this->fgets();
+    }
+
+    /** @return string|array<int, string|null>|false */
+    public function current(): string|array|false
+    {
+        if ($this->__line === null && $this->__row === null) {
+            $this->__readLine(true);
+        }
+        if ($this->__line !== null && (($this->__flags & self::READ_CSV) === 0 || $this->__row === null)) {
+            return $this->__line;
+        }
+        if ($this->__row !== null) {
+            return $this->__row;
+        }
+        return false;
+    }
+
+    public function key(): int
+    {
+        return $this->__num;
+    }
+
+    public function next(): void
+    {
+        $this->__freeLine();
+        if (($this->__flags & self::READ_AHEAD) !== 0) {
+            $this->__readLine(true);
+        }
+        $this->__num++;
+    }
+
+    public function seek(int $line): void
+    {
+        if ($line < 0) {
+            throw new ValueError('SplFileObject::seek(): Argument #1 ($line) must be greater than or equal to 0');
+        }
+        $this->rewind();
+        for ($i = 0; $i < $line; $i++) {
+            if (!$this->__readLine(true)) { return; }
+        }
+        if ($line > 0 && ($this->__flags & self::READ_AHEAD) === 0) {
+            $this->__num++;
+            $this->__freeLine();
+        }
+    }
+
+    public function fgetc(): string|false
+    {
+        $this->__freeLine();
+        $c = \fgetc($this->__stream());
+        if ($c === false) { return false; }
+        if ($c === "\n") { $this->__num++; }
+        return $c;
+    }
+
+    public function fread(int $length): string|false
+    {
+        if ($length <= 0) {
+            throw new ValueError('SplFileObject::fread(): Argument #1 ($length) must be greater than 0');
+        }
+        return \fread($this->__stream(), $length);
+    }
+
+    public function fwrite(string $data, int $length = 0): int|false
+    {
+        if (\func_num_args() > 1) {
+            $data = $length >= 0 ? \substr($data, 0, $length) : '';
+        }
+        if ($data === '') { return 0; }
+        return \fwrite($this->__stream(), $data);
+    }
+
+    /** @return array<int, string|null>|false */
+    public function fgetcsv(string $separator = ',', string $enclosure = '"', string $escape = '\\'): array|false
+    {
+        if (!$this->__readCsv($separator, $enclosure, $escape, true)) { return false; }
+        return $this->__row ?? false;
+    }
+
+    /** @param array<int, mixed> $fields */
+    public function fputcsv(array $fields, string $separator = ',', string $enclosure = '"', string $escape = '\\', string $eol = "\n"): int|false
+    {
+        return \fputcsv($this->__stream(), $fields, $separator, $enclosure, $escape, $eol);
+    }
+
+    public function setCsvControl(string $separator = ',', string $enclosure = '"', string $escape = '\\'): void
+    {
+        $this->__sep = $separator;
+        $this->__enc = $enclosure;
+        $this->__esc = $escape;
+    }
+
+    /** @return string[] */
+    public function getCsvControl(): array
+    {
+        return [$this->__sep, $this->__enc, $this->__esc];
+    }
+
+    public function flock(int $operation, &$wouldBlock = null): bool
+    {
+        return \flock($this->__stream(), $operation, $wouldBlock);
+    }
+
+    public function fflush(): bool
+    {
+        return \fflush($this->__stream());
+    }
+
+    public function ftell(): int|false
+    {
+        return \ftell($this->__stream());
+    }
+
+    public function fseek(int $offset, int $whence = SEEK_SET): int
+    {
+        $this->__freeLine();
+        return \fseek($this->__stream(), $offset, $whence);
+    }
+
+    public function ftruncate(int $size): bool
+    {
+        return \ftruncate($this->__stream(), $size);
+    }
+
+    public function fpassthru(): int
+    {
+        return \fpassthru($this->__stream());
+    }
+
+    /** @return array<int|string, int> */
+    public function fstat(): array
+    {
+        $st = \fstat($this->__stream());
+        return $st === false ? [] : $st;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__flags = $flags;
+    }
+
+    public function getFlags(): int
+    {
+        return $this->__flags;
+    }
+
+    public function setMaxLineLen(int $maxLength): void
+    {
+        if ($maxLength < 0) {
+            throw new ValueError('SplFileObject::setMaxLineLen(): Argument #1 ($maxLength) must be greater than or equal to 0');
+        }
+        $this->__maxLen = $maxLength;
+    }
+
+    public function getMaxLineLen(): int
+    {
+        return $this->__maxLen;
+    }
+
+    public function hasChildren(): bool
+    {
+        return false;
+    }
+
+    public function getChildren(): ?RecursiveIterator
+    {
+        return null;
+    }
+
+    public function __toString(): string
+    {
+        return (string)$this->current();
+    }
+}
+
+class SplTempFileObject extends SplFileObject
+{
+    public function __construct(int $maxMemory = 2 * 1024 * 1024)
+    {
+        $name = $maxMemory < 0 ? 'php://memory'
+            : (\func_num_args() > 0 ? 'php://temp/maxmemory:' . (string)$maxMemory : 'php://temp');
+        parent::__construct($name, 'wb');
+    }
+
+    public function getFilename(): string
+    {
+        return $this->getPathname();
+    }
+
+    public function getPath(): string
+    {
+        return '';
     }
 }
 

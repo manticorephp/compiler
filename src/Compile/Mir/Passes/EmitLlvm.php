@@ -692,6 +692,7 @@ final class EmitLlvm implements EmitVisitor
         $this->noDiscardMethods = $module->noDiscardMethods;
         $this->attrSiteErrors = $module->attrSiteErrors;
         $this->closureCaptures = $module->closureCaptures;
+        $this->closureRawRefUnionMemo = -1;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;
         $this->globalDefaults = $module->globalDefaults;
@@ -1669,9 +1670,15 @@ final class EmitLlvm implements EmitVisitor
         $out .= "entry:\n";
         // snprintf into a stack scratch, then size the heap result exactly.
         $out .= "  %tmp = alloca [40 x i8]\n";
-        $out .= "  %n32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %tmp, i64 40, ptr @.fmt.pg, double %v)\n";
+        // `%G`, not `%g`: php spells the non-finite values `INF` / `-INF` /
+        // `NAN` (C's `%g` says `inf` / `nan`, and `"abc" <=> INF` then
+        // compared the wrong bytes). A NaN is printed unsigned whatever its sign
+        // bit — x86 makes `INF - INF` a NEGATIVE NaN, php still says `NAN`.
+        $out .= "  %isnan = fcmp uno double %v, %v\n";
+        $out .= "  %vp = select i1 %isnan, double 0x7FF8000000000000, double %v\n";
+        $out .= "  %n32 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %tmp, i64 40, ptr @.fmt.pg, double %vp)\n";
         $out .= "  %n = sext i32 %n32 to i64\n";
-        $out .= "  %ep = call ptr @memchr(ptr %tmp, i32 101, i64 %n)\n";   // 'e'
+        $out .= "  %ep = call ptr @memchr(ptr %tmp, i32 69, i64 %n)\n";   // 'E'
         $out .= "  %hase = icmp ne ptr %ep, null\n";
         $out .= "  br i1 %hase, label %sci, label %dec\n";
         // Decimal (the common case): copy the scratch out verbatim, including
@@ -3594,7 +3601,9 @@ final class EmitLlvm implements EmitVisitor
     private function cmpPredicateF(string $op): string
     {
         if ($op === '==' || $op === '===') { return 'oeq'; }
-        if ($op === '!=' || $op === '!==') { return 'one'; }
+        // `une`, not `one`: `NAN != x` is TRUE in php — the negation of an
+        // ordered `==` — and `one` is false whenever a NAN is involved.
+        if ($op === '!=' || $op === '!==') { return 'une'; }
         if ($op === '<')  { return 'olt'; }
         if ($op === '<=') { return 'ole'; }
         if ($op === '>')  { return 'ogt'; }
@@ -4076,6 +4085,8 @@ final class EmitLlvm implements EmitVisitor
             $cls = $base->object->type->class ?? '';
             return $cls !== '' && isset($this->classes[$cls]);
         }
+        // A static property's global IS the cell holding the array pointer.
+        if ($base->kind === Node::KIND_STATIC_PROP) { return true; }
         // A NESTED container (`$a['k']` of `&$a['k'][$j]`): its element slot
         // is itself addressable, and {@see containerCellPtr} opens it.
         if ($base->kind === Node::KIND_ARRAY_ACCESS) {
@@ -4190,6 +4201,11 @@ final class EmitLlvm implements EmitVisitor
             $this->lastValue = $scr;
             $this->lastValueType = 'ptr';
             return $out;
+        }
+        if ($base->kind === Node::KIND_STATIC_PROP) {
+            $this->lastValue = $base->global;
+            $this->lastValueType = 'ptr';
+            return '';
         }
         if ($base->kind === Node::KIND_PROPERTY_ACCESS) {
             // The property field IS the cell holding the array pointer.
@@ -4353,7 +4369,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** Merge a spread source into `$slot` with PHP key semantics: string keys
      *  preserved (later duplicate overwrites), int keys renumbered. */
-    private function emitArraySpreadUnified(string $slot, Spread_ $spreadNode): string
+    private function emitArraySpreadUnified(string $slot, Spread_ $spreadNode, bool $cellVals = false): string
     {
         $sp = $spreadNode;
         $out = $this->emitNode($sp->operand);
@@ -4362,12 +4378,53 @@ final class EmitLlvm implements EmitVisitor
         // ever held it.
         $flavor = $this->mergedTempFlavor($sp->operand);
         $word = '';
-        if ($sp->operand->type->kind === Type::KIND_CELL) {
-            // A cell operand carries its tag bits: read raw, the merge walked
-            // the tagged word as a buffer header.
+        // The merge copies WORDS. Into a literal whose elements are cells, a
+        // source with a concrete element type hands over raw words under a
+        // cell contract — `[...['(', [T_DOUBLE_COLON]], ...[')', ']']]` read
+        // each `)` back as the double with its pointer's bits. Rebuild such a
+        // source boxed first; the rebuild is a fresh temp, dropped once the
+        // merge has retained what it took.
+        $opT = $sp->operand->type;
+        $opElem = $opT->element;
+        $cellified = $cellVals && $opT->isArray() && $opElem !== null
+            && $opElem->kind !== Type::KIND_CELL && $opElem->kind !== Type::KIND_UNKNOWN;
+        $iterSym = $this->mangle('__mc_spread_to_array');
+        if ($opT->kind === Type::KIND_OBJ && isset($this->definedFns[$iterSym])) {
+            // A TRAVERSABLE operand (a generator, an Iterator, an aggregate) is
+            // drained by the prelude into a cell-valued array with php's spread
+            // key rules; the merge then takes that array. Handed to the merge
+            // as the object pointer, it walked the object's header as a buffer
+            // — a generator's elements vanished and an ArrayIterator looped.
             $out .= $this->coerceToI64();
             $word = $this->lastValue;
-            $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            $out .= $this->boxToCell($opT, $sp->operand);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @manticore_' . $iterSym . '(i64 ' . $this->lastValue . ")\n";
+            $pr = $this->ssa->allocReg();
+            $out .= '  ' . $pr . ' = inttoptr i64 ' . $r . " to ptr\n";
+            $this->lastValue = $pr;
+            $this->lastValueType = 'ptr';
+            $opT = Type::assoc(Type::cell(), Type::cell());
+            $cellified = true;
+        } elseif ($cellified) {
+            // The rebuild releases an owned temp source itself.
+            $out .= $this->emitCellifyArrayRaw($opElem, $flavor);
+            $flavor = '';
+        } elseif ($opT->kind === Type::KIND_CELL) {
+            // A CELL operand (`...$mixed`, `...$closure()`) is the tagged word
+            // of an array only its runtime hint describes: strip the tag, and
+            // into a cell-valued literal merge a copy boxed by that hint.
+            $out .= $this->coerceToI64();
+            $word = $this->lastValue;
+            $out .= $this->unboxCellToType(Type::vec(Type::cell()));
+            if ($cellVals) {
+                $out .= $this->coerceToPtr();
+                $cc = $this->ssa->allocReg();
+                $out .= '  ' . $cc . ' = call ptr @__mir_array_cellified_copy(ptr ' . $this->lastValue . ")\n";
+                $this->lastValue = $cc;
+                $this->lastValueType = 'ptr';
+                $cellified = true;
+            }
         }
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
@@ -4376,6 +4433,11 @@ final class EmitLlvm implements EmitVisitor
         $nx = $this->ssa->allocReg();
         $out .= '  ' . $nx . ' = call ptr @__mir_array_spread_into(ptr ' . $cur . ', ptr ' . $src . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
+        if ($cellified) {
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $src . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $opT->isAssoc() ? 'assoccell' : 'veccell');
+        }
         if ($flavor !== '') {
             if ($word === '') {
                 $word = $this->ssa->allocReg();

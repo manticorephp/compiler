@@ -27,6 +27,9 @@ final class FunctionEmitFrame
     /** The fn is a closure — uniform ABI: scalar params/returns travel as
      *  tagged cells. */
     public bool $isClosure = false;
+    /** @var array<string, bool> a closure's CAPTURE params (env-unpacked), as
+     *  opposed to the params its callers pass. */
+    public array $captureNames = [];
     /** The fn is a reflection invoke trampoline (`__mc_rtramp_*`), reached only
      *  through the indirect `__mc_refl_invoke` builtin — same uniform ABI as a
      *  closure for the RETURN: a scalar result must be boxed to a tagged cell,

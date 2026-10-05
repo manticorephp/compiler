@@ -1,0 +1,10 @@
+A Object
+(
+    [x] => 1
+    [y:protected] => p
+    [z:A:private] => Array
+        (
+            [0] => 1
+        )
+
+)

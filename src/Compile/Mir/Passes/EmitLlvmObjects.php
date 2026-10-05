@@ -62,7 +62,16 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** Allocation + the shutdown registry entry for a class that declares `__destruct`. */
     private function emitObjAllocInit(?\Compile\Mir\ClassDef $cd): string
+    {
+        $out = $this->emitObjAllocInitRaw($cd);
+        if ($cd !== null && !$cd->isStruct && $this->resolveMethodClass($cd->name, '__destruct') !== '') {
+            $out .= '  call void @__mir_dtor_reg(ptr ' . $this->lastValue . ")\n";
+        }
+        return $out;
+    }
+    private function emitObjAllocInitRaw(?\Compile\Mir\ClassDef $cd): string
     {
         $size = $cd === null ? 16 : $cd->instanceSize();
         $isStruct = $cd !== null && $cd->isStruct;
@@ -1057,6 +1066,9 @@ trait EmitLlvmObjects
         $rcGep = $this->ssa->allocReg();
         $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $new . ", i64 1\n";
         $out .= '  store i64 1, ptr ' . $rcGep . "\n";
+        if ($this->resolveMethodClass($cd->name, '__destruct') !== '') {
+            $out .= '  call void @__mir_dtor_reg(ptr ' . $new . ")\n";
+        }
         // Copy each property slot; co-own rc-managed values (shallow copy).
         foreach ($cd->propertyNames as $pname) {
             $off = $cd->propertyOffset($pname);
@@ -3016,6 +3028,12 @@ trait EmitLlvmObjects
         // cell write cells, and every read decodes one.
         if ($n->type->kind === Type::KIND_CELL && $n->init->type->kind !== Type::KIND_CELL) {
             $out .= $this->boxToCell($n->init->type, $n->init);
+        } elseif (\Compile\Mir\Ownership::needsCellify($n->type, $n->init->type)) {
+            // A cell-ELEMENT slot ({@see InferScans::scanStaticLocalTypes})
+            // holds the concrete-element initialiser rebuilt boxed.
+            $out .= $this->emitCellifyArrayRaw($n->init->type->element ?? Type::unknown(),
+                $this->cellifySourceFlavor($n->init));
+            $out .= $this->coerceToI64();
         } else {
             $out .= $this->coerceToI64();
         }
@@ -7932,6 +7950,16 @@ trait EmitLlvmObjects
             if ($fallback === $static) {
                 foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
             }
+        } elseif ($static !== '' && !isset($this->sigs->paramTypes[$fallback . '__' . $mc->method])) {
+            // An ABSTRACT declaration resolves the name but has no body, so it
+            // has no signature either: the by-ref mask came back empty and
+            // `$b->step($v)` through an abstract `step(int &$x)` passed the
+            // VALUE 3 where every override dereferences an address. A
+            // descendant's override answers, as an interface's implementors do.
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if ($cn !== $static && isset($this->sigs->paramTypes[$r . '__' . $mc->method])
+                    && $this->classImplementsIface($cn, $static)) { $fallback = $r; break; }
+            }
         }
         // A fully ERASED receiver (`public $defn;` with no declared type) leaves
         // $static empty, so neither branch above ran and the parameter tables
@@ -7944,6 +7972,20 @@ trait EmitLlvmObjects
         // site emits speaks the ABI the arms were selected for.
         if ($static === '' && $fallback === '') {
             foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
+        }
+        // An ABSTRACT declaration has no body, so no signature: the site read
+        // an empty by-ref mask and handed `abstract function m(&$x)` the VALUE
+        // of `$n`, which the implementation then dereferenced. Speak the ABI of
+        // an implementation reachable from the receiver's class instead.
+        if ($fallback !== '' && $static !== '' && isset($this->classes[$static])
+            && !isset($this->sigs->paramTypes[$fallback . '__' . $mc->method])) {
+            foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                if (isset($this->sigs->paramTypes[$r . '__' . $mc->method])
+                    && $this->classImplementsIface((string)$cn, $static)) {
+                    $fallback = $r;
+                    break;
+                }
+            }
         }
         // The fallback's signature decides how many arguments the site emits
         // ({@see faCallArgsRecv} trims the surplus), so on a receiver that is no

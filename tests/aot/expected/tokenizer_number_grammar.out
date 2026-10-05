@@ -1,0 +1,128 @@
+== .5
+T_DNUMBER ".5"
+';'
+== 1.
+T_DNUMBER "1."
+';'
+== 1e3
+T_DNUMBER "1e3"
+';'
+== .5e-3
+T_DNUMBER ".5e-3"
+';'
+== 1_000.5
+T_DNUMBER "1_000.5"
+';'
+== 0x1A
+T_LNUMBER "0x1A"
+';'
+== 0b101
+T_LNUMBER "0b101"
+';'
+== 0o17
+T_LNUMBER "0o17"
+';'
+== 017
+T_LNUMBER "017"
+';'
+== 1__0
+T_LNUMBER "1"
+T_STRING "__0"
+';'
+== ..5
+'.'
+T_DNUMBER ".5"
+';'
+== ...
+T_ELLIPSIS "..."
+';'
+== 1..2
+T_DNUMBER "1."
+T_DNUMBER ".2"
+';'
+== $a.5
+T_VARIABLE "$a"
+T_DNUMBER ".5"
+';'
+== $a. 5
+T_VARIABLE "$a"
+'.'
+T_WHITESPACE " "
+T_LNUMBER "5"
+';'
+== "$a.5"
+'"'
+T_VARIABLE "$a"
+T_ENCAPSED_AND_WHITESPACE ".5"
+'"'
+';'
+== 1.e3
+T_DNUMBER "1.e3"
+';'
+== $a, .5, 1
+T_VARIABLE "$a"
+','
+T_WHITESPACE " "
+T_DNUMBER ".5"
+','
+T_WHITESPACE " "
+T_LNUMBER "1"
+';'
+== .5.5
+T_DNUMBER ".5"
+T_DNUMBER ".5"
+';'
+== 1.5.5
+T_DNUMBER "1.5"
+T_DNUMBER ".5"
+';'
+== 1_0
+T_LNUMBER "1_0"
+';'
+== 1_
+T_LNUMBER "1"
+T_STRING "_"
+';'
+== 0x
+T_LNUMBER "0"
+T_STRING "x"
+';'
+== 1e
+T_LNUMBER "1"
+T_STRING "e"
+';'
+== 1e+
+T_LNUMBER "1"
+T_STRING "e"
+'+'
+';'
+== .e3
+'.'
+T_STRING "e3"
+';'
+== 1._5
+T_DNUMBER "1."
+T_STRING "_5"
+';'
+== 1_.5
+T_LNUMBER "1"
+T_STRING "_"
+T_DNUMBER ".5"
+';'
+== 0b2
+T_LNUMBER "0"
+T_STRING "b2"
+';'
+== 08
+T_LNUMBER "08"
+';'
+== 0_1
+T_LNUMBER "0_1"
+';'
+== 1.0_0
+T_DNUMBER "1.0_0"
+';'
+== 0x_1
+T_LNUMBER "0"
+T_STRING "x_1"
+';'

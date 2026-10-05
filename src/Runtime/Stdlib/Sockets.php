@@ -56,6 +56,7 @@ function __mc_sock_const(int $which): int
     static $eConnAborted = 0;
     static $eNoBufs = 0;
     static $eProto = 0;
+    static $msgDontWait = 0;
 
     if ($ready === 0) {
         $isDarwin = \__mc_host_is_darwin();
@@ -80,6 +81,8 @@ function __mc_sock_const(int $which): int
         $eConnAborted = $isDarwin ? 53 : 103;
         $eNoBufs = $isDarwin ? 55 : 105;
         $eProto = $isDarwin ? 100 : 71;
+        // MSG_DONTWAIT: Darwin <sys/socket.h> 0x80, Linux <bits/socket.h> 0x40.
+        $msgDontWait = $isDarwin ? 128 : 64;
         $ready = 1;
     }
 
@@ -102,6 +105,7 @@ function __mc_sock_const(int $which): int
     if ($which === 16) { return $eConnAborted; }
     if ($which === 17) { return $eNoBufs; }
     if ($which === 18) { return 12; }       // ENOMEM — 12 everywhere
+    if ($which === 20) { return $msgDontWait; }
     return $eProto;
 }
 

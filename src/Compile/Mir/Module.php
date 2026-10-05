@@ -82,6 +82,9 @@ final class Module
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 
+    /** Some `$callable(name: …)` call carries named arguments to bind. */
+    public bool $namedInvokes = false;
+
     /** @var array<string, bool> closure fn name → capture slot 0 is `$this`
      *  (struct slot 1) — where Closure::bind/->bindTo/->call inject the object. */
     public array $closureHasThis = [];

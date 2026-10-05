@@ -58,12 +58,21 @@ function proc_open(
     $childFd = [-1, -1, -1];
     $parentFd = [-1, -1, -1];
     $parentMode = ['', '', ''];
+    // A stream resource as a spec entry ($stderr = tmpfile()): the child gets
+    // a dup of ITS fd, the parent keeps the stream and no pipe is made.
+    $passFd = [-1, -1, -1];
 
     for ($i = 0; $i < __MC_PROC_MAX_FD; $i++) {
         if (!isset($descriptor_spec[$i])) {
             continue;
         }
         $d = $descriptor_spec[$i];
+        if ($d instanceof \Resource) {
+            if ($d->type === 'stream' && !\__mc_stream_is_buffered($d) && $d->addr !== 0) {
+                $passFd[$i] = \__mc_fileno($d);
+            }
+            continue;
+        }
         if (!\is_array($d) || \count($d) === 0) {
             continue;
         }
@@ -108,6 +117,8 @@ function proc_open(
         for ($i = 0; $i < __MC_PROC_MAX_FD; $i++) {
             if ($childFd[$i] >= 0) {
                 \Runtime\Libc\sys_dup2($childFd[$i], $i);
+            } elseif ($passFd[$i] >= 0) {
+                \Runtime\Libc\sys_dup2($passFd[$i], $i);
             }
         }
         for ($i = 0; $i < __MC_PROC_MAX_FD; $i++) {

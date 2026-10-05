@@ -144,6 +144,11 @@ trait EmitLlvmModule
             $this->libcExtra['ferror'] = 'declare i32 @ferror(ptr)';
             $this->libcExtra['exit'] = 'declare void @exit(i32)';
         }
+        // The destructor registry's libc demand (see dtorRegRuntime).
+        $this->libcExtra['calloc'] = 'declare ptr @calloc(i64, i64)';
+        $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
+        $this->libcExtra['free'] = 'declare void @free(ptr)';
+        $this->libcExtra['qsort'] = 'declare void @qsort(ptr, i64, i64, ptr)';
         // The offload worker's libc demand. Same spellings as the Runtime\Libc
         // bindings of these symbols — the FFI binding check compares them.
         if ($this->rt->needsPool) {
@@ -206,7 +211,7 @@ trait EmitLlvmModule
                 . (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC . ", i64 0, i64 0, i64 0, i64 "
                 . (string)\Compile\MemoryAbi::IMMORTAL_ARRAY_RC . ", i64 0, i64 0, ptr null }, align 8\n";
         }
-        $out .= "@.fmt.pg = private unnamed_addr constant [6 x i8] c\"%.14g\\00\", align 1\n";
+        $out .= "@.fmt.pg = private unnamed_addr constant [6 x i8] c\"%.14G\\00\", align 1\n";
         $out .= "@.fmt.x = private unnamed_addr constant [5 x i8] c\"%llx\\00\", align 1\n";
         // var_dump of a typed float: shortest round-trip (`%.*g` probed) wrapped
         // in `float(...)`.
@@ -733,6 +738,7 @@ trait EmitLlvmModule
         $out .= $this->profileRuntime();
         $out .= $this->shutdownRuntime();
         $out .= $this->obShutdownRuntime();
+        $out .= $this->dtorRegRuntime();
         $out .= $this->allocRuntime();
         if ($this->rt->needsOutBuf) {
             $out .= $this->outBufRuntime();
@@ -1002,16 +1008,20 @@ trait EmitLlvmModule
         $this->locals->refLocals = [];
         $this->locals->ownedBoxes = [];
         $this->locals->refParamTypes = [];
+        $this->locals->refParamRetyped = [];
+        $this->locals->captureRefs = [];
         $this->locals->aliasLocals = [];
         foreach ($fn->params as $p) {
             if ($p->byRef) {
                 $this->locals->refLocals[$p->name] = true;
                 $this->locals->refParamTypes[$p->name] = $p->type;
+                if ($p->retypedByRef) { $this->locals->refParamRetyped[$p->name] = true; }
             }
         }
         $this->frame->returnsByRef = $fn->returnsByRef;
         $this->frame->returnType = $fn->returnType;
         $this->frame->isClosure = false;
+        $this->frame->captureNames = [];
         $this->frame->isMain = false;
         $this->frame->isTrampoline = \Compile\Mir\Passes\TrampolineSynth::isSynthReturn($fn->name);
 
@@ -1044,6 +1054,9 @@ trait EmitLlvmModule
         $this->frame->isClosure = $isClosure;
         $this->frame->erasedArrayReturn = \Compile\Mir\Ownership::erasedArrayReturn($fn);
         $this->frame->erasedCond = null;
+        for ($ci = 0; $ci < $capCnt; $ci = $ci + 1) {
+            $this->frame->captureNames[$fn->params[$ci]->name] = true;
+        }
         // The built-in Throwable/Exception/Error hierarchy is identical
         // boilerplate in every module, so emit it `linkonce_odr` — that lets
         // a user object link against the prebuilt stdlib.o (which also carries
@@ -1098,6 +1111,7 @@ trait EmitLlvmModule
             }
             for ($pi = 0; $pi < $capCnt; $pi = $pi + 1) {
                 $cn = $fn->params[$pi]->name;
+                if ($fn->params[$pi]->byRef) { $this->locals->captureRefs[$cn] = true; }
                 $slot = $this->ssa->allocReg();
                 $this->locals->slots[$cn] = $slot;
                 $bodySink->write($this->localSlotAlloca($slot));
@@ -2071,6 +2085,13 @@ trait EmitLlvmModule
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_ob_shutdown)\n";
         }
+        if ($this->hasObjToStr) {
+            $header .= "  store ptr @manticore___mir_obj_to_str, ptr @__mir_obj_to_str_hook\n";
+        }
+        // Destructors still owed run AFTER the shutdown queue (registered next, so
+        // atexit's LIFO runs it first) and BEFORE the ob drain: php's order.
+        $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+        $header .= "  call i32 @atexit(ptr @__manticore_dtor_shutdown)\n";
         if ($this->needsErrorHandlers) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $header .= "  call i32 @atexit(ptr @__manticore_shutdown)\n";
@@ -2109,13 +2130,68 @@ trait EmitLlvmModule
         $this->locals->ownedBoxes = [];
         $body .= $this->emitRefCellBoxes($fn->body, []);
         $body .= $this->emitElemRefBoxSlots($fn->body);
+        // …and `use (&$x)` at file scope: the same heap box the function
+        // prologue plants, so a store here releases what it overwrites.
+        $this->locals->byRefCaptured = [];
+        $this->locals->collectByRefCaptured($fn->body);
+        foreach ($this->locals->byRefCaptured as $bname => $_) {
+            if (!isset($this->locals->slots[$bname])) { continue; }
+            if (isset($this->locals->refLocals[$bname])) { continue; }
+            if (isset($this->locals->globalBacked[$bname])) { continue; }
+            $body .= $this->newOwnedBoxIr($bname, '0');
+        }
         // A global cell whose default is not a link-time constant (an array
         // literal on a static property) is built HERE, before any top-level
         // statement, so the first read/append sees a real array and not 0.
         $body .= $this->emitGlobalRuntimeInits();
         $body .= $this->emitNode($fn->body);
+        // The destructor sweep runs from atexit, after main's frame is gone, so a
+        // destructor that throws needs a landing pad of its own: the same base
+        // slot main installs. Uncaught there, php prints the fatal and runs no
+        // further destructor.
+        $dsh = "define void @__manticore_dtor_shutdown() {\nentry:\n";
+        // Once: exit() inside a destructor re-enters libc's exit, which runs this
+        // hook again — that nested run must not resume the sweep (php stops).
+        $dsh .= "  %dn = load i64, ptr @__mir_dtor_done\n";
+        $dsh .= "  %dd = icmp ne i64 %dn, 0\n";
+        $dsh .= "  br i1 %dd, label %out, label %first\n";
+        $dsh .= "out:\n  ret void\n";
+        $dsh .= "first:\n";
+        $dsh .= "  store i64 1, ptr @__mir_dtor_done\n";
+        if ($this->rt->needsExceptions) {
+            $dsh .= "  br label %arm\n";
+            $dsh .= "arm:\n";
+            $dsh .= "  store i64 1, ptr @__mir_jmp_depth\n";
+            $dsh .= "  %buf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
+            $dsh .= "  %sj = call i32 @_setjmp(ptr %buf)\n";
+            $dsh .= "  %caught = icmp ne i32 %sj, 0\n";
+            $dsh .= "  br i1 %caught, label %unc, label %run\n";
+            $dsh .= "unc:\n";
+            if ($this->needsErrorHandlers) {
+                // A set_exception_handler() takes the Throwable and the sweep
+                // carries on with the next destructor, as php does.
+                $dsh .= "  %e = load ptr, ptr @__mir_thrown\n";
+                $dsh .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
+                // A handler that throws itself is fatal, not a second dispatch.
+                $dsh .= "  %inh = load i64, ptr @__mir_dtor_inh\n";
+                $dsh .= "  %inhn = icmp ne i64 %inh, 0\n";
+                $dsh .= "  br i1 %inhn, label %fatal, label %disp\n";
+                $dsh .= "disp:\n";
+                $dsh .= "  store i64 1, ptr @__mir_dtor_inh\n";
+                $dsh .= "  %handled = call i64 @manticore___mc_dispatch_uncaught_keep(i64 %eb)\n";
+                $dsh .= "  store i64 0, ptr @__mir_dtor_inh\n";
+                $dsh .= "  %washandled = icmp ne i64 %handled, 0\n";
+                $dsh .= "  br i1 %washandled, label %arm, label %fatal\n";
+                $dsh .= "fatal:\n";
+            }
+            $dsh .= "  call void @__mir_uncaught()\n";
+            $dsh .= "  unreachable\n";
+            $dsh .= "run:\n";
+        }
+        $dsh .= "  call void @__mir_dtor_sweep()\n";
+        $dsh .= "  ret void\n}\n\n";
         $body .= "  ret i32 0\n";
-        return $header . $body . "}\n\n";
+        return $header . $body . "}\n\n" . $dsh;
     }
 
     /**

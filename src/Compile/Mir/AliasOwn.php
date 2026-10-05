@@ -86,6 +86,10 @@ final class AliasOwn
      */
     public static function propReadCoOwns(Node $v): bool
     {
+        // Through a pass-through `(string)` too, as {@see coOwns} does: the
+        // release half follows the cast to its operand, so `$l = (string)$this->line;`
+        // scheduled a release the store never retained for, and freed the property's string.
+        $v = self::peel($v);
         if ($v->kind !== Node::KIND_PROPERTY_ACCESS && $v->kind !== Node::KIND_STATIC_PROP) { return false; }
         $k = $v->type->kind;
         return $k === Type::KIND_STRING || $k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE
@@ -131,6 +135,7 @@ final class AliasOwn
      */
     public static function strPropCoOwns(Node $v): bool
     {
+        $v = self::peel($v);
         if ($v->type->kind !== Type::KIND_STRING) { return false; }
         return $v->kind === Node::KIND_PROPERTY_ACCESS || $v->kind === Node::KIND_STATIC_PROP;
     }

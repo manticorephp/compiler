@@ -211,6 +211,10 @@ jobs:
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
+            echo 'known bugs (tests/aot/xfail.sh): an XPASS is a tracked bug this commit fixed — promote its repro and close the issue'
+            echo '```'
+            grep -E '^(XPASS|xfail:)' ci-logs/xfail.log 2>/dev/null || echo 'no known-bug log'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Logs
@@ -274,6 +278,10 @@ jobs:
             echo "## macos-arm64 — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
+            echo '```'
+            echo 'known bugs (tests/aot/xfail.sh): an XPASS is a tracked bug this commit fixed — promote its repro and close the issue'
+            echo '```'
+            grep -E '^(XPASS|xfail:)' ci-logs/xfail.log 2>/dev/null || echo 'no known-bug log'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

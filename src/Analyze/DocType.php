@@ -48,6 +48,14 @@ final class DocType
                 $j = $j + 1;
             }
             $type = \substr($doc, $typeStart, $j - $typeStart);
+            if (\str_contains($type, '/*') || \str_contains($type, '//') || \str_contains($type, '#')) {
+                $type = (string)\preg_replace('/\/\*.*?\*\\\\?\//s', '', $type);
+                $type = (string)\preg_replace('/\/\/[^\r\n]*/', '', $type);
+                $type = (string)\preg_replace('/#[^\r\n]*/', '', $type);
+            }
+            if (\str_contains($type, "\n")) {
+                $type = (string)\preg_replace('/\r?\n[ \t]*\*?[ \t]*/', ' ', $type);
+            }
             if ($varName === '') { return $type; }
             while ($j < $n) {
                 $c = \substr($doc, $j, 1);

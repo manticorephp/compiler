@@ -3414,7 +3414,29 @@ final class LowerFromAst implements Pass
         // `?array`. (The `?array` return-narrowing this pass now does made the
         // arm concrete, which is what triggers the ternary's cell-lift.)
         $declParams = null;
+        // `$this` is untyped until inference, but lowering knows whose method it
+        // is in: the static class of this copy, else the declaring one. Without
+        // it `$c = $this->m(...); $c('a', 'b')` took the one-param shim below
+        // and called `m('a')` — php-cs-fixer's worker-crash callback lost its
+        // reason.
+        if ($cls === '' && $recv instanceof LoadLocal && $recv->name === 'this') {
+            $cls = $this->currentStaticClass !== '' ? $this->currentStaticClass : $this->currentLowerClass;
+        }
         if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
+        if ($declParams === null) {
+            // Any other receiver has no class before inference: the shim is a
+            // placeholder {@see ResolveMethodFcc} rebuilds from the method's own
+            // parameters once the receiver is typed.
+            // Until then (and for good on an interface / abstract / erased
+            // receiver) it forwards EVERY argument: a variadic pass-through,
+            // never an arity cut.
+            $mir = [new Param(name: '__fa', type: Type::vec(Type::cell()), byRef: false, variadic: true)];
+            $loads = [new Spread_(new LoadLocal('__fa', Type::vec(Type::cell())), Type::unknown())];
+            $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
+            $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
+            $this->module->functions[\count($this->module->functions) - 1]->fccMethod = $method;
+            return $node;
+        }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
@@ -3435,6 +3457,8 @@ final class LowerFromAst implements Pass
         // #[RefOut] out-params auto-vivify — `('preg_match')($p, $s, $matches)`
         // must define $matches by ref exactly like a direct `preg_match(...)`.
         $resolved = $this->resolveCallName($name);
+        $mm = $this->minMaxSpreadCall($resolved, $astArgs);
+        if ($mm !== null) { return $this->lowerExpr($mm); }
         $savedPost = $this->pendingCallPost;
         $this->pendingCallPost = [];
         $args = $this->lowerCallArgs($resolved, $astArgs);
@@ -5280,18 +5304,33 @@ final class LowerFromAst implements Pass
      * @param \Parser\Ast\Expr[] $astArgs
      * @return \Parser\Ast\Expr[]|null  rewritten arguments, or null to leave alone
      */
+    /**
+     * `min(...$p)` / `max(...$p)` as the stdlib `__mc_minmax_spread($p, 'min')`:
+     * the pack decides at run time — one element is the single-array form
+     * over THAT element (`min(...[[5, 2]])` is 2), two or more php's variadic
+     * loop (never the frameless two-argument body a direct call takes), none
+     * php's ArgumentCountError. The pack expression is evaluated once, so it
+     * may be an arbitrary call such as max(...array_map(...)). null when the
+     * call is anything else.
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
+    private function minMaxSpreadCall(string $fnName, array $astArgs): ?\Parser\Ast\CallExpr
+    {
+        if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
+        $bare = $this->constBareName(\strtolower($fnName));
+        if ($bare !== 'min' && $bare !== 'max') { return null; }
+        if (!$this->isCodegenBuiltin($fnName)) { return null; }
+        $span = $astArgs[0]->span;
+        return new \Parser\Ast\CallExpr('\\__mc_minmax_spread', [
+            $astArgs[0]->value, new \Parser\Ast\StringLiteral($bare, $span),
+        ], $span);
+    }
+
     private function expandBuiltinSpread(string $fnName, array $astArgs): ?array
     {
         if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
         if (!$this->isCodegenBuiltin($fnName)) { return null; }
         $bare = $this->constBareName(\strtolower($fnName));
-        // min/max are variadic, but their spread form is exactly the
-        // existing single-array "winner element" lowering. Keep the
-        // original array expression intact so it may be an arbitrary call
-        // such as max(...array_map(...)).
-        if ($bare === 'min' || $bare === 'max') {
-            return [$astArgs[0]->value];
-        }
         $arity = $this->fixedBuiltinArity($bare);
         if ($arity === 0) { return null; }
         $pack = $astArgs[0]->value;

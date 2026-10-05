@@ -44,6 +44,12 @@
 #   MC_SUITE=0|1     0 = build and install_smoke only, no AOT suite. What the
 #                    release asks for: CI has already run the suite against that
 #                    commit, and a second run is a slower release, not new news.
+#   MC_XFAIL=0|1|strict  run tests/aot/xfail.sh (known-bug repros) after the suite.
+#                    1 (default) REPORTS: an XPASS — a tracked bug that no longer
+#                    reproduces here — is printed and lands in the summary, but
+#                    does not fail the job, because a bug can be platform-specific
+#                    and a red row also withholds the published seed. `strict`
+#                    makes an XPASS fail the gate (the weekly gate.yml asks for it).
 #
 # Exit 0 only if every stage it ran passed.
 set -uo pipefail
@@ -60,6 +66,7 @@ MC_COMPILER_CACHE="${MC_COMPILER_CACHE:-}"
 MC_COLD="${MC_COLD:-0}"
 MC_SUITE="${MC_SUITE:-1}"
 MC_RUNNER="${MC_RUNNER:-sh}"
+MC_XFAIL="${MC_XFAIL:-1}"
 
 mkdir -p "$MC_WORK" "$MC_LOGDIR"
 
@@ -314,10 +321,31 @@ else
     echo "suite time: $((SECONDS - t0))s (run.sh)"
 fi
 
+# The known-bug repros, AFTER the suite and never part of its verdict: every one
+# of them is expected to be red. What is worth reading is the opposite — an XPASS
+# is a tracked bug this commit fixed, and its issue is still open.
+xfail_rc=0
+XFAIL_LABEL=skipped
+if [ "$MC_XFAIL" != "0" ]; then
+    echo
+    echo "=== tests/aot/xfail.sh (known-bug repros, -j $MC_JOBS) ==="
+    # stderr is the workers' live progress — the same verdict lines a second time.
+    MC_JOBS="$MC_JOBS" bash tests/aot/xfail.sh > "$MC_LOGDIR/xfail.log" 2>/dev/null
+    xfail_rc=$?
+    grep -E '^(XPASS|fixed, promote)' "$MC_LOGDIR/xfail.log" | head -40
+    XFAIL_LABEL="$(grep -E '^xfail:' "$MC_LOGDIR/xfail.log" | tail -1)"
+    [ -n "$XFAIL_LABEL" ] || XFAIL_LABEL="rc=$xfail_rc"
+    echo "$XFAIL_LABEL"
+    if [ "$MC_XFAIL" != "strict" ]; then
+        [ "$xfail_rc" = "0" ] || echo "xfail: an XPASS is REPORTED here, not a failure (MC_XFAIL=strict makes it one)"
+        xfail_rc=0
+    fi
+fi
+
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc ==="
-    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] || exit 1
+    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc known-bugs=[$XFAIL_LABEL] ==="
+    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
     exit 0
 fi
 
@@ -342,6 +370,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc difftest=$diff_rc fixpoint=$fix_rc ==="
-[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
+[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0

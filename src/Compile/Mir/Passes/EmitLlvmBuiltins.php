@@ -1544,7 +1544,21 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
+        // The read half of the element-channel rule: a cell-typed source may be
+        // backed by a RAW-hinted buffer (a `vec[int]` literal handed to a param
+        // its sibling call sites floored to `vec[cell]`), so each word is boxed
+        // by the buffer's own hint before it is unboxed to the target — a
+        // CELL-hinted or unstamped buffer passes through untouched. Unboxed as
+        // a cell, a raw int read as a double's bits and a raw bool as garbage.
+        // $src is the zero-word for a null source and so has a flags word.
+        $hfp = $this->ssa->allocReg();
+        $out .= '  ' . $hfp . ' = getelementptr inbounds i8, ptr ' . $src . ', i64 '
+              . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $hfl = $this->ssa->allocReg();
+        $out .= '  ' . $hfl . ' = load i64, ptr ' . $hfp . "\n";
+        $hint = $this->ssa->allocReg();
+        $out .= '  ' . $hint . ' = and i64 ' . $hfl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
@@ -1563,8 +1577,10 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
+        $ev0 = $this->ssa->allocReg();
+        $out .= '  ' . $ev0 . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $ev = $this->ssa->allocReg();
-        $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+        $out .= '  ' . $ev . ' = call i64 @__mir_box_by_repr(i64 ' . $ev0 . ', i64 ' . $hint . ")\n";
         // Unbox the boxed cell value to the element's raw representation.
         $raw = $this->ssa->allocReg();
         if ($elem->kind === Type::KIND_ARRAY && ($elem->element->kind ?? '') !== Type::KIND_CELL) {
@@ -2964,7 +2980,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $src . ' = select i1 ' . $isNull
               . ', ptr @__mir_zero_word, ptr ' . $rawSrc . "\n";
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $src . "\n";
+        $out .= '  ' . $len . ' = call i64 @__mir_array_live_len(ptr ' . $src . ")\n";
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $empty = $this->ssa->allocLabel('ae.empty');
@@ -2994,7 +3010,7 @@ trait EmitLlvmBuiltins
         } else {
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $idx . ")\n";
-            $out .= $this->boxRawElem($ev, $arrT);
+            $out .= $this->boxErasedOrRawElem($ev, $src, $arrT);
             $boxed = $this->lastValue;
             if ($this->boxRawValueBorrows($this->elemTypeOf($arrT))) {
                 $out .= $this->cellEndpointRetain($boxed);
@@ -3170,6 +3186,26 @@ trait EmitLlvmBuiltins
             $this->markCellBoxed($r);
         }
         return $this->finishI64($out, $r);
+    }
+
+    /**
+     * As {@see boxRawElem}, but an erased / CELL element channel is decoded by
+     * the BUFFER's hint (`__mir_elem_decode`), not passed through: a cell-typed
+     * base (`array|string $v` after `$v = explode(…)`) may hold a raw-hinted
+     * buffer, and its words are untagged payloads — array_first handed the
+     * string pointer out as a denormal float.
+     */
+    private function boxErasedOrRawElem(string $ev, string $arr, Type $arrT): string
+    {
+        $elem = $this->elemTypeOf($arrT);
+        if ($elem === null || $elem->kind === Type::KIND_UNKNOWN || $elem->kind === Type::KIND_CELL) {
+            $dec = $this->ssa->allocReg();
+            $out = '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arr . ', i64 ' . $ev . ")\n";
+            $this->lastValue = $dec;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $this->boxRawValue($ev, $elem);
     }
 
     /**
@@ -3448,8 +3484,8 @@ trait EmitLlvmBuiltins
      *
      * `array_values($a)` — a fresh PACKED, re-indexed list of the source's
      * values as `vec[cell]`. Two compile-time shapes (see the dispatch):
-     *   - CELL/`mixed` source ($boxElem === null): values are ALREADY cells →
-     *     copied as-is. Fixes the stdlib mis-coerce on a cell-backed argument
+     *   - CELL/`mixed` source ($boxElem === null): values are decoded by the
+     *     source buffer's hint (a cell channel may hold a raw buffer). Fixes the stdlib mis-coerce on a cell-backed argument
      *     (bare-`array` .sig erasure), the gap that drove the array_keys builtin.
      *   - typed array source ($boxElem = the element type): each raw value is
      *     re-boxed per its kind, so a `vec[int]`/`assoc[string,string]` etc.
@@ -3493,10 +3529,16 @@ trait EmitLlvmBuiltins
         $out .= $body . ":\n";
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        // A cell source ($boxElem null) and a CELL-element typed source already
-        // carry cells; a typed source re-boxes each raw value per its kind.
+        // A cell source ($boxElem null) or a CELL-element typed source is only
+        // STATICALLY a cell channel: the buffer behind it may be raw-hinted
+        // (`$v = explode(…)` into an `array|string` param), so each word is
+        // decoded by the buffer's hint. A typed source re-boxes each raw value
+        // per its kind.
         $bv = $ev;
-        if ($boxElem !== null && $boxElem->kind !== Type::KIND_CELL) {
+        if ($boxElem === null || $boxElem->kind === Type::KIND_CELL) {
+            $bv = $this->ssa->allocReg();
+            $out .= '  ' . $bv . ' = call i64 @__mir_elem_decode(ptr ' . $src . ', i64 ' . $ev . ")\n";
+        } else {
             $bv = $this->ssa->allocReg();
             $ek = $boxElem->kind;
             if ($ek === Type::KIND_STRING) {
@@ -4415,29 +4457,19 @@ trait EmitLlvmBuiltins
     /** @param Node[] $args  min ($pred slt) / max ($pred sgt), n-ary. */
     private function biMinMax(array $args, string $pred): string
     {
-        // A float operand needs a numeric compare that preserves the winner's
-        // own type (PHP: max(1, 2.5) === 2.5, max(3, 1.5) === 3). Box each
-        // operand, compare as doubles, select the winning boxed cell — the
-        // result is a numericCell ({@see builtinReturnType}). All-int / all-cell
-        // args keep the unchanged integer-compare path.
-        // Non-numeric operands: PHP orders strings and arrays too, and min/max
-        // must hand back a value of that TYPE. The int path below unboxed an
-        // array POINTER as an int, so `max([1,2],[1,3])` printed a raw address.
-        // Arrays go through the chain-carrying array compare, NOT tagged_compare
-        // — the latter's array arm assumes cell elements, and a `vec[int]` holds
-        // raw ones. {@see InferCalls} min/max return type mirrors these rules.
         $allStr = true;
-        $allArr = true;
         foreach ($args as $a) {
             if ($a->type->kind !== Type::KIND_STRING) { $allStr = false; }
-            if ($a->type->kind !== Type::KIND_ARRAY)  { $allArr = false; }
         }
         $count = \count($args);
         // ONE array argument is the "max of its ELEMENTS" form (`max([1,2,3])`
         // is 3, not the array). The numeric paths below unboxed the array
         // POINTER as an int and printed a raw address; defer to the stdlib fold,
         // which compares the elements with `<` / `>` and so rides the same table.
-        if ($count === 1 && $args[0]->type->kind === Type::KIND_ARRAY) {
+        // ANY lone operand is that form (php accepts nothing but an array
+        // there, and the stdlib fold throws its TypeError for the rest): the
+        // int path unboxed the array a cell holds and answered its address.
+        if ($count === 1) {
             if (!isset($this->definedFns[$this->mangle('__mc_minmax_of')])) {
                 $this->libcExtra['manticore___mc_minmax_of'] =
                     'declare i64 @manticore___mc_minmax_of(i64, i64)';
@@ -4460,43 +4492,28 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'i64';
             return $out;
         }
-        // Two or more operands compare against each other.
-        if ($allArr && $count >= 2) {
-            $chains = [];
-            $chainsOk = true;
-            foreach ($args as $a) {
-                $ch = $this->elemChainOf($a->type->element);
-                if ($ch === self::EK_NONE) { $chainsOk = false; break; }
-                $chains[] = $ch;
-            }
-            if ($chainsOk) {
-                $this->rt->needsTaggedCompare = true;
-                $fpred = $pred === 'sgt' ? 'sgt' : 'slt';
-                $out = $this->emitNode($args[0]);
-                $out .= $this->coerceToPtr();
-                $acc = $this->lastValue;
-                $accChain = $chains[0];
-                for ($i = 1; $i < $count; $i = $i + 1) {
-                    $out .= $this->emitNode($args[$i]);
-                    $out .= $this->coerceToPtr();
-                    $v = $this->lastValue;
-                    $c = $this->ssa->allocReg();
-                    $out .= '  ' . $c . ' = call i64 @__mir_array_compare(ptr ' . $v . ', i64 ' . $chains[$i]
-                          . ', ptr ' . $acc . ', i64 ' . $accChain . ")\n";
-                    $cmp = $this->ssa->allocReg();
-                    $out .= '  ' . $cmp . ' = icmp ' . $fpred . ' i64 ' . $c . ", 0\n";
-                    $sel = $this->ssa->allocReg();
-                    $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', ptr ' . $v . ', ptr ' . $acc . "\n";
-                    $acc = $sel;
-                }
-                $this->lastValue = $acc;
-                $this->lastValueType = 'ptr';
-                return $out;
-            }
+        // Two or more operands. php has TWO algorithms and they disagree on
+        // ties and on NAN: a direct two-argument call runs the FRAMELESS body
+        // (`max`: `lhs >= rhs ? lhs : rhs`, `min`: `lhs < rhs ? lhs : rhs`), and
+        // three or more run the variadic loop (replace only on a strict win).
+        // Only operands whose order is plain machine arithmetic stay inline —
+        // all ints, all floats, all strings; everything else (a cell, null, a
+        // bool, an array, an int beside a float — php's exactness rule for
+        // large ints) is php's comparison in the stdlib. {@see InferCalls}
+        // mirrors the result types.
+        $allInt = true;
+        $allFloat = true;
+        foreach ($args as $a) {
+            if ($a->type->kind !== Type::KIND_INT) { $allInt = false; }
+            if ($a->type->kind !== Type::KIND_FLOAT) { $allFloat = false; }
         }
-        if ($allStr && $count >= 2) {
+        $isMax = $pred === 'sgt';
+        if ($allFloat) { return $this->minMaxFloats($args, $isMax); }
+        if ($allStr) {
             $this->rt->needsTaggedCompare = true;
-            $fpred = $pred === 'sgt' ? 'sgt' : 'slt';
+            // sgt/slt = the variadic loop's strict win; a two-argument `min`
+            // takes the RIGHT operand unless the left is strictly smaller.
+            $fpred = $isMax ? 'sgt' : ($count === 2 ? 'sle' : 'slt');
             $out = $this->emitNode($args[0]);
             $out .= $this->shallowBoxToCell($args[0]->type);
             $acc = $this->lastValue;
@@ -4522,51 +4539,16 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'ptr';
             return $out;
         }
-        $anyFloat = false;
-        foreach ($args as $a) {
-            if ($a->type->kind === Type::KIND_FLOAT) { $anyFloat = true; break; }
+        if (!$allInt) {
+            return $count === 2 ? $this->minMaxFold2($args, $isMax) : $this->minMaxFoldN($args, $isMax);
         }
-        if ($anyFloat) {
-            $this->rt->needsTagged = true;
-            $this->rt->needsTaggedToFloat = true;
-            $fpred = $pred === 'sgt' ? 'ogt' : 'olt';
-            $out = $this->emitNode($args[0]);
-            $out .= $this->boxToCell($args[0]->type);
-            $acc = $this->lastValue;
-            $accd = $this->ssa->allocReg();
-            $out .= '  ' . $accd . ' = call double @__manticore_tagged_to_double(i64 ' . $acc . ")\n";
-            $count = \count($args);
-            for ($i = 1; $i < $count; $i = $i + 1) {
-                $out .= $this->emitNode($args[$i]);
-                $out .= $this->boxToCell($args[$i]->type);
-                $v = $this->lastValue;
-                $vd = $this->ssa->allocReg();
-                $out .= '  ' . $vd . ' = call double @__manticore_tagged_to_double(i64 ' . $v . ")\n";
-                $cmp = $this->ssa->allocReg();
-                $out .= '  ' . $cmp . ' = fcmp ' . $fpred . ' double ' . $vd . ', ' . $accd . "\n";
-                $sel = $this->ssa->allocReg();
-                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', i64 ' . $v . ', i64 ' . $acc . "\n";
-                $seld = $this->ssa->allocReg();
-                $out .= '  ' . $seld . ' = select i1 ' . $cmp . ', double ' . $vd . ', double ' . $accd . "\n";
-                $acc = $sel;
-                $accd = $seld;
-            }
-            $this->lastValue = $acc;
-            $this->lastValueType = 'i64';
-            return $out;
-        }
-        // Integer compare. A CELL operand (e.g. a `?int`/numericCell arg like
-        // `$offset + $length` in array_slice) carries its int NaN-boxed — its raw
-        // i64 is meaningless in an icmp, so unbox it first (else min/max returns a
-        // boxed cell read back as a garbage negative). `finishI64` keeps the
-        // result a plain int (all-int path — no float operand).
+        // All ints: equal ints are the same value, so the tie rule is moot.
         $out = $this->emitNode($args[0]);
-        $out .= $this->minMaxOperandI64($args[0]);
+        $out .= $this->coerceToI64();
         $acc = $this->lastValue;
-        $count = \count($args);
         for ($i = 1; $i < $count; $i = $i + 1) {
             $out .= $this->emitNode($args[$i]);
-            $out .= $this->minMaxOperandI64($args[$i]);
+            $out .= $this->coerceToI64();
             $v = $this->lastValue;
             $cmp = $this->ssa->allocReg();
             $out .= '  ' . $cmp . ' = icmp ' . $pred . ' i64 ' . $v . ', ' . $acc . "\n";
@@ -4577,15 +4559,109 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $acc);
     }
 
-    /** Coerce a min/max integer-path operand to a raw i64, unboxing a cell. */
-    private function minMaxOperandI64(Node $a): string
+    /**
+     * All-float min/max, php's own double compares: two arguments are the
+     * frameless body (`max`: keep the left when `l >= r`; `min`: keep the left
+     * when `l < r` — a NAN on either side hands back the RIGHT), three or more
+     * the variadic loop (replace when `acc < v` / `acc > v`, a NAN never wins
+     * nor loses). Ordered fcmp is false on NAN, which is exactly C's `<`.
+     * @param Node[] $args
+     */
+    private function minMaxFloats(array $args, bool $isMax): string
     {
-        $out = $this->coerceToI64();
-        if ($a->type->kind !== Type::KIND_CELL) { return $out; }
+        $count = \count($args);
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceDoubleOperand($args[0]);
+        $acc = $this->lastValue;
+        for ($i = 1; $i < $count; $i = $i + 1) {
+            $out .= $this->emitNode($args[$i]);
+            $out .= $this->coerceDoubleOperand($args[$i]);
+            $v = $this->lastValue;
+            $cmp = $this->ssa->allocReg();
+            $sel = $this->ssa->allocReg();
+            if ($count === 2) {
+                $out .= '  ' . $cmp . ' = fcmp ' . ($isMax ? 'oge' : 'olt') . ' double ' . $acc . ', ' . $v . "\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', double ' . $acc . ', double ' . $v . "\n";
+            } else {
+                $out .= '  ' . $cmp . ' = fcmp ' . ($isMax ? 'olt' : 'ogt') . ' double ' . $acc . ', ' . $v . "\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $cmp . ', double ' . $v . ', double ' . $acc . "\n";
+            }
+            $acc = $sel;
+        }
+        $this->lastValue = $acc;
+        $this->lastValueType = 'double';
+        return $out;
+    }
+
+    /**
+     * `max(a, b)` / `min(a, b)` over operands php orders by its full
+     * comparison: the stdlib `__mc_minmax2` is php's frameless two-argument
+     * body. Its cell return is +1 by the return convention; the operands'
+     * boxes are dropped as any cell-taking builtin drops them.
+     * @param Node[] $args
+     */
+    private function minMaxFold2(array $args, bool $isMax): string
+    {
         $this->rt->needsTagged = true;
-        $u = $this->ssa->allocReg();
-        $out .= '  ' . $u . ' = call i64 @__manticore_unbox_int(i64 ' . $this->lastValue . ")\n";
-        $this->lastValue = $u;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        if (!isset($this->definedFns[$this->mangle('__mc_minmax2')])) {
+            $this->libcExtra['manticore___mc_minmax2'] =
+                'declare i64 @manticore___mc_minmax2(i64, i64, i64)';
+        }
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type, $args[0]);
+        $l = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->boxToCell($args[1]->type, $args[1]);
+        $rv = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax2(i64 ' . $l . ', i64 ' . $rv
+              . ', i64 ' . ($isMax ? '1' : '0') . ")\n";
+        $out .= $this->cellBoxTempDrop($args[1]->type, $rv, $args[1]);
+        $out .= $this->cellBoxTempDrop($args[0]->type, $l, $args[0]);
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * Three or more operands php orders by its full comparison: collected into
+     * a fresh cell list (each element co-owned, the operand boxes dropped) and
+     * folded by `__mc_minmax_n`, php's variadic loop. The list is dropped after
+     * the call; the +1 winner is the caller's.
+     * @param Node[] $args
+     */
+    private function minMaxFoldN(array $args, bool $isMax): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        if (!isset($this->definedFns[$this->mangle('__mc_minmax_n')])) {
+            $this->libcExtra['manticore___mc_minmax_n'] =
+                'declare i64 @manticore___mc_minmax_n(i64, i64)';
+        }
+        $count = \count($args);
+        $cur = $this->ssa->allocReg();
+        $out = '  ' . $cur . ' = call ptr @__mir_array_alloc(i64 ' . $count . ")\n";
+        foreach ($args as $a) {
+            $out .= $this->emitNode($a);
+            $out .= $this->boxToCell($a->type, $a);
+            $v = $this->lastValue;
+            $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
+            $nx = $this->ssa->allocReg();
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $v . ")\n";
+            $out .= $this->cellBoxTempDrop($a->type, $v, $a);
+            $cur = $nx;
+        }
+        $out .= $this->emitElemHintStamp($cur, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
+        $list = $this->ssa->allocReg();
+        $out .= '  ' . $list . ' = call i64 @__manticore_box_array(ptr ' . $cur . ")\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax_n(i64 ' . $list
+              . ', i64 ' . ($isMax ? '1' : '0') . ")\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $list . ")\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }
@@ -5263,6 +5339,17 @@ trait EmitLlvmBuiltins
             $i = $j;
         }
         $argN = \count($convs);
+        // A `%s` over a non-string static type (int / float / bool / null /
+        // object) needs php's string conversion, not a pointer reinterpret:
+        // `sprintf('%s', 5)` handed libc strlen the integer 5. The runtime
+        // engine owns those conversions.
+        for ($ci = 0; $ci < $argN && $ci + 1 < \count($args); $ci = $ci + 1) {
+            if ($convs[$ci] !== 's') { continue; }
+            $ck = $args[$ci + 1]->type->kind;
+            if ($ck !== Type::KIND_STRING && $ck !== Type::KIND_CELL && $ck !== Type::KIND_UNKNOWN) {
+                return $this->biFormatRuntime($args, $toStdout);
+            }
+        }
         // A positional `%n$` spec or fewer args than conversions needs the
         // runtime {@see \__mc_format} engine (arg reordering / a missing arg is
         // "" in PHP) — the inline path can do neither, and would crash on an
@@ -5572,8 +5659,16 @@ trait EmitLlvmBuiltins
         for ($k = 1; $k <= $count; $k = $k + 1) {
             $el = $args[$k];
             $out .= $this->emitNode($el);
-            $out .= $this->retainCellPayload($el);
-            $out .= $this->boxToCell($el->type);
+            if ($el->type->kind === Type::KIND_OBJ || $el->type->kind === Type::KIND_CLOSURE) {
+                // The formatter lives in the stdlib object, which knows no user
+                // class: convert HERE, where __toString resolves (or php's Error
+                // for an object without one). The fresh string moves into the pack.
+                $out .= $this->coerceToStr($el);
+                $out .= $this->boxToCell(Type::string_());
+            } else {
+                $out .= $this->retainCellPayload($el);
+                $out .= $this->boxToCell($el->type);
+            }
             $val = $this->lastValue;
             $off = $hdr + ($k - 1) * $esz;
             $p = $this->ssa->allocReg();
@@ -7929,6 +8024,17 @@ trait EmitLlvmBuiltins
             $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cd->name))) . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $endL . "\n";
         }
+        // An enum without methods owns no ClassDef, only an id: its singletons
+        // still reach here through a mixed receiver (get_class, the string-
+        // conversion Error).
+        foreach ($this->enums as $ed) {
+            if ($ed->classId <= 0 || isset($this->classes[$ed->name])) { continue; }
+            $caseL = $this->ssa->allocLabel('gcf.case');
+            $caseMap[$ed->classId] = $caseL;
+            $bodies .= $caseL . ":\n";
+            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($ed->name))) . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $endL . "\n";
+        }
         $out .= $this->emitAdaptiveClassIdBranch('%gcf.cid', $caseMap, $defL) . $bodies;
         $out .= $defL . ":\n";
         $out .= '  store ptr ' . $this->strLitId($this->pool->intern('')) . ', ptr ' . $res . "\n";
@@ -8783,6 +8889,23 @@ trait EmitLlvmBuiltins
             }
             return $out;
         }
+        if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS
+            && $this->propertyOffsetOrNull($arrNode->object, $arrNode->property) === null) {
+            // An ERASED receiver (`$s` a cell after `$s = 0; … $s = new S2()`)
+            // has no static slot: the relocated buffer goes back through the
+            // shared class_id writer, as the plain store does
+            // ({@see EmitLlvmObjects::emitCellStoreProperty}). The static arm
+            // below inttoptr'd the TAGGED receiver and wrote a guessed offset —
+            // `array_shift($s->j)` SIGSEGV'd storing through 0xfff8….
+            $out = $this->emitObjPtrOf($arrNode->object);
+            $objp = $this->lastValue;
+            $this->rt->needsTagged = true;
+            $cv = $this->ssa->allocReg();
+            $out .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $arr2 . ")\n";
+            $out .= '  call void ' . $this->cellPropertyWriteHelper($arrNode->property)
+                  . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
+            return $out;
+        }
         if ($arrNode->kind === Node::KIND_PROPERTY_ACCESS) {
             $out = $this->emitNode($arrNode->object);
             $out .= $this->coerceToPtr();
@@ -8868,6 +8991,16 @@ trait EmitLlvmBuiltins
                       . $parentPtr . ', i64 ' . $idx . ', i64 ' . $valI . ")\n";
             }
             $this->elemWroteThroughRef = $outerWrote;
+            // A RAW inner array written back into an ERASED parent: describe it
+            // the way the plain erased store of an array value does, or a
+            // reader of the unstamped buffer takes the pointer for an int.
+            if (!$innerCell && !$parentCell && $arrNode->array->type->isArray()
+                && ($arrNode->array->type->element === null
+                    || $arrNode->array->type->element->kind === Type::KIND_UNKNOWN)) {
+                $out .= '  call void @__mir_elem_stamp_raw(ptr ' . $parent2 . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_REPR_ARR . ")\n";
+            }
             $out .= $this->vecWriteBack($arrNode->array, $parent2, $parentCell);
             return $out;
         }

@@ -911,7 +911,7 @@ trait EmitLlvmArrays
         if ($hasSpread && $litHint !== null) { $out .= $this->emitElemHintStamp($init, $litHint); }
         foreach ($al->elements as $el) {
             if ($el->value->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitArraySpreadUnified($slot, $el->value);
+                $out .= $this->emitArraySpreadUnified($slot, $el->value, $cellVals);
                 continue;
             }
             if ($el->key !== null) {
@@ -2103,6 +2103,37 @@ trait EmitLlvmArrays
             $this->elemValReg = $this->lastValue;
             return $out;
         }
+        // The WHOLE-array de-cellify, as {@see EmitLlvmLocals::emitStoreLocal}
+        // does for a local: a cell-element array stored into a slot whose
+        // element is a CONCRETE-element array (`$s->ref[$name] = $mask` with
+        // `$mask` a `vec[cell]` over an `array<string, bool[]>`) is rebuilt
+        // with each element unboxed. Stored as is, the typed reader took a boxed
+        // `false` for a non-zero word — true. The rebuild MOVES the elements,
+        // so a source that keeps them (a local, a borrowed read) is copied
+        // first, and the moved-out buffer leaves bare; the rebuilt +1 is the
+        // slot's outright, so no retain follows.
+        $elT0 = $se->array->type->element ?? null;
+        if ($elT0 !== null && $this->needsDeCellify($elT0, $se->value->type)) {
+            $out .= $this->coerceToPtr();
+            $deSrc = $this->lastValue;
+            if ($this->cellifySourceFlavor($se->value) === '') {
+                $cp = $this->ssa->allocReg();
+                $out .= '  ' . $cp . ' = call ptr @__mir_array_copy(ptr ' . $deSrc . ")\n";
+                $deSrc = $cp;
+                $this->lastValue = $cp;
+                $this->lastValueType = 'ptr';
+            }
+            $out .= $this->emitCellArrayToTyped($elT0);
+            $out .= $this->coerceToI64();
+            $dv = $this->lastValue;
+            $si = $this->ssa->allocReg();
+            $out .= '  ' . $si . ' = ptrtoint ptr ' . $deSrc . " to i64\n";
+            $out .= $this->rcReleaseReg($si, $se->value->type->isAssoc() ? 'assocbuf' : 'vecbuf');
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            $this->elemValReg = $dv;
+            return $out;
+        }
         $dcT = $this->storeElemDeCellifyType($se);
         if ($dcT !== null) { $out .= $this->unboxCellToType($dcT); }
         // An int (or bool) into a FLOAT slot is converted, not bit-stored —
@@ -2481,6 +2512,13 @@ trait EmitLlvmArrays
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
             if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor, $next); }
+        }
+        // A boxed store into a level that did not exist yet: the cow of an absent
+        // nested level is NULL, `__mir_elem_encode` has no buffer to stamp, and
+        // the set/append below mints the buffer — so it comes back unstamped
+        // with a cell inside, and a typed reader trusts the raw claim.
+        if ($boxVal && $se->array->kind === Node::KIND_ARRAY_ACCESS) {
+            $out .= $this->emitElemHintStamp($next, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         }
         // Stamp the element repr on the persisted buffer ($next may be a
         // realloced / promoted / deimmortalised buffer) so the plain repr
