@@ -318,6 +318,21 @@ final class OwnershipFlow implements Pass
             $this->regKey[$name] = $k;
         }
         if (\count($this->regKey) === 0) { return; }
+        // A bare `array` param names no release class of its own type, yet it
+        // arrives holding the CALLER's raw array. Absent from the entry it read
+        // as EMPTY, the identity of the join, so a store that owns on one path
+        // (`if (…) { $magic = []; }`) made the name Own past the join and the
+        // exit drop released the caller's array on the path that never stored.
+        // It is a Borrow of the array class its own stores give the slot.
+        foreach ($fn->params as $p) {
+            if (!isset($this->erasedParams[$p->name]) || isset($entry[$p->name])) { continue; }
+            if (isset($this->excluded[$p->name]) || isset($this->mixedHere[$p->name])) { continue; }
+            $rk = $this->regKey[$p->name] ?? 0;
+            if ($rk === 0) { continue; }
+            $cls = $this->keyClass[$rk];
+            if (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR) { continue; }
+            $entry[$p->name] = OwnLattice::borrow($rk);
+        }
         // The emitter retains a co-owning binding at the NAME's registered
         // class; a loop whose element class is another one binds a borrow.
         foreach ($lat->feValName as $id => $name) {
