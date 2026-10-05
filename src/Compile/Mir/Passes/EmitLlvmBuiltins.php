@@ -8428,6 +8428,7 @@ trait EmitLlvmBuiltins
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
+                if ($this->isBufSlot($cd, $pn)) { continue; }
                 if ($forCompare && $this->isEnumType($pt)) {
                     $off = (string)$cd->propertyOffset($pn);
                     $g = $this->ssa->allocReg();

@@ -3307,6 +3307,13 @@ final class EmitLlvm implements EmitVisitor
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             foreach ($cls->propertyNames as $pn) {
+                if ($this->isBufSlot($cls, $pn)) {
+                    // The class drop frees the buffer through the nbuf runtime.
+                    $this->rt->needsBuf = true;
+                    $this->rt->needsTagged = true;
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 $flavor = $this->discardReleaseFlavor($pt);

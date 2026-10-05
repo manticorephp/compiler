@@ -514,6 +514,19 @@ trait EmitLlvmArrays
         return 0;
     }
 
+    /**
+     * Whether property `$pn` of `$cls` is the native-buffer handle of a
+     * SplFixedArray (or a subclass): the one slot the OBJECT owns as a buffer —
+     * freed by the class drop, deep-copied by `clone`, absent from every
+     * property view — so a subclass's own `__destruct` / `__clone` need not
+     * know about it. Decided by the class alone (the drop body coalesces by
+     * name across modules).
+     */
+    private function isBufSlot(\Compile\Mir\ClassDef $cls, string $pn): bool
+    {
+        return $pn === '__mcbuf' && $this->classIsA($cls->name, 'SplFixedArray');
+    }
+
     /** The LLVM element type of a raw buffer kind ('' for BIT, which packs). */
     private function nbufElemTy(int $kind): string
     {

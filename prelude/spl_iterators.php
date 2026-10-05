@@ -1286,29 +1286,31 @@ class RecursiveDirectoryIterator extends FilesystemIterator implements Recursive
     }
 }
 
-class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
+class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSerializable
 {
-    /** @var array<int, mixed> */
-    private array $__data = [];
-    private int $__size = 0;
+    /** The native CELL buffer (MemoryAbi::BUF_KIND_CELL) holding the elements.
+     *  The compiler owns its lifetime: freed with the object, deep-copied by
+     *  `clone`, hidden from every property view — so a subclass's own
+     *  `__destruct` / `__clone` / `__construct` need not know about it. 0 until
+     *  the first sizing (a subclass constructor that skips parent's). */
+    private int $__mcbuf = 0;
 
     public function __construct(int $size = 0)
     {
         if ($size < 0) {
             throw new ValueError('SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0');
         }
-        $this->__size = $size;
-        for ($i = 0; $i < $size; $i++) { $this->__data[] = null; }
+        $this->__mcbuf = __mc_nbuf_alloc(11, $size);
     }
 
     public function count(): int
     {
-        return $this->__size;
+        return __mc_nbuf_len($this->__mcbuf);
     }
 
     public function getSize(): int
     {
-        return $this->__size;
+        return __mc_nbuf_len($this->__mcbuf);
     }
 
     public function setSize(int $size): bool
@@ -1316,25 +1318,22 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
         if ($size < 0) {
             throw new ValueError('SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0');
         }
-        if ($size < $this->__size) {
-            // Trim IN PLACE. Replacing the buffer with a slice copied every kept
-            // element with a reference of its own, while the old buffer — whose
-            // elements offsetGet lends out — was given back as a buffer only:
-            // every element it held stayed counted (php-cs-fixer's
-            // Tokens::clearEmptyTokens shrinks once per file and kept all its
-            // tokens). A pop hands each dropped element back to be released.
-            for ($i = $this->__size; $i > $size; $i--) { \array_pop($this->__data); }
+        if ($this->__mcbuf === 0) {
+            $this->__mcbuf = __mc_nbuf_alloc(11, $size);
         } else {
-            for ($i = $this->__size; $i < $size; $i++) { $this->__data[] = null; }
+            // Shrinking releases each dropped element; growing null-fills.
+            $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $size);
         }
-        $this->__size = $size;
         return true;
     }
 
     /** @return array<int, mixed> */
     public function toArray(): array
     {
-        return $this->__data;
+        $out = [];
+        $n = __mc_nbuf_len($this->__mcbuf);
+        for ($i = 0; $i < $n; $i++) { $out[] = __mc_nbuf_get_c($this->__mcbuf, $i); }
+        return $out;
     }
 
     public static function fromArray(array $array, bool $preserveKeys = true): SplFixedArray
@@ -1344,17 +1343,17 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
             $max = -1;
             foreach ($array as $k => $_) {
                 if (!\is_int($k) || $k < 0) {
-                    throw new ValueError('array must contain only positive integer keys');
+                    throw new InvalidArgumentException('array must contain only positive integer keys');
                 }
                 if ($k > $max) { $max = $k; }
             }
             $out = new SplFixedArray($max + 1);
-            foreach ($array as $k => $v) { $out->__data[$k] = $v; }
+            foreach ($array as $k => $v) { __mc_nbuf_set_c($out->__mcbuf, (int)$k, $v); }
             return $out;
         }
         $out = new SplFixedArray(\count($array));
         $i = 0;
-        foreach ($array as $v) { $out->__data[$i] = $v; $i = $i + 1; }
+        foreach ($array as $v) { __mc_nbuf_set_c($out->__mcbuf, $i, $v); $i = $i + 1; }
         return $out;
     }
 
@@ -1366,34 +1365,41 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
     public function offsetExists(mixed $index): bool
     {
         if (\is_int($index)) {
-            if ($index >= 0 && $index < $this->__size) { return $this->__data[$index] !== null; }
+            if ($index >= 0 && $index < __mc_nbuf_len($this->__mcbuf)) {
+                return __mc_nbuf_get_c($this->__mcbuf, $index) !== null;
+            }
         }
         $i = $this->__index($index, false);
-        return $i >= 0 && $this->__data[$i] !== null;
+        return $i >= 0 && __mc_nbuf_get_c($this->__mcbuf, $i) !== null;
     }
 
     public function offsetGet(mixed $index): mixed
     {
         if (\is_int($index)) {
-            if ($index >= 0 && $index < $this->__size) { return $this->__data[$index]; }
+            if ($index >= 0 && $index < __mc_nbuf_len($this->__mcbuf)) {
+                return __mc_nbuf_get_c($this->__mcbuf, $index);
+            }
         }
-        return $this->__data[$this->__index($index, true)];
+        return __mc_nbuf_get_c($this->__mcbuf, $this->__index($index, true));
     }
 
     public function offsetSet(mixed $index, mixed $value): void
     {
         if (\is_int($index)) {
-            if ($index >= 0 && $index < $this->__size) { $this->__data[$index] = $value; return; }
+            if ($index >= 0 && $index < __mc_nbuf_len($this->__mcbuf)) {
+                __mc_nbuf_set_c($this->__mcbuf, $index, $value);
+                return;
+            }
         }
         if ($index === null) {
-            throw new RuntimeException('[] operator not supported for SplFixedArray');
+            throw new Error('[] operator not supported for SplFixedArray');
         }
-        $this->__data[$this->__index($index, true)] = $value;
+        __mc_nbuf_set_c($this->__mcbuf, $this->__index($index, true), $value);
     }
 
     public function offsetUnset(mixed $index): void
     {
-        $this->__data[$this->__index($index, true)] = null;
+        __mc_nbuf_set_c($this->__mcbuf, $this->__index($index, true), null);
     }
 
     public function getIterator(): Iterator
@@ -1402,9 +1408,44 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
     }
 
     /** @return array<int, mixed> */
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
+    }
+
+    /** @return array<int, mixed> */
     public function __serialize(): array
     {
-        return $this->__data;
+        return $this->toArray();
+    }
+
+    /** @param array<int|string, mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        // The elements, in order (the keys are their positions).
+        $this->setSize(0);
+        $this->setSize(\count($data));
+        $i = 0;
+        foreach ($data as $v) { __mc_nbuf_set_c($this->__mcbuf, $i, $v); $i = $i + 1; }
+    }
+
+    /** @return array<int, mixed> */
+    public function __debugInfo(): array
+    {
+        return $this->toArray();
+    }
+
+    /** The stored element at the valid position `$i`, past any override of
+     *  offsetGet — what php's own iterator reads. */
+    final public function __mcAt(int $i): mixed
+    {
+        return __mc_nbuf_get_c($this->__mcbuf, $i);
+    }
+
+    /** The stored size, past any override of getSize. */
+    final public function __mcLen(): int
+    {
+        return __mc_nbuf_len($this->__mcbuf);
     }
 
     /** php's offset rule: an int, or a string/float/bool that reads as one; in range. */
@@ -1420,7 +1461,7 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
             if (!$strict && \is_string($index)) { return -1; }
             throw new TypeError('Cannot access offset of type ' . \get_debug_type($index) . ' on SplFixedArray');
         }
-        if ($i < 0 || $i >= $this->__size) {
+        if ($i < 0 || $i >= __mc_nbuf_len($this->__mcbuf)) {
             if (!$strict) { return -1; }
             throw new OutOfBoundsException('Index invalid or out of range');
         }
@@ -1435,11 +1476,11 @@ final class __McFixedArrayIterator implements Iterator
 
     public function __construct(private SplFixedArray $array) {}
 
-    public function current(): mixed { return $this->array[$this->__pos]; }
+    public function current(): mixed { return $this->array->__mcAt($this->__pos); }
     public function key(): mixed { return $this->__pos; }
     public function next(): void { $this->__pos = $this->__pos + 1; }
     public function rewind(): void { $this->__pos = 0; }
-    public function valid(): bool { return $this->__pos < $this->array->getSize(); }
+    public function valid(): bool { return $this->__pos < $this->array->__mcLen(); }
 }
 
 class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess

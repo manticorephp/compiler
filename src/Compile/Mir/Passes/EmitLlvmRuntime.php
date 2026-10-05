@@ -2322,6 +2322,17 @@ trait EmitLlvmRuntime
                 $body .= "members:\n";
             }
             foreach ($cls->propertyNames as $pn) {
+                // The native buffer dies with the object ({@see isBufSlot}); a
+                // null handle is a no-op in the runtime.
+                if ($this->isBufSlot($cls, $pn)) {
+                    $s = (string)$i;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %o, i64 '
+                        . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__mir_nbuf_free(i64 %v' . $s . ")\n";
+                    $i = $i + 1;
+                    continue;
+                }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 // Release obj / string / vec / assoc props (flavor picks the

@@ -4447,8 +4447,19 @@ go:
   br i1 %isc, label %cell, label %fr
 cell:
   %len = load i64, ptr %p
-  call void @__mir_nbuf_drops(i64 %h, i64 0, i64 %len)
-  br label %fr
+  %d = call ptr @__mir_nbuf_data(i64 %h)
+  br label %rloop
+rloop:
+  %ri = phi i64 [ %len, %cell ], [ %ri2, %rbody ]
+  %rc = icmp sgt i64 %ri, 0
+  br i1 %rc, label %rbody, label %fr
+rbody:
+  %ri2 = sub i64 %ri, 1
+  %rsp = getelementptr inbounds i64, ptr %d, i64 %ri2
+  %rold = load i64, ptr %rsp
+  store i64 {NULL}, ptr %rsp
+  call void @__mir_cell_drop(i64 %rold)
+  br label %rloop
 fr:
   call void @free(ptr %p)
   br label %done

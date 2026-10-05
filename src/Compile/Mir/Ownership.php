@@ -723,6 +723,10 @@ final class Ownership
         // ({@see returnBorrowsObj} and {@see keyTempRelease} already read it as
         // fresh): `[...$closure()]` stranded the whole array it spread.
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) { return true; }
+        // `clone` of an erased value boxes a fresh copy — +1 on every arm of
+        // the runtime-class dispatch ({@see Passes\EmitLlvmObjects::
+        // emitCloneDispatch} retains on its pass-through arm for this reason).
+        if ($k === Node::KIND_CLONE) { return true; }
         // `+ - *` over a numeric cell run {@see Passes\EmitLlvmExpr::emitTaggedArith}:
         // the helper boxes a NEW cell on every path, a counted heap box past the
         // inline int form.
@@ -876,7 +880,10 @@ final class Ownership
         // table where the same loop over the argument alone is 1.8.
         // An array `+` is `__mir_array_union`'s fresh buffer, a literal's twin
         // ({@see Passes\InferAllocKind} heaps it for the same reason).
-        $owned = $k === Node::KIND_NEW_OBJ
+        // A `clone` mints a fresh +1 exactly as `new` does: left out, a clone
+        // passed as an argument (`f(clone $t)`, `$fixed[$i] = clone $v`) was
+        // owned by nobody and lived until shutdown.
+        $owned = $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
               || ($k === Node::KIND_ADD && $tk === Type::KIND_ARRAY);
         if ($k === Node::KIND_CALL) {

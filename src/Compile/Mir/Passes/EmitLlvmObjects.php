@@ -951,6 +951,12 @@ trait EmitLlvmObjects
             $fi = $this->ssa->allocReg();
             $out .= '  ' . $fi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             $out .= '  store i64 ' . $fi . ', ptr ' . $slot . "\n";
+        } else {
+            // The pass-through arm hands the SOURCE back. A `clone` is a +1
+            // value to every consumer, so this arm takes one too — else the
+            // consumer's release freed an object its owner still held.
+            $this->rt->needsRc = true;
+            $out .= '  call void @__mir_rc_retain(ptr ' . $src . ")\n";
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -1113,6 +1119,15 @@ trait EmitLlvmObjects
             $out .= '  ' . $v . ' = load i64, ptr ' . $sg . "\n";
             $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
+            // The native buffer is the object's own: the copy gets a deep copy
+            // (each element co-owned), before any `__clone()` runs.
+            if ($this->isBufSlot($cd, $pname)) {
+                $this->rt->needsBuf = true;
+                $bc = $this->ssa->allocReg();
+                $out .= '  ' . $bc . ' = call i64 @__mir_nbuf_clone(i64 ' . $v . ")\n";
+                $out .= '  store i64 ' . $bc . ', ptr ' . $dg . "\n";
+                continue;
+            }
             $pt = $cd->propertyTypes[$pname] ?? null;
             // PHP arrays are VALUES: `clone` must copy each array property (a
             // fresh rc=1 owned buffer, no extra retain), not co-own the handle —
