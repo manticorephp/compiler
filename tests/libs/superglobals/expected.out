@@ -1,0 +1,6 @@
+app,lib
+lib0,app0
+lib1,app1
+lib2,app2
+fresh 2
+growth ok

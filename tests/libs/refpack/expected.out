@@ -1,0 +1,12 @@
+string(3) "s-x"
+string(3) "s-y"
+string(1) "w"
+int(11)
+int(12)
+array(2) {
+  [0]=>
+  string(3) "p-a"
+  [1]=>
+  string(1) "b"
+}
+p-a,b!,c 3
