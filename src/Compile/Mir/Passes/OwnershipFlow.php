@@ -452,7 +452,35 @@ final class OwnershipFlow implements Pass
             $this->removeInserted($body);
             $this->inserted = $keep;
         }
+        if ($this->releases) { $this->recordOwnLive($final); }
         $this->finish($fn, $final, $force, $entry, $entryRetain);
+    }
+
+    /**
+     * Every call reached gets the locals Own just before it runs, by flavor
+     * ({@see \Compile\Mir\Call::$ownLive}) — what an unwind through it drops.
+     */
+    private function recordOwnLive(OwnLattice $l): void
+    {
+        foreach ($l->callAt as $id => $call) {
+            $own = $l->callOwn[$id];
+            if ($own === []) { continue; }
+            /** @var array<string, string> $live */
+            $live = [];
+            foreach ($own as $name => $k) { $live[$name] = $this->keyFlavor[$k]; }
+            $ck = $call->kind;
+            if ($ck === Node::KIND_CALL) {
+                self::asCall($call)->ownLive = $live;
+            } elseif ($ck === Node::KIND_METHOD_CALL) {
+                self::asMethodCall($call)->ownLive = $live;
+            } elseif ($ck === Node::KIND_STATIC_CALL) {
+                self::asStaticCall($call)->ownLive = $live;
+            } elseif ($ck === Node::KIND_NEW_OBJ) {
+                self::asNewObj($call)->ownLive = $live;
+            } else {
+                self::asInvoke($call)->ownLive = $live;
+            }
+        }
     }
 
     private function describe(string $what): string
@@ -1642,6 +1670,10 @@ final class OwnershipFlow implements Pass
     private static function asIf(Node $n): If_ { return $n; }
     private static function asFor(Node $n): For_ { return $n; }
     private static function asCall(Node $n): \Compile\Mir\Call { return $n; }
+    private static function asMethodCall(Node $n): \Compile\Mir\MethodCall_ { return $n; }
+    private static function asStaticCall(Node $n): \Compile\Mir\StaticCall_ { return $n; }
+    private static function asNewObj(Node $n): \Compile\Mir\NewObj { return $n; }
+    private static function asInvoke(Node $n): \Compile\Mir\Invoke_ { return $n; }
     private static function asDoWhile(Node $n): DoWhile_ { return $n; }
     private static function asWhile(Node $n): \Compile\Mir\While_ { return $n; }
     private static function asContinue(Node $n): Continue_ { return $n; }

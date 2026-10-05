@@ -522,6 +522,13 @@ final class Call extends Node
      *  emit time `$args` is always exactly arity-many. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Declared LAST.
+     * @var array<string, string> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1153,6 +1160,13 @@ final class Invoke_ extends Node
         parent::__construct(Node::KIND_INVOKE, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Declared LAST.
+     * @var array<string, string> */
+    public array $ownLive = [];
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitInvoke($this);
@@ -1677,6 +1691,13 @@ final class NewObj extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Declared LAST.
+     * @var array<string, string> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1849,6 +1870,13 @@ final class MethodCall_ extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Declared LAST.
+     * @var array<string, string> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1890,6 +1918,13 @@ final class StaticCall_ extends Node
 
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
+
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Declared LAST.
+     * @var array<string, string> */
+    public array $ownLive = [];
 
 
     public function accept(EmitVisitor $v): string

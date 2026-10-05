@@ -160,6 +160,10 @@ final class OwnLattice implements Lattice
     public array $thrAt = [];
     /** @var array<int, array<string, int>> the state it throws in */
     public array $thrOut = [];
+    /** @var array<int, Node> every call reached, by `spl_object_id` */
+    public array $callAt = [];
+    /** @var array<int, array<string, int>> the Own names before it runs, name → class */
+    public array $callOwn = [];
 
     /**
      * The ONE map from an {@see \Compile\Mir\Ownership} code to a state, for a
@@ -351,6 +355,18 @@ final class OwnLattice implements Lattice
             }
             if ($x > 0) { $this->doubleRetain[$n] = true; }
             return $in;
+        }
+        $k = $stmt->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE) {
+            // The last visit is the converged one: a loop re-walks its body
+            // until the head state is stable.
+            $own = [];
+            foreach ($in as $n => $x) {
+                if ($x > 0) { $own[$n] = $x; }
+            }
+            $this->callAt[$id] = $stmt;
+            $this->callOwn[$id] = $own;
         }
         return $in;
     }

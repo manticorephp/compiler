@@ -87,6 +87,56 @@ final class EscapeSummaries
         return $s;
     }
 
+    /**
+     * The call-target resolver alone — {@see callTargets} — with no summary
+     * computed: the judged set is the bodies {@see judgeable} admits.
+     */
+    public static function resolver(Module $module): self
+    {
+        $s = new self();
+        $s->classes = $module->classes;
+        $s->enums = $module->enums;
+        $s->interfaceAncestors = $module->interfaceAncestors;
+        foreach ($module->interfaceNames as $in => $unused) { $s->interfaceNames[$in] = true; }
+        foreach ($module->functions as $fn) {
+            if (self::judgeable($fn)) { $s->judged[$fn->name] = true; }
+        }
+        return $s;
+    }
+
+    /**
+     * A body that is not HERE cannot be judged: a signature-only stdlib import
+     * (`fwrite` — whose real body parks on back-pressure) and an FFI binding
+     * both carry an empty block. A GENERATOR runs nothing at the call: its
+     * body runs from `current` / `send`, under another caller.
+     */
+    public static function judgeable(FunctionDef $fn): bool
+    {
+        return !$fn->isExtern && $fn->ffiSymbol === null && !$fn->isGenerator;
+    }
+
+    /**
+     * Every judged body the call `$n` (Call / MethodCall_ / StaticCall_ /
+     * NewObj) can reach, or [] when one of them is not judged or the target
+     * set is unknowable (a builtin, an import, `__call`, a closure, an
+     * interface without a known implementer). An Invoke_ is always [].
+     * @return string[]
+     */
+    public function callTargets(Node $n): array
+    {
+        if ($n->kind === Node::KIND_INVOKE) { return []; }
+        return $this->targets($n);
+    }
+
+    /**
+     * Every class that is-a `$target` ({@see isAClasses}).
+     * @return string[]
+     */
+    public function classesIsA(string $target): array
+    {
+        return $this->isAClasses($target);
+    }
+
     /** `prop|Class` — a property slot as far as the receiver's static type pins
      *  it; `prop|` when it does not. */
     public static function propKey(Node $obj, string $prop): string
@@ -173,12 +223,10 @@ final class EscapeSummaries
         /** @var string[] $names */
         $names = [];
         foreach ($module->functions as $fn) {
-            // A body that is not HERE cannot be judged: a signature-only stdlib
-            // import (`fwrite` — whose real body parks on back-pressure) and an
-            // FFI binding both carry an empty block. A GENERATOR parks by
-            // construction: every `yield` hands control to a caller that may
-            // overwrite the slot the value came from.
-            if ($fn->isExtern || $fn->ffiSymbol !== null || $fn->isGenerator) { continue; }
+            // {@see judgeable}. A GENERATOR parks by construction: every
+            // `yield` hands control to a caller that may overwrite the slot
+            // the value came from.
+            if (!self::judgeable($fn)) { continue; }
             $byName[$fn->name] = $fn;
             $names[] = $fn->name;
             $this->judged[$fn->name] = true;
@@ -215,7 +263,7 @@ final class EscapeSummaries
         // 2. Strongly connected components, callees first. Every member of a
         //    component reaches every other, so its answer is ONE: the members'
         //    own effects and everything its outside callees (already final) do.
-        $sccs = self::sccs($names, $callees);
+        $sccs = CallGraphScc::components($names, $callees);
         foreach ($sccs as $scc) {
             /** @var array<string, bool> $inScc */
             $inScc = [];
@@ -257,82 +305,6 @@ final class EscapeSummaries
                     . ' why=' . ($this->why[$kn] ?? ''));
             }
         }
-    }
-
-    /**
-     * Tarjan's strongly connected components of the call graph, in the order
-     * they complete — every component after all the components it calls.
-     * Iterative, with the DFS stack as two parallel lists.
-     *
-     * @param string[] $names
-     * @param array<string, string[]> $callees
-     * @return string[][]
-     */
-    private static function sccs(array $names, array $callees): array
-    {
-        /** @var array<string, int> $index */
-        $index = [];
-        /** @var array<string, int> $low */
-        $low = [];
-        /** @var array<string, bool> $onStack */
-        $onStack = [];
-        /** @var string[] $stack */
-        $stack = [];
-        /** @var string[][] $out */
-        $out = [];
-        $next = 0;
-        foreach ($names as $root) {
-            if (isset($index[$root])) { continue; }
-            /** @var string[] $workNode */
-            $workNode = [$root];
-            /** @var int[] $workPos */
-            $workPos = [0];
-            $index[$root] = $next;
-            $low[$root] = $next;
-            $next = $next + 1;
-            $stack[] = $root;
-            $onStack[$root] = true;
-            while ($workNode !== []) {
-                $top = \count($workNode) - 1;
-                $u = $workNode[$top];
-                $i = $workPos[$top];
-                $succ = $callees[$u];
-                if ($i < \count($succ)) {
-                    $workPos[$top] = $i + 1;
-                    $w = $succ[$i];
-                    if (!isset($index[$w])) {
-                        $index[$w] = $next;
-                        $low[$w] = $next;
-                        $next = $next + 1;
-                        $stack[] = $w;
-                        $onStack[$w] = true;
-                        $workNode[] = $w;
-                        $workPos[] = 0;
-                    } elseif (isset($onStack[$w]) && $index[$w] < $low[$u]) {
-                        $low[$u] = $index[$w];
-                    }
-                    continue;
-                }
-                \array_pop($workNode);
-                \array_pop($workPos);
-                if ($workNode !== []) {
-                    $p = $workNode[\count($workNode) - 1];
-                    if ($low[$u] < $low[$p]) { $low[$p] = $low[$u]; }
-                }
-                if ($low[$u] === $index[$u]) {
-                    /** @var string[] $scc */
-                    $scc = [];
-                    while (true) {
-                        $w = \array_pop($stack);
-                        unset($onStack[$w]);
-                        $scc[] = $w;
-                        if ($w === $u) { break; }
-                    }
-                    $out[] = $scc;
-                }
-            }
-        }
-        return $out;
     }
 
     private function walk(Node $n): void
@@ -686,7 +658,7 @@ final class EscapeSummaries
     }
 
     /** @param array<string, ClassDef> $classes */
-    private static function resolveMethodIn(array $classes, string $class, string $method): string
+    public static function resolveMethodIn(array $classes, string $class, string $method): string
     {
         $c = $class;
         $guard = 0;

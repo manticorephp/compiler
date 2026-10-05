@@ -102,6 +102,16 @@ use Codegen\Llvm\Module as LlvmModule;
 trait EmitLlvmCalls
 {
     /**
+     * Does this call need a cleanup landing pad — some local Own at it and a
+     * callee that may throw ({@see \Compile\Mir\NothrowSummary::callNeedsPad})?
+     * Consumed by the zero-cost unwind (Task 9.3); emission does not ask yet.
+     */
+    private function callNeedsPad(Node $call): bool
+    {
+        return $this->nothrow !== null && $this->nothrow->callNeedsPad($call);
+    }
+
+    /**
      * Emit an FFI function as a thin wrapper forwarding to its C symbol.
      * The outer signature is the uniform MIR ABI (i64 params / i64 return);
      * each arg is coerced from its i64 carrier to the extern's C type, the

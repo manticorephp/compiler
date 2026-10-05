@@ -280,6 +280,9 @@ final class EmitLlvm implements EmitVisitor
     /** The ownership classifier ({@see \Compile\Mir\Ownership}; fresh each {@see emit}). */
     private ?\Compile\Mir\Ownership $own = null;
 
+    /** Which calls can unwind ({@see \Compile\Mir\NothrowSummary}; fresh each {@see emit}). */
+    private ?\Compile\Mir\NothrowSummary $nothrow = null;
+
     /** Arena-allocation state of the current function (fresh each {@see emit}). */
     private ?ArenaContext $arena = null;
 
@@ -674,6 +677,8 @@ final class EmitLlvm implements EmitVisitor
         $this->callableArrayMethods = $module->callableArrayMethods;
         $this->enums = $module->enums;
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
+        $this->nothrow = \Compile\Mir\NothrowSummary::fromModule($module);
+        if (\Compile\Stats::$on) { $this->nothrow->reportSites($module); }
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
