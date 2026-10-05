@@ -478,6 +478,8 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, string> by-ref foreach value var → alloca holding 1
      *  when its latest store in the body left a CELL ({@see foreachWriteBackEncode}) */
     private array $feCellFlags = [];
+    /** @var \Compile\Mir\LiveByRefLoop[] enclosing live by-ref loops, innermost last */
+    private array $liveByRef = [];
     /** A mixed slot is boxing its own raw value: the box takes over the
      *  slot's count ({@see EmitLlvmBuiltins::boxArrayShallow}). */
     private bool $boxSelfMove = false;

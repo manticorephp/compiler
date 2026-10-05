@@ -300,6 +300,7 @@ trait EmitLlvmVisit
             if (!$isValue || $i !== $last) {
                 $fragment .= $this->emitDiscardedCallRelease($s);
             }
+            if (!$isValue) { $fragment .= $this->liveByRefSyncIr($s); }
             if ($chunks === null) {
                 $out .= $fragment;
                 if (\strlen($out) >= 65536) {

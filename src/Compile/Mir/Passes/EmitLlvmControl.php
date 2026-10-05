@@ -1342,6 +1342,21 @@ trait EmitLlvmControl
             $this->feCellFlags[$fe->valueVar] = $feFlag;
             unset($this->feCellFlagSet[$fe->valueVar]);
         }
+        // The live walk's slots exist before every arm: an erased base's body
+        // is shared and may be emitted inside the generator arm, where its
+        // write-backs must see "no array arm" (a null base).
+        $live = $fe->byRef && !$this->foreachBodyYields($fe->body) && $this->unsetBaseIsWritable($fe->array);
+        $liveSlot = '';
+        $liveKey = '';
+        if ($live) {
+            $liveSlot = $this->ssa->allocReg();
+            $out .= '  ' . $liveSlot . " = alloca ptr\n";
+            $out .= '  store ptr null, ptr ' . $liveSlot . "\n";
+            $liveKey = $this->ssa->allocReg();
+            $out .= '  ' . $liveKey . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $liveKey . "\n";
+            $this->liveByRef[] = new \Compile\Mir\LiveByRefLoop($fe, $this->frame->name, $liveSlot, $liveKey, $feFlag);
+        }
         $out .= $this->emitNode($fe->array);
         // An ERASED base (`mixed` cell, or an element read out of an untyped
         // array) is NOT known to be an array. Stripping the tag unconditionally
@@ -1504,9 +1519,6 @@ trait EmitLlvmControl
         // in the generator frame, where the live slots below cannot live. The
         // framed walk wrote `$list` back into the buffer an `unset($list[$k])`
         // had just relocated — php-cs-fixer's EventDispatcher::removeListener.
-        $live = $fe->byRef && !$this->foreachBodyYields($fe->body) && $this->unsetBaseIsWritable($fe->array);
-        $liveSlot = '';
-        $liveKey = '';
         if ($live) {
             $out .= $this->emitSeparatedArray($fe->array, $bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN);
             $sep = $this->lastValue;
@@ -1514,11 +1526,7 @@ trait EmitLlvmControl
             $out .= '  ' . $snz . ' = icmp eq ptr ' . $sep . ", null\n";
             $arr = $this->ssa->allocReg();
             $out .= '  ' . $arr . ' = select i1 ' . $snz . ', ptr @__mir_zero_word, ptr ' . $sep . "\n";
-            $liveSlot = $this->ssa->allocReg();
-            $out .= '  ' . $liveSlot . " = alloca ptr\n";
             $out .= '  store ptr ' . $arr . ', ptr ' . $liveSlot . "\n";
-            $liveKey = $this->ssa->allocReg();
-            $out .= '  ' . $liveKey . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $liveKey . "\n";
             $this->rt->needsCellKey = true;
         }
@@ -1862,6 +1870,101 @@ trait EmitLlvmControl
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
         }
+        if ($live) {
+            $out .= '  store ptr null, ptr ' . $liveSlot . "\n";
+            \array_pop($this->liveByRef);
+        }
+        return $out;
+    }
+
+    /**
+     * Write each enclosing live by-ref loop variable that statement `$s` names
+     * back into its element, as the loop's step does.
+     *
+     * The variable is a copy sharing the element's count, written back by key
+     * at the step. A write in between that RELOCATES it — an unset promoting a
+     * packed buffer, an append growing it — frees the buffer the element still
+     * names, and a body that then reaches the element another way read and
+     * dropped freed memory: `unset($list[$k]); if (!$list) { unset($this->ls[$e][$p]); }`
+     * (php-cs-fixer's EventDispatcher::removeListener). Keeping the element
+     * current after every statement that names the variable closes that window.
+     */
+    private function liveByRefSyncIr(Node $s): string
+    {
+        if ($this->liveByRef === []) { return ''; }
+        $k = $s->kind;
+        if ($k === Node::KIND_RETURN || $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE
+            || $k === Node::KIND_THROW || $k === Node::KIND_GOTO) { return ''; }
+        $out = '';
+        $lv = $this->lastValue;
+        $lt = $this->lastValueType;
+        foreach ($this->liveByRef as $lb) {
+            if ($lb->fnName !== $this->frame->name) { continue; }
+            if (!isset($this->locals->slots[$lb->fe->valueVar])) { continue; }
+            if (!self::namesLocal($s, $lb->fe->valueVar)) { continue; }
+            $out .= $this->liveByRefWriteBackIr($lb);
+        }
+        $this->lastValue = $lv;
+        $this->lastValueType = $lt;
+        return $out;
+    }
+
+    private static function namesLocal(Node $n, string $name): bool
+    {
+        if ($n instanceof LoadLocal && $n->name === $name) { return true; }
+        if ($n instanceof StoreLocal && $n->name === $name) { return true; }
+        if ($n->kind === Node::KIND_CLOSURE) { return false; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if (self::namesLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
+    private function liveByRefWriteBackIr(\Compile\Mir\LiveByRefLoop $lb): string
+    {
+        $fe = $lb->fe;
+        $bk = $fe->array->type->kind;
+        $doL = $this->ssa->allocLabel('fe.sync');
+        $wbL = $this->ssa->allocLabel('fe.syncwb');
+        $endL = $this->ssa->allocLabel('fe.syncend');
+        $cur = $this->ssa->allocReg();
+        $out = '  ' . $cur . ' = load ptr, ptr ' . $lb->liveSlot . "\n";
+        $off = $this->ssa->allocReg();
+        $out .= '  ' . $off . ' = icmp eq ptr ' . $cur . ", null\n";
+        $out .= '  br i1 ' . $off . ', label %' . $endL . ', label %' . $doL . "\n";
+        $out .= $doL . ":\n";
+        $out .= $this->emitNode($fe->array);
+        if ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->arrayPtrOrEmptyIr($this->lastValue);
+            $na = $this->arrayPtrReg;
+        } else {
+            $out .= $this->coerceToPtr();
+            $na = $this->lastValue;
+        }
+        $nnz = $this->ssa->allocReg();
+        $out .= '  ' . $nnz . ' = icmp eq ptr ' . $na . ", null\n";
+        $na2 = $this->ssa->allocReg();
+        $out .= '  ' . $na2 . ' = select i1 ' . $nnz . ', ptr @__mir_zero_word, ptr ' . $na . "\n";
+        $out .= '  store ptr ' . $na2 . ', ptr ' . $lb->liveSlot . "\n";
+        $lk = $this->ssa->allocReg();
+        $out .= '  ' . $lk . ' = load i64, ptr ' . $lb->liveKey . "\n";
+        $pos = $this->ssa->allocReg();
+        $out .= '  ' . $pos . ' = call i64 @__mir_array_pos_cell(ptr ' . $na2 . ', i64 ' . $lk . ")\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = icmp sge i64 ' . $pos . ", 0\n";
+        $out .= '  br i1 ' . $has . ', label %' . $wbL . ', label %' . $endL . "\n";
+        $out .= $wbL . ":\n";
+        $out .= $this->foreachElemAddrUnified($na2, $pos);
+        $addr = $this->feAddr;
+        $wv = $this->ssa->allocReg();
+        $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        $out .= $this->foreachWriteBackEncode($lb->feFlag, $na2, $wv, $fe->array->type->element);
+        $wb = $this->lastValue;
+        $out .= $this->foreachRefTargetAddr($addr, $fe->array->type);
+        $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
         return $out;
     }
 
