@@ -211,8 +211,6 @@ final class UnifiedArrayRuntime
         $bsInit = $fn->block('iu_bs_init');
         $bsStep = $fn->block('iu_bs_step');
         $bsHome = $fn->block('iu_bs_home');
-        $bsHomeS = $fn->block('iu_bs_home_s');
-        $bsHomeI = $fn->block('iu_bs_home_i');
         $bsCmp = $fn->block('iu_bs_cmp');
         $bsMove = $fn->block('iu_bs_move');
         $bsFin = $fn->block('iu_bs_fin');
@@ -241,6 +239,7 @@ final class UnifiedArrayRuntime
         $hi->store($this->intBucketHash($hi, $hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $hSlot);
         $hi->br($linit);
         $h0 = $linit->load(Type::i64(), $hSlot);
+        $want64 = $this->packBucket($linit, $h0, $want);
         $linit->store($linit->and_($h0, $mask), $sSlot);
         $linit->store(Value::int(Type::i64(), 0), $cSlot);
         $linit->br($loc);
@@ -251,7 +250,7 @@ final class UnifiedArrayRuntime
         $loc->brIf($loc->icmp('sge', $c, $nb), $bail, $lchk);
         $s = $lchk->load(Type::i64(), $sSlot);
         $bv = $lchk->load(Type::i64(), $lchk->gep(Type::i64(), $buckets, [$s]));
-        $lchk->brIf($lchk->icmp('eq', $bv, $want), $bsInit, $lstep);
+        $lchk->brIf($lchk->icmp('eq', $bv, $want64), $bsInit, $lstep);
         $sn = $lstep->load(Type::i64(), $sSlot);
         $lstep->store($lstep->and_($lstep->add($sn, Value::int(Type::i64(), 1)), $mask), $sSlot);
         $lstep->store($lstep->add($lstep->load(Type::i64(), $cSlot), Value::int(Type::i64(), 1)), $cSlot);
@@ -267,14 +266,9 @@ final class UnifiedArrayRuntime
         $bsStep->store($t, $tSlot);
         $bv2 = $bsStep->load(Type::i64(), $bsStep->gep(Type::i64(), $buckets, [$t]));
         $bsStep->brIf($bsStep->icmp('eq', $bv2, Value::int(Type::i64(), 0)), $bsFin, $bsHome);
-        $k2 = $bsHome->sub($bv2, Value::int(Type::i64(), 1));
-        $kind2 = $bsHome->load(Type::i64(), $this->entryAddr($bsHome, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
-        $bsHome->brIf($bsHome->icmp('eq', $kind2, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $bsHomeS, $bsHomeI);
-        $kp2 = $bsHomeS->load(Type::ptr(), $this->entryAddr($bsHomeS, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $bsHomeS->store($bsHomeS->call('__mir_array_hash_str', Type::i64(), [$kp2]), $h2Slot);
-        $bsHomeS->br($bsCmp);
-        $bsHomeI->store($this->intBucketHash($bsHomeI, $bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $h2Slot);
-        $bsHomeI->br($bsCmp);
+        // The slot's home is its tag's low bits: no entry load, no re-hash.
+        $bsHome->store($bsHome->lshr($bv2, Value::int(Type::i64(), 32)), $h2Slot);
+        $bsHome->br($bsCmp);
         // Move back iff dist(home → t) >= dist(gap → t), i.e. the gap sits on
         // the probe path from this slot's home.
         $home = $bsCmp->and_($bsCmp->load(Type::i64(), $h2Slot), $mask);
@@ -296,7 +290,8 @@ final class UnifiedArrayRuntime
         $c2 = $swHead->load(Type::i64(), $cSlot);
         $swHead->brIf($swHead->icmp('sge', $c2, $nb), $ret, $swBody);
         $bv3 = $swBody->load(Type::i64(), $swBody->gep(Type::i64(), $buckets, [$c2]));
-        $swBody->brIf($swBody->icmp('sgt', $bv3, $want), $swDec, $swNext);
+        $bv3i = $swBody->and_($bv3, Value::int(Type::i64(), 4294967295));
+        $swBody->brIf($swBody->icmp('sgt', $bv3i, $want), $swDec, $swNext);
         $swDec->store($swDec->sub($bv3, Value::int(Type::i64(), 1)), $swDec->gep(Type::i64(), $buckets, [$c2]));
         $swDec->br($swNext);
         $swNext->store($swNext->add($swNext->load(Type::i64(), $cSlot), Value::int(Type::i64(), 1)), $cSlot);
@@ -329,6 +324,19 @@ final class UnifiedArrayRuntime
      * unset and both backshift loops — or a key is inserted at one slot and
      * hunted at another, which is a silent miss, not a crash.
      */
+    /**
+     * Bucket word: `(h32 << 32) | (entry_index + 1)`, 0 = empty. h32 is the low
+     * 32 bits of the key's hash, so the slot's HOME is `h32 & mask` (the index
+     * has < 2^32 slots: nbuckets is a power of two >= 2*len, and an array of
+     * 2^31 entries is past the 24-byte-entry address-space limits anyway) and a
+     * backshift needs neither the entry nor a re-hash. A probe compares the tag
+     * before it loads the entry. EVERY bucket site goes through this layout.
+     */
+    private function packBucket(Block $b, Value $hash, Value $idxPlus1): Value
+    {
+        $tag = $b->and_($hash, Value::int(Type::i64(), 4294967295));
+        return $b->or_($b->shl($tag, Value::int(Type::i64(), 32)), $idxPlus1);
+    }
     private function intBucketHash(Block $b, Value $k): Value
     {
         $f = $b->xor_($k, $b->lshr($k, Value::int(Type::i64(), 12)));
@@ -361,8 +369,6 @@ final class UnifiedArrayRuntime
         $bsInit = $fn->block('ir_bs_init');
         $bsStep = $fn->block('ir_bs_step');
         $bsHome = $fn->block('ir_bs_home');
-        $bsHomeS = $fn->block('ir_bs_home_s');
-        $bsHomeI = $fn->block('ir_bs_home_i');
         $bsCmp = $fn->block('ir_bs_cmp');
         $bsMove = $fn->block('ir_bs_move');
         $bsFin = $fn->block('ir_bs_fin');
@@ -387,6 +393,7 @@ final class UnifiedArrayRuntime
         $hi->store($this->intBucketHash($hi, $hi->load(Type::i64(), $this->entryAddr($hi, $arr, $j, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $hSlot);
         $hi->br($linit);
         $h0 = $linit->load(Type::i64(), $hSlot);
+        $want64 = $this->packBucket($linit, $h0, $want);
         $linit->store($linit->and_($h0, $mask), $sSlot);
         $linit->store(Value::int(Type::i64(), 0), $cSlot);
         $linit->br($loc);
@@ -395,7 +402,7 @@ final class UnifiedArrayRuntime
         $loc->brIf($loc->icmp('sge', $c, $nb), $bail, $lchk);
         $s = $lchk->load(Type::i64(), $sSlot);
         $bv = $lchk->load(Type::i64(), $lchk->gep(Type::i64(), $buckets, [$s]));
-        $lchk->brIf($lchk->icmp('eq', $bv, $want), $bsInit, $lstep);
+        $lchk->brIf($lchk->icmp('eq', $bv, $want64), $bsInit, $lstep);
         $sn = $lstep->load(Type::i64(), $sSlot);
         $lstep->store($lstep->and_($lstep->add($sn, Value::int(Type::i64(), 1)), $mask), $sSlot);
         $lstep->store($lstep->add($lstep->load(Type::i64(), $cSlot), Value::int(Type::i64(), 1)), $cSlot);
@@ -410,14 +417,9 @@ final class UnifiedArrayRuntime
         $bsStep->store($t, $tSlot);
         $bv2 = $bsStep->load(Type::i64(), $bsStep->gep(Type::i64(), $buckets, [$t]));
         $bsStep->brIf($bsStep->icmp('eq', $bv2, Value::int(Type::i64(), 0)), $bsFin, $bsHome);
-        $k2 = $bsHome->sub($bv2, Value::int(Type::i64(), 1));
-        $kind2 = $bsHome->load(Type::i64(), $this->entryAddr($bsHome, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
-        $bsHome->brIf($bsHome->icmp('eq', $kind2, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $bsHomeS, $bsHomeI);
-        $kp2 = $bsHomeS->load(Type::ptr(), $this->entryAddr($bsHomeS, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $bsHomeS->store($bsHomeS->call('__mir_array_hash_str', Type::i64(), [$kp2]), $h2Slot);
-        $bsHomeS->br($bsCmp);
-        $bsHomeI->store($this->intBucketHash($bsHomeI, $bsHomeI->load(Type::i64(), $this->entryAddr($bsHomeI, $arr, $k2, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET))), $h2Slot);
-        $bsHomeI->br($bsCmp);
+        // The slot's home is its tag's low bits: no entry load, no re-hash.
+        $bsHome->store($bsHome->lshr($bv2, Value::int(Type::i64(), 32)), $h2Slot);
+        $bsHome->br($bsCmp);
         $home = $bsCmp->and_($bsCmp->load(Type::i64(), $h2Slot), $mask);
         $tc = $bsCmp->load(Type::i64(), $tSlot);
         $sc = $bsCmp->load(Type::i64(), $sSlot);
@@ -882,8 +884,8 @@ final class UnifiedArrayRuntime
     /**
      * `__mir_array_index_build(arr) -> void` — (re)build the open-addressed
      * bucket index over the current HASHED entries. `nbuckets` = next power
-     * of two >= max(16, len*2); each bucket holds `entry_index + 1` (0 =
-     * empty). DELETED entries are skipped. Int keys hash to themselves
+     * of two >= max(16, len*2); each bucket holds `(h32 << 32) | (entry_index + 1)`
+     * (0 = empty, see {@see packBucket}). DELETED entries are skipped. Int keys hash to themselves
      * (dense after promote); string keys via FNV.
      */
     private function emitIndexBuild(): void
@@ -993,7 +995,7 @@ final class UnifiedArrayRuntime
         // Store entry_index + 1 at the empty slot.
         $sput = $pput->load(Type::i64(), $sSlot);
         $putAddr = $pput->gep(Type::i64(), $buckets, [$sput]);
-        $pput->store($pput->add($i, Value::int(Type::i64(), 1)), $putAddr);
+        $pput->store($this->packBucket($pput, $pput->load(Type::i64(), $hSlot), $pput->add($i, Value::int(Type::i64(), 1))), $putAddr);
         $pput->br($bnext);
         $bnext->store($bnext->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $bnext->br($head);
@@ -1060,7 +1062,7 @@ final class UnifiedArrayRuntime
         $step->br($scan);
         $sput = $put->load(Type::i64(), $sSlot);
         $putAddr = $put->gep(Type::i64(), $buckets, [$sput]);
-        $put->store($put->add($j, Value::int(Type::i64(), 1)), $putAddr);
+        $put->store($this->packBucket($put, $put->load(Type::i64(), $hSlot), $put->add($j, Value::int(Type::i64(), 1))), $putAddr);
         $put->br($ret);
         $ret->retVoid();
     }
@@ -1096,9 +1098,11 @@ final class UnifiedArrayRuntime
         $hint = $fn->block('hint');
         $startp = $fn->block('startp');
         $head = $fn->block('fhead');
+        $ftag = $fn->block('ftag');
         $fkind = $fn->block('fkind');
         $fdisp = $fn->block('fdisp');
         $fstr = $fn->block('fstr');
+        $fstrCmp = $fn->block('fstr_cmp');
         $fint = $fn->block('fint');
         $next = $fn->block('fnext');
         $hit = $fn->block('fhit');
@@ -1139,15 +1143,20 @@ final class UnifiedArrayRuntime
         $s = $head->load(Type::i64(), $sSlot);
         $slotAddr = $head->gep(Type::i64(), $buckets, [$s]);
         $bv = $head->load(Type::i64(), $slotAddr);
-        $head->brIf($head->icmp('eq', $bv, Value::int(Type::i64(), 0)), $miss, $fkind);
-        $j = $fkind->sub($bv, Value::int(Type::i64(), 1));
+        $head->brIf($head->icmp('eq', $bv, Value::int(Type::i64(), 0)), $miss, $ftag);
+        // Tag first: a slot whose 32-bit hash tag differs is skipped without
+        // touching its entry (a different cache line, a different string).
+        $htag = $ftag->and_($ftag->load(Type::i64(), $hSlot), Value::int(Type::i64(), 4294967295));
+        $ftag->brIf($ftag->icmp('ne', $ftag->lshr($bv, Value::int(Type::i64(), 32)), $htag), $next, $fkind);
+        $j = $fkind->sub($fkind->and_($bv, Value::int(Type::i64(), 4294967295)), Value::int(Type::i64(), 1));
         $fkind->store($j, $jSlot);
         $ekind = $fkind->load(Type::i64(), $this->entryAddr($fkind, $arr, $j, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $fkind->brIf($fkind->icmp('ne', $ekind, $wantKind), $next, $fdisp);
         $fdisp->brIf($fdisp->icmp('eq', $wantKind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $fstr, $fint);
         $jS = $fstr->load(Type::i64(), $jSlot);
         $ek = $fstr->load(Type::ptr(), $this->entryAddr($fstr, $arr, $jS, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $fstr->brIf($fstr->call('__mir_str_eq', Type::i1(), [$ek, $keyptr]), $hit, $next);
+        $fstr->brIf($fstr->icmp('eq', $ek, $keyptr), $hit, $fstrCmp);
+        $fstrCmp->brIf($fstrCmp->call('__mir_str_eq', Type::i1(), [$ek, $keyptr]), $hit, $next);
         $jI = $fint->load(Type::i64(), $jSlot);
         $eki = $fint->load(Type::i64(), $this->entryAddr($fint, $arr, $jI, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         $fint->brIf($fint->icmp('eq', $eki, $keyint), $hit, $next);

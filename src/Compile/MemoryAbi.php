@@ -21,7 +21,9 @@ final class MemoryAbi
      *
      * v15: int bucket hash changed: (k ^ k>>12) * golden. The bucket index is
      * trusted, not validated, so a library built with the old hash would miss
-     * int keys in the arrays it built.
+     * int keys in the arrays it built. Also v15: a bucket word is
+     * `(h32 << 32) | (entry_index + 1)` (h32 = low 32 bits of the key hash), not
+     * a bare `entry_index + 1`.
      */
     public const VERSION = 15;
 
