@@ -8,7 +8,7 @@ function sum(int $n) {
     return $n + sum($n - 1);
 }
 try {
-    down(5000);
+    down(4000);
 } catch (Exception $e) {
     $t = $e->getTrace();
     echo count($t), "\n";

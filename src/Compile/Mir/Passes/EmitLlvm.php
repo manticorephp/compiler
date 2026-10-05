@@ -1881,8 +1881,16 @@ final class EmitLlvm implements EmitVisitor
         return $out;
     }
 
+    /** `$dst = min($depth, 4096)`: frames past the ring were counted, never stored. */
+    private function btClamp(string $dst, string $depth): string
+    {
+        $c = $this->ssa->allocReg();
+        return '  ' . $c . ' = icmp slt i64 ' . $depth . ", 4096\n"
+             . '  ' . $dst . ' = select i1 ' . $c . ', i64 ' . $depth . ", i64 4096\n";
+    }
+
     /** Overwrite the top backtrace frame's name (index depth-1) with `$disp`,
-     *  guarded on depth>0. Emitted at a method's entry so the frame carries
+     *  guarded on 0<depth<=4096 (a frame past the ring was never stored). Emitted at a method's entry so the frame carries
      *  the exact "Class->method" / "Class::method" the callee knows. */
     private function btNameFix(string $disp): string
     {
@@ -1890,6 +1898,11 @@ final class EmitLlvm implements EmitVisitor
         $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
         $c = $this->ssa->allocReg();
         $out .= '  ' . $c . ' = icmp sgt i64 ' . $d . ", 0\n";
+        $c2 = $this->ssa->allocReg();
+        $out .= '  ' . $c2 . ' = icmp sle i64 ' . $d . ", 4096\n";
+        $c3 = $this->ssa->allocReg();
+        $out .= '  ' . $c3 . ' = and i1 ' . $c . ', ' . $c2 . "\n";
+        $c = $c3;
         $set = $this->ssa->allocLabel('btfix.set');
         $end = $this->ssa->allocLabel('btfix.end');
         $out .= '  br i1 ' . $c . ', label %' . $set . ', label %' . $end . "\n" . $set . ":\n";
@@ -5353,12 +5366,14 @@ final class EmitLlvm implements EmitVisitor
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
-        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $dep . ")\n";
+        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $dm . ")\n";
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
+        $dm = $this->ssa->allocReg();
+        $out .= $this->btClamp($dm, $dep);
         $i0 = $this->ssa->allocReg();
-        $out .= '  ' . $i0 . ' = sub i64 ' . $dep . ", 1\n";
+        $out .= '  ' . $i0 . ' = sub i64 ' . $dm . ", 1\n";
         $out .= '  store i64 ' . $i0 . ', ptr ' . $iSlot . "\n";
         $cond = $this->ssa->allocLabel('bt.cond');
         $body = $this->ssa->allocLabel('bt.body');

@@ -2696,7 +2696,9 @@ trait EmitLlvmRuntime
     {
         $o  = '  %' . $tag . "btd = load i64, ptr @__mir_bt_depth\n";
         $o .= '  %' . $tag . 'btok = icmp sgt i64 %' . $tag . "btd, 0\n";
-        $o .= '  %' . $tag . 'btr = sub i64 %' . $tag . "btd, 1\n";
+        $o .= '  %' . $tag . 'btc = icmp slt i64 %' . $tag . "btd, 4096\n";
+        $o .= '  %' . $tag . 'btm = select i1 %' . $tag . 'btc, i64 %' . $tag . 'btd, i64 4096' . "\n";
+        $o .= '  %' . $tag . 'btr = sub i64 %' . $tag . "btm, 1\n";
         $o .= '  %' . $tag . 'bti = select i1 %' . $tag . 'btok, i64 %' . $tag . "btr, i64 0\n";
         $o .= '  %' . $tag . 'btg = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %'
             . $tag . "bti\n";
