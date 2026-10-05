@@ -917,11 +917,13 @@ trait EmitLlvmObjects
      * `clone` over an interface-typed receiver: compare the instance's
      * descriptor word (slot 0) against each candidate's and run that class's
      * own clone. The default arm keeps the historical pass-through, so an
-     * implementer this module cannot see behaves exactly as it did.
+     * implementer this module cannot see behaves exactly as it did — unless
+     * `$fallback` names the receiver's own concrete static class, which is
+     * then what an instance matching no listed subclass is.
      *
      * @param string[] $impls
      */
-    private function emitCloneDispatch(\Compile\Mir\Clone_ $n, string $src, array $impls): string
+    private function emitCloneDispatch(\Compile\Mir\Clone_ $n, string $src, array $impls, string $fallback = ''): string
     {
         $slot = $this->ssa->allocReg();
         $out  = '  ' . $slot . " = alloca i64\n";
@@ -946,6 +948,12 @@ trait EmitLlvmObjects
             $out .= '  store i64 ' . $ci . ', ptr ' . $slot . "\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $next . ":\n";
+        }
+        if ($fallback !== '') {
+            $out .= $this->emitCloneOfClass($n, $this->classes[$fallback], $fallback, $src);
+            $fi = $this->ssa->allocReg();
+            $out .= '  ' . $fi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $out .= '  store i64 ' . $fi . ', ptr ' . $slot . "\n";
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -990,7 +998,34 @@ trait EmitLlvmObjects
             $this->lastValue = $src; $this->lastValueType = 'ptr';
             return $out;
         }
+        // A class-typed receiver is any SUBCLASS at run time. Cloning by the
+        // static class copied the base's slots under the base's descriptor: the
+        // copy lost its class, so `static::class` named the base and a virtual
+        // call on it ran whichever override the base's table held. Dispatch
+        // over the known subclasses; the static class is the default arm.
+        $subs = $this->cloneSubclasses($cls);
+        if ($subs !== []) {
+            return $out . $this->emitCloneDispatch($n, $src, $subs, $cd->isAbstract ? '' : $cls);
+        }
         return $out . $this->emitCloneOfClass($n, $cd, $cls, $src);
+    }
+
+    /**
+     * The proper subclasses of `$cls` this module knows — what a `clone` of a
+     * `$cls`-typed receiver has to tell apart at run time.
+     *
+     * @return string[]
+     */
+    private function cloneSubclasses(string $cls): array
+    {
+        $out = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($name === $cls || $cd->isStruct) { continue; }
+            if ($this->isEnumClass($name) || $this->isClosureClass($name)) { continue; }
+            if (!$this->classIsA($name, $cls)) { continue; }
+            $out[] = $name;
+        }
+        return $out;
     }
 
     /**
