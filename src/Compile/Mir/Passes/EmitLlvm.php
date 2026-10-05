@@ -5404,6 +5404,8 @@ final class EmitLlvm implements EmitVisitor
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
+        $dm = $this->ssa->allocReg();
+        $out .= $this->btClamp($dm, $dep);
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
         $nv = $this->ssa->allocReg();
@@ -5411,8 +5413,6 @@ final class EmitLlvm implements EmitVisitor
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
-        $dm = $this->ssa->allocReg();
-        $out .= $this->btClamp($dm, $dep);
         $i0 = $this->ssa->allocReg();
         $out .= '  ' . $i0 . ' = sub i64 ' . $dm . ", 1\n";
         $out .= '  store i64 ' . $i0 . ', ptr ' . $iSlot . "\n";
