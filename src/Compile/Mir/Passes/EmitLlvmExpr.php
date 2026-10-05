@@ -2675,29 +2675,8 @@ trait EmitLlvmExpr
         return true;
     }
 
-    /**
-     * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
-     * fetch): a variable, a property, a static property or an element of one.
-     * A call base (`f()[$k]`) runs first.
-     */
-    private function keyBeforeBase(Node $n): bool
-    {
-        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STATIC_PROP) {
-            return true;
-        }
-        if ($n instanceof \Compile\Mir\PropertyAccess_) {
-            return $this->keyBeforeBase($n->object);
-        }
-        if ($n instanceof \Compile\Mir\ArrayAccess_) {
-            // An inner key that can run code keeps its source order.
-            $ik = $n->index->kind;
-            if ($ik !== Node::KIND_LOAD_LOCAL && $ik !== Node::KIND_INT_CONST && $ik !== Node::KIND_STRING_CONST) {
-                return false;
-            }
-            return $this->keyBeforeBase($n->array);
-        }
-        return false;
-    }
+    /** {@see \Compile\Mir\ArrayAccess_::keyBeforeBase} */
+    private function keyBeforeBase(Node $n): bool { return \Compile\Mir\ArrayAccess_::keyBeforeBase($n); }
 
     /**
      * Evaluate the base and key of `$a[$k] ?? d` ONCE, probe once, and leave
