@@ -558,6 +558,9 @@ final class LowerFromAst implements Pass
     public bool $includeCli = false;
     /** CLI prelude source, read by Main from `prelude/cli.php`. */
     public string $cliSrc = '';
+    /** Manticore\Ds (typed fixed-width arrays over the native buffer) —
+     *  DEMAND-GATED. Braced-namespace tree with no dependencies of its own. */
+    public string $dsSrc = '';
 
     /**
      * Bundled-stdlib function declarations (parsed from `src/Runtime/**`)

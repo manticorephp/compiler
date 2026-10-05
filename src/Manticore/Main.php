@@ -4917,6 +4917,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // serves plain HTTP never carries the frame codec. Parsed after Http\,
     // whose header helpers and takeover hook it calls.
     $wsSrc = prelude_src_or_empty("websocket.php");
+    $dsSrc = prelude_src_or_empty("ds.php");
     // serialize / unserialize — DEMAND-GATED, and gated SEPARATELY (two files):
     // each one generates a per-class arm set from the class table, so a program
     // that only serializes must not pay for unserialize's rebuild arms.
@@ -5119,6 +5120,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // serves plain HTTP never carries the frame codec. Forced HERE, before
     // $useHttp is read by anything below.
     $useWs = $demand->mentions('WebSocket');
+    // Manticore\Ds — typed fixed-width arrays. Gates on the QUALIFIER like the
+    // trees above: nobody reaches `Int32Array` without writing `Ds\`.
+    $useDs = $demand->mentions('Ds');
     if ($useWs) {
         $useHttp = true;
         $useBuffer = true;
@@ -5586,6 +5590,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read http.php");
         return null;
     }
+    if ($useDs && $dsSrc === "") {
+        dprint("compile failed: prelude: cannot read ds.php");
+        return null;
+    }
     if ($useWs && $wsSrc === "") {
         dprint("compile failed: prelude: cannot read websocket.php");
         return null;
@@ -5690,6 +5698,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->bufferSrc = $useBuffer ? $bufferSrc : "";
         $lower->httpSrc = $useHttp ? $httpSrc : "";
         $lower->wsSrc = $useWs ? $wsSrc : "";
+        $lower->dsSrc = $useDs ? $dsSrc : "";
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
@@ -6217,6 +6226,7 @@ function analyze_prelude_files(): array
         "buffer.php",
         "http.php",
         "websocket.php",
+        "ds.php",
         "weak.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the

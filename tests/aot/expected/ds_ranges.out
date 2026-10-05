@@ -1,0 +1,87 @@
+Manticore\Ds\Int8Array
+int(-128)
+int(127)
+ValueError: Value -129 is out of range for Int8Array (-128..127)
+ValueError: Value 128 is out of range for Int8Array (-128..127)
+Manticore\Ds\Int16Array
+int(-32768)
+int(32767)
+ValueError: Value -32769 is out of range for Int16Array (-32768..32767)
+ValueError: Value 32768 is out of range for Int16Array (-32768..32767)
+Manticore\Ds\Int32Array
+int(-2147483648)
+int(2147483647)
+ValueError: Value -2147483649 is out of range for Int32Array (-2147483648..2147483647)
+ValueError: Value 2147483648 is out of range for Int32Array (-2147483648..2147483647)
+Manticore\Ds\UInt8Array
+int(0)
+int(255)
+ValueError: Value -1 is out of range for UInt8Array (0..255)
+ValueError: Value 256 is out of range for UInt8Array (0..255)
+Manticore\Ds\UInt16Array
+int(0)
+int(65535)
+ValueError: Value -1 is out of range for UInt16Array (0..65535)
+ValueError: Value 65536 is out of range for UInt16Array (0..65535)
+Manticore\Ds\UInt32Array
+int(0)
+int(4294967295)
+ValueError: Value -1 is out of range for UInt32Array (0..4294967295)
+ValueError: Value 4294967296 is out of range for UInt32Array (0..4294967295)
+int(-9223372036854775808)
+int(9223372036854775807)
+ValueError: Value 9.3E+18 is out of range for Int64Array (-9223372036854775808..9223372036854775807)
+int(-9223372036854775808)
+ValueError: Value 1.0E+300 is out of range for Int64Array (-9223372036854775808..9223372036854775807)
+TypeError: Manticore\Ds\Int32Array element must be of type int, float given
+int(3)
+int(0)
+int(12)
+int(12)
+int(100)
+TypeError: Manticore\Ds\Int32Array element must be of type int, string given
+TypeError: Manticore\Ds\Int32Array element must be of type int, string given
+TypeError: Manticore\Ds\Int32Array element must be of type int, string given
+TypeError: Manticore\Ds\Int32Array element must be of type int, string given
+int(1)
+int(0)
+TypeError: Manticore\Ds\Int32Array element must be of type int, null given
+TypeError: Manticore\Ds\Int32Array element must be of type int, array given
+TypeError: Manticore\Ds\Int32Array element must be of type int, stdClass given
+TypeError: Manticore\Ds\Int32Array element must be of type int, float given
+TypeError: Manticore\Ds\Int32Array element must be of type int, float given
+ValueError: Value 4294967296 is out of range for Int32Array (-2147483648..2147483647)
+float(0.10000000149011612)
+float(16777216)
+float(INF)
+float(-INF)
+float(0)
+float(2.5)
+float(1)
+TypeError: Manticore\Ds\Float32Array element must be of type float, string given
+TypeError: Manticore\Ds\Float32Array element must be of type float, null given
+float(0.1)
+float(7)
+float(9.223372036854776E+18)
+float(1000)
+float(0)
+TypeError: Manticore\Ds\Float64Array element must be of type float, array given
+bool(true)
+-1
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+TypeError: Manticore\Ds\BitArray element must be of type bool, null given
+TypeError: Manticore\Ds\BitArray element must be of type bool, array given
+TypeError: Manticore\Ds\BitArray element must be of type bool, stdClass given
+ValueError: Value 300 is out of range for Int8Array (-128..127)
+ValueError: Value 256 is out of range for UInt8Array (0..255)
+ValueError: Value -1 is out of range for UInt8Array (0..255)
+3 -1 0
+TypeError: Manticore\Ds\UInt8Array element must be of type int, string given
