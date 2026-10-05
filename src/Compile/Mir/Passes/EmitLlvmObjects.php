@@ -5479,27 +5479,13 @@ trait EmitLlvmObjects
         $out .= $arrL . ":\n";
         $out .= $this->arrayPtrOrEmptyIr($cv);
         $arr = $this->arrayPtrReg;
-        $r = $this->ssa->allocReg();
-        $val = $this->ssa->allocReg();
-        if ($keyIsCell) {
-            $this->rt->needsCellKey = true;
-            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
-            $out .= '  ' . $val . ' = call i64 @__mir_array_get_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
-        } elseif ($keyIsString) {
-            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
-            $out .= '  ' . $val . ' = call i64 @__mir_array_get_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
-        } else {
-            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
-            $out .= '  ' . $val . ' = call i64 @__mir_array_get_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
-        }
-        // Present-but-NULL is unset, the same mask the typed arm applies.
+        $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
+        // Absent and present-but-NULL are both unset: one test on the word.
         $nn = $this->ssa->allocReg();
-        $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n";
+        $out .= '  ' . $nn . ' = icmp ne i64 ' . $this->lastValue . ", -3659174697238528\n";
         $nnz = $this->ssa->allocReg();
         $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
-        $rr = $this->ssa->allocReg();
-        $out .= '  ' . $rr . ' = and i64 ' . $r . ', ' . $nnz . "\n";
-        $out .= '  store i64 ' . $rr . ', ptr ' . $slot . "\n";
+        $out .= '  store i64 ' . $nnz . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
         $out .= $endL . ":\n";
@@ -5513,6 +5499,29 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * One probe of `$arr[$key]`: calls `__mir_array_lookup_{int,str,cell}` — the
+     * address of the value word, or of the boxed-NULL miss word — and leaves the
+     * LOADED word in lastValue. The word is the raw slot content, exactly what
+     * `__mir_array_get_*` returns for a hit, and the boxed NULL for a miss.
+     */
+    private function emitLookupWord(string $arr, string $key, bool $keyIsCell, bool $keyIsString, Node $index): string
+    {
+        $p = $this->ssa->allocReg();
+        if ($keyIsCell) {
+            $this->rt->needsCellKey = true;
+            $out = '  ' . $p . ' = call ptr @__mir_array_lookup_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
+        } elseif ($keyIsString) {
+            $out = '  ' . $p . ' = call ptr @__mir_array_lookup_str(ptr ' . $arr . ', ptr ' . $key . $this->litKeyHashArgs($index) . ")\n";
+        } else {
+            $out = '  ' . $p . ' = call ptr @__mir_array_lookup_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
+        }
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $p . "\n";
+        $this->lastValue = $w;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
     private function emitIssetTarget(Node $t): string
     {
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
@@ -5554,30 +5563,14 @@ trait EmitLlvmObjects
                 $out .= $this->emitNode($aa->index);
                 $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
                 $key = $this->lastValue;
-                $r = $this->ssa->allocReg();
-                if ($keyIsCell) {
-                    $this->rt->needsCellKey = true;
-                    $out .= '  ' . $r . ' = call i64 @__mir_array_isset_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
-                } elseif ($keyIsString) {
-                    $out .= '  ' . $r . ' = call i64 @__mir_array_isset_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
-                } else {
-                    $out .= '  ' . $r . ' = call i64 @__mir_array_isset_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
-                }
-                // PHP isset()/`??` treat a PRESENT-but-NULL value as unset — zero
-                // the presence bit when the stored value is a boxed NULL (the get
-                // reuses the already-emitted arr/key; a miss returns a non-NULL
-                // default and is masked by the presence bit anyway). A raw-valued
-                // array never holds the NULL sentinel, so the check is a no-op
-                // there. `array_key_exists` keeps pure presence (a different path).
-                $val = $this->ssa->allocReg();
-                if ($keyIsCell) {
-                    $out .= '  ' . $val . ' = call i64 @__mir_array_get_cell(ptr ' . $arr . ', i64 ' . $key . ")\n";
-                } elseif ($keyIsString) {
-                    $out .= '  ' . $val . ' = call i64 @__mir_array_get_str(ptr ' . $arr . ', ptr ' . $key . ", i64 0, i64 0)\n";
-                } else {
-                    $out .= '  ' . $val . ' = call i64 @__mir_array_get_int(ptr ' . $arr . ', i64 ' . $key . ")\n";
-                }
-                // Both calls above are done with the key — drop a fresh one
+                $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
+                $val = $this->lastValue;
+                // PHP isset()/`??` treat a PRESENT-but-NULL value as unset, and the
+                // lookup answers a MISS with the address of a boxed-NULL word, so
+                // one compare against box_null answers both. A raw-valued array
+                // never holds the NULL sentinel. `array_key_exists` keeps pure
+                // presence (a different path).
+                // The lookup is done with the key — drop a fresh one
                 // ({@see EmitLlvm::keyTempRelease}); `isset($m["k" . $i])`
                 // leaked exactly as the plain read did.
                 if ($keyIsCell || $keyIsString) {
@@ -5585,10 +5578,8 @@ trait EmitLlvmObjects
                 }
                 $nn = $this->ssa->allocReg();
                 $out .= '  ' . $nn . ' = icmp ne i64 ' . $val . ", -3659174697238528\n"; // != box_null
-                $nnz = $this->ssa->allocReg();
-                $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
                 $rr = $this->ssa->allocReg();
-                $out .= '  ' . $rr . ' = and i64 ' . $r . ', ' . $nnz . "\n";
+                $out .= '  ' . $rr . ' = zext i1 ' . $nn . " to i64\n";
                 $this->lastValue = $rr;
                 $this->lastValueType = 'i64';
                 return $out;

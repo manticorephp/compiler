@@ -81,6 +81,16 @@ final class MemoryAbi
      */
     public const CELL_NULL = -3659174697238528;
 
+    /**
+     * The MISS word of `__mir_array_lookup_{int,str,cell}`: those return the
+     * ADDRESS of an element's value word, and on a miss the address of this
+     * global, which holds {@see CELL_NULL}. A caller loads the word and tests it
+     * against CELL_NULL — one test for "absent" and "present but NULL" (both are
+     * unset to `isset` and `??`). The address, not a value, is the sentinel
+     * because a raw int element can hold any i64. Never store through it.
+     */
+    public const ARRAY_LOOKUP_MISS_SYMBOL = '__mir_array_miss_word';
+
     /** `0xFFF8000000000000`: OR'd onto a raw object pointer, the OBJECT cell
      *  that carries it — what an `object`-hinted PHP parameter expects when
      *  emitted IR calls a PHP helper with a receiver it holds raw. */

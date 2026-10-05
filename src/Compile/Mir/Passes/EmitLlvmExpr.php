@@ -470,6 +470,17 @@ trait EmitLlvmExpr
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r2 = call i64 @__mir_array_get_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
 
+        $out .= "define ptr @__mir_array_lookup_cell(ptr %arr, i64 %k) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
+        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
+        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
+        $out .= "  br i1 %isstr, label %s, label %i\n";
+        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
+        $out .= "  %r1 = call ptr @__mir_array_lookup_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret ptr %r1\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
+        $out .= "  %r2 = call ptr @__mir_array_lookup_int(ptr %arr, i64 %ki)\n  ret ptr %r2\n}\n\n";
         $out .= "define i64 @__mir_array_isset_cell(ptr %arr, i64 %k) {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";

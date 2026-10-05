@@ -156,6 +156,8 @@ final class UnifiedArrayRuntime
         $this->emitImplodeInt();
         $this->emitIssetInt();
         $this->emitIssetStr();
+        $this->emitLookupInt();
+        $this->emitLookupStr();
         $this->emitPosInt();
         $this->emitPosStr();
         $this->emitUnsetStr();
@@ -5818,6 +5820,126 @@ final class UnifiedArrayRuntime
         $next->br($head);
         $hit->ret(Value::int(Type::i64(), 1));
         $z->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_array_lookup_int(arr, idx) -> ptr` — the ADDRESS of the stored
+     * value word of int key `idx`, or {@see MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL}
+     * (a word holding the boxed NULL) when the key is absent. One probe serves
+     * `isset` and `??`: the caller loads the word and compares it with
+     * {@see MemoryAbi::CELL_NULL}, which answers a miss and a present-NULL alike.
+     * An address and not a value word, because every i64 is a valid raw int
+     * element — no value sentinel exists. Read-only: never store through it.
+     */
+    private function emitLookupInt(): void
+    {
+        $miss = $this->module->globalInt(MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL, Type::i64(), MemoryAbi::CELL_NULL, 'linkonce_odr');
+        $fn = $this->module->func('__mir_array_lookup_int', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $idx = $fn->param(Type::i64(), 'idx');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $packed = $fn->block('packed');
+        $pin = $fn->block('pin');
+        $doidx = $fn->block('doidx');
+        $classify = $fn->block('classify');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $ihit = $fn->block('ihit');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $iSlot = $chk->alloca(Type::i64(), 'i');
+        $rSlot = $chk->alloca(Type::i64(), 'r');
+        $chk->store(Value::int(Type::i64(), 0), $iSlot);
+        $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $doidx, $packed);
+        $ok = $packed->and_(
+            $packed->icmp('sge', $idx, Value::int(Type::i64(), 0)),
+            $packed->icmp('slt', $idx, $len),
+        );
+        $packed->brIf($ok, $pin, $z);
+        $pin->ret($this->packedSlot($pin, $arr, $idx));
+        $rf = $doidx->call('__mir_array_index_find', Type::i64(),
+            [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT), Value::null(), $idx, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
+        $doidx->store($rf, $rSlot);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $head, $classify);
+        $classify->brIf($classify->icmp('sge', $classify->load(Type::i64(), $rSlot), Value::int(Type::i64(), 0)), $ihit, $z);
+        $ij = $ihit->load(Type::i64(), $rSlot);
+        $ihit->ret($this->entryAddr($ihit, $arr, $ij, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $z, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT)), $next, $kok);
+        $k = $kok->load(Type::i64(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->icmp('eq', $k, $idx), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($this->entryAddr($hit, $arr, $hit->load(Type::i64(), $iSlot), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $z->ret($miss);
+    }
+
+    /**
+     * `__mir_array_lookup_str(arr, key, hash, haveHash) -> ptr` — the string-key
+     * twin of {@see emitLookupInt}: the address of the value word, or the miss
+     * word. PACKED has no string keys.
+     */
+    private function emitLookupStr(): void
+    {
+        $miss = Value::global(Type::ptr(), MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL);
+        $fn = $this->module->func('__mir_array_lookup_str', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $key = $fn->param(Type::ptr(), 'key');
+        $hash = $fn->param(Type::i64(), 'hash');
+        $haveHash = $fn->param(Type::i64(), 'haveHash');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $gate = $fn->block('gate');
+        $doidx = $fn->block('doidx');
+        $classify = $fn->block('classify');
+        $ihit = $fn->block('ihit');
+        $preh = $fn->block('preh');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $kok = $fn->block('kind_ok');
+        $hpre = $fn->block('hpre');
+        $cmp = $fn->block('cmp');
+        $next = $fn->block('next');
+        $hit = $fn->block('hit');
+        $z = $fn->block('z');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $len = $chk->load(Type::i64(), $arr);
+        $iSlot = $chk->alloca(Type::i64(), 'i');
+        $rSlot = $chk->alloca(Type::i64(), 'r');
+        $effSlot = $chk->alloca(Type::i64(), 'effh');
+        $chk->store(Value::int(Type::i64(), 0), $iSlot);
+        $chk->brIf($chk->icmp('eq', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $z, $gate);
+        $gate->brIf($gate->icmp('eq', $key, Value::null()), $z, $doidx);
+        $rf = $doidx->call('__mir_array_index_find', Type::i64(),
+            [$arr, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING), $key, Value::int(Type::i64(), 0), $hash, $haveHash]);
+        $doidx->store($rf, $rSlot);
+        $doidx->brIf($doidx->icmp('eq', $rf, Value::int(Type::i64(), -2)), $preh, $classify);
+        $classify->brIf($classify->icmp('sge', $classify->load(Type::i64(), $rSlot), Value::int(Type::i64(), 0)), $ihit, $z);
+        $ij = $ihit->load(Type::i64(), $rSlot);
+        $ihit->ret($this->entryAddr($ihit, $arr, $ij, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $preh->store($this->scanProbeHash($preh, $key, $hash, $haveHash), $effSlot);
+        $preh->br($head);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $z, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('ne', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $next, $kok);
+        $tk = $kok->load(Type::ptr(), $this->entryAddr($kok, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
+        $kok->brIf($kok->or_($kok->icmp('eq', $tk, Value::null()), $kok->icmp('eq', $key, Value::null())), $next, $hpre);
+        $this->hashPrefilter($hpre, $tk, $effSlot, $cmp, $next);
+        $cmp->brIf($cmp->call('__mir_str_eq', Type::i1(), [$tk, $key]), $hit, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $hit->ret($this->entryAddr($hit, $arr, $hit->load(Type::i64(), $iSlot), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+        $z->ret($miss);
     }
 
     /**
