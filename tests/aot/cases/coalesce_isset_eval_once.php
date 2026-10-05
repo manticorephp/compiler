@@ -52,3 +52,12 @@ var_dump(isset($pl[$s1]), $pl[$s1] ?? 'm');
 // a raw int element whose bits equal the boxed NULL word is present
 $r = [10, -3659174697238528];
 var_dump(isset($r[1]), $r[1] ?? 'm');
+
+// a global-reachable int/float/bool buffer: raw 0, 0.0, false and the NULL bits are present
+$gi = [0, 1]; $gf = [0.0, 1.5]; $gb = [false, true]; $gz = [-3659174697238528, 2];
+function gl() {
+    global $gi, $gf, $gb, $gz;
+    var_dump($gi[0] ?? 'miss', isset($gi[0]), $gf[0] ?? 'miss', isset($gf[0]), $gb[0] ?? 'miss', isset($gb[0]));
+    var_dump($gz[0] ?? 'miss', isset($gz[0]), $gi[5] ?? 'miss');
+}
+gl();

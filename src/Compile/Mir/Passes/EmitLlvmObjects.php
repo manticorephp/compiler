@@ -5528,6 +5528,7 @@ trait EmitLlvmObjects
         $w = $this->ssa->allocReg();
         $out .= '  ' . $w . ' = load i64, ptr ' . $p . "\n";
         $this->lookupAddr = $p;
+        $this->lookupArr = $arr;
         $this->lastValue = $w;
         $this->lastValueType = 'i64';
         return $out;
@@ -5538,15 +5539,34 @@ trait EmitLlvmObjects
      * (i64 0|1). A buffer that can hold boxed cells stores NULL as the boxed NULL
      * word, so the word is tested against it (a present NULL is unset). A RAW int
      * element is any i64 — its bits may even equal the boxed NULL — so there
-     * presence is the ADDRESS: not the miss word. A base a by-ref / global view
-     * can reach may have been cellified under its int claim, and keeps the word test.
+     * presence is the ADDRESS: not the miss word. A buffer a by-ref / global
+     * writer cellified under a static int claim says so in its element hint, which
+     * is read at RUN TIME: CELL-hinted → the word test, anything else → the address.
+     * (A null array answers the miss word either way.)
      */
     private function lookupPresent(\Compile\Mir\ArrayAccess_ $aa, string $word): string
     {
         $el = $aa->array->type->element;
         $nn = $this->ssa->allocReg();
-        if ($el !== null && $el->kind === Type::KIND_INT && !$this->elemMayBeCellified($aa->array)) {
-            $out = '  ' . $nn . ' = icmp ne ptr ' . $this->lookupAddr . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
+        if ($el !== null && $el->kind === Type::KIND_INT) {
+            $arr = $this->lookupArr;
+            $isNull = $this->ssa->allocReg();
+            $out = '  ' . $isNull . ' = icmp eq ptr ' . $arr . ", null\n";
+            $fg = $this->ssa->allocReg();
+            $out .= '  ' . $fg . ' = getelementptr inbounds i8, ptr ' . $arr . ', i64 ' . \Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+            $fs = $this->ssa->allocReg();
+            $out .= '  ' . $fs . ' = select i1 ' . $isNull . ', ptr @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . ', ptr ' . $fg . "\n";
+            $fl = $this->ssa->allocReg();
+            $out .= '  ' . $fl . ' = load i64, ptr ' . $fs . "\n";
+            $hn = $this->ssa->allocReg();
+            $out .= '  ' . $hn . ' = and i64 ' . $fl . ', ' . \Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+            $isCell = $this->ssa->allocReg();
+            $out .= '  ' . $isCell . ' = icmp eq i64 ' . $hn . ', ' . \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+            $byAddr = $this->ssa->allocReg();
+            $out .= '  ' . $byAddr . ' = icmp ne ptr ' . $this->lookupAddr . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
+            $byWord = $this->ssa->allocReg();
+            $out .= '  ' . $byWord . ' = icmp ne i64 ' . $word . ', ' . \Compile\MemoryAbi::CELL_NULL . "\n";
+            $out .= '  ' . $nn . ' = select i1 ' . $isCell . ', i1 ' . $byWord . ', i1 ' . $byAddr . "\n";
         } else {
             $out = '  ' . $nn . ' = icmp ne i64 ' . $word . ', ' . \Compile\MemoryAbi::CELL_NULL . "\n";
         }
