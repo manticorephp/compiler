@@ -5,8 +5,8 @@ use Manticore\Ds\BitArray;
 
 $a = Int16Array::fromArray([1, -2, 300]);
 var_dump($a);
-print_r($a->toArray());
-echo json_encode($a->jsonSerialize()), ' ', json_encode(['k' => $a->toArray()]), "\n";
+print_r($a);
+echo json_encode($a), ' ', json_encode(['k' => $a]), "\n";
 $s = serialize($a);
 echo $s, "\n";
 function back16(string $s): Int16Array { return unserialize($s); }

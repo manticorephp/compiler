@@ -4718,6 +4718,16 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         foreach ([$m1[1], $m2[1], $m3[1], $m4[2]] as $group) {
             foreach ($group as $root) {
                 $walkerRoots[$root] = true;
+                // The name as written: also root its last segment (a relative
+                // `new Sub\A`), and what a `use … as` alias stands for.
+                $seg = \strrpos($root, "\\");
+                if ($seg !== false) { $walkerRoots[\substr($root, $seg + 1)] = true; }
+                $head = $seg === false ? $root : \substr($root, 0, (int)\strpos($root, "\\"));
+                if (isset($program->useAliases[$head])) {
+                    $full = \ltrim((string)$program->useAliases[$head], "\\");
+                    $fs = \strrpos($full, "\\");
+                    $walkerRoots[$fs === false ? $full : \substr($full, $fs + 1)] = true;
+                }
             }
         }
         // The AST now owns everything needed from this raw source. Release the

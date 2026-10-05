@@ -100,7 +100,7 @@ same `TypeError` as a store for a value of the wrong type.
 **Copies** — an array is an object: assignment shares it, `clone` copies the
 buffer.
 
-**Dumps and serialization** — `var_dump`, `serialize` / `unserialize` and
+**Dumps and serialization** — `var_dump`, `print_r`, `serialize` / `unserialize` and
 `json_encode` (through `jsonSerialize()`) present the array as the list
 `toArray()` returns.
 
@@ -136,4 +136,3 @@ PHP array element costs.
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
-- `print_r($typedArray)` prints no elements (issue #57).

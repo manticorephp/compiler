@@ -1,0 +1,97 @@
+App\A Object
+(
+    [x] => 1
+    [y:protected] => p
+    [z:App\A:private] => Array
+        (
+            [0] => 1
+            [1] => Array
+                (
+                    [k] => 
+                )
+
+        )
+
+    [next] => App\B Object
+        (
+            [x] => 1
+            [y:protected] => p
+            [z:App\A:private] => Array
+                (
+                    [0] => 1
+                    [1] => Array
+                        (
+                            [k] => 
+                        )
+
+                )
+
+            [next] => 
+            [own:App\B:private] => 5
+            [f] => 1.5
+            [t] => 1
+            [n] => 
+        )
+
+)
+
+Array
+(
+    [0] => App\D Object
+        (
+            [shown] => 1
+            [2] => two
+        )
+
+    [e] => App\Suit Enum:string
+        (
+            [name] => Spades
+            [value] => s
+        )
+
+    [p] => App\Pure Enum
+        (
+            [name] => One
+        )
+
+)
+stdClass Object
+(
+    [a] => 1
+    [list] => Array
+        (
+            [0] => 1
+            [1] => 2
+        )
+
+    [child] => stdClass Object
+        (
+        )
+
+)
+App\B Object
+(
+    [x] => 1
+    [y:protected] => p
+    [z:App\A:private] => Array
+        (
+            [0] => 1
+            [1] => Array
+                (
+                    [k] => 
+                )
+
+        )
+
+    [next] => 
+    [own:App\B:private] => 5
+    [f] => 1.5
+    [t] => 1
+    [n] => 
+)
+Manticore\Ds\Int16Array Object
+(
+    [0] => 4
+    [1] => 5
+)
+

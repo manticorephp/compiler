@@ -470,6 +470,19 @@ trait LowerPrelude
      *
      * @return string[]
      */
+    private function walkerReaches(string $cname): bool
+    {
+        if (isset($this->walkerReachableClasses[$cname])) { return true; }
+        // The roots are names AS WRITTEN in the source — `new A` inside
+        // `namespace App` roots `A`, not `App\A`. Matching the last segment
+        // over-approximates (every class of that short name keeps its arm) and
+        // never misses: a namespaced class without an arm fell to the bag walk
+        // and var_dump / serialize / var_export read a declared object as a
+        // bag (SIGSEGV).
+        $p = \strrpos($cname, '\\');
+        return $p !== false && isset($this->walkerReachableClasses[\substr($cname, $p + 1)]);
+    }
+
     private function walkableClassesDerivedFirst(): array
     {
         $names = [];
@@ -485,10 +498,10 @@ trait LowerPrelude
                 // The unconditional files (the Throwable tree) stay demand-rooted:
                 // an arm for each would grow every var_dump program by ~70 KB.
                 $keep = ($cd->isPreludeClass && !$this->isBasePreludeClass($cname))
-                    || isset($this->walkerReachableClasses[$cname]);
+                    || $this->walkerReaches($cname);
                 $cur = $cd->parent;
                 while (!$keep && $cur !== "" && isset($this->classTable[$cur])) {
-                    $keep = isset($this->walkerReachableClasses[$cur]);
+                    $keep = $this->walkerReaches($cur);
                     $cur = $this->classTable[$cur]->parent;
                 }
                 // The XML prelude is demand-loaded from builtin calls, so its
@@ -849,6 +862,82 @@ trait LowerPrelude
             // is this exact exception, so throw rather than deref.
             . "  throw new \\Exception(\"Serialization of 'Closure' is not allowed\");\n}\n";
         return $body;
+    }
+
+    /**
+     * PHP source for `__mir_print_r_object` — print_r's object arm, written
+     * from the complete class table, same point and pattern as
+     * {@see dumpObjectSrc}. php's shape: `Class Object\n<pad>(\n` then one
+     * `<pad>    [name] => value\n` per property — a protected one keyed
+     * `[name:protected]`, a private one `[name:Declaring:private]` — and
+     * `<pad>)\n`. `__debugInfo()` replaces the walk; an enum case prints
+     * `Enum Enum[:backing]` over `name` (and `value`).
+     */
+    private function printRObjectSrc(): string
+    {
+        $names = $this->walkableClassesDerivedFirst();
+        $body = "function __mir_print_r_obj_map(string \$head, mixed \$d, int \$indent, string \$pad): string {\n"
+            . "  \$out = \$head . \"\\n\" . \$pad . \"(\\n\";\n"
+            . "  foreach (\$d as \$k => \$val) {\n"
+            . "    \$out = \$out . \$pad . '    [' . \$k . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n"
+            . "  }\n"
+            . "  return \$out . \$pad . \")\\n\";\n}\n";
+        $dispatch = "function __mir_print_r_object(mixed \$v, int \$indent): string {\n"
+            . "  \$pad = str_repeat(' ', \$indent);\n"
+            // An enum case, before the class-id dispatch (enums are not classes
+            // here): `Enum Enum[:backing]` over its property view. The view is
+            // taken off the un-narrowed cell — the one shape that answers it.
+            . "  \$en = __mir_enum_name(\$v);\n"
+            . "  if (\$en !== '') {\n"
+            . "    \$d = (array)\$v;\n"
+            . "    \$head = substr(\$en, 0, (int)strrpos(\$en, '::')) . ' Enum';\n"
+            . "    if (array_key_exists('value', \$d)) { \$head = \$head . (is_int(\$d['value']) ? ':int' : ':string'); }\n"
+            . "    return __mir_print_r_obj_map(\$head, \$d, \$indent, \$pad);\n"
+            . "  }\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $arm = 0;
+        foreach ($names as $cname) {
+            $cd = $this->classTable[$cname];
+            $helper = '__mir_print_r_object_arm_' . (string)$arm;
+            $head = $this->dqBody($cd->display() . ' Object');
+            $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad): string {\n"
+                . "  if (\$v instanceof \\" . $cname . ") {\n";
+            if ($this->declaresMethod($cname, '__debugInfo')) {
+                // Through a local, then a `mixed` parameter: a bare-`array`
+                // return erases its element ({@see dumpObjectSrc}).
+                $body .= "    \$d = \$v->__debugInfo();\n"
+                    . "    return __mir_print_r_obj_map(\"" . $head . "\", \$d, \$indent, \$pad);\n";
+            } else {
+                $body .= "    \$out = \"" . $head . "\\n\" . \$pad . \"(\\n\";\n";
+                foreach ($cd->propertyNames as $p) {
+                    $key = $p;
+                    if (isset($cd->propertyMeta[$p])) {
+                        $pm = $cd->propertyMeta[$p];
+                        if ($pm->visibility === 'protected') { $key = $p . ':protected'; }
+                        if ($pm->visibility === 'private') {
+                            $key = $p . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
+                        }
+                    }
+                    $body .= "    \$out = \$out . \$pad . \"    [" . $this->dqBody($key) . "] => \" . __mir_print_r_str(\$v->"
+                        . $p . ", \$indent + 8) . \"\\n\";\n";
+                }
+                if ($cd->usesBag()) {
+                    $body .= "    foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
+                        . "      \$out = \$out . \$pad . '    [' . \$bk . '] => ' . __mir_print_r_str(\$bv, \$indent + 8) . \"\\n\";\n"
+                        . "    }\n";
+                }
+                $body .= "    return \$out . \$pad . \")\\n\";\n";
+            }
+            $body .= "  }\n  return '';\n}\n";
+            $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad);\n";
+            $arm = $arm + 1;
+        }
+        $dispatch .= "  }\n";
+        // A closure carries no property table; everything else left is a
+        // dynamic (stdClass / bag) object.
+        $dispatch .= "  if (\$v instanceof \\Closure) { return \"Closure Object\\n\" . \$pad . \"(\\n\" . \$pad . \")\\n\"; }\n"
+            . "  return __mir_print_r_obj_map(get_class(\$v) . ' Object', \\__mir_obj_bag(\$v), \$indent, \$pad);\n}\n";
+        return $body . $dispatch;
     }
 
     /**

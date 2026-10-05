@@ -1085,6 +1085,18 @@ final class LowerFromAst implements Pass
             }
         }
 
+        // print_r()'s object arm — same point and pattern as __mir_dump_object.
+        if ($this->includePrintR) {
+            $prProg = \Parser\Parser::parseSource("<?php\n" . $this->printRObjectSrc());
+            foreach ($prProg->statements as $pstmt) {
+                if ($pstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$pstmt->decl->name] = $pstmt->decl;
+                $pfn = $this->lowerFunction($pstmt->decl);
+                $pfn->isPrelude = true;
+                $module->addFunction($pfn);
+            }
+        }
+
         // var_export()'s object arm — same point and pattern as
         // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
         // does NOT call that method from var_export, and neither does this.

@@ -6,7 +6,7 @@ object(Manticore\Ds\Int16Array)#1 (3) {
   [2]=>
   int(300)
 }
-Array
+Manticore\Ds\Int16Array Object
 (
     [0] => 1
     [1] => -2
