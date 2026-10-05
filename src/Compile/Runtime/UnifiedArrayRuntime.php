@@ -161,6 +161,7 @@ final class UnifiedArrayRuntime
         $this->emitPosInt();
         $this->emitPosStr();
         $this->emitUnsetStr();
+        $this->emitUnsetStrAt();
         $this->emitUnsetInt();
         $this->emitUnsetAt();
         $this->emitCopy();
@@ -2836,7 +2837,18 @@ final class UnifiedArrayRuntime
         $next = $fn->block('next');
         $hit = $fn->block('hit');
 
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $retzero, $chk);
+        // A canonical int-string key reads the INT key, as `isset` / `??` do
+        // ({@see emitLookupStr}); a miss there still probes the string spelling.
+        $canonInt = $fn->block('canon_int');
+        $canonHit = $fn->block('canon_hit');
+        $fb = $fn->block('first_byte');
+        $outSlot = $e->alloca(Type::i64(), 'canon_out');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $retzero, $fb);
+        $this->canonKeyProbe($fn, $fb, $key, $haveHash, $outSlot, $canonInt, $chk);
+        $cmiss = Value::global(Type::ptr(), MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL);
+        $ci = $canonInt->call('__mir_array_lookup_int', Type::ptr(), [$arr, $canonInt->load(Type::i64(), $outSlot)]);
+        $canonInt->brIf($canonInt->icmp('ne', $ci, $cmiss), $canonHit, $chk);
+        $canonHit->ret($canonHit->load(Type::i64(), $ci));
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
@@ -5909,6 +5921,29 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * The read side of php's key normalisation, shared by every string-keyed
+     * reader and by unset: a dynamic string key that spells a canonical int
+     * ("-?[1-9][0-9]*|0" within int range) addresses the INT key. Wires `from`
+     * to `canonInt` (with the value in `outSlot`) when it does, else to `chk`.
+     * A literal key was folded at lowering (haveHash != 0) and a key whose first
+     * byte is not a digit or '-' bails after one load.
+     */
+    private function canonKeyProbe(FunctionDef $fn, Block $from, Value $key, Value $haveHash, Value $outSlot, Block $canonInt, Block $chk): void
+    {
+        $nn = $fn->block('key_nonnull');
+        $nn2 = $fn->block('key_probe');
+        $canon = $fn->block('canon');
+        $from->brIf($from->icmp('eq', $key, Value::null()), $chk, $nn);
+        $nn->brIf($nn->icmp('eq', $haveHash, Value::int(Type::i64(), 0)), $nn2, $chk);
+        $b1 = $nn2->load(Type::i8(), $key);
+        $d1 = $nn2->and_($nn2->icmp('uge', $b1, Value::int(Type::i8(), 48)), $nn2->icmp('ule', $b1, Value::int(Type::i8(), 57)));
+        $m1 = $nn2->icmp('eq', $b1, Value::int(Type::i8(), 45));
+        $nn2->brIf($nn2->or_($d1, $m1), $canon, $chk);
+        $cr = $canon->call('__mir_str_canon_int', Type::i64(), [$key, $outSlot]);
+        $canon->brIf($canon->icmp('ne', $cr, Value::int(Type::i64(), 0)), $canonInt, $chk);
+    }
+
+    /**
      * `__mir_array_lookup_str(arr, key, hash, haveHash) -> ptr` — the string-key
      * twin of {@see emitLookupInt}: the address of the value word, or the miss
      * word. PACKED has no string keys.
@@ -5936,7 +5971,6 @@ final class UnifiedArrayRuntime
         $next = $fn->block('next');
         $hit = $fn->block('hit');
         $z = $fn->block('z');
-        $canon = $fn->block('canon');
         $canonInt = $fn->block('canon_int');
         $fb = $fn->block('first_byte');
         $outSlot = $e->alloca(Type::i64(), 'canon_out');
@@ -5946,16 +5980,7 @@ final class UnifiedArrayRuntime
         // A literal key was folded at lowering (haveHash != 0) and a key that
         // cannot start a number (first byte not a digit or '-') bails after one
         // load, so the common string probe pays a byte compare.
-        $nn = $fn->block('key_nonnull');
-        $fb->brIf($fb->icmp('eq', $key, Value::null()), $chk, $nn);
-        $nn2 = $fn->block('key_probe');
-        $nn->brIf($nn->icmp('eq', $haveHash, Value::int(Type::i64(), 0)), $nn2, $chk);
-        $b1 = $nn2->load(Type::i8(), $key);
-        $d1 = $nn2->and_($nn2->icmp('uge', $b1, Value::int(Type::i8(), 48)), $nn2->icmp('ule', $b1, Value::int(Type::i8(), 57)));
-        $m1 = $nn2->icmp('eq', $b1, Value::int(Type::i8(), 45));
-        $nn2->brIf($nn2->or_($d1, $m1), $canon, $chk);
-        $cr = $canon->call('__mir_str_canon_int', Type::i64(), [$key, $outSlot]);
-        $canon->brIf($canon->icmp('ne', $cr, Value::int(Type::i64(), 0)), $canonInt, $chk);
+        $this->canonKeyProbe($fn, $fb, $key, $haveHash, $outSlot, $canonInt, $chk);
         $cv = $canonInt->load(Type::i64(), $outSlot);
         // A dynamic string key is stored un-normalised by set_str, so a miss on the
         // int side still falls through to the string probe: both spellings are found.
@@ -6104,6 +6129,34 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_array_unset_str_at(arr, key) -> ptr` — {@see emitUnsetStr} for a base
+     * the caller can write back. A canonical int-string key names an INT key, and
+     * on a PACKED buffer that unset has to promote first ({@see emitUnsetAt}), which
+     * relocates. A separate SYMBOL for the reason {@see emitUnsetAt} gives.
+     */
+    private function emitUnsetStrAt(): void
+    {
+        $fn = $this->module->func('__mir_array_unset_str_at', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $key = $fn->param(Type::ptr(), 'key');
+        $e = $fn->block('entry');
+        $fb = $fn->block('first_byte');
+        $canonInt = $fn->block('canon_int');
+        $str = $fn->block('str');
+        $done = $fn->block('done');
+        $outSlot = $e->alloca(Type::i64(), 'canon_out');
+        $nuSlot = $e->alloca(Type::ptr(), 'nu');
+        $e->store($arr, $nuSlot);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $fb);
+        $this->canonKeyProbe($fn, $fb, $key, Value::int(Type::i64(), 0), $outSlot, $canonInt, $str);
+        $canonInt->store($canonInt->call('__mir_array_unset_at', Type::ptr(), [$arr, $canonInt->load(Type::i64(), $outSlot)]), $nuSlot);
+        $canonInt->br($str);
+        $str->call('__mir_array_unset_str', Type::void(), [$str->load(Type::ptr(), $nuSlot), $key]);
+        $str->br($done);
+        $done->ret($done->load(Type::ptr(), $nuSlot));
+    }
+
+    /**
      * `__mir_array_unset_str(arr, key) -> void` — delete the KIND_STRING
      * entry matching `key`: slide the tail entries down one, decr len.
      * No-op on PACKED / NULL / miss. Key rc not dropped yet (Stage 3).
@@ -6147,7 +6200,19 @@ final class UnifiedArrayRuntime
         $next = $fn->block('next');
         $found = $fn->block('found');
         $done = $fn->block('done');
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $chk);
+        if ($isStr) {
+            // A canonical int-string key names the INT key ({@see canonKeyProbe}); a
+            // string spelling an earlier un-normalised store left is removed below.
+            $canonInt = $fn->block('canon_int');
+            $fb = $fn->block('first_byte');
+            $outSlot = $e->alloca(Type::i64(), 'canon_out');
+            $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $fb);
+            $this->canonKeyProbe($fn, $fb, $key, Value::int(Type::i64(), 0), $outSlot, $canonInt, $chk);
+            $canonInt->call('__mir_array_unset_int', Type::void(), [$arr, $canonInt->load(Type::i64(), $outSlot)]);
+            $canonInt->br($chk);
+        } else {
+            $e->brIf($e->icmp('eq', $arr, Value::null()), $done, $chk);
+        }
         // HASHED only (flags != 0); PACKED is a no-op.
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $len = $chk->load(Type::i64(), $arr);

@@ -531,7 +531,7 @@ trait EmitLlvmExpr
         $out .= "  %isstr = icmp eq i64 %tag, 4\n";
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret ptr %arr\n";
+        $out .= "  %r3 = call ptr @__mir_array_unset_str_at(ptr %arr, ptr %kp)\n  ret ptr %r3\n";
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r = call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)\n  ret ptr %r\n}\n";
 

@@ -5985,6 +5985,17 @@ trait EmitLlvmObjects
                     } elseif ($keyIsCell) {
                         $this->rt->needsCellKey = true;
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
+                    } elseif ($keyIsString && $aa->array->kind === Node::KIND_LOAD_LOCAL
+                        && $this->unsetBaseIsWritable($aa->array)) {
+                        // A canonical int-string key unsets the INT key, which on a
+                        // PACKED buffer promotes (relocates) like the int path. A nested
+                        // base keeps the in-place call: its write-back would vivify an
+                        // absent parent (`unset($a['zz']['y'])`).
+                        $r = $this->ssa->allocReg();
+                        $dropArr = $r;
+                        $out .= '  ' . $r . ' = call ptr @__mir_array_unset_str_at(ptr '
+                              . $arrPtr . ', ptr ' . $key . ")\n";
+                        $out .= $this->vecWriteBack($aa->array, $r, $baseCell);
                     } elseif ($keyIsString) {
                         $out .= '  call void @__mir_array_unset_str(ptr ' . $arrPtr . ', ptr ' . $key . ")\n";
                     } elseif ($this->unsetBaseIsWritable($aa->array)) {

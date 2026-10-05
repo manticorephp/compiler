@@ -66,6 +66,8 @@ function array_search(mixed $needle, array $haystack, bool $strict = false): int
 
 function array_key_exists(int|string $key, array $arr): bool
 {
+    // php normalises a canonical decimal string key to an int key.
+    if (\is_string($key) && (string)(int)$key === $key) { $key = (int)$key; }
     foreach ($arr as $k => $_) {
         if ($k === $key) { return true; }
     }
