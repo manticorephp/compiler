@@ -59,6 +59,15 @@ array.
 Appending is amortised O(1) (capacity doubles); an insert or removal in the
 middle is one `memmove` of the tail.
 
+## Cost
+
+`$a[$i]` and `$a[$i] = $v` on a typed array held in a local compile to a bounds
+test plus one load / store of the element width — no call, no boxing. A
+10M-iteration `$a[$i] = $a[$i] + 1` loop over `Int32Array` runs about 4x faster
+than the same loop over a PHP `array<int, int>` (12 ms vs 47 ms, arm64 macOS).
+An index out of range, or a value outside a narrow kind's range, leaves the
+inline path and throws from the method.
+
 ## Semantics
 
 **Index** — as `SplFixedArray`: an `int`; a canonical integer string (`"12"`),
@@ -122,8 +131,10 @@ PHP array element costs.
 
 ## Current limits
 
-- Element access compiles to a method call; the inline load/store for a
-  statically known receiver is not in yet.
+- The inline path needs a receiver held in a local variable, an `int` index
+  built from locals / constants / `+` `-`, and (for a store) a value of the
+  element's own type with no call in it. Anything else is an ordinary
+  `offsetGet` / `offsetSet` call — correct, slower.
 - `json_encode($typedArray)` does not call `jsonSerialize()` yet (issue #94) —
   encode `$a->toArray()`.
 - `print_r($typedArray)` prints no elements (issue #57).

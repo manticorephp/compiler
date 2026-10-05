@@ -1,0 +1,18 @@
+997000
+float(742.5000110641122)
+67
+-128 127 -5 | 255 0 128 | 65535 40000 | 4294967295 3000000000 | -9223372036854775808 9223372036854775807
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+ValueError: Value 200 is out of range for Int8Array (-128..127)
+ValueError: Value -129 is out of range for Int8Array (-128..127)
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+0 0 0
+float(2)
+float(7)
+OutOfBoundsException: Index invalid or out of range
+9 600

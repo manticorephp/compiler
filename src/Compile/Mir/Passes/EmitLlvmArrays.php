@@ -253,6 +253,8 @@ trait EmitLlvmArrays
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
             if ($fast !== null) { return $fast; }
+            $fast = $this->emitNbufGet($aa, $mc);
+            if ($fast !== null) { return $fast; }
             if ($this->fixedArrayIsPlain($aa)) { return $this->emitFixedArrayCallBorrow($mc); }
             return $this->emitMethodCall($mc);
         }
@@ -492,6 +494,269 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    /** The buffer kind (MemoryAbi::BUF_KIND_*) of a `Manticore\Ds` typed-array
+     *  class, 0 for any other class. The classes are final, so the static
+     *  class of a receiver IS its run-time class. */
+    private function nbufKindOf(string $cls): int
+    {
+        if (\strncmp($cls, 'Manticore\\Ds\\', 13) !== 0) { return 0; }
+        $short = \substr($cls, 13);
+        if ($short === 'Int32Array') { return \Compile\MemoryAbi::BUF_KIND_I32; }
+        if ($short === 'Int64Array') { return \Compile\MemoryAbi::BUF_KIND_I64; }
+        if ($short === 'UInt8Array') { return \Compile\MemoryAbi::BUF_KIND_U8; }
+        if ($short === 'UInt16Array') { return \Compile\MemoryAbi::BUF_KIND_U16; }
+        if ($short === 'UInt32Array') { return \Compile\MemoryAbi::BUF_KIND_U32; }
+        if ($short === 'Int8Array') { return \Compile\MemoryAbi::BUF_KIND_I8; }
+        if ($short === 'Int16Array') { return \Compile\MemoryAbi::BUF_KIND_I16; }
+        if ($short === 'Float64Array') { return \Compile\MemoryAbi::BUF_KIND_F64; }
+        if ($short === 'Float32Array') { return \Compile\MemoryAbi::BUF_KIND_F32; }
+        if ($short === 'BitArray') { return \Compile\MemoryAbi::BUF_KIND_BIT; }
+        return 0;
+    }
+
+    /** The LLVM element type of a raw buffer kind ('' for BIT, which packs). */
+    private function nbufElemTy(int $kind): string
+    {
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_I8 || $kind === \Compile\MemoryAbi::BUF_KIND_U8) { return 'i8'; }
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_I16 || $kind === \Compile\MemoryAbi::BUF_KIND_U16) { return 'i16'; }
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_I32 || $kind === \Compile\MemoryAbi::BUF_KIND_U32) { return 'i32'; }
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_I64) { return 'i64'; }
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_F32) { return 'float'; }
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_F64) { return 'double'; }
+        return '';
+    }
+
+    /** An expression the slow arm of an inline element store may evaluate a
+     *  second time: no call, no write — locals, constants, arithmetic and
+     *  element reads over those. */
+    private function nbufPureExpr(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_INT_CONST
+            || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_BOOL_CONST) { return true; }
+        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
+            || $k === Node::KIND_NEG || $k === Node::KIND_ARRAY_ACCESS) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if (!$this->nbufPureExpr($c)) { return false; }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * The shared head of an inline typed-array access: load the buffer handle
+     * out of `$obj`, test `$idx` against its length, and leave the data
+     * pointer in `$data` and the in-range bit in `$inb`. A null handle (an
+     * object whose constructor never ran) reads length 0.
+     */
+    private function nbufProbe(string $obj, int $off, string $idx, string &$data, string &$inb): string
+    {
+        $hp = $this->ssa->allocReg();
+        $out = '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$off . "\n";
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = load i64, ptr ' . $hp . "\n";
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $h . ", 0\n";
+        $hptr = $this->ssa->allocReg();
+        $out .= '  ' . $hptr . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $safe = $this->ssa->allocReg();
+        $out .= '  ' . $safe . ' = select i1 ' . $nz . ', ptr ' . $hptr . ", ptr @__mir_zero_word\n";
+        $lp = $this->ssa->allocReg();
+        $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $safe . ', i64 '
+              . (string)\Compile\MemoryAbi::BUF_LEN_OFFSET . "\n";
+        $len = $this->ssa->allocReg();
+        $out .= '  ' . $len . ' = load i64, ptr ' . $lp . "\n";
+        $inb = $this->ssa->allocReg();
+        $out .= '  ' . $inb . ' = icmp ult i64 ' . $idx . ', ' . $len . "\n";
+        $data = $this->ssa->allocReg();
+        $out .= '  ' . $data . ' = getelementptr inbounds i8, ptr ' . $hptr . ', i64 '
+              . (string)\Compile\MemoryAbi::BUF_DATA_OFFSET . "\n";
+        return $out;
+    }
+
+    /**
+     * `$a[$i]` on a `Manticore\Ds` typed array held in a local, with a pure
+     * int index: a bounds test and a load of the element width, in place. Out
+     * of range runs `offsetGet`, which throws php's error. The element is a
+     * raw scalar, so nothing is owned. null when the shape does not apply.
+     */
+    private function emitNbufGet(ArrayAccess_ $aa, \Compile\Mir\MethodCall_ $mc): ?string
+    {
+        $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
+        $kind = $this->nbufKindOf($cls);
+        if ($kind === 0) { return null; }
+        if ($aa->index->type->kind !== Type::KIND_INT) { return null; }
+        if ($aa->array->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($aa->index)) { return null; }
+        if (!isset($this->classes[$cls])) { return null; }
+        $off = $this->classes[$cls]->propertyOffset('__mcbuf');
+        if ($off < 0) { return null; }
+        $ty = $this->nbufElemTy($kind);
+        $isF = $ty === 'float' || $ty === 'double';
+        $resTy = $isF ? 'double' : 'i64';
+        $out = $this->emitNode($aa->array);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($aa->index);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        $data = '';
+        $inb = '';
+        $out .= $this->nbufProbe($obj, $off, $idx, $data, $inb);
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = alloca ' . $resTy . "\n";
+        $fastL = $this->ssa->allocLabel('nbuf.fast');
+        $slowL = $this->ssa->allocLabel('nbuf.slow');
+        $endL = $this->ssa->allocLabel('nbuf.end');
+        $out .= '  br i1 ' . $inb . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $v = $this->ssa->allocReg();
+        if ($ty === '') {
+            $wi = $this->ssa->allocReg();
+            $out .= '  ' . $wi . ' = lshr i64 ' . $idx . ", 6\n";
+            $wp = $this->ssa->allocReg();
+            $out .= '  ' . $wp . ' = getelementptr inbounds i64, ptr ' . $data . ', i64 ' . $wi . "\n";
+            $wv = $this->ssa->allocReg();
+            $out .= '  ' . $wv . ' = load i64, ptr ' . $wp . "\n";
+            $bi = $this->ssa->allocReg();
+            $out .= '  ' . $bi . ' = and i64 ' . $idx . ", 63\n";
+            $sh = $this->ssa->allocReg();
+            $out .= '  ' . $sh . ' = lshr i64 ' . $wv . ', ' . $bi . "\n";
+            $out .= '  ' . $v . ' = and i64 ' . $sh . ", 1\n";
+        } else {
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = getelementptr inbounds ' . $ty . ', ptr ' . $data . ', i64 ' . $idx . "\n";
+            if ($ty === 'i64' || $ty === 'double') {
+                $out .= '  ' . $v . ' = load ' . $ty . ', ptr ' . $ep . "\n";
+            } else {
+                $raw = $this->ssa->allocReg();
+                $out .= '  ' . $raw . ' = load ' . $ty . ', ptr ' . $ep . "\n";
+                $signed = $kind === \Compile\MemoryAbi::BUF_KIND_I8 || $kind === \Compile\MemoryAbi::BUF_KIND_I16
+                    || $kind === \Compile\MemoryAbi::BUF_KIND_I32;
+                $ext = $ty === 'float' ? 'fpext' : ($signed ? 'sext' : 'zext');
+                $out .= '  ' . $v . ' = ' . $ext . ' ' . $ty . ' ' . $raw . ' to ' . $resTy . "\n";
+            }
+        }
+        $out .= '  store ' . $resTy . ' ' . $v . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $this->emitMethodCall($mc);
+        $out .= $isF ? $this->coerceTo('double') : $this->coerceToI64();
+        $out .= '  store ' . $resTy . ' ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load ' . $resTy . ', ptr ' . $slot . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = $resTy;
+        return $out;
+    }
+
+    /**
+     * `$a[$i] = $v` on a `Manticore\Ds` typed array held in a local, with a
+     * pure int index and a pure value of the element's own type: bounds test,
+     * the range test of a narrow int kind, and a store of the element width.
+     * A failed test runs `offsetSet` — which re-evaluates `$v` (hence pure)
+     * and throws php's error. null when the shape does not apply.
+     */
+    private function emitNbufSet(Node $arr, Node $index, Node $value, \Compile\Mir\MethodCall_ $mc): ?string
+    {
+        $cls = \ltrim((string)($arr->type->class ?? ''), '\\');
+        $kind = $this->nbufKindOf($cls);
+        if ($kind === 0) { return null; }
+        if ($index->type->kind !== Type::KIND_INT) { return null; }
+        if ($arr->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($index) || !$this->nbufPureExpr($value)) { return null; }
+        $ty = $this->nbufElemTy($kind);
+        $isF = $ty === 'float' || $ty === 'double';
+        $vk = $value->type->kind;
+        if ($ty === '') {
+            if ($vk !== Type::KIND_BOOL) { return null; }
+        } elseif ($isF) {
+            if ($vk !== Type::KIND_FLOAT && $vk !== Type::KIND_INT) { return null; }
+        } elseif ($vk !== Type::KIND_INT) {
+            return null;
+        }
+        if (!isset($this->classes[$cls])) { return null; }
+        $off = $this->classes[$cls]->propertyOffset('__mcbuf');
+        if ($off < 0) { return null; }
+        $out = $this->emitNode($arr);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($index);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        $out .= $this->emitNode($value);
+        $out .= $isF ? $this->coerceTo('double') : $this->coerceToI64();
+        $val = $this->lastValue;
+        $data = '';
+        $ok = '';
+        $out .= $this->nbufProbe($obj, $off, $idx, $data, $ok);
+        $lo = 0;
+        $hi = 0;
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_I8) { $lo = -128; $hi = 127; }
+        elseif ($kind === \Compile\MemoryAbi::BUF_KIND_I16) { $lo = -32768; $hi = 32767; }
+        elseif ($kind === \Compile\MemoryAbi::BUF_KIND_I32) { $lo = -2147483648; $hi = 2147483647; }
+        elseif ($kind === \Compile\MemoryAbi::BUF_KIND_U8) { $hi = 255; }
+        elseif ($kind === \Compile\MemoryAbi::BUF_KIND_U16) { $hi = 65535; }
+        elseif ($kind === \Compile\MemoryAbi::BUF_KIND_U32) { $hi = 4294967295; }
+        if ($hi !== 0) {
+            // One unsigned compare: (v - lo) <= (hi - lo).
+            $sh = $this->ssa->allocReg();
+            $out .= '  ' . $sh . ' = sub i64 ' . $val . ', ' . (string)$lo . "\n";
+            $fit = $this->ssa->allocReg();
+            $out .= '  ' . $fit . ' = icmp ule i64 ' . $sh . ', ' . (string)($hi - $lo) . "\n";
+            $both = $this->ssa->allocReg();
+            $out .= '  ' . $both . ' = and i1 ' . $ok . ', ' . $fit . "\n";
+            $ok = $both;
+        }
+        $fastL = $this->ssa->allocLabel('nbufset.fast');
+        $slowL = $this->ssa->allocLabel('nbufset.slow');
+        $endL = $this->ssa->allocLabel('nbufset.end');
+        $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        if ($ty === '') {
+            $wi = $this->ssa->allocReg();
+            $out .= '  ' . $wi . ' = lshr i64 ' . $idx . ", 6\n";
+            $wp = $this->ssa->allocReg();
+            $out .= '  ' . $wp . ' = getelementptr inbounds i64, ptr ' . $data . ', i64 ' . $wi . "\n";
+            $wv = $this->ssa->allocReg();
+            $out .= '  ' . $wv . ' = load i64, ptr ' . $wp . "\n";
+            $bi = $this->ssa->allocReg();
+            $out .= '  ' . $bi . ' = and i64 ' . $idx . ", 63\n";
+            $mask = $this->ssa->allocReg();
+            $out .= '  ' . $mask . ' = shl i64 1, ' . $bi . "\n";
+            $inv = $this->ssa->allocReg();
+            $out .= '  ' . $inv . ' = xor i64 ' . $mask . ", -1\n";
+            $on = $this->ssa->allocReg();
+            $out .= '  ' . $on . ' = or i64 ' . $wv . ', ' . $mask . "\n";
+            $offw = $this->ssa->allocReg();
+            $out .= '  ' . $offw . ' = and i64 ' . $wv . ', ' . $inv . "\n";
+            $nzv = $this->ssa->allocReg();
+            $out .= '  ' . $nzv . ' = icmp ne i64 ' . $val . ", 0\n";
+            $nw = $this->ssa->allocReg();
+            $out .= '  ' . $nw . ' = select i1 ' . $nzv . ', i64 ' . $on . ', i64 ' . $offw . "\n";
+            $out .= '  store i64 ' . $nw . ', ptr ' . $wp . "\n";
+        } else {
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = getelementptr inbounds ' . $ty . ', ptr ' . $data . ', i64 ' . $idx . "\n";
+            if ($ty === 'i64' || $ty === 'double') {
+                $out .= '  store ' . $ty . ' ' . $val . ', ptr ' . $ep . "\n";
+            } else {
+                $nv = $this->ssa->allocReg();
+                $out .= '  ' . $nv . ' = ' . ($ty === 'float' ? 'fptrunc double ' : 'trunc i64 ') . $val . ' to ' . $ty . "\n";
+                $out .= '  store ' . $ty . ' ' . $nv . ', ptr ' . $ep . "\n";
+            }
+        }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $this->emitMethodCall($mc);
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** A local, a constant, or `+`/`-` over them: safe to evaluate twice. */
     private function pureIntExpr(Node $n): bool
     {
@@ -709,6 +974,8 @@ trait EmitLlvmArrays
         if ($se->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($se->array->type->class ?? '', 'ArrayAccess')) {
             $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$se->index, $se->value], Type::void());
+            $fast = $this->emitNbufSet($se->array, $se->index, $se->value, $mc);
+            if ($fast !== null) { return $fast; }
             return $this->emitMethodCall($mc);
         }
         return $this->emitStoreElementUnified($se);

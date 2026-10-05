@@ -124,8 +124,9 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
 - **`Manticore\Ds` — typed fixed-width arrays** (`docs/ds.md`). `Int8Array` … `Int64Array`,
   `UInt8Array` … `UInt32Array`, `Float32Array`/`Float64Array`, `BitArray` over one native
   buffer runtime (`__mc_nbuf_*`, `MemoryAbi::BUF_*`); no silent wrap; the same source is the
-  `manticorephp/ds` Zend polyfill and the oracle. Open: inline element access for a known
-  receiver, `SplFixedArray` on the same buffer (after the ownership epic lands).
+  `manticorephp/ds` Zend polyfill and the oracle. Element access on a local
+  receiver is inline (bounds test + width load/store). Open: `SplFixedArray` on the same
+  buffer (after the ownership epic lands), `#[TypeDef(repr)]` element types.
 - **`serialize` / `unserialize` + magic methods** — `__serialize`/`__unserialize`,
   `allowed_classes`, `__PHP_Incomplete_Class`, `__debugInfo`, `var_export` of objects, and
   `__get`/`__set`/`__isset`/`__unset`/`__call` firing on an **erased** receiver.
