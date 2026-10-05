@@ -1188,6 +1188,22 @@ final class UnifiedArrayRuntime
         $go->store(Value::int(Type::i64(), 1), $this->hdr($go, $copy, MemoryAbi::ARRAY_RC_OFFSET));
         $go->store(Value::int(Type::i64(), 0), $this->hdr($go, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
         $go->store(Value::null(), $this->hdr($go, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        // The copy holds the same entries at the same positions, so the source's
+        // bucket index (entry_index + 1 per slot) is valid for it verbatim:
+        // duplicate it instead of leaving the copy to rebuild on its first lookup.
+        $srcNb = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $srcBk = $go->load(Type::ptr(), $this->hdr($go, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $hasIdx = $fn->block('copy_idx');
+        $adopt = $fn->block('copy_adopt');
+        $go->brIf($go->icmp('ne', $srcBk, Value::null()), $hasIdx, $adopt);
+        $ibytes = $hasIdx->mul($srcNb, Value::int(Type::i64(), 8));
+        $this->profBucket($hasIdx);
+        $nbk = $this->poolAlloc($hasIdx, $ibytes);
+        $hasIdx->call('memcpy', Type::ptr(), [$nbk, $srcBk, $ibytes]);
+        $hasIdx->store($nbk, $this->hdr($hasIdx, $copy, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        $hasIdx->store($srcNb, $this->hdr($hasIdx, $copy, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $hasIdx->br($adopt);
+        $go = $adopt;
         // A VALUE copy owns its keys and elements: its release drops them
         // whatever the source does. Adopt by the buffer's element hint — what
         // the slots actually hold, the key every flavored release walks by —
