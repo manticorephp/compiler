@@ -1,4 +1,2 @@
-DivisionByZeroError: intdiv viaDiv
-TypeError: f viaType
-TypeError: __construct viaIter
-ValueError: str_repeat viaRepeat
+DivisionByZeroError: viaMod
+DivisionByZeroError: viaMod viaNested

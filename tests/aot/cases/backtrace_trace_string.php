@@ -1,15 +1,15 @@
 <?php
 class A {
-    public static function s(int $n) { return (new A)->m($n); }
-    public function m(int $n) {
-        $f = function () use ($n) { throw new RuntimeException("boom $n"); };
-        return $f();
-    }
+    public static function s() { return (new A)->m(); }
+    public function m() { return B::t(); }
 }
-function chain(int $n) { return A::s($n); }
+class B {
+    public static function t() { throw new RuntimeException("boom"); }
+}
+function chain() { return A::s(); }
 
 try {
-    chain(1);
+    chain();
 } catch (Exception $e) {
     echo $e->getTraceAsString(), "\n";
     echo preg_replace('#\S*/backtrace_trace_string\.php#', 'FILE', (string)$e), "\n";
@@ -21,11 +21,11 @@ try {
 
 function outer() {
     try {
-        chain(2);
+        chain();
     } catch (Exception $e) {
         echo "inner ", count($e->getTrace()), "\n";
         try {
-            chain(3);
+            chain();
         } catch (Exception $e2) {
             echo "nested ", count($e2->getTrace()), "\n";
         }
@@ -39,7 +39,7 @@ try {
     echo count($e->getTrace()), "\n";
 }
 try {
-    chain(4);
+    chain();
 } catch (Exception $e) {
     echo count($e->getTrace()), "\n";
 }
