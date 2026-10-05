@@ -2631,6 +2631,7 @@ function cmd_compile(array $args): int
     $gc = is_darwin()
         ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak) . darwin_export_flags()
         : " -Wl,--gc-sections -lm";
+    $gc = $gc . unwind_link_flags();
     $asNeeded = is_darwin() ? "" : " -Wl,--as-needed";
     $rc2 = system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
     if ($rc2 !== 0) {
@@ -2699,6 +2700,20 @@ function target_os_family(): string
     $os = host_os();
     return \substr($os, 0, 6) === 'Darwin' ? 'Darwin'
         : (\substr($os, 0, 5) === 'Linux' ? 'Linux' : $os);
+}
+
+/**
+ * Where the unwinder (`_Unwind_RaiseException` & co., which every PHP throw goes
+ * through — {@see \Compile\Runtime\UnwindRuntime}) comes from at link time.
+ *
+ * Darwin: libSystem carries libunwind, nothing to add. Linux (glibc and musl):
+ * `-static-libgcc` links libgcc_eh.a into the binary instead of the default
+ * dynamic `libgcc_s.so.1`, so a binary gains no runtime dependency it did not
+ * have before (docs/audit/ownership/eh-spike.md).
+ */
+function unwind_link_flags(): string
+{
+    return is_darwin() ? "" : " -static-libgcc";
 }
 
 /** True when the compile target is Darwin/macOS. */
@@ -3601,7 +3616,7 @@ function build_compile_module(
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
-    $linkExtra = $linkExtra . thinlto_link_flags();
+    $linkExtra = $linkExtra . thinlto_link_flags() . unwind_link_flags();
     // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.

@@ -29,13 +29,6 @@ final class GeneratorContext
     /** SSA ptr to the frame's `retval` word (return value for getReturn()). */
     public string $retvalPtr = '';
     /**
-     * SSA ptr to an ENTRY-BLOCK alloca holding the jmp depth this invocation was
-     * entered with — the consumer's. A resumed generator re-arms its trys and so
-     * raises the global depth; every suspend puts it back, or the slot it armed
-     * outlives the suspension and catches an exception meant for someone else.
-     */
-    public string $entryDepthPtr = '';
-    /**
      * SSA reg: the arena mark-stack depth this invocation was entered with. A
      * generator body pushes no mark of its own, so everything above it at a
      * catch landing belongs to frames the throw unwound; '' without a try.

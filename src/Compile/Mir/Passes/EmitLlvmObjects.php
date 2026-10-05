@@ -6303,7 +6303,7 @@ trait EmitLlvmObjects
                 ], Type::obj('ValueError')),
                 Type::void(),
             );
-            // emitNode(Throw_) longjmps + `unreachable`, then leaves a trailing
+            // emitNode(Throw_) raises + `unreachable`, then leaves a trailing
             // empty `dead.N:` block — terminate it into `done` so the label that
             // follows is well-formed (the branch is itself dead: the throw never
             // returns). `res` is unset on this path but never loaded live.

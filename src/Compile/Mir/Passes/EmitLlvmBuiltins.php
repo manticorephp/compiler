@@ -7054,7 +7054,7 @@ trait EmitLlvmBuiltins
             Type::void(),
         );
         $out = $this->emitNode($throw);
-        // The throw longjmps and never returns, so nothing consumes this — but
+        // The throw never returns, so nothing consumes this — but
         // the expression still has to leave a well-typed value behind for the
         // consumer the type system thinks exists.
         $this->lastValue = '0';

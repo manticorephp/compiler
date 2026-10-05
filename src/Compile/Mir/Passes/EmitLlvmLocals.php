@@ -102,22 +102,10 @@ use Codegen\Llvm\Module as LlvmModule;
  */
 trait EmitLlvmLocals
 {
-    /**
-     * One local's frame slot. In a function that contains a `try` the slot is
-     * PINNED to memory: an empty `asm sideeffect` taking the pointer is a user
-     * that is not a load or a store, which is exactly what mem2reg/SROA refuse
-     * to promote past — and it assembles to nothing. Without it `-O2` keeps the
-     * local in a callee-saved register and `_longjmp` restores that register to
-     * its value at the `setjmp`, so the catch path reads whatever the local held
-     * BEFORE the try ({@see \Compile\Mir\LocalSlots::$sjljPinAll}).
-     */
+    /** One local's frame slot. */
     private function localSlotAlloca(string $slot): string
     {
-        $out = '  ' . $slot . " = alloca i64\n";
-        if ($this->locals->sjljPinAll) {
-            $out .= '  call void asm sideeffect "", "r"(ptr ' . $slot . ")\n";
-        }
-        return $out;
+        return '  ' . $slot . " = alloca i64\n";
     }
 
     /**

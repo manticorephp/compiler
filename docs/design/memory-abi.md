@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **11** (v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **15** (v15: zero-cost exception object, §7b; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -402,6 +402,37 @@ Invariants worth stating out loud:
 * `MANTICORE_DEBUG_VERIFY=1` poisons word +8 of a freed block (cleared on alloc)
   and aborts by name on a double free — libc used to catch those for us, and a
   pooled double free would otherwise just cycle a free list, silently.
+
+## 7b. Exception object (ABI v15)
+
+A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.php`).
+`@__mc_throw(obj)` mallocs one exception object per raise and hands it to
+`_Unwind_RaiseException`:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | `exception_class` = `MemoryAbi::EXC_CLASS` (`"MNTCPHP\0"`) |
+| 8 | 8 | `exception_cleanup` = null (the landing pad frees the object) |
+| 16 | 8 | `private_1` (unwinder) |
+| 24 | 8 | `private_2` (unwinder) |
+| 32 | 8 | payload: the Throwable's address, owning one reference |
+
+`EXC_HEADER_SIZE` = 32 (the `_Unwind_Exception` header on every 64-bit target),
+`EXC_PAYLOAD_OFFSET` = 32, `EXC_SIZE` = 48.
+
+- Personality `@__mc_personality` (own, so no binary links a C++ runtime) reads only the
+  LSDA call-site table: action ≠ 0 is a PHP catch pad (`catch ptr @__mc_typeinfo`) and
+  takes only `EXC_CLASS`; action 0 is a cleanup pad and runs for any exception.
+- Every catch pad starts with `@__mc_eh_catch(ex)`: the payload moves into `@__mir_thrown`
+  (which then owns the +1, as before) and the exception object is freed. A rethrow — no
+  catch matched, or a finally re-raising — is a fresh `@__mc_throw`.
+- When the search phase finds no catch pad, `_Unwind_RaiseException` returns having
+  unwound nothing, and `@__mc_throw` calls the uncaught fatal through
+  `@__mc_uncaught_fn` (set by `@main`).
+- Link: Darwin's libSystem carries the unwinder; Linux links `-static-libgcc`
+  (libgcc_eh.a), so no `libgcc_s.so` dependency is added.
+- Fiber context (64 B, `EmitLlvmFiber`): the five arena globals at 0..39, bytes
+  40..55 unused (they held the setjmp try-slot stack before v15), `@__mir_thrown` at 56.
 
 ## 8. Debug and verification
 

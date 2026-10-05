@@ -634,12 +634,11 @@ final class EmitLlvm implements EmitVisitor
         }
         // A program module (not the bundled stdlib) always links stdlib.o, which
         // CAN throw even when the user's own code never does. The exception
-        // runtime — @main's depth:=1 + base landing pad and the process-global
-        // jmp state — is what makes any throw land; gated on the caller's own
+        // runtime — the uncaught-fatal hook @main installs — is what makes an
+        // uncaught throw end in the php fatal; gated on the caller's own
         // `needsExceptions` it would be absent for e.g. `<?php stat($p);`, and a
-        // stdlib throw would then read an uninitialised depth 0 → slot -1 → a bogus
-        // "Maximum try nesting" fatal instead of a clean uncaught error. Force it
-        // on for every program (a lone base setjmp + BSS; no-op if nothing throws).
+        // stdlib throw nobody catches would abort instead. Force it on for every
+        // program (one store in @main; no-op if nothing throws).
         if (!$this->emitLibrary) { $this->rt->needsExceptions = true; }
         $this->pool = new StringPool();
         $this->functionTextCounter = 0;
@@ -2498,22 +2497,15 @@ final class EmitLlvm implements EmitVisitor
         return '  call void @__prof_class(i64 ' . $classIdReg . ")\n";
     }
 
-    /**
-     * `@__mir_uncaught()` — the top-level fatal handler an uncaught throw
-     * longjmps to (base setjmp installed in @main). Renders PHP's
-     * `PHP Fatal error:  Uncaught <Class>: <message>` to stderr and exits 255.
-     * Class name comes from a runtime class_id switch; the message is the
-     * Throwable's first property (`message`, same offset for every Throwable).
-     */
     /** True if `$n` (or a descendant) throws or has a try-catch. */
     private function scanUsesExceptions(Node $n): bool
     {
         if ($n->kind === Node::KIND_THROW || $n->kind === Node::KIND_TRY_CATCH) {
             return true;
         }
-        // `Enum::from($v)` synthesizes a `throw ValueError` on a miss — the base
-        // landing pad must be set up so an uncaught miss exits 255, not longjmp
-        // to garbage. (tryFrom never throws.)
+        // `Enum::from($v)` synthesizes a `throw ValueError` on a miss — the
+        // uncaught hook must be installed so an uncaught miss exits 255.
+        // (tryFrom never throws.)
         if ($n->kind === Node::KIND_STATIC_CALL) {
             if ($n->method === 'from' && isset($this->enums[$n->class])) { return true; }
         }

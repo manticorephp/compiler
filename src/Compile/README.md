@@ -133,8 +133,8 @@ a "trait" here is a file-level split of one emitter, not an independent unit.
   at descriptor offset 0. Single inheritance;
   virtual dispatch is a class-id chain collapsing to a direct call when
   one concrete class is reachable.
-- Exceptions use setjmp/longjmp + a process-global thrown slot. No
-  `__cxa_throw`. Injected Throwable/Exception/Error hierarchy.
+- Exceptions are zero-cost Itanium unwinding with an own personality
+  (`Runtime/UnwindRuntime.php`): no `__cxa_throw`, no C++ runtime. Injected Throwable/Exception/Error hierarchy.
 - Self-host constraints shape the code: kind-discriminant dispatch over
   `instanceof` (bare short-name collisions across namespaces), return-value
   accumulators over `string &$out`, type-map held on `$this` over

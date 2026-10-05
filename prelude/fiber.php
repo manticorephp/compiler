@@ -5,11 +5,10 @@
 // object's fields, not the asm. DEMAND-GATED (Main.php): compiled only when a
 // program mentions Fiber, so the fiber-free compiler build never emits the asm.
 //
-// The process-global bump arena (cur + a mark stack) and the exception try-slot
-// stack are shared, so a fiber that suspends mid-scope / mid-try would desync
-// main's ⇒ heap corruption / aliased jmp_buf. Each fiber runs on its OWN arena +
-// jmp stack: every jump is bracketed by save(leaving)/load(entering) of the 8
-// context globals (5 arena + jmp_base/depth/thrown). A fresh ctx makes the arena
+// The process-global bump arena (cur + a mark stack) is shared, so a fiber that
+// suspends mid-scope would desync main's ⇒ heap corruption. Each fiber runs on its
+// OWN arena: every jump is bracketed by save(leaving)/load(entering) of the 6
+// context globals (5 arena + the thrown slot). A fresh ctx makes the arena
 // lazily build itself. Nesting works: the "resumer" ctx is the CURRENTLY-running
 // fiber's own ctx (or main's if none), captured per resume in $resumerCtx.
 //
@@ -35,7 +34,7 @@ class Fiber
     private int $resumer = 0;     // fctx to jump back to on suspend/finish
     private int $resumerCtx = 0;  // the resumer's 64B save area (main's or an outer fiber's)
     private int $stackBase = 0;
-    private int $saveCtx = 0;    // this fiber's private arena + jmp save area (64B)
+    private int $saveCtx = 0;    // this fiber's private arena save area (64B)
     private int $state = 0;
     private bool $started = false;
     private mixed $valueIn = null;   // resume($v) -> returned by suspend()

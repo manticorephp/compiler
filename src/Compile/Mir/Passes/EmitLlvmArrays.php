@@ -1648,7 +1648,7 @@ trait EmitLlvmArrays
                 $out .= '  call i64 @manticore___mir_shape_type_error(i64 ' . $given
                       . ', i64 ptrtoint (ptr ' . $this->strRef($where) . ' to i64)'
                       . ', i64 ptrtoint (ptr ' . $this->strRef($expected) . " to i64))\n";
-                // The prelude fn throws (longjmp) and never returns; the edge
+                // The prelude fn throws and never returns; the edge
                 // only satisfies the verifier.
                 $out .= '  br label %' . $contL . "\n";
                 $out .= $contL . ":\n";

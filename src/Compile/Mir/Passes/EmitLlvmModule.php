@@ -527,44 +527,21 @@ trait EmitLlvmModule
             $out .= $this->fiberRuntime();
         }
         if ($this->rt->needsExceptions) {
-            // setjmp/longjmp exception runtime. 16 nested-try slots ×
-            // 512B jmp_buf. The slot stride must exceed the platform's jmp_buf:
-            // macOS arm64 writes 192B, but glibc aarch64 `setjmp` is
-            // `__sigsetjmp(env, 1)` — it saves the 128B signal mask on top of the
-            // 176B register area = ~312B. A 256B stride let slot N's setjmp clobber
-            // the head of slot N+1 (and the tail of slot N-1's saved buffer),
-            // corrupting the base setjmp so a longjmp restored garbage and the
-            // try-depth ran away → spurious "Maximum try nesting (16)". 512 clears
-            // every libc; uniform (no per-OS) — a per-OS minimum belongs to the
-            // target-abi epic. @thrown holds the in-flight exception ptr.
-            // linkonce_odr (NOT internal): exception state is touched by
-            // linkonce_odr runtime helpers; at -O2 those inline into both
-            // user.o + stdlib.o. Per-.o internal copies would split the
-            // jmp/thrown state. These coalesce to one address on both ld64 and GNU
-            // ld — the copies are ONLY safe because @main initialises depth:=1 and
-            // installs the base landing pad. A program that never throws in its own
-            // code but links stdlib.o (which CAN throw) still needs that init, so
-            // the main module force-enables `needsExceptions` (see emit()); without
-            // it a stdlib throw read an uninitialised depth 0 → slot -1 → bogus
-            // "Maximum try nesting" fatal (latent on macOS, where stdlib rarely
-            // throws on the passing paths).
-            $out .= "@__mir_jmp_stack = linkonce_odr global [8192 x i8] zeroinitializer\n";
-            // The active try-slot stack base. Defaults to @__mir_jmp_stack; a
-            // running Fiber swaps it to its own buffer so fiber/main tries at the
-            // same depth don't share a jmp_buf ({@see EmitLlvmFiber}, jmpBufExpr).
-            $out .= "@__mir_jmp_base = linkonce_odr global ptr @__mir_jmp_stack\n";
-            $out .= "@__mir_jmp_depth = linkonce_odr global i64 0\n";
+            // Zero-cost exception runtime ({@see \Compile\Runtime\UnwindRuntime}).
+            // @__mir_thrown holds the exception a catch pad just took off the
+            // unwinder, until the catch binds it or a finally parks it.
+            // linkonce_odr (NOT internal): the stdlib.o and the user .o share
+            // one slot, and one `@__mc_uncaught_fn` — the fatal @main installs.
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
-            $out .= $this->emitJmpSlotGuard();
+            $out .= \Compile\Runtime\UnwindRuntime::ir();
             // `$gen->throw($e)` pending injection: non-null = throw at the
             // next yield resume point (the suspended `yield` expression raises).
             if ($this->gen->throwUsed) {
                 $out .= "@__mir_gen_throw = linkonce_odr global ptr null\n";
             }
-            // Top-level fatal for an UNCAUGHT throw. @main installs a base
-            // setjmp at slot 0 (depth starts at 1 → user tries take slots 1+);
-            // a throw that unwinds past every try longjmps here. Without it a
-            // depth-0 throw computes slot -1 → OOB jmp_buf → UB longjmp. Emitted
+            // Top-level fatal for an UNCAUGHT throw: @main stores it into
+            // `@__mc_uncaught_fn`, which `@__mc_throw` calls when the unwinder's
+            // search phase finds no catch pad on the stack. Emitted
             // ONLY in the module that owns @main (the user program): its class
             // switch is module-specific, so a linkonce_odr copy in stdlib.o
             // (different class table) would be an ODR mismatch.
@@ -981,7 +958,7 @@ trait EmitLlvmModule
         $this->locals->slots = [];
         $this->locals->globalBacked = [];
         $this->locals->globalBackedType = [];
-        $this->locals->sjljPinAll = false;
+        $this->locals->hasTry = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
         $this->arrayHintedRefParams = [];
@@ -994,7 +971,7 @@ trait EmitLlvmModule
         if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);
-        $this->locals->collectSjljPins($fn->body);
+        $this->locals->collectHasTry($fn->body);
         // Top-level (`__main`) vars named in any `global $x` share the
         // same `@g_x` cell so writes are visible inside functions.
         if ($fn->name === '__main') {
@@ -1098,7 +1075,7 @@ trait EmitLlvmModule
             // per-module counters (`__closure_N`); without internal linkage a
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
-            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1157,7 +1134,7 @@ trait EmitLlvmModule
                 $first = false;
                 $paramSig .= 'i64 %arg.' . $p->name;
             }
-            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ") {\nentry:\n";
+            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1929,45 +1906,13 @@ trait EmitLlvmModule
     }
 
     /**
-     * `@__mir_jmp_slot` — slot → byte offset into `@__mir_jmp_stack`, fataling
-     * when the slot is out of range instead of returning an offset that setjmp
-     * would write 192 bytes past the end of.
-     *
-     * Linkage is left to {@see EmitLlvm::linkonceRuntime}, which promotes every
-     * `define` in the preamble to linkonce_odr — an explicit `internal` here
-     * would come out as the invalid `define linkonce_odr internal`. Coalescing
-     * is safe: the body is a pure function of its argument and identical in
-     * every module, exactly like the neighbouring runtime helpers.
+     * `@__mir_uncaught()` — the top-level fatal an uncaught throw ends in
+     * (`@__mc_throw` calls it through `@__mc_uncaught_fn`, which @main sets).
+     * Renders PHP's `PHP Fatal error:  Uncaught <Class>: <message>` to stderr
+     * and exits 255. Class name comes from a runtime class_id switch; the
+     * message is the Throwable's first property (`message`, same offset for
+     * every Throwable).
      */
-    private function emitJmpSlotGuard(): string
-    {
-        $this->libcExtra['exit'] = 'declare void @exit(i32)';
-        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
-        $msg = 'PHP Fatal error:  Maximum try nesting level (16) exceeded';
-        $len = \strlen($msg) + 2; // + "\n" + NUL
-        $out = '@.fmt.jmpof = private unnamed_addr constant [' . (string)$len . ' x i8] c"'
-             . $msg . '\0A\00", align 1' . "\n";
-        $out .= "define i64 @__mir_jmp_slot(i64 %s) {\nentry:\n";
-        $out .= "  %lo = icmp slt i64 %s, 0\n";
-        $out .= "  %hi = icmp sge i64 %s, 16\n";
-        $out .= "  %bad = or i1 %lo, %hi\n";
-        $out .= "  br i1 %bad, label %oflow, label %ok\n";
-        $out .= "oflow:\n";
-        // fd 2 bypasses stdout's stdio buffer; drain it so the fatal line does
-        // not overtake output that logically came first. Emitted only when the
-        // module actually has a funnel — a program with no output has nothing
-        // to drain, and referencing the helper would be an undefined symbol
-        // that link_stubs.sh would quietly resolve to `return 0`.
-        if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
-        $out .= "  %p = call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.jmpof)\n";
-        $out .= "  call void @exit(i32 255)\n";
-        $out .= "  unreachable\n";
-        $out .= "ok:\n";
-        $out .= "  %o = mul i64 %s, 512\n"; // slot stride — must exceed glibc's ~312B setjmp; see @__mir_jmp_stack
-        $out .= "  ret i64 %o\n}\n";
-        return $out;
-    }
-
     private function emitUncaughtHandler(): string
     {
         $this->libcExtra['exit'] = 'declare void @exit(i32)';
@@ -2040,8 +1985,10 @@ trait EmitLlvmModule
         $out .= "print:\n";
         $out .= '  %m = phi ptr [ ' . $empty . ', %named ], [ %msgf, %msg ]' . "\n";
         // Drain stdout before the fd-2 fatal line, so what the program printed
-        // before throwing still comes first. {@see emitJmpSlotGuard} for why
-        // this is conditional.
+        // before throwing still comes first. Only when the module has a funnel:
+        // a program with no output has nothing to drain, and referencing the
+        // helper would be an undefined symbol link_stubs.sh quietly resolves
+        // to `return 0`.
         if ($this->rt->needsOutBuf) { $out .= "  call void @__mir_out_flush()\n"; }
         $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt.uncaught, ptr %cname, ptr %m)\n";
         $out .= "  call void @exit(i32 255)\n";
@@ -2053,20 +2000,12 @@ trait EmitLlvmModule
     {
         $this->rt->needsCliArgv = true;
         $this->frame->isMain = true;
-        $header = "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n";
+        $header = "define i32 @main(i32 %argc, ptr %argv)"
+            . $this->personalityClause() . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
-            // Install the base landing pad: depth 1 reserves slot 0 for this
-            // catch-all, so user tries take slots 1+ and a throw that escapes
-            // them all unwinds here instead of computing an OOB slot -1.
-            $header .= "  store i64 1, ptr @__mir_jmp_depth\n";
-            $header .= "  %__basebuf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
-            $header .= "  %__basesj = call i32 @_setjmp(ptr %__basebuf)\n";
-            $header .= "  %__caught = icmp ne i32 %__basesj, 0\n";
-            $header .= "  br i1 %__caught, label %__uncaught, label %__run\n";
-            $header .= "__uncaught:\n";
-            $header .= "  call void @__mir_uncaught()\n";
-            $header .= "  unreachable\n";
-            $header .= "__run:\n";
+            // A throw no catch pad takes ends in the uncaught fatal: `@__mc_throw`
+            // calls it through this hook, which the stdlib.o copy shares.
+            $header .= "  store ptr @__mir_uncaught, ptr @__mc_uncaught_fn\n";
         }
         if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $header .= "  call i32 @atexit(ptr @__manticore_profile_dump)\n";
@@ -2146,10 +2085,10 @@ trait EmitLlvmModule
         $body .= $this->emitGlobalRuntimeInits();
         $body .= $this->emitNode($fn->body);
         // The destructor sweep runs from atexit, after main's frame is gone, so a
-        // destructor that throws needs a landing pad of its own: the same base
-        // slot main installs. Uncaught there, php prints the fatal and runs no
-        // further destructor.
-        $dsh = "define void @__manticore_dtor_shutdown() {\nentry:\n";
+        // destructor that throws needs a landing pad of its own. Uncaught there,
+        // php prints the fatal and runs no further destructor.
+        $dsh = "define void @__manticore_dtor_shutdown()"
+            . ($this->rt->needsExceptions ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n";
         // Once: exit() inside a destructor re-enters libc's exit, which runs this
         // hook again — that nested run must not resume the sweep (php stops).
         $dsh .= "  %dn = load i64, ptr @__mir_dtor_done\n";
@@ -2161,11 +2100,11 @@ trait EmitLlvmModule
         if ($this->rt->needsExceptions) {
             $dsh .= "  br label %arm\n";
             $dsh .= "arm:\n";
-            $dsh .= "  store i64 1, ptr @__mir_jmp_depth\n";
-            $dsh .= "  %buf = getelementptr inbounds i8, ptr @__mir_jmp_stack, i64 0\n";
-            $dsh .= "  %sj = call i32 @_setjmp(ptr %buf)\n";
-            $dsh .= "  %caught = icmp ne i32 %sj, 0\n";
-            $dsh .= "  br i1 %caught, label %unc, label %run\n";
+            $dsh .= "  invoke void @__mir_dtor_sweep() to label %swept unwind label %lp\n";
+            $dsh .= "swept:\n";
+            $dsh .= "  ret void\n";
+            $dsh .= \Compile\Runtime\UnwindRuntime::catchPad('lp', '%l', '%lx', '%lo');
+            $dsh .= "  br label %unc\n";
             $dsh .= "unc:\n";
             if ($this->needsErrorHandlers) {
                 // A set_exception_handler() takes the Throwable and the sweep
@@ -2178,18 +2117,19 @@ trait EmitLlvmModule
                 $dsh .= "  br i1 %inhn, label %fatal, label %disp\n";
                 $dsh .= "disp:\n";
                 $dsh .= "  store i64 1, ptr @__mir_dtor_inh\n";
-                $dsh .= "  %handled = call i64 @manticore___mc_dispatch_uncaught_keep(i64 %eb)\n";
+                $dsh .= "  %handled = invoke i64 @manticore___mc_dispatch_uncaught_keep(i64 %eb) to label %dispok unwind label %lp\n";
+                $dsh .= "dispok:\n";
                 $dsh .= "  store i64 0, ptr @__mir_dtor_inh\n";
                 $dsh .= "  %washandled = icmp ne i64 %handled, 0\n";
                 $dsh .= "  br i1 %washandled, label %arm, label %fatal\n";
                 $dsh .= "fatal:\n";
             }
             $dsh .= "  call void @__mir_uncaught()\n";
-            $dsh .= "  unreachable\n";
-            $dsh .= "run:\n";
+            $dsh .= "  unreachable\n}\n\n";
+        } else {
+            $dsh .= "  call void @__mir_dtor_sweep()\n";
+            $dsh .= "  ret void\n}\n\n";
         }
-        $dsh .= "  call void @__mir_dtor_sweep()\n";
-        $dsh .= "  ret void\n}\n\n";
         $body .= "  ret i32 0\n";
         return $header . $body . "}\n\n" . $dsh;
     }
@@ -2406,12 +2346,6 @@ trait EmitLlvmModule
                 ? $this->asLoadLocalNode($v)->name : '', $v !== null ? $this->lastValue : '', '');
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
-            // Same slot hand-back as {@see finishReturn} — this branch exits
-            // before it, so a `return` inside a generator's try leaked one slot
-            // per call until the depth hit the 16-slot wall. The reload comes
-            // from the frame: a `yield` in the try means the resume switch
-            // branched past the block that defined the entry reg.
-            $out .= $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();
         }
         // OwnershipFlow's drops run after the value ({@see retLeave}), and
@@ -2685,15 +2619,10 @@ trait EmitLlvmModule
             }
             $this->cf->restoreFinally($saved);
         }
-        // A `return` out of a try branches past the fall-through pop, so the
-        // try's jmp slot would stay claimed for the rest of the PROCESS (the
-        // depth is a global). Give it back — after the finallys above, which run
-        // inside the try region and manage their own depth.
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);
-        $jmp = $this->restoreJmpDepth($this->cf->returnDepthReg(), $this->cf->returnDepthSlot());
-        return $out . $leave . $jmp
+        return $out . $leave
              . '  ret i64 ' . $valReg . "\n" . $this->emitDeadLabel();
     }
 

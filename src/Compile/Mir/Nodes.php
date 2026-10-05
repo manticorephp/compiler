@@ -802,7 +802,7 @@ final class StaticLocalDecl_ extends Node
     }
 }
 
-/** `throw $value` — store + longjmp to the topmost active jmp_buf. */
+/** `throw $value` — `@__mc_throw`: an unwind to the nearest PHP catch pad. */
 final class Throw_ extends Node
 {
     public function __construct(public Node $value, Type $type)
@@ -873,7 +873,7 @@ final class MirCatch
     ) {}
 }
 
-/** `try { } catch { } finally { }` — setjmp/longjmp structured handler. */
+/** `try { } catch { } finally { }` — calls in the body `invoke` the try's landing pad. */
 final class TryCatch_ extends Node
 {
     /**
