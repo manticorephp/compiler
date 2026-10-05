@@ -2793,7 +2793,9 @@ trait EmitLlvmModule
 
     private function arrayHintedEntryMask(\Compile\Mir\Param $p, string $slot): string
     {
-        if ($p->byRef || !$p->arrayHinted || $p->type->kind === Type::KIND_CELL) { return ''; }
+        // A variadic pack is an array whatever its declaration says (the
+        // forwarding `__fa` of an unresolved first-class callable has no hint).
+        if ($p->byRef || !($p->arrayHinted || $p->variadic) || $p->type->kind === Type::KIND_CELL) { return ''; }
         $rw = $this->ssa->allocReg();
         $mk = $this->ssa->allocReg();
         return '  ' . $rw . ' = load i64, ptr ' . $slot . "\n"
