@@ -456,13 +456,28 @@ final class SplitModule
         // copy into the part as well.
         /** @var array<string, bool> */
         $availSet = [];
-        foreach ($mine as $s) {
-            foreach ($defRefs[$s] as $r => $_) {
-                if (isset($availSet[$r]) || !isset($assign[$r]) || $assign[$r] === $p) { continue; }
-                if (($defSize[$r] ?? self::AVAIL_MAX_BYTES + 1) > self::AVAIL_MAX_BYTES) { continue; }
-                if ($this->namesInternal($defRefs[$r], $internal)) { continue; }
-                $availSet[$r] = true;
+        // Transitive: a copied body's own small foreign callees come along too
+        // (depth-capped, per-part byte budget), so a call it inlines onward
+        // does not turn back into a call across the boundary.
+        $availBytes = 0;
+        /** @var string[] */
+        $frontier = $mine;
+        for ($depth = 0; $depth < self::AVAIL_MAX_DEPTH && $frontier !== []; $depth++) {
+            /** @var string[] */
+            $next = [];
+            foreach ($frontier as $s) {
+                foreach ($defRefs[$s] as $r => $_) {
+                    if (isset($availSet[$r]) || !isset($assign[$r]) || $assign[$r] === $p) { continue; }
+                    $sz = $defSize[$r] ?? self::AVAIL_MAX_BYTES + 1;
+                    if ($sz > self::AVAIL_MAX_BYTES) { continue; }
+                    if ($depth > 0 && $availBytes + $sz > self::AVAIL_PART_BYTES) { continue; }
+                    if ($this->namesInternal($defRefs[$r], $internal)) { continue; }
+                    $availSet[$r] = true;
+                    if ($depth > 0) { $availBytes += $sz; }
+                    $next[] = $r;
+                }
             }
+            $frontier = $next;
         }
         /** @var string[] */
         $avail = [];
@@ -937,6 +952,12 @@ final class SplitModule
 
     /** IR bytes up to which another part's callee is copied in `available_externally`. */
     private const AVAIL_MAX_BYTES = 2048;
+
+    /** Transitive depth of the copy closure. */
+    private const AVAIL_MAX_DEPTH = 4;
+
+    /** IR bytes of TRANSITIVE available_externally copies (depth >= 1) one part may take; first-hop copies stay unbounded as before. */
+    private const AVAIL_PART_BYTES = 262144;
 
     /**
      * @param array<string, bool> $refs
