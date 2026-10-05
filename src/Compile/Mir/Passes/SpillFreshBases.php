@@ -93,6 +93,15 @@ final class SpillFreshBases
     /** @var array<int, bool> spl_object_id of every node on a write / reference chain */
     private array $pinned = [];
 
+    /**
+     * spl_object_id of every element read the emitter evaluates KEY FIRST: the
+     * subject of `??` and an array-base `isset` target over a delayed-fetch
+     * base ({@see \Compile\Mir\ArrayAccess_::keyBeforeBase}). Its base is read
+     * after the key, so the key is not a window the base is held across.
+     * @var array<int, bool>
+     */
+    private array $keyFirst = [];
+
     /** @var array<int, StoreLocal> read spills made in the statement being visited */
     private array $pending = [];
 
@@ -153,12 +162,14 @@ final class SpillFreshBases
             if ($fn->isExtern) { continue; }
             $this->fnName = $fn->name;
             $this->pinned = [];
+            $this->keyFirst = [];
             $this->pinWrites($fn->body, $fn->returnsByRef);
             $this->pending = [];
             $this->hoisted = [];
             $fn->body->stmts = $this->stmtList($fn->body->stmts);
         }
         $this->pinned = [];
+        $this->keyFirst = [];
         $this->esc = null;
         $this->own = null;
         return $module;
@@ -633,6 +644,24 @@ final class SpillFreshBases
             }
             return;
         }
+        if ($k === Node::KIND_NULLCOALESCE) {
+            $l = $this->asNullCoalesce($n)->left;
+            if ($l->kind === Node::KIND_ARRAY_ACCESS
+                && \Compile\Mir\ArrayAccess_::keyBeforeBase($this->asArrayAccess($l)->array)) {
+                $this->keyFirst[\spl_object_id($l)] = true;
+            }
+        } elseif ($k === Node::KIND_ISSET) {
+            // `isset` on an object (offsetExists) or a string reads the base first.
+            foreach ($this->asIsset($n)->targets as $t) {
+                if ($t->kind !== Node::KIND_ARRAY_ACCESS) { continue; }
+                $b = $this->asArrayAccess($t)->array;
+                $bk = $b->type->kind;
+                if ($bk !== Type::KIND_OBJ && $bk !== Type::KIND_STRING
+                    && \Compile\Mir\ArrayAccess_::keyBeforeBase($b)) {
+                    $this->keyFirst[\spl_object_id($t)] = true;
+                }
+            }
+        }
         // Anything else — including a Block in EXPRESSION position (a
         // conditional's arm), whose spills belong to the enclosing statement.
         foreach (Walk::children($n) as $c) { $this->visit($c); }
@@ -725,6 +754,7 @@ final class SpillFreshBases
         if ($k === Node::KIND_ARRAY_ACCESS) {
             if (isset($this->pinned[\spl_object_id($n)])) { return []; }
             $aa = $this->asArrayAccess($n);
+            if (isset($this->keyFirst[\spl_object_id($n)])) { return [$aa->index, $aa->array]; }
             return [$aa->array, $aa->index];
         }
         if ($k === Node::KIND_ARRAY_LIT) { return Walk::children($n); }
@@ -758,6 +788,7 @@ final class SpillFreshBases
             $this->withArgs($n, $args);
         } elseif ($k === Node::KIND_ARRAY_ACCESS) {
             $aa = $this->asArrayAccess($n);
+            if (isset($this->keyFirst[\spl_object_id($n)])) { $i = 1 - $i; }
             if ($i === 0) { $aa->array = $v; } else { $aa->index = $v; }
         } elseif ($k === Node::KIND_STORE_PROPERTY) {
             $sp = $this->asStoreProperty($n);
@@ -1198,6 +1229,7 @@ final class SpillFreshBases
     private function asCast(Node $n): \Compile\Mir\Cast { return $n; }
     private function asTernary(Node $n): \Compile\Mir\Ternary { return $n; }
     private function asNullCoalesce(Node $n): \Compile\Mir\NullCoalesce_ { return $n; }
+    private function asIsset(Node $n): \Compile\Mir\Isset_ { return $n; }
     private function asMatch(Node $n): \Compile\Mir\Match_ { return $n; }
     private function asMatchArm(mixed $n): \Compile\Mir\MatchArm_ { return $n; }
     private function asSpread(Node $n): \Compile\Mir\Spread_ { return $n; }
