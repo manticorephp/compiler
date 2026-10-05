@@ -2459,7 +2459,8 @@ trait EmitLlvmRuntime
             // `ptr null` in its descriptor and emits no full reflection block.
             $jsonFld = 'ptr null';
             $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn((int)$id);
-            if (isset($this->sigs->paramTypes[$jsonFn]) && $this->classImplements($cls->name, 'JsonSerializable')) {
+            if (isset($this->sigs->paramTypes[$jsonFn])
+                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name]))) {
                 $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
             }
             if (!$this->reflectWants($cls->name)) {

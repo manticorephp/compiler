@@ -354,6 +354,14 @@ trait LowerPrelude
                 . "  if (\$v instanceof \\" . $cname . ") { return \$v->jsonSerialize(); }\n"
                 . "  return null;\n}\n";
         }
+        // A backed enum case encodes as its backing value (php's rule). Read
+        // off the un-narrowed cell's property view — the one shape that
+        // answers it for a case held in a cell.
+        foreach ($this->enumTable as $ename => $ed) {
+            if ($ed->backing !== 'int' && $ed->backing !== 'string') { continue; }
+            $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($ed->classId) . "(mixed \$v): mixed {\n"
+                . "  \$d = (array)\$v;\n  return \$d['value'];\n}\n";
+        }
         return $src;
     }
 

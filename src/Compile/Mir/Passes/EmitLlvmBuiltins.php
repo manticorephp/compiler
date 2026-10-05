@@ -8391,6 +8391,21 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
+                // An enum-typed slot holds the case ORDINAL; every view of the
+                // object shows the case itself (its immortal singleton). Boxed
+                // as a raw value the ordinal reached json_encode / (array) /
+                // get_object_vars as a denormal float.
+                if ($this->isEnumType($pt)) {
+                    $pp = '';
+                    $out .= $this->emitEnumSingletonPtr((string)$pt->class, $v, $pp);
+                    $boxed = $this->ssa->allocReg();
+                    $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+                    $next = $this->ssa->allocReg();
+                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
+                          . $cur . ', ptr ' . $key . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
+                    $cur = $next;
+                    continue;
+                }
                 // boxRawValue and NOT boxToCell: the slot holds a RAW carrier, and
                 // a float slot's carrier is a double's BIT PATTERN. boxToCell
                 // treats its input as a value of `$pt` already in cell shape, so a
