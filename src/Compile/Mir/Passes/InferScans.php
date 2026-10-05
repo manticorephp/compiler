@@ -90,6 +90,13 @@ trait InferScans
      * Answers whether the slot's type actually CHANGED — what a scan's
      * "changed" must mean, or its driver re-infers the module for nothing.
      */
+    /** 's' string-keyed, 'c' cell-keyed, 'v' a list: what a refinement must keep. */
+    private static function keyShapeOf(Type $t): string
+    {
+        if ($t->isAssoc()) { return 's'; }
+        return ($t->key !== null && $t->key->kind === Type::KIND_CELL) ? 'c' : 'v';
+    }
+
     private function setPropType(\Compile\Mir\ClassDef $cd, string $prop, Type $t): bool
     {
         // Only a DECLARED property has a slot to type. An undeclared one lives
@@ -999,6 +1006,15 @@ trait InferScans
                 $newT = isset($assocKey[$key])
                     ? Type::assoc($assocKey[$key], $observed[$key])
                     : Type::vec($observed[$key]);
+                // A site observation refines the ELEMENT of an already-typed
+                // param, never its KEY shape: a site seen as a vec while its
+                // string keys were still untyped (an early inference round)
+                // turned a doc-typed `array<string, bool[]>` into
+                // `vec[vec[cell]]`, and as a declared type it had no
+                // `siteRefinedFrom` to withdraw to when the later rounds saw the
+                // assoc — every reader then walked the string keys as ints.
+                if (isset($refined[$key]) && $param->type->isArray()
+                    && self::keyShapeOf($param->type) !== self::keyShapeOf($newT)) { continue; }
                 // A parameter already refined to exactly this in an earlier run is
                 // not a change: marking it one re-inferred it and every caller,
                 // transitively, in every InferTypes run for nothing.
