@@ -795,10 +795,6 @@ final class InferTypes implements Pass
      *  ({@see InferScans::overrideBody}). */
     private array $overrideBodyMemo = [];
 
-    /** @var array<string,int> closure class → how many captures lead its
-     *  params ({@see InferScans::closureCapCounts}). */
-    private array $closureCapCount = [];
-
     /** The DECLARED return type per function ({@see Module::$declaredReturnTypes}),
      *  which is what the return adoptions in {@see InferNodes::inferFunction} test:
      *  `$fn->returnType` is rewritten in place by an earlier adoption, so reading
