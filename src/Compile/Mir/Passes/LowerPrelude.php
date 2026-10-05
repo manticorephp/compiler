@@ -338,6 +338,26 @@ trait LowerPrelude
     }
 
     /**
+     * PHP source of the per-class `jsonSerialize()` helpers the class
+     * descriptors point at ({@see \Compile\MemoryAbi::DESCRIPTOR_JSON_FN_OFFSET}):
+     * one `__mc_jsonser_<id>(mixed): mixed` per class that has the method. A
+     * pure function of the class, so every module that emits it agrees.
+     */
+    private function jsonSerSrc(): string
+    {
+        $src = '';
+        foreach ($this->classTable as $cname => $cd) {
+            if ($cname === 'stdClass' || $cd->isStruct || $cd->isAbstract) { continue; }
+            if ($this->isTypeDef($cname)) { continue; }
+            if (!$this->declaresMethod($cname, 'jsonSerialize')) { continue; }
+            $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($cd->classId) . "(mixed \$v): mixed {\n"
+                . "  if (\$v instanceof \\" . $cname . ") { return \$v->jsonSerialize(); }\n"
+                . "  return null;\n}\n";
+        }
+        return $src;
+    }
+
+    /**
      * PHP source for `__mir_dump_object` — a class-aware var_dump for typed
      * objects, generated from the complete class table. Each known class gets
      * an `instanceof` branch (most-derived first, so a subclass is matched

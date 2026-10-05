@@ -173,6 +173,8 @@ public bool $needsClosureRc = false;
     public bool $needsIsaDyn = false;
     /** The native fixed-width buffer runtime ({@see RuntimeLibrary::nbuf}). */
     public bool $needsBuf = false;
+    /** `@__mir_json_ser` alone (the `__mc_json_ser` builtin outside an encoder). */
+    public bool $needsJsonSer = false;
 
     // ── derived demands ────────────────────────────────────────────────────
     // A helper is often pulled in by more than one feature. Naming each union

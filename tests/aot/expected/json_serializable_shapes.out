@@ -1,0 +1,27 @@
+{"amount":12.5,"currency":"EUR"}
+{"id":3,"kind":"Kid"}
+{"x":1}
+[{"amount":0.05,"currency":"USD"},{"id":3,"kind":"Kid"}]
+{"p":9}
+{"0":42,"k":42}
+{"a":1,"m":{"amount":19.99,"currency":"EUR"}}
+{
+    "amount": 1,
+    "currency": "UAH"
+}
+{
+    "list": [
+        {
+            "id": 3,
+            "kind": "Kid"
+        },
+        42
+    ]
+}
+[1,-2,300] {"k":[1,-2,300]} [
+    1,
+    -2,
+    300
+]
+{"amount":0.01,"currency":"X"}[1,-2,300]
+flat

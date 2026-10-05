@@ -456,6 +456,10 @@ function __mc_multiple_pow5(int $value, int $p): bool {
     return $count >= $p;
 }
 
+/** Bootstrap twin of the `__mc_json_ser` builtin: the value json encodes in an
+ *  object's place — itself, for a compiler that does not know the builtin. */
+function __mc_json_ser(mixed $v): mixed { return $v; }
+
 function __mc_json_enc(mixed $v, int $flags = 0, int $maxDepth = 512, int $depth = 0): string {
     if (is_null($v)) { return "null"; }
     if (is_bool($v)) { return $v ? "true" : "false"; }
@@ -479,6 +483,10 @@ function __mc_json_enc(mixed $v, int $flags = 0, int $maxDepth = 512, int $depth
     $endPad = $pretty ? __mc_json_indent($depth) : "";
     $colon = $pretty ? ": " : ":";
     if (is_object($v)) {
+        // A JsonSerializable object is encoded as what its method returns, in
+        // its place (same depth); the same object back means it has none.
+        $js = __mc_json_ser($v);
+        if ($js !== $v) { return __mc_json_enc($js, $flags, $maxDepth, $depth); }
         return __mc_json_obj((array)$v, $flags, $maxDepth, $depth, $nl, $pad, $endPad, $colon);
     }
     // An array encodes as a JSON list `[...]` only when its keys are

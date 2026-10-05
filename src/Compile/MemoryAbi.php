@@ -435,6 +435,15 @@ final class MemoryAbi
      */
     public const DESCRIPTOR_CMP_GROUP_OFFSET = 48;
 
+    /**
+     * `ptr` — `i64 (i64 cell)`: the object's `jsonSerialize()` result as an
+     * owned cell, or null for a class that is not JsonSerializable. A pure
+     * function of the class, like {@see DESCRIPTOR_PROPS_FN_OFFSET}: how the
+     * json encoders (generic, and inside `manticore_stdlib.o`) reach the
+     * method of an application or prelude class.
+     */
+    public const DESCRIPTOR_JSON_FN_OFFSET = 56;
+
     /** The compare group of every class with `#[CompareKey]` properties. */
     public const CMP_GROUP_KEYED = -1;
 

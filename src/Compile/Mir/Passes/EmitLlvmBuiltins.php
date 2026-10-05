@@ -479,6 +479,7 @@ trait EmitLlvmBuiltins
         // semantics, which is how the compiled-PHP encoder came to behave as if
         // JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE were always set.
         if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
+        if ($name === '__mc_json_ser' && \count($args) === 1) { return $this->biJsonSer($args); }
         if ($name === 'json_encode' && \count($args) >= 1
             && $this->argIsDefaultInt($args, 1, 0)
             && $this->argIsDefaultInt($args, 2, 512)) { return $this->biJsonEncode($args); }
@@ -8779,6 +8780,7 @@ trait EmitLlvmBuiltins
     private function biJsonEncode(array $args): string
     {
         $this->rt->needsJsonEnc = true;
+        $this->rt->needsRc = true;        // __mir_cell_retain / _drop (the JsonSerializable arm)
         $this->rt->needsIntStr = true;    // __mir_int_len / __mir_int_fmt + unbox_int
         $this->rt->needsStrRc = true;     // __mir_rc_release_str (float / object temps)
         $this->rt->needsConcat = true;    // __mir_strlen + string runtime decls
@@ -8816,6 +8818,30 @@ trait EmitLlvmBuiltins
         $this->markCellBoxed($res);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_json_ser($obj)` — the value json encodes in the object's place
+     * ({@see \Compile\Mir\RuntimeLibrary::jsonSer}); the stdlib identity body
+     * is the bootstrap twin. The result is the caller's +1.
+     * @param Node[] $args
+     */
+    private function biJsonSer(array $args): string
+    {
+        $this->rt->needsJsonSer = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type, $args[0]);
+        $cell = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_json_ser(i64 ' . $cell . ")\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($r);
         return $out;
     }
 

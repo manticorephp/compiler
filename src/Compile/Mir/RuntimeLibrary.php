@@ -39,7 +39,7 @@ final class RuntimeLibrary
      */
     public static function descriptorType(): string
     {
-        return '{ i64, ptr, ptr, ptr, ptr, ptr, i64 }';
+        return '{ i64, ptr, ptr, ptr, ptr, ptr, i64, ptr }';
     }
 
     /** `@__mir_cmpview_<id>(ptr %o) -> i64` ({@see \Compile\MemoryAbi::DESCRIPTOR_CMP_VIEW_FN_OFFSET}). */
@@ -63,10 +63,47 @@ final class RuntimeLibrary
         string $propsFld = 'ptr null',
         string $cmpViewFld = 'ptr null',
         ?int $cmpGroup = null,
+        string $jsonFld = 'ptr null',
     ): string {
         return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
             . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld
-            . ', ' . $propsFld . ', ' . $cmpViewFld . ', i64 ' . (string)($cmpGroup ?? $id) . " }\n";
+            . ', ' . $propsFld . ', ' . $cmpViewFld . ', i64 ' . (string)($cmpGroup ?? $id) . ', ' . $jsonFld . " }\n";
+    }
+
+    /** The synthesized PHP helper behind {@see \Compile\MemoryAbi::DESCRIPTOR_JSON_FN_OFFSET}. */
+    public static function jsonSerFn(int $id): string
+    {
+        return '__mc_jsonser_' . (string)$id;
+    }
+
+    /**
+     * `@__mir_json_ser(i64 cell) -> i64` — what json encodes IN PLACE of the
+     * object in `cell`: its `jsonSerialize()` result, or the object itself for
+     * a class without one. Always an owned cell; the caller tells the two
+     * apart by the payload.
+     */
+    public function jsonSer(): string
+    {
+        $mask = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $out  = "\ndefine i64 @__mir_json_ser(i64 %cell) {\nentry:\n";
+        $out .= "  %pay = and i64 %cell, " . $mask . "\n";
+        $out .= "  %p = inttoptr i64 %pay to ptr\n";
+        $out .= "  %desc = load ptr, ptr %p\n";
+        $out .= "  %dn = icmp eq ptr %desc, null\n";
+        $out .= "  br i1 %dn, label %self, label %have\n";
+        $out .= "have:\n";
+        $out .= "  %fp = getelementptr inbounds i8, ptr %desc, i64 "
+              . (string)\Compile\MemoryAbi::DESCRIPTOR_JSON_FN_OFFSET . "\n";
+        $out .= "  %f = load ptr, ptr %fp\n";
+        $out .= "  %fn = icmp eq ptr %f, null\n";
+        $out .= "  br i1 %fn, label %self, label %ser\n";
+        $out .= "ser:\n";
+        $out .= "  %r = call i64 %f(i64 %cell)\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "self:\n";
+        $out .= "  call void @__mir_cell_retain(i64 %cell)\n";
+        $out .= "  ret i64 %cell\n}\n";
+        return $out;
     }
 
     /**
@@ -2850,6 +2887,18 @@ final class RuntimeLibrary
         // cell and let the existing `tarr` arm do the work.
         $out .= "  %opay = and i64 %cell, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
         $out .= "  %optr = inttoptr i64 %opay to ptr\n";
+        // JsonSerializable: the method's result is encoded in the object's
+        // place. The same object back means the class has none.
+        $out .= "  %ojs = call i64 @__mir_json_ser(i64 %cell)\n";
+        $out .= "  %ojp = and i64 %ojs, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= "  %ojsame = icmp eq i64 %ojp, %opay\n";
+        $out .= "  br i1 %ojsame, label %tobjself, label %tobjser\n";
+        $out .= "tobjser:\n";
+        $out .= "  call void @__mir_json_app(ptr %slotp, ptr %lp, i64 %ojs)\n";
+        $out .= "  call void @__mir_cell_drop(i64 %ojs)\n";
+        $out .= "  ret void\n";
+        $out .= "tobjself:\n";
+        $out .= "  call void @__mir_cell_drop(i64 %ojs)\n";
         $out .= "  %odesc = load ptr, ptr %optr\n";
         $out .= "  %odn = icmp eq ptr %odesc, null\n";
         $out .= "  br i1 %odn, label %tobjpunt, label %tobjpf\n";

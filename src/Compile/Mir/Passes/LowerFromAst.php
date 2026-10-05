@@ -1070,6 +1070,21 @@ final class LowerFromAst implements Pass
         }
         $module->hasObjToStr = true;
 
+        // The `jsonSerialize()` entries of the class descriptors — one helper
+        // per class that has the method, reached by the json encoders through
+        // the descriptor, never by name.
+        $jsSrc = $this->jsonSerSrc();
+        if ($jsSrc !== '') {
+            $jsProg = \Parser\Parser::parseSource("<?php\n" . $jsSrc);
+            foreach ($jsProg->statements as $jstmt) {
+                if ($jstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$jstmt->decl->name] = $jstmt->decl;
+                $jfn = $this->lowerFunction($jstmt->decl);
+                $jfn->isPrelude = true;
+                $module->addFunction($jfn);
+            }
+        }
+
         // var_export()'s object arm — same point and pattern as
         // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
         // does NOT call that method from var_export, and neither does this.

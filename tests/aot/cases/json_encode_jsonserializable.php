@@ -1,6 +1,5 @@
 <?php
 // json_encode() ignores JsonSerializable: the object encodes from its properties, jsonSerialize() is never called
-// issue: #94
 final class Money implements JsonSerializable {
     public function __construct(private int $cents, private string $cur) {}
     public function jsonSerialize(): mixed { return ['amount' => $this->cents / 100, 'currency' => $this->cur]; }

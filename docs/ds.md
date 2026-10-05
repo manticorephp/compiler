@@ -101,7 +101,8 @@ same `TypeError` as a store for a value of the wrong type.
 buffer.
 
 **Dumps and serialization** — `var_dump`, `serialize` / `unserialize` and
-`jsonSerialize()` present the array as the list `toArray()` returns.
+`json_encode` (through `jsonSerialize()`) present the array as the list
+`toArray()` returns.
 
 ## `#[TypeDef]` and typed arrays
 
@@ -135,8 +136,4 @@ PHP array element costs.
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
-- `json_encode($typedArray)` does not call `jsonSerialize()` yet (issue #94) —
-  encode `$a->toArray()`.
 - `print_r($typedArray)` prints no elements (issue #57).
-- `$m[$i] = $v` where `$m` is a `mixed` value holding a typed array crashes
-  (issue #95) — keep the receiver typed.

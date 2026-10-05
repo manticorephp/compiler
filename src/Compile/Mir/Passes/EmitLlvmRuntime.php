@@ -2457,9 +2457,14 @@ trait EmitLlvmRuntime
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
             // `ptr null` in its descriptor and emits no full reflection block.
+            $jsonFld = 'ptr null';
+            $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn((int)$id);
+            if (isset($this->sigs->paramTypes[$jsonFn]) && $this->classImplements($cls->name, 'JsonSerializable')) {
+                $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
+            }
             if (!$this->reflectWants($cls->name)) {
                 $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
+                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -2528,7 +2533,7 @@ trait EmitLlvmRuntime
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
-                $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
+                $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;
@@ -4009,6 +4014,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
+        if ($this->rt->needsJsonEnc || $this->rt->needsJsonSer) { $out .= $this->lib->jsonSer(); }
         if ($this->rt->needsJsonDec) {
             // stdClass's layout is a constant of the compiler (it declares no
             // properties), so the emitted text is identical in every module and
