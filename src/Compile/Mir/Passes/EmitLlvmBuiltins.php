@@ -8176,8 +8176,8 @@ trait EmitLlvmBuiltins
      * \Compile\Mir\RuntimeLibrary::propsFnSymbol}) — the producer side was
      * already there with only this consumer missing. It returns a FRESH assoc
      * (declared properties, then the bag), so this arm is owned like the others.
-     * A null descriptor, or a class with neither properties nor a bag, keeps the
-     * old bag-only answer.
+     * A null descriptor keeps the old bag-only answer; a class with neither
+     * properties nor a bag answers a fresh empty array.
      */
     private function emitObjectVarsFallback(string $objPtr): string
     {
@@ -8186,6 +8186,7 @@ trait EmitLlvmBuiltins
         $haveL = $this->ssa->allocLabel('gov.desc');
         $callL = $this->ssa->allocLabel('gov.props');
         $bagL  = $this->ssa->allocLabel('gov.bag');
+        $noneL = $this->ssa->allocLabel('gov.none');
         $endL  = $this->ssa->allocLabel('gov.fbend');
         $di = $this->ssa->allocReg();
         $out .= '  ' . $di . ' = load i64, ptr ' . $objPtr . "\n";
@@ -8201,7 +8202,17 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $fn . ' = load ptr, ptr ' . $fp . "\n";
         $fz = $this->ssa->allocReg();
         $out .= '  ' . $fz . ' = icmp eq ptr ' . $fn . ", null\n";
-        $out .= '  br i1 ' . $fz . ', label %' . $bagL . ', label %' . $callL . "\n";
+        $out .= '  br i1 ' . $fz . ', label %' . $noneL . ', label %' . $callL . "\n";
+        // A described class without a props view declares nothing and has no
+        // bag: every class with either one gets the view. Its object ends at
+        // the header, so the bag word the arm below reads is past the end.
+        $out .= $noneL . ":\n";
+        $ea = $this->ssa->allocReg();
+        $out .= '  ' . $ea . " = call ptr @__mir_array_alloc(i64 0)\n";
+        $ei = $this->ssa->allocReg();
+        $out .= '  ' . $ei . ' = ptrtoint ptr ' . $ea . " to i64\n";
+        $out .= '  store i64 ' . $ei . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
         $out .= $callL . ":\n";
         $pv = $this->ssa->allocReg();
         $out .= '  ' . $pv . ' = call i64 ' . $fn . '(ptr ' . $objPtr . ")\n";
