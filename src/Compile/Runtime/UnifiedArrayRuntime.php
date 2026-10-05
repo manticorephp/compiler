@@ -320,12 +320,10 @@ final class UnifiedArrayRuntime
      * bits, so a stride of 2^n (`$i * 4096`) piled every key into one probe run
      * (1.1 us per lookup at 4096 keys); the pre-fold brings the high bits down.
      *
-     * The trade is real and measured: a SPARSE int build+read (1M `$v[$i * 7]`
-     * writes then reads) goes 0.02 s -> 0.07 s, because the identity hash walked
-     * the bucket table in order. A dense list (`$v[] =`, PACKED, no index) and
-     * every string-keyed shape are untouched. Bucket TOMBSTONES instead of
-     * backshift deletion would buy the locality back at the cost of a rebuild
-     * policy; not attempted.
+     * The cost is small and measured: 100k random sparse ids build+read about 10%
+     * slower than the plain multiply, strides 1/7/64/1024/4096 stay at
+     * 2.7/3.6/2.6/2.6/2.6 ns per lookup. A dense list (`$v[] =`, PACKED, no
+     * index) and every string-keyed shape are untouched.
      *
      * EVERY site that computes an int home must agree — index build, add, find,
      * unset and both backshift loops — or a key is inserted at one slot and
