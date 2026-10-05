@@ -255,7 +255,21 @@ namespace Manticore\Ds {
 
         public function offsetGet(mixed $offset): int
         {
+            if (\is_int($offset) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)) {
+                return __mc_nbuf_get_i($this->__mcbuf, $offset);
+            }
             return __mc_nbuf_get_i($this->__mcbuf, $this->idx($offset));
+        }
+
+        public function offsetSet(mixed $offset, mixed $value): void
+        {
+            // The common store, without the offset and value normalisers.
+            if (\is_int($offset) && \is_int($value) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)
+                && $value >= $this->min() && $value <= $this->max()) {
+                __mc_nbuf_set_i($this->__mcbuf, $offset, $value);
+                return;
+            }
+            parent::offsetSet($offset, $value);
         }
 
         protected function load(int $k): mixed { return __mc_nbuf_get_i($this->__mcbuf, $k); }
@@ -318,7 +332,19 @@ namespace Manticore\Ds {
     {
         public function offsetGet(mixed $offset): float
         {
+            if (\is_int($offset) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)) {
+                return __mc_nbuf_get_f($this->__mcbuf, $offset);
+            }
             return __mc_nbuf_get_f($this->__mcbuf, $this->idx($offset));
+        }
+
+        public function offsetSet(mixed $offset, mixed $value): void
+        {
+            if (\is_int($offset) && \is_float($value) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)) {
+                __mc_nbuf_set_f($this->__mcbuf, $offset, $value);
+                return;
+            }
+            parent::offsetSet($offset, $value);
         }
 
         protected function load(int $k): mixed { return __mc_nbuf_get_f($this->__mcbuf, $k); }

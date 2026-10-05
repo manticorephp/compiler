@@ -121,6 +121,11 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
   `compat(true)`. Streamed request and response bodies, chunked framing,
   `Expect: 100-continue`, keep-alive with pipelining, and every limit answered by a
   precomputed refusal. `Buffer\ByteBuffer`/`Reader`/`Writer` underneath.
+- **`Manticore\Ds` — typed fixed-width arrays** (`docs/ds.md`). `Int8Array` … `Int64Array`,
+  `UInt8Array` … `UInt32Array`, `Float32Array`/`Float64Array`, `BitArray` over one native
+  buffer runtime (`__mc_nbuf_*`, `MemoryAbi::BUF_*`); no silent wrap; the same source is the
+  `manticorephp/ds` Zend polyfill and the oracle. Open: inline element access for a known
+  receiver, `SplFixedArray` on the same buffer (after the ownership epic lands).
 - **`serialize` / `unserialize` + magic methods** — `__serialize`/`__unserialize`,
   `allowed_classes`, `__PHP_Incomplete_Class`, `__debugInfo`, `var_export` of objects, and
   `__get`/`__set`/`__isset`/`__unset`/`__call` firing on an **erased** receiver.
