@@ -1151,11 +1151,6 @@ final class Closure_ extends Node
 
 final class Invoke_ extends Node
 {
-    /** Index-parallel to {@see $args}: the name of a named argument, '' for a
-     *  positional one. Empty when the call has none. Bound by
-     *  {@see Passes\ResolveMethodFcc} once the callee closure is known. */
-    public array $argNames = [];
-
     /** @param Node[] $args */
     public function __construct(
         public Node $callee,
@@ -1171,6 +1166,12 @@ final class Invoke_ extends Node
      *  Declared LAST.
      * @var array<string, string> */
     public array $ownLive = [];
+
+    /** Index-parallel to {@see $args}: the name of a named argument, '' for a
+     *  positional one. Empty when the call has none. Bound by
+     *  {@see Passes\ResolveMethodFcc} once the callee closure is known.
+     *  Declared LAST: a field added mid-struct shifts every later offset. */
+    public array $argNames = [];
 
     public function accept(EmitVisitor $v): string
     {
