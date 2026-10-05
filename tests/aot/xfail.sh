@@ -89,6 +89,9 @@ run_one() {
         why="compile TIMEOUT >${COMPILE_TIMEOUT}s"
     elif [[ $crc -ne 0 ]]; then
         why="compile"
+        # An invalid-IR repro makes the compiler keep its .ll for inspection — one
+        # per run, for ever. The log names it.
+        grep -ho '/tmp/manticore_[0-9]*\.ll' "$log" 2>/dev/null | sort -u | xargs rm -f
     elif [[ ! -x "$bin" ]]; then
         why="no binary produced"
     else
