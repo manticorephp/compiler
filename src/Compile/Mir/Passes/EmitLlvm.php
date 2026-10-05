@@ -5163,8 +5163,7 @@ final class EmitLlvm implements EmitVisitor
         if (!$this->rt->needsBacktrace) { return ''; }
         $fn = $this->frame->name;
         if ($fn === '') {
-            return '  call void @__mir_bt_push(ptr ' . $this->strLitId($this->pool->intern($display))
-                 . ', i64 ' . (string)$line . ")\n";
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '');
         }
         // Relative to the function's first traced line, which lives in ONE
         // global per function: a line inserted above a function moves that
@@ -5176,14 +5175,56 @@ final class EmitLlvm implements EmitVisitor
             $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 '
                 . (string)$line . "\n";
         }
-        return '  call void @__mir_bt_push_rel(ptr ' . $this->strLitId($this->pool->intern($display))
-             . ', ptr @.btl.' . $this->mangle($fn) . ', i64 ' . (string)($line - $this->btBaseLine[$fn]) . ")\n";
+        return $this->btPushInline(
+            $this->strLitId($this->pool->intern($display)),
+            (string)($line - $this->btBaseLine[$fn]),
+            '@.btl.' . $this->mangle($fn),
+        );
+    }
+
+    /** The ring push inlined: store name+line at [depth] only while depth < 4096
+     *  (frames past the ring are counted, never stored), then bump depth. With
+     *  `$base`, the line is that global plus `$line` (a delta). */
+    private function btPushInline(string $nameLit, string $line, string $base): string
+    {
+        $d = $this->ssa->allocReg();
+        $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp slt i64 ' . $d . ", 4096\n";
+        $st = $this->ssa->allocLabel('btpush.st');
+        $inc = $this->ssa->allocLabel('btpush.inc');
+        $out .= '  br i1 ' . $ok . ', label %' . $st . ', label %' . $inc . "\n" . $st . ":\n";
+        $ni = $this->ssa->allocReg();
+        $out .= '  ' . $ni . ' = ptrtoint ptr ' . $nameLit . " to i64\n";
+        $np = $this->ssa->allocReg();
+        $out .= '  ' . $np . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 ' . $d . "\n";
+        $out .= '  store i64 ' . $ni . ', ptr ' . $np . "\n";
+        $ln = $line;
+        if ($base !== '') {
+            $b = $this->ssa->allocReg();
+            $out .= '  ' . $b . ' = load i64, ptr ' . $base . "\n";
+            $ln = $this->ssa->allocReg();
+            $out .= '  ' . $ln . ' = add i64 ' . $b . ', ' . $line . "\n";
+        }
+        $lp = $this->ssa->allocReg();
+        $out .= '  ' . $lp . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 ' . $d . "\n";
+        $out .= '  store i64 ' . $ln . ', ptr ' . $lp . "\n";
+        $out .= '  br label %' . $inc . "\n" . $inc . ":\n";
+        $d1 = $this->ssa->allocReg();
+        $out .= '  ' . $d1 . ' = add i64 ' . $d . ", 1\n";
+        $out .= '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
+        return $out;
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
     private function btPop(): string
     {
-        return $this->rt->needsBacktrace ? "  call void @__mir_bt_pop()\n" : '';
+        if (!$this->rt->needsBacktrace) { return ''; }
+        $d = $this->ssa->allocReg();
+        $d1 = $this->ssa->allocReg();
+        return '  ' . $d . " = load i64, ptr @__mir_bt_depth\n"
+             . '  ' . $d1 . ' = sub i64 ' . $d . ", 1\n"
+             . '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
     }
 
     /**
