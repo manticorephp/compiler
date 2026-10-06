@@ -697,6 +697,10 @@ final class InferTypes implements Pass
      *  is what makes {@see elemLoopLocals} sound: an empty array has no element
      *  whose representation a re-type could contradict. */
     private array $localBuiltArrays = [];
+    /** @var array<string,Type> locals whose every whole-value store but an
+     *  EMPTY array literal is one NESTED array type ({@see emptyLitNesting}):
+     *  the literal binds as that type. */
+    private array $emptyLitNest = [];
     /** Set when a loop promoted a NEW name this round (re-infer needed). */
     private bool $loopPromoGrew = false;
     /** @var array<string,bool> "fn|param" already boxed at entry — a promoted
@@ -3169,6 +3173,55 @@ final class InferTypes implements Pass
         }
         if ($cur === null || $cur->kind === Type::KIND_UNKNOWN) { return ''; }
         return $key . ':' . $cur->kind;
+    }
+
+    /** `$acc = []; … $acc += f();` where every other whole-value store of the
+     *  name is ONE nested array type: the empty literal states no nesting
+     *  ({@see nestingKey}) and holds nothing a type could contradict, so it
+     *  binds as that type — the slot then has one element repr on every path
+     *  instead of `vec[unknown]` beside `vec[vec[…]]`. Read off the stores'
+     *  types from the previous run.
+     *  @return array<string, Type> */
+    private function emptyLitNesting(Node $body): array
+    {
+        /** @var array<string, Type> $seen */
+        $seen = [];
+        /** @var array<string, bool> $bad */
+        $bad = [];
+        /** @var array<string, bool> $empty */
+        $empty = [];
+        $this->scanEmptyLitNesting($body, $seen, $bad, $empty);
+        $out = [];
+        foreach ($empty as $name => $unused) {
+            if (isset($bad[$name]) || !isset($seen[$name])) { continue; }
+            $out[$name] = $seen[$name];
+        }
+        return $out;
+    }
+
+    /** @param array<string, Type> $seen @param array<string, bool> $bad
+     *  @param array<string, bool> $empty */
+    private function scanEmptyLitNesting(Node $n, array &$seen, array &$bad, array &$empty): void
+    {
+        if ($n instanceof StoreLocal) {
+            $name = $n->name;
+            $v = $n->value;
+            if ($v instanceof ArrayLit && \count($v->elements) === 0) {
+                $empty[$name] = true;
+            } elseif (!isset($bad[$name])) {
+                $vt = $v->type;
+                $k = $vt->isArray() ? self::nestingKey($vt) : '';
+                if (!\str_contains($k, ':')) {
+                    $bad[$name] = true;
+                } elseif (!isset($seen[$name])) {
+                    $seen[$name] = $vt;
+                } elseif (self::nestingKey($seen[$name]) !== $k
+                    || $seen[$name]->isAssoc() !== $vt->isAssoc()) {
+                    $bad[$name] = true;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanEmptyLitNesting($c, $seen, $bad, $empty); }
     }
 
     /** A VALUE join (ternary arms, match arms, returns) of an ERASED value with
