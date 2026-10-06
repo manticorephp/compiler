@@ -705,6 +705,10 @@ final class SpillFreshBases
         $consumer = ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE || $k === Node::KIND_STORE_PROPERTY
             || $k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_ACCESS) ? $n : null;
+        // A typed-array element read is done in place: no `offsetGet` runs
+        // (and the one its error path runs writes no slot of the holder).
+        if ($k === Node::KIND_ARRAY_ACCESS && !$this->asArrayAccess($n)->probe
+            && \Compile\Mir\NbufInline::reads($this->asArrayAccess($n)->array, $this->asArrayAccess($n)->index)) { $consumer = null; }
         for ($i = 0; $i < $cnt; $i = $i + 1) {
             $op = $ops[$i];
             // A write / reference chain is the slot itself, not a value read

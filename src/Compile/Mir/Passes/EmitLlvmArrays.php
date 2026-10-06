@@ -304,7 +304,7 @@ trait EmitLlvmArrays
         $bufOff = $cd->propertyOffset('__mcbuf');
         if ($bufOff < 0) { return null; }
         // The receiver is read twice (the test, the slow call): a plain local only.
-        if ($aa->array->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($aa->index)) { return null; }
+        if (!\Compile\Mir\NbufInline::pureReceiver($aa->array) || !$this->pureIntExpr($aa->index)) { return null; }
         $out = $this->emitNode($aa->array);
         $out .= $this->coerceToPtr();
         $obj = $this->lastValue;
@@ -462,19 +462,7 @@ trait EmitLlvmArrays
      *  class of a receiver IS its run-time class. */
     private function nbufKindOf(string $cls): int
     {
-        if (\strncmp($cls, 'Manticore\\Ds\\', 13) !== 0) { return 0; }
-        $short = \substr($cls, 13);
-        if ($short === 'Int32Array') { return \Compile\MemoryAbi::BUF_KIND_I32; }
-        if ($short === 'Int64Array') { return \Compile\MemoryAbi::BUF_KIND_I64; }
-        if ($short === 'UInt8Array') { return \Compile\MemoryAbi::BUF_KIND_U8; }
-        if ($short === 'UInt16Array') { return \Compile\MemoryAbi::BUF_KIND_U16; }
-        if ($short === 'UInt32Array') { return \Compile\MemoryAbi::BUF_KIND_U32; }
-        if ($short === 'Int8Array') { return \Compile\MemoryAbi::BUF_KIND_I8; }
-        if ($short === 'Int16Array') { return \Compile\MemoryAbi::BUF_KIND_I16; }
-        if ($short === 'Float64Array') { return \Compile\MemoryAbi::BUF_KIND_F64; }
-        if ($short === 'Float32Array') { return \Compile\MemoryAbi::BUF_KIND_F32; }
-        if ($short === 'BitArray') { return \Compile\MemoryAbi::BUF_KIND_BIT; }
-        return 0;
+        return \Compile\Mir\NbufInline::kindOf($cls);
     }
 
     /**
@@ -503,13 +491,13 @@ trait EmitLlvmArrays
     }
 
     /** An expression the slow arm of an inline element store may evaluate a
-     *  second time: no call, no write — locals, constants, arithmetic and
-     *  element reads over those. */
+     *  second time: no call, no write — locals, properties of a local, static
+     *  properties, constants, arithmetic and element reads over those. */
     private function nbufPureExpr(Node $n): bool
     {
         $k = $n->kind;
-        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_INT_CONST
-            || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_BOOL_CONST) { return true; }
+        if ($k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_BOOL_CONST
+            || \Compile\Mir\NbufInline::pureReceiver($n)) { return true; }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
             || $k === Node::KIND_NEG || $k === Node::KIND_ARRAY_ACCESS) {
             foreach (\Compile\Mir\Walk::children($n) as $c) {
@@ -518,6 +506,28 @@ trait EmitLlvmArrays
             return true;
         }
         return false;
+    }
+
+    /**
+     * The `!tbaa` tag of an inline typed-array access: the element bytes
+     * (`$elem`) against the handle slot and the length word. An element store
+     * can then not clobber the handle or the length, so a loop that only reads
+     * and writes elements loads both once. Untagged code (the runtime, any
+     * call) still clobbers everything. Nodes: {@see emitPreamble}.
+     */
+    private function nbufTbaa(bool $elem): string
+    {
+        $this->rt->needsNbufTbaa = true;
+        return $elem ? ', !tbaa !4' : ', !tbaa !3';
+    }
+
+    /** Ends the slow arm of an inline raw-kind access: the index or the value
+     *  failed the inline test, so `offsetGet` / `offsetSet` threw. Without the
+     *  edge back, the loop around the access has no call in it. */
+    private function nbufNoReturn(): string
+    {
+        $this->libcExtra['llvm.trap'] = 'declare void @llvm.trap()';
+        return "  call void @llvm.trap()\n  unreachable\n";
     }
 
     /**
@@ -531,7 +541,7 @@ trait EmitLlvmArrays
         $hp = $this->ssa->allocReg();
         $out = '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$off . "\n";
         $h = $this->ssa->allocReg();
-        $out .= '  ' . $h . ' = load i64, ptr ' . $hp . "\n";
+        $out .= '  ' . $h . ' = load i64, ptr ' . $hp . $this->nbufTbaa(false) . "\n";
         $nz = $this->ssa->allocReg();
         $out .= '  ' . $nz . ' = icmp ne i64 ' . $h . ", 0\n";
         $hptr = $this->ssa->allocReg();
@@ -542,7 +552,7 @@ trait EmitLlvmArrays
         $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $safe . ', i64 '
               . (string)\Compile\MemoryAbi::BUF_LEN_OFFSET . "\n";
         $len = $this->ssa->allocReg();
-        $out .= '  ' . $len . ' = load i64, ptr ' . $lp . "\n";
+        $out .= '  ' . $len . ' = load i64, ptr ' . $lp . $this->nbufTbaa(false) . "\n";
         $inb = $this->ssa->allocReg();
         $out .= '  ' . $inb . ' = icmp ult i64 ' . $idx . ', ' . $len . "\n";
         $data = $this->ssa->allocReg();
@@ -562,8 +572,7 @@ trait EmitLlvmArrays
         $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
         $kind = $this->nbufKindOf($cls);
         if ($kind === 0) { return null; }
-        if ($aa->index->type->kind !== Type::KIND_INT) { return null; }
-        if ($aa->array->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($aa->index)) { return null; }
+        if (!\Compile\Mir\NbufInline::reads($aa->array, $aa->index)) { return null; }
         if (!isset($this->classes[$cls])) { return null; }
         $off = $this->classes[$cls]->propertyOffset('__mcbuf');
         if ($off < 0) { return null; }
@@ -593,7 +602,7 @@ trait EmitLlvmArrays
             $wp = $this->ssa->allocReg();
             $out .= '  ' . $wp . ' = getelementptr inbounds i64, ptr ' . $data . ', i64 ' . $wi . "\n";
             $wv = $this->ssa->allocReg();
-            $out .= '  ' . $wv . ' = load i64, ptr ' . $wp . "\n";
+            $out .= '  ' . $wv . ' = load i64, ptr ' . $wp . $this->nbufTbaa(true) . "\n";
             $bi = $this->ssa->allocReg();
             $out .= '  ' . $bi . ' = and i64 ' . $idx . ", 63\n";
             $sh = $this->ssa->allocReg();
@@ -603,10 +612,10 @@ trait EmitLlvmArrays
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = getelementptr inbounds ' . $ty . ', ptr ' . $data . ', i64 ' . $idx . "\n";
             if ($ty === 'i64' || $ty === 'double') {
-                $out .= '  ' . $v . ' = load ' . $ty . ', ptr ' . $ep . "\n";
+                $out .= '  ' . $v . ' = load ' . $ty . ', ptr ' . $ep . $this->nbufTbaa(true) . "\n";
             } else {
                 $raw = $this->ssa->allocReg();
-                $out .= '  ' . $raw . ' = load ' . $ty . ', ptr ' . $ep . "\n";
+                $out .= '  ' . $raw . ' = load ' . $ty . ', ptr ' . $ep . $this->nbufTbaa(true) . "\n";
                 $signed = $kind === \Compile\MemoryAbi::BUF_KIND_I8 || $kind === \Compile\MemoryAbi::BUF_KIND_I16
                     || $kind === \Compile\MemoryAbi::BUF_KIND_I32;
                 $ext = $ty === 'float' ? 'fpext' : ($signed ? 'sext' : 'zext');
@@ -617,9 +626,7 @@ trait EmitLlvmArrays
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
         $out .= $this->emitMethodCall($mc);
-        $out .= $isF ? $this->coerceTo('double') : $this->coerceToI64();
-        $out .= '  store ' . $resTy . ' ' . $this->lastValue . ', ptr ' . $slot . "\n";
-        $out .= '  br label %' . $endL . "\n";
+        $out .= $this->nbufNoReturn();
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load ' . $resTy . ', ptr ' . $slot . "\n";
@@ -641,7 +648,7 @@ trait EmitLlvmArrays
         $kind = $this->nbufKindOf($cls);
         if ($kind === 0) { return null; }
         if ($index->type->kind !== Type::KIND_INT) { return null; }
-        if ($arr->kind !== Node::KIND_LOAD_LOCAL || !$this->pureIntExpr($index) || !$this->nbufPureExpr($value)) { return null; }
+        if (!\Compile\Mir\NbufInline::pureReceiver($arr) || !$this->pureIntExpr($index) || !$this->nbufPureExpr($value)) { return null; }
         $ty = $this->nbufElemTy($kind);
         $isF = $ty === 'float' || $ty === 'double';
         $vk = $value->type->kind;
@@ -696,7 +703,7 @@ trait EmitLlvmArrays
             $wp = $this->ssa->allocReg();
             $out .= '  ' . $wp . ' = getelementptr inbounds i64, ptr ' . $data . ', i64 ' . $wi . "\n";
             $wv = $this->ssa->allocReg();
-            $out .= '  ' . $wv . ' = load i64, ptr ' . $wp . "\n";
+            $out .= '  ' . $wv . ' = load i64, ptr ' . $wp . $this->nbufTbaa(true) . "\n";
             $bi = $this->ssa->allocReg();
             $out .= '  ' . $bi . ' = and i64 ' . $idx . ", 63\n";
             $mask = $this->ssa->allocReg();
@@ -711,22 +718,22 @@ trait EmitLlvmArrays
             $out .= '  ' . $nzv . ' = icmp ne i64 ' . $val . ", 0\n";
             $nw = $this->ssa->allocReg();
             $out .= '  ' . $nw . ' = select i1 ' . $nzv . ', i64 ' . $on . ', i64 ' . $offw . "\n";
-            $out .= '  store i64 ' . $nw . ', ptr ' . $wp . "\n";
+            $out .= '  store i64 ' . $nw . ', ptr ' . $wp . $this->nbufTbaa(true) . "\n";
         } else {
             $ep = $this->ssa->allocReg();
             $out .= '  ' . $ep . ' = getelementptr inbounds ' . $ty . ', ptr ' . $data . ', i64 ' . $idx . "\n";
             if ($ty === 'i64' || $ty === 'double') {
-                $out .= '  store ' . $ty . ' ' . $val . ', ptr ' . $ep . "\n";
+                $out .= '  store ' . $ty . ' ' . $val . ', ptr ' . $ep . $this->nbufTbaa(true) . "\n";
             } else {
                 $nv = $this->ssa->allocReg();
                 $out .= '  ' . $nv . ' = ' . ($ty === 'float' ? 'fptrunc double ' : 'trunc i64 ') . $val . ' to ' . $ty . "\n";
-                $out .= '  store ' . $ty . ' ' . $nv . ', ptr ' . $ep . "\n";
+                $out .= '  store ' . $ty . ' ' . $nv . ', ptr ' . $ep . $this->nbufTbaa(true) . "\n";
             }
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
         $out .= $this->emitMethodCall($mc);
-        $out .= '  br label %' . $endL . "\n";
+        $out .= $this->nbufNoReturn();
         $out .= $endL . ":\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
@@ -736,15 +743,7 @@ trait EmitLlvmArrays
     /** A local, a constant, or `+`/`-` over them: safe to evaluate twice. */
     private function pureIntExpr(Node $n): bool
     {
-        $k = $n->kind;
-        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_INT_CONST) { return true; }
-        if ($k === Node::KIND_ADD || $k === Node::KIND_SUB) {
-            foreach (\Compile\Mir\Walk::children($n) as $c) {
-                if (!$this->pureIntExpr($c)) { return false; }
-            }
-            return true;
-        }
-        return false;
+        return \Compile\Mir\NbufInline::pureInt($n);
     }
 
     /** Set by `??` around its presence test on a string base; read and cleared

@@ -802,6 +802,12 @@ trait EmitLlvmModule
         }
         $out .= $this->emitEnumTables();
         $out .= "\n";
+        if ($this->rt->needsNbufTbaa) {
+            // The module's only metadata: header vs element of a native buffer
+            // ({@see nbufTbaa}). Unnamed top-level lines ride in every split part.
+            $out .= "!0 = !{!\"manticore tbaa\"}\n!1 = !{!\"nbuf.hdr\", !0, i64 0}\n!2 = !{!\"nbuf.elem\", !0, i64 0}\n"
+                  . "!3 = !{!1, !1, i64 0}\n!4 = !{!2, !2, i64 0}\n";
+        }
         return $out;
     }
 

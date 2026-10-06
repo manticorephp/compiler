@@ -173,6 +173,8 @@ public bool $needsClosureRc = false;
     public bool $needsIsaDyn = false;
     /** The native fixed-width buffer runtime ({@see RuntimeLibrary::nbuf}). */
     public bool $needsBuf = false;
+    /** An inline typed-array access tagged its loads/stores — emit the TBAA nodes. */
+    public bool $needsNbufTbaa = false;
     /** `@__mir_json_ser` alone (the `__mc_json_ser` builtin outside an encoder). */
     public bool $needsJsonSer = false;
 
