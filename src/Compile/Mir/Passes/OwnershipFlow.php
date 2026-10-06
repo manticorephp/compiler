@@ -689,6 +689,11 @@ final class OwnershipFlow implements Pass
             }
             return $name . ':' . ($cur === null ? '?' : $cur->kind);
         }
+        // A Generator frame is an object word like any other: the rc helpers
+        // self-route on the header (`__mir_rc_retain` / `__mir_rc_release` take
+        // the string path off the object magic), so `$it = new X(); if (…) $it
+        // = gen();` is ONE class, not a string beside an object.
+        if ($c === Ownership::GEN) { return 'obj'; }
         return Ownership::flavorName($c);
     }
 
