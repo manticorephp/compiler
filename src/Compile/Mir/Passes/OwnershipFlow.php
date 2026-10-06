@@ -328,13 +328,22 @@ final class OwnershipFlow implements Pass
         // (`if (…) { $magic = []; }`) made the name Own past the join and the
         // exit drop released the caller's array on the path that never stored.
         // It is a Borrow of the array class its own stores give the slot.
+        // A closure's CAPTURE is the same: an untyped param holding the env's
+        // word, and a by-ref-suspect call on it (an unresolved receiver,
+        // {@see MixedSlots::byRefArgs}) made it Own from an EMPTY start — the
+        // body then dropped the env's array on every call.
         foreach ($fn->params as $p) {
-            if (!isset($this->erasedParams[$p->name]) || isset($entry[$p->name])) { continue; }
+            if (isset($entry[$p->name]) || $p->byRef || $p->variadic) { continue; }
+            if (!isset($this->erasedParams[$p->name]) && $p->type->kind !== Type::KIND_UNKNOWN) { continue; }
             if (isset($this->excluded[$p->name]) || isset($this->mixedHere[$p->name])) { continue; }
             $rk = $this->regKey[$p->name] ?? 0;
             if ($rk === 0) { continue; }
             $cls = $this->keyClass[$rk];
-            if (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR) { continue; }
+            // An untyped param the body binds to ONE class (a capture's reads)
+            // arrives holding that class; a bare `array` param an array.
+            if (isset($this->erasedParams[$p->name])
+                ? (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR)
+                : !$this->singleClass($p->name, $rk)) { continue; }
             $entry[$p->name] = OwnLattice::borrow($rk);
         }
         // The emitter retains a co-owning binding at the NAME's registered
@@ -872,6 +881,15 @@ final class OwnershipFlow implements Pass
         $this->keyClass[$k] = $ks;
         if (!isset($this->firstKey[$name])) { $this->firstKey[$name] = $k; }
         return $k;
+    }
+
+    /** Is `$k` the only release class interned for `$name`? */
+    private function singleClass(string $name, int $k): bool
+    {
+        foreach ($this->keyOwner as $kk => $owner) {
+            if ($owner === $name && $kk !== $k) { return false; }
+        }
+        return true;
     }
 
     private function noteOwnKey(string $name, int $k): void
