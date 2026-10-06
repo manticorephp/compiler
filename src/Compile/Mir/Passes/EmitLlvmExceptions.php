@@ -705,8 +705,10 @@ trait EmitLlvmExceptions
             $body = $this->cf->finallyBody($i);
             $depth = $this->cf->finallyTryDepth($i);
             $this->cf->enterInline($i);
+            $labels = $this->ssa->takeUserLabels();
             $text = '';
             foreach ($body as $s) { $text .= $this->emitNode($s); $text .= $this->emitDiscardedCallRelease($s); }
+            $this->ssa->restoreUserLabels($labels);
             $this->cf->leaveInline();
             $out .= $this->ehTagInlined($text, $depth);
         }
