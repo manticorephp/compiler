@@ -246,11 +246,17 @@ trait EmitLlvmFiber
             'mov x4, #0',
             'str x4, [x0, #0x50]',
             'ret',
+            // The base frame of a fiber stack: its return address is UNDEFINED in
+            // the CFI, so an unwind that reaches it stops here (end of stack)
+            // instead of reading the fcontext words as a caller frame.
             $u . 'mc_fiber_trampoline:',
+            '.cfi_startproc',
+            '.cfi_undefined x30',
             'mov x1, x0',
             'mov x0, x20',
             'blr x19',
             'brk #0',
+            '.cfi_endproc',
         ];
     }
 
@@ -287,10 +293,13 @@ trait EmitLlvmFiber
             'movq %rdi, %rax',
             'ret',
             $u . 'mc_fiber_trampoline:',
+            '.cfi_startproc',
+            '.cfi_undefined %rip',
             'movq %r13, %rdi',
             'movq %rax, %rsi',
             'call *%r12',
             'ud2',
+            '.cfi_endproc',
         ];
     }
 
