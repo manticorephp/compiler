@@ -49,6 +49,8 @@ array.
 | `count(): int`, `getSize(): int` | number of elements |
 | `setSize(int $size): void` | grow (zero-filled) or shrink |
 | `insert(int $at, int $count, $value = 0): void` | open `$count` elements holding `$value` before `$at`; `$at === count()` appends |
+| `push($value): void`, `$a[] = $v` | append one element |
+| `pop(): mixed` | remove and return the last element; `UnderflowException("Cannot pop from an empty <Class>")` when empty |
 | `remove(int $at, int $count): void` | remove `$count` elements; the tail moves down |
 | `fill($value, int $from = 0, ?int $to = null): void` | store `$value` into `[$from, $to)` |
 | `copyFrom(TypedArray $src, int $srcAt, int $dstAt, int $count): void` | copy between two arrays of the SAME class (overlap-safe on one array) |
@@ -73,8 +75,8 @@ inline path and throws from the method.
 **Index** — as `SplFixedArray`: an `int`; a canonical integer string (`"12"`),
 a `float` or a `bool` is converted; anything else is a
 `TypeError("Cannot access offset of type <t> on <Class>")`. Out of range is an
-`OutOfBoundsException("Index invalid or out of range")`. `$a[] = $v` is an
-`Error` — the size only changes through `setSize` / `insert` / `remove`.
+`OutOfBoundsException("Index invalid or out of range")`. `$a[] = $v` appends;
+a value that fails the element rules throws and leaves the size alone.
 
 **Value** — converted like a non-strict typed parameter, and **never wrapped
 silently**:

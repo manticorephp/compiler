@@ -68,7 +68,6 @@ attempt(function () use ($a) { $a[4] = 1; });
 attempt(fn () => $a['x']);
 attempt(fn () => $a[null]);
 attempt(fn () => $a[[1]]);
-attempt(function () use ($a) { $a[] = 1; });
 attempt(function () use ($a) { unset($a[9]); });
 attempt(fn () => new Int32Array(-1));
 attempt(fn () => $a->setSize(-2));

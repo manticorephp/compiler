@@ -44,7 +44,6 @@ OutOfBoundsException: Index invalid or out of range
 TypeError: Cannot access offset of type string on Manticore\Ds\Int32Array
 TypeError: Cannot access offset of type null on Manticore\Ds\Int32Array
 TypeError: Cannot access offset of type array on Manticore\Ds\Int32Array
-Error: [] operator not supported for Manticore\Ds\Int32Array
 OutOfBoundsException: Index invalid or out of range
 ValueError: Manticore\Ds\Int32Array::__construct(): Argument #1 ($size) must be greater than or equal to 0
 ValueError: Manticore\Ds\Int32Array::setSize(): Argument #1 ($size) must be greater than or equal to 0

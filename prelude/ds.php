@@ -92,6 +92,27 @@ namespace Manticore\Ds {
             $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $size);
         }
 
+        /** Appends `$value`; `$a[] = $value` is the same. Amortised O(1). */
+        public function push(mixed $value): void
+        {
+            $c = $this->coerce($value);
+            $n = __mc_nbuf_len($this->__mcbuf);
+            $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $n + 1);
+            $this->fillRaw($c, $n, $n + 1);
+        }
+
+        /** Removes and returns the last element. */
+        public function pop(): mixed
+        {
+            $n = __mc_nbuf_len($this->__mcbuf);
+            if ($n === 0) {
+                throw new \UnderflowException('Cannot pop from an empty ' . $this->shortName());
+            }
+            $v = $this->load($n - 1);
+            $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $n - 1);
+            return $v;
+        }
+
         /** Opens `$count` elements holding `$value` before position `$at`. */
         public function insert(int $at, int $count, mixed $value = 0): void
         {
@@ -174,7 +195,8 @@ namespace Manticore\Ds {
         public function offsetSet(mixed $offset, mixed $value): void
         {
             if ($offset === null) {
-                throw new \Error('[] operator not supported for ' . static::class);
+                $this->push($value);
+                return;
             }
             $k = $this->idx($offset);
             $this->fillRaw($this->coerce($value), $k, $k + 1);

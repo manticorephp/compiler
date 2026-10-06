@@ -642,38 +642,21 @@ trait EmitLlvmArrays
      * A failed test runs `offsetSet` — which re-evaluates `$v` (hence pure)
      * and throws php's error. null when the shape does not apply.
      */
-    private function emitNbufSet(Node $arr, Node $index, Node $value, \Compile\Mir\MethodCall_ $mc): ?string
+    /** Whether `$value`'s static type is the element type of buffer kind
+     *  `$kind`, so an inline store needs no coercion. */
+    private function nbufValueFits(int $kind, Node $value): bool
     {
-        $cls = \ltrim((string)($arr->type->class ?? ''), '\\');
-        $kind = $this->nbufKindOf($cls);
-        if ($kind === 0) { return null; }
-        if ($index->type->kind !== Type::KIND_INT) { return null; }
-        if (!\Compile\Mir\NbufInline::pureReceiver($arr) || !$this->pureIntExpr($index) || !$this->nbufPureExpr($value)) { return null; }
         $ty = $this->nbufElemTy($kind);
-        $isF = $ty === 'float' || $ty === 'double';
         $vk = $value->type->kind;
-        if ($ty === '') {
-            if ($vk !== Type::KIND_BOOL) { return null; }
-        } elseif ($isF) {
-            if ($vk !== Type::KIND_FLOAT && $vk !== Type::KIND_INT) { return null; }
-        } elseif ($vk !== Type::KIND_INT) {
-            return null;
-        }
-        if (!isset($this->classes[$cls])) { return null; }
-        $off = $this->classes[$cls]->propertyOffset('__mcbuf');
-        if ($off < 0) { return null; }
-        $out = $this->emitNode($arr);
-        $out .= $this->coerceToPtr();
-        $obj = $this->lastValue;
-        $out .= $this->emitNode($index);
-        $out .= $this->coerceToI64();
-        $idx = $this->lastValue;
-        $out .= $this->emitNode($value);
-        $out .= $isF ? $this->coerceTo('double') : $this->coerceToI64();
-        $val = $this->lastValue;
-        $data = '';
-        $ok = '';
-        $out .= $this->nbufProbe($obj, $off, $idx, $data, $ok);
+        if ($ty === '') { return $vk === Type::KIND_BOOL; }
+        if ($ty === 'float' || $ty === 'double') { return $vk === Type::KIND_FLOAT || $vk === Type::KIND_INT; }
+        return $vk === Type::KIND_INT;
+    }
+
+    /** ANDs the range test of a narrow int kind into `$ok` ('' = no test yet). */
+    private function nbufRangeTest(int $kind, string $val, string &$ok): string
+    {
+        $out = '';
         $lo = 0;
         $hi = 0;
         if ($kind === \Compile\MemoryAbi::BUF_KIND_I8) { $lo = -128; $hi = 127; }
@@ -688,15 +671,19 @@ trait EmitLlvmArrays
             $out .= '  ' . $sh . ' = sub i64 ' . $val . ', ' . (string)$lo . "\n";
             $fit = $this->ssa->allocReg();
             $out .= '  ' . $fit . ' = icmp ule i64 ' . $sh . ', ' . (string)($hi - $lo) . "\n";
+            if ($ok === '') { $ok = $fit; return $out; }
             $both = $this->ssa->allocReg();
             $out .= '  ' . $both . ' = and i1 ' . $ok . ', ' . $fit . "\n";
             $ok = $both;
         }
-        $fastL = $this->ssa->allocLabel('nbufset.fast');
-        $slowL = $this->ssa->allocLabel('nbufset.slow');
-        $endL = $this->ssa->allocLabel('nbufset.end');
-        $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
-        $out .= $fastL . ":\n";
+        return $out;
+    }
+
+    /** Stores `$val` (i64, or double for a float kind) into element `$idx`. */
+    private function nbufStore(int $kind, string $data, string $idx, string $val): string
+    {
+        $ty = $this->nbufElemTy($kind);
+        $out = '';
         if ($ty === '') {
             $wi = $this->ssa->allocReg();
             $out .= '  ' . $wi . ' = lshr i64 ' . $idx . ", 6\n";
@@ -730,10 +717,116 @@ trait EmitLlvmArrays
                 $out .= '  store ' . $ty . ' ' . $nv . ', ptr ' . $ep . $this->nbufTbaa(true) . "\n";
             }
         }
+        return $out;
+    }
+
+    private function emitNbufSet(Node $arr, Node $index, Node $value, \Compile\Mir\MethodCall_ $mc): ?string
+    {
+        $cls = \ltrim((string)($arr->type->class ?? ''), '\\');
+        $kind = $this->nbufKindOf($cls);
+        if ($kind === 0) { return null; }
+        if ($index->type->kind !== Type::KIND_INT) { return null; }
+        if (!\Compile\Mir\NbufInline::pureReceiver($arr) || !$this->pureIntExpr($index) || !$this->nbufPureExpr($value)) { return null; }
+        $ty = $this->nbufElemTy($kind);
+        $isF = $ty === 'float' || $ty === 'double';
+        if (!$this->nbufValueFits($kind, $value)) { return null; }
+        if (!isset($this->classes[$cls])) { return null; }
+        $off = $this->classes[$cls]->propertyOffset('__mcbuf');
+        if ($off < 0) { return null; }
+        $out = $this->emitNode($arr);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($index);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        $out .= $this->emitNode($value);
+        $out .= $isF ? $this->coerceTo('double') : $this->coerceToI64();
+        $val = $this->lastValue;
+        $data = '';
+        $ok = '';
+        $out .= $this->nbufProbe($obj, $off, $idx, $data, $ok);
+        $out .= $this->nbufRangeTest($kind, $val, $ok);
+        $fastL = $this->ssa->allocLabel('nbufset.fast');
+        $slowL = $this->ssa->allocLabel('nbufset.slow');
+        $endL = $this->ssa->allocLabel('nbufset.end');
+        $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $out .= $this->nbufStore($kind, $data, $idx, $val);
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
         $out .= $this->emitMethodCall($mc);
         $out .= $this->nbufNoReturn();
+        $out .= $endL . ":\n";
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `$a[] = $v` on a `Manticore\Ds` typed array, with a pure value of the
+     * element's own type: while the buffer has room (length below capacity)
+     * and the value fits, a store at the length and a length bump, in place.
+     * A full buffer, a value out of range or a missing buffer runs
+     * `offsetSet(null, $v)`, which grows or throws. null when the shape does
+     * not apply.
+     */
+    private function emitNbufAppend(Node $arr, Node $value, \Compile\Mir\MethodCall_ $mc): ?string
+    {
+        $cls = \ltrim((string)($arr->type->class ?? ''), '\\');
+        $kind = $this->nbufKindOf($cls);
+        if ($kind === 0) { return null; }
+        if (!\Compile\Mir\NbufInline::pureReceiver($arr) || !$this->nbufPureExpr($value)) { return null; }
+        if (!$this->nbufValueFits($kind, $value)) { return null; }
+        if (!isset($this->classes[$cls])) { return null; }
+        $off = $this->classes[$cls]->propertyOffset('__mcbuf');
+        if ($off < 0) { return null; }
+        $ty = $this->nbufElemTy($kind);
+        $out = $this->emitNode($arr);
+        $out .= $this->coerceToPtr();
+        $obj = $this->lastValue;
+        $out .= $this->emitNode($value);
+        $out .= ($ty === 'float' || $ty === 'double') ? $this->coerceTo('double') : $this->coerceToI64();
+        $val = $this->lastValue;
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$off . "\n";
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = load i64, ptr ' . $hp . $this->nbufTbaa(false) . "\n";
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $h . ", 0\n";
+        $hptr = $this->ssa->allocReg();
+        $out .= '  ' . $hptr . ' = inttoptr i64 ' . $h . " to ptr\n";
+        $haveL = $this->ssa->allocLabel('nbufapp.have');
+        $fastL = $this->ssa->allocLabel('nbufapp.fast');
+        $slowL = $this->ssa->allocLabel('nbufapp.slow');
+        $endL = $this->ssa->allocLabel('nbufapp.end');
+        $out .= '  br i1 ' . $nz . ', label %' . $haveL . ', label %' . $slowL . "\n";
+        $out .= $haveL . ":\n";
+        $lp = $this->ssa->allocReg();
+        $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $hptr . ', i64 '
+              . (string)\Compile\MemoryAbi::BUF_LEN_OFFSET . "\n";
+        $len = $this->ssa->allocReg();
+        $out .= '  ' . $len . ' = load i64, ptr ' . $lp . $this->nbufTbaa(false) . "\n";
+        $cp = $this->ssa->allocReg();
+        $out .= '  ' . $cp . ' = getelementptr inbounds i8, ptr ' . $hptr . ', i64 '
+              . (string)\Compile\MemoryAbi::BUF_CAP_OFFSET . "\n";
+        $cap = $this->ssa->allocReg();
+        $out .= '  ' . $cap . ' = load i64, ptr ' . $cp . $this->nbufTbaa(false) . "\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp ult i64 ' . $len . ', ' . $cap . "\n";
+        $out .= $this->nbufRangeTest($kind, $val, $ok);
+        $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $data = $this->ssa->allocReg();
+        $out .= '  ' . $data . ' = getelementptr inbounds i8, ptr ' . $hptr . ', i64 '
+              . (string)\Compile\MemoryAbi::BUF_DATA_OFFSET . "\n";
+        $out .= $this->nbufStore($kind, $data, $len, $val);
+        $nl = $this->ssa->allocReg();
+        $out .= '  ' . $nl . ' = add i64 ' . $len . ", 1\n";
+        $out .= '  store i64 ' . $nl . ', ptr ' . $lp . $this->nbufTbaa(false) . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $this->emitMethodCall($mc);
+        $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
@@ -949,7 +1042,9 @@ trait EmitLlvmArrays
         if ($se->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($se->array->type->class ?? '', 'ArrayAccess')) {
             $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$se->index, $se->value], Type::void());
-            $fast = $this->emitNbufSet($se->array, $se->index, $se->value, $mc);
+            $fast = $se->index->kind === Node::KIND_NULL_CONST
+                ? $this->emitNbufAppend($se->array, $se->value, $mc)
+                : $this->emitNbufSet($se->array, $se->index, $se->value, $mc);
             if ($fast !== null) { return $fast; }
             return $this->emitMethodCall($mc);
         }
