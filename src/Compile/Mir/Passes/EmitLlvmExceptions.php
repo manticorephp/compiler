@@ -330,11 +330,35 @@ trait EmitLlvmExceptions
         foreach ($live as $name => $op) {
             $slot = $this->ownOpSlot($op);
             if ($slot === '') { continue; }
-            $body .= $this->ownDropIr($slot, $op);
+            // A MIXED slot's release reads its frame's flag slot: inline.
+            $fl = $this->rcReleaseFlavor($op);
+            $body .= \str_starts_with($fl, 'mix') ? $this->ownDropIr($slot, $op)
+                : '  call void ' . $this->ehDropHelper($fl) . '(ptr ' . $slot . ")\n";
         }
         $body .= '  resume { ptr, i32 } ' . $lp . "\n";
         $this->ehPadBodies[$pad] = $body;
         return $pad;
+    }
+
+    /**
+     * The out-of-line, cold drop of one slot by release flavor `$flavor` a
+     * cleanup pad calls: a pad is one call per owned local instead of the
+     * inline release sequence (pads are cold, and thousands of them made clang
+     * pay for the inline copies). Registered once per module with the lazy
+     * helpers ({@see drainLazyHelpers}).
+     */
+    private function ehDropHelper(string $flavor): string
+    {
+        $sym = '@__mc_ehd.' . (string)\preg_replace('/[^A-Za-z0-9_]/', '_', $flavor);
+        $key = 'ehd:' . $flavor;
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $oldSsa = $this->ssa;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $body = 'define linkonce_odr void ' . $sym . "(ptr %s) noinline cold {\nentry:\n"
+            . $this->rcReleaseSlot('%s', $flavor) . "  ret void\n}\n\n";
+        $this->ssa = $oldSsa;
+        $this->dynamicMethodHelpers[$key] = $body;
+        return $sym;
     }
 
     /**
