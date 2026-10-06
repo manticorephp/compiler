@@ -944,6 +944,11 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $endL . "\n";
             $out .= $next . ":\n";
         }
+        // The pass-through arm hands the SOURCE back. A `clone` is a +1
+        // value to every consumer, so this arm takes one too — else the
+        // consumer's release freed an object its owner still held.
+        $this->rt->needsRc = true;
+        $out .= '  call void @__mir_rc_retain(ptr ' . $src . ")\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $res = $this->ssa->allocReg();
