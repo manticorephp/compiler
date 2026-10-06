@@ -321,7 +321,7 @@ trait EmitLlvmExceptions
         $this->ehPadKeys[$key] = $pad;
         $lbl = $this->ssa->allocLabel('ehlp');
         $this->ehPadLabels[$pad] = $lbl;
-        if ($this->nothrow !== null && $this->nothrow->releasesRaise() && $this->ehCanChain()) {
+        if ($this->nothrow !== null && $this->nothrow->releasesRaise()) {
             $this->ehPadBodies[$pad] = $this->ehRaisingPad($lbl, $live);
             return $pad;
         }
@@ -457,17 +457,10 @@ trait EmitLlvmExceptions
     }
 
     /**
-     * The module defines the prelude's `__mc_finally_chain`, which chaining
-     * calls from IR alone (no MIR call names it; PruneIr keeps it by this
-     * reference). A prelude older than the chain (a newer compiler building an
-     * older tree) has none: then nothing chains, as before the chain existed.
+     * `$old` (owning its +1) becomes the deepest `previous` of `$new`; the +1 is
+     * released. `__mc_finally_chain` is an unconditional prelude body (exceptions.php)
+     * that only IR names; PruneIr keeps it by this reference.
      */
-    private function ehCanChain(): bool
-    {
-        return isset($this->definedFns[$this->mangle('__mc_finally_chain')]);
-    }
-
-    /** `$old` (owning its +1) becomes the deepest `previous` of `$new`; the +1 is released. */
     private function ehChainUnder(string $new, string $old): string
     {
         $ni = $this->ssa->allocReg();
@@ -904,7 +897,7 @@ trait EmitLlvmExceptions
     private function ehChainRegion(string $text, int $depth, string $pendFlag, string $pendVal): string
     {
         $this->ehChainPads = '';
-        if (\strpos($text, 'call ') === false || !$this->ehCanChain()) { return $text; }
+        if (\strpos($text, 'call ') === false) { return $text; }
         $lines = \explode("\n", $text);
         $n = \count($lines);
         $cur = '';
