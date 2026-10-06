@@ -588,7 +588,9 @@ trait LowerTypes
                 // the `@var` + `new` pair in LowerStmts. Every other use of a
                 // specialized object goes through the erased type, which is sound:
                 // dispatch routes it to the erased thunks (see LowerReify).
-                return Type::objOf($gname, $this->lowerTypeArgs($ginner));
+                $gargs = $this->lowerTypeArgs($ginner);
+                $this->checkNbufBinding($gname, $gargs);
+                return Type::objOf($gname, $gargs);
             }
         }
         $cls = \ltrim($hint, '?\\');

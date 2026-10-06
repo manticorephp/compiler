@@ -70,3 +70,8 @@ echo $d[0]->km(), ' ', $d->pop()->km(), ' ', count($d), "\n";
 $plain = new Int32Array(2);
 $plain[] = 9;
 echo $plain->pop() + 1, ' ', $plain[0] + 5, ' ', get_class($plain), "\n";
+
+// foreach over an unbound array yields the plain scalar
+$sum = 0;
+foreach ($plain as $pv) { $sum += $pv + 1; }
+echo $sum, "\n";

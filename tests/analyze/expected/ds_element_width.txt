@@ -1,0 +1,3 @@
+tests/analyze/cases/ds_element_width.php:0:0: error: #[TypeDef] Kind: cannot be the element of Manticore\Ds\UInt8Array — repr 'u16' does not fit an 'u8' element. Bind it to an array at least that wide and of the same signedness
+
+Found 1 error(s), 0 warning(s).

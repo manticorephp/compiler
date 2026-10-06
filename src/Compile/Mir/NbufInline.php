@@ -38,6 +38,41 @@ final class NbufInline
         return 0;
     }
 
+    /**
+     * Whether every value of an element declared with `$repr` over `$carrier`
+     * ('int' / 'float'; `$repr` '' = the whole carrier) fits the element of
+     * buffer kind `$kind`. A signed repr never fits an unsigned element; an
+     * unsigned one fits a strictly wider signed element.
+     */
+    public static function holds(int $kind, string $repr, string $carrier): bool
+    {
+        $k = self::elementOf($kind);
+        if ($k === '') { return false; }
+        $r = $repr !== '' ? $repr : ($carrier === 'float' ? 'f64' : 'i64');
+        $kf = $k[0];
+        $rf = $r[0];
+        $kb = (int)\substr($k, 1);
+        $rb = (int)\substr($r, 1);
+        if ($kf === 'f' || $rf === 'f') { return $kf === $rf && $rb <= $kb; }
+        if ($rf === $kf) { return $rb <= $kb; }
+        return $rf === 'u' && $kf === 'i' && $rb < $kb;
+    }
+
+    /** The element of a buffer kind as a repr name (`u16`), '' for a kind with no scalar element. */
+    public static function elementOf(int $kind): string
+    {
+        if ($kind === MemoryAbi::BUF_KIND_I8) { return 'i8'; }
+        if ($kind === MemoryAbi::BUF_KIND_I16) { return 'i16'; }
+        if ($kind === MemoryAbi::BUF_KIND_I32) { return 'i32'; }
+        if ($kind === MemoryAbi::BUF_KIND_I64) { return 'i64'; }
+        if ($kind === MemoryAbi::BUF_KIND_U8) { return 'u8'; }
+        if ($kind === MemoryAbi::BUF_KIND_U16) { return 'u16'; }
+        if ($kind === MemoryAbi::BUF_KIND_U32) { return 'u32'; }
+        if ($kind === MemoryAbi::BUF_KIND_F32) { return 'f32'; }
+        if ($kind === MemoryAbi::BUF_KIND_F64) { return 'f64'; }
+        return '';
+    }
+
     /** A local, a constant, or `+`/`-` over them: safe to evaluate twice. */
     public static function pureInt(Node $n): bool
     {
