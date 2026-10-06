@@ -177,10 +177,19 @@ final class UnwindRuntime
         $o .= "  store ptr %a1, ptr %pp\n";
         $o .= "  %lpomit = icmp eq i8 %lpenc, -1\n";
         $o .= "  br i1 %lpomit, label %tt, label %lpskip\n";
+        // A present LPStart (LLVM omits it) is the base landing-pad offsets are
+        // relative to: absolute, or pc-relative to its own field (DW_EH_PE_pcrel).
         $o .= "lpskip:\n";
+        $o .= "  %lpat = load ptr, ptr %pp\n";
         $o .= "  %lpv = call i64 @__mc_eh_enc(ptr %pp, i8 %lpenc)\n";
+        $o .= "  %lpapp = and i8 %lpenc, 112\n";
+        $o .= "  %lppc = icmp eq i8 %lpapp, 16\n";
+        $o .= "  %lpati = ptrtoint ptr %lpat to i64\n";
+        $o .= "  %lpabs = add i64 %lpv, %lpati\n";
+        $o .= "  %lpb = select i1 %lppc, i64 %lpabs, i64 %lpv\n";
         $o .= "  br label %tt\n";
         $o .= "tt:\n";
+        $o .= "  %lpbase = phi i64 [ %fs, %hdr ], [ %lpb, %lpskip ]\n";
         $o .= "  %q = load ptr, ptr %pp\n";
         $o .= "  %ttenc = load i8, ptr %q\n";
         $o .= "  %q1 = getelementptr inbounds i8, ptr %q, i64 1\n";
@@ -240,7 +249,7 @@ final class UnwindRuntime
         $o .= "  call void @_Unwind_SetGR(ptr %ctx, i32 0, i64 %exi)\n";
         $o .= "  %sel = zext i1 %iscatch to i64\n";
         $o .= "  call void @_Unwind_SetGR(ptr %ctx, i32 1, i64 %sel)\n";
-        $o .= "  %tgt = add i64 %fs, %lp\n";
+        $o .= "  %tgt = add i64 %lpbase, %lp\n";
         $o .= "  call void @_Unwind_SetIP(ptr %ctx, i64 %tgt)\n";
         $o .= "  ret i32 7\n";
         $o .= "cont:\n";
