@@ -2336,6 +2336,7 @@ trait EmitLlvmModule
                 $out = $this->emitNode($v);
                 $out .= $this->coerceToI64();
             }
+            $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($this->cf->finallyCount());
             return $out . "  ret i32 0\n" . $this->emitDeadLabel();
         }
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
@@ -2347,6 +2348,7 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
+            $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($this->cf->finallyCount());
             $out .= $this->retLeave($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
                 ? $this->asLoadLocalNode($v)->name : '', $v !== null ? $this->lastValue : '', '');
             $out .= $this->genFinishCurrent();
@@ -2617,13 +2619,8 @@ trait EmitLlvmModule
      */
     private function finishReturn(string $out, string $valReg, string $leave): string
     {
-        if ($this->cf->hasFinally()) {
-            $saved = $this->cf->takeFinally();
-            foreach (\array_reverse($saved) as $body) {
-                foreach ($body as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
-            }
-            $this->cf->restoreFinally($saved);
-        }
+        $out .= $this->emitPendingDiscard();
+        $out .= $this->emitFinallysLeaving($this->cf->finallyCount());
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);

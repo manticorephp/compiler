@@ -418,7 +418,8 @@ trait EmitLlvmVisit
 
     public function visitGoto(Goto_ $n): string
     {
-        return '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel();
+        return $this->emitFinallysLeaving($this->cf->finallysLeftByGoto($n->label))
+             . '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitLabel(Label_ $n): string
@@ -497,17 +498,19 @@ trait EmitLlvmVisit
         return $this->emitDoWhile($n);
     }
 
-    // A `break`/`continue` leaves every IteratorAggregate foreach strictly
-    // inside its target.
+    // A `break`/`continue` runs every finally it leaves, then leaves every
+    // IteratorAggregate foreach strictly inside its target.
     public function visitBreak(Break_ $n): string
     {
-        return $this->releaseAggItersLeftBy($n->level)
+        return $this->emitFinallysLeaving($this->cf->finallysLeftByLevel($n->level))
+             . $this->releaseAggItersLeftBy($n->level)
              . '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitContinue(Continue_ $n): string
     {
-        return $this->releaseAggItersLeftBy($n->level)
+        return $this->emitFinallysLeaving($this->cf->finallysLeftByLevel($n->level))
+             . $this->releaseAggItersLeftBy($n->level)
              . '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 

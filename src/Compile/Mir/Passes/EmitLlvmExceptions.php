@@ -231,7 +231,7 @@ trait EmitLlvmExceptions
         for ($i = 0; $i < $n; $i = $i + 1) {
             $l = $lines[$i];
             if (\strlen($l) < 8 || $l[0] !== ' ') { continue; }
-            if (\strpos($l, 'call ') === false || \strpos($l, ' ;!e') !== false) { continue; }
+            if (\strpos($l, 'call ') === false || \strpos($l, ' ;!') !== false) { continue; }
             if (!$this->ehLineMayThrow($l)) { continue; }
             if ($raisesOnly && !$this->ehRaiseCallee($this->ehCallee)) { continue; }
             $lines[$i] = $l . $tag;
@@ -397,8 +397,10 @@ trait EmitLlvmExceptions
      * continuation, so every `phi` in the region that names the split block as
      * a predecessor is retargeted to it ({@see ehPhiRetarget}); nothing outside
      * the region can name a block inside it, since a try is a statement.
+     * A line of a finally body inlined at a jump out of a try of depth
+     * ≤ `$depth` ({@see ehTagInlined}) is not this region's: it runs outside.
      */
-    private function ehInvokeRegion(string $text, string $pad): string
+    private function ehInvokeRegion(string $text, string $pad, int $depth): string
     {
         $lines = \explode("\n", $text);
         $n = \count($lines);
@@ -414,6 +416,7 @@ trait EmitLlvmExceptions
                 if ($l[$len - 1] === ':' && $l[0] !== ';') { $cur = \substr($l, 0, $len - 1); }
                 continue;
             }
+            if ($this->ehInlinedAt($l) <= $depth) { continue; }
             $rest = $this->ehCallRest($l);
             if ($rest === '') { continue; }
             $k = $this->ssa->allocLabel('eh.c');
@@ -476,7 +479,7 @@ trait EmitLlvmExceptions
         }
         $this->ehLhs = $lhs;
         $this->ehCallee = $rest[$p] === '@' ? $callee : '';
-        $mk = \strpos($rest, ' ;!e');
+        $mk = \strpos($rest, ' ;!');
         if ($mk !== false) { return \substr($rest, 0, $mk); }
         return $rest;
     }
@@ -650,9 +653,201 @@ trait EmitLlvmExceptions
             . '  store i64 -1, ptr ' . $used . "\n";
     }
 
+    // ── finally on every exit ─────────────────────────────────────
+    //
+    // A jump out of a try with a `finally` (return, break N, continue N, goto)
+    // emits the finally body in place before it jumps, innermost first
+    // ({@see emitFinallysLeaving}). That copy runs OUTSIDE its try: its call
+    // lines are tagged ` ;!fD` (D = the try's depth), and the regions of that
+    // try and of every try inside it leave them alone ({@see ehInvokeRegion}),
+    // so a throw out of it goes to the enclosing handlers only. The tags go
+    // when the outermost try is done. The canonical finally body (normal exit,
+    // exception) is its own region ({@see ehChainRegion}): a throw out of it
+    // while an exception is pending chains the pending one as its deepest
+    // `previous`; a `return` out of it discards the pending one
+    // ({@see emitPendingDiscard}).
+
+    /** The try depth a line was inlined for (` ;!fD`), or PHP_INT_MAX. */
+    private function ehInlinedAt(string $l): int
+    {
+        $m = \strpos($l, ' ;!f');
+        if ($m === false) { return \PHP_INT_MAX; }
+        return (int)\substr($l, $m + 4);
+    }
+
+    /** `$text` (a finally body inlined for a try of depth `$depth`) with every may-unwind call tagged. */
+    private function ehTagInlined(string $text, int $depth): string
+    {
+        if (\strpos($text, 'call ') === false) { return $text; }
+        $lines = \explode("\n", $text);
+        $n = \count($lines);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $l = $lines[$i];
+            if (\strlen($l) < 8 || $l[0] !== ' ' || \strpos($l, 'call ') === false) { continue; }
+            $m = \strpos($l, ' ;!f');
+            if ($m !== false) {
+                if ((int)\substr($l, $m + 4) > $depth) { $lines[$i] = \substr($l, 0, $m) . ' ;!f' . (string)$depth; }
+                continue;
+            }
+            if ($this->ehCallRest($l) === '') { continue; }
+            $lines[$i] = $l . ' ;!f' . (string)$depth;
+        }
+        return \implode("\n", $lines);
+    }
+
+    /** The `$count` innermost open finally bodies, inlined in order at a jump that leaves them. */
+    private function emitFinallysLeaving(int $count): string
+    {
+        $out = '';
+        $top = $this->cf->finallyCount() - 1;
+        for ($k = 0; $k < $count; $k = $k + 1) {
+            $i = $top - $k;
+            $body = $this->cf->finallyBody($i);
+            $depth = $this->cf->finallyTryDepth($i);
+            $this->cf->enterInline($i);
+            $text = '';
+            foreach ($body as $s) { $text .= $this->emitNode($s); $text .= $this->emitDiscardedCallRelease($s); }
+            $this->cf->leaveInline();
+            $out .= $this->ehTagInlined($text, $depth);
+        }
+        return $out;
+    }
+
+    /** A `return` inside canonical finally bodies releases their pending exceptions. */
+    private function emitPendingDiscard(): string
+    {
+        $out = '';
+        $vals = $this->cf->pendingVals();
+        foreach ($this->cf->pendingFlags() as $i => $flag) {
+            $val = $vals[$i];
+            $pf = $this->ssa->allocReg();
+            $pc = $this->ssa->allocReg();
+            $rl = $this->ssa->allocLabel('fin_discard');
+            $dl = $this->ssa->allocLabel('fin_discard_done');
+            $out .= '  ' . $pf . ' = load i64, ptr ' . $flag . "\n";
+            $out .= '  ' . $pc . ' = icmp ne i64 ' . $pf . ", 0\n";
+            $out .= '  br i1 ' . $pc . ', label %' . $rl . ', label %' . $dl . "\n";
+            $out .= $rl . ":\n";
+            $pv = $this->ssa->allocReg();
+            $pi = $this->ssa->allocReg();
+            $out .= '  ' . $pv . ' = load ptr, ptr ' . $val . "\n";
+            $out .= '  store i64 0, ptr ' . $flag . "\n";
+            $out .= '  store ptr null, ptr ' . $val . "\n";
+            $out .= '  ' . $pi . ' = ptrtoint ptr ' . $pv . " to i64\n";
+            $out .= $this->rcReleaseReg($pi, 'obj');
+            $out .= '  br label %' . $dl . "\n";
+            $out .= $dl . ":\n";
+        }
+        return $out;
+    }
+
+    /** The chain pads {@see ehChainRegion} produced, for after the try. */
+    private string $ehChainPads = '';
+
+    /**
+     * The canonical finally body `$text` (starting at its label) with every
+     * call that may unwind routed to a chain pad, one per cleanup mark: it
+     * links the pending exception (if any) under the new one, then raises the
+     * new one again from the same cleanup state. Lines inlined for a try of
+     * depth ≤ `$depth` are not the body's own.
+     */
+    private function ehChainRegion(string $text, int $depth, string $pendFlag, string $pendVal): string
+    {
+        $this->ehChainPads = '';
+        if (\strpos($text, 'call ') === false) { return $text; }
+        $lines = \explode("\n", $text);
+        $n = \count($lines);
+        $cur = '';
+        /** @var array<string, string> */
+        $last = [];
+        /** @var array<int, string> */
+        $padOf = [];
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $l = $lines[$i];
+            $len = \strlen($l);
+            if ($len === 0) { continue; }
+            if ($l[0] !== ' ') {
+                if ($l[$len - 1] === ':' && $l[0] !== ';') { $cur = \substr($l, 0, $len - 1); }
+                continue;
+            }
+            if ($this->ehInlinedAt($l) <= $depth) { continue; }
+            $rest = $this->ehCallRest($l);
+            if ($rest === '') { continue; }
+            $mk = 0;
+            $e = \strpos($l, ' ;!e');
+            if ($e !== false) { $mk = (int)\substr($l, $e + 4); }
+            if (!isset($padOf[$mk])) { $padOf[$mk] = $this->ssa->allocLabel('fin_chain'); }
+            $k = $this->ssa->allocLabel('eh.c');
+            $lines[$i] = '  ' . $this->ehLhs . 'invoke ' . $rest . ' to label %' . $k
+                . ' unwind label %' . $padOf[$mk] . "\n" . $k . ':';
+            if ($cur !== '') { $last[$cur] = $k; }
+        }
+        if ($padOf === []) { return $text; }
+        if ($last !== []) {
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                if (\strpos($lines[$i], ' = phi ') !== false) {
+                    $lines[$i] = $this->ehPhiRetarget($lines[$i], $last);
+                }
+            }
+        }
+        $pads = '';
+        foreach ($padOf as $mk => $lbl) {
+            $pads .= $this->ehPad($lbl);
+            $obj = $this->ehPadObj;
+            $pf = $this->ssa->allocReg();
+            $pc = $this->ssa->allocReg();
+            $cl = $this->ssa->allocLabel('fin_chain_prev');
+            $gl = $this->ssa->allocLabel('fin_chain_raise');
+            $pads .= '  ' . $pf . ' = load i64, ptr ' . $pendFlag . "\n";
+            $pads .= '  ' . $pc . ' = icmp ne i64 ' . $pf . ", 0\n";
+            $pads .= '  br i1 ' . $pc . ', label %' . $cl . ', label %' . $gl . "\n";
+            $pads .= $cl . ":\n";
+            $pv = $this->ssa->allocReg();
+            $oi = $this->ssa->allocReg();
+            $pi = $this->ssa->allocReg();
+            $pads .= '  ' . $pv . ' = load ptr, ptr ' . $pendVal . "\n";
+            $pads .= '  store i64 0, ptr ' . $pendFlag . "\n";
+            $pads .= '  store ptr null, ptr ' . $pendVal . "\n";
+            $pads .= '  ' . $oi . ' = ptrtoint ptr ' . $obj . " to i64\n";
+            $pads .= '  ' . $pi . ' = ptrtoint ptr ' . $pv . " to i64\n";
+            $pads .= '  call i64 @manticore___mc_finally_chain(i64 ' . $oi . ', i64 ' . $pi . ")\n";
+            $pads .= $this->rcReleaseReg($pi, 'obj');
+            $pads .= '  br label %' . $gl . "\n";
+            $pads .= $gl . ":\n";
+            $pads .= '  call void @__mc_throw(ptr ' . $obj . ')' . ($mk > 0 ? ' ;!e' . (string)$mk : '') . "\n  unreachable\n";
+        }
+        $this->ehChainPads = $pads;
+        return \implode("\n", $lines);
+    }
+
+    /**
+     * User labels inside a try's body and catches: a `goto` to one stays inside.
+     * @return array<string, bool>
+     */
+    private function ehTryLabels(\Compile\Mir\TryCatch_ $n): array
+    {
+        /** @var array<string, bool> */
+        $out = [];
+        foreach ($n->tryBody as $s) { $this->ehCollectLabels($s, $out); }
+        foreach ($n->catches as $c) {
+            foreach ($this->catchBody($c) as $s) { $this->ehCollectLabels($s, $out); }
+        }
+        return $out;
+    }
+
+    /** @param array<string, bool> $out */
+    private function ehCollectLabels(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_LABEL) { $out[$this->ehLabelNode($n)->name] = true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->ehCollectLabels($c, $out); }
+    }
+
+    private function ehLabelNode(Node $n): \Compile\Mir\Label_ { return $n; }
+
     private function emitTryCatch(\Compile\Mir\TryCatch_ $n): string
     {
         $this->rt->needsExceptions = true;
+        $depth = $this->cf->enterTry();
         $hasFinally = $n->hasFinally;
         $hasCatch = \count($n->catches) > 0;
         $endLbl = $this->ssa->allocLabel('try_end');
@@ -710,7 +905,7 @@ trait EmitLlvmExceptions
             // before exiting the function — make the finally body visible to
             // emitReturn. Popped before the finally's own emission (the finally
             // is not self-protected).
-            $this->cf->pushFinally($n->finallyBody);
+            $this->cf->pushFinally($n->finallyBody, $this->ehTryLabels($n));
         }
         $out .= '  br label %' . $tryLbl . "\n";
 
@@ -721,7 +916,7 @@ trait EmitLlvmExceptions
         $region .= '  br label %' . $joinLbl . "\n";
 
         if ($hasCatch) {
-            $region = $this->ehInvokeRegion($region, $catchLbl);
+            $region = $this->ehInvokeRegion($region, $catchLbl, $depth);
             $region .= $this->ehPad($catchLbl);
             $thrown = $this->ehPadObj;
             $region .= $this->btRestore($btSlot);
@@ -758,7 +953,7 @@ trait EmitLlvmExceptions
             $this->cf->popFinally();
             // An exception out of the try body (catchless) or out of a catch body
             // runs the finally, then goes on up.
-            $out .= $this->ehInvokeRegion($region, $finPadLbl);
+            $out .= $this->ehInvokeRegion($region, $finPadLbl, $depth);
             $out .= $this->ehPad($finPadLbl);
             $out .= $this->btRestore($btSlot);
             $out .= $this->arenaTryLandingIr($spReg);
@@ -767,8 +962,15 @@ trait EmitLlvmExceptions
             $out .= '  store i64 1, ptr ' . $pendFlag . "\n";
             $out .= '  br label %' . $finLbl . "\n";
 
-            $out .= $finLbl . ":\n";
-            foreach ($n->finallyBody as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
+            // The canonical body: reached on the normal exit and with an exception
+            // pending; a throw out of it chains, a return out of it discards.
+            $this->cf->pushPending($pendFlag, $pendVal);
+            $fin = $finLbl . ":\n";
+            foreach ($n->finallyBody as $s) { $fin .= $this->emitNode($s); $fin .= $this->emitDiscardedCallRelease($s); }
+            $this->cf->popPending();
+            $out .= $this->ehChainRegion($fin, $depth - 1, $pendFlag, $pendVal);
+            $chainPads = $this->ehChainPads;
+            $this->ehChainPads = '';
             $rethrowLbl = $this->ssa->allocLabel('try_rethrow');
             $pf = $this->ssa->allocReg();
             $out .= '  ' . $pf . ' = load i64, ptr ' . $pendFlag . "\n";
@@ -779,10 +981,13 @@ trait EmitLlvmExceptions
             $sv = $this->ssa->allocReg();
             $out .= '  ' . $sv . ' = load ptr, ptr ' . $pendVal . "\n";
             $out .= $this->ehMarkRaise($this->emitRethrowAt($sv), $n->ownFinally);
+            $out .= $chainPads;
         }
 
         $out .= $endLbl . ":\n";
         $out = $markInit . $out;
+        $this->cf->leaveTry();
+        if ($depth === 1 && \strpos($out, ' ;!f') !== false) { $out = (string)\preg_replace('/ ;!f[0-9]+/', '', $out); }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
