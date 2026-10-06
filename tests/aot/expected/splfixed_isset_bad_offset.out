@@ -1,0 +1,7 @@
+TypeError: Cannot access offset of type string on SplFixedArray
+bool(false)
+bool(false)
+TypeError: Cannot access offset of type null on SplFixedArray
+TypeError: Cannot access offset of type array on SplFixedArray
+TypeError: Cannot access offset of type string on SplFixedArray
+TypeError: Cannot access offset of type string on SplFixedArray

@@ -1458,7 +1458,6 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSe
         } elseif (\is_float($index) || \is_bool($index)) {
             $i = (int)$index;
         } else {
-            if (!$strict && \is_string($index)) { return -1; }
             throw new TypeError('Cannot access offset of type ' . \get_debug_type($index) . ' on SplFixedArray');
         }
         if ($i < 0 || $i >= __mc_nbuf_len($this->__mcbuf)) {
