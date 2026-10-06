@@ -321,6 +321,10 @@ trait EmitLlvmExceptions
         $this->ehPadKeys[$key] = $pad;
         $lbl = $this->ssa->allocLabel('ehlp');
         $this->ehPadLabels[$pad] = $lbl;
+        if ($this->nothrow !== null && $this->nothrow->releasesRaise() && $this->ehCanChain()) {
+            $this->ehPadBodies[$pad] = $this->ehRaisingPad($lbl, $live);
+            return $pad;
+        }
         $lp = $this->ssa->allocReg();
         $body = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n";
         foreach ($live as $name => $op) {
@@ -331,6 +335,123 @@ trait EmitLlvmExceptions
         $body .= '  resume { ptr, i32 } ' . $lp . "\n";
         $this->ehPadBodies[$pad] = $body;
         return $pad;
+    }
+
+    /**
+     * A cleanup pad whose drops may run a destructor that throws (php: the new
+     * exception takes the one in flight as its deepest `previous`, and the rest
+     * of the frame's locals are still destroyed). Each drop is an `invoke`:
+     * while the original exception is in flight its unwind lands in a catch that
+     * chains that exception's payload under the new one and frees the exception
+     * object; from then on the newest Throwable sits in a slot, every later
+     * drop that throws chains the slot's under its own, and after the last drop
+     * the slot's is raised afresh. A foreign exception just drops and resumes.
+     *
+     * @param array<string, \Compile\Mir\MemoryOp_> $live
+     */
+    private function ehRaisingPad(string $lbl, array $live): string
+    {
+        /** @var string[] */
+        $slots = [];
+        /** @var \Compile\Mir\MemoryOp_[] */
+        $ops = [];
+        foreach ($live as $name => $op) {
+            $slot = $this->ownOpSlot($op);
+            if ($slot === '') { continue; }
+            $slots[] = $slot;
+            $ops[] = $op;
+        }
+        $n = \count($slots);
+        $lp = $this->ssa->allocReg();
+        $ex = $this->ssa->allocReg();
+        $cls = $this->ssa->allocReg();
+        $ours = $this->ssa->allocReg();
+        $cur = $this->ssa->allocReg();
+        $plain = $this->ssa->allocLabel('ehlp.foreign');
+        $drops = $this->ssa->allocLabel('ehlp.drops');
+        $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n";
+        $out .= '  ' . $ex . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n";
+        $out .= '  ' . $cls . ' = load i64, ptr ' . $ex . "\n";
+        $out .= '  ' . $ours . ' = icmp eq i64 ' . $cls . ', ' . (string)\Compile\MemoryAbi::EXC_CLASS . "\n";
+        $out .= '  br i1 ' . $ours . ', label %' . $drops . ', label %' . $plain . "\n";
+        $out .= $plain . ":\n";
+        for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ownDropIr($slots[$i], $ops[$i]); }
+        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        /** @var string[] catch while the original is in flight, per drop */
+        $inFlight = [];
+        /** @var string[] object mode: continue at drop j (j = n: raise) */
+        $next = [];
+        /** @var string[] object mode: catch of drop j */
+        $caught = [];
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $inFlight[] = $this->ssa->allocLabel('ehlp.nest');
+            $caught[] = $this->ssa->allocLabel('ehlp.nest');
+        }
+        for ($j = 0; $j <= $n; $j = $j + 1) { $next[] = $this->ssa->allocLabel('ehlp.next'); }
+        $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
+        for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ehDropInvoke($slots[$i], $ops[$i], $inFlight[$i]); }
+        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $pay = (string)\Compile\MemoryAbi::EXC_PAYLOAD_OFFSET;
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $out .= $this->ehPad($inFlight[$i]);
+            $obj = $this->ehPadObj;
+            $pp = $this->ssa->allocReg();
+            $old = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = getelementptr inbounds i8, ptr ' . $ex . ', i64 ' . $pay . "\n";
+            $out .= '  ' . $old . ' = load ptr, ptr ' . $pp . "\n";
+            $out .= '  call void @free(ptr ' . $ex . ")\n";
+            $out .= $this->ehChainUnder($obj, $old);
+            $out .= '  store ptr ' . $obj . ', ptr ' . $cur . "\n";
+            $out .= '  br label %' . $next[$i + 1] . "\n";
+        }
+        $out .= $next[0] . ":\n  unreachable\n";
+        for ($j = 1; $j < $n; $j = $j + 1) {
+            $out .= $next[$j] . ":\n";
+            $out .= $this->ehDropInvoke($slots[$j], $ops[$j], $caught[$j]);
+            $out .= '  br label %' . $next[$j + 1] . "\n";
+            $out .= $this->ehPad($caught[$j]);
+            $obj = $this->ehPadObj;
+            $prev = $this->ssa->allocReg();
+            $out .= '  ' . $prev . ' = load ptr, ptr ' . $cur . "\n";
+            $out .= $this->ehChainUnder($obj, $prev);
+            $out .= '  store ptr ' . $obj . ', ptr ' . $cur . "\n";
+            $out .= '  br label %' . $next[$j + 1] . "\n";
+        }
+        $last = $this->ssa->allocReg();
+        $out .= $next[$n] . ":\n";
+        $out .= '  ' . $last . ' = load ptr, ptr ' . $cur . "\n";
+        $out .= $this->emitRethrowAt($last);
+        return $out;
+    }
+
+    /** Drop `$slot` with every call of it an `invoke` unwinding to `$pad`; ends in a fresh block. */
+    private function ehDropInvoke(string $slot, \Compile\Mir\MemoryOp_ $op, string $pad): string
+    {
+        $l = $this->ssa->allocLabel('ehlp.d');
+        return '  br label %' . $l . "\n"
+            . $this->ehInvokeRegion($l . ":\n" . $this->ownDropIr($slot, $op), $pad, -1);
+    }
+
+    /**
+     * The module defines the prelude's `__mc_finally_chain`, which chaining
+     * calls from IR alone (no MIR call names it; PruneIr keeps it by this
+     * reference). A prelude older than the chain (a newer compiler building an
+     * older tree) has none: then nothing chains, as before the chain existed.
+     */
+    private function ehCanChain(): bool
+    {
+        return isset($this->definedFns[$this->mangle('__mc_finally_chain')]);
+    }
+
+    /** `$old` (owning its +1) becomes the deepest `previous` of `$new`; the +1 is released. */
+    private function ehChainUnder(string $new, string $old): string
+    {
+        $ni = $this->ssa->allocReg();
+        $oi = $this->ssa->allocReg();
+        return '  ' . $ni . ' = ptrtoint ptr ' . $new . " to i64\n"
+            . '  ' . $oi . ' = ptrtoint ptr ' . $old . " to i64\n"
+            . '  call i64 @manticore___mc_finally_chain(i64 ' . $ni . ', i64 ' . $oi . ")\n"
+            . $this->rcReleaseReg($oi, 'obj');
     }
 
     /**
@@ -759,7 +880,7 @@ trait EmitLlvmExceptions
     private function ehChainRegion(string $text, int $depth, string $pendFlag, string $pendVal): string
     {
         $this->ehChainPads = '';
-        if (\strpos($text, 'call ') === false) { return $text; }
+        if (\strpos($text, 'call ') === false || !$this->ehCanChain()) { return $text; }
         $lines = \explode("\n", $text);
         $n = \count($lines);
         $cur = '';
@@ -808,15 +929,10 @@ trait EmitLlvmExceptions
             $pads .= '  br i1 ' . $pc . ', label %' . $cl . ', label %' . $gl . "\n";
             $pads .= $cl . ":\n";
             $pv = $this->ssa->allocReg();
-            $oi = $this->ssa->allocReg();
-            $pi = $this->ssa->allocReg();
             $pads .= '  ' . $pv . ' = load ptr, ptr ' . $pendVal . "\n";
             $pads .= '  store i64 0, ptr ' . $pendFlag . "\n";
             $pads .= '  store ptr null, ptr ' . $pendVal . "\n";
-            $pads .= '  ' . $oi . ' = ptrtoint ptr ' . $obj . " to i64\n";
-            $pads .= '  ' . $pi . ' = ptrtoint ptr ' . $pv . " to i64\n";
-            $pads .= '  call i64 @manticore___mc_finally_chain(i64 ' . $oi . ', i64 ' . $pi . ")\n";
-            $pads .= $this->rcReleaseReg($pi, 'obj');
+            $pads .= $this->ehChainUnder($obj, $pv);
             $pads .= '  br label %' . $gl . "\n";
             $pads .= $gl . ":\n";
             $pads .= '  call void @__mc_throw(ptr ' . $obj . ')' . ($mk > 0 ? ' ;!e' . (string)$mk : '') . "\n  unreachable\n";
