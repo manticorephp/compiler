@@ -145,10 +145,36 @@ buffer but `setSize`, `push` and `$b[] = $byte`. A typed read costs about
 ## `#[TypeDef]` and typed arrays
 
 The `repr` set of [`#[TypeDef]`](attributes.md#typedef) (`i8` … `i64`, `u8` …
-`u32`, `f32`, `f64`) is the same set of machine widths. A typed array is the
-container to keep such values in: store `$id->value`, rebuild with
-`new Id($a[$i])` — both sides are erased, so the round trip costs nothing.
+`u32`, `f32`, `f64`) is the same set of machine widths, and a typed array can
+be **bound** to such a class: the element is stored at the array's width and
+read back AS the class — the same scalar, named, with its methods.
 
+```php
+#[TypeDef(repr: 'u16')]
+final class TokenKind
+{
+    public function __construct(public readonly int $value) {}
+    public function isComment(): bool { return $this->value === 7 || $this->value === 8; }
+}
+
+final class Tokens
+{
+    /** @var UInt16Array<TokenKind> */
+    public UInt16Array $kinds;
+}
+
+/** @var UInt16Array<TokenKind> $kinds */
+$kinds = new UInt16Array($n);
+$kinds[$i] = new TokenKind(7);        // a 2-byte store; no object exists
+if ($kinds[$i]->isComment()) { … }    // a 2-byte load and a direct call
+$last = $kinds->pop();                // a TokenKind
+```
+
+The binding is written in a docblock (`@var` on a local or a property,
+`@param`, `@return`), like every other [generic](generics.md). It costs
+nothing at run time: `get_class($kinds)` is still `Manticore\Ds\UInt16Array`.
+An array with no binding reads plain `int` / `float`, as before. `foreach`
+over a bound array still yields the plain scalar.
 ## Polyfill
 
 The classes are ordinary PHP (`prelude/ds.php`) over a small set of buffer

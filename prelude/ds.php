@@ -16,8 +16,12 @@
 namespace Manticore\Ds {
 
     /**
-     * @implements \ArrayAccess<int, mixed>
-     * @implements \IteratorAggregate<int, mixed>
+     * `T` is the type an element is read as: the scalar itself, or a
+     * `#[TypeDef]` class over it (`UInt16Array<TokenKind>`).
+     *
+     * @template T
+     * @implements \ArrayAccess<int, T>
+     * @implements \IteratorAggregate<int, T>
      */
     abstract class TypedArray implements \ArrayAccess, \Countable, \IteratorAggregate, \JsonSerializable
     {
@@ -101,7 +105,10 @@ namespace Manticore\Ds {
             $this->fillRaw($c, $n, $n + 1);
         }
 
-        /** Removes and returns the last element. */
+        /**
+         * Removes and returns the last element.
+         * @return T
+         */
         public function pop(): mixed
         {
             $n = __mc_nbuf_len($this->__mcbuf);
@@ -279,6 +286,9 @@ namespace Manticore\Ds {
      * The integer kinds: an element is an int inside [min(), max()].
      * @implements \ArrayAccess<int, int>
      * @implements \IteratorAggregate<int, int>
+     *
+     * @template T = int
+     * @extends TypedArray<T>
      */
     abstract class IntTypedArray extends TypedArray
     {
@@ -286,6 +296,7 @@ namespace Manticore\Ds {
 
         abstract protected function rangeMax(): int;
 
+        /** @return T */
         public function offsetGet(mixed $offset): int
         {
             if (\is_int($offset) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)) {
@@ -379,9 +390,13 @@ namespace Manticore\Ds {
      * The float kinds.
      * @implements \ArrayAccess<int, float>
      * @implements \IteratorAggregate<int, float>
+     *
+     * @template T = float
+     * @extends TypedArray<T>
      */
     abstract class FloatTypedArray extends TypedArray
     {
+        /** @return T */
         public function offsetGet(mixed $offset): float
         {
             if (\is_int($offset) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)) {
@@ -440,6 +455,7 @@ namespace Manticore\Ds {
         }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class Int8Array extends IntTypedArray
     {
         protected function kind(): int { return 1; }
@@ -447,6 +463,7 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return 127; }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class Int16Array extends IntTypedArray
     {
         protected function kind(): int { return 2; }
@@ -454,6 +471,7 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return 32767; }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class Int32Array extends IntTypedArray
     {
         protected function kind(): int { return 3; }
@@ -461,6 +479,7 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return 2147483647; }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class Int64Array extends IntTypedArray
     {
         protected function kind(): int { return 4; }
@@ -468,6 +487,7 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return \PHP_INT_MAX; }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class UInt8Array extends IntTypedArray
     {
         protected function kind(): int { return 5; }
@@ -475,6 +495,7 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return 255; }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class UInt16Array extends IntTypedArray
     {
         protected function kind(): int { return 6; }
@@ -488,6 +509,9 @@ namespace Manticore\Ds {
      * `$bigEndian`. An access that runs past the end is an
      * `OutOfBoundsException`; an integer that does not fit its width is a
      * `ValueError`.
+     *
+     * @template T = int
+     * @extends IntTypedArray<T>
      */
     final class ByteBuffer extends IntTypedArray
     {
@@ -607,6 +631,7 @@ namespace Manticore\Ds {
         }
     }
 
+    /** @template T = int @extends IntTypedArray<T> */
     final class UInt32Array extends IntTypedArray
     {
         protected function kind(): int { return 7; }
@@ -614,12 +639,18 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return 4294967295; }
     }
 
-    /** Elements are stored as IEEE-754 binary32: a read returns the rounded value. */
+    /**
+     * Elements are stored as IEEE-754 binary32: a read returns the rounded value.
+     *
+     * @template T = float
+     * @extends FloatTypedArray<T>
+     */
     final class Float32Array extends FloatTypedArray
     {
         protected function kind(): int { return 8; }
     }
 
+    /** @template T = float @extends FloatTypedArray<T> */
     final class Float64Array extends FloatTypedArray
     {
         protected function kind(): int { return 9; }

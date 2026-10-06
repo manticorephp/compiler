@@ -21,6 +21,10 @@ final class NbufInline
         $cls = \ltrim($cls, '\\');
         if (\strncmp($cls, 'Manticore\\Ds\\', 13) !== 0) { return 0; }
         $short = \substr($cls, 13);
+        // A specialization (`UInt16Array<Kind>` built as `UInt16Array__of__…`,
+        // {@see Passes\LowerReify::reifySpecName}) is the same container.
+        $of = \strpos($short, '__of__');
+        if ($of !== false) { $short = \substr($short, 0, $of); }
         if ($short === 'Int32Array') { return MemoryAbi::BUF_KIND_I32; }
         if ($short === 'Int64Array') { return MemoryAbi::BUF_KIND_I64; }
         if ($short === 'UInt8Array' || $short === 'ByteBuffer') { return MemoryAbi::BUF_KIND_U8; }
