@@ -33,8 +33,14 @@ final class MemoryAbi
      * `__mir_str_reclaim` destroys a frame it frees (`__mir_gen_destroy`):
      * state ≥ 0 re-enters the resume function at `-2 - state`. A v16 resume
      * function has no such entry and its readers take retval raw.
+     *
+     * v18: v17 above AND the native-buffer lineage — the `BUF_*` block layout
+     * (`__mir_nbuf_*`, a SplFixedArray / `Manticore\Ds` element store) and the
+     * class descriptor's `json_fn@56` slot. That lineage also called itself v17
+     * on its own branch, so the two v17s are different layouts and neither may
+     * link with a v18 object.
      */
-    public const VERSION = 17;
+    public const VERSION = 18;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
