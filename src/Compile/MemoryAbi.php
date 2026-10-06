@@ -27,8 +27,14 @@ final class MemoryAbi
      * object is the zero-cost `_Unwind_Exception` header + Throwable pointer
      * (`EXC_*`, docs/design/memory-abi.md §7b). Either v15 alone is a
      * different layout, so neither may link with a v16 object.
+     *
+     * v17: a Generator frame OWNS every cell of its header — current@16,
+     * key@24, sent@40 and retval@48 (now a tagged cell, was a raw word) — and
+     * `__mir_str_reclaim` destroys a frame it frees (`__mir_gen_destroy`):
+     * state ≥ 0 re-enters the resume function at `-2 - state`. A v16 resume
+     * function has no such entry and its readers take retval raw.
      */
-    public const VERSION = 16;
+    public const VERSION = 17;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 

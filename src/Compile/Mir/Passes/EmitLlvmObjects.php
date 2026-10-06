@@ -7551,7 +7551,7 @@ trait EmitLlvmObjects
         // leaves the self-describing cell the runtime classifiers want.
         if ($m === 'current') {
             $out .= $this->genPrimeIfFresh($g);
-            $out .= $this->genFieldLoad($g, 16);
+            $out .= $this->genLiveFieldLoad($g, 16);
             $out .= $this->unboxCellToType($mc->type);
             $out .= $this->coerceToI64();
             $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
@@ -7569,12 +7569,23 @@ trait EmitLlvmObjects
         // file came back with a dead pathname for a key.
         if ($m === 'key') {
             $out .= $this->genPrimeIfFresh($g);
-            $out .= $this->genFieldLoad($g, 24);
+            $out .= $this->genLiveFieldLoad($g, 24);
             $out .= $this->coerceToI64();
             $out .= $this->genCurrentRetain(Type::cell(), $this->lastValue);
             return $this->finishI64($out, $this->lastValue);
         }
-        if ($m === 'getReturn') { $out .= $this->genFieldLoad($g, 48); return $this->finishI64($out, $this->lastValue); }
+        // `retval`@48 is the frame's own cell, like `current`.
+        if ($m === 'getReturn') {
+            $out .= $this->genFieldLoad($g, 48);
+            $out .= $this->unboxCellToType($mc->type);
+            $out .= $this->coerceToI64();
+            $out .= $this->genCurrentRetain($mc->type, $this->lastValue);
+            $out = $this->finishI64($out, $this->lastValue);
+            if ($mc->type->kind === Type::KIND_CELL) {
+                $this->markCellOpaque($this->lastValue);
+            }
+            return $out;
+        }
         if ($m === 'rewind') { $out .= $this->genPrimeIfFresh($g); return $this->finishI64($out, '0'); }
         // next()/send() on a generator nobody started run it to its first
         // yield first, as php's ensureInitialized does: next() then steps past
@@ -7587,9 +7598,15 @@ trait EmitLlvmObjects
             if (\count($mc->args) >= 1) {
                 // The yield expression is cell-typed — box the sent value so
                 // `$x = yield` reads a valid cell (var_dump/echo correct).
+                // The frame owns the slot until the yield moves it out; a
+                // generator that never reads it drops it when it is destroyed.
                 $out .= $this->emitNode($mc->args[0]);
-                $out .= $this->boxToCell($mc->args[0]->type);
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sentPtr . "\n";
+                $out .= $this->genBoxOwned($mc->args[0], true);
+                $nsv = $this->lastValue;
+                $osv = $this->ssa->allocReg();
+                $out .= '  ' . $osv . ' = load i64, ptr ' . $sentPtr . "\n";
+                $out .= '  store i64 ' . $nsv . ', ptr ' . $sentPtr . "\n";
+                $out .= $this->rcReleaseReg($osv, 'cell');
             }
             $out .= $this->genResumeCall($g);
             $out .= $this->genFieldLoad($g, 16);
@@ -7746,6 +7763,27 @@ trait EmitLlvmObjects
         $out .= '  br i1 ' . $fresh . ', label %' . $doL . ', label %' . $skL . "\n";
         $out .= $doL . ":\n" . $this->genResumeCall($g) . '  br label %' . $skL . "\n";
         $out .= $skL . ":\n";
+        return $out;
+    }
+
+    /**
+     * `current`@16 / `key`@24 as a reader sees them: null once the generator is
+     * finished. One that returned nulled both itself; one an exception ended
+     * still holds its last value, which only the frame's destruction drops.
+     */
+    private function genLiveFieldLoad(string $g, int $off): string
+    {
+        $this->rt->needsTagged = true;
+        $out = $this->genFieldLoad($g, 8);
+        $fin = $this->ssa->allocReg();
+        $out .= '  ' . $fin . ' = icmp eq i64 ' . $this->lastValue . ", -1\n";
+        $out .= $this->genFieldLoad($g, $off);
+        $bn = $this->ssa->allocReg();
+        $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $fin . ', i64 ' . $bn . ', i64 ' . $this->lastValue . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
         return $out;
     }
 

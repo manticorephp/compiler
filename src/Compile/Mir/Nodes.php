@@ -850,6 +850,13 @@ final class Yield_ extends Node
         parent::__construct(Node::KIND_YIELD, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own while the generator
+     *  is suspended here, name → its `drop` op — what destroying the frame at
+     *  this yield, or an exception injected into it, drops. Not copied by
+     *  {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitYield($this);
@@ -1423,6 +1430,22 @@ final class Foreach_ extends Node
     public bool $ownCoOwn = false;
     public ?MemoryOp_ $ownDropValue = null;
     public ?MemoryOp_ $ownDropKey = null;
+    /** Set by {@see Passes\OwnershipFlow}: the key var takes its own +1 of a
+     *  generator's key — the frame drops its own at the next yield. */
+    public bool $ownKey = false;
+    /** Set by {@see Passes\OwnershipFlow} on a co-owning loop: a `drop` of the
+     *  value var at the class THIS loop binds it — the flavor its retain takes. */
+    public ?MemoryOp_ $ownBind = null;
+    /** Set by {@see Passes\OwnershipFlow}: a `drop` of the iterator local
+     *  ({@see $iterName}) before the loop takes a new iterator — an earlier
+     *  run of this loop an exception left may still hold one. */
+    public ?MemoryOp_ $ownDropIter = null;
+    /** Set by {@see Passes\OwnershipFlow} on an iterator loop: the locals Own
+     *  while it steps its iterator (the iterator local among them) — what an
+     *  exception out of `rewind` / `valid` / `current` / `key` / `next` or a
+     *  generator's resume drops on its way out of the frame.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
 
     public function accept(EmitVisitor $v): string
     {

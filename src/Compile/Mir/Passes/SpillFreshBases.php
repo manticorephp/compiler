@@ -1021,12 +1021,14 @@ final class SpillFreshBases
         $k = $n->kind;
         if ($k === Node::KIND_CMP) {
             $c = $this->asCmp($n);
-            $c->left = $this->consume($c->left);
-            $c->right = $this->consume($c->right);
+            $l = $c->left;
+            $c->left = $this->consumeCompared($l, $c->right);
+            $c->right = $this->consumeCompared($c->right, $l);
         } elseif ($k === Node::KIND_SPACESHIP) {
             $sp = $this->asSpaceship($n);
-            $sp->left = $this->consume($sp->left);
-            $sp->right = $this->consume($sp->right);
+            $l = $sp->left;
+            $sp->left = $this->consumeCompared($l, $sp->right);
+            $sp->right = $this->consumeCompared($sp->right, $l);
         } elseif ($k === Node::KIND_INSTANCEOF) {
             $io = $this->asInstanceof($n);
             $io->operand = $this->consume($io->operand);
@@ -1065,6 +1067,26 @@ final class SpillFreshBases
             if ($name === $bare) { return true; }
         }
         return false;
+    }
+
+    /**
+     * {@see consume} for one side of a comparison against `$other`. A string a
+     * cast MINTS (`(string)$int`, always on the heap) is the emitter's to free
+     * when both sides are strings; against a cell or an erased value the compare
+     * runs through the tagged table, which frees nothing — `(string)$i == $key`
+     * over an `int|string` key kept the buffer. A local owns it there. A concat
+     * is left alone: its buffer is the arena's, and this pass runs after
+     * ApplyMemoryMode settled which loops reset theirs.
+     */
+    private function consumeCompared(Node $v, Node $other): Node
+    {
+        $ok = $other->type->kind;
+        if ($v->type->kind === Type::KIND_STRING && ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN)) {
+            if ($v->kind === Node::KIND_CAST && $this->asCast($v)->operand->type->kind !== Type::KIND_STRING) {
+                return $this->spill($v);
+            }
+        }
+        return $this->consume($v);
     }
 
     private function consume(Node $v): Node

@@ -2208,7 +2208,7 @@ function __mc_sendfile(\Resource $out, \Resource $in, int $offset, int $len): in
  * The local ("host:port") name of a socket, or the peer's when $want_peer.
  * @return string|false
  */
-function stream_socket_get_name(\Resource $handle, bool $want_peer)
+function stream_socket_get_name(\Resource $handle, bool $want_peer): string|false
 {
     if (!\__mc_stream_is_net($handle)) {
         return false;

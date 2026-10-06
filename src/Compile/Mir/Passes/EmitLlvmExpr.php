@@ -5401,6 +5401,10 @@ trait EmitLlvmExpr
             $chunks[] = $jnL . ":\n";
             $phi = $this->ssa->allocReg();
             $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
+            // A fresh string operand dies here, in the join, as on the
+            // string-vs-string path: `(string)(int)$key === $key` over an
+            // `int|string` key kept one buffer per `array_key_exists()` call.
+            $chunks[] = $this->freeStrTemp($leftIsStr ? $c->left : $c->right, $sp);
             $res = $phi;
             if ($op === '!==') { $res = $this->ssa->allocReg(); $chunks[] = '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
             $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";

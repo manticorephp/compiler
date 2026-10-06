@@ -165,7 +165,7 @@ trait EmitLlvmControl
         $out .= '  ' . $fresh . ' = icmp eq i64 ' . $st0 . ", 0\n";
         $out .= '  br i1 ' . $fresh . ', label %' . $rewindLabel . ', label %' . $condLabel . "\n";
         $out .= $rewindLabel . ":\n";
-        $out .= $this->genResumeCall($g);
+        $out .= $this->ehMarkRaise($this->genResumeCall($g), $fe->ownLive);
         $out .= '  br label %' . $condLabel . "\n";
 
         $out .= $condLabel . ":\n";
@@ -206,6 +206,7 @@ trait EmitLlvmControl
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
             $kw = $this->lastValue;
+            if ($fe->ownKey) { $out .= $this->rcRetainReg($kw, 'cell'); }
             $out .= $this->foreachPrevDrop($fe, true);
             $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
@@ -213,7 +214,7 @@ trait EmitLlvmControl
 
         $out .= $stepLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
-        $out .= $this->genResumeCall($g);
+        $out .= $this->ehMarkRaise($this->genResumeCall($g), $fe->ownLive);
         $out .= '  br label %' . $condLabel . "\n";
 
         $out .= $endLabel . ":\n";
@@ -631,7 +632,11 @@ trait EmitLlvmControl
         $iterSlot = $this->locals->slots[$iterName];
         $out .= $this->emitNode($fe->array);
         $out .= $this->coerceToI64();
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $subj = $this->lastValue;
+        if ($fe->ownDropIter !== null) {
+            $out .= $this->ownDropIr($iterSlot, $fe->ownDropIter);
+        }
+        $out .= '  store i64 ' . $subj . ', ptr ' . $iterSlot . "\n";
         $iterType = \Compile\Mir\Type::obj($fe->iterClass);
         if ($fe->iterAggregate) {
             $subjNode = new \Compile\Mir\LoadLocal($iterName, $fe->array->type);
@@ -646,13 +651,13 @@ trait EmitLlvmControl
         $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
         // The iterator `getIterator()` handed back is the loop's own (+1): give
         // it back when the loop ends — it held the subject, and with it every
-        // element (a SplFixedArray's). Only a concrete, non-Generator class: an
-        // interface-typed one may be a Generator at run time, whose frame is
-        // released through another header. A `return` / `break N` / `continue N`
-        // out of the body branches past the end label, so it releases the same
-        // slot on its way out ({@see ControlFlow::aggItersLeftBy}).
-        $owns = $fe->iterAggregate && $fe->iterClass !== 'Generator'
-            && ($dyn || isset($this->classes[$fe->iterClass]));
+        // element (a SplFixedArray's). A Generator frame is given back the same
+        // way: the object release routes on the header, and the frame lets go
+        // of what it holds ({@see EmitLlvmGenerator}). A `return` / `break N` /
+        // `continue N` out of the body branches past the end label, so it
+        // releases the same slot on its way out ({@see ControlFlow::aggItersLeftBy}).
+        $owns = $fe->iterAggregate
+            && ($fe->iterClass === 'Generator' || $dyn || isset($this->classes[$fe->iterClass]));
         if ($owns) { $this->cf->pushAggIter($iterSlot, $dyn); }
         $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
         if ($owns) {
@@ -721,17 +726,9 @@ trait EmitLlvmControl
         }
         $it = $this->ssa->allocReg();
         $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
-        if ($dyn) {
-            // `getIterator(): Iterator` (SplFixedArray's own) may still be a
-            // Generator frame at run time: release only an object, by the
-            // same probe every protocol step takes.
-            $out .= $this->genFrameProbeIr($it);
-            $obj = $this->ssa->allocReg();
-            $out .= '  ' . $obj . ' = select i1 ' . $this->genFrameReg . ', i64 0, i64 ' . $it . "\n";
-            $out .= $this->rcReleaseReg($obj, 'obj');
-        } else {
-            $out .= $this->rcReleaseReg($it, 'obj');
-        }
+        // An object or — `getIterator(): Iterator` may hand one back at run
+        // time — a Generator frame: `__mir_rc_release` routes on the header.
+        $out .= $this->rcReleaseReg($it, 'obj');
         $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
         if ($skipL !== '') {
             $out .= '  br label %' . $skipL . "\n" . $skipL . ":\n";
@@ -760,7 +757,7 @@ trait EmitLlvmControl
         string $iterName, \Compile\Mir\Type $iterType, bool $dyn): string
     {
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
-        $out = $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
+        $out = $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind'), $fe->ownLive);
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -769,14 +766,14 @@ trait EmitLlvmControl
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $condL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid'), $fe->ownLive);
         $out .= $this->coerceToI64();
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
         $out .= '  br i1 ' . $v . ', label %' . $bodyL . ', label %' . $endL . "\n";
 
         $out .= $bodyL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current'), $fe->ownLive);
         $out .= $this->coerceToI64();
         $cur = $this->lastValue;
         // `current()` is +1 on every arm — a method's return convention, and
@@ -789,7 +786,7 @@ trait EmitLlvmControl
         }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
-            $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key');
+            $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key'), $fe->ownLive);
             $out .= $this->coerceToI64();
             $kw = $this->lastValue;
             $out .= $this->foreachPrevDrop($fe, true);
@@ -798,7 +795,7 @@ trait EmitLlvmControl
         $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);
 
         $out .= $stepL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next'), $fe->ownLive);
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $endL . ":\n";
@@ -1100,7 +1097,7 @@ trait EmitLlvmControl
      */
     private function foreachOwnedRebind(Foreach_ $fe, string $cur, bool $retain): string
     {
-        $fl = $this->rcReleaseFlavor($this->frame->ownLocals[$fe->valueVar]);
+        $fl = $this->rcReleaseFlavor($fe->ownBind ?? $this->frame->ownLocals[$fe->valueVar]);
         if ($fl === '') { return ''; }
         $out = $retain ? $this->rcRetainReg($cur, $fl) : '';
         return $out . $this->foreachPrevDrop($fe, false);

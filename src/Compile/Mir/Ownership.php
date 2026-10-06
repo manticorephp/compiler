@@ -238,6 +238,9 @@ final class Ownership
         // The caught exception: `throw` handed `@__mir_thrown` a +1, and the
         // catch takes it out of the slot ({@see CaughtValue_}).
         if ($value->kind === Node::KIND_CAUGHT_VALUE) { return true; }
+        // A `yield` expression MOVES the sent value out of the frame's slot
+        // ({@see Passes\EmitLlvmGenerator::emitYield}).
+        if ($value->kind === Node::KIND_YIELD) { return true; }
         $tk = $value->type->kind;
         // A `Closure`-returning method types its call `closure`, not
         // `obj<Closure>`; the same producer rule as the object arm below.
@@ -284,7 +287,7 @@ final class Ownership
             // retains a borrowed closure it returns
             // ({@see returnBorrowsObj}), a returned owned
             // local transfers. So a call / invoke producer is owned; any other
-            // (an alias, a property read) stays a borrow; an element read co-owns. Refusing
+            // (a property read) stays a borrow; an element read and an alias co-own. Refusing
             // them all meant a closure that left the frame that built it —
             // returned, then dropped — was never released, nor was anything
             // it captured.
@@ -293,6 +296,12 @@ final class Ownership
                 if ($ck === Node::KIND_CALL) { return !isset($this->ctx->externFns[$value->function]); }
                 if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
                 if ($this->propReadCoOwns($value)) { return true; }
+                // `$fn = $s` over an `obj<__closure_N>` (a monomorphized
+                // `callable` param): the store retains it like any object alias
+                // ({@see AliasOwn::coOwns}, {@see Passes\EmitLlvmLocals}'s
+                // $aliasObjStr), so the local owns that +1 — read as a borrow,
+                // every call kept the env.
+                if (AliasOwn::coOwns($value)) { return true; }
                 return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                     || $ck === Node::KIND_INVOKE;
             }
@@ -719,6 +728,8 @@ final class Ownership
         // operand, a builtin argument and a cast each stranded the payload.
         if (CondOwn::isConditional($n)) { return $this->condOwnedTemp($n); }
         $k = $n->kind;
+        // The sent value a `yield` expression moved out of the frame.
+        if ($k === Node::KIND_YIELD) { return true; }
         // A closure / callable INVOKE returns under the same +1 convention
         // ({@see returnBorrowsObj} and {@see keyTempRelease} already read it as
         // fresh): `[...$closure()]` stranded the whole array it spread.
