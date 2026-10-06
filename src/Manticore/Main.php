@@ -6092,6 +6092,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         return $module;
     } catch (\Throwable $e) {
+        // Under analysis a front-end error IS the finding: printed to stderr
+        // only, the report below it said "No errors found".
+        if ($collect !== null) {
+            $collect->lines[] = $e->getMessage();
+            return null;
+        }
         dprint("compile failed: " . $e->getMessage());
         return null;
     }
