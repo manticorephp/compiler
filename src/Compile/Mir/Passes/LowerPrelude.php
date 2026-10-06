@@ -121,12 +121,6 @@ trait LowerPrelude
             // After spl_arrays.php: AppendIterator hands out an ArrayIterator.
             $src .= $this->splIteratorsSrc;
         }
-        if ($this->includeArrayFns) {
-            $src .= $this->arrayFnsSrc;
-        }
-        if ($this->includeArrayFnsExt) {
-            $src .= $this->arrayFnsExtSrc;
-        }
         if ($this->includeCli) {
             $src .= $this->cliSrc;
         }
@@ -238,6 +232,36 @@ trait LowerPrelude
             // WeakMap / WeakReference. After spl_arrays.php: WeakMap implements
             // ArrayAccess, Countable and IteratorAggregate.
             $src .= $this->weakSrc;
+        }
+        // The array functions come last, because the prelude calls them too
+        // (`SplQueue` slices its list, `SplDoublyLinkedList::add` splices):
+        // the program's own demand decided the two flags, and a prelude file
+        // that is in counts like the program. Without this its call compiled
+        // to an undefined-function trap in any program that did not happen to
+        // call the same function itself.
+        if (!$this->includeArrayFns || !$this->includeArrayFnsExt) {
+            $own = new \Compile\Mir\PreludeDemand([
+                "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
+                "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc,
+            ]);
+            if (!$this->includeArrayFnsExt
+                && $own->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsExtSrc))) {
+                $this->includeArrayFnsExt = true;
+            }
+            if (!$this->includeArrayFns) {
+                $base = \Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsSrc);
+                if ($own->callsAny($base) || ($this->includeArrayFnsExt
+                        && (new \Compile\Mir\PreludeDemand(["<?php\n" . $this->arrayFnsExtSrc]))->callsAny($base))) {
+                    $this->includeArrayFns = true;
+                }
+            }
+        }
+        if ($this->includeArrayFns) {
+            $src .= $this->arrayFnsSrc;
+        }
+        if ($this->includeArrayFnsExt) {
+            $src .= $this->arrayFnsExtSrc;
         }
         // Belt and braces: the concatenation ALREADY starts with the Throwable
         // prelude's own `<?php`, so this leading tag is redundant today and the
@@ -451,9 +475,19 @@ trait LowerPrelude
                 . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
                 . "  foreach (\$d as \$k => \$val) {\n"
                 . "    if (is_int(\$k)) { echo \$pad, '  [', (string)\$k, \"]=>\\n\", \$pad, '  '; }\n"
-                . "    else { echo \$pad, '  [\"', \$k, \"\\\"]=>\\n\", \$pad, '  '; }\n"
+                . "    else { echo \$pad, '  [', __mir_dump_debug_key((string)\$k), \"]=>\\n\", \$pad, '  '; }\n"
                 . "    __mir_var_dump(\$val, \$indent + 1);\n"
-                . "  }\n}\n";
+                . "  }\n}\n"
+                // A mangled key names a non-public property, as in php's own
+                // debug table: "\0*\0p" protected, "\0Class\0p" private.
+                . "function __mir_dump_debug_key(string \$k): string {\n"
+                . "  if (\$k === '' || \$k[0] !== \"\\0\") { return '\"' . \$k . '\"'; }\n"
+                . "  \$p = strpos(\$k, \"\\0\", 1);\n"
+                . "  if (\$p === false) { return '\"' . \$k . '\"'; }\n"
+                . "  \$c = substr(\$k, 1, \$p - 1);\n"
+                . "  \$n = substr(\$k, \$p + 1);\n"
+                . "  if (\$c === '*') { return '\"' . \$n . '\":protected'; }\n"
+                . "  return '\"' . \$n . '\":\"' . \$c . '\":private';\n}\n";
         }
         return $body . $dispatch;
     }
@@ -896,9 +930,18 @@ trait LowerPrelude
         $body = "function __mir_print_r_obj_map(string \$head, mixed \$d, int \$indent, string \$pad): string {\n"
             . "  \$out = \$head . \"\\n\" . \$pad . \"(\\n\";\n"
             . "  foreach (\$d as \$k => \$val) {\n"
-            . "    \$out = \$out . \$pad . '    [' . \$k . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n"
+            . "    \$out = \$out . \$pad . '    [' . __mir_print_r_debug_key((string)\$k) . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n"
             . "  }\n"
-            . "  return \$out . \$pad . \")\\n\";\n}\n";
+            . "  return \$out . \$pad . \")\\n\";\n}\n"
+            // A mangled key ({@see dumpObjectSrc}): `p:protected`, `p:Class:private`.
+            . "function __mir_print_r_debug_key(string \$k): string {\n"
+            . "  if (\$k === '' || \$k[0] !== \"\\0\") { return \$k; }\n"
+            . "  \$p = strpos(\$k, \"\\0\", 1);\n"
+            . "  if (\$p === false) { return \$k; }\n"
+            . "  \$c = substr(\$k, 1, \$p - 1);\n"
+            . "  \$n = substr(\$k, \$p + 1);\n"
+            . "  if (\$c === '*') { return \$n . ':protected'; }\n"
+            . "  return \$n . ':' . \$c . ':private';\n}\n";
         $dispatch = "function __mir_print_r_object(mixed \$v, int \$indent): string {\n"
             . "  \$pad = str_repeat(' ', \$indent);\n"
             // An enum case, before the class-id dispatch (enums are not classes
