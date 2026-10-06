@@ -311,7 +311,9 @@ trait EmitLlvmExceptions
         $key = '';
         foreach ($live as $name => $op) {
             if ($this->ownOpSlot($op) === '') { continue; }
-            $key .= $name . '=' . $this->rcReleaseFlavor($op) . ';';
+            // By op identity: the drop IR comes from the op (slot, flavor, type), and
+            // two ops of one name and flavor need not emit the same drop.
+            $key .= $name . '#' . (string)\spl_object_id($op) . ';';
         }
         if ($key === '') { return 0; }
         if (isset($this->ehPadKeys[$key])) { return $this->ehPadKeys[$key]; }
@@ -342,6 +344,7 @@ trait EmitLlvmExceptions
         if (!$this->ehOn || \strpos($text, ' ;!e') === false) { return $text; }
         $lines = \explode("\n", $text);
         $n = \count($lines);
+        // A split before the statement's first label is not retargeted: no emitter puts a phi naming that block in the same statement.
         $cur = '';
         /** @var array<string, string> */
         $last = [];
