@@ -5076,6 +5076,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'SplQueue',
             'SplStack',
             'SplObjectStorage',
+            'SplHeap',
+            'SplMinHeap',
+            'SplMaxHeap',
+            'SplPriorityQueue',
         ]) || $demand->usesYieldFrom();
     $useArrayClasses = $useSplIterators || $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
         // iterator_to_array / _count / _apply are plain FUNCTIONS in the same

@@ -1775,3 +1775,283 @@ function __mc_yf_wrap(mixed $src): \Generator
         }
     }
 }
+
+/**
+ * php's binary heap, with its exact sift order (equal elements come out in
+ * the order Zend gives them). The root is the element `compare()` ranks
+ * highest. A `compare()` that throws leaves the heap corrupted: every later
+ * read or write throws until recoverFromCorruption().
+ */
+abstract class SplHeap implements Iterator, Countable
+{
+    private int $flags = 0;
+    private bool $isCorrupted = false;
+    /** @var array<int, mixed> */
+    private array $heap = [];
+
+    abstract protected function compare(mixed $value1, mixed $value2): int;
+
+    public function insert(mixed $value): true
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        $err = null;
+        $i = \count($this->heap);
+        $this->heap[] = $value;
+        while ($i > 0) {
+            $p = \intdiv($i - 1, 2);
+            if ($this->__mcCmp($this->heap[$p], $value, $err) >= 0) { break; }
+            $this->heap[$i] = $this->heap[$p];
+            $i = $p;
+        }
+        $this->heap[$i] = $value;
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return true;
+    }
+
+    public function extract(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't extract from an empty heap"); }
+        $err = null;
+        $top = $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return $top;
+    }
+
+    public function top(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't peek at an empty heap"); }
+        return $this->heap[0];
+    }
+
+    public function isEmpty(): bool { return $this->heap === []; }
+
+    public function count(): int { return \count($this->heap); }
+
+    public function rewind(): void {}
+
+    public function valid(): bool { return $this->heap !== []; }
+
+    public function current(): mixed { return $this->heap === [] ? null : $this->heap[0]; }
+
+    public function key(): int { return \count($this->heap) - 1; }
+
+    public function next(): void
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { return; }
+        $err = null;
+        $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+    }
+
+    public function recoverFromCorruption(): true
+    {
+        $this->isCorrupted = false;
+        return true;
+    }
+
+    public function isCorrupted(): bool { return $this->isCorrupted; }
+
+    /** @return array<int, mixed> */
+    public function __serialize(): array
+    {
+        return [[], ['flags' => $this->flags, 'heap_elements' => $this->heap]];
+    }
+
+    /** @param array<int, mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        $this->flags = (int)$data[1]['flags'];
+        $this->heap = \array_values($data[1]['heap_elements']);
+    }
+
+    private function __mcCmp(mixed $a, mixed $b, ?Throwable &$err): int
+    {
+        if ($err !== null) { return 0; }
+        try {
+            return $this->compare($a, $b);
+        } catch (Throwable $e) {
+            $err = $e;
+            return 0;
+        }
+    }
+
+    private function __mcDeleteTop(?Throwable &$err): mixed
+    {
+        $top = $this->heap[0];
+        $bottom = \array_pop($this->heap);
+        $n = \count($this->heap);
+        if ($n === 0) { return $top; }
+        $limit = \intdiv($n, 2);
+        $i = 0;
+        while ($i < $limit) {
+            $j = 2 * $i + 1;
+            if ($j !== $n && $this->__mcCmp($this->__mcAt($j + 1, $n, $bottom), $this->heap[$j], $err) > 0) { $j = $j + 1; }
+            if ($this->__mcCmp($bottom, $this->__mcAt($j, $n, $bottom), $err) >= 0) { break; }
+            $this->heap[$i] = $this->__mcAt($j, $n, $bottom);
+            $i = $j;
+        }
+        $this->heap[$i] = $bottom;
+        return $top;
+    }
+
+    /** Element `$j` as Zend sees it mid-removal: slot `$n` still holds the old last element. */
+    private function __mcAt(int $j, int $n, mixed $bottom): mixed
+    {
+        return $j === $n ? $bottom : $this->heap[$j];
+    }
+}
+
+class SplMinHeap extends SplHeap
+{
+    protected function compare(mixed $value1, mixed $value2): int { return $value2 <=> $value1; }
+}
+
+class SplMaxHeap extends SplHeap
+{
+    protected function compare(mixed $value1, mixed $value2): int { return $value1 <=> $value2; }
+}
+
+/** A heap of `[data, priority]` pairs ranked by `compare()` over the priorities. */
+class SplPriorityQueue implements Iterator, Countable
+{
+    public const EXTR_BOTH = 3;
+    public const EXTR_PRIORITY = 2;
+    public const EXTR_DATA = 1;
+
+    private int $flags = 1;
+    private bool $isCorrupted = false;
+    /** @var array<int, array<string, mixed>> */
+    private array $heap = [];
+
+    public function compare(mixed $priority1, mixed $priority2): int { return $priority1 <=> $priority2; }
+
+    public function insert(mixed $value, mixed $priority): true
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        $err = null;
+        $el = ['data' => $value, 'priority' => $priority];
+        $i = \count($this->heap);
+        $this->heap[] = $el;
+        while ($i > 0) {
+            $p = \intdiv($i - 1, 2);
+            if ($this->__mcCmp($this->heap[$p], $el, $err) >= 0) { break; }
+            $this->heap[$i] = $this->heap[$p];
+            $i = $p;
+        }
+        $this->heap[$i] = $el;
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return true;
+    }
+
+    public function setExtractFlags(int $flags): int
+    {
+        if (($flags & 3) === 0) { throw new RuntimeException('Must specify at least one extract flag'); }
+        $this->flags = $flags & 3;
+        return $this->flags;
+    }
+
+    public function getExtractFlags(): int { return $this->flags; }
+
+    public function extract(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't extract from an empty heap"); }
+        $err = null;
+        $top = $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return $this->__mcView($top);
+    }
+
+    public function top(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't peek at an empty heap"); }
+        return $this->__mcView($this->heap[0]);
+    }
+
+    public function isEmpty(): bool { return $this->heap === []; }
+
+    public function count(): int { return \count($this->heap); }
+
+    public function rewind(): void {}
+
+    public function valid(): bool { return $this->heap !== []; }
+
+    public function current(): mixed { return $this->heap === [] ? null : $this->__mcView($this->heap[0]); }
+
+    public function key(): int { return \count($this->heap) - 1; }
+
+    public function next(): void
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { return; }
+        $err = null;
+        $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+    }
+
+    public function recoverFromCorruption(): true
+    {
+        $this->isCorrupted = false;
+        return true;
+    }
+
+    public function isCorrupted(): bool { return $this->isCorrupted; }
+
+    /** @return array<int, mixed> */
+    public function __serialize(): array
+    {
+        return [[], ['flags' => $this->flags, 'heap_elements' => $this->heap]];
+    }
+
+    /** @param array<int, mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        $this->flags = (int)$data[1]['flags'];
+        $this->heap = \array_values($data[1]['heap_elements']);
+    }
+
+    /** @param array<string, mixed> $el */
+    private function __mcView(array $el): mixed
+    {
+        if ($this->flags === 1) { return $el['data']; }
+        if ($this->flags === 2) { return $el['priority']; }
+        return $el;
+    }
+
+    /** @param array<string, mixed> $a  @param array<string, mixed> $b */
+    private function __mcCmp(array $a, array $b, ?Throwable &$err): int
+    {
+        if ($err !== null) { return 0; }
+        try {
+            return $this->compare($a['priority'], $b['priority']);
+        } catch (Throwable $e) {
+            $err = $e;
+            return 0;
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function __mcDeleteTop(?Throwable &$err): array
+    {
+        $top = $this->heap[0];
+        $bottom = \array_pop($this->heap);
+        $n = \count($this->heap);
+        if ($n === 0) { return $top; }
+        $limit = \intdiv($n, 2);
+        $i = 0;
+        while ($i < $limit) {
+            $j = 2 * $i + 1;
+            if ($j !== $n && $this->__mcCmp($j + 1 === $n ? $bottom : $this->heap[$j + 1], $this->heap[$j], $err) > 0) { $j = $j + 1; }
+            $child = $j === $n ? $bottom : $this->heap[$j];
+            if ($this->__mcCmp($bottom, $child, $err) >= 0) { break; }
+            $this->heap[$i] = $child;
+            $i = $j;
+        }
+        $this->heap[$i] = $bottom;
+        return $top;
+    }
+}
