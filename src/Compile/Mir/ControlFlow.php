@@ -19,43 +19,25 @@ final class ControlFlow
     private array $continueStack = [];
     /** @var array<int, Node[]> pending `finally` bodies, innermost last */
     private array $finallyStack = [];
-    /**
-     * Pre-try `@__mir_jmp_depth` SSA regs of the OPEN trys, outermost first.
-     *
-     * A try pushes its slot by bumping the global depth and pops it again only
-     * on the fall-through and catch paths ({@see EmitLlvmExceptions::emitTry}).
-     * Every other way out — `return`, `break`, `continue` — branches away and
-     * would leave the slot claimed FOREVER, since the depth is a process-global.
-     * 15 such escapes and the next try's setjmp writes past @__mir_jmp_stack,
-     * over @__mir_jmp_depth / @__mir_thrown / @__manticore_argc / @__manticore_argv.
-     * So each escape restores the depth from here first.
-     *
-     * The reg is the depth BEFORE the try (`$od` when there's a finally — that
-     * form burns two slots — else `$idb`), and it dominates the whole try
-     * region, so an escape anywhere inside can name it.
-     * @var string[]
-     */
-    private array $tryDepthStack = [];
-    /**
-     * Generator frame slot holding each open try's pre-try depth, parallel to
-     * $tryDepthStack; -1 outside a generator.
-     *
-     * The SSA reg alone is not enough there: a `yield` inside the try makes the
-     * resume switch branch INTO the try body, past the block that defined the
-     * reg, so it no longer dominates. {@see EmitLlvmExceptions::tryReloadDepth}
-     * reads the frame instead — the same reason the fall-through and catch pops
-     * already go through it.
-     * @var int[]
-     */
-    private array $tryDepthSlots = [];
-    /**
-     * count($tryDepthStack) sampled at each loop/switch entry; parallel to
-     * $breakStack. A `break`/`continue` unwinds only the trys opened INSIDE its
-     * target loop — the entries at or past this mark — so the loop restores to
-     * $tryDepthStack[$mark], not to the function's entry depth.
-     * @var int[]
-     */
-    private array $loopTryLen = [];
+    /** @var int[] loop/switch depth at each open finally's try */
+    private array $finallyLoop = [];
+    /** @var array<int, array<string, bool>> user labels inside each open finally's try and catches */
+    private array $finallyLabels = [];
+    /** @var int[] try depth of each open finally's try */
+    private array $finallyTry = [];
+    /** @var array<int, array<int, Node[]>> */
+    private array $savedStack = [];
+    /** @var array<int, int[]> */
+    private array $savedLoop = [];
+    /** @var array<int, array<int, array<string, bool>>> */
+    private array $savedLabels = [];
+    /** @var array<int, int[]> */
+    private array $savedTry = [];
+    private int $tryDepth = 0;
+    /** @var string[] pending-exception flag slots of the canonical finally bodies being emitted */
+    private array $pendFlags = [];
+    /** @var string[] */
+    private array $pendVals = [];
     /**
      * The iterator slot of every open IteratorAggregate `foreach` — the loop owns
      * the `getIterator()` result (+1) and gives it back after its end label —
@@ -72,6 +54,8 @@ final class ControlFlow
     private array $aggIterLevel = [];
     /** @var string[] an i1 slot that says whether the iterator is owned at all ('': always) */
     private array $aggIterFlag = [];
+    /** @var string[] the release flavor of an owned array iterable ('': an iterator object) */
+    private array $aggIterFlavor = [];
 
     /** Restart for a new function body. */
     public function reset(): void
@@ -79,9 +63,16 @@ final class ControlFlow
         $this->breakStack = [];
         $this->continueStack = [];
         $this->finallyStack = [];
-        $this->tryDepthStack = [];
-        $this->tryDepthSlots = [];
-        $this->loopTryLen = [];
+        $this->finallyLoop = [];
+        $this->finallyLabels = [];
+        $this->finallyTry = [];
+        $this->savedStack = [];
+        $this->savedLoop = [];
+        $this->savedLabels = [];
+        $this->savedTry = [];
+        $this->tryDepth = 0;
+        $this->pendFlags = [];
+        $this->pendVals = [];
         $this->aggIterSlots = [];
         $this->aggIterDyn = [];
         $this->aggIterLevel = [];
@@ -93,7 +84,6 @@ final class ControlFlow
     {
         $this->breakStack[] = $break;
         $this->continueStack[] = $continue;
-        $this->loopTryLen[] = \count($this->tryDepthStack);
     }
 
     /**
@@ -111,73 +101,6 @@ final class ControlFlow
     {
         \array_pop($this->breakStack);
         \array_pop($this->continueStack);
-        \array_pop($this->loopTryLen);
-    }
-
-    /**
-     * Enter a try region whose pre-try depth is held in $depthReg, and (in a
-     * generator) also in frame slot $genSlot — pass -1 when there is none.
-     */
-    public function pushTryDepth(string $depthReg, int $genSlot): void
-    {
-        $this->tryDepthStack[] = $depthReg;
-        $this->tryDepthSlots[] = $genSlot;
-    }
-
-    public function popTryDepth(): void
-    {
-        \array_pop($this->tryDepthStack);
-        \array_pop($this->tryDepthSlots);
-    }
-
-    /**
-     * Depth to restore before a `return`: the outermost open try's pre-try
-     * depth, which IS this function's entry depth. '' when no try is open —
-     * then the depth was never touched and needs no restore.
-     */
-    public function returnDepthReg(): string
-    {
-        if ($this->tryDepthStack === []) { return ''; }
-        return $this->tryDepthStack[0];
-    }
-
-    /** Generator frame slot paired with {@see returnDepthReg}; -1 if none. */
-    public function returnDepthSlot(): int
-    {
-        if ($this->tryDepthSlots === []) { return -1; }
-        return $this->tryDepthSlots[0];
-    }
-
-    /**
-     * Index into $tryDepthStack of the outermost try opened inside the `break N`
-     * / `continue N` target loop, or -1 when the jump crosses no try — the
-     * common case, and then no restore is emitted.
-     */
-    private function loopTryIndex(int $level): int
-    {
-        $n = \count($this->loopTryLen);
-        if ($n === 0) { return -1; }
-        $idx = $n - $level;
-        if ($idx < 0) { $idx = 0; }
-        $mark = $this->loopTryLen[$idx];
-        if ($mark >= \count($this->tryDepthStack)) { return -1; }
-        return $mark;
-    }
-
-    /** Depth to restore before a `break N` / `continue N`. '' = nothing to do. */
-    public function loopDepthReg(int $level): string
-    {
-        $i = $this->loopTryIndex($level);
-        if ($i < 0) { return ''; }
-        return $this->tryDepthStack[$i];
-    }
-
-    /** Generator frame slot paired with {@see loopDepthReg}; -1 if none. */
-    public function loopDepthSlot(int $level): int
-    {
-        $i = $this->loopTryIndex($level);
-        if ($i < 0) { return -1; }
-        return $this->tryDepthSlots[$i];
     }
 
     /** `break N` target — indexes outward from the innermost loop. */
@@ -205,9 +128,11 @@ final class ControlFlow
         return $stack[$idx];
     }
 
-    /** Open an aggregate foreach whose loop is entered next. */
-    public function pushAggIter(string $slot, bool $dyn, string $flag = ''): void
+    /** Open an aggregate foreach whose loop is entered next — or, `$flavor`
+     *  set, a foreach that owns a fresh array iterable, released by that flavor. */
+    public function pushAggIter(string $slot, bool $dyn, string $flag = '', string $flavor = ''): void
     {
+        $this->aggIterFlavor[] = $flavor;
         $this->aggIterFlag[] = $flag;
         $this->aggIterSlots[] = $slot;
         $this->aggIterDyn[] = $dyn;
@@ -220,6 +145,7 @@ final class ControlFlow
         \array_pop($this->aggIterDyn);
         \array_pop($this->aggIterLevel);
         \array_pop($this->aggIterFlag);
+        \array_pop($this->aggIterFlavor);
     }
 
     /**
@@ -245,15 +171,30 @@ final class ControlFlow
 
     public function aggIterFlag(int $i): string { return $this->aggIterFlag[$i]; }
 
-    /** @param Node[] $body */
-    public function pushFinally(array $body): void
+    public function aggIterFlavor(int $i): string { return $this->aggIterFlavor[$i]; }
+
+    /**
+     * Open a `try` that has a `finally`: every jump out of the try (or out of one
+     * of its catches) runs `$body` first. `$labels`: the user labels inside the
+     * try and catch bodies — a `goto` to any other label leaves it.
+     *
+     * @param Node[] $body
+     * @param array<string, bool> $labels
+     */
+    public function pushFinally(array $body, array $labels): void
     {
         $this->finallyStack[] = $body;
+        $this->finallyLoop[] = \count($this->breakStack);
+        $this->finallyLabels[] = $labels;
+        $this->finallyTry[] = $this->tryDepth;
     }
 
     public function popFinally(): void
     {
         \array_pop($this->finallyStack);
+        \array_pop($this->finallyLoop);
+        \array_pop($this->finallyLabels);
+        \array_pop($this->finallyTry);
     }
 
     public function hasFinally(): bool
@@ -261,23 +202,100 @@ final class ControlFlow
         return $this->finallyStack !== [];
     }
 
-    /**
-     * The pending `finally` bodies (innermost last) AND clear them: a `return`
-     * inside an inlined finally must exit directly rather than re-run the
-     * chain. Pair with {@see restoreFinally}.
-     *
-     * @return array<int, Node[]>
-     */
-    public function takeFinally(): array
+    /** Number of open finally bodies; a `return` leaves all of them. */
+    public function finallyCount(): int
     {
-        $saved = $this->finallyStack;
-        $this->finallyStack = [];
-        return $saved;
+        return \count($this->finallyStack);
     }
 
-    /** @param array<int, Node[]> $saved */
-    public function restoreFinally(array $saved): void
+    /**
+     * How many of the open finally bodies (counted from the innermost) a
+     * `break N` / `continue N` leaves: those of the trys inside its target loop.
+     */
+    public function finallysLeftByLevel(int $level): int
     {
-        $this->finallyStack = $saved;
+        $min = \count($this->breakStack) - $level;
+        $n = 0;
+        for ($i = \count($this->finallyLoop) - 1; $i >= 0; $i--) {
+            if ($this->finallyLoop[$i] <= $min) { break; }
+            $n++;
+        }
+        return $n;
     }
+
+    /** How many of the open finally bodies (from the innermost) a `goto $label` leaves. */
+    public function finallysLeftByGoto(string $label): int
+    {
+        $n = 0;
+        for ($i = \count($this->finallyLabels) - 1; $i >= 0; $i--) {
+            if (isset($this->finallyLabels[$i][$label])) { break; }
+            $n++;
+        }
+        return $n;
+    }
+
+    /** @return Node[] finally body `$i` (0 = outermost) */
+    public function finallyBody(int $i): array { return $this->finallyStack[$i]; }
+
+    /** The try depth ({@see enterTry}) of finally body `$i`. */
+    public function finallyTryDepth(int $i): int { return $this->finallyTry[$i]; }
+
+    /**
+     * Emit finally body `$i` in place, at a jump that leaves it: only the bodies
+     * outside it stay open (a `return` inside it runs those, not itself again).
+     * Pair with {@see leaveInline}.
+     */
+    public function enterInline(int $i): void
+    {
+        $this->savedStack[] = $this->finallyStack;
+        $this->savedLoop[] = $this->finallyLoop;
+        $this->savedLabels[] = $this->finallyLabels;
+        $this->savedTry[] = $this->finallyTry;
+        $this->finallyStack = \array_slice($this->finallyStack, 0, $i);
+        $this->finallyLoop = \array_slice($this->finallyLoop, 0, $i);
+        $this->finallyLabels = \array_slice($this->finallyLabels, 0, $i);
+        $this->finallyTry = \array_slice($this->finallyTry, 0, $i);
+    }
+
+    public function leaveInline(): void
+    {
+        $this->finallyStack = \array_pop($this->savedStack);
+        $this->finallyLoop = \array_pop($this->savedLoop);
+        $this->finallyLabels = \array_pop($this->savedLabels);
+        $this->finallyTry = \array_pop($this->savedTry);
+    }
+
+    /** Enter a `try` (any kind); its depth, 1 = outermost of the function. */
+    public function enterTry(): int
+    {
+        $this->tryDepth++;
+        return $this->tryDepth;
+    }
+
+    public function leaveTry(): void
+    {
+        $this->tryDepth--;
+    }
+
+    /**
+     * Emitting the canonical finally body of a try whose pending-exception
+     * slots are `$flag` / `$val`: a `return` inside it discards that exception.
+     */
+    public function pushPending(string $flag, string $val): void
+    {
+        $this->pendFlags[] = $flag;
+        $this->pendVals[] = $val;
+    }
+
+    public function popPending(): void
+    {
+        \array_pop($this->pendFlags);
+        \array_pop($this->pendVals);
+    }
+
+    /** @return string[] */
+    public function pendingFlags(): array { return $this->pendFlags; }
+
+    /** @return string[] */
+    public function pendingVals(): array { return $this->pendVals; }
 }

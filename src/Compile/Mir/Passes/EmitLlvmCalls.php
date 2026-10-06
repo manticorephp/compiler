@@ -102,6 +102,16 @@ use Codegen\Llvm\Module as LlvmModule;
 trait EmitLlvmCalls
 {
     /**
+     * Does this call need a cleanup landing pad — some local Own at it and a
+     * callee that may throw ({@see \Compile\Mir\NothrowSummary::callNeedsPad})?
+     * Consumed by the zero-cost unwind (Task 9.3); emission does not ask yet.
+     */
+    private function callNeedsPad(Node $call): bool
+    {
+        return $this->nothrow !== null && $this->nothrow->callNeedsPad($call);
+    }
+
+    /**
      * Emit an FFI function as a thin wrapper forwarding to its C symbol.
      * The outer signature is the uniform MIR ABI (i64 params / i64 return);
      * each arg is coerced from its i64 carrier to the extern's C type, the
@@ -1564,6 +1574,16 @@ trait EmitLlvmCalls
         $dynReboxSlots = [];
         $dynReboxTmps = [];
         $dynReboxBits = [];
+        /** @var string[] $invReboxSlots */
+        $invReboxSlots = [];
+        /** @var string[] $invReboxTmps */
+        $invReboxTmps = [];
+        /** @var string[] $invBoxSlots */
+        $invBoxSlots = [];
+        /** @var string[] $invBoxTmps */
+        $invBoxTmps = [];
+        /** @var Type[] $invBoxTypes */
+        $invBoxTypes = [];
         if (!$known) {
             $refGate = $this->closureRefGate(\count($iv->args));
             if ($refGate !== 0) {
@@ -1592,18 +1612,9 @@ trait EmitLlvmCalls
         // expanded into multiple positional slots.
         $pi = 0;
         $padDrops = '';
+        $erasedArgDrops = '';
         /** @var string[] $intArgBoxes */
         $intArgBoxes = [];
-        /** @var string[] $refReboxSlots */
-        $refReboxSlots = [];
-        /** @var string[] $refReboxTmps */
-        $refReboxTmps = [];
-        /** @var string[] $refCellBoxSlots */
-        $refCellBoxSlots = [];
-        /** @var string[] $refCellBoxTmps */
-        $refCellBoxTmps = [];
-        /** @var Type[] $refCellBoxTypes */
-        $refCellBoxTypes = [];
         $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
@@ -1652,23 +1663,21 @@ trait EmitLlvmCalls
             // NaN-boxed tag bits. Without this the callee's writes vanished (a
             // silently dropped mutation) or crashed.
             if (($calleeRefs[$capCnt + $pi] ?? false)) {
-                // The reference agrees with its target's representation, as on
-                // the named-call path: a cell lvalue to a raw-payload param is
-                // decoded into a scratch slot and re-boxed after the call, and a
-                // concrete lvalue to a CELL param is boxed into one and decoded
-                // back. Handing the raw slot to a cell param read `$n = 1` as a
-                // denormal and wrote a string pointer back as a double.
-                if ($this->isByRefAddressable($a)
-                    && $this->byRefNeedsCellUnbox($a, $calleeParams, $capCnt + $pi)) {
-                    $out .= $this->emitByRefCellUnboxArg($a, $calleeParams[$capCnt + $pi] ?? null);
-                    $refReboxSlots[] = $this->refBoxSlot;
-                    $refReboxTmps[] = $this->refBoxTmp;
-                } elseif ($this->isByRefAddressable($a)
-                    && $this->byRefNeedsCellBox($a, $calleeParams, $capCnt + $pi)) {
+                // A cell lvalue handed to a raw-typed by-ref param, or a raw
+                // lvalue to a cell param: the same scratch-and-write-back the
+                // named-call path takes ({@see emitByRefCellUnboxArg},
+                // {@see emitByRefCellBox}) — handing over the slot itself made
+                // `$f($cellLocal)` on `array &$a` dereference the tag bits.
+                $rpi = $capCnt + $pi;
+                if ($this->isByRefAddressable($a) && $this->byRefNeedsCellUnbox($a, $calleeParams, $rpi)) {
+                    $out .= $this->emitByRefCellUnboxArg($a, $calleeParams[$rpi] ?? null);
+                    $invReboxSlots[] = $this->refBoxSlot;
+                    $invReboxTmps[] = $this->refBoxTmp;
+                } elseif ($this->isByRefAddressable($a) && $this->byRefNeedsCellBox($a, $calleeParams, $rpi)) {
                     $out .= $this->emitByRefCellBox($a);
-                    $refCellBoxSlots[] = $this->refBoxSlot;
-                    $refCellBoxTmps[] = $this->refBoxTmp;
-                    $refCellBoxTypes[] = $a->type;
+                    $invBoxSlots[] = $this->refBoxSlot;
+                    $invBoxTmps[] = $this->refBoxTmp;
+                    $invBoxTypes[] = $a->type;
                 } elseif ($this->isByRefAddressable($a)) {
                     $out .= $this->byRefAddrOf($a);
                 } else {
@@ -1700,18 +1709,35 @@ trait EmitLlvmCalls
                 continue;
             }
             $out .= $this->emitNode($a);
-            if ($packNode !== null && $a === $packNode && $packTarget !== null) {
-                $out .= $this->emitCellArrayToTyped($packTarget);
-            }
             $pt = $calleeParams[$capCnt + $pi] ?? null;
-            // Cellify only for a KNOWN callee whose param is provably erased
-            // (a cell; {@see closureArgRepr}). A dynamic callee (`callable`) can't be gated — its
-            // param might be a TYPED array (an array_map-style callback) that
-            // needs the raw array, and cellifying it blindly corrupts the
-            // element reads (it crashes self-host). So the dynamic-callback case
-            // — a `usort($x, fn($a,$b)=>$cmp($a["k"],$b["k"]))` with an int-arith
-            // `$cmp` — is still open, pending a representation discriminator.
-            $out .= $this->closureArgRepr($a->type, $known ? $pt : null);
+            $ownsBox = $this->closureArgOwnsBox($a->type, $known ? $pt : null);
+            // An owned temp argument (`$g(new O)`, a call result, a literal, an
+            // erased array a declared-`array` callee handed back) is given back
+            // once the closure returns: a closure BORROWS its params, retaining
+            // what it keeps. A box the call site owns consumed it instead.
+            $af = $ownsBox ? '' : $this->freshRcArgFlavor($a);
+            if ($packNode !== null && $a === $packNode && $packTarget !== null) {
+                // The cell-built pack is rebuilt into the typed vec, MOVING
+                // every value: its bare buffer is dead now, and the rebuilt vec
+                // is the temp the callee borrows.
+                $out .= $this->coerceToPtr();
+                $packSrc = $this->lastValue;
+                $out .= $this->emitCellArrayToTyped($packTarget);
+                $out .= '  call void @__mir_array_release_buf(ptr ' . $packSrc . ")\n";
+                $af = $this->discardReleaseFlavor($packTarget);
+            }
+            if ($af !== '') {
+                $sv = $this->lastValue;
+                $st = $this->lastValueType;
+                $out .= $this->coerceToI64();
+                $erasedArgDrops .= $this->rcReleaseReg($this->lastValue, $af);
+                $this->lastValue = $sv;
+                $this->lastValueType = $st;
+            }
+            // One representation for a known and a dynamic callee
+            // ({@see closureArgRepr}); only a KNOWN cell param refines it.
+            $out .= $this->closureArgRepr($a->type, $known ? $pt : null, $a);
+            if ($ownsBox) { $erasedArgDrops .= $this->cellBoxTempDrop($a->type, $this->lastValue, $a); }
             // The box an INT arg became is this call site's own ({@see
             // EmitLlvmBuiltins::cellBoxTempDrop}): given back once the callee ran.
             if ($a->type->kind === Type::KIND_INT && $this->isCellBoxableArg($a->type)) {
@@ -1773,13 +1799,14 @@ trait EmitLlvmCalls
         }
         $out .= $this->faPop();
         foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
-        $out .= $this->emitByRefCellRebox($refReboxSlots, $refReboxTmps);
-        $rci = 0;
-        foreach ($refCellBoxTmps as $rct) {
-            $out .= $this->emitByRefCellWriteBack($rct, $refCellBoxSlots[$rci], $refCellBoxTypes[$rci]);
-            $rci = $rci + 1;
-        }
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
+        $out .= $this->emitByRefCellRebox($invReboxSlots, $invReboxTmps);
+        $bi = 0;
+        foreach ($invBoxTmps as $btmp) {
+            $out .= $this->emitByRefCellWriteBack($btmp, $invBoxSlots[$bi], $invBoxTypes[$bi]);
+            $bi = $bi + 1;
+        }
+        $out .= $erasedArgDrops;
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         // A by-REFERENCE closure returns the ADDRESS of an lvalue rather than a
@@ -1967,7 +1994,10 @@ trait EmitLlvmCalls
                 $this->lastPadDrops .= $this->omittedRefSlotDrop($tmp, $pt);
             } else {
                 $out .= $this->emitNode($def);
-                $out .= $this->closureArgRepr($def->type, $pt);
+                $out .= $this->closureArgRepr($def->type, $pt, $def);
+                if ($this->closureArgOwnsBox($def->type, $pt)) {
+                    $this->lastPadDrops .= $this->cellBoxTempDrop($def->type, $this->lastValue, $def);
+                }
                 $this->lastPadArgs .= ', i64 ' . $this->lastValue;
             }
             $i = $i + 1;
@@ -2035,28 +2065,64 @@ trait EmitLlvmCalls
 
     /**
      * The uniform closure ABI's representation of one by-value argument of
-     * type `$at` already in `lastValue`: a scalar crosses as a tagged cell, a
-     * typed array is cellified only into a param `$pt` KNOWN to be a cell, and
-     * anything else crosses raw. One rule for a written argument and a padded
-     * default alike. `$pt` is null for a dynamic callee.
+     * type `$at` already in `lastValue` — ONE contract for a known and a
+     * dynamic callee, a written argument and a padded default alike:
+     *
+     *  - a scalar or string crosses as its tagged cell;
+     *  - an rc object (an object union too) and a closure value cross as the
+     *    object cell, by pointer — nothing is counted, the callee borrows;
+     *  - an array crosses as the array cell, by pointer, its element hint
+     *    stamped from the static type when the buffer has none, so a cell
+     *    reader decodes its raw words ({@see boxArrayShallow} without the
+     *    count);
+     *  - anything else (an erased word, an enum ordinal, a struct) crosses as
+     *    it is.
+     *
+     * The callee's DECLARED param decides what it reads: a cell param keeps
+     * the cell, a typed one unboxes at entry ({@see EmitLlvmModule}'s closure
+     * prologue — a scalar by tag, a pointer by mask). Raw, a `mixed` param's
+     * retain skipped the word, and `fn ($i) => $i` handed back an uncounted
+     * row that array_map's result then shared with its source.
+     *
+     * The one place the callee's param refines the box: a KNOWN cell param
+     * receiving a concrete-scalar array whose hint cannot describe it gets the
+     * rebuilt cell array ({@see boxToCell}) — the caller owns that box and
+     * drops it after the call ({@see closureArgOwnsBox}).
      */
-    private function closureArgRepr(Type $at, ?Type $pt): string
+    private function closureArgRepr(Type $at, ?Type $pt, ?Node $src = null): string
     {
-        // CELL only: the closure entry unboxes a cell param, but an `unknown`
-        // one (a bare `array` / `?array` hint) stores its word RAW and COWs it
-        // as an array pointer, so a boxed array there SIGSEGVed.
-        $paramErased = $pt !== null && $pt->kind === Type::KIND_CELL;
-        if ($this->isCellBoxableArg($at)
-            || ($paramErased && $at->isArray() && $this->hasConcreteScalarElem($at))
-            // A closure env into a CELL param is the OBJECT cell it is: raw, the
-            // callee's cell retain / drop skip it, so `fn ($f) => $f` handed
-            // back an uncounted word (array_map over `Closure[]`).
-            || ($paramErased && $this->isClosureValueType($at))) {
+        if ($this->closureArgOwnsBox($at, $pt)) { return $this->boxToCell($at, $src); }
+        if ($this->isCellBoxableArg($at) || $this->isClosureValueType($at)
+            || $this->own->condFlavor($at) === 'obj') {
             return $this->boxToCell($at);
+        }
+        if ($at->isArray()) {
+            $el = $at->element;
+            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+                $sh = $this->boxArrayShallow($el, 'uncounted');
+                if ($sh !== null) { return $sh; }
+            }
+            $out = $this->coerceToPtr();
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__manticore_box_array(ptr ' . $this->lastValue . ")\n";
+            $ret = $this->finishI64($out, $r);
+            $this->markCellBoxed($this->lastValue);
+            return $ret;
         }
         return $this->coerceToI64();
     }
 
+    /**
+     * Does {@see closureArgRepr} hand a KNOWN cell param a box this call site
+     * owns (a concrete-scalar array, rebuilt or retained into its cell)? Then
+     * the source temp is consumed by the box ({@see cellifySourceFlavor}) and
+     * the box is dropped after the call ({@see cellBoxTempDrop}).
+     */
+    private function closureArgOwnsBox(Type $at, ?Type $pt): bool
+    {
+        return $pt !== null && $pt->kind === Type::KIND_CELL
+            && $at->isArray() && $this->hasConcreteScalarElem($at);
+    }
     /**
      * The module's closures a DYNAMIC invoke of `$argc` arguments may reach
      * with a default left to pad — name => capture count. Empty for a module
@@ -2306,7 +2372,11 @@ trait EmitLlvmCalls
         $cv = $this->ssa->allocReg();
         $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
         $scalar = $pt !== null && $this->isByRefScalarParam($pt);
-        if ($scalar) {
+        // A STRING param decodes too: php coerces the argument on entry, and the
+        // bare payload of an int cell handed to `string &$s` was dereferenced
+        // as a string pointer. The rendered string is the slot's own after the
+        // re-box, as the callee's overwrite treats it.
+        if ($scalar || ($pt !== null && $pt->kind === Type::KIND_STRING)) {
             // A SCALAR out-param (`preg_replace(…, int &$count)` handed a
             // `?int &$count`): the callee reads and writes the raw int, so
             // the scratch holds the decoded value, re-boxed by type after.
@@ -2319,6 +2389,7 @@ trait EmitLlvmCalls
                 $this->lastValue = $bits;
                 $this->lastValueType = 'i64';
             }
+            $out .= $this->coerceToI64();
             $raw = $this->lastValue;
         } else {
             $raw = $this->ssa->allocReg();
@@ -2329,7 +2400,10 @@ trait EmitLlvmCalls
         // Written for EVERY scratch, scalar or not: the key is an SSA register
         // name, which the next function reuses. A stale scalar entry re-boxed
         // parse_str's nested array as an INT (`int(4387692744)`).
-        $this->byRefScalarTmps[$tmp] = $scalar ? $pt : null;
+        // A STRING / OBJECT payload re-boxes by its own kind too: boxed as
+        // `vec[cell]` a string came back as `array(24945)` and an object as an
+        // array tag over the instance.
+        $this->byRefScalarTmps[$tmp] = ($scalar || ($pt !== null && $this->isByRefPtrParam($pt))) ? $pt : null;
         $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
         $taddr = $this->ssa->allocReg();
         $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
@@ -2473,6 +2547,10 @@ trait EmitLlvmCalls
 
         $pure = ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->slots[$a->name]))
             || ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$a->name]))
+            // A module cell (a global, a superglobal, a `static`) is a slot like
+            // a frame local's: its address is free and a CELL one takes the
+            // scratch below, not the raw slot.
+            || ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->globalBacked[$a->name]))
             || ($a->kind === Node::KIND_PROPERTY_ACCESS && $this->isByRefAddressable($a));
         if (!$pure) {
             if ($this->isByRefAddressable($a)) {
@@ -2495,7 +2573,6 @@ trait EmitLlvmCalls
                 $joinL = $this->ssa->allocLabel('dynref.join');
                 $out .= '  br i1 ' . $isRef . ', label %' . $refL . ', label %' . $valL . "\n";
                 $out .= $refL . ":\n";
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->byRefAddrOf($a);
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $joinL . "\n";
@@ -2519,7 +2596,6 @@ trait EmitLlvmCalls
             $out .= $this->dynByRefSelect($maskReg, $pi, $addrT, $val);
             return $out;
         }
-        $out .= $this->ownByRefArgLocal($a);
         $out .= $this->byRefAddrOf($a);
         $addr = $this->lastValue;
         // A CELL lvalue goes over as-is to a CELL by-ref param — that closure
@@ -2902,10 +2978,17 @@ trait EmitLlvmCalls
         if ($pt === null) { return false; }
         $pk = $pt->kind;
         return $pk === Type::KIND_UNKNOWN || $pk === Type::KIND_ARRAY
-            || $pk === Type::KIND_STRING || $this->isByRefScalarParam($pt);
+            || $this->isByRefPtrParam($pt) || $this->isByRefScalarParam($pt);
     }
 
-    /** @var array<string, ?Type> scratch alloca → the scalar param type it re-boxes by */
+    /** A raw string / object-pointer by-ref param: re-boxed by its own kind. */
+    private function isByRefPtrParam(Type $pt): bool
+    {
+        return $pt->kind === Type::KIND_STRING
+            || ($pt->kind === Type::KIND_OBJ && !$this->isEnumType($pt));
+    }
+
+    /** @var array<string, ?Type> scratch alloca → the scalar / string / object param type it re-boxes by */
     private array $byRefScalarTmps = [];
 
     /** A raw scalar by-ref param a cell lvalue must be decoded for. */
@@ -3090,6 +3173,8 @@ trait EmitLlvmCalls
     private function emitDiscardedCallRelease(Node $s): string
     {
         $k = $s->kind;
+        // A catch without a variable: nothing binds the exception it took.
+        if ($k === Node::KIND_CAUGHT_VALUE) { return $this->rcReleaseReg($this->lastValue, 'obj'); }
         // A value block discarded as a statement: its result is its last
         // statement's, which {@see visitBlock} left owned.
         if ($k === Node::KIND_BLOCK && $s->type->kind !== Type::KIND_VOID) {
@@ -3102,6 +3187,10 @@ trait EmitLlvmCalls
         if ($this->condOwnsResult($s)) {
             $cf = $this->condFlavor($s->type);
             return $cf === '' ? '' : $this->rcReleaseReg($this->lastValue, $cf);
+        }
+        // A declared-`array` callee hands back its erased array at +1.
+        if (!($this->lastCallWasBuiltin && $k === Node::KIND_CALL) && $this->own->erasedArrayCall($s)) {
+            return $this->rcReleaseReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
         }
         if ($k === Node::KIND_CALL) {
             // Free-function call: only a USER function reliably +1-owns its
@@ -3473,34 +3562,6 @@ trait EmitLlvmCalls
             || $k === Node::KIND_BOOL_CONST || $k === Node::KIND_STRING_CONST;
     }
 
-    /**
-     * A by-ref ARGUMENT's storage owns its value: a callee that stores a new
-     * one gives the old one back ({@see EmitLlvmLocals::refParamOverwriteIr}).
-     * A local this frame only BORROWS — a by-value parameter, a foreach value —
-     * owns nothing, so it takes a reference first, as php separates such a
-     * variable on the by-ref pass. The frame never releases a borrowed name, so
-     * that count is a leak at worst, where the callee's release on its own
-     * would free the caller's value (`k(array $p) { krsort($p); }`).
-     */
-    private function ownByRefArgLocal(Node $a): string
-    {
-        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return ''; }
-        $name = $this->asLoadLocalNode($a)->name;
-        if (!isset($this->locals->slots[$name])
-            || isset($this->frame->rcObjLocals[$name])
-            || isset($this->locals->refLocals[$name])
-            || isset($this->locals->globalBacked[$name])
-            || isset($this->locals->ownedBoxes[$name])
-            || isset($this->locals->byRefCaptured[$name])
-            || isset($this->locals->refCellTargets[$name])
-            || isset($this->locals->aliasLocals[$name])) { return ''; }
-        $flavor = $this->discardReleaseFlavor($a->type);
-        if ($flavor === '') { return ''; }
-        $v = $this->ssa->allocReg();
-        return '  ' . $v . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n"
-            . $this->rcRetainReg($v, $flavor);
-    }
-
     private function emitByRefArg(Node $a): string
     {
         $addr = $this->byRefAddrOf($a);
@@ -3724,7 +3785,6 @@ trait EmitLlvmCalls
                 // scratch slot holding the decoded payload, then re-box what it
                 // left back into the caller's slot. Passing the cell slot
                 // directly makes the callee deref the tag bits.
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellUnboxArg($a, $ptypes[$ai] ?? null);
                 $argList .= 'i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
@@ -3732,7 +3792,6 @@ trait EmitLlvmCalls
             } elseif (($mask[$ai] ?? false) && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai)
             ) {
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->emitByRefCellBox($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $cellBoxSlots[] = $this->refBoxSlot;
@@ -3742,7 +3801,6 @@ trait EmitLlvmCalls
                 // By-ref param fed an addressable lvalue (plain local or
                 // `$obj->prop`): pass the address so the callee's writes land
                 // in the caller's slot / the object's field.
-                $out .= $this->ownByRefArgLocal($a);
                 $out .= $this->byRefAddrOf($a);
                 $argList .= 'i64 ' . $this->lastValue;
                 $ck = $this->byRefConformKind($a, $ptypes, $ai);

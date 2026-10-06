@@ -1,0 +1,11 @@
+it 0
+it 1
+read h
+~h
+read ct
+~ct
+then rebound
+~rebound
+then cf
+~cf
+done

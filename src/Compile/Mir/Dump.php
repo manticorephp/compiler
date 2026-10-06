@@ -110,6 +110,22 @@ final class Dump implements EmitVisitor
         return $out;
     }
 
+    /**
+     * A call's {@see Call::$ownLive}: `  ; own: a=str,b=obj`, or ''.
+     * @param array<string, MemoryOp_> $live
+     */
+    private static function own(array $live): string
+    {
+        if ($live === []) { return ''; }
+        $out = '';
+        foreach ($live as $name => $op) {
+            $out .= ($out === '' ? '' : ',') . $name . '=' . self::opFlavor($op);
+        }
+        return '  ; own: ' . $out;
+    }
+
+    private static function opFlavor(MemoryOp_ $op): string { return $op->flavor; }
+
     private int $nextId = 0;
 
     public function visitIntConst(IntConst $n): string
@@ -248,7 +264,7 @@ final class Dump implements EmitVisitor
         $name = $this->allocSlot();
         return $out . $this->indent . $name . ' = call ' . $n->function
              . '(' . $argLine . ')'
-             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . self::own($n->ownLive) . "\n";
     }
 
     public function visitBlock(Block $n): string
@@ -345,7 +361,7 @@ final class Dump implements EmitVisitor
         $name = $this->allocSlot();
         return $out . $this->indent . $name . ' = new ' . $n->class
              . '(' . $argLine . ')'
-             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . self::own($n->ownLive) . "\n";
     }
 
     public function visitPropertyAccess(PropertyAccess_ $n): string
@@ -386,7 +402,7 @@ final class Dump implements EmitVisitor
         $name = $this->allocSlot();
         return $oChunk . $argOut . $this->indent . $name . ' = method_call '
              . $oName . '->' . $n->method . '(' . $argLine . ')'
-             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . self::own($n->ownLive) . "\n";
     }
 
     public function visitStaticCall(StaticCall_ $n): string
@@ -403,7 +419,7 @@ final class Dump implements EmitVisitor
         $name = $this->allocSlot();
         return $argOut . $this->indent . $name . ' = static_call '
              . $n->class . '::' . $n->method . '(' . $argLine . ')'
-             . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
+             . ' : ' . $n->type->toString() . $this->eff($n) . self::own($n->ownLive) . "\n";
     }
 
     public function visitNeg(Neg $n): string
@@ -848,7 +864,7 @@ final class Dump implements EmitVisitor
         }
         $name = $this->allocSlot();
         return $cChunk . $argOut . $this->indent . $name . ' = invoke ' . $cName
-             . '(' . $argLine . ')' . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
+             . '(' . $argLine . ')' . ' : ' . $n->type->toString() . $this->eff($n) . self::own($n->ownLive) . "\n";
     }
 
     public function visitClosure(Closure_ $n): string
@@ -866,6 +882,12 @@ final class Dump implements EmitVisitor
         $name = $this->allocSlot();
         return $out . $this->indent . $name . ' = closure #' . (string)$n->id
              . ' use (' . $useLine . ')' . ' : ' . $n->type->toString() . $this->eff($n) . "\n";
+    }
+
+    public function visitCaughtValue(CaughtValue_ $n): string
+    {
+        $name = $this->allocSlot();
+        return $this->indent . $name . ' = caught_value : ' . $n->type->toString() . "\n";
     }
 
     public function visitStaticProp(StaticProp_ $n): string

@@ -1,0 +1,20 @@
+free a
+a!
+--
+free n
+xxx|
+--
+free r
+free c
+c|
+--
+it e0
+it e1
+free e0
+free e1
+--
+free f0
+f0
+free r
+free z
+end

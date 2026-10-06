@@ -28,7 +28,7 @@ interface RuntimeHost
 {
     /**
      * Allocate `$size` bytes for the given refcount flavor
-     * ({@see \Compile\MemoryOp}::FLAVOR_*). Returns the ptr Value.
+     * (`'assoc'` / `'obj'` / `'vec'`). Returns the ptr Value.
      */
     public function rtAlloc(Block $b, Value $size, string $flavor): Value;
 

@@ -66,9 +66,8 @@ final class VecCopyOnAssign
      * takes a private copy so the store never reaches the caller's buffer
      * ({@see \Compile\Mir\Passes\EmitLlvmModule}). That copy is a fresh rc=1
      * buffer the FRAME owns, so the same answer decides OWNERSHIP too: the
-     * param is released at scope exit and takes no entry retain
-     * ({@see \Compile\Mir\Passes\InsertMemoryOps}, {@see
-     * \Compile\Mir\Passes\EmitLlvmMemory::initRcObjSlots}). Without the release
+     * param enters OWNED and is dropped like any owned local
+     * ({@see \Compile\Mir\Passes\OwnershipFlow}). Without the release
      * every call leaked the copy — `InferTypes` alone stranded a map per
      * mutated `array` param per call. A closure prologue copies the same way
      * (a closure CAPTURE is no array-hinted param); a generator's copies nothing.

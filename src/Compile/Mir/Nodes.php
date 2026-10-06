@@ -136,6 +136,11 @@ final class LoadLocal extends Node
         parent::__construct(Node::KIND_LOAD_LOCAL, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: this read is the value a container
+     *  store takes without a count of its own while the local stays live — the
+     *  `own_share` +1 is taken right here, on the word just read. Not a child. */
+    public ?MemoryOp_ $ownShare = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitLoadLocal($this);
@@ -162,6 +167,14 @@ final class StoreLocal extends Node
         parent::__construct(Node::KIND_STORE_LOCAL, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the slot's OLD
+     *  value — `drop` releases it after the new value is computed, `own_retain`
+     *  takes a +1 on it before a self-append consumes it. Not a child. */
+    public ?MemoryOp_ $ownOld = null;
+    /** `own_retain` of the value just stored: a borrowed store the flow forces
+     *  to own. Not a child. */
+    public ?MemoryOp_ $ownNew = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitStoreLocal($this);
@@ -175,8 +188,15 @@ final class StoreLocal extends Node
 
     /** The NULL an out-parameter local starts as ({@see Passes\VivifyRefArgs}):
      *  the by-ref callee stores an owned value into the slot, so the slot owns
-     *  what it ends up holding. Declared LAST — field order is layout. */
+     *  what it ends up holding. Field order is layout: append after the last. */
     public bool $outParamInit = false;
+    /** `$x = $x` on one cell slot the flow manages: a relabel that moves
+     *  nothing ({@see Passes\OwnershipFlow}), so the emitter emits no store. */
+    public bool $ownRelabel = false;
+    /** A hidden local that holds a property read across a call that may
+     *  overwrite the slot ({@see Passes\SpillFreshBases::coOwnHeld}): it
+     *  co-owns the value by a retain — never a copy, it is never written. */
+    public bool $coOwnRead = false;
 }
 
 // ── Arithmetic ────────────────────────────────────────────────────
@@ -450,6 +470,20 @@ final class Return_ extends Node
         parent::__construct(Node::KIND_RETURN, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the `drop` of every local owned on
+     *  this return path, run after the value (and any finally) is evaluated.
+     *  Not children.
+     *  @var MemoryOp_[] */
+    public array $ownDrops = [];
+    /** The returned local is OWNED on this path: its reference moves to the
+     *  caller. Otherwise the return takes the +1 a borrow owes. */
+    public bool $ownMove = false;
+    /** @var array<string, bool> the locals among {@see $ownDrops} whose drop
+     *  waits for the returned WORD: the value is a conditional the return takes
+     *  no +1 on ({@see Ownership::returnArmLocals}), so the arm that ran moves to
+     *  the caller and only the others drop — decided by identity at run time. */
+    public array $ownArms = [];
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitReturn($this);
@@ -488,6 +522,13 @@ final class Call extends Node
      *  emit time `$args` is always exactly arity-many. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -522,16 +563,17 @@ final class Block extends Node
 }
 
 /**
- * Explicit memory operation, inserted by {@see Passes\InsertMemoryOps}
- * from the allocation-kind verdict — the MemoryOps layer (contract
- * step #5). EmitLlvm *consumes* these; it never invents retain/release
- * from its feature handlers.
+ * Explicit memory operation. EmitLlvm *consumes* these; it never invents
+ * retain / release for a local from its feature handlers.
  *
- * `op`     — 'retain' | 'release' | 'cow' | 'root' | 'arena_enter' | 'arena_leave'
- * `flavor` — heap family the runtime helper dispatches on:
- *            'string' | 'vec' | 'assoc' | 'obj' | 'cell' (empty for arena scope)
- * `target` — the value the op acts on (a `LoadLocal` for scope-exit
- *            releases; null for whole-frame arena enter / leave).
+ * `op` — `arena_enter` / `arena_leave` ({@see Passes\InsertMemoryOps}: the
+ *        frame's arena scope); `drop`, `own_retain` and the registrations
+ *        `own_local` / `own_local_b` ({@see Passes\OwnershipFlow}); `own_share`
+ *        rides on a {@see LoadLocal}, never in a statement list.
+ * `flavor` — the release class the runtime helper dispatches on (the
+ *        {@see Passes\EmitLlvmMemory::rcReleaseFlavor} vocabulary; empty for
+ *        the arena scope).
+ * `target` — the local the op acts on (a `LoadLocal`; null for the arena scope).
  */
 final class MemoryOp_ extends Node
 {
@@ -760,13 +802,24 @@ final class StaticLocalDecl_ extends Node
     }
 }
 
-/** `throw $value` — store + longjmp to the topmost active jmp_buf. */
+/** `throw $value` — `@__mc_throw`: an unwind to the nearest PHP catch pad. */
 final class Throw_ extends Node
 {
     public function __construct(public Node $value, Type $type)
     {
         parent::__construct(Node::KIND_THROW, $type);
     }
+
+    /** Set by {@see Passes\OwnershipFlow}: the thrown local is Own and the
+     *  throw leaves the function, so its +1 moves into `@__mir_thrown` (no
+     *  retain). Declared LAST. */
+    public bool $ownMove = false;
+
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own when the throw
+     *  raises (the moved thrown local excluded), name → its `drop` op — what
+     *  the unwind out of this frame drops. Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
 
     public function accept(EmitVisitor $v): string
     {
@@ -826,7 +879,7 @@ final class MirCatch
     ) {}
 }
 
-/** `try { } catch { } finally { }` — setjmp/longjmp structured handler. */
+/** `try { } catch { } finally { }` — calls in the body `invoke` the try's landing pad. */
 final class TryCatch_ extends Node
 {
     /**
@@ -850,6 +903,16 @@ final class TryCatch_ extends Node
      *  alloca dominating neither. Declared LAST — a field added mid-struct
      *  shifts every later offset. */
     public int $genBtSlot = -1;
+
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own at catch entry —
+     *  what the re-raise of an exception no catch matched drops on its way
+     *  out of the frame. Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownCatch = [];
+    /** The locals Own when the finally ends — what its re-raise of a pending
+     *  exception drops. Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownFinally = [];
 
     public function __construct(
         public array $tryBody,
@@ -1104,11 +1167,6 @@ final class Closure_ extends Node
 
 final class Invoke_ extends Node
 {
-    /** Index-parallel to {@see $args}: the name of a named argument, '' for a
-     *  positional one. Empty when the call has none. Bound by
-     *  {@see Passes\ResolveMethodFcc} once the callee closure is known. */
-    public array $argNames = [];
-
     /** @param Node[] $args */
     public function __construct(
         public Node $callee,
@@ -1117,6 +1175,19 @@ final class Invoke_ extends Node
     ) {
         parent::__construct(Node::KIND_INVOKE, $type);
     }
+
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
+    /** Index-parallel to {@see $args}: the name of a named argument, '' for a
+     *  positional one. Empty when the call has none. Bound by
+     *  {@see Passes\ResolveMethodFcc} once the callee closure is known.
+     *  Declared LAST: a field added mid-struct shifts every later offset. */
+    public array $argNames = [];
 
     public function accept(EmitVisitor $v): string
     {
@@ -1346,6 +1417,13 @@ final class Foreach_ extends Node
      *  ({@see Passes\InsertMemoryOps::foreachValueSlotType}). Set by InferTypes. */
     public ?Type $iterValueType = null;
 
+    /** Set by {@see Passes\OwnershipFlow}: whether this loop's value binding
+     *  co-owns (the emitter retains each element), and the `drop` of the
+     *  value / key the slot holds at the head, run before each binding. */
+    public bool $ownCoOwn = false;
+    public ?MemoryOp_ $ownDropValue = null;
+    public ?MemoryOp_ $ownDropKey = null;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitForeach($this);
@@ -1515,6 +1593,30 @@ final class ArrayAccess_ extends Node
      */
     public bool $probe = false;
 
+    /**
+     * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
+     * fetch): a variable, a property, a static property or an element of one.
+     * A call base (`f()[$k]`) runs first.
+     */
+    public static function keyBeforeBase(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STATIC_PROP) {
+            return true;
+        }
+        if ($n instanceof PropertyAccess_) {
+            return self::keyBeforeBase($n->object);
+        }
+        if ($n instanceof ArrayAccess_) {
+            // An inner key that can run code keeps its source order.
+            $ik = $n->index->kind;
+            if ($ik !== Node::KIND_LOAD_LOCAL && $ik !== Node::KIND_INT_CONST && $ik !== Node::KIND_STRING_CONST) {
+                return false;
+            }
+            return self::keyBeforeBase($n->array);
+        }
+        return false;
+    }
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitArrayAccess($this);
@@ -1635,6 +1737,13 @@ final class NewObj extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1668,6 +1777,13 @@ final class PropertyAccess_ extends Node
     {
         return [$this->object];
     }
+
+    /** Set by {@see Passes\InferScans::markByRefPropTypeError}: this TYPED
+     *  property is a by-ref argument to a param of another scalar type, which
+     *  php refuses with a TypeError — the message around `get_debug_type` of
+     *  the value. '' when the binding is fine. Field order is layout: append. */
+    public string $byRefTypeErrorHead = '';
+    public string $byRefTypeErrorTail = '';
 }
 
 /**
@@ -1800,6 +1916,13 @@ final class MethodCall_ extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1842,6 +1965,13 @@ final class StaticCall_ extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
+     *  through this call must drop ({@see NothrowSummary::callMayThrow}).
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1852,5 +1982,33 @@ final class StaticCall_ extends Node
     public function children(): array
     {
         return $this->args;
+    }
+}
+
+/**
+ * The exception a matched `catch` binds: the +1 `throw` handed into
+ * `@__mir_thrown`, taken out of the slot, which is cleared. `catch (E $e)`
+ * lowers to `StoreLocal($e, CaughtValue_)` as the arm's first statement, so the
+ * local owns the object from there like any other fresh value; a catch without
+ * a variable discards it as a statement. `$types` are the catch's accepted
+ * class names — InferTypes types the node as their join.
+ */
+final class CaughtValue_ extends Node
+{
+    /** @param string[] $types */
+    public function __construct(public array $types, Type $type)
+    {
+        parent::__construct(Node::KIND_CAUGHT_VALUE, $type);
+    }
+
+    public function accept(EmitVisitor $v): string
+    {
+        return $v->visitCaughtValue($this);
+    }
+
+    /** @return Node[] */
+    public function children(): array
+    {
+        return [];
     }
 }

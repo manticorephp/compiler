@@ -1,0 +1,26 @@
+new x
+new y
+free y
+got x
+free x
+new x
+new y
+free x
+got y
+free y
+new ux
+new uy
+free uy
+got ux
+free ux
+new ux
+new uy
+free ux
+got uy
+free uy
+new a
+new b
+free b
+got a
+free a
+end

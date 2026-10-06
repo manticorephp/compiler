@@ -78,7 +78,7 @@ final class InferEffects implements Pass
         // Missing, it never reached InferAllocKind's RC_HEAP arm, so the local
         // a clone was stored in was never released: `$q = clone $p;` leaked
         // the copy and everything it co-owned — the retain side
-        // (isBorrowedObjReturn, retainCellPayload) already counted it +1.
+        // (Ownership::returnBorrowsObj, retainCellPayload) already counted it +1.
         if ($k === Node::KIND_CLONE) {
             return Effects::ALLOC | Effects::MAY_THROW;
         }

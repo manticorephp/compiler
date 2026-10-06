@@ -19,13 +19,16 @@ final class MemoryAbi
     /**
      * Bump on any layout / encoding change.
      *
-     * v15: int bucket hash changed: (k ^ k>>12) * golden. The bucket index is
-     * trusted, not validated, so a library built with the old hash would miss
-     * int keys in the arrays it built. Also v15: a bucket word is
-     * `(h32 << 32) | (entry_index + 1)` (h32 = low 32 bits of the key hash), not
-     * a bare `entry_index + 1`.
+     * v16: both v15 lineages at once — the int bucket hash is
+     * (k ^ k>>12) * golden and a bucket word is `(h32 << 32) | (entry_index + 1)`
+     * (h32 = low 32 bits of the key hash), not a bare `entry_index + 1`; the
+     * bucket index is trusted, not validated, so a library built with the old
+     * hash or word would miss keys in the arrays it built. AND the exception
+     * object is the zero-cost `_Unwind_Exception` header + Throwable pointer
+     * (`EXC_*`, docs/design/memory-abi.md §7b). Either v15 alone is a
+     * different layout, so neither may link with a v16 object.
      */
-    public const VERSION = 15;
+    public const VERSION = 16;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -978,4 +981,24 @@ final class MemoryAbi
     public const OFFLOAD_OP_OPEN = 17;
     public const OFFLOAD_OP_READDIR_NAME = 18;
     public const OFFLOAD_OP_SCANDIR = 19;
+
+    // ─── exception object (zero-cost unwinding) ───────────────────
+
+    /**
+     * `_Unwind_Exception::exception_class` of a PHP throw ("MNTCPHP\0"). The
+     * personality catches only this class; a foreign exception (C++, forced
+     * unwind) passes through every PHP catch pad.
+     */
+    public const EXC_CLASS = 0x4D4E544350485000;
+
+    /**
+     * The exception object `@__mc_throw` hands `_Unwind_RaiseException`:
+     * the Itanium `_Unwind_Exception` header (class@0, cleanup@8,
+     * private_1@16, private_2@24 — 32 bytes on every 64-bit target) followed
+     * by the thrown Throwable's address. malloc'd per raise, freed by the
+     * landing pad that takes the payload ({@see \Compile\Runtime\UnwindRuntime}).
+     */
+    public const EXC_HEADER_SIZE = 32;
+    public const EXC_PAYLOAD_OFFSET = 32;
+    public const EXC_SIZE = 48;
 }

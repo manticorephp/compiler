@@ -1,0 +1,32 @@
+tern a
+~tern
+ternNull a SSSS
+~ternNull
+ifNull SSSS a
+~ifNull
+catchNull NNNN
+~catchNull
+tern s
+ternNull n NNNN
+ifNull NNNN n
+catchNull SSSS
+~catchNull
+mt a
+~mt
+mt i
+mt s
+mtNull SSSS
+~mtNull
+mtNull NNNN
+~ret
+as
+swNull SSSS
+~swNull
+swNull NNNN
+loopNull SSSS
+~loop
+loopNull NNNN
+~noloop
+viaNullable s
+viaNullable a
+done

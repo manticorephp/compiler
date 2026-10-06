@@ -35,6 +35,7 @@ interface EmitVisitor
     public function visitCall(Call $n): string;
     public function visitBlock(Block $n): string;
     public function visitMemoryOp(MemoryOp_ $n): string;
+    public function visitCaughtValue(CaughtValue_ $n): string;
     public function visitCmp(Cmp $n): string;
     public function visitSpaceship(\Compile\Mir\Spaceship $n): string;
     public function visitIf(If_ $n): string;

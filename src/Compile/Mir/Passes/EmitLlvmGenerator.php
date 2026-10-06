@@ -134,7 +134,7 @@ trait EmitLlvmGenerator
             $genParamNames[$p->name] = true;
             if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
         }
-        $this->initRcObjSlots($fn->body, $genParamNames);
+        $this->initOwnSlots($fn->body, $genParamNames);
 
         // ── creator ──
         // A generator CLOSURE composes two frame mechanisms: it is invoked with
@@ -217,7 +217,6 @@ trait EmitLlvmGenerator
                       . (string)($capIndex[$name] + 1) . "\n";
                 $cv = $this->ssa->allocReg();
                 $out .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
-                $out .= $this->genParamCoOwn($name, $cv);
                 $out .= $this->genStoreAt($fr, $off, $cv);
             } elseif (isset($paramNames[$name])) {
                 // A CLOSURE generator's caller (emitInvoke) boxed every scalar
@@ -232,10 +231,8 @@ trait EmitLlvmGenerator
                     $out .= $this->unboxCellToType($pt);
                     $out .= $this->coerceToI64();
                     $pv = $this->lastValue;
-                    $out .= $this->genParamCoOwn($name, $pv);
                     $out .= $this->genStoreAt($fr, $off, $pv);
                 } else {
-                    $out .= $this->genParamCoOwn($name, '%arg.' . $name);
                     $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
                     // The frame outlives this call and reads the param later, so
                     // it must co-own it: `(new D(5))->it()` freed the receiver
@@ -262,7 +259,9 @@ trait EmitLlvmGenerator
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
-        $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
+        $this->frame->erasedArrayReturn = false;
+        $this->frame->erasedCond = null;
+        $out .= 'define ' . $defLinkage . 'i64 ' . $resume . '(ptr %frame)' . $this->personalityClause() . " {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
         foreach ($locals as $name => $idx) {
             $off = self::GEN_HEADER + 8 * $idx;
@@ -283,16 +282,13 @@ trait EmitLlvmGenerator
         $out .= '  ' . $this->gen->sentPtr . " = getelementptr inbounds i8, ptr %frame, i64 40\n";
         $this->gen->retvalPtr = $this->ssa->allocReg();
         $out .= '  ' . $this->gen->retvalPtr . " = getelementptr inbounds i8, ptr %frame, i64 48\n";
-        // The consumer's jmp depth, captured per INVOCATION in the entry block.
-        // A generator re-arms its trys on resume ({@see rearmGeneratorTrys}) and so
-        // bumps the global depth; it has to put it back on the way out, or the slot
-        // it armed stays live after the suspension and steals the next exception
-        // raised at that depth — including one meant for a DIFFERENT generator.
-        $this->gen->entryDepthPtr = $this->ssa->allocReg();
-        $out .= '  ' . $this->gen->entryDepthPtr . " = alloca i64\n";
-        $ed = $this->ssa->allocReg();
-        $out .= '  ' . $ed . " = load i64, ptr @__mir_jmp_depth\n";
-        $out .= '  store i64 ' . $ed . ', ptr ' . $this->gen->entryDepthPtr . "\n";
+
+        $this->gen->entryArenaSp = '';
+        if ($this->locals->hasTry) {
+            $this->rt->needsArena = true;
+            $this->gen->entryArenaSp = $this->ssa->allocReg();
+            $out .= '  ' . $this->gen->entryArenaSp . " = load i64, ptr @__mir_arena_sp\n";
+        }
         $st = $this->ssa->allocReg();
         $out .= '  ' . $st . ' = load i64, ptr ' . $this->gen->statePtr . "\n";
         $nYields = $this->countYields($fn->body);
@@ -312,11 +308,9 @@ trait EmitLlvmGenerator
         $this->gen->inGenerator = $savedInGen;
         $this->gen->yieldCounter = $savedCounter;
 
-        // Fell off the end → finished. The depth goes back here too: a generator
-        // that ran to completion must not leave the consumer's jmp depth raised.
+        // Fell off the end → finished.
         $out .= $this->genFinishCurrent();
         $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
-        $out .= $this->genRestoreEntryDepth();
         $out .= "  ret i64 0\n}\n\n";
         return $out;
     }
@@ -366,21 +360,6 @@ trait EmitLlvmGenerator
             || $vk === Node::KIND_CLOSURE || \Compile\Mir\BitOp::mintsFresh($v);
     }
 
-    /**
-     * A param (or capture) the body owns — reassigned, or released at the end
-     * — holds the caller's BORROWED value, so the frame takes its own +1 as it
-     * seeds the slot: the entry retain {@see initRcObjSlots} gives an ordinary
-     * function, placed in the creator because the resume entry runs on every
-     * resume.
-     */
-    private function genParamCoOwn(string $name, string $val): string
-    {
-        if (isset($this->locals->refLocals[$name])) { return ''; }
-        $mo = $this->frame->rcObjLocals[$name] ?? null;
-        if ($mo === null) { return ''; }
-        $fl = $this->rcReleaseFlavor($mo);
-        return $fl === '' ? '' : $this->rcRetainReg($val, $fl);
-    }
 
     /** `store i64 <val>, ptr (base + off)` — a frame header/local write. */
     private function genStoreAt(string $base, int $off, string $val): string
@@ -465,15 +444,6 @@ trait EmitLlvmGenerator
         }
     }
 
-    /** Put the consumer's jmp depth back before suspending or returning.
-     *  {@see GeneratorContext::$entryDepthPtr} for why it must not be left raised. */
-    private function genRestoreEntryDepth(): string
-    {
-        if ($this->gen->entryDepthPtr === '') { return ''; }
-        $v = $this->ssa->allocReg();
-        return '  ' . $v . ' = load i64, ptr ' . $this->gen->entryDepthPtr . "\n"
-             . '  store i64 ' . $v . ", ptr @__mir_jmp_depth\n";
-    }
 
     /**
      * `yield`, `yield $v`, `yield $k => $v` inside a resume body: store the
@@ -579,18 +549,12 @@ trait EmitLlvmGenerator
         $k = $this->gen->yieldCounter + 1;
         $this->gen->yieldCounter = $k;
         $out .= '  store i64 ' . (string)$k . ', ptr ' . $this->gen->statePtr . "\n";
-        $out .= $this->genRestoreEntryDepth();
         $out .= "  ret i64 1\n";
         $out .= 'gen.resume.' . (string)$k . ":\n";
-        // FIRST, before anything can throw: re-arm the enclosing trys in THIS
-        // frame. The setjmp that guarded them belongs to the invocation that
-        // entered the try, and that frame died when this yield returned.
-        // {@see rearmGeneratorTrys}
-        $out .= $this->rearmGeneratorTrys();
         // `$gen->throw($e)` injection: on resume, a pending exception makes the
         // suspended `yield` expression raise — caught by an enclosing try in the
-        // generator (its landing pad was just re-armed above, so depth-1 is ours
-        // and points at a LIVE frame), else propagated to the consumer.
+        // generator (the raise is an invoke to its landing pad, in this same
+        // resume function), else propagated to the consumer.
         if ($this->gen->throwUsed) {
             $gt = $this->ssa->allocReg();
             $out .= '  ' . $gt . " = load ptr, ptr @__mir_gen_throw\n";
@@ -601,14 +565,7 @@ trait EmitLlvmGenerator
             $out .= '  br i1 ' . $inj . ', label %' . $thrL . ', label %' . $contL . "\n";
             $out .= $thrL . ":\n";
             $out .= "  store ptr null, ptr @__mir_gen_throw\n";
-            $out .= '  store ptr ' . $gt . ", ptr @__mir_thrown\n";
-            $d = $this->ssa->allocReg();
-            $out .= '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
-            $s = $this->ssa->allocReg();
-            $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
-            $out .= $this->jmpBufExpr($s);
-            $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
-            $out .= "  unreachable\n";
+            $out .= $this->emitRethrowAt($gt);
             $out .= $contL . ":\n";
         }
         // Resumed: the yield expression evaluates to the sent-in value.

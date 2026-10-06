@@ -107,7 +107,7 @@ trait EmitLlvmBuiltins
      * A user call has both halves of the ownership contract: `emitCall`
      * releases a fresh rc arg temp after the call ({@see
      * EmitLlvm::freshRcArgFlavor}) and the callee retains what it keeps
-     * ({@see EmitLlvmMemory::initRcObjSlots}). A CODEGEN BUILTIN has neither.
+     * (a store or a return of a param retains). A CODEGEN BUILTIN has neither.
      * It reads the buffer inline and returns, so `count(explode($d, $s))`
      * stranded the exploded vec on every call — and the ones that looked fine
      * (`implode`, `in_array`) were only saved by a cellify rebuild whose
@@ -1404,6 +1404,15 @@ trait EmitLlvmBuiltins
             $ep = '';
             $out .= $this->emitEnumSingletonPtr((string)$elem->class, $ev, $ep);
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
+        } elseif ($ek === Type::KIND_UNION && $this->own->condFlavor($elem) === 'obj') {
+            // An all-object UNION element is a bare object pointer like `obj<C>`:
+            // boxed and co-owned the same way. It fell to `box_int` below, so
+            // the rebuilt array (`[...$v, ...$u]` over a `list<A|C>`) dropped a
+            // count it never took and freed `$u`'s object while `$y` held it.
+            $elemRetain = 'obj';
+            $ep = $this->ssa->allocReg();
+            $out .= '  ' . $ep . ' = inttoptr i64 ' . $ev . " to ptr\n";
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $ep . ")\n";
         } elseif ($ek === Type::KIND_OBJ || $ek === Type::KIND_CLOSURE) {
             // discardReleaseFlavor answers '' for the header-less classes (a
             // #[Struct] / enum ordinal / Ffi\Ptr) — never rc-touch those. A
@@ -1521,8 +1530,16 @@ trait EmitLlvmBuiltins
      * e.g. `uasort`'s `$arr = $new` writeback restoring the byref param's typed
      * representation). lastValue holds the source array cell/ptr on entry; the
      * boxed concrete array on exit.
+     *
+     * ⚠ OWNERSHIP. By default the rebuild MOVES each value out of the source:
+     * right for an owned temp whose bare buffer the caller then frees. `$coOwn`
+     * is for a source that keeps its elements (a named local that is released
+     * at its own scope exit): the rebuild then takes a reference per element,
+     * or both arrays release the same payload — `$astArgs = $expanded` in
+     * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
+     * and the self-built compiler crashed on `method_exists(...$pack)`.
      */
-    private function emitCellArrayToTyped(Type $arrType): string
+    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -1583,9 +1600,14 @@ trait EmitLlvmBuiltins
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
             $out .= $this->unboxCellToType($elem);
-            $out .= $this->emitCellArrayToTyped($elem);
+            $out .= $this->emitCellArrayToTyped($elem, $coOwn);
             $raw = $this->lastValue;
         } else {
+            if ($coOwn) {
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_cell_retain(i64 ' . $ev . ")\n";
+            }
             $this->lastValue = $ev;
             $this->lastValueType = 'i64';
             $out .= $this->unboxCellToType($elem);
@@ -1640,6 +1662,22 @@ trait EmitLlvmBuiltins
         return $sk === Type::KIND_INT || $sk === Type::KIND_FLOAT
             || $sk === Type::KIND_STRING || $sk === Type::KIND_BOOL
             || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
+    }
+
+    /** The mirror of {@see needsDeCellify}: a CONCRETE-element array value bound
+     *  to a CELL-element array slot (a local whose element a reference or a
+     *  by-ref sink promoted, a by-value param converted at entry). */
+    private function needsForwardCellify(Type $slotType, Type $valueType): bool
+    {
+        if (!$slotType->isArray() || !$valueType->isArray()) { return false; }
+        if ($slotType->isShape() || $valueType->isShape()) { return false; }
+        $se = $slotType->element;
+        $ve = $valueType->element;
+        if ($se === null || $ve === null || $se->kind !== Type::KIND_CELL) { return false; }
+        $vk = $ve->kind;
+        return $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT
+            || $vk === Type::KIND_STRING || $vk === Type::KIND_BOOL
+            || ($vk === Type::KIND_OBJ && !$this->isEnumType($ve)) || $vk === Type::KIND_ARRAY;
     }
 
     /** A concrete OBJECT-element array being written back through a by-ref
@@ -4198,9 +4236,14 @@ trait EmitLlvmBuiltins
         // ternary null arm keeps the obj type (`$c ? new P() : null`), so both
         // is_null and is_object must runtime-check the pointer instead of
         // short-circuiting on the static obj type (which would answer null=never,
-        // object=always). is_null → ptr==0; is_object → ptr!=0.
-        if (($a->type->kind === Type::KIND_OBJ && ($kind === Type::KIND_NULL || $kind === Type::KIND_OBJ))
-            || ($a->type->kind === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
+        // object=always). is_null → ptr==0; is_object → ptr!=0. An ARRAY and a
+        // STRING are the same kind of carrier: their null rides the slot as ptr
+        // 0 (a `?array` return, `null ∪ string`, a null-seeded loop array), and
+        // `=== null` already answers it that way.
+        $ak = $a->type->kind;
+        if ((($ak === Type::KIND_OBJ || $ak === Type::KIND_ARRAY || $ak === Type::KIND_STRING)
+                && ($kind === Type::KIND_NULL || $kind === $ak))
+            || ($ak === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
@@ -4360,6 +4403,19 @@ trait EmitLlvmBuiltins
             return $out;
         }
         $k = $a->type->kind;
+        // A string or an array slot holds its null as ptr 0 ({@see biIsType}).
+        if ($k === Type::KIND_STRING || $k === Type::KIND_ARRAY) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $isN = $this->ssa->allocReg();
+            $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $sel . ' = select i1 ' . $isN . ', ptr ' . $this->strRef($nNull) . ', ptr '
+                  . $this->strRef($k === Type::KIND_STRING ? $nStr : $nArr) . "\n";
+            $this->lastValue = $sel;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         $name = $nUnk;
         if ($k === Type::KIND_INT) { $name = $nInt; }
         elseif ($k === Type::KIND_STRING) { $name = $nStr; }
@@ -6998,7 +7054,7 @@ trait EmitLlvmBuiltins
             Type::void(),
         );
         $out = $this->emitNode($throw);
-        // The throw longjmps and never returns, so nothing consumes this — but
+        // The throw never returns, so nothing consumes this — but
         // the expression still has to leave a well-typed value behind for the
         // consumer the type system thinks exists.
         $this->lastValue = '0';
@@ -8120,8 +8176,8 @@ trait EmitLlvmBuiltins
      * \Compile\Mir\RuntimeLibrary::propsFnSymbol}) — the producer side was
      * already there with only this consumer missing. It returns a FRESH assoc
      * (declared properties, then the bag), so this arm is owned like the others.
-     * A null descriptor, or a class with neither properties nor a bag, keeps the
-     * old bag-only answer.
+     * A null descriptor keeps the old bag-only answer; a class with neither
+     * properties nor a bag answers a fresh empty array.
      */
     private function emitObjectVarsFallback(string $objPtr): string
     {
@@ -8130,6 +8186,7 @@ trait EmitLlvmBuiltins
         $haveL = $this->ssa->allocLabel('gov.desc');
         $callL = $this->ssa->allocLabel('gov.props');
         $bagL  = $this->ssa->allocLabel('gov.bag');
+        $noneL = $this->ssa->allocLabel('gov.none');
         $endL  = $this->ssa->allocLabel('gov.fbend');
         $di = $this->ssa->allocReg();
         $out .= '  ' . $di . ' = load i64, ptr ' . $objPtr . "\n";
@@ -8145,7 +8202,17 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $fn . ' = load ptr, ptr ' . $fp . "\n";
         $fz = $this->ssa->allocReg();
         $out .= '  ' . $fz . ' = icmp eq ptr ' . $fn . ", null\n";
-        $out .= '  br i1 ' . $fz . ', label %' . $bagL . ', label %' . $callL . "\n";
+        $out .= '  br i1 ' . $fz . ', label %' . $noneL . ', label %' . $callL . "\n";
+        // A described class without a props view declares nothing and has no
+        // bag: every class with either one gets the view. Its object ends at
+        // the header, so the bag word the arm below reads is past the end.
+        $out .= $noneL . ":\n";
+        $ea = $this->ssa->allocReg();
+        $out .= '  ' . $ea . " = call ptr @__mir_array_alloc(i64 0)\n";
+        $ei = $this->ssa->allocReg();
+        $out .= '  ' . $ei . ' = ptrtoint ptr ' . $ea . " to i64\n";
+        $out .= '  store i64 ' . $ei . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
         $out .= $callL . ":\n";
         $pv = $this->ssa->allocReg();
         $out .= '  ' . $pv . ' = call i64 ' . $fn . '(ptr ' . $objPtr . ")\n";
@@ -8863,10 +8930,8 @@ trait EmitLlvmBuiltins
             $out = $this->emitNode($arrNode->object);
             $out .= $this->coerceToPtr();
             $objp = $this->lastValue;
-            $off = $this->propertyOffset($arrNode->object, $arrNode->property);
-            $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
-                  . ', i64 ' . (string)$off . "\n";
+            $out .= $this->propSlotGep($arrNode->object, $objp, $arrNode->property);
+            $g = $this->lastValue;
             $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";

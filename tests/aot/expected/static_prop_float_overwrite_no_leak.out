@@ -1,0 +1,4 @@
+mixed str then float growth ok
+untyped str then float growth ok
+untyped array then float growth ok
+1.5 0.5

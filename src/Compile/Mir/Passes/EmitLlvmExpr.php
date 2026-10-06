@@ -2166,7 +2166,7 @@ trait EmitLlvmExpr
         // which is also what makes InferAllocKind/InsertMemoryOps own+release
         // the fresh result.
         if ($intOp === 'add' && $self->type->kind === Type::KIND_ARRAY) {
-            return $this->emitArrayUnion($left, $right);
+            return $this->emitArrayUnion($left, $right, $self->type);
         }
         $isFloat = $self->type->kind === Type::KIND_FLOAT;
         $target = $isFloat ? 'double' : 'i64';
@@ -2254,16 +2254,26 @@ trait EmitLlvmExpr
      * operand that arrives as a CELL (an erased/`mixed` local holding an array)
      * is unboxed by coerceToPtr, so a boxed and a raw side union alike.
      */
-    private function emitArrayUnion(Node $left, Node $right): string
+    private function emitArrayUnion(Node $left, Node $right, Type $resultType): string
     {
         $out = $this->emitNode($left);
+        // The union co-owns every element it copies: an owned temp operand
+        // (`$v + [5 => new A]`, `f() + $d`) is dead once it ran.
+        $lf = $this->mergedTempFlavor($left);
         $out .= $this->unionOperandPtr($left);
         $l = $this->lastValue;
+        $lw = $this->unionTempWord;
         $out .= $this->emitNode($right);
+        $rf = $this->mergedTempFlavor($right);
         $out .= $this->unionOperandPtr($right);
         $r = $this->lastValue;
+        $rw = $this->unionTempWord;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_array_union(ptr ' . $l . ', ptr ' . $r . ")\n";
+        // The result co-owns its elements the way its owner releases them.
+        $sym = '@__mir_array_union' . $this->ownerVariantSuffix($this->discardReleaseFlavor($resultType));
+        $out .= '  ' . $reg . ' = call ptr ' . $sym . '(ptr ' . $l . ', ptr ' . $r . ")\n";
+        if ($lf !== '') { $out .= $this->rcReleaseReg($lw, $lf); }
+        if ($rf !== '') { $out .= $this->rcReleaseReg($rw, $rf); }
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2280,9 +2290,14 @@ trait EmitLlvmExpr
     {
         $k = $op->type->kind;
         if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN) {
-            return $this->coerceToPtr();
+            $out = $this->coerceToPtr();
+            $w = $this->ssa->allocReg();
+            $this->unionTempWord = $w;
+            return $out . '  ' . $w . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         }
         $out = $this->coerceToI64();
+        // The operand as it came: a cell temp drops by its tagged word.
+        $this->unionTempWord = $this->lastValue;
         $raw = $this->ssa->allocReg();
         $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
         $this->lastValue = $raw;
@@ -2660,29 +2675,8 @@ trait EmitLlvmExpr
         return true;
     }
 
-    /**
-     * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
-     * fetch): a variable, a property, a static property or an element of one.
-     * A call base (`f()[$k]`) runs first.
-     */
-    private function keyBeforeBase(Node $n): bool
-    {
-        if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STATIC_PROP) {
-            return true;
-        }
-        if ($n instanceof \Compile\Mir\PropertyAccess_) {
-            return $this->keyBeforeBase($n->object);
-        }
-        if ($n instanceof \Compile\Mir\ArrayAccess_) {
-            // An inner key that can run code keeps its source order.
-            $ik = $n->index->kind;
-            if ($ik !== Node::KIND_LOAD_LOCAL && $ik !== Node::KIND_INT_CONST && $ik !== Node::KIND_STRING_CONST) {
-                return false;
-            }
-            return $this->keyBeforeBase($n->array);
-        }
-        return false;
-    }
+    /** {@see \Compile\Mir\ArrayAccess_::keyBeforeBase} */
+    private function keyBeforeBase(Node $n): bool { return \Compile\Mir\ArrayAccess_::keyBeforeBase($n); }
 
     /**
      * Evaluate the base and key of `$a[$k] ?? d` ONCE, probe once, and leave
@@ -2914,7 +2908,7 @@ trait EmitLlvmExpr
                 // the whole assoc `mk()` returned, once per call.
                 $out .= $this->boxToCell($nc->left->type, $nc->left);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $nc->left);
             }
             $leftVal = $this->lastValue;
             $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
@@ -2928,7 +2922,7 @@ trait EmitLlvmExpr
                 $out .= $this->armRetainPreBox($n, $nc->right);
                 $out .= $this->boxToCell($nc->right->type, $nc->right);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $nc->right);
             }
             $rightVal = $this->lastValue;
             $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
@@ -2992,9 +2986,12 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
             $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         } else {
-            $leftVal = $lv;
-            $out .= $this->armRetainPostBox($n, $nc->left, $lv);
-            $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
+            $this->lastValue = $lv;
+            $this->lastValueType = 'i64';
+            $out .= $this->armCoerce($n, $nc->left);
+            $leftVal = $this->lastValue;
+            $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
+            $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
@@ -3003,7 +3000,7 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPreBox($n, $nc->right);
             $out .= $this->boxToCell($nc->right->type, $nc->right);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($n, $nc->right);
         }
         $rightVal = $this->lastValue;
         $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
@@ -3097,8 +3094,12 @@ trait EmitLlvmExpr
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
             // The kept value is a raw property load — always a borrow.
-            $out .= $this->armRetainPostBox($nc, $leafPa, $cur);
-            $out .= '  store i64 ' . $cur . ', ptr ' . $res . "\n";
+            $this->lastValue = $cur;
+            $this->lastValueType = 'i64';
+            $out .= $this->armCoerce($nc, $leafPa);
+            $kept = $this->lastValue;
+            $out .= $this->armRetainPostBox($nc, $leafPa, $kept);
+            $out .= '  store i64 ' . $kept . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
@@ -3107,7 +3108,7 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPreBox($nc, $nc->right);
             $out .= $this->boxToCell($nc->right->type);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($nc, $nc->right);
         }
         $out .= $this->armRetainPostBox($nc, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
@@ -6243,15 +6244,54 @@ trait EmitLlvmExpr
             $this->scalarStrArgTemp = $this->lastValue;
             return $out;
         }
-        if ($ak !== Type::KIND_CELL) { return ''; }
+        if ($ak !== Type::KIND_CELL) { return $this->nestedArgConform($a->type, $pt); }
         if ($pt === null) { return ''; }
         $out = $this->unboxCellToType($pt);
+        $out .= $this->nestedArgConform($a->type, $pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
         // leaves a `double` behind (the tag has to be read to get a real value
         // out of the cell) — carry it over as its bit pattern, or the call site
         // emits `i64 %d` for a double-typed register and clang rejects the
         // module. Every other kind already leaves an i64 and this is a no-op.
         return $out . $this->coerceToI64();
+    }
+
+    /**
+     * An array argument whose INNER buffers the caller cannot vouch for (its
+     * element is erased or a cell, at the outer or the nested level) bound to a
+     * param claiming a concrete nested element — `@param array<string, bool[]>`
+     * fed an `assoc[string, unknown]` built from boxed reads: the callee reads
+     * the inner words raw, and a boxed `false` is true. Conform the argument to
+     * the claim in place, both levels ({@see \Compile\Runtime\UnifiedArrayRuntime::emitArrayConform},
+     * a no-op on a buffer not hinted CELL), as a typed return already is. One
+     * level is the existing call-binding rebuild's; this is the level below.
+     * lastValue (the array word) is left as it was.
+     */
+    private function nestedArgConform(Type $at, ?Type $pt): string
+    {
+        if ($pt === null || !$at->isArray() || $at->isShape()) { return ''; }
+        if ((!$pt->isVec() && !$pt->isAssoc()) || $pt->isShape()) { return ''; }
+        $el = $pt->element;
+        if ($el === null || (!$el->isVec() && !$el->isAssoc()) || $el->isShape() || $el->element === null) { return ''; }
+        $outerCode = $this->elementHintCodeForType($el);
+        $innerCode = $this->elementHintCodeForType($el->element);
+        if ($outerCode === null || $innerCode === null
+            || $innerCode === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return ''; }
+        $ae = $at->element;
+        $loose = static fn (?Type $t): bool => $t === null || $t->kind === Type::KIND_UNKNOWN || $t->kind === Type::KIND_CELL;
+        if (!$loose($ae) && !($ae->isArray() && $loose($ae->element))) { return ''; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out = $this->coerceToI64();
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $out .= '  call void @__mir_array_conform(ptr ' . $p . ', i64 ' . (string)$outerCode . ")\n";
+        $out .= '  call void @__mir_array_conform_inner(ptr ' . $p . ', i64 ' . (string)$innerCode . ")\n";
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
     }
 
     /**
@@ -6357,27 +6397,39 @@ trait EmitLlvmExpr
         // A CLOSURE is boxed like an object ({@see boxToCell}): left out, a
         // `\Closure` return or argument read out of a cell element handed the
         // tagged word on as the closure pointer.
-        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE) {
+        // An object UNION is the bare object pointer `obj<C>` is ({@see boxToCell}
+        // boxes both by box_object): left out, a cell stored into a `vec[A|C]`
+        // slot kept its tag bits under an `obj` hint.
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE || $pk === Type::KIND_UNION) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
-            // A cell array reaching a CONCRETE element claim (`/** @var
-            // list<array{…}> $p */ $p = $decoded['packages']` off json_decode)
-            // still holds CELL elements; the typed reader takes them raw.
-            // Conform the buffer to the claim — a no-op unless it is hinted CELL.
-            // Never a SHAPE: its reads check each field against the hint.
-            if (($pt->isVec() || $pt->isAssoc()) && !$pt->isShape() && $pt->element !== null) {
-                $code = $this->elementHintCodeForType($pt->element);
-                if ($code !== null && $code !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
-                    $cp = $this->ssa->allocReg();
-                    $out .= '  ' . $cp . ' = inttoptr i64 ' . $r . " to ptr\n";
-                    $out .= '  call void @__mir_array_conform(ptr ' . $cp . ', i64 ' . (string)$code . ")\n";
-                }
-            }
-            return $out;
+            return $out . $this->conformToClaim($pt, $r);
         }
         return '';
+    }
+
+    /**
+     * An array leaving a CELL channel for a CONCRETE element claim: the cell
+     * may hold a buffer a cell writer rebuilt as cells (a `: array<K,V>|null`
+     * return boxes its typed array that way), and the typed consumer reads raw
+     * words — a boxed 5 read as -4222124650659835. The static claim is
+     * re-established where the buffer comes back, exactly as after a by-ref
+     * erased callee ({@see \Compile\Runtime\UnifiedArrayRuntime::emitArrayConform}):
+     * a CELL-hinted buffer is unboxed in place to the claimed kind, any other
+     * hint is left alone.
+     */
+    private function conformToClaim(Type $pt, string $word): string
+    {
+        if ((!$pt->isVec() && !$pt->isAssoc()) || $pt->isShape()) { return ''; }
+        $el = $pt->element;
+        if ($el === null) { return ''; }
+        $code = $this->elementHintCodeForType($el);
+        if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return ''; }
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $word . " to ptr\n"
+            . '  call void @__mir_array_conform(ptr ' . $p . ', i64 ' . (string)$code . ")\n";
     }
 
     /**

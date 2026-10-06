@@ -27,6 +27,11 @@ final class Param
      *  the call site. Serialized into the interface `.sig`. */
     public bool $cellArg = false;
 
+    /** A by-ref variadic `&...$xs`: the param itself is a by-value pack of
+     *  REFERENCES (byRef false). Serialized into the `.sig` as `byref` so a
+     *  caller in another module packs references too. */
+    public bool $refPack = false;
+
     public function __construct(
         public readonly string $name,
         public Type $type,

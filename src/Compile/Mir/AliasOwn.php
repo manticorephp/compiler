@@ -11,7 +11,7 @@ namespace Compile\Mir;
  * and the EmitLlvm traits (which emit the co-owner retain) answer "does the
  * destination co-own this value?". Same discipline, and the same reason, as
  * {@see CondOwn}: the two answers must be identical or the value is freed twice
- * or never.
+ * or never. The store side asks it through {@see Ownership::classifyStored}.
  *
  * Both failure modes were paid for in one session. With only the RETAIN, every
  * `$s = $x;` in a function leaked one reference per call — the shape half the
@@ -76,29 +76,31 @@ final class AliasOwn
      * An OBJECT read the same way: `$d = $this->def; if (…) { $d = new…;
      * $this->def = $d; }` is how a lazily (re)built member is written, and the
      * borrow vetoed `$def` for the whole class — permessage-deflate's per-message
-     * context under `server_no_context_takeover` was never released. A closure
-     * env is not an object here: its reads keep their own borrowed rule.
+     * context under `server_no_context_takeover` was never released.
+     *
+     * Every other rc kind too, and a STATIC property's read the same way: a
+     * closure env, a cell, an all-object union. A property store releases what
+     * it overwrites, so no read that outlives its statement may stay a borrow.
+     * Type-only: the rc-eligibility of the class ({@see Ownership::propReadCoOwns})
+     * is the caller's.
      */
     public static function propReadCoOwns(Node $v): bool
     {
         // Through a pass-through `(string)` too, as {@see coOwns} does: the
-        // release half ({@see Passes\InsertMemoryOps::isOwnedObj}) follows the
-        // cast to its operand, so `$l = (string)$this->line;` scheduled a
-        // release the store never retained for, and freed the property's string.
+        // release half follows the cast to its operand, so `$l = (string)$this->line;`
+        // scheduled a release the store never retained for, and freed the property's string.
         $v = self::peel($v);
-        if ($v->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        if ($v->kind !== Node::KIND_PROPERTY_ACCESS && $v->kind !== Node::KIND_STATIC_PROP) { return false; }
         $k = $v->type->kind;
-        if ($k === Type::KIND_STRING) { return true; }
-        if ($k !== Type::KIND_OBJ) { return false; }
-        $cls = $v->type->class ?? '';
-        return $cls !== 'Closure' && !\str_starts_with($cls, '__closure_');
+        return $k === Type::KIND_STRING || $k === Type::KIND_OBJ || $k === Type::KIND_CLOSURE
+            || $k === Type::KIND_CELL || $k === Type::KIND_UNION;
     }
 
     /**
      * The builtins whose result is a BORROW, not the +1 every other call hands
      * back: `__mir_fiber_current()` reads the running fiber out of a global its
      * owner holds. The one list the passes that own call results ask
-     * ({@see InsertMemoryOps::isOwnedObj}, SpillFreshBases, EmitLlvmModule's
+     * ({@see Ownership::classifyStored}, SpillFreshBases, EmitLlvmModule's
      * return retain).
      *
      * @return string[]

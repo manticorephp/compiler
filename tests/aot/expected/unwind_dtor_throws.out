@@ -1,0 +1,11 @@
+d a
+bad b
+d c
+LogicException:dtor b
+RuntimeException:first
+bad x
+bad y
+LogicException:dtor y
+LogicException:dtor x
+RuntimeException:first
+end

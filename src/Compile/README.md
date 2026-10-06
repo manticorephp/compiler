@@ -38,7 +38,9 @@ Also in `Compile/Mir/`, supporting the above rather than being surface of their
 own: `RuntimeLibrary` (the emitted runtime's IR bodies — by far the largest file
 here), `PreludeDemand` (which prelude tiers a program actually pulls in),
 `RuntimeFeatures`, `ControlFlow`, `CondOwn` (the shared `?:`/`??`/ternary/`match`
-ownership predicate), `ArenaContext`, `GeneratorContext`, `FunctionEmitFrame`,
+ownership predicate), `Ownership` (the one "is this value +1" classifier the pass
+and the emitter both ask, plus the container-store and return conventions),
+`Flow/Forward` + `Flow/OwnLattice` + `Flow/MixedSlots` (OwnershipFlow's dataflow), `ArenaContext`, `GeneratorContext`, `FunctionEmitFrame`,
 `LocalSlots`, `MethodMeta`, `ParamMeta`, `PropertyMeta`, `StringPool`,
 `SsaBuilder`, `NodeClone`, `FunctionSignatures`.
 
@@ -88,7 +90,10 @@ DemoteCharLocals  a compared / ord()'d `$s[$i]` becomes a byte read, not a fresh
 InferEffects      stamp intrinsic Effects per node; union per function
 InferAllocKind    escape analysis → RcHeap (escapes) / NoRefcount (confined) / Arena
 ApplyMemoryMode   overlay --memory: confined → Arena (hybrid) | NoRefcount (rc)
-InsertMemoryOps   lower the verdict to explicit MemoryOp_ nodes (arena scope / release)
+SpillFreshBases   spill a fresh temp that is an element / property base into a local
+InsertMemoryOps   the frame's ARENA scope: arena_enter / arena_leave
+OwnershipFlow     rc locals per program point (Empty | Own | Borrow): explicit drop /
+                  own_retain ops, container moves, return drops and moves
 Verify            assert structural invariants; throw before bad MIR reaches LLVM
 EmitLlvm          MIR → LLVM IR text
 ```
@@ -128,8 +133,8 @@ a "trait" here is a file-level split of one emitter, not an independent unit.
   at descriptor offset 0. Single inheritance;
   virtual dispatch is a class-id chain collapsing to a direct call when
   one concrete class is reachable.
-- Exceptions use setjmp/longjmp + a process-global thrown slot. No
-  `__cxa_throw`. Injected Throwable/Exception/Error hierarchy.
+- Exceptions are zero-cost Itanium unwinding with an own personality
+  (`Runtime/UnwindRuntime.php`): no `__cxa_throw`, no C++ runtime. Injected Throwable/Exception/Error hierarchy.
 - Self-host constraints shape the code: kind-discriminant dispatch over
   `instanceof` (bare short-name collisions across namespaces), return-value
   accumulators over `string &$out`, type-map held on `$this` over
