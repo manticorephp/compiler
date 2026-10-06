@@ -523,10 +523,10 @@ final class Call extends Node
     public int $srcArgc = -1;
 
     /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
-     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
      *  through this call must drop ({@see NothrowSummary::callMayThrow}).
-     *  Declared LAST.
-     * @var array<string, string> */
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
 
@@ -815,6 +815,12 @@ final class Throw_ extends Node
      *  retain). Declared LAST. */
     public bool $ownMove = false;
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own when the throw
+     *  raises (the moved thrown local excluded), name → its `drop` op — what
+     *  the unwind out of this frame drops. Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitThrow($this);
@@ -897,6 +903,16 @@ final class TryCatch_ extends Node
      *  alloca dominating neither. Declared LAST — a field added mid-struct
      *  shifts every later offset. */
     public int $genBtSlot = -1;
+
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own at catch entry —
+     *  what the re-raise of an exception no catch matched drops on its way
+     *  out of the frame. Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownCatch = [];
+    /** The locals Own when the finally ends — what its re-raise of a pending
+     *  exception drops. Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownFinally = [];
 
     public function __construct(
         public array $tryBody,
@@ -1161,10 +1177,10 @@ final class Invoke_ extends Node
     }
 
     /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
-     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
      *  through this call must drop ({@see NothrowSummary::callMayThrow}).
-     *  Declared LAST.
-     * @var array<string, string> */
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
     /** Index-parallel to {@see $args}: the name of a named argument, '' for a
@@ -1722,10 +1738,10 @@ final class NewObj extends Node
     public int $srcArgc = -1;
 
     /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
-     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
      *  through this call must drop ({@see NothrowSummary::callMayThrow}).
-     *  Declared LAST.
-     * @var array<string, string> */
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
 
@@ -1901,10 +1917,10 @@ final class MethodCall_ extends Node
     public int $srcArgc = -1;
 
     /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
-     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
      *  through this call must drop ({@see NothrowSummary::callMayThrow}).
-     *  Declared LAST.
-     * @var array<string, string> */
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
 
@@ -1950,10 +1966,10 @@ final class StaticCall_ extends Node
     public int $srcArgc = -1;
 
     /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
-     *  runs (its operands evaluated), name → release flavor — what an unwind
+     *  runs (its operands evaluated), name → its `drop` op — what an unwind
      *  through this call must drop ({@see NothrowSummary::callMayThrow}).
-     *  Declared LAST.
-     * @var array<string, string> */
+     *  Not copied by {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
 

@@ -52,6 +52,8 @@ final class NothrowSummary
     private array $newCls = [];
     /** The module builds an object by a runtime class name: any class may have an instance. */
     private bool $dynNew = false;
+    /** The module calls into the stdlib, which may hand out an instance of any class. */
+    private bool $imports = false;
     /** @var array<string, bool> */
     private array $objSafeMemo = [];
     /** @var array<string, bool> */
@@ -79,6 +81,7 @@ final class NothrowSummary
         $s->resolve = EscapeSummaries::resolver($module);
         foreach ($module->functions as $fn) {
             $s->defined[$fn->name] = true;
+            if ($fn->isExtern) { $s->imports = true; }
             if ($fn->ffiSymbol !== null && !$fn->isGenerator) { $s->ffi[$fn->name] = true; }
         }
         $s->compute($module);
@@ -100,6 +103,25 @@ final class NothrowSummary
             }
         }
         return $s;
+    }
+
+    /** Some destructor may throw: a release that may drop an object may unwind. */
+    public function releasesRaise(): bool
+    {
+        return $this->releasesRaise;
+    }
+
+    /**
+     * Every judged function that cannot unwind.
+     * @return string[]
+     */
+    public function nothrowNames(): array
+    {
+        $out = [];
+        foreach ($this->nothrow as $fn => $v) {
+            if ($v) { $out[] = $fn; }
+        }
+        return $out;
     }
 
     /** A judged function that cannot unwind; false for anything not judged. */
@@ -134,7 +156,7 @@ final class NothrowSummary
 
     /**
      * A call node's {@see Call::$ownLive}; [] for any other node.
-     * @return array<string, string>
+     * @return array<string, MemoryOp_>
      */
     public static function ownLive(Node $n): array
     {
@@ -239,16 +261,19 @@ final class NothrowSummary
     /**
      * Every class INSTANTIATED here has a judged nothrow destructor. A class
      * never named by a `new` cannot have an instance, unless the module builds
-     * objects by a runtime class name ({@see $dynNew}). Collects the classes
-     * whose destructor may throw, and closes the unsafe class set over them
-     * ({@see closeUnsafe}). Assumes no stdlib import hands out an instance of
-     * a class the module never instantiates itself.
+     * objects by a runtime class name ({@see $dynNew}) or imports from the
+     * stdlib ({@see $imports}: `socket_create()` hands out a `Socket` the module
+     * never `new`s). Collects the classes whose destructor may throw, and
+     * closes the unsafe class set over them ({@see closeUnsafe}). A class the
+     * module carries no def of has no destructor to judge here: a throw out of
+     * one is a missed pad (a leak on that unwind), never a wrong unwind — a
+     * call with no landing pad unwinds on.
      */
     private function dtorsNothrow(): bool
     {
         $ok = true;
         foreach ($this->classes as $cd) {
-            if (!$this->dynNew && !isset($this->newCls[$cd->name])) { continue; }
+            if (!$this->dynNew && !$this->imports && !isset($this->newCls[$cd->name])) { continue; }
             $owner = EscapeSummaries::resolveMethodIn($this->classes, $cd->name, '__destruct');
             if ($owner === '') { continue; }
             if (!($this->nothrow[$owner . '____destruct'] ?? false)) {

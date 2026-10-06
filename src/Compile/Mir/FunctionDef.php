@@ -135,4 +135,20 @@ final class FunctionDef
      * method's parameters. '' for every other function.
      */
     public string $fccMethod = '';
+
+    /**
+     * Set by {@see Passes\OwnershipFlow}: the leaf statements a raise inside
+     * may leave the frame from while locals the statement never names are
+     * Own — a throw the emitter synthesises (a division by zero, a TypeError)
+     * belongs to no call node. Statement `i` drops
+     * `$ownStmtDrops[$ownStmtStart[i] .. $ownStmtEnd[i])`.
+     * @var Node[]
+     */
+    public array $ownStmtNodes = [];
+    /** @var int[] */
+    public array $ownStmtStart = [];
+    /** @var int[] */
+    public array $ownStmtEnd = [];
+    /** @var MemoryOp_[] */
+    public array $ownStmtDrops = [];
 }

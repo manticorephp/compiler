@@ -534,6 +534,7 @@ trait InferNodes
         // arrays this function builds from `[]` (the soundness gate on the
         // elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
         $this->scanLocalFacts($fn->body);
+        $this->emptyLitNest = $this->emptyLitNesting($fn->body);
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
         // re-kinds is a cell from function ENTRY — its reads dispatch by tag
@@ -951,6 +952,17 @@ trait InferNodes
             $this->localTypes[$node->name] = $nty;
             $node->type = $nty;
             return $node->type;
+        }
+        // An empty `[]` of a name every other store binds to ONE nested array
+        // type ({@see InferTypes::emptyLitNesting}): built as that type, so the
+        // slot's element repr agrees on every path.
+        if (isset($this->emptyLitNest[$node->name]) && $node->value instanceof ArrayLit
+            && \count($node->value->elements) === 0) {
+            $nt = $this->emptyLitNest[$node->name];
+            $node->value->type = $nt;
+            $this->localTypes[$node->name] = $nt;
+            $node->type = $nt;
+            return $nt;
         }
         // An array whose ELEMENT a loop proves ({@see loopMerge}): the entry seed
         // in inferFunctionOnce is not enough on its own, because the `$out = []`

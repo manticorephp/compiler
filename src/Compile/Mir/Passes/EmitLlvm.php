@@ -2617,6 +2617,7 @@ final class EmitLlvm implements EmitVisitor
                 return '';
             }
         }
+        if ($this->ehOn) { return $this->emitNodeEh($n); }
         if ($this->irCensus) { return $this->emitNodeCensus($n); }
         $out = $n->accept($this);
         if ($this->cellGuard) { $this->markCellCalleeResult($n); }

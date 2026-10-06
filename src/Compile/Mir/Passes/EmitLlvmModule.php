@@ -943,6 +943,8 @@ trait EmitLlvmModule
                 . '(' . $params . ")\n";
         }
         $this->ssa->reset();
+        $this->ehOn = false;
+        $this->ehPersonality = false;
         // SSA regs restart here, so a leftover reg key would name a DIFFERENT
         // value in this function ({@see EmitLlvm::$ptrArgCellByReg}).
         $this->clearPtrArgCells();
@@ -1024,6 +1026,7 @@ trait EmitLlvmModule
             $this->frame->body = null;
             return $generatorBody;
         }
+        $this->ehBegin($fn);
 
         // A closure fn takes an env ptr (the closure struct) followed by
         // its declared params; its first `capCnt` "params" are captures
@@ -1252,21 +1255,21 @@ trait EmitLlvmModule
             $stmtCount = \count($fn->body->stmts);
             for ($stmtIndex = 0; $stmtIndex < $stmtCount; $stmtIndex = $stmtIndex + 1) {
                 $stmt = $fn->body->stmts[$stmtIndex];
-                $bodySink->write($this->emitNoDiscardWarn($stmt));
-                $bodySink->write($this->emitNode($stmt));
-                $bodySink->write($this->emitDiscardedCallRelease($stmt));
+                $bodySink->write($this->ehLower($this->emitNoDiscardWarn($stmt)));
+                $bodySink->write($this->ehLower($this->emitNode($stmt)));
+                $bodySink->write($this->ehLower($this->emitDiscardedCallRelease($stmt)));
                 unset($fn->body->stmts[$stmtIndex], $stmt);
             }
             unset($stmtCount, $stmtIndex);
         } else {
-            $bodySink->write($this->emitNode($fn->body));
+            $bodySink->write($this->ehLower($this->emitNode($fn->body)));
         }
         // Uniform closure ABI: a closure's IMPLICIT return (fall off the end, or a
         // bare `return;`) must be a BOXED null, not raw 0 — a dynamic `callable`
         // caller reads the result by tag, so raw 0 decoded as float and
         // `$h(…) === null` was false for a void callback. {@see emitReturn}
-        $bodySink->write($this->emitOwnedBoxReleases([]));
-        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n}");
+        $bodySink->write($this->ehLower($this->emitOwnedBoxReleases([])));
+        $bodySink->write('  ret i64 ' . $this->implicitReturnValue() . "\n" . $this->ehEnd() . '}');
         $body = $bodySink->finish() . "\n\n";
         // Do not keep the per-invocation chunk array alive through the return
         // boundary. Doctrine emits tens of thousands of functions; explicit
@@ -2333,6 +2336,7 @@ trait EmitLlvmModule
                 $out = $this->emitNode($v);
                 $out .= $this->coerceToI64();
             }
+            $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($this->cf->finallyCount());
             return $out . "  ret i32 0\n" . $this->emitDeadLabel();
         }
         // Inside a generator, `return` FINISHES it (state = -1, resume → 0).
@@ -2344,6 +2348,7 @@ trait EmitLlvmModule
                 $out .= $this->coerceToI64();
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
             }
+            $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($this->cf->finallyCount());
             $out .= $this->retLeave($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
                 ? $this->asLoadLocalNode($v)->name : '', $v !== null ? $this->lastValue : '', '');
             $out .= $this->genFinishCurrent();
@@ -2622,13 +2627,8 @@ trait EmitLlvmModule
      */
     private function finishReturn(string $out, string $valReg, string $leave): string
     {
-        if ($this->cf->hasFinally()) {
-            $saved = $this->cf->takeFinally();
-            foreach (\array_reverse($saved) as $body) {
-                foreach ($body as $s) { $out .= $this->emitNode($s); $out .= $this->emitDiscardedCallRelease($s); }
-            }
-            $this->cf->restoreFinally($saved);
-        }
+        $out .= $this->emitPendingDiscard();
+        $out .= $this->emitFinallysLeaving($this->cf->finallyCount());
         // The finally bodies left their own last value behind; the sink guard
         // must see what `ret` carries.
         $this->noteCellSinkStored($valReg);

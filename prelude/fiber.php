@@ -126,10 +126,17 @@ class Fiber
             $this->pendingEx = $e;
         }
         // This frame never returns: the jump below abandons its stack, so no
-        // scope exit ever releases what its locals co-own.
-        unset($cb, $a, $e);
+        // scope exit ever releases what its locals co-own. A destructor those
+        // releases run may throw: caught here too, or it would unwind off the
+        // fiber stack's base (the asm trampoline) instead of reaching the resumer.
+        try {
+            unset($cb, $a, $e);
+            $this->valueOut = null;   // a terminated fiber's resume() yields null, not the last suspend value
+        } catch (\Throwable $e2) {
+            if ($this->pendingEx === null) { $this->pendingEx = $e2; }
+        }
+        unset($e2);
         $this->state = 3;
-        $this->valueOut = null;   // a terminated fiber's resume() yields null, not the last suspend value
         \__mir_fiber_ctx_save($this->saveCtx);
         \__mir_fiber_ctx_load($this->resumerCtx);
         \__mir_fiber_jump($this->resumer);

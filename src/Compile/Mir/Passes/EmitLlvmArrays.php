@@ -445,9 +445,15 @@ trait EmitLlvmArrays
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
         $out .= $callIr;
+        // The call may end in another block — an `invoke` inside a `try`
+        // continues at its normal destination — so the phi names a block of
+        // its own that only the call's fall-through reaches.
+        $slowEndL = $this->ssa->allocLabel('sfaset.slowend');
+        $out .= '  br label %' . $slowEndL . "\n";
+        $out .= $slowEndL . ":\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
-        $out .= '  ' . $resReg . ' = phi i64 [ 0, %' . $fastL . ' ], [ ' . $callReg . ', %' . $slowL . " ]\n";
+        $out .= '  ' . $resReg . ' = phi i64 [ 0, %' . $fastL . ' ], [ ' . $callReg . ', %' . $slowEndL . " ]\n";
         return $out;
     }
 

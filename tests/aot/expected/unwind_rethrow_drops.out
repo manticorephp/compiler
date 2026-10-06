@@ -1,0 +1,13 @@
+d a.x
+caught a
+fin b
+d b.y
+d b.z
+caught b
+d c.w
+caught c
+d d.v
+caught Division by zero
+d e.u
+caught Modulo by zero
+end

@@ -328,13 +328,22 @@ final class OwnershipFlow implements Pass
         // (`if (…) { $magic = []; }`) made the name Own past the join and the
         // exit drop released the caller's array on the path that never stored.
         // It is a Borrow of the array class its own stores give the slot.
+        // A closure's CAPTURE is the same: an untyped param holding the env's
+        // word, and a by-ref-suspect call on it (an unresolved receiver,
+        // {@see MixedSlots::byRefArgs}) made it Own from an EMPTY start — the
+        // body then dropped the env's array on every call.
         foreach ($fn->params as $p) {
-            if (!isset($this->erasedParams[$p->name]) || isset($entry[$p->name])) { continue; }
+            if (isset($entry[$p->name]) || $p->byRef || $p->variadic) { continue; }
+            if (!isset($this->erasedParams[$p->name]) && $p->type->kind !== Type::KIND_UNKNOWN) { continue; }
             if (isset($this->excluded[$p->name]) || isset($this->mixedHere[$p->name])) { continue; }
             $rk = $this->regKey[$p->name] ?? 0;
             if ($rk === 0) { continue; }
             $cls = $this->keyClass[$rk];
-            if (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR) { continue; }
+            // An untyped param the body binds to ONE class (a capture's reads)
+            // arrives holding that class; a bare `array` param an array.
+            if (isset($this->erasedParams[$p->name])
+                ? (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR)
+                : !$this->singleClass($p->name, $rk)) { continue; }
             $entry[$p->name] = OwnLattice::borrow($rk);
         }
         // The emitter retains a co-owning binding at the NAME's registered
@@ -471,7 +480,12 @@ final class OwnershipFlow implements Pass
             $this->removeInserted($body);
             $this->inserted = $keep;
         }
-        if ($this->releases) { $this->recordOwnLive($final); }
+        if ($this->releases) {
+            $this->unwindOps = [];
+            $this->recordOwnLive($final);
+            if (!$fn->isGenerator && $fn->name !== '__main') { $this->recordLeafDrops($final, $fn); }
+            $this->unwindOps = [];
+        }
         $this->finish($fn, $final, $force, $entry, $entryRetain);
     }
 
@@ -484,9 +498,7 @@ final class OwnershipFlow implements Pass
         foreach ($l->callAt as $id => $call) {
             $own = $l->callOwn[$id];
             if ($own === []) { continue; }
-            /** @var array<string, string> $live */
-            $live = [];
-            foreach ($own as $name => $k) { $live[$name] = $this->keyFlavor[$k]; }
+            $live = $this->unwindDrops($own, '');
             $ck = $call->kind;
             if ($ck === Node::KIND_CALL) {
                 self::asCall($call)->ownLive = $live;
@@ -500,8 +512,105 @@ final class OwnershipFlow implements Pass
                 self::asInvoke($call)->ownLive = $live;
             }
         }
+        foreach ($l->catchAt as $id => $tc) {
+            self::asTry($tc)->ownCatch = $this->unwindDrops($l->catchOwn[$id], '');
+        }
+        foreach ($l->finAt as $id => $tc) {
+            self::asTry($tc)->ownFinally = $this->unwindDrops($l->finOwn[$id], '');
+        }
     }
 
+    /**
+     * The `drop` of every Own name of `$own` but `$moved` — what an unwind
+     * leaving the frame at that point releases, in the state's order.
+     *
+     * @param array<string, int> $own
+     * @return array<string, MemoryOp_>
+     */
+    private function unwindDrops(array $own, string $moved): array
+    {
+        /** @var array<string, MemoryOp_> $live */
+        $live = [];
+        foreach ($own as $name => $k) {
+            if ($k <= 0 || $name === $moved) { continue; }
+            $live[$name] = $this->unwindOp($name, $k);
+        }
+        return $live;
+    }
+
+    private static function asTry(Node $n): TryCatch_ { return $n; }
+
+    /** @var array<string, MemoryOp_> one unwind `drop` per name and class, per function */
+    private array $unwindOps = [];
+
+    /** The unwind `drop` of `$name` at class `$k`, shared by every site that drops it. */
+    private function unwindOp(string $name, int $k): MemoryOp_
+    {
+        $key = $name . '#' . (string)$k;
+        if (!isset($this->unwindOps[$key])) { $this->unwindOps[$key] = $this->dropOp($name, $k); }
+        return $this->unwindOps[$key];
+    }
+
+    /** @var array<string, bool> {@see namesIn} scratch */
+    private array $leafNames = [];
+
+    /**
+     * Per leaf statement, the Own names at its entry that no node of it names:
+     * nothing inside can change what their slots hold, so a raise anywhere in
+     * it may drop them ({@see FunctionDef::$ownStmtNodes}). Equal sets share
+     * one run of drops.
+     */
+    private function recordLeafDrops(OwnLattice $l, FunctionDef $fn): void
+    {
+        $fn->ownStmtNodes = [];
+        $fn->ownStmtStart = [];
+        $fn->ownStmtEnd = [];
+        $fn->ownStmtDrops = [];
+        /** @var array<string, int> $keyStart */
+        $keyStart = [];
+        /** @var array<string, int> $keyEnd */
+        $keyEnd = [];
+        foreach ($l->leafAt as $id => $st) {
+            $own = $l->leafOwn[$id];
+            if ($own === []) { continue; }
+            $this->leafNames = [];
+            $this->namesIn($l, $st);
+            $key = '';
+            foreach ($own as $name => $k) {
+                if (isset($this->leafNames[$name])) { continue; }
+                $key .= $name . '=' . (string)$k . ';';
+            }
+            if ($key === '') { continue; }
+            if (!isset($keyStart[$key])) {
+                $keyStart[$key] = \count($fn->ownStmtDrops);
+                foreach ($own as $name => $k) {
+                    if (isset($this->leafNames[$name])) { continue; }
+                    $fn->ownStmtDrops[] = $this->unwindOp($name, $k);
+                }
+                $keyEnd[$key] = \count($fn->ownStmtDrops);
+            }
+            $fn->ownStmtNodes[] = $st;
+            $fn->ownStmtStart[] = $keyStart[$key];
+            $fn->ownStmtEnd[] = $keyEnd[$key];
+        }
+        $this->leafNames = [];
+    }
+
+    /** Every local the flow sees `$n`'s subtree read, write, move, unset or compensate. */
+    private function namesIn(OwnLattice $l, Node $n): void
+    {
+        $id = \spl_object_id($n);
+        if (isset($l->loadName[$id])) { $this->leafNames[$l->loadName[$id]] = true; }
+        if (isset($l->storeName[$id])) { $this->leafNames[$l->storeName[$id]] = true; }
+        if (isset($l->moveName[$id])) { $this->leafNames[$l->moveName[$id]] = true; }
+        if (isset($l->shareName[$id])) { $this->leafNames[$l->shareName[$id]] = true; }
+        if (isset($l->refArgName[$id])) { $this->leafNames[$l->refArgName[$id]] = true; }
+        if (isset($l->opName[$id])) { $this->leafNames[$l->opName[$id]] = true; }
+        if (isset($l->unsetNames[$id])) {
+            foreach ($l->unsetNames[$id] as $un) { $this->leafNames[$un] = true; }
+        }
+        foreach (Walk::children($n) as $c) { $this->namesIn($l, $c); }
+    }
     private function describe(string $what): string
     {
         $out = [];
@@ -589,6 +698,11 @@ final class OwnershipFlow implements Pass
             }
             return $name . ':' . ($cur === null ? '?' : $cur->kind);
         }
+        // A Generator frame is an object word like any other: the rc helpers
+        // self-route on the header (`__mir_rc_retain` / `__mir_rc_release` take
+        // the string path off the object magic), so `$it = new X(); if (…) $it
+        // = gen();` is ONE class, not a string beside an object.
+        if ($c === Ownership::GEN) { return 'obj'; }
         return Ownership::flavorName($c);
     }
 
@@ -767,6 +881,15 @@ final class OwnershipFlow implements Pass
         $this->keyClass[$k] = $ks;
         if (!isset($this->firstKey[$name])) { $this->firstKey[$name] = $k; }
         return $k;
+    }
+
+    /** Is `$k` the only release class interned for `$name`? */
+    private function singleClass(string $name, int $k): bool
+    {
+        foreach ($this->keyOwner as $kk => $owner) {
+            if ($owner === $name && $kk !== $k) { return false; }
+        }
+        return true;
     }
 
     private function noteOwnKey(string $name, int $k): void
@@ -1581,14 +1704,19 @@ final class OwnershipFlow implements Pass
         $n = \count($l->thrAt);
         for ($i = 0; $i < $n; $i++) {
             $at = $l->thrAt[$i];
-            if ($at->kind !== Node::KIND_THROW || isset($inTry[\spl_object_id($at)])) { continue; }
+            if ($at->kind !== Node::KIND_THROW) { continue; }
             $t = self::asThrow($at);
+            $moved = '';
             $v = $t->value;
-            if ($v->kind !== Node::KIND_LOAD_LOCAL) { continue; }
-            $tn = self::asLoadLocal($v)->name;
-            $ts = $l->thrOut[$i][$tn] ?? OwnLattice::EMPTY;
-            $t->ownMove = $ts > 0;
-            $this->say($t->line, $tn, $ts, $ts > 0 ? 'throw moves' : 'throw retains');
+            if (!isset($inTry[\spl_object_id($at)]) && $v->kind === Node::KIND_LOAD_LOCAL) {
+                $tn = self::asLoadLocal($v)->name;
+                $ts = $l->thrOut[$i][$tn] ?? OwnLattice::EMPTY;
+                $t->ownMove = $ts > 0;
+                if ($ts > 0) { $moved = $tn; }
+                $this->say($t->line, $tn, $ts, $ts > 0 ? 'throw moves' : 'throw retains');
+            }
+            // The last visit is the converged one.
+            if ($rel) { $t->ownLive = $this->unwindDrops($l->thrOut[$i], $moved); }
         }
 
         /** @var MemoryOp_[] $head */

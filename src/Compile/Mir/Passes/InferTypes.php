@@ -697,6 +697,10 @@ final class InferTypes implements Pass
      *  is what makes {@see elemLoopLocals} sound: an empty array has no element
      *  whose representation a re-type could contradict. */
     private array $localBuiltArrays = [];
+    /** @var array<string,Type> locals whose every whole-value store but an
+     *  EMPTY array literal is one NESTED array type ({@see emptyLitNesting}):
+     *  the literal binds as that type. */
+    private array $emptyLitNest = [];
     /** Set when a loop promoted a NEW name this round (re-infer needed). */
     private bool $loopPromoGrew = false;
     /** @var array<string,bool> "fn|param" already boxed at entry — a promoted
@@ -828,6 +832,8 @@ final class InferTypes implements Pass
 
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
+    /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
+    private array $interfaceAncestors = [];
 
     /** {@see declarersOf}: method => the classes whose OWN table names it, in
      *  `$classes` order. `methodNames` is fixed at lowering, so this is per run.
@@ -852,6 +858,7 @@ final class InferTypes implements Pass
         $this->rescanTouched = [];
         $this->bodyKinds = [];
         $this->classes = $module->classes;
+        $this->interfaceAncestors = $module->interfaceAncestors;
         $this->declarersIdx = [];
         $this->enums = $module->enums;
         $this->moduleSourceFile = $module->sourceFile;
@@ -2323,7 +2330,7 @@ final class InferTypes implements Pass
                     || self::boxBackEnd($else) !== \count($else->stmts))) { continue; }
             $tT = self::boxBackValueType($then->stmts[$ti]);
             $oT = self::boxBackValueType($else->stmts[$ei]);
-            if ($tT->kind !== $oT->kind) { continue; }
+            if ($tT->kind !== $oT->kind || $this->joinDisagrees($tT, $oT)) { continue; }
             $then->stmts = self::withoutStmt($then->stmts, $ti);
             $else->stmts = self::withoutStmt($else->stmts, $ei);
             $out[$name] = $this->unionTypes($tT, $oT);
@@ -3120,6 +3127,17 @@ final class InferTypes implements Pass
      *  {@see loopMerge} and {@see planMergeShadow} box. */
     private function joinDisagrees(Type $a, Type $b): bool
     {
+        if ($a->kind === Type::KIND_ARRAY && $b->kind === Type::KIND_ARRAY) {
+            return self::nestingDisagrees($a, $b);
+        }
+        // Two objects with no common class or interface join to a CELL
+        // ({@see unionTypes}) — the read past the merge dispatches by tag, so the
+        // raw object word on each arm has to be boxed there: `$x = new P; if (…)
+        // { $x = new Q; } get_class($x)` answered '' off the unboxed pointer.
+        if ($a->kind === Type::KIND_OBJ && $b->kind === Type::KIND_OBJ) {
+            return $a->class !== null && $b->class !== null && $a->class !== $b->class
+                && $this->unionTypes($a, $b)->kind === Type::KIND_CELL;
+        }
         if ($a->kind === $b->kind) { return false; }
         // An ERASED value (a bare-`array` result, an unknown receiver's return)
         // beside a scalar, a string, an object or a cell shares no raw word with
@@ -3135,6 +3153,86 @@ final class InferTypes implements Pass
         if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
         if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
         return $this->cellCarries($a) && $this->cellCarries($b);
+    }
+
+    /** Two arrays ride one raw buffer word, but a slot's drop walks the
+     *  elements by the static NESTING (`vec[vec[string]]` releases each inner
+     *  buffer as a `vecstr`, {@see EmitLlvmMemory::nestedArrFlavor}), so
+     *  `$h = array_values($h); if (…) { $h = [$h]; }` — a cell element beside an
+     *  inner raw array — has no element repr in common. An erased or empty side
+     *  (`[]`, a bare-`array` result) states no nesting and agrees with any. */
+    private static function nestingDisagrees(Type $a, Type $b): bool
+    {
+        $ka = self::nestingKey($a);
+        $kb = self::nestingKey($b);
+        return $ka !== '' && $kb !== '' && $ka !== $kb;
+    }
+
+    /** The nesting a slot drop reads off an array type: `arr` for a flat
+     *  element, `arr:arr:<innermost kind>` per nested level; '' when an erased
+     *  level leaves it unstated. */
+    private static function nestingKey(Type $t): string
+    {
+        $el = $t->element;
+        if ($el === null || $el->kind === Type::KIND_UNKNOWN) { return ''; }
+        if ($el->kind !== Type::KIND_ARRAY) { return 'arr'; }
+        $key = 'arr';
+        $cur = $el;
+        while ($cur !== null && $cur->kind === Type::KIND_ARRAY) {
+            $key = $key . ':arr';
+            $cur = $cur->element;
+        }
+        if ($cur === null || $cur->kind === Type::KIND_UNKNOWN) { return ''; }
+        return $key . ':' . $cur->kind;
+    }
+
+    /** `$acc = []; … $acc += f();` where every other whole-value store of the
+     *  name is ONE nested array type: the empty literal states no nesting
+     *  ({@see nestingKey}) and holds nothing a type could contradict, so it
+     *  binds as that type — the slot then has one element repr on every path
+     *  instead of `vec[unknown]` beside `vec[vec[…]]`. Read off the stores'
+     *  types from the previous run.
+     *  @return array<string, Type> */
+    private function emptyLitNesting(Node $body): array
+    {
+        /** @var array<string, Type> $seen */
+        $seen = [];
+        /** @var array<string, bool> $bad */
+        $bad = [];
+        /** @var array<string, bool> $empty */
+        $empty = [];
+        $this->scanEmptyLitNesting($body, $seen, $bad, $empty);
+        $out = [];
+        foreach ($empty as $name => $unused) {
+            if (isset($bad[$name]) || !isset($seen[$name])) { continue; }
+            $out[$name] = $seen[$name];
+        }
+        return $out;
+    }
+
+    /** @param array<string, Type> $seen @param array<string, bool> $bad
+     *  @param array<string, bool> $empty */
+    private function scanEmptyLitNesting(Node $n, array &$seen, array &$bad, array &$empty): void
+    {
+        if ($n instanceof StoreLocal) {
+            $name = $n->name;
+            $v = $n->value;
+            if ($v instanceof ArrayLit && \count($v->elements) === 0) {
+                $empty[$name] = true;
+            } elseif (!isset($bad[$name])) {
+                $vt = $v->type;
+                $k = $vt->isArray() ? self::nestingKey($vt) : '';
+                if (!\str_contains($k, ':')) {
+                    $bad[$name] = true;
+                } elseif (!isset($seen[$name])) {
+                    $seen[$name] = $vt;
+                } elseif (self::nestingKey($seen[$name]) !== $k
+                    || $seen[$name]->isAssoc() !== $vt->isAssoc()) {
+                    $bad[$name] = true;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanEmptyLitNesting($c, $seen, $bad, $empty); }
     }
 
     /** A VALUE join (ternary arms, match arms, returns) of an ERASED value with
@@ -3428,7 +3526,12 @@ final class InferTypes implements Pass
             // common supertype if `$b` also conforms to it.
             if ($this->classImplementsT($b, $c)) { return $c; }
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
+            // An interface climbs its `extends` list: `DeprecatedOption extends
+            // Option` beside `Option` is an Option, not a cell.
+            if ($cd === null) {
+                foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
+                continue;
+            }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }

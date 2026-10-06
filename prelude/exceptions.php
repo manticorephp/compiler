@@ -121,6 +121,33 @@ function __mc_throwable_string(Throwable $e): string
         . "\nStack trace:\n" . $e->getTraceAsString();
 }
 
+/**
+ * A finally body threw `$e` while `$old` was pending: `$old` becomes the deepest
+ * `previous` of `$e`, unless that would close a cycle (php's
+ * zend_exception_set_previous). Called from the IR of a finally's chain pad
+ * ({@see \Compile\Mir\Passes\EmitLlvmExceptions::ehChainRegion}).
+ */
+function __mc_finally_chain(Throwable $e, Throwable $old): void
+{
+    if ($e === $old) { return; }
+    $a = $old->getPrevious();
+    while ($a !== null) {
+        if ($a === $e) { return; }
+        $a = $a->getPrevious();
+    }
+    $cur = $e;
+    $p = $cur->getPrevious();
+    while ($p !== null) {
+        $cur = $p;
+        $p = $cur->getPrevious();
+    }
+    if ($cur instanceof Exception) {
+        $cur->previous = $old;
+    } elseif ($cur instanceof Error) {
+        $cur->previous = $old;
+    }
+}
+
 class RuntimeException extends Exception {}
 class LogicException extends Exception {}
 class InvalidArgumentException extends LogicException {}

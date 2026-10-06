@@ -1,0 +1,3 @@
+dtor caught inner
+dtor caught inner
+handler RuntimeException outeroo

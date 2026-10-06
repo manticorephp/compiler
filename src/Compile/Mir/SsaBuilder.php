@@ -51,4 +51,23 @@ final class SsaBuilder
         }
         return $this->userLabels[$name];
     }
+
+    /**
+     * The user-label map, cleared: a finally body emitted again (inlined at a
+     * jump) defines its labels anew, and a `goto` in it stays inside the copy.
+     * Pair with {@see restoreUserLabels}.
+     * @return array<string, string>
+     */
+    public function takeUserLabels(): array
+    {
+        $saved = $this->userLabels;
+        $this->userLabels = [];
+        return $saved;
+    }
+
+    /** @param array<string, string> $saved */
+    public function restoreUserLabels(array $saved): void
+    {
+        $this->userLabels = $saved;
+    }
 }
