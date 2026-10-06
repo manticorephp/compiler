@@ -2403,7 +2403,10 @@ final class EmitLlvm implements EmitVisitor
     // Generator frame layout:
     //   resume_fn@0, state@8, current@16, key@24, nextkey@32,
     //   sent@40, retval@48, locals@56+
-    // state: 0 = not started, k = suspended at yield k, -1 = finished.
+    // state: 0 = not started, k = suspended at yield k, -1 = finished (or
+    // running: the resume entry stores it, a yield overwrites it);
+    // -2 - s = being destroyed from state s (`__mir_gen_destroy`).
+    // The frame owns current / key / sent / retval, each a tagged cell.
     private const GEN_HEADER = 56;
 
     /** Count `yield` nodes in a generator body (state-machine arity). */

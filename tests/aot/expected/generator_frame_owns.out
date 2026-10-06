@@ -1,0 +1,34 @@
+~unstarted
+unstarted gone
+t
+~started
+started gone
+t
+finished
+~finished
+loop done
+finished gone
+fin inner
+fin outer
+~outer
+~inner
+nest1 gone
+fin inner
+fin outer
+~outer
+~inner
+nest2 gone
+key after: last3 2
+got sent null
+~sent
+sent done
+ret ret
+box still has ret
+~ret
+~boom-local
+caught x
+bool(false)
+thrown done
+body
+bool(false)
+end

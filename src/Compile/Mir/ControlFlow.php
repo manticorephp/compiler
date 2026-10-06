@@ -33,6 +33,10 @@ final class ControlFlow
     private array $savedLabels = [];
     /** @var array<int, int[]> */
     private array $savedTry = [];
+    /** @var array<int, array<string, MemoryOp_>> the locals Own when each open finally ends */
+    private array $finallyOwn = [];
+    /** @var array<int, array<int, array<string, MemoryOp_>>> */
+    private array $savedOwn = [];
     private int $tryDepth = 0;
     /** @var string[] pending-exception flag slots of the canonical finally bodies being emitted */
     private array $pendFlags = [];
@@ -70,6 +74,8 @@ final class ControlFlow
         $this->savedLoop = [];
         $this->savedLabels = [];
         $this->savedTry = [];
+        $this->finallyOwn = [];
+        $this->savedOwn = [];
         $this->tryDepth = 0;
         $this->pendFlags = [];
         $this->pendVals = [];
@@ -178,11 +184,15 @@ final class ControlFlow
      * of its catches) runs `$body` first. `$labels`: the user labels inside the
      * try and catch bodies — a `goto` to any other label leaves it.
      *
+     * `$own`: the locals Own when the finally ends ({@see TryCatch_::$ownFinally}).
+     *
      * @param Node[] $body
      * @param array<string, bool> $labels
+     * @param array<string, MemoryOp_> $own
      */
-    public function pushFinally(array $body, array $labels): void
+    public function pushFinally(array $body, array $labels, array $own = []): void
     {
+        $this->finallyOwn[] = $own;
         $this->finallyStack[] = $body;
         $this->finallyLoop[] = \count($this->breakStack);
         $this->finallyLabels[] = $labels;
@@ -191,6 +201,7 @@ final class ControlFlow
 
     public function popFinally(): void
     {
+        \array_pop($this->finallyOwn);
         \array_pop($this->finallyStack);
         \array_pop($this->finallyLoop);
         \array_pop($this->finallyLabels);
@@ -237,6 +248,9 @@ final class ControlFlow
     /** @return Node[] finally body `$i` (0 = outermost) */
     public function finallyBody(int $i): array { return $this->finallyStack[$i]; }
 
+    /** @return array<string, MemoryOp_> {@see TryCatch_::$ownFinally} of finally body `$i` */
+    public function finallyOwn(int $i): array { return $this->finallyOwn[$i]; }
+
     /** The try depth ({@see enterTry}) of finally body `$i`. */
     public function finallyTryDepth(int $i): int { return $this->finallyTry[$i]; }
 
@@ -251,6 +265,8 @@ final class ControlFlow
         $this->savedLoop[] = $this->finallyLoop;
         $this->savedLabels[] = $this->finallyLabels;
         $this->savedTry[] = $this->finallyTry;
+        $this->savedOwn[] = $this->finallyOwn;
+        $this->finallyOwn = \array_slice($this->finallyOwn, 0, $i);
         $this->finallyStack = \array_slice($this->finallyStack, 0, $i);
         $this->finallyLoop = \array_slice($this->finallyLoop, 0, $i);
         $this->finallyLabels = \array_slice($this->finallyLabels, 0, $i);
@@ -263,6 +279,7 @@ final class ControlFlow
         $this->finallyLoop = \array_pop($this->savedLoop);
         $this->finallyLabels = \array_pop($this->savedLabels);
         $this->finallyTry = \array_pop($this->savedTry);
+        $this->finallyOwn = \array_pop($this->savedOwn);
     }
 
     /** Enter a `try` (any kind); its depth, 1 = outermost of the function. */

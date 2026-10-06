@@ -206,6 +206,7 @@ trait EmitLlvmControl
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
             $kw = $this->lastValue;
+            if ($fe->ownKey) { $out .= $this->rcRetainReg($kw, 'cell'); }
             $out .= $this->foreachPrevDrop($fe, true);
             $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }

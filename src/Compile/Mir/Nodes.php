@@ -850,6 +850,13 @@ final class Yield_ extends Node
         parent::__construct(Node::KIND_YIELD, $type);
     }
 
+    /** Set by {@see Passes\OwnershipFlow}: the locals Own while the generator
+     *  is suspended here, name → its `drop` op — what destroying the frame at
+     *  this yield, or an exception injected into it, drops. Not copied by
+     *  {@see NodeClone}: clones run before OwnershipFlow sets it.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitYield($this);
@@ -1423,6 +1430,9 @@ final class Foreach_ extends Node
     public bool $ownCoOwn = false;
     public ?MemoryOp_ $ownDropValue = null;
     public ?MemoryOp_ $ownDropKey = null;
+    /** Set by {@see Passes\OwnershipFlow}: the key var takes its own +1 of a
+     *  generator's key — the frame drops its own at the next yield. */
+    public bool $ownKey = false;
 
     public function accept(EmitVisitor $v): string
     {

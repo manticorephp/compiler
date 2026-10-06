@@ -817,8 +817,8 @@ trait InferCalls
             if ($node->method === 'call')   { $node->type = Type::cell();    return $node->type; }
         }
         // Generator iterator protocol: current()/send() yield the value type
-        // (the Generator's element); key() an int; valid() a bool. next()/
-        // rewind()/getReturn() are left as-is (void / unknown).
+        // (the Generator's element); key() and getReturn() a cell; valid() a
+        // bool. next()/rewind() are left as-is (void).
         //
         // No declared element means CELL, not unknown: `current`@16 holds a
         // shallow-boxed cell ({@see EmitLlvmGenerator::emitYield}), so a bare
@@ -846,6 +846,9 @@ trait InferCalls
                 $node->type = Type::cell();
             } elseif ($m === 'valid') {
                 $node->type = Type::bool_();
+            } elseif ($m === 'getReturn') {
+                // `retval`@48 is a tagged cell, like `key`.
+                $node->type = Type::cell();
             }
             return $node->type;
         }

@@ -238,6 +238,9 @@ final class Ownership
         // The caught exception: `throw` handed `@__mir_thrown` a +1, and the
         // catch takes it out of the slot ({@see CaughtValue_}).
         if ($value->kind === Node::KIND_CAUGHT_VALUE) { return true; }
+        // A `yield` expression MOVES the sent value out of the frame's slot
+        // ({@see Passes\EmitLlvmGenerator::emitYield}).
+        if ($value->kind === Node::KIND_YIELD) { return true; }
         $tk = $value->type->kind;
         // A `Closure`-returning method types its call `closure`, not
         // `obj<Closure>`; the same producer rule as the object arm below.
@@ -719,6 +722,8 @@ final class Ownership
         // operand, a builtin argument and a cast each stranded the payload.
         if (CondOwn::isConditional($n)) { return $this->condOwnedTemp($n); }
         $k = $n->kind;
+        // The sent value a `yield` expression moved out of the frame.
+        if ($k === Node::KIND_YIELD) { return true; }
         // A closure / callable INVOKE returns under the same +1 convention
         // ({@see returnBorrowsObj} and {@see keyTempRelease} already read it as
         // fresh): `[...$closure()]` stranded the whole array it spread.

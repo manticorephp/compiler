@@ -151,4 +151,11 @@ final class FunctionDef
     public array $ownStmtEnd = [];
     /** @var MemoryOp_[] */
     public array $ownStmtDrops = [];
+    /**
+     * Set by {@see Passes\OwnershipFlow} on a generator: the params its frame
+     * OWNS from creation (the creator takes their +1), name → the `drop` op —
+     * what destroying a generator nobody started drops.
+     * @var array<string, MemoryOp_>
+     */
+    public array $ownGenParams = [];
 }

@@ -612,7 +612,17 @@ trait EmitLlvmRuntime
         $out .= "  br label %df\n";
         $out .= "k1:\n";
         $out .= "  %is1 = icmp eq i64 %cap, " . $p1c . "\n";
-        $out .= "  br i1 %is1, label %p1, label %df\n";
+        $out .= "  br i1 %is1, label %p1, label %gchk\n";
+        // A Generator frame is freed through here too (its header is a
+        // string's, {@see \Compile\MemoryAbi::GENERATOR_TAG_MAGIC} in the cap
+        // word): it lets go of what it holds first.
+        $out .= "gchk:\n";
+        $out .= "  %isgen = icmp eq i64 %cap, " . (string)\Compile\MemoryAbi::GENERATOR_TAG_MAGIC . "\n";
+        $out .= "  br i1 %isgen, label %gen, label %df\n";
+        $out .= "gen:\n";
+        $out .= "  %gfr = getelementptr inbounds i8, ptr %sbase, i64 " . $H . "\n";
+        $out .= "  call void @__mir_gen_destroy(ptr %gfr)\n";
+        $out .= "  br label %df\n";
         $out .= "p1:\n";
         $out .= "  %pn1 = load i64, ptr @__mir_strpool1_n\n";
         $out .= "  %pfull1 = icmp uge i64 %pn1, " . $pmax . "\n";
@@ -628,6 +638,35 @@ trait EmitLlvmRuntime
         $out .= "  br label %df\n";
         $out .= "df:\n";
         $out .= "  call void @free(ptr %sbase)\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        // The last reference to a Generator frame is gone. One that is not
+        // finished (state ≥ 0: never started, or suspended at yield k) is
+        // re-entered at `-2 - state`, where the resume function carries the exit
+        // of a generator abandoned there ({@see EmitLlvmGenerator}) — the
+        // `finally` blocks around the yield and the drops of its owned locals.
+        // Then the header's own cells go: current@16, key@24, sent@40, retval@48.
+        $this->rt->needsTagged = true;
+        $out .= "define void @__mir_gen_destroy(ptr %g) {\n";
+        $out .= "entry:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %g, i64 8\n";
+        $out .= "  %s = load i64, ptr %sp\n";
+        $out .= "  %live = icmp sge i64 %s, 0\n";
+        $out .= "  br i1 %live, label %run, label %drop\n";
+        $out .= "run:\n";
+        $out .= "  %ds = sub i64 -2, %s\n";
+        $out .= "  store i64 %ds, ptr %sp\n";
+        $out .= "  %fnw = load i64, ptr %g\n";
+        $out .= "  %fn = inttoptr i64 %fnw to ptr\n";
+        $out .= "  call i64 %fn(ptr %g)\n";
+        $out .= "  br label %drop\n";
+        $out .= "drop:\n";
+        foreach ([16, 24, 40, 48] as $goff) {
+            $gs = (string)$goff;
+            $out .= "  %hp" . $gs . " = getelementptr inbounds i8, ptr %g, i64 " . $gs . "\n";
+            $out .= "  %hv" . $gs . " = load i64, ptr %hp" . $gs . "\n";
+            $out .= "  call void @__mir_cell_drop(i64 %hv" . $gs . ")\n";
+        }
         $out .= "  ret void\n";
         $out .= "}\n";
         $out .= $this->lib->stringCore();

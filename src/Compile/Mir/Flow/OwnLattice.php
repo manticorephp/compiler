@@ -370,7 +370,7 @@ final class OwnLattice implements Lattice
         }
         $k = $stmt->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE) {
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE || $k === Node::KIND_YIELD) {
             // The last visit is the converged one: a loop re-walks its body
             // until the head state is stable.
             $own = [];

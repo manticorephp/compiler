@@ -2343,14 +2343,25 @@ trait EmitLlvmModule
         // The return value (if any) is stashed in `retval` for getReturn().
         if ($this->gen->inGenerator) {
             $out = '';
+            $rv = '';
+            $moved = $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
+                ? $this->asLoadLocalNode($v)->name : '';
             if ($v !== null) {
+                // `retval`@48 is the frame's own cell: an owned local moves in,
+                // a fresh value's +1 does, a borrow is co-owned.
                 $out .= $this->emitNode($v);
+                $out .= $this->boxToCellShallow($v->type);
                 $out .= $this->coerceToI64();
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->retvalPtr . "\n";
+                $rb = $this->lastValue;
+                $rv = $rb;
+                if ($moved === '' && !$this->yieldValueFresh($v)) { $out .= $this->rcRetainReg($rb, 'cell'); }
+                $orv = $this->ssa->allocReg();
+                $out .= '  ' . $orv . ' = load i64, ptr ' . $this->gen->retvalPtr . "\n";
+                $out .= '  store i64 ' . $rb . ', ptr ' . $this->gen->retvalPtr . "\n";
+                $out .= $this->rcReleaseReg($orv, 'cell');
             }
             $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($this->cf->finallyCount());
-            $out .= $this->retLeave($r, $r->ownMove && $v !== null && $v->kind === Node::KIND_LOAD_LOCAL
-                ? $this->asLoadLocalNode($v)->name : '', $v !== null ? $this->lastValue : '', '');
+            $out .= $this->retLeave($r, $moved, $rv, '');
             $out .= $this->genFinishCurrent();
             $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
             return $out . "  ret i64 0\n" . $this->emitDeadLabel();

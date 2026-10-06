@@ -79,7 +79,9 @@ trait EmitLlvmExceptions
     /** @var array<int, int> leaf statement `spl_object_id` → its index in {@see \Compile\Mir\FunctionDef::$ownStmtNodes} */
     private array $ehStmtIdx = [];
 
-    private function ehBegin(\Compile\Mir\FunctionDef $fn): void
+    /** `$resume`: `$fn` is a generator and what follows is its resume function —
+     *  the frame's locals are dropped by an unwind out of it like any other's. */
+    private function ehBegin(\Compile\Mir\FunctionDef $fn, bool $resume = false): void
     {
         $this->ehPadKeys = [];
         $this->ehPadLabels = [];
@@ -92,7 +94,7 @@ trait EmitLlvmExceptions
         $this->ehPersonality = false;
         $this->ehFn = null;
         $this->ehStmtIdx = [];
-        if ($this->nothrow === null || $fn->isGenerator || $this->gen->inGenerator) { return; }
+        if ($this->nothrow === null || (!$resume && ($fn->isGenerator || $this->gen->inGenerator))) { return; }
         $this->ehFn = $fn;
         foreach ($fn->ownStmtNodes as $si => $st) { $this->ehStmtIdx[\spl_object_id($st)] = $si; }
         $this->ehPersonality = $fn->ownStmtNodes !== [] || $this->ehNeedsPads($fn->body);
@@ -1043,7 +1045,7 @@ trait EmitLlvmExceptions
             // before exiting the function — make the finally body visible to
             // emitReturn. Popped before the finally's own emission (the finally
             // is not self-protected).
-            $this->cf->pushFinally($n->finallyBody, $this->ehTryLabels($n));
+            $this->cf->pushFinally($n->finallyBody, $this->ehTryLabels($n), $n->ownFinally);
         }
         $out .= '  br label %' . $tryLbl . "\n";
 
