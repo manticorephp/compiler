@@ -78,7 +78,12 @@ final class UnwindRuntime
         $o .= "  br i1 %end, label %eos, label %pass\n";
         $o .= "pass:\n";
         $o .= "  ret i32 0\n";
+        // A destructor the unwind ran may have caught a throw of its own, which
+        // overwrote and cleared @__mir_thrown: the fatal reads this exception's.
         $o .= "eos:\n";
+        $o .= "  %pl = getelementptr inbounds i8, ptr %ex, i64 " . $pay . "\n";
+        $o .= "  %obj = load ptr, ptr %pl\n";
+        $o .= "  store ptr %obj, ptr @__mir_thrown\n";
         $o .= "  call void @free(ptr %ex)\n";
         $o .= "  %h = load ptr, ptr @__mc_uncaught_fn\n";
         $o .= "  %hn = icmp eq ptr %h, null\n";
