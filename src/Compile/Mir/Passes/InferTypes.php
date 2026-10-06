@@ -832,6 +832,8 @@ final class InferTypes implements Pass
 
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
+    /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
+    private array $interfaceAncestors = [];
 
     /** {@see declarersOf}: method => the classes whose OWN table names it, in
      *  `$classes` order. `methodNames` is fixed at lowering, so this is per run.
@@ -856,6 +858,7 @@ final class InferTypes implements Pass
         $this->rescanTouched = [];
         $this->bodyKinds = [];
         $this->classes = $module->classes;
+        $this->interfaceAncestors = $module->interfaceAncestors;
         $this->declarersIdx = [];
         $this->enums = $module->enums;
         $this->moduleSourceFile = $module->sourceFile;
@@ -3127,6 +3130,14 @@ final class InferTypes implements Pass
         if ($a->kind === Type::KIND_ARRAY && $b->kind === Type::KIND_ARRAY) {
             return self::nestingDisagrees($a, $b);
         }
+        // Two objects with no common class or interface join to a CELL
+        // ({@see unionTypes}) — the read past the merge dispatches by tag, so the
+        // raw object word on each arm has to be boxed there: `$x = new P; if (…)
+        // { $x = new Q; } get_class($x)` answered '' off the unboxed pointer.
+        if ($a->kind === Type::KIND_OBJ && $b->kind === Type::KIND_OBJ) {
+            return $a->class !== null && $b->class !== null && $a->class !== $b->class
+                && $this->unionTypes($a, $b)->kind === Type::KIND_CELL;
+        }
         if ($a->kind === $b->kind) { return false; }
         // An ERASED value (a bare-`array` result, an unknown receiver's return)
         // beside a scalar, a string, an object or a cell shares no raw word with
@@ -3515,7 +3526,12 @@ final class InferTypes implements Pass
             // common supertype if `$b` also conforms to it.
             if ($this->classImplementsT($b, $c)) { return $c; }
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
+            // An interface climbs its `extends` list: `DeprecatedOption extends
+            // Option` beside `Option` is an Option, not a cell.
+            if ($cd === null) {
+                foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
+                continue;
+            }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }
