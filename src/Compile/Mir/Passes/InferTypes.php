@@ -2323,7 +2323,7 @@ final class InferTypes implements Pass
                     || self::boxBackEnd($else) !== \count($else->stmts))) { continue; }
             $tT = self::boxBackValueType($then->stmts[$ti]);
             $oT = self::boxBackValueType($else->stmts[$ei]);
-            if ($tT->kind !== $oT->kind) { continue; }
+            if ($tT->kind !== $oT->kind || $this->joinDisagrees($tT, $oT)) { continue; }
             $then->stmts = self::withoutStmt($then->stmts, $ti);
             $else->stmts = self::withoutStmt($else->stmts, $ei);
             $out[$name] = $this->unionTypes($tT, $oT);
@@ -3120,6 +3120,9 @@ final class InferTypes implements Pass
      *  {@see loopMerge} and {@see planMergeShadow} box. */
     private function joinDisagrees(Type $a, Type $b): bool
     {
+        if ($a->kind === Type::KIND_ARRAY && $b->kind === Type::KIND_ARRAY) {
+            return self::nestingDisagrees($a, $b);
+        }
         if ($a->kind === $b->kind) { return false; }
         // An ERASED value (a bare-`array` result, an unknown receiver's return)
         // beside a scalar, a string, an object or a cell shares no raw word with
@@ -3135,6 +3138,37 @@ final class InferTypes implements Pass
         if ($a->kind === Type::KIND_NULL) { return $this->nullBoxesWith($b); }
         if ($b->kind === Type::KIND_NULL) { return $this->nullBoxesWith($a); }
         return $this->cellCarries($a) && $this->cellCarries($b);
+    }
+
+    /** Two arrays ride one raw buffer word, but a slot's drop walks the
+     *  elements by the static NESTING (`vec[vec[string]]` releases each inner
+     *  buffer as a `vecstr`, {@see EmitLlvmMemory::nestedArrFlavor}), so
+     *  `$h = array_values($h); if (…) { $h = [$h]; }` — a cell element beside an
+     *  inner raw array — has no element repr in common. An erased or empty side
+     *  (`[]`, a bare-`array` result) states no nesting and agrees with any. */
+    private static function nestingDisagrees(Type $a, Type $b): bool
+    {
+        $ka = self::nestingKey($a);
+        $kb = self::nestingKey($b);
+        return $ka !== '' && $kb !== '' && $ka !== $kb;
+    }
+
+    /** The nesting a slot drop reads off an array type: `arr` for a flat
+     *  element, `arr:arr:<innermost kind>` per nested level; '' when an erased
+     *  level leaves it unstated. */
+    private static function nestingKey(Type $t): string
+    {
+        $el = $t->element;
+        if ($el === null || $el->kind === Type::KIND_UNKNOWN) { return ''; }
+        if ($el->kind !== Type::KIND_ARRAY) { return 'arr'; }
+        $key = 'arr';
+        $cur = $el;
+        while ($cur !== null && $cur->kind === Type::KIND_ARRAY) {
+            $key = $key . ':arr';
+            $cur = $cur->element;
+        }
+        if ($cur === null || $cur->kind === Type::KIND_UNKNOWN) { return ''; }
+        return $key . ':' . $cur->kind;
     }
 
     /** A VALUE join (ternary arms, match arms, returns) of an ERASED value with
