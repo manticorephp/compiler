@@ -410,7 +410,16 @@ trait LowerPrelude
                     $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
                 }
                 foreach ($props as $p) {
-                    $body .= "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
+                    // php marks a non-public slot: `["p":protected]`, `["p":"Declaring":private]`.
+                    $vis = '';
+                    if (isset($cd->propertyMeta[$p])) {
+                        $pm = $cd->propertyMeta[$p];
+                        if ($pm->visibility === 'protected') { $vis = ':protected'; }
+                        if ($pm->visibility === 'private') {
+                            $vis = ':"' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . '":private';
+                        }
+                    }
+                    $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
                 }
                 if ($cd->usesBag()) {
                     $body .= "    foreach (\$bag as \$bk => \$bv) {\n"
