@@ -219,6 +219,11 @@ final class CheckTypeDefs
         $cls = $n->value->type->typeDefClass();
         if ($cls === null || !isset($this->typeDefs[$cls])) { return; }
         if (!$this->isBoxed($fn->returnType)) { return; }
+        // The erased view of a specialized generic method ({@see
+        // LowerReify::erasedThunkFor}) boxes on purpose: a caller that holds
+        // `Box` without its binding asked for the carrier in a cell, and no
+        // source line could declare anything else for it.
+        if (\str_ends_with($fn->name, '$erased')) { return; }
         $this->fail(
             $cls,
             '`' . $fn->name . '()` returns `mixed` — declare the return type `' . $cls . '`, else the'

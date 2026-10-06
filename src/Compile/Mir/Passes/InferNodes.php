@@ -2437,6 +2437,13 @@ trait InferNodes
         if ($at->kind === Type::KIND_OBJ && ($at->class ?? '') !== ''
             && $this->classImplementsT($at->class, 'ArrayAccess')) {
             $node->type = $this->iterMethodReturn($at->class, 'offsetGet', Type::unknown());
+            // `$o[$k]` IS `$o->offsetGet($k)`, so a receiver that bound the
+            // class's type parameters (`UInt16Array<Kind>` in a property or a
+            // parameter) names the result the same way a method call does —
+            // when that leaves the representation alone (the same scalar,
+            // named). A binding that would change it stays on the call path.
+            $bound = $this->genericReturnType($at->class, 'offsetGet', $at);
+            if ($bound !== null && $bound->kind === $node->type->kind) { $node->type = $bound; }
         }
         return $node->type;
     }

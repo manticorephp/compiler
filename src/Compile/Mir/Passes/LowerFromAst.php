@@ -2584,16 +2584,20 @@ final class LowerFromAst implements Pass
         $this->sawYield = $savedSawYield;
         $usesFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = $savedSawFuncArgs;
-        $mret = $this->lowerTypeHint($this->effectiveHint(
-            $m->returnType,
-            $this->docTagType($m->docComment, '@return', ''),
-        ));
+        $mretDoc = $this->docTagType($m->docComment, '@return', '');
+        $mret = $this->lowerTypeHint($this->effectiveHint($m->returnType, $mretDoc));
         // `@return T` on a generic class: the shared body must see the ERASED
         // type (exactly what it saw before generics), so keep the un-erased form
         // aside for call sites to substitute against their receiver's binding.
         if ($mret->hasTypeVar()) {
             $cd->genericReturns[$m->name] = $mret;
             $mret = $mret->eraseTypeVars();
+        } elseif ($m->returnType !== null && $mretDoc !== null && $mretDoc !== '') {
+            // A real hint kept the body's type (`offsetGet(): int` + `@return T`),
+            // and the docblock still says WHICH parameter the value is: a call
+            // site that bound it names the result by it.
+            $mdocT = $this->lowerTypeHint($mretDoc);
+            if ($mdocT->hasTypeVar()) { $cd->genericReturns[$m->name] = $mdocT; }
         }
         if ($isGen) {
             $elem = $mret->isGenerator() ? $mret->element : null;

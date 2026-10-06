@@ -573,7 +573,12 @@ trait LowerTypes
             $glt = \strpos($gbase, '<');
             $gname = \substr($gbase, 0, $glt);
             $ginner = \substr($gbase, $glt + 1, \strlen($gbase) - $glt - 2);
-            if (isset($this->classTable[$gname]) || isset($this->knownClassNames[$gname])) {
+            // The base is a class NAME like any other: a short name behind a
+            // `use` or the enclosing namespace resolves the same way. Left
+            // unresolved, `UInt16Array<Kind>` fell through to the array reading
+            // below and the object was then walked as a PHP array.
+            $gname = $this->resolveClassHint($gname);
+            if ($gname !== '') {
                 // Stays the ERASED class carrying its binding. A hint does not get
                 // to name a specialization: a hint types a SLOT, and a slot can be
                 // handed an object built somewhere else — an unannotated
@@ -594,6 +599,13 @@ trait LowerTypes
         if ($this->isTypeDef($cls)) {
             return $this->typeDefCarrier($cls);
         }
+        // …under whatever spelling: a docblock names it as written (`Kind` behind
+        // a `use`), and read as an ordinary class that is obj<Kind> — a pointer
+        // type over what is a bare scalar.
+        $tdResolved = $this->resolveClassHint($cls);
+        if ($tdResolved !== '' && $tdResolved !== $cls && $this->isTypeDef($tdResolved)) {
+            return $this->typeDefCarrier($tdResolved);
+        }
         // A bare class name → obj<Class> (so method returns / params of
         // a class type carry their class for dispatch + __toString).
         // `Ffi\Ptr` stays obj<Ffi\Ptr> but is treated as an opaque FOREIGN
@@ -603,8 +615,20 @@ trait LowerTypes
         // boundary: the PUBLIC handle type is the prelude class `\Resource`,
         // which owns the address and can carry a destructor — a Ptr is excluded
         // from rc, so it can own nothing.
+        $resolved = $this->resolveClassHint($cls);
+        if ($resolved !== '') { return $this->classHintType($resolved, $nullable); }
+        return Type::unknown();
+    }
+
+    /**
+     * The declared class a hint NAME refers to, '' when none: the name as
+     * written, else the nearest enclosing namespace that declares it, else the
+     * one class in the module with that short name.
+     */
+    private function resolveClassHint(string $cls): string
+    {
         if (isset($this->classTable[$cls]) || isset($this->knownClassNames[$cls])) {
-            return $this->classHintType($cls, $nullable);
+            return $cls;
         }
         // Unqualified short name: PHP resolves it in the current namespace
         // first. Prefer the same-namespace class — this disambiguates a
@@ -624,7 +648,7 @@ trait LowerTypes
             while ($ns !== '') {
                 $qualified = $ns . '\\' . $cls;
                 if (isset($this->classTable[$qualified]) || isset($this->knownClassNames[$qualified])) {
-                    return $this->classHintType($qualified, $nullable);
+                    return $qualified;
                 }
                 $p = \strrpos($ns, '\\');
                 if ($p === false || $p < 0) { break; }
@@ -636,9 +660,9 @@ trait LowerTypes
         if (\strpos($cls, '\\') === false
             && isset($this->shortClassFqn[$cls])
             && !isset($this->shortClassAmbiguous[$cls])) {
-            return $this->classHintType($this->shortClassFqn[$cls], $nullable);
+            return $this->shortClassFqn[$cls];
         }
-        return Type::unknown();
+        return '';
     }
 
     /**
@@ -928,6 +952,26 @@ trait LowerTypes
         if ($hint !== null && $docType !== null && $this->bindsSameClass($hint, $docType)) {
             return $docType;
         }
+        // A real hint next to a type-parameter docblock (`pop(): mixed` +
+        // `@return T`, `offsetGet(): int` + `@return T`). PHP cannot write `T`,
+        // so the hint is only the widest thing the author could say, and the
+        // docblock refines it — when both lower to the same representation:
+        // `mixed` holds any `T`; a scalar hint holds a `T` bound to that scalar
+        // or to a `#[TypeDef]` over it. An unbound `T` (a cell) never replaces
+        // a raw `int`. Taking the hint alone gave the specialization an
+        // untyped return, which the narrowing pass then re-derived from the
+        // body as the bare carrier — the value came out without its type.
+        // (Inside a specialization the parameter is no longer one — it is a key
+        // of the substitution the members are lowered under.)
+        if ($hint !== null && $docType !== null
+            && ($this->isTypeParam($docType) || isset($this->currentTypeSubst[$docType]))) {
+            if (\strtolower(\ltrim($hint, '\\')) === 'mixed') { return $docType; }
+            $dt = $this->lowerTypeHint($docType);
+            if ($dt->kind !== Type::KIND_UNKNOWN && $dt->kind !== Type::KIND_CELL
+                && $dt->kind === $this->lowerTypeHint($hint)->kind) {
+                return $docType;
+            }
+        }
         return $hint;
     }
 
@@ -949,7 +993,13 @@ trait LowerTypes
         // tagged (sebastian/diff's `$contextLines`).
         if ($low === 'int' || $low === 'integer' || $low === 'float' || $low === 'string'
             || $low === 'bool' || $low === 'array') { return false; }
-        return $base !== '' && $base === \ltrim($hint, '?\\');
+        if ($base === '') { return false; }
+        $h = \ltrim($hint, '?\\');
+        if ($base === $h) { return true; }
+        // The same class under two spellings: the hint arrives resolved
+        // (`Manticore\Ds\UInt16Array`), the docblock as written (`UInt16Array`).
+        $rb = $this->resolveClassHint($base);
+        return $rb !== '' && $rb === $this->resolveClassHint($h);
     }
 
     /** Whether `$t` is a `@template` parameter of the class being lowered (`T`, `T[]`). */
