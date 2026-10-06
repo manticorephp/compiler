@@ -255,6 +255,7 @@ public bool $needsClosureRc = false;
             // The unwinder ({@see \Compile\Runtime\UnwindRuntime}): libSystem on
             // Darwin, libgcc_eh on Linux (`-static-libgcc` at the link).
             $decls['_Unwind_RaiseException'] = "declare i32 @_Unwind_RaiseException(ptr)";
+            $decls['_Unwind_ForcedUnwind'] = "declare i32 @_Unwind_ForcedUnwind(ptr, ptr, ptr)";
             $decls['_Unwind_GetIP'] = "declare i64 @_Unwind_GetIP(ptr)";
             $decls['_Unwind_GetRegionStart'] = "declare i64 @_Unwind_GetRegionStart(ptr)";
             $decls['_Unwind_GetLanguageSpecificData'] = "declare ptr @_Unwind_GetLanguageSpecificData(ptr)";

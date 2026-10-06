@@ -9,10 +9,11 @@ use Compile\MemoryAbi;
  *
  * - `@__mc_throw(obj)` wraps the Throwable in an exception object
  *   ({@see MemoryAbi::EXC_SIZE}: `_Unwind_Exception` header + payload) and
- *   calls `_Unwind_RaiseException`. It returns only when no frame catches
- *   (two-phase: the search phase found no handler, so nothing was unwound),
- *   and then runs the uncaught-exception fatal that `@main` installed in
- *   `@__mc_uncaught_fn`.
+ *   calls `_Unwind_RaiseException`. That returns only when no frame catches
+ *   (the search phase found no handler, so nothing was unwound); then a forced
+ *   unwind runs every frame's cleanup pads (php destroys the unwound locals
+ *   first) and its stop function, at the end of the stack, runs the
+ *   uncaught-exception fatal that `@main` installed in `@__mc_uncaught_fn`.
  * - `@__mc_personality` is the personality of every function with a landing
  *   pad. It reads the LSDA LLVM emits for `invoke`/`landingpad` (call-site
  *   table only — the type table is never consulted): a call site whose action
@@ -50,8 +51,35 @@ final class UnwindRuntime
         $o .= "  %pl = getelementptr inbounds i8, ptr %ex, i64 " . $pay . "\n";
         $o .= "  store ptr %obj, ptr %pl\n";
         $o .= "  %rc = call i32 @_Unwind_RaiseException(ptr %ex)\n";
-        $o .= "  call void @free(ptr %ex)\n";
+        // No frame catches it: unwind anyway, running every frame's cleanups (php
+        // destroys the unwound frames' locals before the fatal), and report it
+        // from the stop function at the end of the stack. Returns only if the
+        // unwinder refuses; then the fatal runs from here.
         $o .= "  store ptr %obj, ptr @__mir_thrown\n";
+        $o .= "  store i64 0, ptr %p1\n";
+        $o .= "  store i64 0, ptr %p2\n";
+        $o .= "  %rf = call i32 @_Unwind_ForcedUnwind(ptr %ex, ptr @__mc_uncaught_stop, ptr null)\n";
+        $o .= "  call void @free(ptr %ex)\n";
+        $o .= "  %h = load ptr, ptr @__mc_uncaught_fn\n";
+        $o .= "  %hn = icmp eq ptr %h, null\n";
+        $o .= "  br i1 %hn, label %none, label %fatal\n";
+        $o .= "fatal:\n";
+        $o .= "  call void %h()\n";
+        $o .= "  br label %none\n";
+        $o .= "none:\n";
+        $o .= "  call void @abort()\n";
+        $o .= "  unreachable\n}\n";
+
+        // The forced unwind's stop function: every frame passes (0 NO_REASON);
+        // at the end of the stack (_UA_END_OF_STACK = 16) the uncaught fatal.
+        $o .= "define i32 @__mc_uncaught_stop(i32 %ver, i32 %act, i64 %cls, ptr %ex, ptr %ctx, ptr %arg) {\nentry:\n";
+        $o .= "  %e = and i32 %act, 16\n";
+        $o .= "  %end = icmp ne i32 %e, 0\n";
+        $o .= "  br i1 %end, label %eos, label %pass\n";
+        $o .= "pass:\n";
+        $o .= "  ret i32 0\n";
+        $o .= "eos:\n";
+        $o .= "  call void @free(ptr %ex)\n";
         $o .= "  %h = load ptr, ptr @__mc_uncaught_fn\n";
         $o .= "  %hn = icmp eq ptr %h, null\n";
         $o .= "  br i1 %hn, label %none, label %fatal\n";
@@ -191,7 +219,11 @@ final class UnwindRuntime
         $o .= "  br i1 %nolp, label %cont, label %haslp\n";
         $o .= "haslp:\n";
         $o .= "  %iscatch = icmp ne i64 %ac, 0\n";
-        $o .= "  %handler = and i1 %iscatch, %ours\n";
+        // A forced unwind (_UA_FORCE_UNWIND = 8: an uncaught throw) runs cleanups only.
+        $o .= "  %fbit = and i32 %act, 8\n";
+        $o .= "  %unforced = icmp eq i32 %fbit, 0\n";
+        $o .= "  %ours2 = and i1 %ours, %unforced\n";
+        $o .= "  %handler = and i1 %iscatch, %ours2\n";
         $o .= "  %sbit = and i32 %act, 1\n";
         $o .= "  %search = icmp ne i32 %sbit, 0\n";
         $o .= "  br i1 %search, label %phase1, label %phase2\n";
