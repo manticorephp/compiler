@@ -1489,117 +1489,195 @@ class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess
     public const IT_MODE_DELETE = 1;
     public const IT_MODE_KEEP = 0;
 
-    /** @var array<int, mixed> */
-    private array $__items = [];
-    private int $__mode = 0;
+    private int $flags = 0;
+    /** @var array<int, mixed> head to tail; the live elements start at `$__off` */
+    private array $dllist = [];
+    /** Slots at the front already shifted out: a shift is O(1), the list is compacted when half of it is dead. */
+    private int $__off = 0;
     private int $__pos = 0;
+    /** The cursor points at an element (php's traverse pointer is not NULL). */
+    private bool $__live = false;
 
-    public function push(mixed $value): void { $this->__items[] = $value; }
+    public function push(mixed $value): void { $this->dllist[] = $value; }
 
-    public function unshift(mixed $value): void { \array_unshift($this->__items, $value); }
+    public function unshift(mixed $value): void
+    {
+        if ($this->__off > 0) {
+            $this->__off = $this->__off - 1;
+            $this->dllist[$this->__off] = $value;
+            return;
+        }
+        \array_unshift($this->dllist, $value);
+    }
 
     public function pop(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't pop from an empty datastructure"); }
-        return \array_pop($this->__items);
+        if (\count($this->dllist) === $this->__off) { throw new RuntimeException("Can't pop from an empty datastructure"); }
+        $v = \array_pop($this->dllist);
+        if (\count($this->dllist) === $this->__off) { $this->dllist = []; $this->__off = 0; }
+        return $v;
     }
 
     public function shift(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't shift from an empty datastructure"); }
-        return \array_shift($this->__items);
+        $n = \count($this->dllist);
+        if ($n === $this->__off) { throw new RuntimeException("Can't shift from an empty datastructure"); }
+        $v = $this->dllist[$this->__off];
+        $this->dllist[$this->__off] = null;
+        $this->__off = $this->__off + 1;
+        if ($this->__off === $n) {
+            $this->dllist = [];
+            $this->__off = 0;
+        } elseif ($this->__off >= 16 && $this->__off * 2 >= $n) {
+            $this->dllist = \array_slice($this->dllist, $this->__off);
+            $this->__off = 0;
+        }
+        return $v;
     }
 
     public function top(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't peek at an empty datastructure"); }
-        return $this->__items[\count($this->__items) - 1];
+        $n = \count($this->dllist);
+        if ($n === $this->__off) { throw new RuntimeException("Can't peek at an empty datastructure"); }
+        return $this->dllist[$n - 1];
     }
 
     public function bottom(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't peek at an empty datastructure"); }
-        return $this->__items[0];
+        if (\count($this->dllist) === $this->__off) { throw new RuntimeException("Can't peek at an empty datastructure"); }
+        return $this->dllist[$this->__off];
     }
 
-    public function isEmpty(): bool { return $this->__items === []; }
+    public function isEmpty(): bool { return \count($this->dllist) === $this->__off; }
 
-    public function count(): int { return \count($this->__items); }
-
-    /** @return array<int, mixed> */
-    public function toArray(): array { return $this->__items; }
+    public function count(): int { return \count($this->dllist) - $this->__off; }
 
     public function setIteratorMode(int $mode): int
     {
-        $this->__mode = $mode;
-        return $mode;
+        $fixed = $this->__mcFixed();
+        if ($fixed !== 0 && ($mode & 2) !== ($fixed & 2)) {
+            throw new RuntimeException("Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen");
+        }
+        $this->flags = $mode & 3;
+        return $this->flags | $fixed;
     }
 
-    public function getIteratorMode(): int { return $this->__mode; }
+    public function getIteratorMode(): int { return $this->flags | $this->__mcFixed(); }
 
     public function offsetExists(mixed $index): bool
     {
-        return \is_numeric($index) && (int)$index >= 0 && (int)$index < \count($this->__items);
+        $k = $this->__mcIndex($index, 'offsetExists');
+        return $k >= 0 && $k < \count($this->dllist) - $this->__off;
     }
 
     public function offsetGet(mixed $index): mixed
     {
-        if (!$this->offsetExists($index)) { throw new OutOfRangeException('SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range'); }
-        return $this->__items[(int)$index];
+        return $this->dllist[$this->__mcSlot($this->__mcIndex($index, 'offsetGet'), 'offsetGet')];
     }
 
     public function offsetSet(mixed $index, mixed $value): void
     {
-        if ($index === null) { $this->__items[] = $value; return; }
-        if (!$this->offsetExists($index)) { throw new OutOfRangeException('SplDoublyLinkedList::offsetSet(): Argument #1 ($index) is out of range'); }
-        $this->__items[(int)$index] = $value;
+        if ($index === null) { $this->dllist[] = $value; return; }
+        $this->dllist[$this->__mcSlot($this->__mcIndex($index, 'offsetSet'), 'offsetSet')] = $value;
     }
 
     public function offsetUnset(mixed $index): void
     {
-        if (!$this->offsetExists($index)) { throw new OutOfRangeException('SplDoublyLinkedList::offsetUnset(): Argument #1 ($index) is out of range'); }
-        \array_splice($this->__items, (int)$index, 1);
+        \array_splice($this->dllist, $this->__mcSlot($this->__mcIndex($index, 'offsetUnset'), 'offsetUnset'), 1);
+    }
+
+    /** Inserts `$value` so that it becomes element `$index` (counted from the top in LIFO mode). */
+    public function add(int $index, mixed $value): void
+    {
+        $n = \count($this->dllist) - $this->__off;
+        if ($index < 0 || $index > $n) { throw new OutOfRangeException('SplDoublyLinkedList::add(): Argument #1 ($index) is out of range'); }
+        if ($index === $n) { $this->dllist[] = $value; return; }
+        \array_splice($this->dllist, $this->__mcSlot($index, 'add'), 0, [$value]);
     }
 
     public function rewind(): void
     {
-        $this->__pos = ($this->__mode & self::IT_MODE_LIFO) !== 0 ? \count($this->__items) - 1 : 0;
+        $n = \count($this->dllist) - $this->__off;
+        $this->__pos = (($this->flags | $this->__mcFixed()) & 2) !== 0 ? $n - 1 : 0;
+        $this->__live = $n > 0;
     }
 
-    public function valid(): bool
-    {
-        return $this->__pos >= 0 && $this->__pos < \count($this->__items);
-    }
+    public function valid(): bool { return $this->__live; }
 
     public function current(): mixed
     {
-        return $this->valid() ? $this->__items[$this->__pos] : null;
+        // A cursor whose element was removed under it reads null, as php's does.
+        if (!$this->__live || $this->__pos < 0 || $this->__pos >= \count($this->dllist) - $this->__off) { return null; }
+        return $this->dllist[$this->__off + $this->__pos];
     }
 
-    public function key(): mixed
+    public function key(): int { return $this->__pos; }
+
+    public function next(): void { $this->__mcStep((($this->flags | $this->__mcFixed()) & 2) !== 0); }
+
+    public function prev(): void { $this->__mcStep((($this->flags | $this->__mcFixed()) & 2) === 0); }
+
+    /** @return array<int, mixed> */
+    public function __serialize(): array
     {
-        return $this->__pos;
+        return [$this->flags | $this->__mcFixed(), \array_slice($this->dllist, $this->__off), []];
     }
 
-    public function next(): void
+    /** @param array<int, mixed> $data */
+    public function __unserialize(array $data): void
     {
-        $lifo = ($this->__mode & self::IT_MODE_LIFO) !== 0;
-        if (($this->__mode & self::IT_MODE_DELETE) !== 0) {
-            if ($lifo) {
-                \array_pop($this->__items);
-                $this->__pos = \count($this->__items) - 1;
-            } else {
-                \array_shift($this->__items);
-            }
-            return;
+        $this->flags = ((int)$data[0]) & 3;
+        $this->dllist = \array_values($data[1]);
+        $this->__off = 0;
+    }
+
+    /** @return array<string, mixed> */
+    public function __debugInfo(): array
+    {
+        return [
+            "\0SplDoublyLinkedList\0flags" => $this->flags | $this->__mcFixed(),
+            "\0SplDoublyLinkedList\0dllist" => \array_slice($this->dllist, $this->__off),
+        ];
+    }
+
+    /** One cursor step toward the head (`$back`) or the tail, deleting the end it leaves in DELETE mode. */
+    private function __mcStep(bool $back): void
+    {
+        if (!$this->__live) { return; }
+        $delete = ($this->flags & 1) !== 0;
+        if ($back) {
+            $this->__pos = $this->__pos - 1;
+            if ($delete) { $this->pop(); }
+        } elseif ($delete) {
+            $this->shift();
+        } else {
+            $this->__pos = $this->__pos + 1;
         }
-        $this->__pos = $lifo ? $this->__pos - 1 : $this->__pos + 1;
+        $this->__live = $this->__pos >= 0 && $this->__pos < \count($this->dllist) - $this->__off;
     }
 
-    public function prev(): void
+    /** The mode bits an SplStack / SplQueue cannot change. */
+    private function __mcFixed(): int
     {
-        $lifo = ($this->__mode & self::IT_MODE_LIFO) !== 0;
-        $this->__pos = $lifo ? $this->__pos + 1 : $this->__pos - 1;
+        if ($this instanceof SplStack) { return 6; }
+        if ($this instanceof SplQueue) { return 4; }
+        return 0;
+    }
+
+    /** php's `int $index` coercion. */
+    private function __mcIndex(mixed $index, string $fn): int
+    {
+        if (\is_int($index)) { return $index; }
+        if (\is_bool($index) || \is_float($index) || $index === null || (\is_string($index) && \is_numeric($index))) { return (int)$index; }
+        throw new TypeError('SplDoublyLinkedList::' . $fn . '(): Argument #1 ($index) must be of type int, ' . \get_debug_type($index) . ' given');
+    }
+
+    /** The storage slot of element `$k`, counted from the top in LIFO mode. */
+    private function __mcSlot(int $k, string $fn): int
+    {
+        $n = \count($this->dllist) - $this->__off;
+        if ($k < 0 || $k >= $n) { throw new OutOfRangeException('SplDoublyLinkedList::' . $fn . '(): Argument #1 ($index) is out of range'); }
+        return $this->__off + ((($this->flags | $this->__mcFixed()) & 2) !== 0 ? $n - 1 - $k : $k);
     }
 }
 
@@ -1612,10 +1690,6 @@ class SplQueue extends SplDoublyLinkedList
 
 class SplStack extends SplDoublyLinkedList
 {
-    public function __construct()
-    {
-        $this->setIteratorMode(self::IT_MODE_LIFO);
-    }
 }
 
 class SplObjectStorage implements Countable, SeekableIterator, ArrayAccess
