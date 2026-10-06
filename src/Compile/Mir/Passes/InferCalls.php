@@ -1061,7 +1061,15 @@ trait InferCalls
             $seen[$c] = true;
             if ($c === $iface) { return true; }
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
+            // An interface has no ClassDef: its `extends` list is the ancestor
+            // map the emitter walks too ({@see EmitLlvm::classImplements}). Left
+            // out, `foreach` over an `Aware extends \Iterator` slot found no
+            // iterator class here while the emitter drove the protocol, and the
+            // binding was typed erased over the tagged cell `current()` answers.
+            if ($cd === null) {
+                foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
+                continue;
+            }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }
