@@ -31,15 +31,351 @@ trait EmitLlvmExceptions
 
     /** The `invoke` result prefix (`%r = ` or '') of the line {@see ehCallRest} just accepted. */
     private string $ehLhs = '';
+    /** The named callee (`@sym`) of the line {@see ehCallRest} just accepted; '' when indirect. */
+    private string $ehCallee = '';
     /** The Throwable the last {@see ehPad} took off the unwinder. */
     private string $ehPadObj = '';
 
     /** ` personality …` for the `define` of a function that holds a landing pad. */
     private function personalityClause(): string
     {
-        return $this->locals->hasTry ? UnwindRuntime::PERSONALITY : '';
+        return $this->locals->hasTry || $this->ehPersonality ? UnwindRuntime::PERSONALITY : '';
     }
 
+    // ── cleanup pads: an unwind out of the frame drops its owned locals ──
+    //
+    // While a function body is emitted, every may-unwind `call` line a call
+    // node, a `throw` or a try's re-raise produces is MARKED (` ;!eK`) with the
+    // set of locals Own at that point ({@see \Compile\Mir\Call::$ownLive}): K > 0
+    // names a cleanup pad, 0 none. Marking is post-order, so a nested call has
+    // marked its own lines before its parent sees the text; the non-call
+    // operands of a call mark theirs 0, since their state is not the call's.
+    // A try region rewrites its lines to its own pad first ({@see
+    // ehInvokeRegion}: the locals stay alive for the catch); what is still a
+    // marked `call` at the end of a top-level statement becomes `invoke … unwind
+    // label %ehlp.K` ({@see ehLower}). One pad per distinct drop set per
+    // function: `landingpad cleanup`, the drops, `resume`.
+
+    /** Marking is on for the function being emitted. */
+    private bool $ehOn = false;
+    /** The function's define carries a personality for its cleanup pads. */
+    private bool $ehPersonality = false;
+    /** The SSA the function body is emitted in; an outlined helper's nodes are not marked. */
+    private ?\Compile\Mir\SsaBuilder $ehSsa = null;
+    /** The node being emitted is an operand of a call node. */
+    private bool $ehInCall = false;
+    /** Call nodes open around the node being emitted. */
+    private int $ehCallDepth = 0;
+    /** @var array<string, int> drop-set key → pad number */
+    private array $ehPadKeys = [];
+    /** @var array<int, string> pad number → label */
+    private array $ehPadLabels = [];
+    /** @var array<int, string> pad number → its IR */
+    private array $ehPadBodies = [];
+    /** @var array<int, bool> pads some invoke unwinds to */
+    private array $ehPadUsed = [];
+    /** The function being emitted, for its leaf-statement drop sets. */
+    private ?\Compile\Mir\FunctionDef $ehFn = null;
+    /** @var array<int, int> leaf statement `spl_object_id` → its index in {@see \Compile\Mir\FunctionDef::$ownStmtNodes} */
+    private array $ehStmtIdx = [];
+
+    private function ehBegin(\Compile\Mir\FunctionDef $fn): void
+    {
+        $this->ehPadKeys = [];
+        $this->ehPadLabels = [];
+        $this->ehPadBodies = [];
+        $this->ehPadUsed = [];
+        $this->ehInCall = false;
+        $this->ehCallDepth = 0;
+        $this->ehSsa = $this->ssa;
+        $this->ehOn = false;
+        $this->ehPersonality = false;
+        $this->ehFn = null;
+        $this->ehStmtIdx = [];
+        if ($this->nothrow === null || $fn->isGenerator || $this->gen->inGenerator) { return; }
+        $this->ehFn = $fn;
+        foreach ($fn->ownStmtNodes as $si => $st) { $this->ehStmtIdx[\spl_object_id($st)] = $si; }
+        $this->ehPersonality = $fn->ownStmtNodes !== [] || $this->ehNeedsPads($fn->body);
+        $this->ehOn = $this->ehPersonality;
+    }
+
+    /** The used pads' IR, for the end of the function; marking stops. */
+    private function ehEnd(): string
+    {
+        $out = '';
+        foreach ($this->ehPadBodies as $k => $body) {
+            if (isset($this->ehPadUsed[$k])) { $out .= $body; }
+        }
+        $this->ehOn = false;
+        $fn = $this->ehFn;
+        if ($fn !== null) {
+            // The statements are emitted: let them go with the rest of the body.
+            $fn->ownStmtNodes = [];
+            $fn->ownStmtStart = [];
+            $fn->ownStmtEnd = [];
+            $fn->ownStmtDrops = [];
+        }
+        $this->ehFn = null;
+        $this->ehStmtIdx = [];
+        $this->ehPadKeys = [];
+        $this->ehPadLabels = [];
+        $this->ehPadBodies = [];
+        $this->ehPadUsed = [];
+        return $out;
+    }
+
+    /** Some point of `$n` would unwind out of the frame with an owned local. */
+    private function ehNeedsPads(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE) {
+            if ($this->callNeedsPad($n)) { return true; }
+        } elseif ($k === Node::KIND_THROW) {
+            if ($this->ehThrow($n)->ownLive !== []) { return true; }
+        } elseif ($k === Node::KIND_TRY_CATCH) {
+            $t = $this->ehTry($n);
+            if ($t->ownCatch !== [] || $t->ownFinally !== []) { return true; }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->ehNeedsPads($c)) { return true; }
+        }
+        return false;
+    }
+
+    private function ehThrow(Node $n): \Compile\Mir\Throw_ { return $n; }
+    private function ehTry(Node $n): \Compile\Mir\TryCatch_ { return $n; }
+
+    /** {@see emitNode} while marking: emit, then mark this node's own lines. */
+    private function emitNodeEh(Node $n): string
+    {
+        $k = $n->kind;
+        $isCall = $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE;
+        $parent = $this->ehInCall;
+        $this->ehInCall = $isCall;
+        if ($isCall) { $this->ehCallDepth = $this->ehCallDepth + 1; }
+        if ($this->irCensus) {
+            $out = $this->emitNodeCensus($n);
+        } else {
+            $out = $n->accept($this);
+            if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        }
+        if ($isCall) { $this->ehCallDepth = $this->ehCallDepth - 1; }
+        $this->ehInCall = $parent;
+        if ($this->ssa !== $this->ehSsa) { return $out; }
+        if ($isCall) {
+            if (!$this->callNeedsPad($n)) { return $this->ehMark($out, []); }
+            return $this->ehMark($out, \Compile\Mir\NothrowSummary::ownLive($n));
+        }
+        // A throw with nothing to drop leaves its raise to the enclosing call: an
+        // emitter-synthesised one (intdiv's DivisionByZeroError) has no flow state.
+        if ($k === Node::KIND_THROW) {
+            $tl = $this->ehThrow($n)->ownLive;
+            return $tl === [] ? $out : $this->ehMark($out, $tl);
+        }
+        if ($parent) { return $this->ehMark($out, []); }
+        if ($this->ehStmtIdx !== []) {
+            $si = $this->ehStmtIdx[\spl_object_id($n)] ?? -1;
+            if ($si >= 0 && $this->ehFn !== null && $this->ehFn->ownStmtNodes[$si] === $n) {
+                // A return's own drops run after its value: with a destructor
+                // that may throw, one of them may raise mid-drop.
+                if ($k === Node::KIND_RETURN && $this->nothrow !== null && $this->nothrow->releasesRaise()) {
+                    return $out;
+                }
+                return $this->ehMark($out, $this->ehStmtLive($si), true);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Leaf statement `$si`'s drop set ({@see \Compile\Mir\FunctionDef::$ownStmtNodes}).
+     * @return array<string, \Compile\Mir\MemoryOp_>
+     */
+    private function ehStmtLive(int $si): array
+    {
+        $out = [];
+        $fn = $this->ehFn;
+        if ($fn === null) { return $out; }
+        $end = $fn->ownStmtEnd[$si];
+        for ($i = $fn->ownStmtStart[$si]; $i < $end; $i = $i + 1) {
+            $op = $fn->ownStmtDrops[$i];
+            $t = $op->target;
+            if ($t === null || $t->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $out[$this->asLoadLocalNode($t)->name] = $op;
+        }
+        return $out;
+    }
+    /**
+     * `$text` with every unmarked may-unwind `call` line marked for the drop
+     * set `$live` (pad 0 when it drops nothing). Nothing to do when the set
+     * is empty and no enclosing call node would mark the lines instead.
+     *
+     * `$raisesOnly`: only the emitter's own raises (a statement's set covers
+     * the throws it synthesises, not every helper of it).
+     *
+     * @param array<string, \Compile\Mir\MemoryOp_> $live
+     */
+    private function ehMark(string $text, array $live, bool $raisesOnly = false): string
+    {
+        if (!$this->ehOn) { return $text; }
+        if ($live === [] && $this->ehCallDepth === 0) { return $text; }
+        if (\strpos($text, 'call ') === false) { return $text; }
+        $pad = $live === [] ? 0 : $this->ehPadFor($live);
+        if ($pad === 0 && $this->ehCallDepth === 0) { return $text; }
+        $tag = ' ;!e' . (string)$pad;
+        $lines = \explode("\n", $text);
+        $n = \count($lines);
+        $changed = false;
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $l = $lines[$i];
+            if (\strlen($l) < 8 || $l[0] !== ' ') { continue; }
+            if (\strpos($l, 'call ') === false || \strpos($l, ' ;!e') !== false) { continue; }
+            if (!$this->ehLineMayThrow($l)) { continue; }
+            if ($raisesOnly && !$this->ehRaiseCallee($this->ehCallee)) { continue; }
+            $lines[$i] = $l . $tag;
+            $changed = true;
+        }
+        return $changed ? \implode("\n", $lines) : $text;
+    }
+
+    /** A raise the emitter synthesises: `@__mc_throw`, or a php-bodied `__mir_*_error` thrower. */
+    private function ehRaiseCallee(string $c): bool
+    {
+        return $c === '@__mc_throw'
+            || (\str_starts_with($c, '@manticore___mir_') && \str_ends_with($c, '_error'));
+    }
+
+    /** @var array<string, bool> `@manticore_*` symbols of functions that cannot unwind */
+    private array $ehNothrowSyms = [];
+    private bool $ehNothrowSymsBuilt = false;
+
+    /**
+     * May the `call` line `$l` unwind, for a cleanup pad? A judged nothrow
+     * function cannot; a runtime helper can unless it is a retain, an
+     * allocation or a plain container read, or a release while no destructor
+     * of the module may throw ({@see \Compile\Mir\NothrowSummary::releasesRaise}).
+     * Anything else — a php function, a dispatch helper that runs user code,
+     * a conversion that may call `__toString`, an indirect call — may.
+     */
+    private function ehLineMayThrow(string $l): bool
+    {
+        if ($this->ehCallRest($l) === '') { return false; }
+        $c = $this->ehCallee;
+        if ($c === '') { return true; }
+        if (\str_starts_with($c, '@manticore_')) {
+            if (!$this->ehNothrowSymsBuilt) {
+                $this->ehNothrowSymsBuilt = true;
+                if ($this->nothrow !== null) {
+                    foreach ($this->nothrow->nothrowNames() as $fn) {
+                        $this->ehNothrowSyms['@manticore_' . $this->mangle($fn)] = true;
+                    }
+                }
+            }
+            return !isset($this->ehNothrowSyms[$c]);
+        }
+        if (\str_starts_with($c, '@__mir_array_retain') || \str_starts_with($c, '@__mir_alloc')
+            || $c === '@__mir_cell_retain' || $c === '@__mir_str_alloc' || $c === '@__mir_str_from_cstr'
+            || $c === '@__mir_array_alloc' || $c === '@__mir_array_value_at' || $c === '@__mir_array_live_len'
+            || $c === '@__mir_array_key_cell_at' || $c === '@__mir_strlen' || $c === '@__mir_dtor_reg') {
+            return false;
+        }
+        if ($this->nothrow !== null && !$this->nothrow->releasesRaise()) {
+            if ($c === '@__mir_cell_drop' || \str_starts_with($c, '@__mir_rc_release')
+                || \str_starts_with($c, '@__mir_array_release') || $c === '@__mir_closure_release') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * A try's re-raise marked for `$live`, outside any node's marking.
+     * @param array<string, \Compile\Mir\MemoryOp_> $live
+     */
+    private function ehMarkRaise(string $text, array $live): string
+    {
+        if (!$this->ehOn || $live === [] || $this->ssa !== $this->ehSsa) { return $text; }
+        return $this->ehMark($text, $live);
+    }
+
+    /**
+     * The cleanup pad dropping `$live` (registered on first use), or 0 when no
+     * name of it has a slot this frame releases.
+     *
+     * @param array<string, \Compile\Mir\MemoryOp_> $live
+     */
+    private function ehPadFor(array $live): int
+    {
+        $key = '';
+        foreach ($live as $name => $op) {
+            if ($this->ownOpSlot($op) === '') { continue; }
+            $key .= $name . '=' . $this->rcReleaseFlavor($op) . ';';
+        }
+        if ($key === '') { return 0; }
+        if (isset($this->ehPadKeys[$key])) { return $this->ehPadKeys[$key]; }
+        $pad = \count($this->ehPadKeys) + 1;
+        $this->ehPadKeys[$key] = $pad;
+        $lbl = $this->ssa->allocLabel('ehlp');
+        $this->ehPadLabels[$pad] = $lbl;
+        $lp = $this->ssa->allocReg();
+        $body = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n";
+        foreach ($live as $name => $op) {
+            $slot = $this->ownOpSlot($op);
+            if ($slot === '') { continue; }
+            $body .= $this->ownDropIr($slot, $op);
+        }
+        $body .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $this->ehPadBodies[$pad] = $body;
+        return $pad;
+    }
+
+    /**
+     * One top-level statement's IR with its marks resolved: a `call` marked
+     * for a pad becomes `invoke … unwind label %pad` (the block continues at a
+     * fresh label, and a `phi` naming the split block is retargeted, as in
+     * {@see ehInvokeRegion}); every mark is removed.
+     */
+    private function ehLower(string $text): string
+    {
+        if (!$this->ehOn || \strpos($text, ' ;!e') === false) { return $text; }
+        $lines = \explode("\n", $text);
+        $n = \count($lines);
+        $cur = '';
+        /** @var array<string, string> */
+        $last = [];
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $l = $lines[$i];
+            $len = \strlen($l);
+            if ($len === 0) { continue; }
+            if ($l[0] !== ' ') {
+                if ($l[$len - 1] === ':' && $l[0] !== ';') { $cur = \substr($l, 0, $len - 1); }
+                continue;
+            }
+            $m = \strpos($l, ' ;!e');
+            if ($m === false) { continue; }
+            $pad = (int)\substr($l, $m + 4);
+            $l = \substr($l, 0, $m);
+            $lines[$i] = $l;
+            if ($pad === 0) { continue; }
+            $rest = $this->ehCallRest($l);
+            if ($rest === '') { continue; }
+            $k = $this->ssa->allocLabel('eh.c');
+            $lines[$i] = '  ' . $this->ehLhs . 'invoke ' . $rest . ' to label %' . $k
+                . ' unwind label %' . $this->ehPadLabels[$pad] . "\n" . $k . ':';
+            $this->ehPadUsed[$pad] = true;
+            if ($cur !== '') { $last[$cur] = $k; }
+        }
+        if ($last !== []) {
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                if (\strpos($lines[$i], ' = phi ') !== false) {
+                    $lines[$i] = $this->ehPhiRetarget($lines[$i], $last);
+                }
+            }
+        }
+        return \implode("\n", $lines);
+    }
     /** A PHP catch pad at `$label`; the Throwable lands in {@see $ehPadObj}. */
     private function ehPad(string $label): string
     {
@@ -112,6 +448,7 @@ trait EmitLlvmExceptions
     {
         $body = \substr($l, 2);
         $lhs = '';
+        $callee = '';
         if ($body !== '' && $body[0] === '%') {
             $eq = \strpos($body, ' = ');
             if ($eq === false) { return ''; }
@@ -138,6 +475,9 @@ trait EmitLlvmExceptions
             if ($this->ehNounwind($callee)) { return ''; }
         }
         $this->ehLhs = $lhs;
+        $this->ehCallee = $rest[$p] === '@' ? $callee : '';
+        $mk = \strpos($rest, ' ;!e');
+        if ($mk !== false) { return \substr($rest, 0, $mk); }
         return $rest;
     }
 
@@ -407,7 +747,7 @@ trait EmitLlvmExceptions
             }
             // No catch matched — raise it again from here: the finally pad below
             // (when there is one) or the next frame out.
-            $region .= $this->emitRethrowAt($thrown);
+            $region .= $this->ehMarkRaise($this->emitRethrowAt($thrown), $n->ownCatch);
         }
 
         if (!$hasFinally) {
@@ -438,7 +778,7 @@ trait EmitLlvmExceptions
             $out .= $rethrowLbl . ":\n";
             $sv = $this->ssa->allocReg();
             $out .= '  ' . $sv . ' = load ptr, ptr ' . $pendVal . "\n";
-            $out .= $this->emitRethrowAt($sv);
+            $out .= $this->ehMarkRaise($this->emitRethrowAt($sv), $n->ownFinally);
         }
 
         $out .= $endLbl . ":\n";

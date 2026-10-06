@@ -164,6 +164,18 @@ final class OwnLattice implements Lattice
     public array $callAt = [];
     /** @var array<int, array<string, int>> the Own names before it runs, name → class */
     public array $callOwn = [];
+    /** @var array<int, Node> every leaf statement reached, by `spl_object_id` */
+    public array $leafAt = [];
+    /** @var array<int, array<string, int>> the Own names when it is entered */
+    public array $leafOwn = [];
+    /** @var array<int, Node> every try with a catch arm reached, by `spl_object_id` */
+    public array $catchAt = [];
+    /** @var array<int, array<string, int>> the Own names at its catch entry */
+    public array $catchOwn = [];
+    /** @var array<int, Node> every try whose finally ends reachably, by `spl_object_id` */
+    public array $finAt = [];
+    /** @var array<int, array<string, int>> the Own names when its finally ends */
+    public array $finOwn = [];
 
     /**
      * The ONE map from an {@see \Compile\Mir\Ownership} code to a state, for a
@@ -372,6 +384,18 @@ final class OwnLattice implements Lattice
     }
 
 
+    /** @param array<string, int> $in */
+    public function leaf(Node $n, array $in): void
+    {
+        $own = [];
+        foreach ($in as $name => $x) {
+            if ($x > 0) { $own[$name] = $x; }
+        }
+        $id = \spl_object_id($n);
+        $this->leafAt[$id] = $n;
+        $this->leafOwn[$id] = $own;
+    }
+
     /**
      * @param array<string, int> $out
      * @param array<string, int> $joined
@@ -387,6 +411,20 @@ final class OwnLattice implements Lattice
             $this->thrAt[] = $at;
             $this->thrOut[] = $out;
             return;
+        }
+        if ($kind === 'catch' || $kind === 'finexit') {
+            $own = [];
+            foreach ($out as $n => $x) {
+                if ($x > 0) { $own[$n] = $x; }
+            }
+            $id = \spl_object_id($at);
+            if ($kind === 'finexit') {
+                $this->finAt[$id] = $at;
+                $this->finOwn[$id] = $own;
+                return;
+            }
+            $this->catchAt[$id] = $at;
+            $this->catchOwn[$id] = $own;
         }
         foreach ($out as $n => $o) {
             if ($o <= 0) { continue; }

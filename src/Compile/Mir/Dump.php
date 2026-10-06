@@ -112,17 +112,19 @@ final class Dump implements EmitVisitor
 
     /**
      * A call's {@see Call::$ownLive}: `  ; own: a=str,b=obj`, or ''.
-     * @param array<string, string> $live
+     * @param array<string, MemoryOp_> $live
      */
     private static function own(array $live): string
     {
         if ($live === []) { return ''; }
         $out = '';
-        foreach ($live as $name => $flavor) {
-            $out .= ($out === '' ? '' : ',') . $name . '=' . $flavor;
+        foreach ($live as $name => $op) {
+            $out .= ($out === '' ? '' : ',') . $name . '=' . self::opFlavor($op);
         }
         return '  ; own: ' . $out;
     }
+
+    private static function opFlavor(MemoryOp_ $op): string { return $op->flavor; }
 
     private int $nextId = 0;
 

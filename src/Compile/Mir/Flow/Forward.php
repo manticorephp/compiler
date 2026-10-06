@@ -81,6 +81,8 @@ use Compile\Mir\While_;
  *                       implicit return at the end of the body: the body Block
  *                       / its last stmt, null when the body is empty
  *   throw               the Throw_ / itself
+ *   finexit             TryCatch_ / the finally's last stmt: the state its
+ *                       re-raise of a pending exception leaves with (no target)
  */
 final class Forward
 {
@@ -396,6 +398,7 @@ final class Forward
             $this->jump('goto', $n, $n, -1, $n->label, $s);
             return self::deadState();
         }
+        $this->lattice->leaf($n, $s);
         if ($n instanceof Return_) {
             $out = $this->expr($n, $s);
             if (!self::isDead($out)) { $this->jump('return', $n, $n, -1, '', $out); }
@@ -815,6 +818,7 @@ final class Forward
             if (!self::isDead($fOut)) { $this->jump($kind, $at, $fTail, $target, $label, $fOut); }
         }
         if (self::isDead($fOut)) { return $fOut; }
+        $this->edge('finexit', $n, $fTail, 0, $fOut, $fOut);
         $this->mayThrow($fOut);
         return self::isDead($norm) ? $norm : $fOut;
     }

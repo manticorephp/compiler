@@ -55,4 +55,12 @@ interface Lattice
      * @param array<string, int> $joined
      */
     public function onEdge(string $kind, Node $at, ?Node $pred, array $out, array $joined): void;
+
+    /**
+     * A statement that holds no statement (an expression statement, a return)
+     * is entered in `$in`. Called on every visit; the last is the converged one.
+     *
+     * @param array<string, int> $in
+     */
+    public function leaf(Node $n, array $in): void;
 }
