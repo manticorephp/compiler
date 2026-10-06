@@ -229,9 +229,12 @@ trait EmitLlvmLocals
             // and can disagree, so a foreach can take it with iterClass still
             // ''. An unused 8-byte slot costs nothing — LLVM drops it — while a
             // missed hoist is an invalid-IR build failure.
+            // OwnershipFlow names the ones it owns ({@see Foreach_::$ownDropIter}).
             if ($n->iterName === '') {
                 $n->iterName = '@it.' . (string)$this->iterCounter;
                 $this->iterCounter = $this->iterCounter + 1;
+            }
+            if (!isset($this->locals->slots[$n->iterName])) {
                 $is = $this->ssa->allocReg();
                 $this->locals->slots[$n->iterName] = $is;
                 $out .= $this->localSlotAlloca($is);

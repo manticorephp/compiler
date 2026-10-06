@@ -84,6 +84,11 @@ final class OwnLattice implements Lattice
     public array $feKeyState = [];
     /** @var array<int, int> */
     public array $feKeyKey = [];
+    /** @var array<int, string> foreach id → the hidden local holding the
+     *  iterator `getIterator()` handed the loop, which owns it */
+    public array $feItName = [];
+    /** @var array<int, int> its class */
+    public array $feItKey = [];
 
     /** @var array<int, string> rc-typed LoadLocal id → name (Unset_ targets and
      *  the pass's own op targets excluded) */
@@ -126,6 +131,11 @@ final class OwnLattice implements Lattice
     public array $feValIn = [];
     /** @var array<int, int> */
     public array $feKeyIn = [];
+    /** @var array<int, int> foreach id → the iterator local's state at the head */
+    public array $feItIn = [];
+    /** @var array<int, array<string, int>> foreach id → the Own names while the
+     *  loop steps its iterator, name → class */
+    public array $feOwn = [];
     /** @var array<int, array<string, int>> unset id → state before */
     public array $unsetIn = [];
 
@@ -321,8 +331,13 @@ final class OwnLattice implements Lattice
             foreach ($this->unsetNames[$id] as $n) { unset($out[$n]); }
             return $out;
         }
-        if (isset($this->feValName[$id]) || isset($this->feKeyName[$id])) {
+        if (isset($this->feValName[$id]) || isset($this->feKeyName[$id]) || isset($this->feItName[$id])) {
             $out = $in;
+            if (isset($this->feItName[$id])) {
+                $n = $this->feItName[$id];
+                $this->feItIn[$id] = $in[$n] ?? self::EMPTY;
+                $out = $this->with($out, $n, $this->feItKey[$id]);
+            }
             if (isset($this->feValName[$id])) {
                 $n = $this->feValName[$id];
                 $this->feValIn[$id] = $in[$n] ?? self::EMPTY;
@@ -337,6 +352,14 @@ final class OwnLattice implements Lattice
                 if (self::isBorrow($v) && isset($this->force[$n])) { $v = self::borrowKey($v); }
                 $out = $this->with($out, $n, $v);
             }
+            // What an exception out of a protocol step leaves behind: the
+            // head's owned names (the slots still hold them) and the iterator.
+            $own = [];
+            foreach ($in as $n => $x) {
+                if ($x > 0) { $own[$n] = $x; }
+            }
+            if (isset($this->feItName[$id])) { $own[$this->feItName[$id]] = $this->feItKey[$id]; }
+            $this->feOwn[$id] = $own;
             return $out;
         }
         if (isset($this->loadName[$id])) {
@@ -370,7 +393,7 @@ final class OwnLattice implements Lattice
         }
         $k = $stmt->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE) {
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE || $k === Node::KIND_YIELD) {
             // The last visit is the converged one: a loop re-walks its body
             // until the head state is stable.
             $own = [];

@@ -289,8 +289,19 @@ static method or closure that DECLARES a bare `array` / `?array` return
 `array`) returns +1 on EVERY path — a borrowed value is retained by its tag, every arm of a
 conditional is normalized — so a caller owns what such a call hands back: a local stores it
 at the `erasedarr` class (raw buffer or tagged cell, split by tag at every retain and drop),
-an argument temp or a discarded result is released after the call. A generator stores its return value in the frame
-without a retain; the frame does not release it yet. By-reference binding forwards the slot
+an argument temp or a discarded result is released after the call. A generator FRAME owns what it holds
+(ABI v17): its params from creation (the creator takes their +1), its locals, and the four
+header cells — `current`@16, `key`@24, `sent`@40, `retval`@48, each a tagged cell. Every reader
+(`current()`, `key()`, `getReturn()`, a `foreach` value / key var) takes its own +1; a `yield`
+expression MOVES the sent value out of `sent`. The frame is freed through the string release,
+and `__mir_str_reclaim` calls `__mir_gen_destroy` on it first: a frame that is not finished
+(state ≥ 0) re-enters its resume function at `-2 - state`, where each yield carries the exit
+of a generator abandoned there — the `finally` of every enclosing try, then the drops of the
+locals OwnershipFlow has Own at that point (`Yield_::$ownLive`, or the outermost `finally`'s
+`ownFinally`) — and a frame nobody started drops its params; then the header cells are
+dropped. The resume entry stores state -1, so an exception that leaves the body leaves the
+generator finished, and its unwind drops the locals through the same cleanup pads as any
+other function. By-reference binding forwards the slot
 to a shared cell and bypasses rc ops at the binding site; the underlying buffer stays owned
 by whichever local holds it.
 
@@ -442,6 +453,8 @@ A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.
   (libgcc_eh.a), so no `libgcc_s.so` dependency is added.
 - Fiber context (64 B, `EmitLlvmFiber`): the five arena globals at 0..39, bytes
   40..55 unused (they held the setjmp try-slot stack before v15), `@__mir_thrown` at 56.
+  The context OWNS the arena it saved: `__mir_fiber_ctx_free` walks the chunk chain
+  (head at 0, each chunk's next at its offset 0), frees the mark stack (16), then the block.
 
 ## 8. Debug and verification
 

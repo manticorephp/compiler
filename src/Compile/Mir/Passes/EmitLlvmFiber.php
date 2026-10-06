@@ -590,14 +590,50 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_ctx_free(ctx) : void — free the ctx block. */
+    /**
+     * __mir_fiber_ctx_free(ctx) : void — free the ctx block AND the arena it
+     * saved: the fiber ran on its own chunk chain (head@0, each chunk's next at
+     * its offset 0) and mark stack (@16), which nothing else points to once the
+     * fiber is gone — every task that reached an arena scope kept its chunks.
+     */
     private function biFiberCtxFree(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $cp = $this->ssa->allocReg();
         $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . ' to ptr' . "\n";
+        $pre = $this->ssa->allocLabel('fcf.pre');
+        $head = $this->ssa->allocLabel('fcf.chunk');
+        $body = $this->ssa->allocLabel('fcf.free');
+        $tail = $this->ssa->allocLabel('fcf.marks');
+        $done = $this->ssa->allocLabel('fcf.done');
+        $nn = $this->ssa->allocReg();
+        $h = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $ce = $this->ssa->allocReg();
+        $nx = $this->ssa->allocReg();
+        $mp = $this->ssa->allocReg();
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $nn . ' = icmp eq ptr ' . $cp . ", null\n";
+        $out .= '  br i1 ' . $nn . ', label %' . $done . ', label %' . $pre . "\n";
+        $out .= $pre . ":\n";
+        $out .= '  ' . $h . ' = load ptr, ptr ' . $cp . "\n";
+        $out .= '  br label %' . $head . "\n";
+        $out .= $head . ":\n";
+        $out .= '  ' . $c . ' = phi ptr [ ' . $h . ', %' . $pre . ' ], [ ' . $nx . ', %' . $body . " ]\n";
+        $out .= '  ' . $ce . ' = icmp eq ptr ' . $c . ", null\n";
+        $out .= '  br i1 ' . $ce . ', label %' . $tail . ', label %' . $body . "\n";
+        $out .= $body . ":\n";
+        $out .= '  ' . $nx . ' = load ptr, ptr ' . $c . "\n";
+        $out .= '  call void @free(ptr ' . $c . ")\n";
+        $out .= '  br label %' . $head . "\n";
+        $out .= $tail . ":\n";
+        $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $cp . ", i64 16\n";
+        $out .= '  ' . $m . ' = load ptr, ptr ' . $mp . "\n";
+        $out .= '  call void @free(ptr ' . $m . ")\n";
         $out .= '  call void @free(ptr ' . $cp . ")\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
