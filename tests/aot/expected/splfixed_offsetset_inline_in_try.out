@@ -1,0 +1,4 @@
+caught OutOfBoundsException trace
+0='a'
+1=NULL
+2='c'
