@@ -359,9 +359,15 @@ final class OwnershipFlow implements Pass
         }
         // The emitter retains a co-owning binding at the NAME's registered
         // class; a loop whose element class is another one binds a borrow.
+        // An ITERATOR step hands the loop a +1 whatever the name's class is
+        // (a generator's `current`, a `current()` call), and the emitter
+        // retains / drops it at the LOOP's class ({@see Foreach_::$ownBind}):
+        // bound as a borrow, a name two such loops share at two classes kept
+        // one reference per iteration of the second.
         foreach ($lat->feValName as $id => $name) {
             $st = $lat->feValState[$id];
             if ($st > 0 && ($this->regKey[$name] ?? 0) !== $st) {
+                if (isset($this->feById[$id]) && $this->feById[$id]->array->type->kind === Type::KIND_OBJ) { continue; }
                 $lat->feValState[$id] = OwnLattice::borrow($st);
             }
         }
@@ -1671,7 +1677,8 @@ final class OwnershipFlow implements Pass
 
         foreach ($this->feById as $id => $fe) {
             $fe->ownCoOwn = isset($l->feValName[$id]) && $l->feValState[$id] > 0
-                && ($this->regKey[$fe->valueVar] ?? 0) === $l->feValState[$id];
+                && (($this->regKey[$fe->valueVar] ?? 0) === $l->feValState[$id] || $fe->array->type->kind === Type::KIND_OBJ);
+            $fe->ownBind = $fe->ownCoOwn ? $this->dropOp($fe->valueVar, $l->feValState[$id]) : null;
             if (isset($l->feValIn[$id])) {
                 $x = $l->feValIn[$id];
                 if ($x > 0 && $rel) { $fe->ownDropValue = $this->dropOp($fe->valueVar, $x); }

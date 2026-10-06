@@ -647,13 +647,13 @@ trait EmitLlvmControl
         $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
         // The iterator `getIterator()` handed back is the loop's own (+1): give
         // it back when the loop ends — it held the subject, and with it every
-        // element (a SplFixedArray's). Only a concrete, non-Generator class: an
-        // interface-typed one may be a Generator at run time, whose frame is
-        // released through another header. A `return` / `break N` / `continue N`
-        // out of the body branches past the end label, so it releases the same
-        // slot on its way out ({@see ControlFlow::aggItersLeftBy}).
-        $owns = $fe->iterAggregate && $fe->iterClass !== 'Generator'
-            && ($dyn || isset($this->classes[$fe->iterClass]));
+        // element (a SplFixedArray's). A Generator frame is given back the same
+        // way: the object release routes on the header, and the frame lets go
+        // of what it holds ({@see EmitLlvmGenerator}). A `return` / `break N` /
+        // `continue N` out of the body branches past the end label, so it
+        // releases the same slot on its way out ({@see ControlFlow::aggItersLeftBy}).
+        $owns = $fe->iterAggregate
+            && ($fe->iterClass === 'Generator' || $dyn || isset($this->classes[$fe->iterClass]));
         if ($owns) { $this->cf->pushAggIter($iterSlot, $dyn); }
         $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
         if ($owns) {
@@ -722,17 +722,9 @@ trait EmitLlvmControl
         }
         $it = $this->ssa->allocReg();
         $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
-        if ($dyn) {
-            // `getIterator(): Iterator` (SplFixedArray's own) may still be a
-            // Generator frame at run time: release only an object, by the
-            // same probe every protocol step takes.
-            $out .= $this->genFrameProbeIr($it);
-            $obj = $this->ssa->allocReg();
-            $out .= '  ' . $obj . ' = select i1 ' . $this->genFrameReg . ', i64 0, i64 ' . $it . "\n";
-            $out .= $this->rcReleaseReg($obj, 'obj');
-        } else {
-            $out .= $this->rcReleaseReg($it, 'obj');
-        }
+        // An object or — `getIterator(): Iterator` may hand one back at run
+        // time — a Generator frame: `__mir_rc_release` routes on the header.
+        $out .= $this->rcReleaseReg($it, 'obj');
         $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
         if ($skipL !== '') {
             $out .= '  br label %' . $skipL . "\n" . $skipL . ":\n";
@@ -1101,7 +1093,7 @@ trait EmitLlvmControl
      */
     private function foreachOwnedRebind(Foreach_ $fe, string $cur, bool $retain): string
     {
-        $fl = $this->rcReleaseFlavor($this->frame->ownLocals[$fe->valueVar]);
+        $fl = $this->rcReleaseFlavor($fe->ownBind ?? $this->frame->ownLocals[$fe->valueVar]);
         if ($fl === '') { return ''; }
         $out = $retain ? $this->rcRetainReg($cur, $fl) : '';
         return $out . $this->foreachPrevDrop($fe, false);

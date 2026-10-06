@@ -1433,6 +1433,9 @@ final class Foreach_ extends Node
     /** Set by {@see Passes\OwnershipFlow}: the key var takes its own +1 of a
      *  generator's key — the frame drops its own at the next yield. */
     public bool $ownKey = false;
+    /** Set by {@see Passes\OwnershipFlow} on a co-owning loop: a `drop` of the
+     *  value var at the class THIS loop binds it — the flavor its retain takes. */
+    public ?MemoryOp_ $ownBind = null;
 
     public function accept(EmitVisitor $v): string
     {

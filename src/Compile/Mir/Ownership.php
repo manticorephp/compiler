@@ -287,7 +287,7 @@ final class Ownership
             // retains a borrowed closure it returns
             // ({@see returnBorrowsObj}), a returned owned
             // local transfers. So a call / invoke producer is owned; any other
-            // (an alias, a property read) stays a borrow; an element read co-owns. Refusing
+            // (a property read) stays a borrow; an element read and an alias co-own. Refusing
             // them all meant a closure that left the frame that built it —
             // returned, then dropped — was never released, nor was anything
             // it captured.
@@ -296,6 +296,12 @@ final class Ownership
                 if ($ck === Node::KIND_CALL) { return !isset($this->ctx->externFns[$value->function]); }
                 if ($ck === Node::KIND_ARRAY_ACCESS) { return \Compile\Debug::$rcElemReadOwns; }
                 if ($this->propReadCoOwns($value)) { return true; }
+                // `$fn = $s` over an `obj<__closure_N>` (a monomorphized
+                // `callable` param): the store retains it like any object alias
+                // ({@see AliasOwn::coOwns}, {@see Passes\EmitLlvmLocals}'s
+                // $aliasObjStr), so the local owns that +1 — read as a borrow,
+                // every call kept the env.
+                if (AliasOwn::coOwns($value)) { return true; }
                 return $ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL
                     || $ck === Node::KIND_INVOKE;
             }

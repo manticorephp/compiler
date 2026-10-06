@@ -453,6 +453,8 @@ A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.
   (libgcc_eh.a), so no `libgcc_s.so` dependency is added.
 - Fiber context (64 B, `EmitLlvmFiber`): the five arena globals at 0..39, bytes
   40..55 unused (they held the setjmp try-slot stack before v15), `@__mir_thrown` at 56.
+  The context OWNS the arena it saved: `__mir_fiber_ctx_free` walks the chunk chain
+  (head at 0, each chunk's next at its offset 0), frees the mark stack (16), then the block.
 
 ## 8. Debug and verification
 
