@@ -168,6 +168,17 @@ namespace Manticore\Ds {
         }
 
         /** First position >= `$from` holding `$value`, or -1. */
+        /** Element-wise equality with the same class of array. */
+        abstract protected function sameRaw(TypedArray $other): bool;
+
+        /** Whether `$other` is the same class of array with the same elements. */
+        public function equals(TypedArray $other): bool
+        {
+            return \get_class($other) === static::class
+                && __mc_nbuf_len($other->__mcbuf) === __mc_nbuf_len($this->__mcbuf)
+                && $this->sameRaw($other);
+        }
+
         public function indexOf(mixed $value, int $from = 0): int
         {
             try {
@@ -271,9 +282,9 @@ namespace Manticore\Ds {
      */
     abstract class IntTypedArray extends TypedArray
     {
-        abstract protected function min(): int;
+        abstract protected function rangeMin(): int;
 
-        abstract protected function max(): int;
+        abstract protected function rangeMax(): int;
 
         public function offsetGet(mixed $offset): int
         {
@@ -287,7 +298,7 @@ namespace Manticore\Ds {
         {
             // The common store, without the offset and value normalisers.
             if (\is_int($offset) && \is_int($value) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf)
-                && $value >= $this->min() && $value <= $this->max()) {
+                && $value >= $this->rangeMin() && $value <= $this->rangeMax()) {
                 __mc_nbuf_set_i($this->__mcbuf, $offset, $value);
                 return;
             }
@@ -318,7 +329,7 @@ namespace Manticore\Ds {
                 }
                 if ($f < -9223372036854775808.0 || $f >= 9223372036854775808.0) {
                     throw new \ValueError('Value ' . (string)$f . ' is out of range for ' . $this->shortName()
-                        . ' (' . (string)$this->min() . '..' . (string)$this->max() . ')');
+                        . ' (' . (string)$this->rangeMin() . '..' . (string)$this->rangeMax() . ')');
                 }
                 $i = (int)$f;
             }
@@ -327,9 +338,9 @@ namespace Manticore\Ds {
 
         private function inRange(int $i): int
         {
-            if ($i < $this->min() || $i > $this->max()) {
+            if ($i < $this->rangeMin() || $i > $this->rangeMax()) {
                 throw new \ValueError('Value ' . (string)$i . ' is out of range for ' . $this->shortName()
-                    . ' (' . (string)$this->min() . '..' . (string)$this->max() . ')');
+                    . ' (' . (string)$this->rangeMin() . '..' . (string)$this->rangeMax() . ')');
             }
             return $i;
         }
@@ -342,6 +353,25 @@ namespace Manticore\Ds {
         protected function findRaw(mixed $c, int $from): int
         {
             return __mc_nbuf_find_i($this->__mcbuf, (int)$c, $from);
+        }
+        /** The sum of the elements (wraps past the int range, as native ints do). */
+        public function sum(): int { return __mc_nbuf_reduce_i($this->__mcbuf, 0); }
+
+        public function min(): int
+        {
+            if (__mc_nbuf_len($this->__mcbuf) === 0) { throw new \ValueError($this->shortName() . '::min(): array must contain at least one element'); }
+            return __mc_nbuf_reduce_i($this->__mcbuf, 1);
+        }
+
+        public function max(): int
+        {
+            if (__mc_nbuf_len($this->__mcbuf) === 0) { throw new \ValueError($this->shortName() . '::max(): array must contain at least one element'); }
+            return __mc_nbuf_reduce_i($this->__mcbuf, 2);
+        }
+
+        protected function sameRaw(TypedArray $other): bool
+        {
+            return __mc_nbuf_same($this->__mcbuf, $other->__mcbuf) !== 0;
         }
     }
 
@@ -389,55 +419,74 @@ namespace Manticore\Ds {
         {
             return __mc_nbuf_find_f($this->__mcbuf, (float)$c, $from);
         }
+        /** The sum of the elements (summed in index order). */
+        public function sum(): float { return __mc_nbuf_reduce_f($this->__mcbuf, 0); }
+
+        public function min(): float
+        {
+            if (__mc_nbuf_len($this->__mcbuf) === 0) { throw new \ValueError($this->shortName() . '::min(): array must contain at least one element'); }
+            return __mc_nbuf_reduce_f($this->__mcbuf, 1);
+        }
+
+        public function max(): float
+        {
+            if (__mc_nbuf_len($this->__mcbuf) === 0) { throw new \ValueError($this->shortName() . '::max(): array must contain at least one element'); }
+            return __mc_nbuf_reduce_f($this->__mcbuf, 2);
+        }
+
+        protected function sameRaw(TypedArray $other): bool
+        {
+            return __mc_nbuf_same($this->__mcbuf, $other->__mcbuf) !== 0;
+        }
     }
 
     final class Int8Array extends IntTypedArray
     {
         protected function kind(): int { return 1; }
-        protected function min(): int { return -128; }
-        protected function max(): int { return 127; }
+        protected function rangeMin(): int { return -128; }
+        protected function rangeMax(): int { return 127; }
     }
 
     final class Int16Array extends IntTypedArray
     {
         protected function kind(): int { return 2; }
-        protected function min(): int { return -32768; }
-        protected function max(): int { return 32767; }
+        protected function rangeMin(): int { return -32768; }
+        protected function rangeMax(): int { return 32767; }
     }
 
     final class Int32Array extends IntTypedArray
     {
         protected function kind(): int { return 3; }
-        protected function min(): int { return -2147483648; }
-        protected function max(): int { return 2147483647; }
+        protected function rangeMin(): int { return -2147483648; }
+        protected function rangeMax(): int { return 2147483647; }
     }
 
     final class Int64Array extends IntTypedArray
     {
         protected function kind(): int { return 4; }
-        protected function min(): int { return \PHP_INT_MIN; }
-        protected function max(): int { return \PHP_INT_MAX; }
+        protected function rangeMin(): int { return \PHP_INT_MIN; }
+        protected function rangeMax(): int { return \PHP_INT_MAX; }
     }
 
     final class UInt8Array extends IntTypedArray
     {
         protected function kind(): int { return 5; }
-        protected function min(): int { return 0; }
-        protected function max(): int { return 255; }
+        protected function rangeMin(): int { return 0; }
+        protected function rangeMax(): int { return 255; }
     }
 
     final class UInt16Array extends IntTypedArray
     {
         protected function kind(): int { return 6; }
-        protected function min(): int { return 0; }
-        protected function max(): int { return 65535; }
+        protected function rangeMin(): int { return 0; }
+        protected function rangeMax(): int { return 65535; }
     }
 
     final class UInt32Array extends IntTypedArray
     {
         protected function kind(): int { return 7; }
-        protected function min(): int { return 0; }
-        protected function max(): int { return 4294967295; }
+        protected function rangeMin(): int { return 0; }
+        protected function rangeMax(): int { return 4294967295; }
     }
 
     /** Elements are stored as IEEE-754 binary32: a read returns the rounded value. */
@@ -484,6 +533,13 @@ namespace Manticore\Ds {
         protected function findRaw(mixed $c, int $from): int
         {
             return __mc_nbuf_find_i($this->__mcbuf, (int)$c, $from);
+        }
+        /** The number of set bits. */
+        public function sum(): int { return __mc_nbuf_reduce_i($this->__mcbuf, 0); }
+
+        protected function sameRaw(TypedArray $other): bool
+        {
+            return __mc_nbuf_same($this->__mcbuf, $other->__mcbuf) !== 0;
         }
     }
 }

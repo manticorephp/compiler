@@ -55,6 +55,9 @@ array.
 | `fill($value, int $from = 0, ?int $to = null): void` | store `$value` into `[$from, $to)` |
 | `copyFrom(TypedArray $src, int $srcAt, int $dstAt, int $count): void` | copy between two arrays of the SAME class (overlap-safe on one array) |
 | `indexOf($value, int $from = 0): int` | first position holding `$value`, or `-1` |
+| `sum()` | sum of the elements — `int` for the integer arrays (wraps past the int range), `float` for the float arrays, the number of set bits for `BitArray` |
+| `min()`, `max()` | smallest / largest element of an integer or float array; `ValueError("<Class>::min(): array must contain at least one element")` when empty |
+| `equals(TypedArray $other): bool` | same class, same length, equal elements (a `NAN` equals nothing) |
 | `$a[$i]`, `$a[$i] = $v`, `isset($a[$i])`, `unset($a[$i])` | element access |
 | `foreach ($a as $i => $v)` | by value, in order |
 

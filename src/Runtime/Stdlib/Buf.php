@@ -155,4 +155,42 @@ function __mc_nbuf_copy(int $dst, int $dstAt, int $src, int $srcAt, int $count):
     for ($k = 0; $k < $count; $k++) { __mc_nbuf_op(5, $dst, $dstAt + $k, 0, 0, $slice[$k]); }
 }
 
+/** Sum (`$op` 0), minimum (1) or maximum (2) of an int-kind buffer; the identity when empty. */
+function __mc_nbuf_reduce_i(int $h, int $op): int
+{
+    $n = __mc_nbuf_len($h);
+    $a = $op === 0 ? 0 : ($op === 1 ? PHP_INT_MAX : PHP_INT_MIN);
+    for ($k = 0; $k < $n; $k++) {
+        $v = (int) __mc_nbuf_op(4, $h, $k, 0, 0, null);
+        if ($op === 0) { $a = $a + $v; }
+        elseif ($op === 1) { if ($v < $a) { $a = $v; } }
+        elseif ($v > $a) { $a = $v; }
+    }
+    return $a;
+}
+
+/** The same over a float-kind buffer. */
+function __mc_nbuf_reduce_f(int $h, int $op): float
+{
+    $n = __mc_nbuf_len($h);
+    $a = $op === 0 ? 0.0 : ($op === 1 ? INF : -INF);
+    for ($k = 0; $k < $n; $k++) {
+        $v = (float) __mc_nbuf_op(4, $h, $k, 0, 0, null);
+        if ($op === 0) { $a = $a + $v; }
+        elseif ($op === 1) { if ($v < $a) { $a = $v; } }
+        elseif ($v > $a) { $a = $v; }
+    }
+    return $a;
+}
+
+/** 1 when two buffers of one kind and length hold equal elements. */
+function __mc_nbuf_same(int $a, int $b): int
+{
+    $n = __mc_nbuf_len($a);
+    for ($k = 0; $k < $n; $k++) {
+        if (__mc_nbuf_op(4, $a, $k, 0, 0, null) != __mc_nbuf_op(4, $b, $k, 0, 0, null)) { return 0; }
+    }
+    return 1;
+}
+
 function __mc_nbuf_clone(int $h): int { return (int) __mc_nbuf_op(11, $h, 0, 0, 0, null); }

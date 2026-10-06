@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **966 / 2135** · classes **169 / 327** · codegen builtins 232 · lowered 33 · stdlib globals 1071 · prelude globals 1168
+Functions **966 / 2135** · classes **169 / 327** · codegen builtins 232 · lowered 33 · stdlib globals 1074 · prelude globals 1168
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -159,7 +159,7 @@ Functions (39): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1484 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1487 — not user API.
 
 ## Per extension
 

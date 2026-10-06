@@ -4984,6 +4984,109 @@ done:
             '{CELL}' => (string)\Compile\MemoryAbi::BUF_KIND_CELL,
         ];
         foreach ($sub as $from => $to) { $ir = \str_replace($from, $to, $ir); }
+        return $ir . $this->nbufReduce();
+    }
+
+    /**
+     * Whole-buffer reductions: `reduce_i` / `reduce_f` (`$op` 0 sum, 1 min,
+     * 2 max) and `same` (element-wise equality of two buffers of one kind and
+     * length). One loop per element kind and operation, each over a typed
+     * load, so the optimiser sees a plain counted loop instead of a kind test
+     * per element. An empty buffer answers the identity (0, or the far end of
+     * the range for min / max).
+     */
+    private function nbufReduce(): string
+    {
+        /** @var array<int, array<int, string>> kind, element type, widening cast */
+        $ints = [
+            [(string)\Compile\MemoryAbi::BUF_KIND_I8, 'i8', 'sext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_I16, 'i16', 'sext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_I32, 'i32', 'sext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_I64, 'i64', ''],
+            [(string)\Compile\MemoryAbi::BUF_KIND_U8, 'i8', 'zext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_U16, 'i16', 'zext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_U32, 'i32', 'zext'],
+        ];
+        /** @var array<int, array<int, string>> */
+        $floats = [
+            [(string)\Compile\MemoryAbi::BUF_KIND_F32, 'float', 'fpext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_F64, 'double', ''],
+        ];
+        /** @var array<int, string> */
+        $initI = ['0', '9223372036854775807', '-9223372036854775808'];
+        /** @var array<int, string> */
+        $initF = ['0.0', '0x7FF0000000000000', '0xFFF0000000000000'];
+        $ir = '';
+        foreach ([$ints, $floats] as $fam => $kinds) {
+            $acc = $fam === 0 ? 'i64' : 'double';
+            $sfx = $fam === 0 ? 'i' : 'f';
+            foreach ($kinds as $kd) {
+                for ($op = 0; $op < 3; $op++) {
+                    $init = $fam === 0 ? $initI[$op] : $initF[$op];
+                    $ir .= 'define ' . $acc . ' @__mir_nbuf_red_' . $kd[0] . '_' . (string)$op . "(ptr %d, i64 %n) {\n"
+                        . "entry:\n  %z = icmp sgt i64 %n, 0\n  br i1 %z, label %loop, label %done\n"
+                        . "loop:\n  %i = phi i64 [ 0, %entry ], [ %i2, %loop ]\n"
+                        . '  %a = phi ' . $acc . ' [ ' . $init . ", %entry ], [ %a2, %loop ]\n"
+                        . '  %p = getelementptr inbounds ' . $kd[1] . ", ptr %d, i64 %i\n";
+                    if ($kd[2] === '') {
+                        $ir .= '  %v = load ' . $kd[1] . ", ptr %p\n";
+                    } else {
+                        $ir .= '  %r = load ' . $kd[1] . ", ptr %p\n"
+                            . '  %v = ' . $kd[2] . ' ' . $kd[1] . ' %r to ' . $acc . "\n";
+                    }
+                    if ($op === 0) {
+                        $ir .= '  %a2 = ' . ($fam === 0 ? 'add i64' : 'fadd double') . " %a, %v\n";
+                    } else {
+                        $cmp = $fam === 0 ? ($op === 1 ? 'icmp slt i64' : 'icmp sgt i64') : ($op === 1 ? 'fcmp olt double' : 'fcmp ogt double');
+                        $ir .= '  %c = ' . $cmp . " %v, %a\n"
+                            . '  %a2 = select i1 %c, ' . $acc . ' %v, ' . $acc . " %a\n";
+                    }
+                    $ir .= "  %i2 = add nuw nsw i64 %i, 1\n  %e = icmp eq i64 %i2, %n\n  br i1 %e, label %done, label %loop\n"
+                        . "done:\n  %res = phi " . $acc . ' [ ' . $init . ", %entry ], [ %a2, %loop ]\n"
+                        . '  ret ' . $acc . " %res\n}\n\n";
+                }
+            }
+            // The dispatcher: kind, then operation. A kind outside the family
+            // (a BitArray under reduce_i) is summed element by element.
+            $ir .= 'define ' . $acc . ' @__mir_nbuf_reduce_' . $sfx . "(i64 %h, i64 %op) {\n"
+                . "entry:\n  %n = call i64 @__mir_nbuf_len(i64 %h)\n  %k = call i64 @__mir_nbuf_kindof(i64 %h)\n"
+                . "  %d = call ptr @__mir_nbuf_data(i64 %h)\n  switch i64 %k, label %other [\n";
+            foreach ($kinds as $kd) { $ir .= '    i64 ' . $kd[0] . ', label %k' . $kd[0] . "\n"; }
+            $ir .= "  ]\n";
+            foreach ($kinds as $kd) {
+                $ir .= 'k' . $kd[0] . ":\n  switch i64 %op, label %k" . $kd[0] . "o0 [\n    i64 1, label %k" . $kd[0]
+                    . "o1\n    i64 2, label %k" . $kd[0] . "o2\n  ]\n";
+                for ($op = 0; $op < 3; $op++) {
+                    $ir .= 'k' . $kd[0] . 'o' . (string)$op . ":\n  %r" . $kd[0] . '_' . (string)$op . ' = call ' . $acc
+                        . ' @__mir_nbuf_red_' . $kd[0] . '_' . (string)$op . "(ptr %d, i64 %n)\n"
+                        . '  ret ' . $acc . ' %r' . $kd[0] . '_' . (string)$op . "\n";
+                }
+            }
+            $get = $fam === 0 ? 'call i64 @__mir_nbuf_get_i' : 'call double @__mir_nbuf_get_f';
+            $zero = $fam === 0 ? '0' : '0.0';
+            $ir .= "other:\n  br label %oloop\noloop:\n  %oi = phi i64 [ 0, %other ], [ %oi2, %obody ]\n"
+                . '  %oa = phi ' . $acc . ' [ ' . $zero . ", %other ], [ %oa2, %obody ]\n"
+                . "  %oc = icmp slt i64 %oi, %n\n  br i1 %oc, label %obody, label %odone\n"
+                . "obody:\n  %ov = " . $get . "(i64 %h, i64 %oi)\n"
+                . '  %oa2 = ' . ($fam === 0 ? 'add i64' : 'fadd double') . " %oa, %ov\n"
+                . "  %oi2 = add i64 %oi, 1\n  br label %oloop\nodone:\n  ret " . $acc . " %oa\n}\n\n";
+        }
+        $f32 = (string)\Compile\MemoryAbi::BUF_KIND_F32;
+        $f64 = (string)\Compile\MemoryAbi::BUF_KIND_F64;
+        // Raw kinds compare as bytes (the slack past `len` is zero, so a
+        // BitArray's last word compares whole); floats compare as values.
+        $ir .= "define i64 @__mir_nbuf_same(i64 %a, i64 %b) {\n"
+            . "entry:\n  %n = call i64 @__mir_nbuf_len(i64 %a)\n  %k = call i64 @__mir_nbuf_kindof(i64 %a)\n"
+            . "  switch i64 %k, label %raw [\n    i64 " . $f32 . ", label %fl\n    i64 " . $f64 . ", label %fl\n  ]\n"
+            . "raw:\n  %by = call i64 @__mir_nbuf_bytes(i64 %k, i64 %n)\n"
+            . "  %da = call ptr @__mir_nbuf_data(i64 %a)\n  %db = call ptr @__mir_nbuf_data(i64 %b)\n"
+            . "  %m = call i32 @memcmp(ptr %da, ptr %db, i64 %by)\n  %eq = icmp eq i32 %m, 0\n"
+            . "  %r = zext i1 %eq to i64\n  ret i64 %r\n"
+            . "fl:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %fl ], [ %i2, %next ]\n"
+            . "  %c = icmp slt i64 %i, %n\n  br i1 %c, label %body, label %yes\n"
+            . "body:\n  %x = call double @__mir_nbuf_get_f(i64 %a, i64 %i)\n  %y = call double @__mir_nbuf_get_f(i64 %b, i64 %i)\n"
+            . "  %ne = fcmp une double %x, %y\n  br i1 %ne, label %no, label %next\n"
+            . "next:\n  %i2 = add i64 %i, 1\n  br label %loop\nyes:\n  ret i64 1\nno:\n  ret i64 0\n}\n\n";
         return $ir;
     }
 
@@ -4993,9 +5096,9 @@ done:
      */
     public static function nbufSig(string $op): string
     {
-        if ($op === 'get_i' || $op === 'alloc' || $op === 'resize') { return 'iii'; }
+        if ($op === 'get_i' || $op === 'alloc' || $op === 'resize' || $op === 'reduce_i' || $op === 'same') { return 'iii'; }
         if ($op === 'set_i' || $op === 'remove') { return 'iiiv'; }
-        if ($op === 'get_f') { return 'iif'; }
+        if ($op === 'get_f' || $op === 'reduce_f') { return 'iif'; }
         if ($op === 'set_f') { return 'iifv'; }
         if ($op === 'get_c') { return 'iic'; }
         if ($op === 'set_c') { return 'iicv'; }
