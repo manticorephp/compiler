@@ -4997,7 +4997,7 @@ done:
      */
     private function nbufReduce(): string
     {
-        /** @var array<int, array<int, string>> kind, element type, widening cast */
+        /** @var array<int, array<int, string>> kind, element type, widening cast[, 'u' = compare unsigned] */
         $ints = [
             [(string)\Compile\MemoryAbi::BUF_KIND_I8, 'i8', 'sext'],
             [(string)\Compile\MemoryAbi::BUF_KIND_I16, 'i16', 'sext'],
@@ -5006,6 +5006,7 @@ done:
             [(string)\Compile\MemoryAbi::BUF_KIND_U8, 'i8', 'zext'],
             [(string)\Compile\MemoryAbi::BUF_KIND_U16, 'i16', 'zext'],
             [(string)\Compile\MemoryAbi::BUF_KIND_U32, 'i32', 'zext'],
+            [(string)\Compile\MemoryAbi::BUF_KIND_U64, 'i64', '', 'u'],
         ];
         /** @var array<int, array<int, string>> */
         $floats = [
@@ -5021,8 +5022,11 @@ done:
             $acc = $fam === 0 ? 'i64' : 'double';
             $sfx = $fam === 0 ? 'i' : 'f';
             foreach ($kinds as $kd) {
+                $uns = ($kd[3] ?? '') === 'u';
                 for ($op = 0; $op < 3; $op++) {
                     $init = $fam === 0 ? $initI[$op] : $initF[$op];
+                    // Unsigned: min starts at all ones, max at zero.
+                    if ($uns && $op > 0) { $init = $op === 1 ? '-1' : '0'; }
                     $ir .= 'define ' . $acc . ' @__mir_nbuf_red_' . $kd[0] . '_' . (string)$op . "(ptr %d, i64 %n) {\n"
                         . "entry:\n  %z = icmp sgt i64 %n, 0\n  br i1 %z, label %loop, label %done\n"
                         . "loop:\n  %i = phi i64 [ 0, %entry ], [ %i2, %loop ]\n"
@@ -5037,7 +5041,7 @@ done:
                     if ($op === 0) {
                         $ir .= '  %a2 = ' . ($fam === 0 ? 'add i64' : 'fadd double') . " %a, %v\n";
                     } else {
-                        $cmp = $fam === 0 ? ($op === 1 ? 'icmp slt i64' : 'icmp sgt i64') : ($op === 1 ? 'fcmp olt double' : 'fcmp ogt double');
+                        $cmp = $fam === 0 ? ($op === 1 ? ($uns ? 'icmp ult i64' : 'icmp slt i64') : ($uns ? 'icmp ugt i64' : 'icmp sgt i64')) : ($op === 1 ? 'fcmp olt double' : 'fcmp ogt double');
                         $ir .= '  %c = ' . $cmp . " %v, %a\n"
                             . '  %a2 = select i1 %c, ' . $acc . ' %v, ' . $acc . " %a\n";
                     }

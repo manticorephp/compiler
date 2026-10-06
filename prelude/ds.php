@@ -504,6 +504,85 @@ namespace Manticore\Ds {
     }
 
     /**
+     * 64-bit unsigned elements. PHP has no unsigned int, so an element READS
+     * as the int with the same 64 bits — a value of 2^63 or more reads
+     * negative — and an int WRITES its bits, so `$a[$i] = $a[$j]` copies any
+     * value. A numeric string or a float is a VALUE: 0..18446744073709551615,
+     * anything else is a `ValueError`. Ordering (`min`, `max`, `compare`) is
+     * unsigned; `getString()` gives the decimal value.
+     *
+     * @template T = int
+     * @extends IntTypedArray<T>
+     */
+    final class UInt64Array extends IntTypedArray
+    {
+        protected function kind(): int { return 12; }
+        protected function rangeMin(): int { return \PHP_INT_MIN; }
+        protected function rangeMax(): int { return \PHP_INT_MAX; }
+
+        /** Element `$index` as its unsigned decimal value. */
+        public function getString(int $index): string
+        {
+            return self::toDecimal($this->offsetGet($index));
+        }
+
+        /** -1, 0 or 1 as `$a` is below, equal to or above `$b`, both read as unsigned. */
+        public static function compare(int $a, int $b): int
+        {
+            return ($a ^ \PHP_INT_MIN) <=> ($b ^ \PHP_INT_MIN);
+        }
+
+        /** The unsigned decimal value of 64 bits. */
+        public static function toDecimal(int $bits): string
+        {
+            if ($bits >= 0) { return (string)$bits; }
+            // Unsigned divide by ten: halve as unsigned, divide by five.
+            $q = \intdiv(($bits >> 1) & \PHP_INT_MAX, 5);
+            return (string)$q . (string)($bits - $q * 10);
+        }
+
+        protected function coerce(mixed $value): mixed
+        {
+            if (\is_int($value)) { return $value; }
+            if (\is_bool($value)) { return $value ? 1 : 0; }
+            if (\is_string($value) && \is_numeric($value)) {
+                $d = \ltrim(\trim($value), '+');
+                $digits = $d !== '';
+                for ($k = 0; $k < \strlen($d); $k++) {
+                    if ($d[$k] < '0' || $d[$k] > '9') { $digits = false; break; }
+                }
+                if ($digits) { return $this->parseDecimal(\ltrim($d, '0')); }
+                $value = (float)$value;
+            }
+            if (!\is_float($value)) {
+                throw new \TypeError(static::class . ' element must be of type int, ' . \get_debug_type($value) . ' given');
+            }
+            if (!\is_finite($value) || \floor($value) !== $value) {
+                throw new \TypeError(static::class . ' element must be of type int, float given');
+            }
+            if ($value < 0.0 || $value >= 18446744073709551616.0) { $this->outOfRange((string)$value); }
+            if ($value < 9223372036854775808.0) { return (int)$value; }
+            return ((int)($value - 9223372036854775808.0)) | \PHP_INT_MIN;
+        }
+
+        /** Decimal digits with no leading zeros → the 64 bits of that value. */
+        private function parseDecimal(string $d): int
+        {
+            $n = \strlen($d);
+            if ($n === 0) { return 0; }
+            if ($n > 20 || ($n === 20 && \strcmp($d, '18446744073709551615') > 0)) { $this->outOfRange($d); }
+            $v = 0;
+            for ($k = 0; $k < $n; $k++) { $v = $v * 10 + (\ord($d[$k]) - 48); }
+            return $v;
+        }
+
+        private function outOfRange(string $what): never
+        {
+            throw new \ValueError('Value ' . $what . ' is out of range for UInt64Array (0..18446744073709551615)');
+        }
+    }
+
+    /**
      * A resizable run of bytes: a `UInt8Array` (`$b[$i]`, `push`, `fill`, …)
      * with typed reads and writes at a BYTE offset, little-endian unless
      * `$bigEndian`. An access that runs past the end is an

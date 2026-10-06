@@ -27,6 +27,7 @@ final class NbufInline
         if ($of !== false) { $short = \substr($short, 0, $of); }
         if ($short === 'Int32Array') { return MemoryAbi::BUF_KIND_I32; }
         if ($short === 'Int64Array') { return MemoryAbi::BUF_KIND_I64; }
+        if ($short === 'UInt64Array') { return MemoryAbi::BUF_KIND_U64; }
         if ($short === 'UInt8Array' || $short === 'ByteBuffer') { return MemoryAbi::BUF_KIND_U8; }
         if ($short === 'UInt16Array') { return MemoryAbi::BUF_KIND_U16; }
         if ($short === 'UInt32Array') { return MemoryAbi::BUF_KIND_U32; }
@@ -68,6 +69,7 @@ final class NbufInline
         if ($kind === MemoryAbi::BUF_KIND_U8) { return 'u8'; }
         if ($kind === MemoryAbi::BUF_KIND_U16) { return 'u16'; }
         if ($kind === MemoryAbi::BUF_KIND_U32) { return 'u32'; }
+        if ($kind === MemoryAbi::BUF_KIND_U64) { return 'u64'; }
         if ($kind === MemoryAbi::BUF_KIND_F32) { return 'f32'; }
         if ($kind === MemoryAbi::BUF_KIND_F64) { return 'f64'; }
         return '';

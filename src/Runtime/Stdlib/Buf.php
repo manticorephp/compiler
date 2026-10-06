@@ -159,14 +159,16 @@ function __mc_nbuf_copy(int $dst, int $dstAt, int $src, int $srcAt, int $count):
 function __mc_nbuf_reduce_i(int $h, int $op): int
 {
     $n = __mc_nbuf_len($h);
+    // Kind 12 (U64) orders unsigned: flipping the sign bit maps it onto signed order.
+    $flip = (int) __mc_nbuf_op(12, $h, 0, 0, 0, null) === 12 ? PHP_INT_MIN : 0;
     $a = $op === 0 ? 0 : ($op === 1 ? PHP_INT_MAX : PHP_INT_MIN);
     for ($k = 0; $k < $n; $k++) {
         $v = (int) __mc_nbuf_op(4, $h, $k, 0, 0, null);
         if ($op === 0) { $a = $a + $v; }
-        elseif ($op === 1) { if ($v < $a) { $a = $v; } }
-        elseif ($v > $a) { $a = $v; }
+        elseif ($op === 1) { if (($v ^ $flip) < $a) { $a = $v ^ $flip; } }
+        elseif (($v ^ $flip) > $a) { $a = $v ^ $flip; }
     }
-    return $a;
+    return $op === 0 ? $a : $a ^ $flip;
 }
 
 /** The same over a float-kind buffer. */

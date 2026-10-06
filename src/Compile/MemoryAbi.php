@@ -36,7 +36,7 @@ final class MemoryAbi
      *
      * v18: v17 above AND the native-buffer lineage — the `BUF_*` block layout
      * (`__mir_nbuf_*`, a SplFixedArray / `Manticore\Ds` element store) and the
-     * class descriptor's `json_fn@56` slot. That lineage also called itself v17
+     * class descriptor's `json_fn@56` slot, and buffer kind 12 (`U64`). That lineage also called itself v17
      * on its own branch, so the two v17s are different layouts and neither may
      * link with a v18 object.
      */
@@ -1026,6 +1026,8 @@ final class MemoryAbi
     public const BUF_KIND_F64 = 9;
     public const BUF_KIND_BIT = 10;
     public const BUF_KIND_CELL = 11;
+    /** Raw 64 bits read as an unsigned value (`UInt64Array`); stored like I64. */
+    public const BUF_KIND_U64 = 12;
 
     // ─── exception object (zero-cost unwinding) ───────────────────
 

@@ -128,7 +128,7 @@ Types: `Io\Poll\Backend` (enum) `Io\Poll\BackendUnavailableException` `Io\Poll\C
 
 #### `Manticore\Ds\`
 
-Types: `Manticore\Ds\BitArray` `Manticore\Ds\ByteBuffer` `Manticore\Ds\Float32Array` `Manticore\Ds\Float64Array` `Manticore\Ds\FloatTypedArray` `Manticore\Ds\Int16Array` `Manticore\Ds\Int32Array` `Manticore\Ds\Int64Array` `Manticore\Ds\Int8Array` `Manticore\Ds\IntTypedArray` `Manticore\Ds\TypedArray` `Manticore\Ds\UInt16Array` `Manticore\Ds\UInt32Array` `Manticore\Ds\UInt8Array`
+Types: `Manticore\Ds\BitArray` `Manticore\Ds\ByteBuffer` `Manticore\Ds\Float32Array` `Manticore\Ds\Float64Array` `Manticore\Ds\FloatTypedArray` `Manticore\Ds\Int16Array` `Manticore\Ds\Int32Array` `Manticore\Ds\Int64Array` `Manticore\Ds\Int8Array` `Manticore\Ds\IntTypedArray` `Manticore\Ds\TypedArray` `Manticore\Ds\UInt16Array` `Manticore\Ds\UInt32Array` `Manticore\Ds\UInt64Array` `Manticore\Ds\UInt8Array`
 
 #### `Manticore\Sapi\` — [http.md](http.md)
 

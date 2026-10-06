@@ -29,6 +29,7 @@ echo $offsets[0] + $offsets[1];      // 16
 | `UInt8Array` | `int` | 1 byte | 0..255 |
 | `UInt16Array` | `int` | 2 bytes | 0..65535 |
 | `UInt32Array` | `int` | 4 bytes | 0..4294967295 |
+| `UInt64Array` | `int` (the 64 bits) | 8 bytes | 0..18446744073709551615 |
 | `Float32Array` | `float` | 4 bytes | IEEE-754 binary32 |
 | `Float64Array` | `float` | 8 bytes | IEEE-754 binary64 |
 | `BitArray` | `bool` | 1 bit | |
@@ -108,6 +109,30 @@ buffer.
 **Dumps and serialization** — `var_dump`, `print_r`, `serialize` / `unserialize` and
 `json_encode` (through `jsonSerialize()`) present the array as the list
 `toArray()` returns.
+
+## `UInt64Array`
+
+PHP has no unsigned 64-bit int, so a `UInt64Array` element **reads as the int
+with the same 64 bits**: a value of 2^63 or more reads negative. An int
+**writes its bits**, so `$a[$i] = $a[$j]` copies any value and hashes, masks
+and ids round-trip untouched. A numeric string or a float is a **value**:
+
+```php
+$h = new UInt64Array(2);
+$h[0] = '18446744073709551615';   // reads as -1
+$h[1] = 2 ** 63;                  // reads as PHP_INT_MIN
+echo $h->getString(0);            // 18446744073709551615
+echo UInt64Array::toDecimal($h->max());
+```
+
+- `min()`, `max()` and `UInt64Array::compare(int $a, int $b): int` order
+  **unsigned**; `sum()` wraps modulo 2^64.
+- `getString(int $index): string` and `UInt64Array::toDecimal(int $bits): string`
+  give the unsigned decimal value.
+- A string or float outside 0..18446744073709551615 (`'-1'`, `2.0 ** 64`) is a
+  `ValueError`; a fractional float is a `TypeError`.
+- `UInt64Array<T>` takes a `#[TypeDef(repr: 'u64')]`; an `i64` TypeDef does not
+  fit, nor does a `u64` one fit an `Int64Array`.
 
 ## `ByteBuffer`
 

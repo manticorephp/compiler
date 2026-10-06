@@ -484,7 +484,7 @@ trait EmitLlvmArrays
         if ($kind === \Compile\MemoryAbi::BUF_KIND_I8 || $kind === \Compile\MemoryAbi::BUF_KIND_U8) { return 'i8'; }
         if ($kind === \Compile\MemoryAbi::BUF_KIND_I16 || $kind === \Compile\MemoryAbi::BUF_KIND_U16) { return 'i16'; }
         if ($kind === \Compile\MemoryAbi::BUF_KIND_I32 || $kind === \Compile\MemoryAbi::BUF_KIND_U32) { return 'i32'; }
-        if ($kind === \Compile\MemoryAbi::BUF_KIND_I64) { return 'i64'; }
+        if ($kind === \Compile\MemoryAbi::BUF_KIND_I64 || $kind === \Compile\MemoryAbi::BUF_KIND_U64) { return 'i64'; }
         if ($kind === \Compile\MemoryAbi::BUF_KIND_F32) { return 'float'; }
         if ($kind === \Compile\MemoryAbi::BUF_KIND_F64) { return 'double'; }
         return '';
