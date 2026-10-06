@@ -116,8 +116,8 @@ final class NodeClone
         // ── Statements / expressions with children ────────────────
         if ($k === Node::KIND_ECHO)   { $x = self::asEcho($n);   return new Echo_(self::nodes($x->exprs), $n->type); }
         if ($k === Node::KIND_RETURN) { $x = self::asReturn($n); return new Return_($x->value === null ? null : self::node($x->value), $n->type); }
-        if ($k === Node::KIND_CALL)   { $x = self::asCall($n);   $c = new Call($x->function, self::nodes($x->args), $n->type); $c->ownLive = $x->ownLive; return $c; }
-        if ($k === Node::KIND_INVOKE) { $x = self::asInvoke($n); $c = new Invoke_(self::node($x->callee), self::nodes($x->args), $n->type); $c->ownLive = $x->ownLive; return $c; }
+        if ($k === Node::KIND_CALL)   { $x = self::asCall($n);   $c = new Call($x->function, self::nodes($x->args), $n->type); return $c; }
+        if ($k === Node::KIND_INVOKE) { $x = self::asInvoke($n); $c = new Invoke_(self::node($x->callee), self::nodes($x->args), $n->type); return $c; }
         // Shallow: clones the Closure_ NODE, reusing the underlying `__closure_N`
         // FunctionDef (same `id` / `->class`). Correct when the enclosing clone
         // does NOT need its own closure fn (Phase A callable-dim specialization,
@@ -176,7 +176,7 @@ final class NodeClone
         // argument, so a rebuild drops it unless it is copied here — a cloned
         // `new` (Monomorphize, InlineClosures) would otherwise hand the ctor the
         // PADDED arity instead of what the source wrote.
-        if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; $c->srcArgc = $x->srcArgc; $c->ownLive = $x->ownLive; return $c; }
+        if ($k === Node::KIND_NEW_OBJ) { $x = self::asNewObj($n); $c = new NewObj($x->class, self::nodes($x->args), $n->type); $c->bare = $x->bare; $c->srcArgc = $x->srcArgc; return $c; }
         if ($k === Node::KIND_NEW_DYN_OBJ) { $d = $n; $c = new NewDynObj(self::node($d->classExpr), self::nodes($d->args), $n->type); $c->srcArgc = $d->srcArgc; return $c; }
         if ($k === Node::KIND_PROPERTY_ACCESS) {
             $x = self::asPropertyAccess($n);
@@ -193,8 +193,8 @@ final class NodeClone
             return $d;
         }
         if ($k === Node::KIND_STORE_DYN_PROP) { $x = self::asStoreDynProp($n); return new StoreDynProp_(self::node($x->object), self::node($x->name), self::node($x->value), $n->type); }
-        if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); $c = new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); $c->ownLive = $x->ownLive; return $c; }
-        if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); $c = new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); $c->ownLive = $x->ownLive; return $c; }
+        if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); $c = new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); return $c; }
+        if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); $c = new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); return $c; }
         if ($k === Node::KIND_CLONE) {
             $x = self::asClone($n);
             $wp = [];
