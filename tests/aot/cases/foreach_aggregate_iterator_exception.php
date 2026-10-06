@@ -1,6 +1,5 @@
 <?php
 // LEAK: an exception leaving a foreach over an IteratorAggregate never releases the iterator getIterator() returned
-// issue: #103
 final class M { public function __construct(public string $data) {} }
 final class C implements \IteratorAggregate {
     public int $n = 0;

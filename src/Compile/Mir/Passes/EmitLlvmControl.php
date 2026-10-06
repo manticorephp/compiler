@@ -165,7 +165,7 @@ trait EmitLlvmControl
         $out .= '  ' . $fresh . ' = icmp eq i64 ' . $st0 . ", 0\n";
         $out .= '  br i1 ' . $fresh . ', label %' . $rewindLabel . ', label %' . $condLabel . "\n";
         $out .= $rewindLabel . ":\n";
-        $out .= $this->genResumeCall($g);
+        $out .= $this->ehMarkRaise($this->genResumeCall($g), $fe->ownLive);
         $out .= '  br label %' . $condLabel . "\n";
 
         $out .= $condLabel . ":\n";
@@ -214,7 +214,7 @@ trait EmitLlvmControl
 
         $out .= $stepLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
-        $out .= $this->genResumeCall($g);
+        $out .= $this->ehMarkRaise($this->genResumeCall($g), $fe->ownLive);
         $out .= '  br label %' . $condLabel . "\n";
 
         $out .= $endLabel . ":\n";
@@ -632,7 +632,11 @@ trait EmitLlvmControl
         $iterSlot = $this->locals->slots[$iterName];
         $out .= $this->emitNode($fe->array);
         $out .= $this->coerceToI64();
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $subj = $this->lastValue;
+        if ($fe->ownDropIter !== null) {
+            $out .= $this->ownDropIr($iterSlot, $fe->ownDropIter);
+        }
+        $out .= '  store i64 ' . $subj . ', ptr ' . $iterSlot . "\n";
         $iterType = \Compile\Mir\Type::obj($fe->iterClass);
         if ($fe->iterAggregate) {
             $subjNode = new \Compile\Mir\LoadLocal($iterName, $fe->array->type);
@@ -753,7 +757,7 @@ trait EmitLlvmControl
         string $iterName, \Compile\Mir\Type $iterType, bool $dyn): string
     {
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
-        $out = $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
+        $out = $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind'), $fe->ownLive);
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -762,14 +766,14 @@ trait EmitLlvmControl
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $condL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid'), $fe->ownLive);
         $out .= $this->coerceToI64();
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
         $out .= '  br i1 ' . $v . ', label %' . $bodyL . ', label %' . $endL . "\n";
 
         $out .= $bodyL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current'), $fe->ownLive);
         $out .= $this->coerceToI64();
         $cur = $this->lastValue;
         // `current()` is +1 on every arm — a method's return convention, and
@@ -782,7 +786,7 @@ trait EmitLlvmControl
         }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
-            $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key');
+            $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key'), $fe->ownLive);
             $out .= $this->coerceToI64();
             $kw = $this->lastValue;
             $out .= $this->foreachPrevDrop($fe, true);
@@ -791,7 +795,7 @@ trait EmitLlvmControl
         $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);
 
         $out .= $stepL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next'), $fe->ownLive);
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $endL . ":\n";

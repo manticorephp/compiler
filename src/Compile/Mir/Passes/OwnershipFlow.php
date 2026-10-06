@@ -538,6 +538,10 @@ final class OwnershipFlow implements Pass
                 self::asInvoke($call)->ownLive = $live;
             }
         }
+        foreach ($this->feById as $id => $fe) {
+            $fe->ownLive = isset($l->feOwn[$id]) && $fe->array->type->kind === Type::KIND_OBJ
+                ? $this->unwindDrops($l->feOwn[$id], '') : [];
+        }
         foreach ($l->catchAt as $id => $tc) {
             self::asTry($tc)->ownCatch = $this->unwindDrops($l->catchOwn[$id], '');
         }
@@ -688,6 +692,8 @@ final class OwnershipFlow implements Pass
         $l->storeMode = $p->storeMode;
         $l->unsetNames = $p->unsetNames;
         $l->feValName = $p->feValName;
+        $l->feItName = $p->feItName;
+        $l->feItKey = $p->feItKey;
         $l->feValState = $p->feValState;
         $l->feValKey = $p->feValKey;
         $l->feKeyName = $p->feKeyName;
@@ -1216,6 +1222,9 @@ final class OwnershipFlow implements Pass
             && self::asLoadLocal($leaf)->name === $sl->name;
     }
 
+    /** Names the hidden iterator locals {@see scanForeach} creates, per run. */
+    private int $itSeq = 0;
+
     private function scanForeach(Foreach_ $fe, OwnLattice $lat): void
     {
         $id = \spl_object_id($fe);
@@ -1238,6 +1247,24 @@ final class OwnershipFlow implements Pass
                 // it as a Borrow of the same class, not as a scalar.
                 if ($et->kind === Type::KIND_UNKNOWN && self::storesCell($fe->body, $val)) { $et = Type::cell(); }
                 $this->bindBorrow($lat, $id, $val, $et, true);
+            }
+        }
+        // The iterator `getIterator()` hands the loop is the loop's own +1,
+        // held in a hidden local: the emitter gives it back where the loop
+        // ends and clears the slot, and as an Own name every other way out —
+        // an exception, a generator destroyed mid-loop — drops it too (a
+        // cleared slot drops nothing).
+        if ($fe->iterAggregate && $fe->array->type->kind === Type::KIND_OBJ) {
+            $it = Type::obj($fe->iterClass === '' ? 'Iterator' : $fe->iterClass);
+            if ($this->keyString($it) === 'obj') {
+                if ($fe->iterName === '') {
+                    $fe->iterName = '@io.' . (string)$this->itSeq;
+                    $this->itSeq = $this->itSeq + 1;
+                }
+                $k = $this->intern($fe->iterName, 'obj', $it);
+                $lat->feItName[$id] = $fe->iterName;
+                $lat->feItKey[$id] = $k;
+                $this->noteOwnKey($fe->iterName, $k);
             }
         }
         $key = $fe->keyVar;
@@ -1686,6 +1713,10 @@ final class OwnershipFlow implements Pass
                 if (OwnLattice::isBorrow($l->feValState[$id]) && isset($force[$fe->valueVar])) {
                     $this->insStart[\spl_object_id($fe->body)][] = $this->plainRetain($fe->valueVar, $l->feValKey[$id]);
                 }
+            }
+            $fe->ownDropIter = null;
+            if (isset($l->feItIn[$id]) && $l->feItIn[$id] > 0 && $rel) {
+                $fe->ownDropIter = $this->dropOp($fe->iterName, $l->feItIn[$id]);
             }
             $kv = $fe->keyVar;
             $fe->ownKey = $kv !== null && isset($l->feKeyName[$id]) && $l->feKeyState[$id] > 0;

@@ -1436,6 +1436,16 @@ final class Foreach_ extends Node
     /** Set by {@see Passes\OwnershipFlow} on a co-owning loop: a `drop` of the
      *  value var at the class THIS loop binds it — the flavor its retain takes. */
     public ?MemoryOp_ $ownBind = null;
+    /** Set by {@see Passes\OwnershipFlow}: a `drop` of the iterator local
+     *  ({@see $iterName}) before the loop takes a new iterator — an earlier
+     *  run of this loop an exception left may still hold one. */
+    public ?MemoryOp_ $ownDropIter = null;
+    /** Set by {@see Passes\OwnershipFlow} on an iterator loop: the locals Own
+     *  while it steps its iterator (the iterator local among them) — what an
+     *  exception out of `rewind` / `valid` / `current` / `key` / `next` or a
+     *  generator's resume drops on its way out of the frame.
+     * @var array<string, MemoryOp_> */
+    public array $ownLive = [];
 
     public function accept(EmitVisitor $v): string
     {

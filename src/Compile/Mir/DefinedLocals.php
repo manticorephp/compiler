@@ -99,6 +99,8 @@ final class DefinedLocals
             $fe = $n;
             $this->defined[$fe->valueVar] = true;
             if ($fe->keyVar !== null) { $this->defined[$fe->keyVar] = true; }
+            // The hidden iterator local OwnershipFlow owns ({@see Foreach_::$ownDropIter}).
+            if ($fe->iterName !== '') { $this->defined[$fe->iterName] = true; }
             $this->walk($fe->array);
             $this->walk($fe->body);
             return;

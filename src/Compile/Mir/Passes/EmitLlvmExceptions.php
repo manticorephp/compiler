@@ -138,6 +138,8 @@ trait EmitLlvmExceptions
         } elseif ($k === Node::KIND_TRY_CATCH) {
             $t = $this->ehTry($n);
             if ($t->ownCatch !== [] || $t->ownFinally !== []) { return true; }
+        } elseif ($k === Node::KIND_FOREACH) {
+            if ($this->ehForeach($n)->ownLive !== []) { return true; }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) {
             if ($this->ehNeedsPads($c)) { return true; }
@@ -147,6 +149,7 @@ trait EmitLlvmExceptions
 
     private function ehThrow(Node $n): \Compile\Mir\Throw_ { return $n; }
     private function ehTry(Node $n): \Compile\Mir\TryCatch_ { return $n; }
+    private function ehForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 
     /** {@see emitNode} while marking: emit, then mark this node's own lines. */
     private function emitNodeEh(Node $n): string
