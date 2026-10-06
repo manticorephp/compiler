@@ -508,6 +508,24 @@ trait EmitLlvmArrays
         return false;
     }
 
+    /** Set while {@see nbufEmitReceiver} evaluates a property-held receiver:
+     *  the slot load it ends in takes the header tag. */
+    private bool $nbufSlotTag = false;
+
+    /**
+     * Evaluates the receiver of an inline typed-array access. The load of the
+     * slot that holds it — a property of a local, a static property — is
+     * tagged as header: an element store cannot overwrite the holder, so a
+     * loop loads `$this->buf` once too.
+     */
+    private function nbufEmitReceiver(Node $arr): string
+    {
+        $this->nbufSlotTag = $arr->kind !== Node::KIND_LOAD_LOCAL;
+        $out = $this->emitNode($arr);
+        $this->nbufSlotTag = false;
+        return $out;
+    }
+
     /**
      * The `!tbaa` tag of an inline typed-array access: the element bytes
      * (`$elem`) against the handle slot and the length word. An element store
@@ -579,7 +597,7 @@ trait EmitLlvmArrays
         $ty = $this->nbufElemTy($kind);
         $isF = $ty === 'float' || $ty === 'double';
         $resTy = $isF ? 'double' : 'i64';
-        $out = $this->emitNode($aa->array);
+        $out = $this->nbufEmitReceiver($aa->array);
         $out .= $this->coerceToPtr();
         $obj = $this->lastValue;
         $out .= $this->emitNode($aa->index);
@@ -733,7 +751,7 @@ trait EmitLlvmArrays
         if (!isset($this->classes[$cls])) { return null; }
         $off = $this->classes[$cls]->propertyOffset('__mcbuf');
         if ($off < 0) { return null; }
-        $out = $this->emitNode($arr);
+        $out = $this->nbufEmitReceiver($arr);
         $out .= $this->coerceToPtr();
         $obj = $this->lastValue;
         $out .= $this->emitNode($index);
@@ -781,7 +799,7 @@ trait EmitLlvmArrays
         $off = $this->classes[$cls]->propertyOffset('__mcbuf');
         if ($off < 0) { return null; }
         $ty = $this->nbufElemTy($kind);
-        $out = $this->emitNode($arr);
+        $out = $this->nbufEmitReceiver($arr);
         $out .= $this->coerceToPtr();
         $obj = $this->lastValue;
         $out .= $this->emitNode($value);

@@ -6171,7 +6171,7 @@ trait EmitLlvmObjects
     private function emitStaticProp(\Compile\Mir\StaticProp_ $n): string
     {
         $reg = $this->ssa->allocReg();
-        $out = '  ' . $reg . ' = load i64, ptr ' . $n->global . "\n";
+        $out = '  ' . $reg . ' = load i64, ptr ' . $n->global . ($this->nbufSlotTag ? $this->nbufTbaa(false) : '') . "\n";
         if ($n->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -8881,7 +8881,7 @@ trait EmitLlvmObjects
             $reg = $this->ssa->allocReg();
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
-            return '  ' . $reg . ' = load i64, ptr ' . $gep . "\n";
+            return '  ' . $reg . ' = load i64, ptr ' . $gep . ($this->nbufSlotTag ? $this->nbufTbaa(false) : '') . "\n";
         }
         // ALWAYS hands back i64 BITS, exactly as a full-word load does — every
         // caller then applies its own coercion (a float property bitcasts, an
