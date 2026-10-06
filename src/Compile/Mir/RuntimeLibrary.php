@@ -5087,6 +5087,35 @@ done:
             . "body:\n  %x = call double @__mir_nbuf_get_f(i64 %a, i64 %i)\n  %y = call double @__mir_nbuf_get_f(i64 %b, i64 %i)\n"
             . "  %ne = fcmp une double %x, %y\n  br i1 %ne, label %no, label %next\n"
             . "next:\n  %i2 = add i64 %i, 1\n  br label %loop\nyes:\n  ret i64 1\nno:\n  ret i64 0\n}\n\n";
+        // Byte-offset access for a byte buffer (`Manticore\Ds\ByteBuffer`):
+        // `peek` / `poke` move `%w` bytes, least significant first unless
+        // `%be`; the caller has checked the span. `bits_f` / `f_bits` are the
+        // IEEE-754 image of a float (`%w` 4: through binary32).
+        $ir .= "define i64 @__mir_nbuf_peek(i64 %h, i64 %off, i64 %w, i64 %be) {\n"
+            . "entry:\n  %d = call ptr @__mir_nbuf_data(i64 %h)\n  %p = getelementptr inbounds i8, ptr %d, i64 %off\n"
+            . "  %big = icmp ne i64 %be, 0\n  %last = sub i64 %w, 1\n  br label %loop\n"
+            . "loop:\n  %i = phi i64 [ 0, %entry ], [ %i2, %body ]\n  %v = phi i64 [ 0, %entry ], [ %v2, %body ]\n"
+            . "  %c = icmp slt i64 %i, %w\n  br i1 %c, label %body, label %done\n"
+            . "body:\n  %ri = sub i64 %last, %i\n  %ix = select i1 %big, i64 %ri, i64 %i\n"
+            . "  %bp = getelementptr inbounds i8, ptr %p, i64 %ix\n  %b = load i8, ptr %bp\n  %z = zext i8 %b to i64\n"
+            . "  %sh = shl i64 %i, 3\n  %t = shl i64 %z, %sh\n  %v2 = or i64 %v, %t\n  %i2 = add i64 %i, 1\n  br label %loop\n"
+            . "done:\n  ret i64 %v\n}\n\n"
+            . "define void @__mir_nbuf_poke(i64 %h, i64 %off, i64 %w, i64 %be, i64 %v) {\n"
+            . "entry:\n  %d = call ptr @__mir_nbuf_data(i64 %h)\n  %p = getelementptr inbounds i8, ptr %d, i64 %off\n"
+            . "  %big = icmp ne i64 %be, 0\n  %last = sub i64 %w, 1\n  br label %loop\n"
+            . "loop:\n  %i = phi i64 [ 0, %entry ], [ %i2, %body ]\n  %c = icmp slt i64 %i, %w\n  br i1 %c, label %body, label %done\n"
+            . "body:\n  %ri = sub i64 %last, %i\n  %ix = select i1 %big, i64 %ri, i64 %i\n"
+            . "  %bp = getelementptr inbounds i8, ptr %p, i64 %ix\n  %sh = shl i64 %i, 3\n  %t = lshr i64 %v, %sh\n"
+            . "  %b = trunc i64 %t to i8\n  store i8 %b, ptr %bp\n  %i2 = add i64 %i, 1\n  br label %loop\n"
+            . "done:\n  ret void\n}\n\n"
+            . "define double @__mir_nbuf_bits_f(i64 %bits, i64 %w) {\n"
+            . "entry:\n  %wide = icmp eq i64 %w, 8\n  br i1 %wide, label %d64, label %d32\n"
+            . "d64:\n  %x = bitcast i64 %bits to double\n  ret double %x\n"
+            . "d32:\n  %n = trunc i64 %bits to i32\n  %f = bitcast i32 %n to float\n  %y = fpext float %f to double\n  ret double %y\n}\n\n"
+            . "define i64 @__mir_nbuf_f_bits(double %v, i64 %w) {\n"
+            . "entry:\n  %wide = icmp eq i64 %w, 8\n  br i1 %wide, label %d64, label %d32\n"
+            . "d64:\n  %x = bitcast double %v to i64\n  ret i64 %x\n"
+            . "d32:\n  %f = fptrunc double %v to float\n  %n = bitcast float %f to i32\n  %y = zext i32 %n to i64\n  ret i64 %y\n}\n\n";
         return $ir;
     }
 
@@ -5098,7 +5127,10 @@ done:
     {
         if ($op === 'get_i' || $op === 'alloc' || $op === 'resize' || $op === 'reduce_i' || $op === 'same') { return 'iii'; }
         if ($op === 'set_i' || $op === 'remove') { return 'iiiv'; }
-        if ($op === 'get_f' || $op === 'reduce_f') { return 'iif'; }
+        if ($op === 'get_f' || $op === 'reduce_f' || $op === 'bits_f') { return 'iif'; }
+        if ($op === 'f_bits') { return 'fii'; }
+        if ($op === 'peek') { return 'iiiii'; }
+        if ($op === 'poke') { return 'iiiiiv'; }
         if ($op === 'set_f') { return 'iifv'; }
         if ($op === 'get_c') { return 'iic'; }
         if ($op === 'set_c') { return 'iicv'; }

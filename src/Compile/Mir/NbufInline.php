@@ -23,7 +23,7 @@ final class NbufInline
         $short = \substr($cls, 13);
         if ($short === 'Int32Array') { return MemoryAbi::BUF_KIND_I32; }
         if ($short === 'Int64Array') { return MemoryAbi::BUF_KIND_I64; }
-        if ($short === 'UInt8Array') { return MemoryAbi::BUF_KIND_U8; }
+        if ($short === 'UInt8Array' || $short === 'ByteBuffer') { return MemoryAbi::BUF_KIND_U8; }
         if ($short === 'UInt16Array') { return MemoryAbi::BUF_KIND_U16; }
         if ($short === 'UInt32Array') { return MemoryAbi::BUF_KIND_U32; }
         if ($short === 'Int8Array') { return MemoryAbi::BUF_KIND_I8; }

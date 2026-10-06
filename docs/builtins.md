@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **966 / 2135** · classes **169 / 327** · codegen builtins 232 · lowered 33 · stdlib globals 1074 · prelude globals 1168
+Functions **966 / 2135** · classes **169 / 327** · codegen builtins 232 · lowered 33 · stdlib globals 1078 · prelude globals 1168
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -128,7 +128,7 @@ Types: `Io\Poll\Backend` (enum) `Io\Poll\BackendUnavailableException` `Io\Poll\C
 
 #### `Manticore\Ds\`
 
-Types: `Manticore\Ds\BitArray` `Manticore\Ds\Float32Array` `Manticore\Ds\Float64Array` `Manticore\Ds\FloatTypedArray` `Manticore\Ds\Int16Array` `Manticore\Ds\Int32Array` `Manticore\Ds\Int64Array` `Manticore\Ds\Int8Array` `Manticore\Ds\IntTypedArray` `Manticore\Ds\TypedArray` `Manticore\Ds\UInt16Array` `Manticore\Ds\UInt32Array` `Manticore\Ds\UInt8Array`
+Types: `Manticore\Ds\BitArray` `Manticore\Ds\ByteBuffer` `Manticore\Ds\Float32Array` `Manticore\Ds\Float64Array` `Manticore\Ds\FloatTypedArray` `Manticore\Ds\Int16Array` `Manticore\Ds\Int32Array` `Manticore\Ds\Int64Array` `Manticore\Ds\Int8Array` `Manticore\Ds\IntTypedArray` `Manticore\Ds\TypedArray` `Manticore\Ds\UInt16Array` `Manticore\Ds\UInt32Array` `Manticore\Ds\UInt8Array`
 
 #### `Manticore\Sapi\` — [http.md](http.md)
 
@@ -159,7 +159,7 @@ Functions (39): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1487 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1491 — not user API.
 
 ## Per extension
 

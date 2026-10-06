@@ -109,6 +109,39 @@ buffer.
 `json_encode` (through `jsonSerialize()`) present the array as the list
 `toArray()` returns.
 
+## `ByteBuffer`
+
+A `ByteBuffer` is a typed array of bytes (0..255, as `UInt8Array`; a class of its
+own) — every method above works on it, `$b[$i]`
+is one byte — with typed reads and writes at a **byte offset**:
+
+```php
+use Manticore\Ds\ByteBuffer;
+
+$b = ByteBuffer::fromString($packet);
+$length = $b->getUInt16(2, true);        // big-endian (network order)
+$stamp  = $b->getInt64(4);               // little-endian by default
+$b->setFloat32(12, 0.5);
+$b->write(16, "tail");
+fwrite($sock, $b->toString());
+```
+
+| | |
+|---|---|
+| `ByteBuffer::fromString(string $bytes): ByteBuffer` | a buffer holding a copy of the bytes |
+| `toString(int $offset = 0, ?int $length = null): string` | the bytes `[$offset, $offset + $length)`; to the end when `$length` is null |
+| `write(int $offset, string $bytes): void` | copy a string over the buffer |
+| `getInt8` / `getUInt8(int $offset): int` | one byte |
+| `getInt16` / `getUInt16` / `getInt32` / `getUInt32` / `getInt64(int $offset, bool $bigEndian = false): int` | an integer of that width |
+| `getFloat32` / `getFloat64(int $offset, bool $bigEndian = false): float` | an IEEE-754 float |
+| `setInt8` … `setInt64(int $offset, int $value, bool $bigEndian = false): void` | store an integer; a value outside the width is a `ValueError("Value 70000 is out of range for uint16 (0..65535)")` |
+| `setFloat32` / `setFloat64(int $offset, float $value, bool $bigEndian = false): void` | store a float (`setFloat32` rounds to binary32) |
+
+An access that runs past the end is an
+`OutOfBoundsException("Index invalid or out of range")`; nothing grows the
+buffer but `setSize`, `push` and `$b[] = $byte`. A typed read costs about
+5 ns — the same as composing the value from `ord()` calls by hand, and some
+60 times less than `unpack()` at an offset.
 ## `#[TypeDef]` and typed arrays
 
 The `repr` set of [`#[TypeDef]`](attributes.md#typedef) (`i8` … `i64`, `u8` …

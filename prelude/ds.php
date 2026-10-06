@@ -482,6 +482,131 @@ namespace Manticore\Ds {
         protected function rangeMax(): int { return 65535; }
     }
 
+    /**
+     * A resizable run of bytes: a `UInt8Array` (`$b[$i]`, `push`, `fill`, …)
+     * with typed reads and writes at a BYTE offset, little-endian unless
+     * `$bigEndian`. An access that runs past the end is an
+     * `OutOfBoundsException`; an integer that does not fit its width is a
+     * `ValueError`.
+     */
+    final class ByteBuffer extends IntTypedArray
+    {
+        protected function kind(): int { return 5; }
+        protected function rangeMin(): int { return 0; }
+        protected function rangeMax(): int { return 255; }
+
+        public static function fromString(string $bytes): self
+        {
+            $n = \strlen($bytes);
+            $b = new self($n);
+            for ($k = 0; $k < $n; $k++) { __mc_nbuf_set_i($b->__mcbuf, $k, \ord($bytes[$k])); }
+            return $b;
+        }
+
+        /** The bytes `[$offset, $offset + $length)` as a string; to the end when `$length` is null. */
+        public function toString(int $offset = 0, ?int $length = null): string
+        {
+            $w = $length ?? __mc_nbuf_len($this->__mcbuf) - $offset;
+            $this->span($offset, $w);
+            $out = '';
+            for ($k = 0; $k < $w; $k++) { $out .= \chr(__mc_nbuf_get_i($this->__mcbuf, $offset + $k)); }
+            return $out;
+        }
+
+        /** Copies `$bytes` over the buffer at `$offset`. */
+        public function write(int $offset, string $bytes): void
+        {
+            $w = \strlen($bytes);
+            $this->span($offset, $w);
+            for ($k = 0; $k < $w; $k++) { __mc_nbuf_set_i($this->__mcbuf, $offset + $k, \ord($bytes[$k])); }
+        }
+
+        public function getUInt8(int $offset): int { return $this->peek($offset, 1, false); }
+
+        public function getInt8(int $offset): int
+        {
+            $v = $this->peek($offset, 1, false);
+            return $v >= 128 ? $v - 256 : $v;
+        }
+
+        public function getUInt16(int $offset, bool $bigEndian = false): int { return $this->peek($offset, 2, $bigEndian); }
+
+        public function getInt16(int $offset, bool $bigEndian = false): int
+        {
+            $v = $this->peek($offset, 2, $bigEndian);
+            return $v >= 32768 ? $v - 65536 : $v;
+        }
+
+        public function getUInt32(int $offset, bool $bigEndian = false): int { return $this->peek($offset, 4, $bigEndian); }
+
+        public function getInt32(int $offset, bool $bigEndian = false): int
+        {
+            $v = $this->peek($offset, 4, $bigEndian);
+            return $v >= 2147483648 ? $v - 4294967296 : $v;
+        }
+
+        public function getInt64(int $offset, bool $bigEndian = false): int { return $this->peek($offset, 8, $bigEndian); }
+
+        public function getFloat32(int $offset, bool $bigEndian = false): float
+        {
+            return __mc_nbuf_bits_f($this->peek($offset, 4, $bigEndian), 4);
+        }
+
+        public function getFloat64(int $offset, bool $bigEndian = false): float
+        {
+            return __mc_nbuf_bits_f($this->peek($offset, 8, $bigEndian), 8);
+        }
+
+        public function setUInt8(int $offset, int $value): void { $this->poke($offset, 1, false, $value, 0, 255, 'uint8'); }
+
+        public function setInt8(int $offset, int $value): void { $this->poke($offset, 1, false, $value, -128, 127, 'int8'); }
+
+        public function setUInt16(int $offset, int $value, bool $bigEndian = false): void { $this->poke($offset, 2, $bigEndian, $value, 0, 65535, 'uint16'); }
+
+        public function setInt16(int $offset, int $value, bool $bigEndian = false): void { $this->poke($offset, 2, $bigEndian, $value, -32768, 32767, 'int16'); }
+
+        public function setUInt32(int $offset, int $value, bool $bigEndian = false): void { $this->poke($offset, 4, $bigEndian, $value, 0, 4294967295, 'uint32'); }
+
+        public function setInt32(int $offset, int $value, bool $bigEndian = false): void { $this->poke($offset, 4, $bigEndian, $value, -2147483648, 2147483647, 'int32'); }
+
+        public function setInt64(int $offset, int $value, bool $bigEndian = false): void { $this->poke($offset, 8, $bigEndian, $value, \PHP_INT_MIN, \PHP_INT_MAX, 'int64'); }
+
+        public function setFloat32(int $offset, float $value, bool $bigEndian = false): void
+        {
+            $this->span($offset, 4);
+            __mc_nbuf_poke($this->__mcbuf, $offset, 4, $bigEndian ? 1 : 0, __mc_nbuf_f_bits($value, 4));
+        }
+
+        public function setFloat64(int $offset, float $value, bool $bigEndian = false): void
+        {
+            $this->span($offset, 8);
+            __mc_nbuf_poke($this->__mcbuf, $offset, 8, $bigEndian ? 1 : 0, __mc_nbuf_f_bits($value, 8));
+        }
+
+        private function span(int $offset, int $width): void
+        {
+            if ($offset < 0 || $width < 0 || $offset + $width > __mc_nbuf_len($this->__mcbuf)) {
+                throw new \OutOfBoundsException('Index invalid or out of range');
+            }
+        }
+
+        private function peek(int $offset, int $width, bool $bigEndian): int
+        {
+            $this->span($offset, $width);
+            return __mc_nbuf_peek($this->__mcbuf, $offset, $width, $bigEndian ? 1 : 0);
+        }
+
+        private function poke(int $offset, int $width, bool $bigEndian, int $value, int $min, int $max, string $type): void
+        {
+            if ($value < $min || $value > $max) {
+                throw new \ValueError('Value ' . (string)$value . ' is out of range for ' . $type
+                    . ' (' . (string)$min . '..' . (string)$max . ')');
+            }
+            $this->span($offset, $width);
+            __mc_nbuf_poke($this->__mcbuf, $offset, $width, $bigEndian ? 1 : 0, $value);
+        }
+    }
+
     final class UInt32Array extends IntTypedArray
     {
         protected function kind(): int { return 7; }

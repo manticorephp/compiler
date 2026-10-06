@@ -193,4 +193,60 @@ function __mc_nbuf_same(int $a, int $b): int
     return 1;
 }
 
+/** `$w` bytes at byte offset `$off` of a byte buffer as an unsigned int (8 bytes: the signed word). */
+function __mc_nbuf_peek(int $h, int $off, int $w, int $be): int
+{
+    $v = 0;
+    for ($k = 0; $k < $w; $k++) {
+        $b = (int) __mc_nbuf_op(4, $h, $off + ($be !== 0 ? $w - 1 - $k : $k), 0, 0, null);
+        $v = $v | ($b << (8 * $k));
+    }
+    return $v;
+}
+
+/** Stores the low `$w` bytes of `$v` at byte offset `$off`. */
+function __mc_nbuf_poke(int $h, int $off, int $w, int $be, int $v): void
+{
+    for ($k = 0; $k < $w; $k++) {
+        __mc_nbuf_op(5, $h, $off + ($be !== 0 ? $w - 1 - $k : $k), 0, 0, ($v >> (8 * $k)) & 255);
+    }
+}
+
+/** The float whose IEEE-754 image is `$bits` (`$w` 8: binary64, 4: binary32). */
+function __mc_nbuf_bits_f(int $bits, int $w): float
+{
+    $eb = $w === 8 ? 11 : 8;
+    $mb = $w === 8 ? 52 : 23;
+    $sign = (($bits >> ($eb + $mb)) & 1) !== 0 ? -1.0 : 1.0;
+    $exp = ($bits >> $mb) & ((1 << $eb) - 1);
+    $man = $bits & ((1 << $mb) - 1);
+    $bias = (1 << ($eb - 1)) - 1;
+    if ($exp === (1 << $eb) - 1) { return $man !== 0 ? NAN : $sign * INF; }
+    if ($exp === 0) { return $sign * ((float) $man * (2.0 ** (1 - $bias - $mb))); }
+    return $sign * ((float) ($man | (1 << $mb)) * (2.0 ** ($exp - $bias - $mb)));
+}
+
+/** The IEEE-754 image of `$v` (`$w` 4: of `$v` rounded to binary32). */
+function __mc_nbuf_f_bits(float $v, int $w): int
+{
+    $eb = $w === 8 ? 11 : 8;
+    $mb = $w === 8 ? 52 : 23;
+    $bias = (1 << ($eb - 1)) - 1;
+    if ($w === 4) { $v = __mc_nbuf_f32($v); }
+    $top = (1 << $eb) - 1;
+    if (is_nan($v)) { return ($top << $mb) | (1 << ($mb - 1)); }
+    $neg = $v < 0.0 || ($v === 0.0 && fdiv(1.0, $v) < 0.0);
+    $s = $neg ? 1 << ($eb + $mb) : 0;
+    $a = abs($v);
+    if ($a === 0.0) { return $s; }
+    if (is_infinite($a)) { return $s | ($top << $mb); }
+    $e = (int) floor(log($a, 2.0));
+    if ($e > $bias) { $e = $bias; }
+    if ($e < 1 - $bias - $mb) { $e = 1 - $bias - $mb; }
+    while ($e < $bias && $a >= 2.0 ** ($e + 1)) { $e++; }
+    while ($a < 2.0 ** $e) { $e--; }
+    if ($e < 1 - $bias) { return $s | (int) ($a / (2.0 ** (1 - $bias - $mb))); }
+    return $s | (($e + $bias) << $mb) | ((int) ($a / (2.0 ** ($e - $mb))) & ((1 << $mb) - 1));
+}
+
 function __mc_nbuf_clone(int $h): int { return (int) __mc_nbuf_op(11, $h, 0, 0, 0, null); }
