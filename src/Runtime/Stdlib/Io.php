@@ -1153,8 +1153,9 @@ function __mc_ctx_pack(string $s): string
 
 /**
  * Unpack the KIND_CONTEXT blob into [method, header, content, localCert, localPk,
- * verifyPeer, verifyName]. The two flags are '1'/'0' strings so the result is a
- * homogeneous string array (no cell), which callers turn back into bools.
+ * verifyPeer, verifyName, socketBacklog]. The two flags are '1'/'0' strings and the
+ * backlog is its decimal ('' = unset) so the result is a homogeneous string array
+ * (no cell), which callers turn back into bools / ints.
  * @return string[]
  */
 function __mc_ctx_unpack(string $blob): array
@@ -1180,6 +1181,10 @@ function __mc_ctx_unpack(string $blob): array
     // Two trailing flag chars.
     $out[] = ($pos < $n) ? $blob[$pos] : '1';
     $out[] = ($pos + 1 < $n) ? $blob[$pos + 1] : '1';
+    // socket.backlog, length-prefixed after the flags.
+    $pos = $pos + 2;
+    $bar = $pos < $n ? \strpos($blob, '|', $pos) : false;
+    $out[] = $bar === false ? '' : \substr($blob, $bar + 1, (int)\substr($blob, $pos, $bar - $pos));
     return $out;
 }
 
@@ -1239,8 +1244,9 @@ function __mc_ctx_header_raw($h): string
 
 /**
  * php's stream_context_create(). Only the option subset the HTTP/TLS client
- * honours is stored: http.method / http.header / http.content and
- * ssl.verify_peer / ssl.verify_peer_name. Everything else is accepted and
+ * and the listener honour is stored: http.method / http.header / http.content,
+ * ssl.verify_peer / ssl.verify_peer_name / ssl.local_cert / ssl.local_pk and
+ * socket.backlog. Everything else is accepted and
  * ignored (php does the same for options a wrapper does not implement).
  *
  * @param array<string,mixed>|null $options
@@ -1255,6 +1261,7 @@ function stream_context_create(?array $options = null, ?array $params = null): \
     $localPk = '';
     $verifyPeer = '1';
     $verifyName = '1';
+    $backlog = '';
     if ($options !== null) {
         if (isset($options['http']) && \is_array($options['http'])) {
             $h = $options['http'];
@@ -1273,10 +1280,12 @@ function stream_context_create(?array $options = null, ?array $params = null): \
             $localPk = $localCert;
             if (isset($s['local_pk'])) { $localPk = (string)$s['local_pk']; }
         }
+        if (isset($options['socket']) && \is_array($options['socket'])
+            && isset($options['socket']['backlog'])) {
+            $backlog = (string)(int)$options['socket']['backlog'];
+        }
     }
-    $blob = \__mc_ctx_pack($method) . \__mc_ctx_pack($header) . \__mc_ctx_pack($content)
-          . \__mc_ctx_pack($localCert) . \__mc_ctx_pack($localPk)
-          . $verifyPeer . $verifyName;
+    $blob = \__mc_ctx_repack($method, $header, $content, $localCert, $localPk, $verifyPeer, $verifyName, $backlog);
     $r = new \Resource(\Resource::KIND_CONTEXT, 'stream-context', 0);
     $r->rbuf = $blob;
     return $r;
@@ -1329,11 +1338,25 @@ function __mc_ctx_verify_flags(\Resource $context): array
     return [$o[5] === '1', $o[6] === '1'];
 }
 
-/** Reassemble the 7-field context blob from its parts (twin of the create packer). */
-function __mc_ctx_repack(string $method, string $header, string $content, string $cert, string $pk, string $vp, string $vn): string
+/**
+ * A stream context's socket.backlog — the listen() queue a server binds with —
+ * or php's default 32 when absent or not a context.
+ */
+function __mc_ctx_backlog(\Resource $context): int
+{
+    if ($context->kind !== \Resource::KIND_CONTEXT) {
+        return 32;
+    }
+    $b = \__mc_ctx_unpack($context->rbuf)[7];
+    return $b === '' ? 32 : (int)$b;
+}
+
+/** Reassemble the 8-field context blob from its parts. */
+function __mc_ctx_repack(string $method, string $header, string $content, string $cert, string $pk, string $vp, string $vn, string $backlog = ''): string
 {
     return \__mc_ctx_pack($method) . \__mc_ctx_pack($header) . \__mc_ctx_pack($content)
-         . \__mc_ctx_pack($cert) . \__mc_ctx_pack($pk) . $vp . $vn;
+         . \__mc_ctx_pack($cert) . \__mc_ctx_pack($pk) . $vp . $vn
+         . ($backlog === '' ? '' : \__mc_ctx_pack($backlog));
 }
 
 /**
@@ -1366,6 +1389,7 @@ function stream_context_get_options(\Resource $context): array
     if ($o[1] !== '') { $http['header'] = $o[1]; }
     if ($o[2] !== '') { $http['content'] = $o[2]; }
     if (\count($http) > 0) { $out['http'] = $http; }
+    if ($o[7] !== '') { $out['socket'] = ['backlog' => (int)$o[7]]; }
     return $out;
 }
 
@@ -1396,7 +1420,7 @@ function stream_context_set_option(\Resource $context, $wrapper_or_options, ?str
     }
     $o = \__mc_ctx_unpack($context->rbuf);
     $method = $o[0]; $header = $o[1]; $content = $o[2];
-    $cert = $o[3]; $pk = $o[4]; $vp = $o[5]; $vn = $o[6];
+    $cert = $o[3]; $pk = $o[4]; $vp = $o[5]; $vn = $o[6]; $backlog = $o[7];
     if (\is_array($wrapper_or_options)) {
         // The array form: ['ssl'=>['verify_peer'=>false,...], 'http'=>[...]].
         if (isset($wrapper_or_options['ssl']) && \is_array($wrapper_or_options['ssl'])) {
@@ -1412,6 +1436,10 @@ function stream_context_set_option(\Resource $context, $wrapper_or_options, ?str
             if (isset($h['header'])) { $header = \__mc_ctx_header_raw($h['header']); }
             if (isset($h['content'])) { $content = (string)$h['content']; }
         }
+        if (isset($wrapper_or_options['socket']) && \is_array($wrapper_or_options['socket'])
+            && isset($wrapper_or_options['socket']['backlog'])) {
+            $backlog = (string)(int)$wrapper_or_options['socket']['backlog'];
+        }
     } else {
         // The (wrapper, option, value) form.
         $wrapper = (string)$wrapper_or_options;
@@ -1425,10 +1453,21 @@ function stream_context_set_option(\Resource $context, $wrapper_or_options, ?str
             if ($opt === 'method') { $method = (string)$value; }
             elseif ($opt === 'header') { $header = \__mc_ctx_header_raw($value); }
             elseif ($opt === 'content') { $content = (string)$value; }
+        } elseif ($wrapper === 'socket' && $opt === 'backlog') {
+            $backlog = (string)(int)$value;
         }
     }
-    $context->rbuf = \__mc_ctx_repack($method, $header, $content, $cert, $pk, $vp, $vn);
+    $context->rbuf = \__mc_ctx_repack($method, $header, $content, $cert, $pk, $vp, $vn, $backlog);
     return true;
+}
+
+/**
+ * php 8.3's stream_context_set_options(): the array form of stream_context_set_option.
+ * @param array<string,mixed> $options
+ */
+function stream_context_set_options(\Resource $context, array $options): bool
+{
+    return \stream_context_set_option($context, $options);
 }
 
 /**

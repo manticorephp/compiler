@@ -504,6 +504,12 @@ final class Ownership
      * store is Own ({@see storedOwned}). A bare borrow was safe only while no
      * cell element slot dropped what it held; now an overwrite or an unset
      * does, and `$y = $a[0]; $a[0] = 5; $y->n` read freed memory.
+     *
+     * An ERASED base co-owns too: its read is the three-armed `__mir_eidx_*`,
+     * and only the array arm hands out a borrow — the emitter retains on that
+     * arm alone ({@see Passes\EmitLlvmLocals::elemReadCoOwn}). As a borrow,
+     * `$it = $rows[0]; $it['k'] = 1;` saw rc 1 and wrote through into `$rows`,
+     * and the write that grew the table freed the buffer `$rows` still held.
      */
     public static function cellElemReadCoOwns(Node $v): bool
     {
@@ -511,7 +517,8 @@ final class Ownership
         if (!($v instanceof ArrayAccess_) || $v->probe) { return false; }
         if ($v->type->kind !== Type::KIND_CELL) { return false; }
         $at = $v->array->type;
-        return $at->isVec() || $at->isAssoc() || $at->kind === Type::KIND_OBJ;
+        return $at->isVec() || $at->isAssoc() || $at->kind === Type::KIND_OBJ
+            || $at->kind === Type::KIND_CELL;
     }
 
     /**

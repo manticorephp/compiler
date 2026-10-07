@@ -1743,6 +1743,10 @@ trait EmitLlvmArrays
         // CELLGUARD: the `c` body decodes its array arm by the buffer hint and
         // boxes its string/object arms — a cell read, `opaque`.
         if ($self->type->kind === Type::KIND_CELL) { $this->markCellOpaque($r); }
+        $this->eidxLastResult = $r;
+        $this->eidxLastSubject = $cv;
+        $this->eidxLastObjArm = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet') !== [];
+        $this->eidxLastStrArm = !$keyIsString;
 
         // The callee is done with the key, so a fresh temp dies once
         // ({@see EmitLlvm::keyTempRelease}). The BOXED copy the object arm

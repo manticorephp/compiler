@@ -567,6 +567,7 @@ trait EmitLlvmLocals
             $out = $this->coerceToI64();
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
+            $out .= $this->eidxBorrowArmIr($v);
             $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
             $this->lastValue = $sv;
             $this->lastValueType = $st;
@@ -584,6 +585,47 @@ trait EmitLlvmLocals
         $out .= $this->rcRetainByType($v, $this->lastValue, $slotType);
         $this->lastValue = $sv;
         $this->lastValueType = $st;
+        return $out;
+    }
+
+    /**
+     * Sets lastValue to the word an erased-base element read must retain: the result when
+     * `__mir_eidx_*` took its ARRAY arm (a borrow of the slot), 0 — which
+     * `__mir_cell_retain` ignores — when it took the object arm (offsetGet's
+     * return is already the reader's) or the string arm (an immortal char).
+     * The arm is the subject's tag, tested exactly as the body tests it.
+     */
+    private function eidxBorrowArmIr(Node $v): string
+    {
+        $res = $this->lastValue;
+        if (!($v instanceof ArrayAccess_) || $v->array->type->kind !== Type::KIND_CELL) { return ''; }
+        if ($this->eidxLastResult !== $res) { return ''; }
+        $out = '';
+        $cv = $this->eidxLastSubject;
+        $box = $this->ssa->allocReg();
+        $out .= '  ' . $box . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $cv . ", 48\n";
+        $nib = $this->ssa->allocReg();
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $other = 'false';
+        /** @var int[] $tags */
+        $tags = [];
+        if ($this->eidxLastObjArm) { $tags[] = 8; }
+        if ($this->eidxLastStrArm) { $tags[] = 4; }
+        foreach ($tags as $tag) {
+            $is = $this->ssa->allocReg();
+            $out .= '  ' . $is . ' = icmp eq i64 ' . $nib . ', ' . $tag . "\n";
+            $or = $this->ssa->allocReg();
+            $out .= '  ' . $or . ' = or i1 ' . $other . ', ' . $is . "\n";
+            $other = $or;
+        }
+        if ($other === 'false') { return ''; }
+        $skip = $this->ssa->allocReg();
+        $out .= '  ' . $skip . ' = and i1 ' . $box . ', ' . $other . "\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = select i1 ' . $skip . ', i64 0, i64 ' . $res . "\n";
+        $this->lastValue = $w;
         return $out;
     }
 

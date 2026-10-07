@@ -36,7 +36,8 @@ worker and forwards SIGTERM/SIGINT to all of them. The parent serves nothing;
 `serve()` returns once every worker has exited. `workers(0)` (the default)
 serves in-process.
 
-`->maxConnections(N)` is the ceiling per worker. The permit is taken **before**
+`->maxConnections(N)` is the ceiling per worker, 4096 by default (a live
+connection costs ~32 KB). The permit is taken **before**
 `accept`, so at the ceiling the worker stops accepting and the queue stays in
 the kernel backlog — which is what backpressure means for a server.
 
@@ -369,7 +370,8 @@ well as the handler, so a streaming body sees it too.
 | `uploadMaxFilesize` | 2097152 | the part is kept with `error` 1 (`UPLOAD_ERR_INI_SIZE`), no temp file |
 | `postMaxSize` | 0 | reserved: php's `post_max_size`; not enforced in either mode — a buffered body is already bounded by `maxBodySize` (413), and a streamed one's field bytes are the handler's (`Part::readAll()`) |
 | `maxInputVars` | 1000 | `queryArray()`, urlencoded and multipart `postArray()` truncated silently (php's `max_input_vars`) |
-| `keepAliveMax` | 1000 | connection closed after N requests |
+| `keepAliveMax` | 0 | connection closed after N requests; 0 = never (Go's net/http, Node; nginx's 1000 only forces reconnects) |
+| `backlog` | 511 | listen queue (kernel-clamped to `somaxconn`); a full queue answers a connect with RST. A context's `socket.backlog` wins |
 | `idleTimeout` | 5.0 | silent close between requests |
 | `headerTimeout` | 10.0 | 408 mid-head |
 | `writeTimeout` | 30.0 | the write is bounded |

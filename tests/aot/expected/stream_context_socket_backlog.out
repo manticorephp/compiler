@@ -1,0 +1,15 @@
+array(1) {
+  ["socket"]=>
+  array(1) {
+    ["backlog"]=>
+    int(5)
+  }
+}
+array(1) {
+  ["backlog"]=>
+  int(64)
+}
+int(128)
+bool(false)
+bool(true)
+string(2) "hi"
