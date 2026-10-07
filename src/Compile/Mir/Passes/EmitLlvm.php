@@ -127,6 +127,7 @@ final class EmitLlvm implements EmitVisitor
     use EmitLlvmModule;
     use EmitLlvmRuntime;
     use EmitLlvmBuiltins;
+    use EmitLlvmHmap;
     use EmitLlvmExceptions;
     use EmitLlvmObjects;
     use EmitLlvmFiber;

@@ -33,6 +33,7 @@ function __mc_hmap_epoch(int $h): int { return __mc_hmap_tab($h)['epoch']; }
 
 function __mc_hmap_find(int $h, mixed $key): int
 {
+    if (!\is_int($key) && !\is_string($key) && !\is_object($key)) { return -2; }
     $t = &__mc_hmap_tab($h);
     return $t['ix'][__mc_hmap_ekey($key)] ?? -1;
 }
@@ -42,6 +43,7 @@ function __mc_hmap_val(int $h, int $e): mixed { $t = &__mc_hmap_tab($h); return 
 
 function __mc_hmap_put(int $h, mixed $key, mixed $val): int
 {
+    if (!\is_int($key) && !\is_string($key) && !\is_object($key)) { return -2; }
     $t = &__mc_hmap_tab($h);
     $ek = __mc_hmap_ekey($key);
     if (isset($t['ix'][$ek])) { if ($t['set'] === 0) { $t['v'][$t['ix'][$ek]] = $val; } return 0; }
@@ -64,8 +66,19 @@ function __mc_hmap_compact(array &$t): void
     $t['epoch']++;
 }
 
+function __mc_hmap_delat(int $h, int $e): int
+{
+    $t = &__mc_hmap_tab($h);
+    unset($t['ix'][__mc_hmap_ekey($t['k'][$e])]);
+    $old = $t['v'][$e];
+    $t['alive'][$e] = false; $t['k'][$e] = null; $t['v'][$e] = null; $t['len']--;
+    $old = null;
+    return 1;
+}
+
 function __mc_hmap_del(int $h, mixed $key): int
 {
+    if (!\is_int($key) && !\is_string($key) && !\is_object($key)) { return 0; }
     $t = &__mc_hmap_tab($h);
     $ek = __mc_hmap_ekey($key);
     if (!isset($t['ix'][$ek])) { return 0; }

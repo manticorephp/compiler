@@ -452,7 +452,11 @@ trait EmitLlvmBuiltins
         }
         if (\strncmp($name, '__mc_hmap_', 10) === 0) {
             $hmapSig = \Compile\Mir\RuntimeLibrary::hmapSig(\substr($name, 10));
-            if (\strlen($hmapSig) === \count($args) + 1) { return $this->biNbuf('hmap', \substr($name, 10), $hmapSig, $args); }
+            if (\strlen($hmapSig) === \count($args) + 1) {
+                $fast = $this->emitHmapBuiltin(\substr($name, 10), $args);
+                if ($fast !== null) { return $fast; }
+                return $this->biNbuf('hmap', \substr($name, 10), $hmapSig, $args);
+            }
         }
         if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }

@@ -6439,10 +6439,13 @@ define i64 @__mir_hmap_hash(i64 %k0) {
 entry:
   %k = call i64 @__manticore_deref(i64 %k0)
   %t = call i64 @__manticore_tag(i64 %k)
-  switch i64 %t, label %obj [
+  switch i64 %t, label %bad [
     i64 1, label %int
     i64 4, label %str
+    i64 8, label %obj
   ]
+bad:
+  ret i64 -2
 int:
   %x = call i64 @__manticore_unbox_int(i64 %k)
   %hi = call i64 @__mir_hmap_mix(i64 %x)
@@ -6536,6 +6539,11 @@ miss:
 define i64 @__mir_hmap_find(i64 %h, i64 %key) {
 entry:
   %hash = call i64 @__mir_hmap_hash(i64 %key)
+  %bad = icmp eq i64 %hash, -2
+  br i1 %bad, label %rej, label %go
+rej:
+  ret i64 -2
+go:
   %r = call i64 @__mir_hmap_findh(i64 %h, i64 %key, i64 %hash)
   ret i64 %r
 }
@@ -6844,6 +6852,11 @@ map:
 define i64 @__mir_hmap_put(i64 %h, i64 %key, i64 %val) {
 entry:
   %hash = call i64 @__mir_hmap_hash(i64 %key)
+  %bad = icmp eq i64 %hash, -2
+  br i1 %bad, label %rej, label %pf
+rej:
+  ret i64 -2
+pf:
   %e = call i64 @__mir_hmap_findh(i64 %h, i64 %key, i64 %hash)
   %hit = icmp sge i64 %e, 0
   br i1 %hit, label %upd, label %miss
@@ -6930,16 +6943,12 @@ fin:
   ret i64 1
 }
 
-define i64 @__mir_hmap_del(i64 %h, i64 %key) {
+define i64 @__mir_hmap_delat(i64 %h, i64 %e) {
 entry:
-  %hash = call i64 @__mir_hmap_hash(i64 %key)
-  %e = call i64 @__mir_hmap_findh(i64 %h, i64 %key, i64 %hash)
-  %hit = icmp sge i64 %e, 0
-  br i1 %hit, label %go, label %miss
-miss:
-  ret i64 0
-go:
   %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)
+  %hash = load i64, ptr %ep
+  br label %go
+go:
   %dkp = getelementptr inbounds i8, ptr %ep, i64 {EKEY}
   %dk = load i64, ptr %dkp
   %dfl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
@@ -7007,6 +7016,19 @@ done:
   call void @__mir_cell_drop(i64 %dk)
   call void @__mir_cell_drop(i64 %dv)
   ret i64 1
+}
+
+define i64 @__mir_hmap_del(i64 %h, i64 %key) {
+entry:
+  %hash = call i64 @__mir_hmap_hash(i64 %key)
+  %e = call i64 @__mir_hmap_findh(i64 %h, i64 %key, i64 %hash)
+  %hit = icmp sge i64 %e, 0
+  br i1 %hit, label %go, label %miss
+miss:
+  ret i64 0
+go:
+  %r = call i64 @__mir_hmap_delat(i64 %h, i64 %e)
+  ret i64 %r
 }
 
 define i64 @__mir_hmap_next(i64 %h, i64 %e0) {
@@ -7105,8 +7127,40 @@ done:
             '{PMASK}' => (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK,
             '{NULL}' => (string)\Compile\MemoryAbi::CELL_NULL,
         ];
+        $ir .= self::hmapProbe('i') . self::hmapProbe('s') . self::hmapProbe('o');
         foreach ($sub as $from => $to) { $ir = \str_replace($from, $to, $ir); }
         return $ir;
+    }
+
+    /**
+     * `__mir_hmap_find_{i,s,o}`: a probe for a key whose static type is int /
+     * string / object — no tag dispatch, no cell box. Same hash as {@see hmap}'s
+     * `hash` (an erased and a specialised probe must agree), the stored hash
+     * is compared first, and a string compares by pointer before its bytes.
+     * A null `?string` / object pointer answers -2 (invalid key) like the erased probe.
+     */
+    private static function hmapProbe(string $r): string
+    {
+        $kt = $r === 'i' ? 'i64' : 'ptr';
+        if ($r === 'i') {
+            $pre = "  %hash = call i64 @__mir_hmap_mix(i64 %k)\n  br label %go\n";
+            $eq = "  %kd = call i64 @__manticore_deref(i64 %kk)\n  %kt = call i64 @__manticore_tag(i64 %kd)\n  %ki = icmp eq i64 %kt, 1\n  br i1 %ki, label %ci, label %next\nci:\n"
+                . "  %ku = call i64 @__manticore_unbox_int(i64 %kd)\n  %q = icmp eq i64 %ku, %k\n  br i1 %q, label %hit, label %next\n";
+        } elseif ($r === 's') {
+            $pre = "  %z = icmp eq ptr %k, null\n  br i1 %z, label %bad, label %hs\nbad:\n  ret i64 -2\nhs:\n  %sx = call i64 @__mir_array_hash_str(ptr %k)\n  %hash = call i64 @__mir_hmap_mix(i64 %sx)\n  br label %go\n";
+            $eq = "  %kd = call i64 @__manticore_deref(i64 %kk)\n  %kt = call i64 @__manticore_tag(i64 %kd)\n  %ki = icmp eq i64 %kt, 4\n  br i1 %ki, label %ci, label %next\nci:\n"
+                . "  %km = and i64 %kd, {PMASK}\n  %kpp = inttoptr i64 %km to ptr\n  %q = call i1 @__mir_str_eq(ptr %kpp, ptr %k)\n  br i1 %q, label %hit, label %next\n";
+        } else {
+            $pre = "  %z = icmp eq ptr %k, null\n  br i1 %z, label %bad, label %ho\nbad:\n  ret i64 -2\nho:\n  %oi = ptrtoint ptr %k to i64\n  %ox = lshr i64 %oi, 4\n  %hash = call i64 @__mir_hmap_mix(i64 %ox)\n  br label %go\n";
+            $eq = "  %kd = call i64 @__manticore_deref(i64 %kk)\n  %kt = call i64 @__manticore_tag(i64 %kd)\n  %ki = icmp eq i64 %kt, 8\n  br i1 %ki, label %ci, label %next\nci:\n"
+                . "  %km = and i64 %kd, {PMASK}\n  %oi2 = ptrtoint ptr %k to i64\n  %q = icmp eq i64 %km, %oi2\n  br i1 %q, label %hit, label %next\n";
+        }
+        return "\ndefine i64 @__mir_hmap_find_" . $r . "(i64 %h, " . $kt . " %k) {\nentry:\n" . $pre
+            . "go:\n  %mask = call i64 @__mir_hmap_hld(i64 %h, i64 {MASK})\n  %ixw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})\n  %ixp = inttoptr i64 %ixw to ptr\n  %s0 = and i64 %hash, %mask\n  br label %loop\n"
+            . "loop:\n  %s = phi i64 [ %s0, %go ], [ %s2, %next ]\n  %sp = getelementptr inbounds i32, ptr %ixp, i64 %s\n  %sl = load i32, ptr %sp\n  %emp = icmp eq i32 %sl, -1\n  br i1 %emp, label %miss, label %chk\n"
+            . "chk:\n  %e = zext i32 %sl to i64\n  %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)\n  %eh = load i64, ptr %ep\n  %heq = icmp eq i64 %eh, %hash\n  br i1 %heq, label %cmp, label %next\n"
+            . "cmp:\n  %kp = getelementptr inbounds i8, ptr %ep, i64 {EKEY}\n  %kk = load i64, ptr %kp\n" . $eq
+            . "next:\n  %s1 = add i64 %s, 1\n  %s2 = and i64 %s1, %mask\n  br label %loop\nhit:\n  ret i64 %e\nmiss:\n  ret i64 -1\n}\n";
     }
 
     /**
@@ -7142,6 +7196,7 @@ done:
         if ($op === 'alloc' || $op === 'len' || $op === 'epoch' || $op === 'clone') { return 'ii'; }
         if ($op === 'free' || $op === 'clear') { return 'iv'; }
         if ($op === 'find' || $op === 'del') { return 'ici'; }
+        if ($op === 'delat') { return 'iii'; }
         if ($op === 'key' || $op === 'val') { return 'iic'; }
         if ($op === 'put') { return 'icci'; }
         if ($op === 'next') { return 'iii'; }
