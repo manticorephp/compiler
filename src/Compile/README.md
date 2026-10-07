@@ -42,13 +42,15 @@ ownership predicate), `Ownership` (the one "is this value +1" classifier the pas
 and the emitter both ask, plus the container-store and return conventions),
 `Flow/Forward` + `Flow/OwnLattice` + `Flow/MixedSlots` (OwnershipFlow's dataflow), `ArenaContext`, `GeneratorContext`, `FunctionEmitFrame`,
 `LocalSlots`, `MethodMeta`, `ParamMeta`, `PropertyMeta`, `StringPool`,
-`SsaBuilder`, `NodeClone`, `FunctionSignatures`.
+`SsaBuilder`, `NodeClone`, `FunctionSignatures`, and `NbufInline` (the one owner of
+what counts as an in-place native-buffer / `Manticore\Ds` typed-array access, shared
+by `SpillFreshBases` and the emitter).
 
 ### Memory ABI (`src/Compile/`)
 
 | Symbol | Role |
 |--------|------|
-| `MemoryAbi` | One source of truth for object/array layout, rc encoding, tag magics, CC state bits. Versioned (`VERSION`, currently 7 — not surfaced by any command today). Contract: `docs/design/memory-abi.md` |
+| `MemoryAbi` | One source of truth for object/array layout, rc encoding, tag magics, CC state bits. Versioned (`VERSION`; the `.sig` header carries it, no command prints it). Contract: `docs/design/memory-abi.md` |
 
 ### Runtime IR host (`src/Compile/Runtime/`)
 
@@ -56,6 +58,7 @@ and the emitter both ask, plus the container-store and return conventions),
 |--------|------|
 | `RuntimeHost` | Contract the standalone runtime emitters need from a backend: alloc + labels/instrumentation |
 | `BareHost` | MIR's host: plain libc `malloc`/`realloc`, no arena/profile/verify, private label counter |
+| `UnwindRuntime` | Zero-cost Itanium unwinding runtime: own personality, no `__cxa_throw`, no C++ runtime |
 | `UnifiedArrayRuntime` | The ONE PhpArray runtime (`docs/design/memory-abi.md` §4): 56-byte header, PACKED (vec fast path) ↔ HASHED (assoc map) modes, rc always at one offset |
 
 ### Type-hint parser (`src/Compile/TypeHint/`)
@@ -67,18 +70,22 @@ and the emitter both ask, plus the container-store and return conventions),
 
 ## Pipeline
 
-Driven by `lower_module()` / `compile_via_mir()` in
-`src/Manticore/Main.php`. Each pass takes a `Module`, returns a
+Sequenced by `lower_module()` / `compile_via_mir()` in
+`src/Manticore/Main.php` (driven by `cmd_compile`). Each pass takes a `Module`, returns a
 `Module`, and stamps `passesApplied`:
 
 ```
 LowerFromAst      AST → MIR; a bare `array` hint lowers to `unknown`
+NarrowScalarGuards  `if (is_int($x))` reads an unboxed copy of a cell `$x`
 ConstFold         fold literal arith/cmp/unary; collapse dead `if`
 DeadStore         drop a pure StoreLocal whose name is never read
 InferTypes        refine every node's Type from `unknown` (name→Type map)
+VivifyRefArgs     auto-vivify a by-ref argument (`f($a['k'])`) before the call
+ResolveMethodFcc  rebuild a `$r->m(...)` closure with the method's own params once the receiver class is known
 NarrowReturns*    concrete param-independent `array` returns → vec[T] / assoc[K,V]
 InferTypes        re-run on the narrowed returns
 InlineClosures    inline captureless arrow closures; fuse map/filter/reduce to loops
+ResolveOverloads  retarget a call to a concretely-typed overload when every argument matches exactly
 InferTypes        re-run on the spliced / fused expressions
 Monomorphize      specialize erased-array and callable params per call-site shape
 FuseSplitJoin     implode(explode(…)) → one native str_replace
@@ -104,9 +111,9 @@ re-runs are not redundant — each later pass needs the types the previous one m
 concrete, which is also why `Monomorphize` sits this far down rather than right
 after lowering.
 
-`EmitLlvm` is one class assembled from 14 traits (`EmitLlvm.php`): `EmitLlvmVisit`,
+`EmitLlvm` is one class assembled from 15 traits (`EmitLlvm.php`): `EmitLlvmVisit`,
 `Expr`, `Control`, `Locals`, `Calls`, `Memory`, `Arrays`, `Generator`, `Module`,
-`Runtime`, `Builtins`, `Exceptions`, `Objects`, `Fiber`. They share one `$this`, so
+`Runtime`, `Builtins`, `Exceptions`, `Objects`, `Fiber`, `CellGuard`. They share one `$this`, so
 a "trait" here is a file-level split of one emitter, not an independent unit.
 
 ## Key invariants

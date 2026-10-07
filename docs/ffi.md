@@ -27,7 +27,7 @@ function getpid(): int {}
   link line (see *Linking*). `'c'` (libc / libSystem) needs no flag — it is always linked.
 
 Because the body is ignored when compiled, write an empty or trivial one. That body is the
-**Zend fallback**: the same source also runs under stock PHP during the cold bootstrap, where
+**Zend fallback**: the same source also runs under stock PHP (the difftest oracle, Zend-hosted dev tools), where
 the attribute is inert and the body executes instead. Keep it harmless (`{}`, `return 0;`,
 `return '';`).
 

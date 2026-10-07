@@ -29,7 +29,7 @@ manticore version        # -> manticore 0.13.0
 
 Re-running the installer **upgrades in place**. When it builds from source, a
 working `manticore` rebuilds the new version *with itself* (self-host, fast) and
-the Zend seed is only the cold first boot. Knobs: `MANTICORE_HOME`,
+a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`). Knobs: `MANTICORE_HOME`,
 `MANTICORE_VERSION` (a specific release), `MANTICORE_FROM_SOURCE=1` (skip the
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
 (build a local checkout instead of cloning).
@@ -68,13 +68,14 @@ $MANTICORE_HOME/lib/prelude/*.php
 |---|---|---|
 | **`clang`**, LLVM **≥ 15** | assembling emitted LLVM IR → object | `Main.php` — `clang -c`, the compile and library paths |
 | **`cc`** | linking objects → executable | `Main.php` — the `system("cc …")` link step |
-| **PHP 8.5** (Zend) | *cold bootstrap only* — seeds the first native compiler | `bin/compile:41` |
+| **PHP 8.5** (Zend) | *optional* — only the difftest oracle (and a few Zend-hosted dev tools) | `tools/difftest.sh` |
+| **`curl`** or `wget` | a first build fetches the pinned bootstrap release | `tools/fetch_bootstrap.sh` |
 | **libpcre2** (8-bit) + `pcre2-config` | `preg_*` | `Main.php::pcre2_link_flags()`, `src/Runtime/Pcre.php` |
 | **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php::openssl_link_flags()`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
 | **libcurl ≥ 7.68** + `curl-config` — *only* to compile a program that calls `curl_*` | `ext/curl` | `Main.php::generic_link_flags()`, `prelude/curl.php` |
 | **libsqlite3** + `pkg-config sqlite3` — *only* to compile a program that mentions `PDO` | `pdo_sqlite` | `Main.php::generic_link_flags()`, `prelude/pdo_sqlite.php` |
 | **libxml2** (**dev** package) — *only* to compile a program that uses `DOM*` / `SimpleXML` | `ext/dom`, SimpleXML | `Main.php::generic_link_flags()`, `prelude/xml.php` |
-| `bash`, `find`, `sort`, `xargs`, `sed`, `awk`, `grep`, `mktemp` | build scripts | `bin/compile`, `tools/*.sh` |
+| `bash`, `find`, `sort`, `xargs`, `sed`, `awk`, `grep`, `mktemp` | build scripts | `bin/build`, `tools/*.sh` |
 
 `pcre2-config --libs8` and `pkg-config --libs openssl` are how the link flags
 are discovered; if either tool is missing, Manticore falls back to literal
@@ -94,18 +95,19 @@ mentions `PDO` never links it, and `pkg-config --libs sqlite3` answers on the
 first probe. It too lives in the **development** package, not in the `sqlite3`
 command-line tool.
 
-PHP itself is needed **once**. `bin/compile` runs the compiler's own source
-under Zend to produce a throwaway seed binary; that seed then builds the real
-`bin/manticore`, and from then on the compiler rebuilds itself (`bin/build`).
-Nothing the compiler emits ever calls into a PHP runtime.
+PHP is not needed to build. With no compiler yet, `bin/build` fetches the release
+named in `BOOTSTRAP_VERSION` (verified against its `SHA256SUMS`), builds the tree
+with it, and lets the result rebuild itself; from then on the compiler rebuilds
+itself. There is no Zend seed. Nothing the compiler emits ever calls into a PHP
+runtime.
 
 ### Hard floors — these are not "prefer newer"
 
 - **LLVM ≥ 15.** Manticore emits opaque-pointer IR. clang 14 and older reject
   it outright: `ptr type is only supported in -opaque-pointers mode`. Debian
   bookworm's stock clang is 14, so it cannot build Manticore.
-- **PHP 8.5 for the seed.** 8.5 is Manticore's *target* language version. An
-  older Zend seed disagrees with the source it is compiling.
+- **PHP 8.5 for the oracle** (`tools/difftest.sh`). 8.5 is Manticore's *target*
+  language version; an older Zend disagrees with the source it runs.
 - **glibc ≥ 2.34**, measured rather than assumed: `readelf -V` on a released
   binary reports `GLIBC_2.34` as the highest symbol version it references. The
   floor starts with `stat` / `lstat` / `fstat`, which manticore binds by name and
@@ -185,7 +187,7 @@ apk add clang lld gcc musl-dev binutils pcre2-dev openssl-dev curl-dev sqlite-de
 ```
 
 Alpine splits php far finer than Debian does, and the split is not cosmetic: `php85`
-alone has no **ctype**, and the Zend seed dies on the first line of the bootstrap with
+alone has no **ctype**, and Zend dies on the first line of a Zend-hosted tool with
 `Call to undefined function ctype_digit()`. Everything after `php85-mbstring` above is
 what Debian's `php8.5-cli` bundles and Alpine does not.
 
@@ -226,7 +228,7 @@ functions degrade accordingly.
 | Linux glibc < 2.34 (e.g. Ubuntu 20.04, Debian 11) | **unsupported** — cannot link `stat` |
 | Linux musl / Alpine (arm64 / x86_64) | **supported** — full build + suite per push; `:alpine` image and `linux-musl` tarballs; minus some `glob` constants |
 
-Both macOS and Linux build the compiler from the cold Zend seed, self-host
+Both macOS and Linux build the compiler from the pinned bootstrap release, self-host
 (`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite
 and the self-host fixpoint. To reproduce the Linux build + suite in a container,
 see [`tools/docker/README.md`](../tools/docker/README.md).
@@ -254,8 +256,8 @@ The root `Dockerfile` builds that image, and three stages lead to it:
 | Target | What it is |
 |---|---|
 | `base` | clang + the `-dev` libraries the compiler links against. **No php.** |
-| `toolchain` | `base` + PHP 8.5 — the cold-seed interpreter and the difftest oracle |
-| `build` | `toolchain` + the compiler, cold-seeded from the source tree |
+| `toolchain` | `base` + PHP 8.5 — the difftest oracle |
+| `build` | `toolchain` + the compiler: `bin/build` from the source tree, starting from the pinned release |
 | `runtime` | `base` + that compiler — what gets published |
 
 ```bash
@@ -274,8 +276,8 @@ native binary and never asks for an interpreter, so `runtime` branches off
 
 The base is `ARG DEBIAN_TAG=12` (bookworm, glibc 2.36) for development, CI and
 releases alike. One base is not tidiness: glibc is backwards compatible and not
-forwards, so a compiler published from a newer base cannot seed a build on an
-older one — split bases split the seed chain. `Dockerfile.alpine` is the musl
+forwards, so a compiler published from a newer base cannot bootstrap a build on an
+older one — split bases split the bootstrap chain. `Dockerfile.alpine` is the musl
 counterpart, with the same four stages.
 
 To run the libc probes and the AOT suite in a container, see
@@ -285,11 +287,11 @@ To run the libc probes and the AOT suite in a container, see
 
 ## Troubleshooting
 
-**`ptr type is only supported in -opaque-pointers mode`** during the seed
+**`ptr type is only supported in -opaque-pointers mode`** during the
 assemble step — clang is older than 15. Install a newer LLVM and make sure bare
 `clang` on `PATH` resolves to it (apt.llvm.org installs `clang-21`, not `clang`).
 
-**`undefined reference to 'pcre2_compile_8'`** (and six siblings) at the seed
+**`undefined reference to 'pcre2_compile_8'`** (and six siblings) at
 link — this was [issue #1], the macOS-only symbol scraper. If you see it on a
 current checkout, `tools/link_stubs.sh` failed to recognise your linker's
 diagnostic format; it prints the raw linker output when that happens, so file
@@ -302,11 +304,8 @@ than 2.34. See the hard floors above.
 install the PCRE2 *development* package (`libpcre2-dev`, `pcre2-dev`, or
 `brew install pcre2`), not just the runtime library. Same shape for OpenSSL.
 
-**Seed build runs out of memory** — two different ceilings, and the second one
-is the one people hit. `bin/compile` invokes Zend with `-d memory_limit=2048M`,
-so a container with a lower hard limit is OOM-killed during the bootstrap. Past
-that, the seed builds the whole compiler as one LLVM module, and **that peaks at
-just under 7 GiB** (measured: 6.83 GiB on glibc, 6.94 GiB on musl — the libc is
-not the variable). A machine or a Docker VM with 8 GB is therefore right at the
-edge: glibc squeaks under and musl does not. Give the VM 12 GB, or use a warm
-`bin/build`, which does not pay this at all.
+**Build runs out of memory** — `bin/build` compiles the whole compiler as one
+LLVM module; the self-build peak is about 0.5 GB, so any machine or Docker VM
+that runs clang comfortably has room. If it is OOM-killed, check the container's
+hard memory limit, then re-run `bin/build` to a clean finish (a failed build
+poisons `bin/manticore` and `lib/*.o`).

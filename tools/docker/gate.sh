@@ -12,8 +12,8 @@
 # ELF ones onto the host.
 #
 # Env:
-#   MC_GATE=0|1      0 (default) = self-hosted cache (or cold fallback) + full
-#                    AOT suite (bin/build from the cache, cold seed otherwise).
+#   MC_GATE=0|1      0 (default) = self-hosted cache (or the pinned release) + full
+#                    AOT suite (bin/build from the cache, the pinned release otherwise).
 #                    1 = + difftest (php parity) + selfhost_fixpoint
 #                        (fixpoint, MIR golden, rebuild stability).
 #                    It is a shorthand for MC_DIFFTEST=1 MC_FIXPOINT=1; either
@@ -26,17 +26,18 @@
 #                    Default 0 here: a gate machine is idle otherwise.
 #   MC_FILTER=<sub>  narrow the suite step to matching case names (`-k`), for
 #                    chasing ONE Linux-only failure. Never with MC_GATE=1.
-#   MC_STABILITY_N   rebuild-stability rounds (default 2 — a container cold seed
+#   MC_STABILITY_N   rebuild-stability rounds (default 2 — a container build
 #                    is minutes, and the local default of 5 is a different budget).
 #   MC_REPO          read-only source mount (default /repo)
 #   MC_WORK          writable scratch (default /build)
 #   MC_LOGDIR        where the stage logs land (default $MC_WORK)
 #   MC_SEED_DIR      a directory holding a PUBLISHED compiler (bin/ + lib/), used
-#                    when the cache misses and before the Zend seed. Validated by
+#                    when the cache misses and before the pinned release. Validated by
 #                    running it, not by an id — it came from another machine.
 #   MC_COMPILER_CACHE writable directory holding a compatible self-hosted
-#                    compiler (optional; unset means always cold-seed)
-#   MC_COLD=0|1      ignore a compiler cache and force the Zend cold seed
+#                    compiler (optional; unset means build from the published seed or the pin)
+#   MC_COLD=0|1      ignore the cache and the published seed: build from the
+#                    pinned release (BOOTSTRAP_VERSION, fetched — needs network)
 #   MC_RUNNER=sh|native  which harness runs the suite: tests/aot/run.sh (the
 #                    gate), or the EXPERIMENTAL native runner tests/aot/runner —
 #                    built here by the compiler under test and streamed LIVE, so
@@ -78,7 +79,7 @@ else
     MC_OS="$(sw_vers -productName 2>/dev/null) $(sw_vers -productVersion 2>/dev/null)"
 fi
 echo "=== host:  $(uname -m) / $MC_OS"
-echo "=== php:   $(php -r 'echo PHP_VERSION;')"
+echo "=== php:   $(php -r 'echo PHP_VERSION;' 2>/dev/null || echo none)"
 echo "=== clang: $(clang --version | head -1)"
 # MC_COMMIT is what CI passes in: the image carries no git, and a bind-mounted
 # checkout is a different owner than the container user, which `git` refuses.
@@ -108,7 +109,7 @@ cache_id() {
     printf 'arch=%s\nlibc=%s\nclang=%s\nphp=%s\n' \
         "$(uname -m)" "$libc" \
         "$(clang --version | head -1)" \
-        "$(php -r 'echo PHP_VERSION;')"
+        "$(php -r 'echo PHP_VERSION;' 2>/dev/null || echo none)"
 }
 
 # Content hash of a list of tree paths (sorted, so the walk order cannot move
@@ -163,17 +164,16 @@ restore_compiler_cache() {
     return 0
 }
 
-# The PUBLISHED compiler, as a second warm source between the cache and Zend.
+# The PUBLISHED compiler, as a second warm source between the cache and the pin.
 #
 # The cache is the fast path and a fragile one: its key carries the Dockerfile
 # hash, GitHub evicts an entry after a week idle, and a branch cannot see another
 # branch's. A published image does not evict, so `MC_SEED_DIR` — a directory the
-# caller extracted one into — is what keeps the cold seed for the cases that
-# genuinely need it: a bootstrap gap, a new platform, no network.
+# caller extracted one into — keeps a compiler NEWER than the pin in reach.
 #
 # Validated by BEHAVIOUR, not by an id file: it comes from another machine and
 # possibly another image, so the question is not "was it built here" but "does it
-# run here and can it build". If it cannot, bin/build fails and the seed follows.
+# run here and can it build". If it cannot, bin/build fails and the pin follows.
 restore_published_seed() {
     [ "$MC_COLD" != "1" ] || return 1
     [ -n "${MC_SEED_DIR:-}" ] || return 1
@@ -192,6 +192,19 @@ restore_published_seed() {
     return 0
 }
 
+# The PINNED release (BOOTSTRAP_VERSION): the floor, and the only source a
+# release or a runner with nothing cached has. Fetched here, not by the caller,
+# so every consumer of this script reaches it the same way.
+restore_bootstrap() {
+    local dir="$MC_WORK/stage0"
+    rm -rf "$dir"
+    bash tools/fetch_bootstrap.sh "$dir" || return 1
+    mkdir -p bin lib
+    cp "$dir/bin/manticore" bin/manticore
+    cp -RP "$dir/lib/." lib/
+    rm -rf "$dir"
+}
+
 # SAYS whether it worked, and that is the point. The cache directory is a host
 # mount shared by two different users: on CI the files restored by actions/cache
 # belong to the runner, while this container is uid 1000 — and unlinking an entry
@@ -199,7 +212,7 @@ restore_published_seed() {
 # is unremovable from in here unless the workflow chmods it recursively. When
 # that step is missing the copy fails, every message is an `rm: Permission
 # denied` nobody reads, the job still passes, and the cache silently never
-# updates: every run goes back to a cold seed for ever. A cache that cannot be
+# updates: every run starts over from the pin for ever. A cache that cannot be
 # written is not fatal, but it must not be quiet.
 save_compiler_cache() {
     [ -n "$MC_COMPILER_CACHE" ] || return 0
@@ -225,94 +238,88 @@ save_compiler_cache() {
     else
         rm -rf "$tmp" 2>/dev/null
         echo "cache: the existing entry belongs to another user and cannot be replaced" \
-             "from uid $(id -u) — NOT saved, the next run will cold-seed again"
+             "from uid $(id -u) — NOT saved, the next run will start from the pin again"
     fi
 }
 
 echo
-# Three sources, in falling order of cheapness: the cache this runner wrote, the
-# compiler the project publishes, and Zend. The third is a RECOVERY path, not a
-# step — it is what crosses a bootstrap gap, reaches a platform nothing has been
-# published for, and re-derives the compiler from source when the chain is in
-# doubt, which is why the release builds that way on purpose.
-WARM=""
-if restore_compiler_cache; then
-    WARM="cache"
-elif restore_published_seed; then
-    WARM="published seed"
-fi
+# Three warm sources, in falling order of cheapness: the cache this runner wrote,
+# the compiler `main` publishes, and the pinned release. Each one that restores
+# gets a full build; one that cannot build the tree hands over to the next. The
+# pin is the floor — a tree it cannot build uses a feature newer than the pin,
+# and that is a red build with a name.
+BUILT=""
+for source in cache "published seed" "pinned release"; do
+    case "$source" in
+        cache)            restore_compiler_cache || continue ;;
+        "published seed") restore_published_seed || continue ;;
+        *)                restore_bootstrap || continue ;;
+    esac
 
-# A cached compiler built from THIS src/ is already the self-built compiler of
-# this tree — rebuilding it (twice) buys nothing. Only a change under src/ (or
-# the manifest / bin/build that drive the build) makes a new compiler; a change
-# confined to prelude/ or tests/ does not. prelude/ is read from the tree by the
-# compiler in a checkout, but the stdlib object carries linkonce copies of the
-# prelude functions it calls, so a prelude change still rebuilds lib/ — with
-# the cached compiler, in one pass.
-if [ "$WARM" = "cache" ] && [ -f "$MC_COMPILER_CACHE/src.sha" ] \
-        && [ "$(cat "$MC_COMPILER_CACHE/src.sha")" = "$(src_sha)" ]; then
-    echo "=== compiler: src/ unchanged since the cached build — reused, not rebuilt ==="
-    reuse=1
-    if [ "$(cat "$MC_COMPILER_CACHE/prelude.sha" 2>/dev/null)" != "$(prelude_sha)" ]; then
-        echo "prelude/ changed — rebuilding lib/ with the cached compiler"
-        if MANTICORE_PRELUDE="$PWD/prelude" MANTICORE_CELLGUARD=strict \
-                bin/manticore build --libs-only manticore.json > "$MC_LOGDIR/compile.log" 2>&1; then
-            echo "lib/: OK"
-        else
-            echo "lib/: FAILED — falling back to the full self-build"
-            tail -20 "$MC_LOGDIR/compile.log"
-            reuse=0
+    # A cached compiler built from THIS src/ is already the self-built compiler
+    # of this tree — rebuilding it (twice) buys nothing. Only a change under src/
+    # (or the manifest / bin/build that drive the build) makes a new compiler; a
+    # change confined to prelude/ or tests/ does not. prelude/ is read from the
+    # tree by the compiler in a checkout, but the stdlib object carries linkonce
+    # copies of the prelude functions it calls, so a prelude change still
+    # rebuilds lib/ — with the cached compiler, in one pass.
+    if [ "$source" = cache ] && [ -f "$MC_COMPILER_CACHE/src.sha" ] \
+            && [ "$(cat "$MC_COMPILER_CACHE/src.sha")" = "$(src_sha)" ]; then
+        echo "=== compiler: src/ unchanged since the cached build — reused, not rebuilt ==="
+        reuse=1
+        if [ "$(cat "$MC_COMPILER_CACHE/prelude.sha" 2>/dev/null)" != "$(prelude_sha)" ]; then
+            echo "prelude/ changed — rebuilding lib/ with the cached compiler"
+            if MANTICORE_PRELUDE="$PWD/prelude" MANTICORE_CELLGUARD=strict \
+                    bin/manticore build --libs-only manticore.json > "$MC_LOGDIR/compile.log" 2>&1; then
+                echo "lib/: OK"
+            else
+                echo "lib/: FAILED — falling back to the full self-build"
+                tail -20 "$MC_LOGDIR/compile.log"
+                reuse=0
+            fi
+        fi
+        if [ "$reuse" = "1" ]; then
+            mkdir -p lib/prelude
+            cp prelude/*.php lib/prelude/
+            BUILT="$source"
+            break
         fi
     fi
-    if [ "$reuse" = "1" ]; then
-        mkdir -p lib/prelude
-        cp prelude/*.php lib/prelude/
-        WARM=""
-    fi
-fi
 
-if [ -n "$WARM" ]; then
     # bin/build, not a bare `manticore build`: it preflights src/ against the
-    # warm (one generation behind) compiler, builds to a temp path, smoke
-    # tests, swaps, and only THEN lets the NEW binary build lib/. A one-pass
-    # build would leave the stdlib a generation behind and overwrite the running
-    # executable. A bootstrap gap exits 1 here and falls through to the seed.
+    # warm (older) compiler, builds to a temp path, smoke tests, swaps, and only
+    # THEN lets the NEW binary build lib/. A one-pass build would leave the
+    # stdlib a generation behind and overwrite the running executable.
     #
     # Then a SECOND generation. The first one is this tree compiled by an older
     # compiler, so it carries every miscompile that compiler had — the tree's
     # fixes are only in its source, not in its code. A v0.11.0 seed built a
     # compiler that SIGSEGV'd compiling any http program on amd64 while the same
     # tree rebuilt by itself was clean. The suite must judge the self-built one.
-    echo "=== bin/build (self-hosted from the $WARM, then by itself) ==="
+    echo "=== bin/build (self-hosted from the $source, then by itself) ==="
     if bin/build > "$MC_LOGDIR/compile.log" 2>&1 \
             && bin/build >> "$MC_LOGDIR/compile.log" 2>&1; then
         echo "bin/build: OK (two generations)"
         tail -5 "$MC_LOGDIR/compile.log"
+        BUILT="$source"
+        break
     else
         rc=$?
-        echo "bin/build: FAILED (exit $rc); falling back to cold seed"
-        tail -20 "$MC_LOGDIR/compile.log"
-        rm -rf bin/manticore bin/.manticore.prev lib/
     fi
-fi
+    echo "bin/build: FAILED from the $source (exit $rc)"
+    tail -20 "$MC_LOGDIR/compile.log"
+    rm -rf bin/manticore bin/.manticore.prev lib/
+done
 
-if [ ! -x bin/manticore ]; then
-    echo "=== bin/compile (cold Zend seed) ==="
-    # NEVER pipe this: a pipe reports tail's exit code instead of the build's.
-    if bin/compile > "$MC_LOGDIR/compile.log" 2>&1; then
-        echo "bin/compile: OK"
-        tail -5 "$MC_LOGDIR/compile.log"
-    else
-        rc=$?
-        echo "bin/compile: FAILED (exit $rc)"
-        echo "--- last 60 lines of the build log ---"
-        tail -60 "$MC_LOGDIR/compile.log"
-        echo
-        echo "=== RESULT: build failed, suite not run ==="
-        exit 1
-    fi
-fi
 
+if [ -z "$BUILT" ]; then
+    echo
+    echo "=== RESULT: bootstrap gap — no compiler could build this tree, suite not run ==="
+    echo "The pinned release (BOOTSTRAP_VERSION=$(tr -d '[:space:]' < BOOTSTRAP_VERSION)) is the floor."
+    echo "If it failed above, src/ uses a feature newer than the pin: ship the feature,"
+    echo "release it, raise BOOTSTRAP_VERSION, and only then use it in src/."
+    exit 1
+fi
 save_compiler_cache
 
 # Before the suite, because it is seconds and it covers what the suite cannot:

@@ -1,9 +1,7 @@
 # `src/` — Manticore PHP source tree
 
-PHP source for the self-hosted Manticore compiler and standard library. The cold
-bootstrap (`bin/compile`) walks this tree and lowers every `.php` file into one
-LLVM IR module; the normal loop (`bin/build`) builds it through the manifest,
-with the compiler compiling itself.
+PHP source for the self-hosted Manticore compiler and standard library. `bin/build` builds it through the manifest, with the compiler compiling itself
+(from the pinned release on a clean clone).
 
 ## Layout
 
@@ -27,9 +25,8 @@ driver's own functions are in `src/Manticore/Main.php`. Global stdlib functions
 | `Parser/` | `\Parser` | Recursive-descent + Pratt parser, `Ast/` node classes |
 | `Runtime/` | `\Runtime` | libc / OpenSSL / PCRE FFI bindings + the pure-PHP stdlib under `Runtime/Stdlib/` |
 
-`zzz_entry.php` is the top-level driver — the name sorts last, so every class and
-function declaration has registered before its `exit(main_driver())` lowers into
-the binary's `main`.
+`main.php` is the entry point named by the manifest (`manticore.json`); it calls the
+driver's `main_driver()`, which lowers into the binary's `main`.
 
 ## Rules for new code
 
@@ -42,22 +39,17 @@ the binary's `main`.
 
 ## Discovery
 
-The cold seed (`bin/compile`) runs:
+The build is driven by the manifest (`manticore.json`): `bin/build` compiles the
+whole tree into one native compiler, using the previous native compiler (the
+pinned release on a clean clone — see `AGENTS.md`, "Bootstrap: the pinned
+release"). `src/` is not required to run under Zend php.
+
+`tools/compile_user_mir.php` is a Zend-hosted ~3 s fast loop for inspecting the
+emitted IR of a user program; it works while `src/` stays php-runnable, but
+nothing depends on it:
 
 ```
-find src -name "*.php" | sort | xargs php -d memory_limit=2048M tools/compile_files_mir.php > out.ll
-```
-
-Sort order is deterministic and `zzz_entry.php` runs last by name. That path is
-the **cold bootstrap only** — use `bin/build` for the normal loop, so the native
-binary rebuilds itself. A green `bin/build` says nothing about `bin/compile`, and
-vice versa; see `docs/ROADMAP.md`.
-
-`tools/compile_files_mir.php` is also the quickest way to inspect emitted IR for
-one file:
-
-```
-MANTICORE_PRELUDE=$PWD/prelude php tools/compile_files_mir.php <file.php>
+php tools/compile_user_mir.php <file.php>
 ```
 
 ⚠ That dump does **not** link the stdlib, so a call into it resolves as

@@ -6032,11 +6032,16 @@ final class LowerFromAst implements Pass
             if ($expr->args === []) {
                 $this->typeDefError($cls, 'constructed with no argument — a value type needs its value');
             }
-            return new Call(
+            $tdValue = new Call(
                 \ltrim($cls, '\\') . '____invoke',
                 $args,
                 $this->typeDefCarrier($cls),
             );
+            // A narrow repr is enforced on the value, once, here ({@see typeDefRangeFn}).
+            if ($this->typeDefIsNarrow($cls)) {
+                return new Call(\ltrim($cls, '\\') . '____range', [$tdValue], $this->typeDefCarrier($cls));
+            }
+            return $tdValue;
         }
         $no = new NewObj($cls, $args, Type::obj($cls));
         $no->srcArgc = \count($expr->args);

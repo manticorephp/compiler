@@ -59,9 +59,9 @@ CMD ["/bin/bash"]
 FROM base AS toolchain
 
 # Alpine splits php far finer than Debian does, and the split is not cosmetic:
-# `php85` alone has no ctype, and the Zend seed dies on line one of the bootstrap
-# with `Call to undefined function ctype_digit()`. Everything below `mbstring` is
-# what Debian's php8.5-cli bundles and Alpine does not.
+# `php85` alone has no ctype (the oracle and the Zend-hosted dev tools die on
+# `ctype_digit()` without it). Everything below `mbstring` is what Debian's
+# php8.5-cli bundles and Alpine does not.
 USER root
 RUN apk add --no-cache \
         php85 php85-mbstring php85-curl php85-pdo_sqlite php85-intl \
@@ -84,7 +84,7 @@ COPY --chown=manticore:manticore . /build/manticore
 WORKDIR /build/manticore
 
 RUN rm -rf bin/manticore lib tests/aot/tmp \
-    && bin/compile
+    && bin/build
 
 ENV PATH="/build/manticore/bin:${PATH}"
 CMD ["/bin/bash"]

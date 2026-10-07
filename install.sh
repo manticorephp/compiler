@@ -10,13 +10,12 @@
 #   * a PUBLISHED build for this platform (linux/linux-musl/macos × arm64/amd64), verified
 #     against the release's SHA256SUMS. Needs no php: the compiler is native and
 #     CI already paid the bootstrap. MANTICORE_FROM_SOURCE=1 skips it.
-#   * otherwise Manticore compiles ITSELF from PHP source:
-#   * first install (no $MANTICORE_HOME/bin/manticore yet): cold bootstrap via
-#     the Zend seed (bin/compile).
+#   * otherwise Manticore compiles ITSELF from PHP source (bin/build):
 #   * upgrade (a working binary already installed): the installed compiler
-#     rebuilds the new version itself (bin/build, self-host) — faster, and the
-#     whole point of a self-hosting compiler; falls back to the cold seed if the
-#     self build fails.
+#     rebuilds the new version itself — the whole point of a self-hosting
+#     compiler.
+#   * first install, or the installed compiler is too old: bin/build fetches
+#     the pinned bootstrap release (BOOTSTRAP_VERSION) and builds from it.
 #
 # Layout it produces (argv0-relative, so the binary finds its runtime with no
 # env vars — see src/Manticore/Main.php find_stdlib_object / find_prelude_src):
@@ -48,7 +47,7 @@ log "platform $OS/$ARCH -> prefix $PREFIX"
 
 # ---- 1b. a published build, if there is one for this platform -------------
 # The fast path, and since 0.11 the usual one: a release tarball is steps 3-5
-# below, already done on CI and cold-seeded from the tag. It costs a download
+# below, already done on CI and built from the pinned release. It costs a download
 # instead of a bootstrap, and it needs no php at all — the compiler is native.
 # Skipped for an explicitly source-flavoured install (MANTICORE_SRC, a
 # non-default MANTICORE_REF, MANTICORE_FROM_SOURCE=1), and ANY miss falls
@@ -141,15 +140,13 @@ PREBUILT=0
 if try_prebuilt; then PREBUILT=1; fi
 
 # ---- 2. toolchain ---------------------------------------------------------
-# Hard requirements to BUILD the compiler: php (seed), clang>=15, cc. The
+# Hard requirements to BUILD the compiler: clang>=15, cc. The
 # stdlib's preg/TLS/hash bindings are declare-only in the object, resolved at
 # link time — so pcre2/openssl/pkg-config are only needed later, when a USER
 # program actually calls preg_*/https/hash. Missing them is a warning, not a
 # blocker.
 hard=()
-# php seeds the bootstrap and nothing else — a published build has already been
-# through it, so an install that took the fast path does not want php at all.
-[ "$PREBUILT" = 1 ] || have php || hard+=("php 8.5        (the cold-bootstrap seed)")
+# php is not on the list: a source build starts from the pinned release.
 have clang || hard+=("clang/LLVM>=15  (opaque-pointer IR)")
 have cc    || hard+=("cc             (final link driver)")
 soft=()
@@ -190,9 +187,9 @@ if [ "$PREBUILT" = 0 ]; then
 # ---- 3. source ------------------------------------------------------------
 CLEAN_SRC=0
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
-if [ -n "${MANTICORE_SRC:-}" ] && [ -f "$MANTICORE_SRC/bin/compile" ]; then
+if [ -n "${MANTICORE_SRC:-}" ] && [ -f "$MANTICORE_SRC/bin/build" ]; then
     SRC="$MANTICORE_SRC"
-elif [ -n "$_script_dir" ] && [ -f "$_script_dir/bin/compile" ]; then
+elif [ -n "$_script_dir" ] && [ -f "$_script_dir/bin/build" ] && [ -d "$_script_dir/src" ]; then
     SRC="$_script_dir"
 else
     have git || die "git not found — needed to fetch source (or set MANTICORE_SRC to a checkout)."
@@ -214,11 +211,11 @@ if [ -x "$PREFIX/bin/manticore" ]; then
     log "existing install found -> self-host rebuild (installed compiler builds the new version)"
     cp "$PREFIX/bin/manticore" "$SRC/bin/manticore"
     if ( cd "$SRC" && bin/build ); then built=1
-    else warn "self-host build failed -> falling back to the cold seed"; rm -rf "$SRC/bin/manticore" "$SRC/lib"; fi
+    else warn "self-host build failed -> starting from the pinned release"; rm -rf "$SRC/bin/manticore" "$SRC/lib"; fi
 fi
 if [ "$built" = 0 ]; then
-    log "cold bootstrap via the Zend seed (bin/compile)"
-    ( cd "$SRC" && bin/compile )
+    log "bootstrap from the pinned release (bin/build, BOOTSTRAP_VERSION)"
+    ( cd "$SRC" && bin/build ) || die "bin/build failed — see above."
 fi
 [ -x "$SRC/bin/manticore" ] || die "build did not produce bin/manticore"
 
@@ -228,8 +225,8 @@ mkdir -p "$PREFIX/bin" "$PREFIX/lib/prelude"
 cp "$SRC/bin/manticore" "$PREFIX/bin/manticore"
 cp "$SRC"/lib/manticore_stdlib.o "$PREFIX/lib/"
 cp "$SRC"/lib/manticore_stdlib.o.sig "$PREFIX/lib/" 2>/dev/null || true
-# prelude: bin/compile installs lib/prelude itself; the self-host path does not,
-# so publish it from source unconditionally (idempotent, covers both paths).
+# prelude: published from source unconditionally (idempotent), so the installed
+# layout never depends on what the build left under lib/prelude.
 cp "$SRC"/prelude/*.php "$PREFIX/lib/prelude/"
 
 fi   # end of the from-source path

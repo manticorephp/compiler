@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
 #
-# Self-host build: rebuild the compiler USING the compiler (not Zend).
+# Self-host build, ONE-MODULE path: rebuild the compiler using the compiler,
+# without the manifest.
 #
 #   tools/selfhost.sh [stage_n_binary] [output]
 #
 # The Stage-N manticore binary (default bin/manticore) compiles the whole
 # of src/ to LLVM IR, which is then assembled + linked into the Stage-(N+1)
-# binary. Mirrors bin/compile's clang/stub/link tail, but the front-end is
-# the native compiler instead of `php tools/compile_files_mir.php`.
-#
-# bin/compile (Zend front-end) still bootstraps the FIRST binary; once it
-# exists, this script reproduces it. `tools/selfhost_fixpoint.sh` chains two
-# generations and asserts they are byte-identical.
+# binary. bin/build is the canonical (manifest) build; this one-module path is
+# what `tools/selfhost_fixpoint.sh` chains to assert byte-identical generations.
 #
 # Runtime-free: undefined externals (the FFI-runtime bridge symbols) get a
-# void* stub, exactly as bin/compile does.
+# void* stub (tools/link_stubs.sh).
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,7 +53,7 @@ OBJ="$OUT_DIR/${OUT_BASE}.o"
 STUBS_PREFIX="$OUT_DIR/${OUT_BASE}"
 
 if [[ ! -x "$MANTICORE" ]]; then
-    echo "fatal: $MANTICORE not executable; run bin/compile first" >&2
+    echo "fatal: $MANTICORE not executable; run bin/build first" >&2
     exit 1
 fi
 

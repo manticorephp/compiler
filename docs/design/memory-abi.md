@@ -7,7 +7,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **16** (v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **19** (v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -414,8 +414,8 @@ Invariants worth stating out loud:
   `__mir_pool_size` before growing.
 * **`MANTICORE_POOL=0` must hold for the WHOLE build.** These bodies are
   `linkonce_odr`, so a stdlib `.o` built with the pool linked against a user
-  `.o` built without it keeps ONE body of each: an honest A/B is two cold seeds,
-  not two `compile` invocations with different env.
+  `.o` built without it keeps ONE body of each: an honest A/B is two full builds
+  with the pool on and off, not two `compile` invocations with different env.
 * **Freed blocks are never returned to the OS.** `__mir_pool_free` pushes onto a
   per-class free list; there is no `munmap`, no `madvise`, no span reclaim and no
   cross-class reuse. **Peak RSS is a per-size-class high-water mark by design** —
@@ -463,6 +463,32 @@ A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.
   The context OWNS the arena it saved: `__mir_fiber_ctx_free` walks the chunk chain
   (head at 0, each chunk's next at its offset 0), frees the mark stack (16), then the block.
 
+## 7c. BIGINT box and native buffers (ABI v14 / v18)
+
+**BIGINT (cell tag 5, `CELL_TAG_BIGINT`).** An int past the signed-48 inline cell form lives in
+a heap box `[rc@0 | value@8]` (`BIGINT_BOX_SIZE = 16`). The cell's payload points at the VALUE,
+so every reader is a plain load; the box count is at `BIGINT_BOX_RC_OFFSET = -8` relative to
+the payload pointer, the value at `BIGINT_BOX_VALUE_OFFSET = 8` relative to the malloc base.
+The box is COUNTED like any payload a cell carries (`__mir_cell_retain` / `__mir_cell_drop`);
+it was immortal once, which leaked one box per boxing of a pointer-sized int through a
+`mixed` slot.
+
+**Native fixed-width buffer (v18; `SplFixedArray`, `Manticore\Ds\*`).** A malloc'd block reached
+through an int handle (its address):
+
+```
+offset 0  : i64  len     -- BUF_LEN_OFFSET
+offset 8  : i64  cap     -- BUF_CAP_OFFSET
+offset 16 : i32  kind    -- BUF_KIND_OFFSET
+offset 20 : i32  flags   -- BUF_FLAGS_OFFSET
+offset 24 : ...  data    -- BUF_DATA_OFFSET
+```
+
+The element type is `kind`; codes (`BUF_KIND_*`): I8 1, I16 2, I32 3, I64 4, U8 5, U16 6, U32 7,
+F32 8, F64 9, BIT 10 (packed 64 per i64 word), CELL 11 (one 8-byte cell word the slot OWNS),
+U64 12 (raw 64 bits read as unsigned, stored like I64). Slots in `[len, cap)` are zero / null
+cells. The bootstrap twins of the `__mc_nbuf_*` codegen builtins are `src/Runtime/Stdlib/Buf.php`.
+
 ## 8. Debug and verification
 
 `src/Compile/Debug.php` reads these environment variables, once, at startup:
@@ -486,6 +512,7 @@ Bump `MemoryAbi::VERSION` in the same patch as any layout or encoding change, an
 patch also: rewrite the drop-body / walker emission against the new shape, update every
 direct offset GEP, and bump the affected `*_HEADER_SIZE`.
 
-The constant is **not** currently surfaced by any command — `manticore version` prints the
-release version (`manticore 0.11.0`) and nothing else. Exposing the ABI version so vendored
-`.o` artefacts can detect a mismatch is open work.
+No command prints the constant — `manticore version` prints the release version only. A
+library's `.sig` header carries it as `"abi"`, and the compiler refuses a `.sig` whose `abi`
+differs from its own `MemoryAbi::VERSION`. A memory-ABI bump needs no bootstrap-pin raise
+(AGENTS.md, "Bootstrap: the pinned release").

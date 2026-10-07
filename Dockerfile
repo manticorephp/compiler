@@ -5,16 +5,17 @@
 #   docker build --target build     -t manticore-build .
 #
 # `base`      — clang + the -dev libraries the compiler links against. No php.
-# `toolchain` — base + php 8.5: the seed interpreter and the difftest oracle.
+# `toolchain` — base + php 8.5: the difftest oracle.
 #               Mount a checkout into it and build by hand; this is what
 #               tools/docker/run_tests.sh and the workflows use.
-# `build`     — toolchain + the compiler cold-seeded from this source tree.
+# `build`     — toolchain + the compiler built from this tree, starting from
+#               the pinned release (BOOTSTRAP_VERSION).
 # `runtime`   — base + that compiler. What gets published; no php in it.
 #
 # Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian's
 # stock php and clang are both wrong for this compiler:
-#   * PHP 8.5 is manticore's target language version, so the Zend seed must be
-#     8.5 or the seed disagrees with what it is compiling.
+#   * PHP 8.5 is manticore's target language version, so the difftest oracle
+#     must be 8.5 or it disagrees with what the compiler implements.
 #   * clang 14 predates LLVM 15's opaque pointers and REJECTS the IR manticore
 #     emits ("ptr type is only supported in -opaque-pointers mode"). Verified,
 #     not assumed -- bookworm's DEFAULT clang-14 failed the seed assemble step.
@@ -113,11 +114,10 @@ USER manticore
 CMD ["/bin/bash"]
 
 
-# ---- + PHP 8.5, the seed interpreter and the difftest oracle ----
+# ---- + PHP 8.5, the difftest oracle ----
 #
 # A STAGE of its own, because the shipped compiler does not need it: php is what
-# cold-seeds the build and what difftest grades against, and neither happens in
-# the image a user runs. `runtime` therefore branches off `base`, not off this.
+# difftest grades against, and that never happens in the image a user runs. `runtime` therefore branches off `base`, not off this.
 #
 # The `php8.5-*` extension packages are here for the ORACLE, not for linking:
 # difftest grades our output against this php, so a case that calls curl_* or
@@ -147,20 +147,19 @@ USER manticore
 
 # ---- build the compiler from source ----
 #
-# Bakes the compiler in: `bin/compile` cold-seeds src/ -> bin/manticore + lib/.
-# The Linux blockers are fixed (issue #1 linker scrape; the [5/5] failures were
-# FFI-wrapper linkage, a missing -lm, and an uninitialised exception runtime).
+# Bakes the compiler in: `bin/build` fetches the pinned release (BOOTSTRAP_VERSION),
+# builds src/ with it and lets that compiler rebuild itself -> bin/manticore + lib/.
 FROM toolchain AS build
 
 # --chown so the unprivileged `manticore` user (set in toolchain) owns the tree
-# and bin/compile can write bin/manticore + lib/ into it.
+# and bin/build can write bin/manticore + lib/ into it.
 COPY --chown=manticore:manticore . /build/manticore
 WORKDIR /build/manticore
 
 # A stale macOS bin/manticore or lib/*.o would fake a pass, or link Mach-O into
 # an ELF build. .dockerignore keeps them out of the context; belt and braces.
 RUN rm -rf bin/manticore lib tests/aot/tmp \
-    && bin/compile
+    && bin/build
 
 ENV PATH="/build/manticore/bin:${PATH}"
 CMD ["/bin/bash"]

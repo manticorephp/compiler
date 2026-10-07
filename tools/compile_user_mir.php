@@ -9,9 +9,9 @@
  * broken change cannot even build itself (and a stale binary silently measures
  * OLD source instead).
  *
- * Distinct from {@see compile_files_mir.php}, which is the BOOTSTRAP driver:
- * there the cold seed defines the stdlib itself, so injecting the bundled
- * extern decls would double-define. Here we want exactly those decls — without
+ * Unlike the old Zend bootstrap driver (compile_files_mir.php, removed with the
+ * cold seed), which defined the stdlib itself, this one wants the bundled
+ * extern decls — without
  * them a prelude callee (`__mc_dtoa_core`, reached by any `var_dump` of a
  * float) is called but never declared and clang rejects the module.
  *
@@ -61,7 +61,7 @@ require_once $srcBase . '/Manticore/Main.php';
 // Compiler-internal builtins the native compiler emits inline. Under Zend they
 // are ordinary calls, and only the empty-vs-not answer is load-bearing
 // ({@see \Compile\Mir\StringPool::intern}) — the shim
-// {@see compile_files_mir.php} installs, missing here, so this driver could not
+// the old bootstrap driver installed, missing here, so this driver could not
 // compile ANY program that interns a string.
 if (!\function_exists('str_bytes')) {
     function str_bytes(string $s): int { return $s === '' ? 0 : 1; }

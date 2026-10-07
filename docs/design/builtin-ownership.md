@@ -92,7 +92,7 @@ The table went **20 leaks → 0**. Every root it found, in the order they fell:
 
 **Gates at `f1baf57`** (merged into local main): suite **1050/1052, failed 0** ·
 difftest **MATCH 967 / DIFF 2** (`error_handler_basic`,
-`trigger_deprecation_shape`, both pre-existing) · **LINUX arm64, cold seed +
+`trigger_deprecation_shape`, both pre-existing) · **LINUX arm64, cold build +
 full suite, 1050/1052 failed 0** · the binary is a **bit-for-bit fixpoint**
 (gen 0 = gen 3 = gen 4 = gen 5 by SHA-256), which is why `selfhost_fixpoint.sh`
 was skipped by choice. Not run: **amd64**.
@@ -295,7 +295,7 @@ bin/build && bin/build                          # gen 1, gen 2
 ./bin/manticore compile tests/aot/cases/closure_match_inlined.php -o /tmp/canary
 ```
 
-That canary caught both. It is also the only honest bisect harness: reseed,
+That canary caught both. It is also the only honest bisect harness: rebuild from the previous binary,
 build twice, test — anything less attributes a gen-2 crash to the wrong commit,
 which happened here (the alias fix was blamed for the pack's crash because the
 two were in the tree together).
@@ -329,7 +329,7 @@ for every host after the first.
 - ⚠ **Two parallel string arrays, never one array of pairs.** A nested array
   element comes back ERASED, and concatenating that cell renders its raw word:
   `ptrtoint ptr 44565160096`, which is not even valid IR. It poisoned the binary
-  and needed a reseed from main's compiler. This is why `emitCall` keeps
+  and needed a rebuild from main's compiler (a "seed" then). This is why `emitCall` keeps
   `$rcArgRegs` / `$rcArgFlavs` parallel — now documented at `$arrArgTempRegs`.
 - ⚠ **A failed `bin/build` poisons `bin/manticore` AND `lib/*.o`.** Recovery:
   `cp /path/to/main/bin/manticore bin/manticore`, `rm -rf lib && cp -R
@@ -356,8 +356,8 @@ for every host after the first.
   the strength of it. For any type-GATED ownership decision, read the binary's
   IR (`--keep-ir`, which writes next to the `-o` path, not the source).
 - ⚠ **A green suite on the generation that EMITS a change proves nothing.** Two
-  changes in this epic passed 1000+ cases on gen 1 and SIGSEGVed gen 2. Reseed,
-  `bin/build` twice, and compile `tests/aot/cases/closure_match_inlined.php` —
+  changes in this epic passed 1000+ cases on gen 1 and SIGSEGVed gen 2. Rebuild
+  from the pin, `bin/build` twice, and compile `tests/aot/cases/closure_match_inlined.php` —
   that canary caught both, and it is the only honest bisect harness.
 - ⚠ **A filtered sweep is not the suite.** 28 families and 1000+ cases were
   green while `__mc_hosts_lookup_in` answered `''` for every host after the

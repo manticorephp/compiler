@@ -70,7 +70,7 @@ esac
 export MC_OPT="$OPT"
 
 if [[ ! -x "$MANTICORE" ]]; then
-    echo "fatal: $MANTICORE not built; run bin/compile first" >&2
+    echo "fatal: $MANTICORE not built; run bin/build first" >&2
     exit 1
 fi
 

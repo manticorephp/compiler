@@ -213,10 +213,12 @@ and runtime reflection coexist cleanly — they live at different layers.
 
 ## Phased plan (each phase fully gated)
 
+> **2026-10: the Zend cold seed is gone** — the compiler bootstraps from the pinned release (AGENTS.md, "Bootstrap: the pinned release"). The seed-based recovery/validation advice below is historical.
+
 Gate EVERY phase: `tests/aot/run.sh` (full) + `tools/difftest.sh` +
 `tools/selfhost_fixpoint.sh` (fixpoint byte-identical + self-host suite +
-stability 5×2) + `bin/build --seed` (the Zend cold-seed enforces PHP param hints
-the native rebuild ignores). Revert-on-regression discipline (cf. NaN-boxing).
+stability 5×2) + `bin/build --seed` (the Zend cold-seed enforced PHP param hints
+the native rebuild ignores; now `bootstrap-from-pin` plays the independent-generation role). Revert-on-regression discipline (cf. NaN-boxing).
 
 - **Phase 0 — skeleton + identity.** Add the `Monomorphize` pass that does NOTHING
   (pass-through), wired into the pipeline. Prove zero diff (fixpoint identical).
@@ -244,7 +246,7 @@ the native rebuild ignores). Revert-on-regression discipline (cf. NaN-boxing).
 - **Self-host is the hard gate.** The compiler compiles ITSELF; a monomorphization
   bug in the compiler's own (array-heavy) code corrupts the native compiler while
   Zend stays clean (the SwitchCase / float-repr heisenbugs). Validate via
-  `bin/build --seed` AND a Zend dump; they diverge. Bisect with the bad-seed
+  the native self-build AND a Zend dump (`tools/compile_user_mir.php`); they diverge. Bisect with the bad-seed
   dprint method.
 - **Code-size / compile-time explosion.** Bound specializations per fn; fall back
   to `$cell`. `log`/note any cap hit (silent truncation reads as "covered").
@@ -253,7 +255,7 @@ the native rebuild ignores). Revert-on-regression discipline (cf. NaN-boxing).
 - **Don't compare computed method-call strings under self-host** — compare `->kind`.
 - **Representation ≠ type:** specialization changes DISPATCH/var_dump/checking
   correctness, not raw representation — focus tests on those observable sites.
-- Recovery from a mis-built native binary: `bin/build --seed`.
+- Recovery from a mis-built native binary: restore `bin/.manticore.prev` or re-run `bin/build` from the pin (historically: `bin/build --seed`).
 
 ## First action for the dedicated session
 

@@ -1,7 +1,7 @@
 # The published compiler image, assembled from a compiler that ALREADY EXISTS.
 #
-# The root Dockerfile's `runtime` target cold-seeds from source, which is right
-# for a release and wrong for every push: CI has just built and tested a compiler,
+# The root Dockerfile's `runtime` target builds from source (from the pin), which
+# is right for a local image and wrong for every push: CI has just built and tested a compiler,
 # and building a second one to ship would double the most expensive step in the
 # pipeline to produce the same bytes.
 #
