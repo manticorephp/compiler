@@ -1996,6 +1996,12 @@ final class EmitLlvm implements EmitVisitor
      *  one shared body each ({@see EmitLlvmArrays::emitErasedIndexFns}). */
     /** @var array<string, true> */
     private array $eidxNeeded = [];
+    /** The last erased index read: its result and subject registers, and which
+     *  non-array arms its body has ({@see EmitLlvmLocals::eidxBorrowArmIr}). */
+    private string $eidxLastResult = '';
+    private string $eidxLastSubject = '';
+    private bool $eidxLastObjArm = false;
+    private bool $eidxLastStrArm = false;
 
     /** Argument SHAPES a `new $cls(...)` site used; one shared comparison
      *  chain each ({@see EmitLlvmObjects::emitNewDynFns}). */
