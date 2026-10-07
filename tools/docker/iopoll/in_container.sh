@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs INSIDE the php:8.6 container. Cold-seeds Manticore on Linux, then compiles
+# Runs INSIDE the php:8.6 container. Builds Manticore on Linux (bin/build, from the
+# pinned release), then compiles
 # each Io\Poll case and diffs native output vs php 8.6 (the oracle). The repo is
 # bind-mounted read-only at /repo; the build writes into src/, so copy first.
 set -uo pipefail
@@ -10,12 +11,12 @@ cd /build/src || exit 2
 # fake a pass / break the Linux link.
 rm -rf bin/manticore lib tests/aot/tmp
 
-echo "== bin/compile (Zend cold seed → native, on Linux) =="
+echo "== bin/build (from the pinned release, on Linux) =="
 # ⚠ Pre-existing (not Io\Poll): the seed aborts here with glibc `free(): invalid
 # pointer` building stdlib.o — a genuine invalid-free that macOS's allocator
 # tolerates but glibc's always-on integrity check rejects (MALLOC_CHECK_ can't
 # suppress it). Fix the Linux runtime bug to unblock this harness.
-bash bin/compile > /build/compile.log 2>&1
+bash bin/build > /build/compile.log 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then
     echo "SEED-BUILD FAILED rc=$rc"

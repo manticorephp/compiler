@@ -38,9 +38,6 @@
 #                    compiler (optional; unset means build from the published seed or the pin)
 #   MC_COLD=0|1      ignore the cache and the published seed: build from the
 #                    pinned release (BOOTSTRAP_VERSION, fetched — needs network)
-#   MC_ZEND_SEED=0|1 1 = when no warm source can build the tree, try the cold
-#                    Zend seed (bin/compile) before failing. Off by default: a
-#                    tree the pin cannot build is a bootstrap error, not a seed.
 #   MC_RUNNER=sh|native  which harness runs the suite: tests/aot/run.sh (the
 #                    gate), or the EXPERIMENTAL native runner tests/aot/runner —
 #                    built here by the compiler under test and streamed LIVE, so
@@ -250,8 +247,7 @@ echo
 # the compiler `main` publishes, and the pinned release. Each one that restores
 # gets a full build; one that cannot build the tree hands over to the next. The
 # pin is the floor — a tree it cannot build uses a feature newer than the pin,
-# and that is a red build with a name, never a silent Zend seed. MC_ZEND_SEED=1
-# opts into the Zend recovery path below it.
+# and that is a red build with a name.
 BUILT=""
 for source in cache "published seed" "pinned release"; do
     case "$source" in
@@ -315,20 +311,6 @@ for source in cache "published seed" "pinned release"; do
     rm -rf bin/manticore bin/.manticore.prev lib/
 done
 
-if [ -z "$BUILT" ] && [ "${MC_ZEND_SEED:-0}" = "1" ]; then
-    echo "=== bin/compile (cold Zend seed, MC_ZEND_SEED=1) ==="
-    # NEVER pipe this: a pipe reports tail's exit code instead of the build's.
-    if bin/compile > "$MC_LOGDIR/compile.log" 2>&1; then
-        echo "bin/compile: OK"
-        tail -5 "$MC_LOGDIR/compile.log"
-        BUILT="Zend seed"
-    else
-        rc=$?
-        echo "bin/compile: FAILED (exit $rc)"
-        echo "--- last 60 lines of the build log ---"
-        tail -60 "$MC_LOGDIR/compile.log"
-    fi
-fi
 
 if [ -z "$BUILT" ]; then
     echo

@@ -327,7 +327,7 @@ u4/u6. It BROKE SELF-HOST two ways:
    promotion must be FLOW-SENSITIVE (only the merge-ambiguous live range is cell)
    or the WHOLE slot must be cell with array/obj stores ALSO boxing and EVERY
    array access using the `__mir_array_*_cell` dispatch — neither is a small
-   change. Recovered with `bin/build --seed`; reverted clean.
+   change. Recovered with `bin/build --seed` (then; the seed is gone — today: re-run `bin/build` from the pin); reverted clean.
 
 **Detector-precision retry ALSO failed (s8, second attempt).** Added a
 `scanNonScalarLocals` guard: promote only a name NEVER used as array base /
@@ -423,14 +423,16 @@ element/key fidelity gap); float formatting precision (`var_dump(0.1+0.2)` →
 `0.29999999999927`, PHP `0.30000000000000004` — needs shortest-round-trip float→str).
 
 ## Constraints / lessons (hard-won)
+> **2026-10: the Zend cold seed is gone** — the compiler bootstraps from the pinned release (AGENTS.md, "Bootstrap: the pinned release"). The seed-based recovery/validation advice below is historical.
+
 - Self-host is the gate. Every phase: suite + difftest + fixpoint + stability,
-  AND the Zend cold-seed (`bin/build --seed`) which enforces PHP param type
+  AND (then) the Zend cold-seed (`bin/build --seed`) which enforced PHP param type
   hints the native rebuild ignores.
 - Mutating a `Param->type` in a readonly array: fetch the Param to a local first
   (see scanParamElements) — indirect write through the readonly array crashes.
 - Comparing two computed method-call strings (`$a->toString() !== $b->toString()`)
   silently mis-fires under self-host; compare a plain `->kind` field.
-- Recovery from a native binary that mis-builds: `bin/build --seed`.
+- Recovery from a native binary that mis-builds: restore `bin/.manticore.prev` or re-run `bin/build` from the pin (historically `bin/build --seed`).
 - Representation ≠ type: many "wrong" concrete types are harmless because every
   value is i64 — but DISPATCH and var_dump/checking read the type, so precision
   matters there.

@@ -83,7 +83,7 @@ instead of being over-released.
 Not an expression predicate — a MIR pass chain:
 
 ```
-InferEffects → InferAllocKind → ApplyMemoryMode → InsertMemoryOps → Verify
+InferEffects → InferAllocKind → ApplyMemoryMode → SpillFreshBases → InsertMemoryOps → OwnershipFlow → Verify
 ```
 
 `InferAllocKind` is layers 3–4: it decides per allocation whether it can be arena-allocated,

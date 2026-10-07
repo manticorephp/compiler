@@ -2,7 +2,7 @@
 #
 # Self-hosting fixpoint gate.
 #
-# Stage-1 (bin/manticore, built by bin/compile / Zend) compiles src/ into
+# Stage-1 (bin/manticore, whatever built it) compiles src/ into
 # Stage-2; Stage-2 compiles src/ into Stage-3. A stable self-hosting compiler
 # is a FIXPOINT: the IR Stage-2 emits for src/ must be byte-identical to the IR
 # Stage-3 emits (a compiler built by the self-hosted compiler reproduces the
@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 if [[ ! -x bin/manticore ]]; then
-    echo "fatal: bin/manticore missing; run bin/compile first" >&2
+    echo "fatal: bin/manticore missing; run bin/build first" >&2
     exit 1
 fi
 
@@ -30,13 +30,11 @@ bash tools/selfhost.sh /tmp/manticore_g3 /tmp/manticore_g4
 
 # ⚠ Compare Stage-3 against Stage-4, NOT Stage-2 against Stage-3.
 # The fixpoint claim is "a SELF-HOSTED compiler reproduces itself". Stage-2 is
-# built by whatever bin/manticore happens to be — and after `bin/compile`, that
-# is the ZEND SEED, whose emission differs structurally (measured on Linux:
-# g2 64 330 667 B vs g3 57 597 509 B, 368 181 lines apart even modulo SSA
-# numbering). Stage-2 is therefore not yet self-emitted and can never match.
-# g3 == g4 byte-identically, so the property holds one generation later.
-# This passed on macOS only because bin/manticore there is already self-hosted
-# via `bin/build`, which made Stage-2 self-emitted by accident of setup.
+# built by whatever bin/manticore happens to be — an older release (the pin),
+# or once the Zend seed, whose emission differed structurally (measured on Linux:
+# g2 64 330 667 B vs g3 57 597 509 B). Stage-2 is therefore not necessarily
+# self-emitted and need not match. g3 == g4 byte-identically, so the property
+# holds one generation later.
 echo "── fixpoint: Stage-3 IR == Stage-4 IR? ──"
 if cmp -s /tmp/manticore_g3.ll /tmp/manticore_g4.ll; then
     echo "FIXPOINT OK: IR byte-identical across self-hosted generations"
@@ -56,9 +54,9 @@ install_binary() {
 }
 
 cp bin/manticore /tmp/manticore_stage1.bak
-# Stage-3, not Stage-2: after a cold `bin/compile` seed, Stage-2 is emitted by the
-# ZEND SEED and is not self-hosted, so running the suite through it does not test
-# what this stage claims to. Stage-3 is the first generation a self-hosted
+# Stage-3, not Stage-2: Stage-2 is emitted by whatever built bin/manticore (an
+# older release, say) and is not self-hosted, so running the suite through it does
+# not test what this stage claims to. Stage-3 is the first generation a self-hosted
 # compiler produced, and it is the one the fixpoint above proves stable.
 install_binary /tmp/manticore_g3 bin/manticore
 set +e

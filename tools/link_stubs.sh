@@ -8,7 +8,7 @@
 # (`manticore_rt_*`) that have no implementation in the pure-PHP tree;
 # they link-stub to 0 (and only fire at runtime if actually called).
 #
-# THE one implementation — bin/compile and tools/selfhost.sh both call this.
+# THE one implementation — tools/selfhost.sh and the probe tools call this.
 # It used to be copy-pasted into all three, in an Apple-ld-only form, which is
 # why the Linux seed link failed (issue #1).
 #

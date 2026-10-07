@@ -15,8 +15,8 @@ raw-int probe) exposes a representation bug.
 ## Docblock first — inline `<…>` is an extension
 
 Generics are **docblock-driven by design**, so the source stays valid PHP and
-runs unchanged under Zend `php` (which the cold bootstrap and `tools/difftest.sh`
-rely on): `/** @param Pt[] $pts */` or `/** @var Box<float> $b */`.
+runs unchanged under Zend `php` (which `tools/difftest.sh`
+relies on): `/** @param Pt[] $pts */` or `/** @var Box<float> $b */`.
 
 Manticore also parses an **inline** generic type in a type position —
 `function dump(array<Pt> $pts)`, `Box<float>` — as a compiler extension

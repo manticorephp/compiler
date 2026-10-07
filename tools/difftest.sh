@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MANTICORE="$ROOT/bin/manticore"
-[[ -x "$MANTICORE" ]] || { echo "fatal: bin/manticore missing; run bin/compile" >&2; exit 1; }
+[[ -x "$MANTICORE" ]] || { echo "fatal: bin/manticore missing; run bin/build" >&2; exit 1; }
 command -v php >/dev/null || { echo "fatal: php not found" >&2; exit 1; }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

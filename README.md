@@ -29,7 +29,7 @@ plus a real toolchain, because it ends in `clang` and `cc`:
 | What | Version | Why |
 |---|---|---|
 | `clang` + `cc` on `PATH` | **LLVM ≥ 15** | Manticore emits opaque-pointer IR; clang 14 rejects it |
-| `php` | **8.5** | optional — the difftest oracle, and the opt-in Zend seed; building needs none |
+| `php` | **8.5** | optional — only the `tools/difftest.sh` oracle (and a few Zend-hosted dev tools); building needs none |
 | libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
 | OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
 | libxml2, libsqlite3, libcurl, libicu (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, `curl_*`, or ext/intl (`Normalizer`, …) — each is demand-gated and linked (dynamically) on mention; Homebrew's keg-only `icu4c` is found by itself |
@@ -324,12 +324,15 @@ PHP source
   → Lexer            (src/Lexer)         tokens
   → Parser           (src/Parser)        AST  (recursive-descent + Pratt)
   → LowerFromAst     ─┐
+  → NarrowScalarGuards│
   → ConstFold         │
   → DeadStore         │
   → InferTypes        │  MIR (src/Compile/Mir) — flat, typed, SSA-ish IR.
   → VivifyRefArgs     │  The only backend. InferTypes re-runs after each pass
+  → ResolveMethodFcc  │
   → NarrowReturns     │
   → InlineClosures    │  that makes new types concrete, which is why
+  → ResolveOverloads  │
   → Monomorphize      │  Monomorphize — specializing erased-array and callable
   → FuseSplitJoin     │  params per call-site shape — sits this far down.
   → TypeCheck         │
@@ -340,7 +343,9 @@ PHP source
   → InferEffects      │
   → InferAllocKind    │
   → ApplyMemoryMode   │
+  → SpillFreshBases   │
   → InsertMemoryOps   │  (rc retain/release/CoW insertion)
+  → OwnershipFlow     │  (per-program-point ownership of locals)
   → Verify           ─┘
   → EmitLlvm          (src/Compile/Mir/Passes/EmitLlvm*) → LLVM IR text
   → clang -c          IR → object
@@ -358,8 +363,7 @@ allocation between arena and heap-rc), `rc`, `arena`.
 
 ```
 bin/            build & run scripts + the output binary
-  build           self-host rebuild via the manifest (+ --verify, --fast, --seed)
-  compile         opt-in Zend cold seed (Zend → throwaway seed → native compiler + stdlib)
+  build           self-host rebuild via the manifest (+ --verify, --fast); fetches the pinned release when no compiler exists
   manticore-install  the installer entry point Composer exposes
 lib/            prebuilt stdlib object + .sig + prelude (build artifacts, gitignored)
 prelude/        PHP injected into every program (Fiber, async runtime, Resource, …)
@@ -387,14 +391,19 @@ bash tools/difftest.sh                # parity vs `php`
 bash tools/selfhost_fixpoint.sh       # fixpoint + self-host suite + rebuild stability
 bash tools/docker/run_tests.sh --gate # the same, on Linux
 bash tools/install_smoke.sh           # an installed compiler ($PATH, symlink) finds its own lib/
+bash tests/aot/xfail.sh               # known-bug repros: XFAIL = still open, XPASS = fixed, promote it
+bash tools/file_bug.sh <repro.php>    # file a minimised repro as a GitHub issue (-n: dry run)
 ```
 
-CI runs the suite on every push to `main` and every PR — Linux arm64 and amd64 in
-the container, macOS bare — self-hosting from the compiler the previous run cached,
-falling back to the published `main` compiler and then to the pinned release
-(`BOOTSTRAP_VERSION`), never to Zend; a `bootstrap-from-pin` job checks on every
-push that the tree still builds from the pin alone. `gate.yml` adds difftest
-weekly, and the fixpoint only when asked for.
+CI runs the suite on every push to `main` and every PR — Linux arm64 and amd64 on
+Debian (glibc) and on Alpine (musl), in the container, plus macOS arm64 bare —
+self-hosting from the compiler the previous run cached, falling back to the
+published `main` compiler and then to the pinned release (`BOOTSTRAP_VERSION`);
+there is no Zend seed. The `bootstrap-from-pin` job checks on every push that the
+tree still builds from the pin alone. Required checks: `linux-arm64`,
+`linux-amd64`, `linux-alpine-arm64`, `linux-alpine-amd64`, `macos-arm64` and
+`bootstrap-from-pin`. `gate.yml` adds difftest weekly, and the fixpoint only when
+asked for.
 
 `selfhost_fixpoint.sh` asserts gen2 IR == gen3 IR, runs the suite through the
 self-built compiler, and rebuilds repeatedly to catch build-to-build layout roulette.

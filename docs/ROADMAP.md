@@ -20,8 +20,8 @@ still Zend: if `php` runs it, `tools/difftest.sh` must agree byte-for-byte.
 rather than trusting a number written here.
 
 **Build:** `bin/build` (self-host — the normal loop; with no compiler it starts from the
-pinned release in `BOOTSTRAP_VERSION`), `bin/build --verify` (+ the gate). `bin/build --seed`
-(Zend) is an opt-in recovery path only — see AGENTS.md "Bootstrap: the pinned release".
+pinned release in `BOOTSTRAP_VERSION`), `bin/build --verify` (+ the gate). There is no Zend
+seed — see AGENTS.md "Bootstrap: the pinned release".
 
 ⚠ **`bin/build` green says nothing about `tools/selfhost.sh`.** The manifest build compiles
 `src/Runtime` as a LIBRARY with a flattened namespace; the self-host path takes everything as
@@ -54,7 +54,7 @@ wrong at `-O2`.
 Built on branch `ci` (2026-09-07): **`bin/build --fast`** (`-O1`, apps only, to
 `bin/manticore.fast`, never the canonical slot — 71 s vs 83 s), **`tests/aot/run.sh -O <n>`**,
 and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, consumed by
-`tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
+`tools/docker/run_tests.sh` and by `.github/workflows/{ci,gate,release}.yml`.
 
 ### Recently completed (2026-10)
 
@@ -440,13 +440,13 @@ of the same mechanism.
   json/`(array)` walkers read it. What remains: `tostr_fn` / `debug_fn` are not on the
   descriptor, so `__manticore_tagged_to_str` and three `LowerPrelude::*ObjectSrc()`
   generators still synthesize per-program walkers. Finishing it bumps `MemoryAbi::VERSION`
-  (⇒ one `bin/build --seed`).
+  (no pin raise needed: an ABI bump rebuilds through plain `bin/build`).
 - **No dependency resolution, no cross-build module cache, no packaging bootstrap.** `MANTICORE_HOME`,
   `~/.manticore/cache` and a `compiler_abi` field appear in
   [`design/module-system.md`](design/module-system.md) but nowhere in `src/`. Manifest targets
   and Composer source discovery work; transitive dependency fetch does not.
-- **The ABI version is not surfaced.** `MemoryAbi::VERSION` is 8 and `manticore version`
-  prints only `manticore 0.11.0`, so a vendored `.o` cannot detect a mismatch.
+- **The ABI version is not surfaced.** `MemoryAbi::VERSION` is not printed and `manticore version`
+  prints only the release version (`manticore 0.13.0`), so a vendored `.o` cannot detect a mismatch.
 - **`dump-mir --after=<pass>`** is described in [`design/mir.md`](design/mir.md) but not
   implemented.
 - **Cycle collector: manual trigger only**, and it does not scan static or global roots. A
@@ -455,12 +455,14 @@ of the same mechanism.
   "every monomorphized function keeps exactly one name-addressable `$cell` entry" invariant in
   [`design/monomorphization.md`](design/monomorphization.md) is aspirational, not upheld.
 - **A compiler built ONE generation from an older one carries its miscompiles** (found
-  2026-09-28): the v0.11.0 published seed built this tree into a compiler that SIGSEGV'd on
+  2026-09-28): the v0.11.0 published release built this tree into a compiler that SIGSEGV'd on
   every http case on alpine-amd64, while the tree rebuilt by itself was clean. `gate.sh` now
-  builds twice on the warm path; what remains is finding the seed-side miscompile (it only
-  shows on x86_64 musl) and republishing the seed so a cold consumer of it is not exposed.
-- **CI is parked, no prebuilt binaries.** `.github/workflows/{ci,nightly}.yml` exist over
-  `tools/docker/gate.sh` but run on manual dispatch only. Every install compiles from source.
+  builds twice on the warm path; what remains is finding the bootstrap-side miscompile (it only
+  shows on x86_64 musl) and republishing the release so a consumer of it is not exposed.
+- **CI runs per push and PR** (`ci.yml`: linux arm64/amd64 on Debian and Alpine, macOS arm64,
+  and `bootstrap-from-pin`, all required; `gate.yml` weekly difftest; `release.yml` publishes
+  tarballs and images built from the pin). `install.sh` downloads the published tarball for the
+  host, else builds from source.
 
 ## Tier 4 — performance
 
@@ -495,11 +497,11 @@ remaining levers:
    committing to a design.
 2. **Find the convergent root.** Monomorphization was *the* root behind a dozen erasure
    symptoms. Ask "is there one fix that collapses several rows?" before building.
-3. **Phase and gate hard, every phase:** suite + difftest + fixpoint + stability + `--seed`.
+3. **Phase and gate hard, every phase:** suite + difftest + fixpoint + stability + `bootstrap-from-pin`.
    Never batch risky changes. A "random transient" can be a real latent bug — chase it.
-4. **Dual-validate the Zend seed AND the native build** — they diverge on strings, floats and
-   by-ref. Some bugs only surface in the native self-build, and an emitter fix needs TWO
-   generations before its effect is real.
+4. **Dual-validate against Zend (difftest) AND the native self-build** — they diverge on strings,
+   floats and by-ref. Some bugs only surface in the native self-build, and an emitter fix needs
+   TWO generations before its effect is real.
 5. **php-faithful signatures; root cause over workaround.** No reverts, no workarounds.
 6. **Self-host is the gate; real programs are the probes.**
 

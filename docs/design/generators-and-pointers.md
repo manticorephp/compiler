@@ -97,9 +97,13 @@ deref-load/store codegen.
 
 ## 2a. No new syntax — a `#[Ptr]` parameter attribute
 
-Hard constraint: **the compiler source is valid PHP that runs under Zend** (the
-cold bootstrap parses + executes it). New pointer *syntax* (`*p`, `&T`, Go-style)
-would make Zend reject the source — the bootstrap breaks. So an explicit pointer
+> **2026-10: the Zend cold seed is gone** — the compiler bootstraps from the pinned release (AGENTS.md, "Bootstrap: the pinned release"). The seed-based recovery/validation advice below is historical.
+
+Hard constraint: **the compiler source is valid PHP that runs under Zend** (it was the
+cold bootstrap's input; today it still keeps `tools/difftest.sh` and the Zend-hosted dev
+tools working, but nothing requires it for the build). New pointer *syntax* (`*p`, `&T`,
+Go-style) would make Zend reject the source — and `src/` unusable until the pin names a
+release that parses it. So an explicit pointer
 must be expressed in **ordinary PHP that Zend accepts and the compiler
 reinterprets** — exactly the FFI pattern (`#[Library, Symbol]` + valid bodies).
 

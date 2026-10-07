@@ -8,15 +8,12 @@
     "authors": [
         { "name": "Taras Chornyi" }
     ],
-    "require": {
-        "php": ">=8.5"
-    },
     "bin": ["bin/manticore-install"],
     "scripts": {
         "post-create-project-cmd": "@build",
         "build": "bash install.sh"
     },
     "scripts-descriptions": {
-        "build": "Build Manticore from source into $MANTICORE_HOME (default ~/.manticore) and install the `manticore` binary."
+        "build": "Install Manticore into $MANTICORE_HOME (default ~/.manticore): the published binary for this platform, else a source build from the pinned release. The compiler needs no php."
     }
 }

@@ -92,7 +92,7 @@ directly, so it opts out of the runtime, and it has no other libraries to select
                   "output": "lib/manticore_stdlib.o", "exclude": [],
                   "runtime": true }],
   "applications": [{ "name": "compiler", "src": "src", "output": "bin/manticore",
-                     "entry": "src/zzz_entry.php", "stdlib": false }]
+                     "entry": "src/main.php", "stdlib": false }]
 }
 ```
 
@@ -116,10 +116,10 @@ manticore dump-sig src/Util/*.php
 ```
 
 A `.sig` carries the library's **classes, interfaces, enums and constants**
-alongside its functions:
+alongside its functions (`abi` is `MemoryAbi::VERSION` at the time the library was built; a compiler refuses a `.sig` whose `abi` differs from its own):
 
 ```json
-{"schema":2,"abi":7,
+{"schema":2,"abi":<MemoryAbi::VERSION>,
  "functions":[…],
  "classes":[{"name":"Acme\\Point","kind":"class","id":651526131271716,
              "props":[…],"sprops":[…],"methods":[…],"consts":[…],
@@ -217,26 +217,26 @@ as above. Both are transparent to you — call the function, it works.
 
 ## Building the compiler itself (bootstrap)
 
-The compiler is written in PHP, so the first binary must be seeded by a stock
-PHP interpreter; after that it builds itself from the manifest.
+The compiler is written in PHP and compiles itself. The bootstrap compiler is a
+**pinned release**: `BOOTSTRAP_VERSION` at the repo root names it, and
+`tools/fetch_bootstrap.sh` downloads it and checks it against the release's
+`SHA256SUMS`. There is no Zend seed and no php is needed to build.
 
 ```bash
-bin/compile         # COLD seed: PHP (Zend) builds a throwaway seed binary,
-                    # which then runs `build manticore.json` → native bin/manticore
-                    # + lib/manticore_stdlib.{o,sig}
-bin/build         # SELF-HOST: the existing bin/manticore builds the manifest
+bin/build           # no bin/manticore yet: fetch the pinned release, build the tree
+                    # with it, then rebuild once with the result.
+                    # Otherwise: the existing bin/manticore builds the manifest
                     # to a temp path, smoke-tests it, then atomically swaps in
-bin/build --seed  # force the cold seed even if a binary exists
-bin/build --verify# rebuild, then run the fixpoint + suite gate
+bin/build --verify  # rebuild, then run the fixpoint + suite gate
 ```
 
-`bin/compile` and `bin/build` both end by running `build manticore.json` —
-the manifest is the single source of truth. Only the *first* binary needs the
-Zend interpreter (the manifest build itself can't run under Zend: its file IO
-fills mutable libc buffers that Zend's immutable strings can't provide). The
-emitted binaries make no PHP-runtime calls — they link against libc, PCRE2 and
-OpenSSL, plus any FFI-bound library the program names.
+`bin/build` ends by running `build manticore.json` — the manifest is the single
+source of truth. The emitted binaries make no PHP-runtime calls — they link
+against libc, PCRE2 and OpenSSL, plus any FFI-bound library the program names.
 
+A feature may be used inside `src/` only once `BOOTSTRAP_VERSION` names a release
+that has it (the two-step rule, see `AGENTS.md`, "Bootstrap: the pinned release").
+A memory-ABI bump needs no pin raise.
 A self-rebuild is byte-identical: gen2 and gen3 emit the same IR.
 
 ---
