@@ -213,10 +213,101 @@ The binding is written in a docblock (`@var` on a local or a property,
 nothing at run time: `get_class($kinds)` is still `Manticore\Ds\UInt16Array`.
 An array with no binding reads plain `int` / `float`, as before. `foreach`
 over a bound array still yields the plain scalar.
+## `Map`, `Set`, `Vec`
+
+Insertion-ordered containers over native tables (`Map`, `Set`) and a native
+buffer of boxed values (`Vec`). Unlike a PHP array the keys are **strict**.
+
+```php
+use Manticore\Ds\{Map, Set, Vec};
+
+$m = new Map();
+$m->set('a', 1);
+$m[2] = 'two';                 // int and string keys stay distinct: "2" !== 2
+$m->set($obj, 'by identity');  // an object is a key
+foreach ($m as $k => $v) { … } // insertion order
+```
+
+| `Map` | |
+|---|---|
+| `set(mixed $key, mixed $value): void`, `$m[$k] = $v` | insert or overwrite (an overwrite keeps the position) |
+| `get(mixed $key, mixed $default = null): mixed`, `$m[$k]` | the value; a missing key returns `$default` when one is passed, else `OutOfBoundsException("Key not found")` |
+| `has(mixed $key): bool`, `isset($m[$k])` | key present (a stored `null` still counts) |
+| `remove(mixed $key): mixed` | remove and return the value; `OutOfBoundsException("Key not found")` when missing |
+| `unset($m[$k])` | remove; a missing key is a no-op |
+| `count(): int`, `isEmpty(): bool`, `clear(): void` | |
+| `keys(): Vec`, `values(): Vec` | in order |
+| `toArray(): array` | see below |
+
+`$m[] = $v` is an `Error("Cannot append to a Map; use set()")`.
+
+| `Set` | |
+|---|---|
+| `add(mixed $value): void` | add; an existing value keeps its position |
+| `has(mixed $value): bool` | |
+| `remove(mixed $value): void` | `OutOfBoundsException("Value not found")` when missing |
+| `count()`, `isEmpty()`, `clear()` | |
+| `union(Set)`, `intersect(Set)`, `diff(Set)`: `Set` | new set; order follows the left operand, then the right for `union` |
+| `toArray(): array` | a list |
+
+| `Vec` | |
+|---|---|
+| `Vec::fromArray(array $values): Vec` | values in iteration order |
+| `push(mixed $value): void`, `$v[] = $x` | append |
+| `pop(): mixed` | `UnderflowException("Cannot pop from an empty Vec")` when empty |
+| `$v[$i]`, `$v[$i] = $x`, `isset($v[$i])` | an `int` index; other types `TypeError("Cannot access offset of type <t> on Vec")`; out of range `OutOfBoundsException("Index invalid or out of range")` |
+| `count()`, `isEmpty()`, `clear()`, `toArray()` | |
+
+`unset($v[$i])` is an `Error("Cannot unset a Vec element; use pop()")`.
+
+**Keys** (`Map`, `Set`) — `int`, `string` or object. `"1"` and `1` are
+different keys; an object is its own key by identity. Anything else (`float`,
+`bool`, `null`, `array`) is a `TypeError("Cannot use a key of type <t> in Map")`
+(`... in Set`).
+
+**Order** — iteration is insertion order. `remove` + re-insert moves the key to
+the end. Removing during `foreach` is fine. A **compaction** (triggered by an
+insert) or `clear()` during `foreach` throws
+`RuntimeException("Map modified during iteration")` /
+`("Set modified during iteration")`.
+`Vec` iteration has no guard: it re-reads the length every step.
+
+**`toArray()` / JSON** — `Map::toArray()` throws
+`ValueError("Map::toArray(): keys collide in a PHP array")` when `1` and `"1"`
+are both keys, and `TypeError("Map::toArray(): object keys cannot be array keys")`
+for an object key. `json_encode($map)` goes through `(object) toArray()`, so it
+is **always an object** (`{}` when empty). `Set` and `Vec` encode as JSON
+lists. `var_dump` / `print_r` show the entries (`Map`: a list of `[key, value]`
+pairs); `serialize` round-trips all three.
+
+**Copies** — assignment shares, `clone` copies the table (shallow: keys and
+values are retained, not cloned).
+
+**Cycles** — a cycle through a `Map` / `Set` / `Vec` (`$m->set('self', $m)`)
+is collected natively by `gc_collect_cycles()`. Under the Zend polyfill it is
+not (the buffers live in a static registry).
+
+### Cost
+
+P1 is **erased**: every operation is a method call over a native table, values
+are boxed and keys are not specialised. 1,000,000 insert + lookup + remove,
+arm64 macOS (`tools/bench/ds_map_bench.php`; peak is the process peak, so it
+accumulates down the list):
+
+| | PHP array | Map / Set |
+|---|---|---|
+| string keys `"k$i"` | 291 ms | 383 ms |
+| int keys | 95 ms | 149 ms |
+| objects (`spl_object_id` array vs `Set`) | 96 ms | 165 ms |
+
+Expect to trail a PHP array until P2 (key/value specialisation, inlined
+lookups, native `foreach`), which is planned. What `Map` / `Set` give today is
+strict keys, object keys without `spl_object_id`, and a defined order contract.
+
 ## Polyfill
 
-The classes are ordinary PHP (`prelude/ds.php`) over a small set of buffer
-primitives. Natively those primitives are compiler builtins; under Zend they
+The classes are ordinary PHP (`prelude/ds.php`, `prelude/ds_map.php`) over a small set of buffer
+and table primitives. Natively those primitives are compiler builtins; under Zend they
 are PHP functions that keep each buffer in a PHP array. Both are generated from
 the same files, so the polyfill behaves identically by construction — it is
 the oracle the native implementation is tested against.
@@ -230,7 +321,8 @@ through Composer) runs unchanged under `php` and under the compiler; natively
 the bootstrap is a no-op because the classes are built in.
 
 The polyfill is for portability, not speed: under Zend an element costs what a
-PHP array element costs.
+PHP array element costs. `Map` / `Set` / `Vec` keep their buffers in a static
+registry, so a cycle through one is not collected under Zend.
 
 ## Current limits
 
@@ -238,3 +330,5 @@ PHP array element costs.
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
+- `Map` / `Set` / `Vec` are erased (P1): no key or value specialisation, no inline
+  lookups, no native `foreach` yet — each access is a method call.

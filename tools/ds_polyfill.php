@@ -11,7 +11,12 @@ if (!is_dir($out . '/src') && !mkdir($out . '/src', 0777, true)) {
     fwrite(STDERR, "ds_polyfill: cannot create $out/src\n");
     exit(1);
 }
-foreach (['src/Runtime/Stdlib/Buf.php' => 'src/Buf.php', 'prelude/ds.php' => 'src/ds.php'] as $from => $to) {
+foreach ([
+    'src/Runtime/Stdlib/Buf.php' => 'src/Buf.php',
+    'src/Runtime/Stdlib/HMap.php' => 'src/HMap.php',
+    'prelude/ds.php' => 'src/ds.php',
+    'prelude/ds_map.php' => 'src/ds_map.php',
+] as $from => $to) {
     if (!copy($root . '/' . $from, $out . '/' . $to)) {
         fwrite(STDERR, "ds_polyfill: cannot copy $from\n");
         exit(1);
@@ -20,7 +25,9 @@ foreach (['src/Runtime/Stdlib/Buf.php' => 'src/Buf.php', 'prelude/ds.php' => 'sr
 // Under the native compiler the classes are built in: the guard keeps a
 // program that requires the package from declaring them twice.
 $boot = "<?php\n\nif (!\\class_exists(\\Manticore\\Ds\\TypedArray::class, false)) {\n"
-    . "    require __DIR__ . '/Buf.php';\n    require __DIR__ . '/ds.php';\n}\n";
+    . "    require __DIR__ . '/Buf.php';\n    require __DIR__ . '/ds.php';\n}\n"
+    . "if (!\\class_exists(\\Manticore\\Ds\\Map::class, false)) {\n"
+    . "    require_once __DIR__ . '/Buf.php';\n    require __DIR__ . '/HMap.php';\n    require __DIR__ . '/ds_map.php';\n}\n";
 file_put_contents($out . '/src/bootstrap.php', $boot);
 $composer = [
     'name' => 'manticorephp/ds',
