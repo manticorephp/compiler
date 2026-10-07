@@ -1,5 +1,6 @@
 <?php
 // A cycle that runs through an array of objects stored as a Manticore\Ds\Map value is not collected by gc_collect_cycles().
+// issue: #124
 use Manticore\Ds\Map;
 final class A { public ?Map $m = null; public string $pad; public function __construct() { $this->pad = str_repeat('x', 16384); } }
 $m0 = memory_get_peak_usage();

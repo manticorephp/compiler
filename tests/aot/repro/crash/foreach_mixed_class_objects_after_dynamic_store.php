@@ -1,5 +1,6 @@
 <?php
 // A dynamic property store and a foreach over an object from an array of objects of different classes SIGSEGVs.
+// issue: #126
 #[AllowDynamicProperties]
 final class P { public int $a = 1; }
 foreach ([new P(), (object) ['x' => 1]] as $o) {

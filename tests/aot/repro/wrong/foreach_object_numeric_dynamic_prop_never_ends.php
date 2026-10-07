@@ -1,5 +1,6 @@
 <?php
 // foreach over an object with a numeric dynamic property ('5') yields 0=0, 1=0, ... and never terminates.
+// issue: #121
 #[AllowDynamicProperties]
 final class P { public int $a = 1; }
 $p = new P();

@@ -1,5 +1,6 @@
 <?php
 // Reading a function-static array through a by-reference return (`tab()["len"]`) leaks a copy of the whole array on every call.
+// issue: #125
 /** @return array<string, mixed> */
 function &tab(): array
 {
