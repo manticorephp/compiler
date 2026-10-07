@@ -4173,7 +4173,7 @@ function cmd_dump_llvm(array $args): int
 
 function cmd_version(array $args): int
 {
-    puts("manticore 0.12.0");
+    puts("manticore 0.13.0");
     return 0;
 }
 
