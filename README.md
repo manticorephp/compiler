@@ -29,7 +29,7 @@ plus a real toolchain, because it ends in `clang` and `cc`:
 | What | Version | Why |
 |---|---|---|
 | `clang` + `cc` on `PATH` | **LLVM ≥ 15** | Manticore emits opaque-pointer IR; clang 14 rejects it |
-| `php` | **8.5** | cold bootstrap only — Zend runs the compiler source once to seed the first native binary |
+| `php` | **8.5** | optional — the difftest oracle, and the opt-in Zend seed; building needs none |
 | libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
 | OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
 | libxml2, libsqlite3, libcurl, libicu (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, `curl_*`, or ext/intl (`Normalizer`, …) — each is demand-gated and linked (dynamically) on mention; Homebrew's keg-only `icu4c` is found by itself |
@@ -74,7 +74,7 @@ Re-running the installer **upgrades in place**. Knobs: `MANTICORE_HOME`,
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (build a
 local checkout instead of cloning). Building from source is the same self-hosting
 loop it always was: an existing `manticore` rebuilds the new version *with itself*,
-and the Zend seed is only the cold first boot.
+and a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`) — no php.
 
 In a container, with the toolchain already in it:
 
@@ -107,8 +107,8 @@ $MANTICORE_HOME/lib/prelude/*.php
 ### From a checkout
 
 ```bash
-bin/compile              # cold bootstrap: Zend seeds the first native compiler
-bin/build                # thereafter it rebuilds ITSELF (this is the normal loop)
+bin/build                # first run: fetch the pinned release (BOOTSTRAP_VERSION), build, rebuild
+                         # thereafter it rebuilds ITSELF (this is the normal loop)
 bin/build --verify       # + fixpoint + suite gate
 ```
 
@@ -358,8 +358,8 @@ allocation between arena and heap-rc), `rc`, `arena`.
 
 ```
 bin/            build & run scripts + the output binary
-  compile         cold seed (Zend → throwaway seed → native compiler + stdlib)
-  build           self-host rebuild via the manifest (+ --seed, --verify)
+  build           self-host rebuild via the manifest (+ --verify, --fast, --seed)
+  compile         opt-in Zend cold seed (Zend → throwaway seed → native compiler + stdlib)
   manticore-install  the installer entry point Composer exposes
 lib/            prebuilt stdlib object + .sig + prelude (build artifacts, gitignored)
 prelude/        PHP injected into every program (Fiber, async runtime, Resource, …)
@@ -391,7 +391,9 @@ bash tools/install_smoke.sh           # an installed compiler ($PATH, symlink) f
 
 CI runs the suite on every push to `main` and every PR — Linux arm64 and amd64 in
 the container, macOS bare — self-hosting from the compiler the previous run cached,
-with the Zend seed as the fallback rather than the loop. `gate.yml` adds difftest
+falling back to the published `main` compiler and then to the pinned release
+(`BOOTSTRAP_VERSION`), never to Zend; a `bootstrap-from-pin` job checks on every
+push that the tree still builds from the pin alone. `gate.yml` adds difftest
 weekly, and the fixpoint only when asked for.
 
 `selfhost_fixpoint.sh` asserts gen2 IR == gen3 IR, runs the suite through the

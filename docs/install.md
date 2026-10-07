@@ -29,7 +29,7 @@ manticore version        # -> manticore 0.13.0
 
 Re-running the installer **upgrades in place**. When it builds from source, a
 working `manticore` rebuilds the new version *with itself* (self-host, fast) and
-the Zend seed is only the cold first boot. Knobs: `MANTICORE_HOME`,
+a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`). Knobs: `MANTICORE_HOME`,
 `MANTICORE_VERSION` (a specific release), `MANTICORE_FROM_SOURCE=1` (skip the
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
 (build a local checkout instead of cloning).
@@ -68,7 +68,8 @@ $MANTICORE_HOME/lib/prelude/*.php
 |---|---|---|
 | **`clang`**, LLVM **≥ 15** | assembling emitted LLVM IR → object | `Main.php` — `clang -c`, the compile and library paths |
 | **`cc`** | linking objects → executable | `Main.php` — the `system("cc …")` link step |
-| **PHP 8.5** (Zend) | *cold bootstrap only* — seeds the first native compiler | `bin/compile:41` |
+| **PHP 8.5** (Zend) | *optional* — the difftest oracle, and the opt-in Zend seed | `tools/difftest.sh`, `bin/compile` |
+| **`curl`** or `wget` | a first build fetches the pinned bootstrap release | `tools/fetch_bootstrap.sh` |
 | **libpcre2** (8-bit) + `pcre2-config` | `preg_*` | `Main.php::pcre2_link_flags()`, `src/Runtime/Pcre.php` |
 | **OpenSSL 3** (libssl + libcrypto) + `pkg-config` | TLS streams, `hash`/`hmac` | `Main.php::openssl_link_flags()`, `src/Runtime/Openssl.php`, `src/Runtime/Crypto.php` |
 | **libcurl ≥ 7.68** + `curl-config` — *only* to compile a program that calls `curl_*` | `ext/curl` | `Main.php::generic_link_flags()`, `prelude/curl.php` |
@@ -94,9 +95,11 @@ mentions `PDO` never links it, and `pkg-config --libs sqlite3` answers on the
 first probe. It too lives in the **development** package, not in the `sqlite3`
 command-line tool.
 
-PHP itself is needed **once**. `bin/compile` runs the compiler's own source
-under Zend to produce a throwaway seed binary; that seed then builds the real
-`bin/manticore`, and from then on the compiler rebuilds itself (`bin/build`).
+PHP is not needed to build. With no compiler yet, `bin/build` fetches the release
+named in `BOOTSTRAP_VERSION` (verified against its `SHA256SUMS`), builds the tree
+with it, and lets the result rebuild itself; from then on the compiler rebuilds
+itself. `bin/build --seed` (`bin/compile`) still bootstraps through Zend as an
+opt-in recovery path, for as long as the compiler's source runs under php.
 Nothing the compiler emits ever calls into a PHP runtime.
 
 ### Hard floors — these are not "prefer newer"
@@ -104,8 +107,8 @@ Nothing the compiler emits ever calls into a PHP runtime.
 - **LLVM ≥ 15.** Manticore emits opaque-pointer IR. clang 14 and older reject
   it outright: `ptr type is only supported in -opaque-pointers mode`. Debian
   bookworm's stock clang is 14, so it cannot build Manticore.
-- **PHP 8.5 for the seed.** 8.5 is Manticore's *target* language version. An
-  older Zend seed disagrees with the source it is compiling.
+- **PHP 8.5 for the oracle** (and the opt-in seed). 8.5 is Manticore's *target*
+  language version; an older Zend disagrees with the source it runs.
 - **glibc ≥ 2.34**, measured rather than assumed: `readelf -V` on a released
   binary reports `GLIBC_2.34` as the highest symbol version it references. The
   floor starts with `stat` / `lstat` / `fstat`, which manticore binds by name and
@@ -226,7 +229,7 @@ functions degrade accordingly.
 | Linux glibc < 2.34 (e.g. Ubuntu 20.04, Debian 11) | **unsupported** — cannot link `stat` |
 | Linux musl / Alpine (arm64 / x86_64) | **supported** — full build + suite per push; `:alpine` image and `linux-musl` tarballs; minus some `glob` constants |
 
-Both macOS and Linux build the compiler from the cold Zend seed, self-host
+Both macOS and Linux build the compiler from the pinned bootstrap release, self-host
 (`bin/build` rebuilds the compiler byte-for-byte), and pass the full AOT suite
 and the self-host fixpoint. To reproduce the Linux build + suite in a container,
 see [`tools/docker/README.md`](../tools/docker/README.md).
@@ -254,8 +257,8 @@ The root `Dockerfile` builds that image, and three stages lead to it:
 | Target | What it is |
 |---|---|
 | `base` | clang + the `-dev` libraries the compiler links against. **No php.** |
-| `toolchain` | `base` + PHP 8.5 — the cold-seed interpreter and the difftest oracle |
-| `build` | `toolchain` + the compiler, cold-seeded from the source tree |
+| `toolchain` | `base` + PHP 8.5 — the difftest oracle (and the opt-in Zend seed) |
+| `build` | `toolchain` + the compiler, built from the source tree starting from the pinned release |
 | `runtime` | `base` + that compiler — what gets published |
 
 ```bash

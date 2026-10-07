@@ -5,14 +5,17 @@
 #   bin/build [--seed] [--auto-seed] [--verify] [--fast] [output]
 #
 # Manticore builds Manticore. The self-built `bin/manticore` is the
-# canonical builder; the Zend front-end (`bin/compile`) is only the COLD
-# bootstrap seed used when no working binary exists yet.
+# canonical builder. With no binary yet, the build starts from the PINNED
+# release (BOOTSTRAP_VERSION, fetched by tools/fetch_bootstrap.sh — no php),
+# then lets the compiler that release built rebuild itself once. The Zend
+# front-end (`bin/compile`) is an opt-in recovery path, kept while src/ still
+# runs under php.
 #
 #   default        self-host: bin/manticore compiles src/ -> new bin/manticore
-#                  (falls back to the Zend seed automatically if no binary)
-#   --seed         force the cold bootstrap (Zend front-end via bin/compile)
+#                  (no binary: fetch the pinned release, build, rebuild)
+#   --seed         force the cold Zend bootstrap (bin/compile; needs php 8.5)
 #   --auto-seed    on a BOOTSTRAP GAP (below), escalate to the cold seed
-#                  instead of failing — for CI, where nobody reads the advice
+#                  instead of failing
 #   --verify       after rebuilding, run the fixpoint + suite gate
 #   --fast         ITERATION build: -O1, application only, to
 #                  bin/manticore.fast. Never swaps bin/manticore and never
@@ -47,9 +50,10 @@
 # needs a compiler newer than itself — a call to a codegen builtin this binary
 # does not know (it compiles into a silent "Call to undefined function" trap
 # rather than a link error), or syntax its parser cannot read. Both are detected
-# BEFORE the swap, named, and reported; the answer is a cold seed. See the
-# "PHP body first, codegen builtin second" rule in src/Runtime/Stdlib/README.md
-# for how to add a builtin that needs no seed at all.
+# BEFORE the swap, named, and reported. From the pinned release that is a merge
+# using a feature newer than the pin: release the feature and raise the pin
+# first. See the "PHP body first, codegen builtin second" rule in
+# src/Runtime/Stdlib/README.md for how to add a builtin that needs neither.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -113,9 +117,19 @@ if [[ $FAST -eq 1 ]]; then
     fi
 fi
 
+# No compiler: start from the pinned release. Only for the canonical slot — the
+# second generation below re-runs this script, which writes bin/manticore.
+STAGE0=0
 if [[ $SEED -eq 0 && ! -x bin/manticore ]]; then
-    echo "no bin/manticore yet — cold bootstrap via Zend seed" >&2
-    SEED=1
+    echo "── no bin/manticore — bootstrap from the pinned release (BOOTSTRAP_VERSION) ──"
+    if ! bash tools/fetch_bootstrap.sh "$ROOT"; then
+        echo "" >&2
+        echo "bin/build: cannot fetch the bootstrap compiler (above)." >&2
+        echo "  \`bin/build --seed\` bootstraps through Zend instead (needs php 8.5)," >&2
+        echo "  while src/ still runs under php." >&2
+        exit 1
+    fi
+    [[ "$OUT" == "bin/manticore" ]] && STAGE0=1
 fi
 
 # A bootstrap gap: explain it, and either escalate or stop. Terminal either way
@@ -134,10 +148,13 @@ bootstrap_gap() {
         exit 0
     fi
     echo "" >&2
-    echo "  rerun with \`bin/build --seed\` (cold Zend bootstrap, ~2 min)," >&2
-    echo "  or \`bin/build --auto-seed\` to escalate automatically." >&2
+    echo "  bin/manticore is $(bin/manticore version 2>/dev/null || echo '?'); the pin (BOOTSTRAP_VERSION) is $(tr -d '[:space:]' < BOOTSTRAP_VERSION)." >&2
+    echo "  If that is the pinned release, src/ uses a feature newer than the pin:" >&2
+    echo "  ship the feature, release it, raise BOOTSTRAP_VERSION, THEN use it." >&2
+    echo "  A newer compiler (a later main build) builds this tree as it is." >&2
+    echo "  \`bin/build --seed\` bootstraps through Zend while src/ still runs under php." >&2
     echo "" >&2
-    echo "  A new codegen builtin needs no seed if it ships with a same-named" >&2
+    echo "  A new codegen builtin needs no pin raise if it ships with a same-named" >&2
     echo "  PHP body (as strpos/array_keys already do): the old compiler links" >&2
     echo "  the body, the new one inlines the builtin." >&2
     exit 1
@@ -287,6 +304,14 @@ else
     # self-hosted build left it at whatever the last COLD seed wrote.
     mkdir -p lib/prelude
     cp prelude/*.php lib/prelude/
+fi
+
+# The first generation is this tree compiled by the RELEASE, so it carries every
+# miscompile that release had; only a compiler built by itself carries the
+# tree's fixes in its code. One more round, from the binary just installed.
+if [[ $STAGE0 -eq 1 ]]; then
+    echo "── stage0 built generation 1 — generation 1 rebuilds itself ──"
+    exec "$0" "$@"
 fi
 
 if [[ $VERIFY -eq 1 ]]; then

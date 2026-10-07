@@ -19,18 +19,19 @@ still Zend: if `php` runs it, `tools/difftest.sh` must agree byte-for-byte.
 5×2) · `tools/docker/run_tests.sh --gate` (Linux). Counts move every session — run them
 rather than trusting a number written here.
 
-**Build:** `bin/build` (self-host — the normal loop), `bin/build --seed` (cold Zend
-bootstrap), `bin/build --verify` (+ the gate). `bin/compile` is the cold-bootstrap fallback
-only.
+**Build:** `bin/build` (self-host — the normal loop; with no compiler it starts from the
+pinned release in `BOOTSTRAP_VERSION`), `bin/build --verify` (+ the gate). `bin/build --seed`
+(Zend) is an opt-in recovery path only — see AGENTS.md "Bootstrap: the pinned release".
 
 ⚠ **`bin/build` green says nothing about `tools/selfhost.sh`.** The manifest build compiles
 `src/Runtime` as a LIBRARY with a flattened namespace; the self-host path takes everything as
 ONE module. They diverge on emitted symbol names, and only the stability gate covers the
 second. Corollary: **never ship a compiler fix together with tree code that needs that fix** —
-the previous generation then cannot build the tree at all, and only a cold seed recovers.
+the previous generation then cannot build the tree at all. A feature `src/` needs goes
+through the two-step rule: release it, raise `BOOTSTRAP_VERSION`, then use it.
 
-⚠ **A new codegen builtin used by the stdlib needs `bin/build --seed`.** The previous
-generation does not know the symbol, so the stdlib `.o` build dies on an undefined symbol.
+⚠ **A new codegen builtin ships with a same-named PHP body** (AGENTS.md, BOOTSTRAP RULE), or
+the previous generation compiles calls to it into undefined-function traps.
 
 ## Direction (2026-09) — read this before planning work
 

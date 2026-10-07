@@ -11,7 +11,7 @@
 #   bash tools/docker/run_tests.sh --both
 #   bash tools/docker/run_tests.sh --alpine        # musl (Alpine) instead of glibc
 #   bash tools/docker/run_tests.sh --shell         # drop into the container
-#   bash tools/docker/run_tests.sh --cold          # ignore the self-host cache
+#   bash tools/docker/run_tests.sh --cold          # ignore the cache: build from the pinned release
 #   bash tools/docker/run_tests.sh -k http_workers # ONE case (or a substring)
 #
 # `-k` is what makes a Linux-only failure debuggable: the full suite is the gate,
@@ -80,15 +80,15 @@ for platform in "${PLATFORMS[@]}"; do
     cache_volume="manticore-compiler-cache-$arch-$LIBC"
     echo "############ $platform ############" >&2
     # The root Dockerfile's `toolchain` target — the same image an end user
-    # builds. Its `build` target is deliberately NOT used here: this harness runs
-    # bin/compile against a bind-mounted working tree, not a baked-in copy.
+    # builds. Its `build` target is deliberately NOT used here: this harness builds
+    # against a bind-mounted working tree, not a baked-in copy.
     docker build --platform "$platform" --target toolchain -t "$image" \
         -f "$DOCKERFILE" "$ROOT" >&2
 
     # Keep Linux ELF artifacts outside the host checkout. A warmed compiler can
-    # self-host the current source tree, so an edit need not pay the Zend cold
-    # seed again. The gate validates the architecture/toolchain marker itself
-    # and falls back to a cold seed if the cache cannot be used.
+    # self-host the current source tree, so an edit need not start over from the
+    # pinned release. The gate validates the architecture/toolchain marker itself
+    # and falls back to the pin if the cache cannot be used.
     docker volume create "$cache_volume" >/dev/null
     docker run --rm --platform "$platform" --user root \
         --mount "type=volume,src=$cache_volume,dst=/compiler-cache" \
@@ -105,6 +105,7 @@ for platform in "${PLATFORMS[@]}"; do
         -e MC_GATE="$GATE_MODE" \
         -e MC_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
         -e MC_COLD="$COLD_MODE" \
+        -e MC_ZEND_SEED="${MC_ZEND_SEED:-0}" \
         -e MC_COMPILER_CACHE=/compiler-cache \
         -e MC_FILTER="$FILTER" \
         -e MC_RUNNER="${MC_RUNNER:-sh}" \

@@ -7,11 +7,11 @@
 # machine, the image, the cache and the environment.
 #
 # WARM, NOT COLD. Every job restores the compiler it built last time and
-# self-hosts from it (`bin/build`), the way a developer does; the Zend cold seed
-# is the fallback, not the loop. gate.sh validates the cache against
-# arch + clang + php before trusting it, and a bootstrap gap (a MemoryAbi
-# VERSION bump, new syntax) fails `bin/build` and falls through to the seed on
-# its own — so a stale cache costs one slow run, never a wrong answer.
+# self-hosts from it (`bin/build`), the way a developer does. On a miss it falls
+# to the compiler `main` published, then to the PINNED release
+# (BOOTSTRAP_VERSION) — never to Zend. A stale cache costs one slow run, never a
+# wrong answer; a tree the pin cannot build is a red run that says so, and the
+# `bootstrap` job below asks that question on every push.
 name: ci
 
 # The line is not "documentation versus everything else", it is "cannot change
@@ -129,9 +129,9 @@ jobs:
       # Second warm source, reached only when the cache missed — which it does on
       # every Dockerfile change, after a week of not being touched (GitHub evicts
       # it), and on any branch that cannot see main's. The published image does
-      # not evict, so this is what keeps the Zend seed for the cases that
-      # genuinely need one: a bootstrap gap, an unpublished platform, no network.
-      # A miss here is not an error — `|| true`, and gate.sh falls through.
+      # not evict, and it is newer than the pin, so a cache miss does not have to
+      # walk up from the last release. A miss here is not an error — `|| true`,
+      # and gate.sh falls through to the pinned release.
       - name: Fetch the published compiler
         if: steps.cache.outputs.cache-matched-key == ''
         run: |
@@ -145,7 +145,7 @@ jobs:
             chmod -R 777 ci-seed
             echo "seed: $IMAGE:main-${{ matrix.tag }}"
           else
-            echo "seed: nothing published for ${{ matrix.tag }} yet — the Zend seed it is"
+            echo "seed: nothing published for ${{ matrix.tag }} yet — the pinned release it is"
           fi || true
 
       # /logs and /compiler-cache are mounts the unprivileged container user
@@ -232,9 +232,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Homebrew's `php` is the SEED interpreter and the difftest oracle. With a
-      # warm cache neither is touched — it is installed for the run where the
-      # cache misses, which is the only one that needs Zend.
+      # Homebrew's `php` is the difftest oracle; the build never touches it — a
+      # cache miss starts from the pinned release (BOOTSTRAP_VERSION).
       - name: Toolchain
         run: |
           brew install php pcre2 openssl@3 sqlite icu4c
@@ -290,6 +289,49 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-macos-arm64
+          path: ci-logs/
+          if-no-files-found: warn
+
+  # The bootstrap rule, checked on every push: this tree must build from the
+  # PINNED release alone — no cache, no published `main`, no Zend. A merge that
+  # uses a feature newer than BOOTSTRAP_VERSION goes red HERE, while every other
+  # row may still be green off a newer cached compiler. Release the feature and
+  # raise the pin first. One row is enough: the gap (a builtin, syntax, a trap)
+  # is a property of the source, not of the platform. No suite — gate.sh with
+  # MC_SUITE=0 builds two generations and runs the install smokes.
+  bootstrap:
+    name: bootstrap-from-pin
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: toolchain
+          tags: manticore-toolchain:arm64
+          load: true
+          cache-from: type=gha,scope=toolchain-arm64
+      - name: Build from BOOTSTRAP_VERSION
+        run: |
+          mkdir -p ci-logs && chmod -R 777 ci-logs
+          docker run --rm \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -e MC_SUITE=0 \
+            -e MC_XFAIL=0 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+            manticore-toolchain:arm64 \
+            /bin/bash /repo/tools/docker/gate.sh
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-bootstrap
           path: ci-logs/
           if-no-files-found: warn
 
