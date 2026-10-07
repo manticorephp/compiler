@@ -62,6 +62,7 @@ namespace Manticore\Ds {
             for ($e = __mc_hmap_next($this->__mcbuf, 0); $e >= 0; $e = __mc_hmap_next($this->__mcbuf, $e + 1)) {
                 $k = __mc_hmap_key($this->__mcbuf, $e);
                 if (\is_object($k)) { throw new \TypeError('Map::toArray(): object keys cannot be array keys'); }
+                if (\array_key_exists($k, $out)) { throw new \ValueError('Map::toArray(): keys collide in a PHP array'); }
                 $out[$k] = __mc_hmap_val($this->__mcbuf, $e);
             }
             return $out;
@@ -100,7 +101,7 @@ namespace Manticore\Ds {
             foreach ($data as $p) { $this->set($p[0], $p[1]); }
         }
         public function __debugInfo(): array { return $this->__serialize(); }
-        public function jsonSerialize(): mixed { return $this->toArray(); }
+        public function jsonSerialize(): mixed { return (object) $this->toArray(); }
     }
 
     /**

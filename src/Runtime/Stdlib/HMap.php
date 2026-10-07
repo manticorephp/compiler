@@ -10,9 +10,10 @@ function __mc_hmap_ekey(mixed $k): string
 }
 
 /** @return array<string, mixed> */
-function &__mc_hmap_tab(int $h): array
+function &__mc_hmap_tab(int $h, bool $drop = false): array
 {
     static $t = [];
+    if ($drop) { unset($t[$h]); $none = []; return $none; }
     if (!isset($t[$h])) { $t[$h] = []; }
     return $t[$h];
 }
@@ -26,7 +27,7 @@ function __mc_hmap_alloc(int $isSet): int
     return $next;
 }
 
-function __mc_hmap_free(int $h): void { $t = &__mc_hmap_tab($h); $t = []; }
+function __mc_hmap_free(int $h): void { __mc_hmap_tab($h, true); }
 function __mc_hmap_len(int $h): int { return __mc_hmap_tab($h)['len']; }
 function __mc_hmap_epoch(int $h): int { return __mc_hmap_tab($h)['epoch']; }
 
