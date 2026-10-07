@@ -1817,19 +1817,32 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             $cellTemp = $this->lastValue;
         }
-        if ($arg->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } elseif ($arg->type->kind === Type::KIND_UNKNOWN) {
-            // An ERASED arg may carry a boxed cell, and `inttoptr` of the tagged
-            // word is what a string builtin then walked: `strlen($name)` /
-            // `sprintf('%s', $name)` over an element of an erased array faulted
-            // in libc strlen. Route it through the string unbox, which strips a
-            // pointer-shaped payload and RENDERS a scalar tag — the same
-            // treatment the call-arg boundary gives an erased arg bound to a
-            // string param ({@see EmitLlvmExpr::unboxCellArg}). It is the
-            // identity on a value that was already a raw string pointer.
-            $out .= $this->unboxCellToType(Type::string_());
-            $out .= $this->coerceToPtr();
+        if ($arg->type->kind === Type::KIND_CELL || $arg->type->kind === Type::KIND_UNKNOWN) {
+            // A cell (or an ERASED arg carrying one) is unboxed the way the
+            // call-arg boundary unboxes a cell bound to a string param
+            // ({@see EmitLlvmExpr::unboxCellArg}): a pointer-shaped payload is
+            // stripped, an INT / BOOL tag is RENDERED as php's coercion does.
+            // The plain strip handed the int itself to the builtin as a string
+            // pointer: `strlen($k)` over a generator's auto key SIGSEGVd (#102).
+            // A rendered string is fresh and is given back after the builtin.
+            $out .= $this->coerceToI64();
+            $cw = $this->lastValue;
+            $this->rt->needsCellToStrPtr = true;
+            $this->rt->needsTaggedToStr = true;
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $cw . ")\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $rn = $this->ssa->allocReg();
+            $out .= '  ' . $rn . ' = icmp ne ptr ' . $sp . ', ' . $pp . "\n";
+            $own = $this->ssa->allocReg();
+            $out .= '  ' . $own . ' = select i1 ' . $rn . ', ptr ' . $sp . ", ptr null\n";
+            $this->arrArgTempRegs[] = $own;
+            $this->arrArgTempFlavors[] = 'str';
+            $this->lastValue = $sp;
+            $this->lastValueType = 'ptr';
         } elseif ($arg->type->kind === Type::KIND_INT || $arg->type->kind === Type::KIND_FLOAT
             || $arg->type->kind === Type::KIND_BOOL) {
             // A scalar where a string is expected is RENDERED, as php does in
