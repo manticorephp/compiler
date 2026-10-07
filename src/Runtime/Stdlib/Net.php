@@ -1327,7 +1327,7 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
     }
     // unix:// carries a filesystem path — bind + listen straight on it.
     if ($scheme === 'unix') {
-        $u = \__mc_unix_listen($addr);
+        $u = \__mc_unix_listen($addr, $context === null ? 32 : \__mc_ctx_backlog($context));
         if ($u === false) {
             $error_code = -1;
             $error_message = 'cannot bind ' . $address;
@@ -1375,7 +1375,7 @@ function stream_socket_server(string $address, &$error_code = 0, &$error_message
             return false;
         }
     }
-    $s = \__mc_tcp_listen($host, $port);
+    $s = \__mc_tcp_listen($host, $port, $context === null ? 32 : \__mc_ctx_backlog($context));
     if ($s === false) {
         $error_code = -1;
         $error_message = 'cannot listen on ' . $address;

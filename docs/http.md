@@ -370,6 +370,7 @@ well as the handler, so a streaming body sees it too.
 | `postMaxSize` | 0 | reserved: php's `post_max_size`; not enforced in either mode — a buffered body is already bounded by `maxBodySize` (413), and a streamed one's field bytes are the handler's (`Part::readAll()`) |
 | `maxInputVars` | 1000 | `queryArray()`, urlencoded and multipart `postArray()` truncated silently (php's `max_input_vars`) |
 | `keepAliveMax` | 1000 | connection closed after N requests |
+| `backlog` | 511 | listen queue (kernel-clamped to `somaxconn`); a full queue answers a connect with RST. A context's `socket.backlog` wins |
 | `idleTimeout` | 5.0 | silent close between requests |
 | `headerTimeout` | 10.0 | 408 mid-head |
 | `writeTimeout` | 30.0 | the write is bounded |

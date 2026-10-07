@@ -3767,6 +3767,7 @@ final class Server
      *  hundred requests; nginx's equivalent default is 1000. It is a DoS knob,
      *  not a correctness one. */
     private int $keepAliveMax = 1000;
+    private int $backlog = 511;
     private string $serverName = 'manticore';
     private bool $secure = false;
     /** @var array<int, array<int, string>> parsed CIDRs, {@see trustedProxies} */
@@ -3856,6 +3857,8 @@ final class Server
         return $this;
     }
     public function keepAliveMax(int $n): Server { $this->keepAliveMax = $n; return $this; }
+    /** The listen() queue; the kernel clamps it to somaxconn. A context's own `socket.backlog` wins. */
+    public function backlog(int $n): Server { $this->backlog = $n; return $this; }
     /** '' omits the `Server:` header entirely. */
     public function serverName(string $s): Server { $this->serverName = $s; return $this; }
     public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
@@ -3942,9 +3945,13 @@ final class Server
         }
         $errno = 0;
         $errstr = '';
-        $l = $this->context === null
-            ? \stream_socket_server($this->addr, $errno, $errstr)
-            : \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $this->context);
+        // php's listener default is 32 — under a burst of connects the queue
+        // overflows while the loop is busy, and the kernel answers RST.
+        $ctx = $this->context ?? \stream_context_create();
+        if (!isset(\stream_context_get_options($ctx)['socket']['backlog'])) {
+            \stream_context_set_option($ctx, 'socket', 'backlog', $this->backlog);
+        }
+        $l = \stream_socket_server($this->addr, $errno, $errstr, \STREAM_SERVER_BIND | \STREAM_SERVER_LISTEN, $ctx);
         if ($l === false) {
             throw new \RuntimeException('Http\\Server: cannot bind ' . $this->addr . ': ' . $errstr);
         }
