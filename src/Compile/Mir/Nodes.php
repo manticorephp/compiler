@@ -1958,6 +1958,12 @@ final class MethodCall_ extends Node
      * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
+    /** Set by {@see Passes\ResolveOverloads}: the function this call runs, with
+     *  the receiver as its `$this` and no dispatch — a reified receiver whose
+     *  argument does not fit the binding's claim runs the ORIGIN's erased body
+     *  ({@see FunctionDef::$claimOrigin}). '' = ordinary dispatch. */
+    public string $direct = '';
+
 
     public function accept(EmitVisitor $v): string
     {

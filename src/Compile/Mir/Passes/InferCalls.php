@@ -815,6 +815,12 @@ trait InferCalls
         foreach ($node->args as $a) {
             $this->inferNode($a);
         }
+        // Routed to the origin's erased body ({@see MethodCall_::$direct}): its
+        // return is what the call yields, not the reified method's.
+        if ($node->direct !== '') {
+            $node->type = $this->sigs[$node->direct] ?? Type::cell();
+            return $node->type;
+        }
         $mcCls = $objType->class;
         if ($mcCls !== null && $mcCls !== '') {
             $this->adoptLitParamElem($node->args, $mcCls . '__' . $node->method, 1);

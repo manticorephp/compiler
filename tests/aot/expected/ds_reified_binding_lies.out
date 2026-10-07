@@ -1,0 +1,21 @@
+OutOfBounds: Key not found
+50
+bool(false)
+TypeError: Cannot use a key of type float in Map
+TypeError: Cannot use a key of type bool in Map
+OutOfBounds: Key not found
+2
+500
+50
+TypeError: Cannot use a key of type float in Map
+TypeError: Cannot use a key of type bool in Map
+9
+3
+2
+str7
+int7
+big
+3
+int
+string
+float

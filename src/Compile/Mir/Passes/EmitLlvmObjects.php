@@ -7979,6 +7979,17 @@ trait EmitLlvmObjects
     private function emitMethodCallInner(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
+        // Routed to one body with no dispatch (a reified receiver whose argument
+        // does not fit the binding's claim runs the origin's erased method): a
+        // plain call with the receiver as `$this`, so the callee's own erased
+        // params drive the arg coercions.
+        if ($mc->direct !== '') {
+            $dArgs = [$mc->object];
+            foreach ($mc->args as $a) { $dArgs[] = $a; }
+            $dc = new \Compile\Mir\Call($mc->direct, $dArgs, $n->type);
+            $dc->srcArgc = $mc->srcArgc;
+            return $this->emitNode($dc);
+        }
         // A method on a `#[TypeDef]` receiver: a direct call with the scalar as
         // the first argument. Nothing to dispatch on — the class is final and has
         // no runtime identity. Routed through the ordinary Call path so the

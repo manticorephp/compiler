@@ -4,6 +4,7 @@ namespace Compile\Mir\Passes;
 
 use Compile\Mir\Call;
 use Compile\Mir\FunctionDef;
+use Compile\Mir\MethodCall_;
 use Compile\Mir\Module;
 use Compile\Mir\Node;
 use Compile\Mir\Param;
@@ -32,6 +33,12 @@ final class ResolveOverloads implements Pass
     /** @var array<string, FunctionDef[]> canonical name → its overloads, declaration order */
     private array $overloads = [];
 
+    /** @var array<string, FunctionDef> spec method name → its def, for each one with claimed params */
+    private array $claimed = [];
+
+    /** @var array<string, \Compile\Mir\ClassDef> */
+    private array $classes = [];
+
     public function name(): string { return self::NAME; }
 
     public function requires(): array { return [InferTypes::NAME]; }
@@ -39,19 +46,26 @@ final class ResolveOverloads implements Pass
     public function run(Module $module): Module
     {
         $this->overloads = [];
+        $this->claimed = [];
         foreach ($module->functions as $fn) {
+            if ($fn->claimParams !== []) { $this->claimed[$fn->name] = $fn; }
             if ($fn->overloadOf === '') { continue; }
             $this->overloads[$fn->overloadOf][] = $fn;
         }
-        if ($this->overloads !== []) {
+        if ($this->overloads !== [] || $this->claimed !== []) {
+            $this->classes = $module->classes;
             foreach ($module->functions as $fn) {
                 // The canonical body and the overloads themselves call each
-                // other by name on purpose; leave their calls as written.
+                // other by name on purpose; leave their calls as written. An
+                // erased thunk checks its claimed args itself.
                 if ($fn->overloadOf !== '' || isset($this->overloads[$fn->name])) { continue; }
+                if (\str_ends_with($fn->name, '$erased')) { continue; }
                 $this->visit($fn->body);
             }
         }
         $this->overloads = [];
+        $this->claimed = [];
+        $this->classes = [];
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -59,7 +73,62 @@ final class ResolveOverloads implements Pass
     private function visit(Node $n): void
     {
         if ($n->kind === Node::KIND_CALL) { $this->resolve($n); }
+        if ($n->kind === Node::KIND_METHOD_CALL) { $this->resolveClaim($n); }
         foreach (Walk::children($n) as $c) { $this->visit($c); }
+    }
+
+    /**
+     * A reified receiver (`Map<string,int>` → `Map__of__string__int`) runs its
+     * spec method only when every argument provably fits what the binding
+     * claimed for an erased param; otherwise the ORIGIN's erased body runs, as
+     * on an unbound receiver — the claim never converts or reinterprets.
+     */
+    private function resolveClaim(MethodCall_ $mc): void
+    {
+        $t = $mc->object->type;
+        if ($t->kind !== Type::KIND_OBJ) { return; }
+        $fn = $this->claimedMethod($t->class ?? '', $mc->method);
+        if ($fn === null) { return; }
+        foreach ($fn->claimParams as $i => $ct) {
+            $a = $mc->args[$i - 1] ?? null;
+            if ($a === null) { continue; }
+            if ($a->kind === Node::KIND_SPREAD || !$this->claimFits($a->type, $ct)) {
+                $mc->direct = $fn->claimOrigin;
+                return;
+            }
+        }
+    }
+
+    /** The claimed spec method `$cls` resolves for `$method`, walking its parents. */
+    private function claimedMethod(string $cls, string $method): ?FunctionDef
+    {
+        $guard = 0;
+        while ($cls !== '' && $guard < 32) {
+            $guard = $guard + 1;
+            $fn = $this->claimed[$cls . '__' . $method] ?? null;
+            if ($fn !== null) { return $fn; }
+            $cd = $this->classes[$cls] ?? null;
+            if ($cd === null || isset($cd->methodNames[$method])) { return null; }
+            $cls = $cd->parent;
+        }
+        return null;
+    }
+
+    private function claimFits(Type $given, Type $want): bool
+    {
+        if ($want->kind !== Type::KIND_OBJ) { return $this->argFits($given, $want); }
+        if ($given->kind !== Type::KIND_OBJ) { return false; }
+        $c = $given->class ?? '';
+        $w = $want->class ?? '';
+        $guard = 0;
+        while ($c !== '' && $guard < 32) {
+            $guard = $guard + 1;
+            if ($c === $w) { return true; }
+            $cd = $this->classes[$c] ?? null;
+            if ($cd === null) { return false; }
+            $c = $cd->parent;
+        }
+        return false;
     }
 
     private function resolve(Call $call): void
