@@ -1,0 +1,54 @@
+bool(true)
+NULL
+bool(true)
+bool(false)
+int(2)
+string(3) "xxx"
+float(1.152921504606847E+18)
+object(Manticore\Ds\Map)#1 (5) {
+  [0]=>
+  array(2) {
+    [0]=>
+    string(1) "n"
+    [1]=>
+    NULL
+  }
+  [1]=>
+  array(2) {
+    [0]=>
+    string(1) "f"
+    [1]=>
+    float(1.152921504606847E+18)
+  }
+  [2]=>
+  array(2) {
+    [0]=>
+    string(1) "b"
+    [1]=>
+    bool(false)
+  }
+  [3]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    array(2) {
+      [0]=>
+      int(1)
+      [1]=>
+      array(2) {
+        [0]=>
+        int(2)
+        [1]=>
+        int(3)
+      }
+    }
+  }
+  [4]=>
+  array(2) {
+    [0]=>
+    string(1) "s"
+    [1]=>
+    string(3) "xxx"
+  }
+}

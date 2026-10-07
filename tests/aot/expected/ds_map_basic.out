@@ -1,0 +1,16 @@
+3 2 3
+a=10 c=3 b=20 
+{"a":10,"c":3,"b":20}
+bool(false)
+bool(true)
+string(4) "dflt"
+Array
+(
+    [c] => 3
+    [b] => 20
+)
+OutOfBoundsException: Key not found
+Cannot append to a Map; use set()
+2 3
+bool(true)
+O:16:"Manticore\Ds\Map":2:{i:0;a:2:{i:0;i:1;i:1;s:3:"one";}i:1;a:2:{i:0;s:1:"k";i:1;d:2.5;}}
