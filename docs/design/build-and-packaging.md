@@ -52,7 +52,7 @@ scripts stop hand-rolling clang/stub/link steps.
 - **Done (`6292b94`):** `bin/build` self-host path now runs
   `manticore build manticore.json` (temp output via a one-line manifest `sed`,
   then smoke-test + atomic swap). `tools/selfhost.sh` is no longer the driver.
-- **Done (`ef115f4`):** the cold seed `bin/compile` is now a *full self-rebuild*
+- **Done (`ef115f4`; since removed — `bin/compile` and the Zend seed no longer exist, see the 2026-10 note under "Bootstrap"):** the cold seed `bin/compile` is now a *full self-rebuild*
   seed — Zend compiles `src/` to a THROWAWAY seed binary, which then runs
   `build manticore.json` to produce the shipped native compiler **and** the
   stdlib library. The manifest declares the stdlib as a library target
@@ -134,7 +134,7 @@ So 2A is the safe immediate correctness; the drop-ABI fix is the architectural
 unlock for fast multi-object (2C) + extensions. After it, the default can be
 fast two-object again.
 
-If only 2A ships (drop-ABI fix deferred), `bin/compile`'s `[5/5]` step and
+If only 2A ships (drop-ABI fix deferred), the (since removed) `bin/compile` `[5/5]` step and
 `lib/manticore_stdlib.{o,sig}` are deleted and #4's seed-unification falls out
 cleanly (no two-object path left).
 
@@ -195,11 +195,25 @@ touches the manticore arena/rc runtime, so it **adds no rc=139 surface**.
 
 So the same single-module decision (2A) serves stdlib and extensions uniformly.
 
-## Bootstrap: when a rebuild needs the Zend cold seed, and how rarely
+## Bootstrap: the pinned release, and how a rebuild stays one generation
 
-`bin/build` self-hosts; `bin/compile` (the Zend front-end) is the cold seed. The
-seed used to be needed unpredictably — "add a function, and sometimes the build
-has to start from Zend" — because three separate things were conflated.
+> **2026-10: the Zend cold seed is gone.** `bin/compile`, `tools/compile_files_mir.php`,
+> `bin/build --seed` / `--auto-seed` and `MC_ZEND_SEED` were removed. The old Zend-seed text
+> in this section was cut; the generation-skew and undefined-trap analysis below still holds.
+
+The bootstrap compiler (stage0) is a **pinned release**: `BOOTSTRAP_VERSION` at the repo root
+names it, and `tools/fetch_bootstrap.sh` downloads it and verifies it against the release's
+`SHA256SUMS`. `bin/build` with no `bin/manticore` fetches it, builds the tree with it, then
+rebuilds once with the result; otherwise the installed compiler rebuilds itself. CI warm-starts
+from its cache, then the published `main` image, then the pin; the `bootstrap-from-pin` job
+builds from the pin alone and is a required check, and the release workflow builds from the
+pin only. The rule that keeps this working is two-step: ship a feature in release N, raise
+`BOOTSTRAP_VERSION` to N, only then use it in `src/`. A memory-ABI bump needs no pin raise (the
+old compiler compiles the new source with its own runtime, and pass 2 rebuilds `lib/` with the
+new binary). `src/` is no longer required to run under Zend php.
+
+The generation problems below were what once forced the Zend seed; the analysis is kept because
+the mechanisms (two-pass build, undefined-call trap, preflight) are still live.
 
 **1. A generation skew was structural.** One `manticore build` runs the manifest
 in one process, libraries first, applications second, so `lib/manticore_stdlib.o`
@@ -207,8 +221,7 @@ was always emitted by the compiler being REPLACED. Every user program then
 linked a stdlib one generation older than the compiler that built it, and a
 change under `src/Runtime` only took effect on the next rebuild — the "run
 `bin/build` twice" folklore. `bin/build` now runs two passes with the binary swap
-between them (`--apps-only`, then `--libs-only` through the NEW binary), and
-`bin/compile` does the same after the seed produces the native compiler. Safe
+between them (`--apps-only`, then `--libs-only` through the NEW binary). Safe
 because the compiler application is `"stdlib": false` and never links the library
 it rebuilds.
 
@@ -226,8 +239,7 @@ them, and a LIBRARY target refuses to be written with any (override:
 `manticore analyze src --only undefined.,parse.error` — the closed-world
 undefined-symbol rules plus parse errors, asked of the INSTALLED compiler about
 the NEW source, in about two seconds and without codegen. On a hit it names the
-symbols and stops with advice; `--auto-seed` escalates to `bin/compile` instead
-(for CI). The outgoing binary is kept as `bin/.manticore.prev`, so a checkout is
+symbols and stops with advice (a bootstrap-gap error naming both versions, when built from the pin). The outgoing binary is kept as `bin/.manticore.prev`, so a checkout is
 never left without a working compiler.
 
 What remains genuinely irreducible is small: new **syntax** used inside `src/`
@@ -240,8 +252,8 @@ ever sees an unresolved name. Nine names already ship both.
 
 ## Open items after #2
 
-- ✅ Unify the Zend cold seed onto the manifest (#4) — done (`ef115f4`,
-  full self-rebuild seed; per-app library selection + `--libs-only`).
+- ✅ Unify the cold seed onto the manifest (#4) — done (`ef115f4`, per-app library
+  selection + `--libs-only`); the seed itself has since been removed (pinned release).
 - Weak library symbols (`--emit-library` exports `weak`) so an app can override.
 - ✅ Composer autoload discovery — done. A `build` application target with
   `"composer": true` builds the project the way Composer sees it: its

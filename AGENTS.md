@@ -23,7 +23,6 @@ bin/build                      # self-host rebuild via the manifest — THE norm
                                # (no bin/manticore: fetch the pinned release, build, rebuild)
 bin/build --verify             # rebuild, then the fixpoint + suite gate
 bin/build --fast               # -O1, application only, to bin/manticore.fast — NOT gate evidence
-bin/build --seed               # Zend cold seed — opt-in recovery, only while src/ runs under php
 ```
 
 Iterate with `bin/build`. It uses the installed native compiler (~1–2 min); a
@@ -61,9 +60,9 @@ A merge that needs a newer compiler than the pin fails `bootstrap-from-pin`
 The cached and published compilers are newer than the pin, so the other CI rows
 may stay green over the same merge — that row is the one that answers.
 
-The Zend seed (`bin/build --seed`, `MC_ZEND_SEED=1` for `gate.sh`) stays as an
-opt-in recovery path for as long as `src/` happens to run under php. Nothing
-depends on it, and `src/` is free to stop being Zend-runnable.
+There is no Zend seed: `src/` is not required to run under php. php is needed
+only as the `tools/difftest.sh` oracle and by a few Zend-hosted dev tools
+(`tools/compile_user_mir.php`, the ~3 s fast loop).
 
 ## Test
 
@@ -139,15 +138,17 @@ platform in the issue and label it.
 
 ```
 PHP source → Lexer → Parser → AST
-  → LowerFromAst → ConstFold → DeadStore → InferTypes → VivifyRefArgs
-  → NarrowReturns → InferTypes → InlineClosures → InferTypes → Monomorphize
-  → FuseSplitJoin → TypeCheck (full; MANTICORE_TYPECHECK=0 → reprOnly) → NarrowReturns → CheckTypeDefs
+  → LowerFromAst → NarrowScalarGuards → ConstFold → DeadStore → InferTypes → VivifyRefArgs
+  → ResolveMethodFcc → NarrowReturns → InferTypes → InlineClosures → ResolveOverloads
+  → InferTypes → Monomorphize → FuseSplitJoin
+  → TypeCheck (full; MANTICORE_TYPECHECK=0 → reprOnly) → NarrowReturns → CheckTypeDefs
   → ReflectAnalysis → DemoteCharLocals → InferEffects → InferAllocKind
-  → ApplyMemoryMode → InsertMemoryOps → Verify
+  → ApplyMemoryMode → SpillFreshBases → InsertMemoryOps → OwnershipFlow → Verify
   → EmitLlvm (+ HoistAllocas, PruneIr) → LLVM IR → clang -c → cc → static binary
 ```
 
-The driver that sequences this is `cmd_compile` in `src/Manticore/Main.php`.
+The driver is `cmd_compile` in `src/Manticore/Main.php`; it calls `lower_module` (the
+passes) and `compile_via_mir` (EmitLlvm).
 `InferTypes` re-runs after each pass that makes new types concrete. Full
 annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 
@@ -208,7 +209,7 @@ Corollaries:
   the new source with its OWN runtime inside the compiler (which links no
   stdlib), and pass 2 rebuilds `lib/*.o` with the NEW binary, so no program ever
   mixes two layouts. Verified on the v8 → v9 bump: a v8 compiler's `bin/build`
-  reached the fixpoint byte-identical to the Zend-seeded binary.
+  reached the fixpoint byte-identical to the previously seeded binary.
 - **New syntax goes through the two-step rule.** It is unusable inside `src/`
   until `BOOTSTRAP_VERSION` names a release that parses it. Never ship a parser
   change together with tree code that needs it — `bootstrap-from-pin` goes red.

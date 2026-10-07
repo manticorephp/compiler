@@ -129,6 +129,10 @@ Stop overloading. Introduce the distinction the lattice is missing:
 
 ## 7. Staged execution (each stage: Zend-seed-validate on USER programs → full gate)
 
+> **2026-10: the Zend cold seed is gone** — the compiler bootstraps from the pinned release (AGENTS.md, "Bootstrap: the pinned release"). The seed-based recovery/validation advice below is historical.
+
+(The user-program validation below now runs through `tools/compile_user_mir.php`, the Zend-hosted fast loop, while `src/` stays php-runnable; `tools/compile_files_mir.php` is deleted.)
+
 0. **This doc.** Define + agree the invariant.
 1. **Disentangle the stdlib ABI.** Give stdlib-erased array params a distinct
    "raw array" type so a later `unknown → cell` normalization can't touch them.
@@ -144,14 +148,14 @@ Stop overloading. Introduce the distinction the lattice is missing:
    the raw-unknown fallbacks (offset-16 etc.). By now nothing feeds them.
 5. **Break the fixpoint where needed.** For any stage that destabilizes self-host,
    first make the compiler SOURCE robust to the correct behavior — validated ONLY
-   via the Zend seed compiling USER programs, never `bin/build` — then flip codegen
+   via the Zend-hosted compiler compiling USER programs, never `bin/build` — then flip codegen
    and let the fixpoint re-converge.
 
 ## 8. DIAGNOSTIC RESULTS (2026-07-08) — the invariant is EMPIRICALLY CONFIRMED
 
 A throwaway blanket `residual unknown → cell` normalization at the InferTypes tail
 was compiled onto USER programs by the **Zend-hosted** compiler and linked WITHOUT
-any self-build (`php tools/compile_files_mir.php user.php > u.ll; clang -c u.ll;
+any self-build (historically `php tools/compile_files_mir.php user.php > u.ll; clang -c u.ll;
 cc u.o lib/manticore_stdlib.o -o u`). This is the fixpoint-break harness — it proves
 codegen correctness on user code independently of self-compilation.
 
@@ -189,7 +193,7 @@ ripple). Routed `KIND_UNKNOWN` receivers to it in `emitPropertyAccess`.
 s3 or arrays** (surgical `->prop`-only, unlike the blanket experiment). This fix is
 READY — re-apply it the moment the source blocker below is cleared.
 
-**Self-host blocker — precisely isolated.** `bin/compile` self-build smoke SIGSEGVs
+**Self-host blocker — precisely isolated.** The (then) `bin/compile` self-build smoke SIGSEGVs
 `KERN_INVALID_ADDRESS at 0x38` (a null→field@offset-56), NONDETERMINISTIC ~5% (the
 documented heisenbug). Made the switch **strictly additive** (default + non-holder
 class_id → keep offset-16; override ONLY confirmed holders) → **still crashes.** So the
@@ -226,7 +230,7 @@ empty (the offset-16 path), `error_log("UNKPROP\tfn=…\t->prop\trkind=…")`. G
 is fine under Zend but calling it with `$e->getFile()` broke self-compile emit; and
 `dprint`'s `write(2,…)` is a no-op stub under Zend so its output is lost). Run the
 Zend front-end over all of `src/`:
-`MANTICORE_UNKNOWN_PROP_TRACE=1 find src -name '*.php' | sort | xargs php tools/compile_files_mir.php >/dev/null`.
+`MANTICORE_UNKNOWN_PROP_TRACE=1 find src -name '*.php' | sort | xargs php tools/compile_files_mir.php >/dev/null` (historical; that driver is deleted).
 This lists EVERY genuinely-unknown-receiver `->prop` the compiler emits over its own
 source — complete, deterministic, ~seconds. **36 sites at HEAD.** No heisenbug, no gate
 per discovery. (Re-run anytime to measure remaining count.)

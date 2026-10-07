@@ -2,9 +2,10 @@
 
 PHP-side runtime support compiled into every output binary: libc FFI
 bindings, the built-in `stdClass`, a native JSON encoder/decoder, and
-pure-PHP reimplementations of common PHP std-functions. No external runtime,
-no external libs — everything builds on the same compile-time-FFI
-mechanism the compiler uses internally.
+pure-PHP reimplementations of common PHP std-functions. No PHP runtime: the
+libraries it rides on are system libraries linked dynamically (libc, PCRE2,
+OpenSSL, and ICU / libxml2 / sqlite3 / libcurl on demand), all reached through
+the same compile-time-FFI mechanism the compiler uses internally.
 
 This stdlib is **bundled**: built once into a prebuilt
 `lib/manticore_stdlib.o` (+ a `.sig` module-interface sidecar) that is
@@ -44,8 +45,10 @@ self-contained compiler.
   `select` trio).
 - `Crypto.php`, `Openssl.php`, `Pcre.php` — bindings for the two host
   libraries the build links (OpenSSL 3, PCRE2).
-- `Stdlib/` — global-namespace PHP std-function reimplementations, 33
-  files. See `Stdlib/README.md` for the grouping and the invariants.
+- `Stdlib/` — global-namespace PHP std-function reimplementations, 55
+  files (including `Stdlib/Buf.php`, the bootstrap twins of the native-buffer
+  builtins behind `SplFixedArray` / `Manticore\Ds`). See `Stdlib/README.md` for the
+  grouping and the invariants.
 
 ## Public surface (global namespace)
 

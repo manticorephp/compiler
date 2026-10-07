@@ -7,24 +7,27 @@ no import and no registration.
 
 ## Files
 
-33 files, grouped by surface:
+55 files, grouped by surface:
 
 | Group | Files |
 |---|---|
 | Arrays | `Arrays.php` |
-| Strings | `Strings.php`, `StringsExtra.php`, `NatCompare.php`, `Format.php` (the `printf` family), `Scanf.php`, `Encoding.php`, `Mbstring*.php` (mbstring; `MbstringTables.php` is generated), `Iconv.php` |
+| Strings | `Html.php` (entities, `strip_tags`), `Strings.php`, `StringsExtra.php`, `NatCompare.php`, `Format.php` (the `printf` family), `Scanf.php`, `Encoding.php`, `Mbstring*.php` (mbstring; `MbstringTables.php` is generated), `Iconv.php` |
 | Character classes | `Ctype.php` |
 | Regex | `Pcre.php` (the `preg_*` family over host PCRE2) |
-| Math / random | `MathExtra.php`, `Random.php` |
+| Math / random | `MathExtra.php`, `Random.php`, `Xxhash.php` |
 | Date & time | `Time.php`, `DateCivil.php`, `DateFormat.php`, `DateFuncs.php`, `DateOps.php`, `DateParse.php`, `TzIf.php`, `TzInfo.php` |
 | Filesystem | `Io.php`, `Fs.php`, `FsRest.php`, `Stat.php`, `Path.php` |
 | Structured formats | `Csv.php`, `Ini.php` |
-| Networking | `Net.php`, `Sockets.php`, `Dns.php` |
+| Networking | `Net.php`, `Sockets.php`, `Dns.php`, `DnsWire.php` |
 | Hashing | `Hash.php` |
-| Process | `Pcntl.php` |
+| Process | `Pcntl.php`, `Proc.php`, `Offload.php` (blocking-offload pool) |
+| Native buffers | `Buf.php` (bootstrap twins of the `__mc_nbuf_*` codegen builtins behind `SplFixedArray` / `Manticore\Ds\*`) |
+| Compression / images | `Zlib.php`, `Image.php` |
+| Web / session / SAPI | `Session.php`, `Sapi.php`, `Win.php`, `Output.php`, `Locale.php`, `Apcu.php` |
 | Misc | `Gc.php`, `VarExtra.php` |
 
-`Io.php` (64 KB), `Net.php` (95 KB) and `Sockets.php` (50 KB) are the three that
+`Io.php` (~76 KB), `Net.php` (~100 KB) and `Sockets.php` (~50 KB) are the three that
 carry most of the surface; start there when looking for a stream or socket
 function.
 
@@ -93,8 +96,8 @@ source it compiles. It has never heard of the new builtin, and a call it cannot
 resolve does not fail the build — `EmitLlvmCalls::emitCall` compiles it into a
 runtime `Call to undefined function` throw. So the trap rides silently into the
 next binary, or worse into `lib/manticore_stdlib.o`, where it outlives the
-source that caused it. Recovering meant a cold Zend seed, and knowing that you
-needed one.
+source that caused it. Built from the pinned release, the same trap fails the
+`bootstrap-from-pin` CI job.
 
 With the pair, nothing is ever unresolved: the old compiler links the PHP body,
 the new one shadows it (`emitCall` asks `emitBuiltin` before `definedFns`) and

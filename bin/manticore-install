@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Composer bin proxy: builds + installs Manticore into $MANTICORE_HOME by running
+# Composer bin proxy: installs Manticore into $MANTICORE_HOME (published binary,
+# else a source build from the pinned release) by running
 # the package's install.sh. Reachable as `vendor/bin/manticore-install` after a
 # `composer require manticorephp/compiler`. Resolves through composer's bin
 # symlink to find the package root.

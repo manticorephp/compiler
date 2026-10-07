@@ -7,8 +7,8 @@ namespace Compile;
  * from an environment variable when the compiler starts.
  *
  * Two layers of "compile-time": when bin/manticore compiles a user file these
- * control what it emits into the user's binary; when bin/compile bootstraps
- * bin/manticore (Zend runs the same code) they control bin/manticore's OWN
+ * control what it emits into the user's binary; when bin/build rebuilds
+ * bin/manticore (the compiler runs the same code) they control its OWN
  * binary — so it is self-debuggable without extra plumbing.
  *
  * Env vars:
@@ -575,7 +575,7 @@ final class Debug
      * and the allocators calling them are `linkonce_odr`: link a stdlib `.o`
      * built with the pool against a user `.o` built without it and the linker
      * keeps one body of each, so a block can be pooled by one and handed to
-     * libc `free()` by the other. `bin/compile` / `bin/build` pass their
+     * libc `free()` by the other. `bin/build` passes its
      * environment to both halves, so exporting the variable for the build is
      * enough — flipping it for a single file is not.
      */

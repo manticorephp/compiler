@@ -8,10 +8,10 @@
 # PEAK live set with its allocating backtraces. Its output is folded by the same
 # tools/prof/report.php, so a Linux table and a macOS table are comparable.
 #
-# Like the macOS path, the compiler is seeded with MANTICORE_POOL=0 — the pool
+# Like the macOS path, the compiler is built with MANTICORE_POOL=0 — the pool
 # carves objects out of one big mmap and any malloc-level profiler would see a
 # single allocation instead of millions (Debug.php:124: the flag must hold for
-# the WHOLE build; bin/compile passes its environment to both halves).
+# the WHOLE build; bin/build passes its environment to both passes).
 #
 # `perf` is deliberately not here: it needs a kernel-matched package plus
 # --cap-add SYS_ADMIN, which this harness does not grant.
@@ -38,8 +38,8 @@ cp -a /repo /build/src-tree
 cd /build/src-tree
 rm -rf bin/manticore lib tests/aot/tmp
 
-echo "=== cold seed with MANTICORE_POOL=0 (malloc-visible allocations) ==="
-MANTICORE_POOL=0 bin/compile
+echo "=== bin/build with MANTICORE_POOL=0 (malloc-visible allocations) ==="
+MANTICORE_POOL=0 bin/build
 
 echo "=== heaptrack: bin/manticore build --apps-only ==="
 export MANTICORE_PRELUDE=/build/src-tree/prelude

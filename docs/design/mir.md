@@ -116,17 +116,21 @@ copy (used by Monomorphize and inlining); `Dump.php` = the `dump-mir` printer.
 Every pass implements `Pass` (`Pass.php`): `name()`, `requires()` (declared
 dependency pass names), `run(Module): Module`. Each stamps `markPassApplied`.
 `requires()` is declarative; the actual valid order is the fixed chain in
-`Main.php::lower_module()`. Run order:
+`lower_module()` (`src/Manticore/Main.php`; `compile_via_mir` then runs `EmitLlvm`, and
+`cmd_compile` drives both). Run order:
 
 | # | Pass | File | What it does |
 |---|---|---|---|
 | 1 | **LowerFromAst** | `LowerFromAst.php` | AST → MIR. Seeds types as `unknown`, stamps `line`. Injects prelude sources, resolves stdlib externs (`isExtern`), marks generators, wires FFI `#[Symbol]`. |
+| 1b | **NarrowScalarGuards** | `NarrowScalarGuards.php` | `if (is_int($x))` over a cell `$x` reads an unboxed copy of it inside the guarded branch. |
 | 2 | **ConstFold** | `ConstFold.php` | Fold constant expressions (`interface_exists`/`trait_exists` too). |
 | 3 | **DeadStore** | `DeadStore.php` | Dead-store elimination. |
 | 4 | **InferTypes** | `InferTypes.php` | The big type-inference pass, split across `InferTypes` / `InferNodes` / `InferScans` / `InferCalls` / `InferNarrow` (~300 KB together). Refines every node's `Type`; sets `Foreach_` iterator dispatch. |
 | 4b | **VivifyRefArgs** | `VivifyRefArgs.php` | Define the locals whose ONLY definition is a by-reference argument position (`preg_match($re, $s, $m)` — php creates `$m` as NULL and the callee writes through it). |
+| 4c | **ResolveMethodFcc** | `ResolveMethodFcc.php` | After the first inference the receiver of a first-class-callable `$r->m(...)` has a class: rebuild the closure with the method's own parameters (by-ref, variadic, defaults) so every argument is forwarded. A receiver that stays erased keeps the placeholder. |
 | 5 | **NarrowReturns(preMono=true)** | `NarrowReturns.php` | Narrow concrete, param-independent bare-`array` returns early so call-site fusion sees a concrete element. Then **re-run InferTypes**. |
 | 6 | **InlineClosures** | `InlineClosures.php` | Inline captureless arrow closures at known invoke sites; fuse `array_map`/`filter`/`reduce` over a concrete array + literal closure into a native typed loop. Then **re-run InferTypes**. |
+| 6b | **ResolveOverloads** | `ResolveOverloads.php` | Retarget a call to a concretely-typed overload (e.g. a string-only variant of a function whose canonical return is `array|string|null`) when every argument is concretely typed and matches exactly. Then **re-run InferTypes**. |
 | 7 | **Monomorphize** | `Monomorphize.php` | Specialize erased-array / polymorphic functions per call-site shape (`<name>$mono$<key>`); repoints calls; re-runs InferTypes internally when it specializes. |
 | 8 | **FuseSplitJoin** | `FuseSplitJoin.php` | Fuse an `implode(explode(…))` round-trip into one native `str_replace` — no intermediate array. |
 | 9 | **TypeCheck** | `TypeCheck.php` | An array-REPRESENTATION conflict is FATAL, because it means the callee walks the buffer at the wrong type. The full checker (arg/return array-ness, arithmetic on a provably non-numeric string constant) runs too and is equally fatal; `MANTICORE_TYPECHECK=0` narrows it back to `reprOnly`. |
@@ -137,7 +141,9 @@ dependency pass names), `run(Module): Module`. Each stamps `markPassApplied`.
 | 14 | **InferEffects** | `InferEffects.php` | Fill each node's `Effects` + the function aggregate (§6). |
 | 15 | **InferAllocKind** | `InferAllocKind.php` | Escape analysis → `allocKind` on allocating nodes (§6). |
 | 16 | **ApplyMemoryMode** | `ApplyMemoryMode.php` | Overlay the `--memory` mode (rc/arena/hybrid) onto the verdicts (§6). |
+| 16b | **SpillFreshBases** | `SpillFreshBases.php` | Spill a fresh temp that is an element / property base into a local, so the base has an owner for the drop (a `Manticore\Ds` typed-array read the emitter runs in place stays a borrow, see `NbufInline`). |
 | 17 | **InsertMemoryOps** | `InsertMemoryOps.php` | Materialize `MemoryOp_` nodes (retain/release/cow/arena_enter/leave) from the verdicts. |
+| 17b | **OwnershipFlow** | `OwnershipFlow.php` | Per-program-point ownership of rc locals (Empty / Own / Borrow, dataflow in `Flow/*`): explicit drop / retain ops, container moves, return drops and moves. |
 | 18 | **Verify** | `Verify.php` | Sanity gate before codegen. |
 
 Then `EmitLlvm` (not a `Pass`) emits LLVM IR.
@@ -219,7 +225,7 @@ state after the full pipeline. Landing it is a roadmap item.
 | Effects / AllocationKind / MemoryMode | `src/Compile/Mir/{Effects,AllocationKind,MemoryMode}.php` |
 | Traversal / clone / dump | `src/Compile/Mir/{Walk,NodeClone,Dump}.php` |
 | Passes | `src/Compile/Mir/Passes/*.php` |
-| Pipeline wiring | `src/Manticore/Main.php` (`lower_module`) |
+| Pipeline wiring | `src/Manticore/Main.php` (`lower_module`, `compile_via_mir`) |
 | Memory ABI (offsets, tags, rc encoding) | `src/Compile/MemoryAbi.php` |
 
 Related design docs: `type-system-v2.md`, `monomorphization.md`,

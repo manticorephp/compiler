@@ -208,9 +208,10 @@ would silently give back the allocation it exists to remove.
 #### Why the PHP body is real
 
 The class body is ordinary PHP, and `php` executes it as a genuine object — the
-honest arithmetic, the honest validation. That is deliberate: Manticore's cold
-bootstrap runs `src/` under Zend, so the language may only be extended in ways
-Zend ignores. An attribute is inert to Zend; the body is not.
+honest arithmetic, the honest validation. That is deliberate: the same source must still run under
+stock `php` (the `tools/difftest.sh` oracle, portability), so the language may
+only be extended in ways Zend ignores. An attribute is inert to Zend; the body is
+not.
 
 So there is exactly **one** implementation. Native runs the very `__invoke` and
 the very methods the programmer wrote — only unboxed. The two paths cannot drift,

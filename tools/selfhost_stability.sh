@@ -10,7 +10,8 @@
 # is FATAL only in some layouts — ~4/5 of rebuilds crashed at startup while the
 # rest got a lucky layout. The single-run fixpoint gate is BLIND to this: it
 # builds one stage-2 binary and, if that layout happens to survive, reports
-# green. This gate rebuilds N times through BOTH front-ends and smoke-tests
+# green. This gate rebuilds N times through BOTH build paths (the manifest one
+# bin/build uses, and the one-module tools/selfhost.sh) and smoke-tests
 # each binary, so the layout-roulette bug class is caught immediately instead
 # of months later.
 #
@@ -31,7 +32,7 @@ export MANTICORE_PRELUDE="$ROOT/prelude"
 N="${1:-8}"
 
 if [[ ! -x bin/manticore ]]; then
-    echo "fatal: bin/manticore missing; run bin/compile first" >&2
+    echo "fatal: bin/manticore missing; run bin/build first" >&2
     exit 1
 fi
 
@@ -39,18 +40,9 @@ WORK="$(mktemp -d)"
 SMOKE="$WORK/smoke.php"
 printf '<?php echo "selfhost-stable\\n";\n' > "$SMOKE"
 
-# ⚠ `bin/compile` REBUILDS THE CHECKOUT'S TOOLCHAIN as a side effect: it writes
-# bin/manticore and lib/manticore_stdlib.{o,sig} even when the binary it is asked
-# for goes to $WORK. Running it N times therefore replaces the compiler this script
-# still needs — the self front-end loop below uses bin/manticore, and `bin/build`
-# afterwards uses it too. One imperfect seed build then poisons every later stage,
-# which is how a green branch (suite 684/684, difftest 0 DIFF, fixpoint + MIR golden
-# OK) still ended a gate at rc=1 with `use of undefined value '@manticore_str_bytes'`
-# — and left the developer's checkout unable to build itself.
-#
-# So: snapshot the toolchain up front and put it back on the way out, whatever
-# happens. The gate stays honest (each rebuild is still smoke-tested on its own) and
-# it stops being destructive.
+# Snapshot the toolchain up front and put it back on the way out, whatever
+# happens: every rebuild below runs from the SNAPSHOT, so nothing a failed build
+# leaves behind can poison a later stage or the developer's checkout.
 # Swapping a compiler binary must be a RENAME, never an in-place overwrite: on
 # macOS the kernel caches a mach-o's code signature per vnode, so `cp` over a
 # binary that has already run leaves every later exec SIGKILLed ("Killed: 9") —
@@ -74,8 +66,7 @@ restore_toolchain() {
 }
 trap 'restore_toolchain; rm -rf "$WORK"' EXIT
 
-# The self front-end loop must drive the SNAPSHOT, not whatever the Zend loop last
-# left in bin/ — that is the binary this gate was asked to test.
+# Both loops drive the SNAPSHOT — the binary this gate was asked to test.
 STABLE_BIN="$SAVE/manticore"
 
 # Smoke-test one compiler binary: front-end startup + full compile→run.
@@ -102,21 +93,21 @@ smoke() {
 
 fail=0
 
-echo "── Zend front-end (bin/compile) × $N rebuilds ──"
+echo "── manifest build (manticore build --apps-only) × $N rebuilds ──"
 for i in $(seq 1 "$N"); do
-    # Each of these rewrites bin/manticore + lib/ (see the snapshot note above).
     # `set -e` would kill the script silently on a failed rebuild — the gate then
     # exits 1 with no diagnosis at all, which is exactly what happened once. Report
-    # it and keep going so the run still says WHICH front-end broke and how.
-    if ! bin/compile "$WORK/zend_$i" >"$WORK/zend_$i.log" 2>&1; then
-        echo "  zend-build$i: FAIL (bin/compile: $(tail -1 "$WORK/zend_$i.log"))"
+    # it and keep going so the run still says WHICH path broke and how.
+    sed "s#\"bin/manticore\"#\"$WORK/manifest_$i\"#" manticore.json > "$WORK/manifest_$i.json"
+    if ! "$STABLE_BIN" build --apps-only "$WORK/manifest_$i.json" >"$WORK/manifest_$i.log" 2>&1; then
+        echo "  manifest-build$i: FAIL (manticore build: $(tail -1 "$WORK/manifest_$i.log"))"
         fail=$((fail + 1))
         continue
     fi
-    smoke "$WORK/zend_$i" "zend-build$i" || fail=$((fail + 1))
+    smoke "$WORK/manifest_$i" "manifest-build$i" || fail=$((fail + 1))
 done
 
-echo "── self front-end (tools/selfhost.sh) × $N rebuilds ──"
+echo "── one-module build (tools/selfhost.sh) × $N rebuilds ──"
 for i in $(seq 1 "$N"); do
     if ! bash tools/selfhost.sh "$STABLE_BIN" "$WORK/self_$i" >"$WORK/self_$i.log" 2>&1; then
         echo "  self-build$i: FAIL (tools/selfhost.sh: $(tail -1 "$WORK/self_$i.log"))"

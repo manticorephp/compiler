@@ -1,4 +1,4 @@
-# Self-compile artifacts. Only the driver script is checked in.
+# Self-compile artifacts. Only the driver scripts are checked in.
 #
 # The wildcards matter: tools/selfhost.sh writes manticore_self{,.ll,_stubs.c}
 # here, and a 954k-line .ll that is neither tracked nor ignored rides into the
@@ -25,5 +25,4 @@ manticore.g*
 /*
 !/.gitignore
 !/build
-!/compile
 !/manticore-install

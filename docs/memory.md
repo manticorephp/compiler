@@ -144,7 +144,7 @@ Only the first is something you would normally touch:
   the refcount at one fixed offset regardless of mode, plus copy-on-write. The
   immortal empty-array singleton uses a saturated refcount, **not** `-1`.
 - **Exact offsets and tag encodings:** `src/Compile/MemoryAbi.php` is the single
-  source of truth, `MemoryAbi::VERSION` is currently 7. It is not surfaced by any
+  source of truth, `MemoryAbi::VERSION` carries the current version (see the constant). It is not surfaced by any
   command today — `manticore version` prints the release version only.
 - **Passes:** `InferEffects` → `InferAllocKind` (escape analysis) →
   `ApplyMemoryMode` (mode overlay) → `InsertMemoryOps` (retain/release/CoW

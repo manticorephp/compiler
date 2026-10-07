@@ -153,17 +153,20 @@ other way round means landing the tag in a shape where a missed arm is a silent 
 
 ## Traps already paid for (2026-08-07/08)
 
+> **2026-10: the Zend cold seed is gone** — the compiler bootstraps from the pinned release (AGENTS.md, "Bootstrap: the pinned release"). The seed-based recovery/validation advice below is historical.
+
+
 - **A bare `array` return erases its element type across a delegation hop.** A
   method returning another `array`-returning method's result handed back cells.
-  Cost: a seed build that died three steps away, blaming `array_merge`.
+  Cost: a (Zend) seed build that died three steps away, blaming `array_merge`.
 - **New `private bool` fields on a hot class miscompiled natively.** The Zend-run
   lexer was byte-identical on every source in the tree while the natively built
   one silently lost prelude demand. Prefer a parameter and a local.
 - **A failed `bin/build` poisons `bin/manticore` + `lib/*.o`**, and the next
-  suite run measures the poison, not the source. Recover with `bin/build --seed`
+  suite run measures the poison, not the source. Recover with a clean `bin/build` (then: `bin/build --seed`)
   before believing any number.
-- **`bin/build` green says nothing about `bin/build --seed`, in BOTH directions.**
-  Both were observed failing while the other passed, on one source tree.
+- **`bin/build` green said nothing about `bin/build --seed`, in BOTH directions** (historical:
+  both were observed failing while the other passed, on one source tree).
 - **Narrowing a node does NOT work inside a TRAIT.** The
   `private static function as…(Node $n): X { return $n; }` idiom resolves field
   offsets correctly in a CLASS (`Walk`, `NodeClone`, `DeadStore`) and not in a

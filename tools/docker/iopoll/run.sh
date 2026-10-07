@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Io\Poll Linux-parity difftest: build a php-8.6 + toolchain image, cold-seed
+# Io\Poll Linux-parity difftest: build a php-8.6 + toolchain image, build
 # Manticore on Linux, compile the Io\Poll cases and diff vs php 8.6.
 #
 #   bash tools/docker/iopoll/run.sh

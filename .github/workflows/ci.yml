@@ -178,9 +178,9 @@ jobs:
           key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
 
       # Publish what this run just built and tested, from the artifacts it
-      # already has — NOT by building a second compiler. The runtime target in
-      # the root Dockerfile cold-seeds from source, which is what a release
-      # wants and what a push must not pay twice for the same bytes.
+      # already has — NOT by building a second compiler (the root Dockerfile's
+      # `runtime` target builds one from the pin), which a push must not pay
+      # twice for the same bytes.
       #
       # Only on main, and only after the suite: a red suite never reaches here,
       # and what is published is therefore always a compiler that passed.

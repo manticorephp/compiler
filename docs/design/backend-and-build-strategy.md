@@ -126,11 +126,11 @@ prints its opt level.
 
 `tools/docker/gate.sh` is now the ONE definition of a Linux gate — `tools/docker/run_tests.sh`
 and both workflows call it, so a CI green and a local green mean the same thing.
-`.github/workflows/ci.yml` runs the cold seed + full suite on arm64 and amd64;
-`nightly.yml` runs the heavy gate (+ difftest + fixpoint) plus a macOS suite, and writes the
-commit into the run summary. ⚠ Both are PARKED on `workflow_dispatch` only (`dcc7566`) —
-the per-push trigger is commented out until the signal is wanted; neither has run on GitHub.
-There is none today, which is why the status file is full of "⛔ not run". A nightly
+`.github/workflows/ci.yml` runs the suite on every push and PR — linux arm64/amd64 on Debian
+and Alpine plus macOS arm64, and `bootstrap-from-pin`, all REQUIRED checks; `gate.yml` runs
+the heavy gate (difftest, fixpoint) weekly; `release.yml` publishes from the pin. (Originally
+this item was written when CI was parked on `workflow_dispatch` and had never run; that is
+no longer true.) The original motivation, kept for the record: a nightly
 `tools/docker/run_tests.sh --gate` on arm64 **and** amd64 plus `tests/aot` + `difftest` on
 macOS would have caught the `RC_ELEM_READ_OWNS` Linux miscompile weeks earlier, and would end
 the "which commit is this green result from?" problem outright.
@@ -176,7 +176,7 @@ One root under most of the open gap list. `cell` is a static CLAIM with no runti
    handed to an `array<K,mixed>` param. (Repros exist — the 12-liner in the `eidx` notes, and
    `tools/prof/foreach_borrow_uaf.php`.)
 2. One canonical tagged word at every one of those boundaries. Bumps `MemoryAbi::VERSION`
-   ⇒ one `bin/build --seed`.
+   (no pin raise needed: an ABI bump rebuilds through plain `bin/build`).
 3. **A verifier pass that FAILS THE BUILD** where a `cell`-typed edge is fed by a producer
    that cannot prove the claim. Harden `MANTICORE_TYPECHECK=1` into this and turn it on by
    default. A static claim nobody checks is how we got here.

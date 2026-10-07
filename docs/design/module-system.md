@@ -143,10 +143,10 @@ warning (or hard error — TBD at impl).
   prebuilt `.o`+`.sig` per triple.
 - **Compiler** (`manticorephp/compiler`): shipped as PHP SOURCE (manticore is
   self-hosting PHP). `composer global require manticorephp/compiler` →
-  post-install hook bootstraps the native binary via the Zend seed
-  (`php bin/compile`) using the user's PHP, and emits the bundled
-  `stdlib.o`+`stdlib.sig` for the host triple. Chicken-and-egg solved by the
-  system php.
+  post-install hook runs `install.sh`, which downloads the published tarball for
+  the host, else builds from source via `bin/build` (from the pinned release,
+  `BOOTSTRAP_VERSION`) — no php needed. (Originally designed as a Zend-seed
+  bootstrap through `php bin/compile`; the seed is gone, 2026-10.)
 
 ### On-disk layout
 ```
@@ -168,7 +168,7 @@ warning (or hard error — TBD at impl).
 5. **deps resolution**: read `dependencies`, locate under vendor/ + global,
    transitive + composer.lock.
 6. composer packaging: `manticorephp/compiler` post-install bootstrap.
-7. Rewire `bin/compile`/`bin/rebuild` onto `manticore build`; full gate
+7. Rewire `bin/compile`/`bin/rebuild` onto `manticore build` (done; `bin/compile` has since been removed); full gate
    (suite, difftest, stability, fixpoint).
 
 Already done (commit 34418d9): stdlib bundling (prebuilt stdlib.o, declare

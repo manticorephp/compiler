@@ -31,7 +31,7 @@
 #
 # ⚠ The small-object pool never returns memory to the OS (a push-only per-class
 # free list), so pool high-water rides in every number here. An honest pool A/B
-# is TWO COLD SEEDS with MANTICORE_POOL=0 — the bodies are linkonce_odr, so a
+# is TWO COMPILER BUILDS, one with MANTICORE_POOL=0 — the bodies are linkonce_odr, so a
 # per-case env var does NOT give a control build.
 #
 # Not part of any gate — run it by hand to refresh the perf snapshot.

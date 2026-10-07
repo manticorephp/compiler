@@ -46,7 +46,7 @@ rebuild-stability) after the suite, and exits non-zero if any of the three fails
 That is the only honest gate for anything touching the epoll path, the Linux
 socket/errno constants or a glibc `free()` — macOS green proves nothing about them
 (see the invalid-free that only glibc caught). Stability defaults to 2x2 rebuilds
-in a container because each cold seed is minutes; `MC_STABILITY_N=5` for the full
+in a container because each cold build from the pin is minutes; `MC_STABILITY_N=5` for the full
 sweep.
 
 The image is the **root `Dockerfile`'s `toolchain` target** (or
@@ -57,7 +57,7 @@ hand the gate a compiler the loader refuses. It carries **PHP 8.5** (sury.org) a
 the **latest stable clang** (apt.llvm.org, currently 22) on board, deliberately
 -- Debian's stock php and clang are both unusable here:
 
-- PHP 8.5 is manticore's target language, so the Zend seed must be 8.5.
+- PHP 8.5 is manticore's target language, so the difftest oracle must be 8.5.
 - clang 14 predates LLVM 15's opaque pointers and **rejects the IR manticore
   emits** (`ptr type is only supported in -opaque-pointers mode`). Verified.
 
@@ -70,74 +70,19 @@ architecture, PHP version, and clang version match. It rebuilds the current sour
 with that compiler and refreshes the volume. A missing, incompatible, or failing
 cache falls back to the pinned release (`BOOTSTRAP_VERSION`, fetched by
 `tools/fetch_bootstrap.sh`); use `--cold` to force that path. A tree the pin cannot
-build fails with a bootstrap-gap error; `MC_ZEND_SEED=1` opts into the Zend seed
-(`bin/compile`) before failing.
+build fails with a bootstrap-gap error naming both versions.
 
 The build is never piped: it is redirected to a log. `set -euo pipefail`
 would report `tail`'s exit code and hide a failed build.
 
-### Current state: the Linux build is GREEN
+### Current state
 
-`bin/compile` cold-seeds, self-hosts (`bin/build`, fixpoint OK), and passes the
-full AOT suite on Linux (arm64) in this image, non-root. Two rounds of blockers
-got it there; both are fixed.
-
-**(a) `bin/compile` stage [3/5] was macOS-only -- FIXED (issue #1).** It stubbed
-undefined symbols by scraping the linker's error text with `grep '^  "_'`, which
-matches Apple ld's format only:
-
-```
-  "_pcre2_compile_8", referenced from:
-```
-
-GNU ld reports the same condition differently, and *in the user's language*:
-
-```
-mir:(.text+0x31cb64): undefined reference to `pcre2_compile_8'
-mir:(.text+0x31cb64): référence indéfinie vers « pcre2_compile_8 »   # fr_FR
-```
-
-so on Linux `stubs.c` came out EMPTY and stage [4/5] failed with the seven
-`pcre2_*_8` references it was supposed to stub. The same broken snippet was
-copy-pasted into `bin/compile`, `tools/selfhost.sh` and `tools/link_stubs.sh`.
-
-Now there is **one** implementation, `tools/link_stubs.sh`, which the other two
-call. It probes the linker under `LC_ALL=C` (killing the localized-message class
-of failure at the source rather than matching translations), understands Apple
-ld / GNU ld / lld, and **fails loudly** if the linker reported errors but no
-symbols were extracted -- the silent-empty-`stubs.c` mode is what made this bug
-surface one stage later than its cause.
-
-**(b) stage [5/5] failures -- FIXED.** This section once blamed a SIGSEGV in
-`EmitLlvm::unboxCellToType`; that crash was already gone when the port resumed
-(fixed upstream by repr-consistency work). The genuine Linux-only blockers were
-three linkage/runtime issues -- the emitted IR is byte-identical across
-platforms, so none were visible from the IR alone; only GNU ld vs Apple ld64 and
-glibc vs BSD libc differed:
-
-- **FFI-wrapper linkage.** Prelude libc wrappers (`__mc_libc_*`, declared in
-  `prelude/resource.php`) were emitted with external linkage into *every* module,
-  so a user `.o` and the prebuilt `stdlib.o` both defined them -> GNU ld
-  "multiple definition" (Apple ld64 silently coalesces). Non-prelude bindings
-  (`Runtime\Libc\*`), by contrast, are defined once and referenced across the
-  `.o` boundary, so `--gc-sections` drops a linkonce copy. Fix: `linkonce_odr`
-  for *prelude* FFI wrappers, plain external for the rest (mirrors
-  `EmitLlvmModule`'s per-function `isPrelude` linkage).
-- **Missing `-lm`.** glibc/musl keep libm in a separate archive (Darwin folds it
-  into libSystem), so `tanh`/`pow`/… went undefined. Fix: append `-lm` on the
-  non-Darwin link.
-- **Uninitialised exception runtime.** A program that never `throw`s in its own
-  code but links `stdlib.o` (which can) left `@main`'s `depth:=1` + base landing
-  pad unemitted -- both were gated on the *caller* module's `needsExceptions`. A
-  stdlib throw then read an uninitialised depth 0, computed slot `0-1 = -1`, and
-  the out-of-range guard fatally reported "Maximum try nesting" (it fires on
-  slot < 0 too). Fix: force `needsExceptions` on for every non-library module.
-
-Plus a container-faithfulness fix so the image matches a real deployment: add
-`netbase` (`/etc/services`, `/etc/protocols`) and run as a non-root user (root
-bypasses DAC checks, so `is_writable()` of a `0400` file wrongly returns true).
-Root-cause detail and the debugging trail are in the git history / linux-port
-notes.
+The Linux build (arm64 and amd64, glibc and musl) self-hosts from the pinned
+release and passes the AOT suite in this image, non-root. The earlier
+port-time blockers (a macOS-only linker-error scraper, FFI-wrapper linkage,
+missing `-lm`, an uninitialised exception runtime) are fixed; the history is in
+git. `tools/link_stubs.sh` is now the one implementation of the undefined-symbol
+stubbing shared with `tools/selfhost.sh`.
 
 ## Files
 

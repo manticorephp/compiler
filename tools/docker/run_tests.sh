@@ -105,7 +105,6 @@ for platform in "${PLATFORMS[@]}"; do
         -e MC_GATE="$GATE_MODE" \
         -e MC_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
         -e MC_COLD="$COLD_MODE" \
-        -e MC_ZEND_SEED="${MC_ZEND_SEED:-0}" \
         -e MC_COMPILER_CACHE=/compiler-cache \
         -e MC_FILTER="$FILTER" \
         -e MC_RUNNER="${MC_RUNNER:-sh}" \

@@ -5,7 +5,7 @@
 #   docker build --target build     -t manticore-build .
 #
 # `base`      — clang + the -dev libraries the compiler links against. No php.
-# `toolchain` — base + php 8.5: the difftest oracle (and the opt-in Zend seed).
+# `toolchain` — base + php 8.5: the difftest oracle.
 #               Mount a checkout into it and build by hand; this is what
 #               tools/docker/run_tests.sh and the workflows use.
 # `build`     — toolchain + the compiler built from this tree, starting from
@@ -14,8 +14,8 @@
 #
 # Carries PHP 8.5 and the latest stable clang ON BOARD, deliberately -- Debian's
 # stock php and clang are both wrong for this compiler:
-#   * PHP 8.5 is manticore's target language version, so the Zend seed must be
-#     8.5 or the seed disagrees with what it is compiling.
+#   * PHP 8.5 is manticore's target language version, so the difftest oracle
+#     must be 8.5 or it disagrees with what the compiler implements.
 #   * clang 14 predates LLVM 15's opaque pointers and REJECTS the IR manticore
 #     emits ("ptr type is only supported in -opaque-pointers mode"). Verified,
 #     not assumed -- bookworm's DEFAULT clang-14 failed the seed assemble step.
@@ -114,11 +114,10 @@ USER manticore
 CMD ["/bin/bash"]
 
 
-# ---- + PHP 8.5, the seed interpreter and the difftest oracle ----
+# ---- + PHP 8.5, the difftest oracle ----
 #
 # A STAGE of its own, because the shipped compiler does not need it: php is what
-# cold-seeds the build and what difftest grades against, and neither happens in
-# the image a user runs. `runtime` therefore branches off `base`, not off this.
+# difftest grades against, and that never happens in the image a user runs. `runtime` therefore branches off `base`, not off this.
 #
 # The `php8.5-*` extension packages are here for the ORACLE, not for linking:
 # difftest grades our output against this php, so a case that calls curl_* or
