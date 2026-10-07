@@ -6394,7 +6394,7 @@ entry:
 define i64 @__mir_hmap_stride(i64 %h) {
 entry:
   %f = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
-  %s = and i64 %f, 1
+  %s = and i64 %f, {FSET}
   %b = mul i64 %s, {ESD}
   %r = sub i64 {ESM}, %b
   ret i64 %r
@@ -6650,7 +6650,7 @@ go:
   %k = load i64, ptr %kp
   call void @__mir_cell_drop(i64 %k)
   %fl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
-  %iss = and i64 %fl, 1
+  %iss = and i64 %fl, {FSET}
   %isn = icmp ne i64 %iss, 0
   br i1 %isn, label %done, label %val
 val:
@@ -6672,7 +6672,7 @@ go:
   %k = load i64, ptr %kp
   call void @__mir_cell_retain(i64 %k)
   %fl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
-  %iss = and i64 %fl, 1
+  %iss = and i64 %fl, {FSET}
   %isn = icmp ne i64 %iss, 0
   br i1 %isn, label %done, label %val
 val:
@@ -6684,22 +6684,62 @@ done:
   ret void
 }
 
+define i64 @__mir_hmap_detach(i64 %h) {
+entry:
+  %old = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
+  %cap = call i64 @__mir_hmap_hld(i64 %h, i64 {CAP})
+  %st = call i64 @__mir_hmap_stride(i64 %h)
+  %eb = mul i64 %cap, %st
+  %np = call ptr @malloc(i64 %eb)
+  %nw = ptrtoint ptr %np to i64
+  call void @__mir_hmap_hst(i64 %h, i64 {ENTRIES}, i64 %nw)
+  call void @__mir_hmap_hst(i64 %h, i64 {USED}, i64 0)
+  call void @__mir_hmap_hst(i64 %h, i64 {LEN}, i64 0)
+  %ep0 = call i64 @__mir_hmap_hld(i64 %h, i64 {EPOCH})
+  %ep1 = add i64 %ep0, 1
+  call void @__mir_hmap_hst(i64 %h, i64 {EPOCH}, i64 %ep1)
+  %mask = call i64 @__mir_hmap_hld(i64 %h, i64 {MASK})
+  %slots = add i64 %mask, 1
+  %bytes = shl i64 %slots, 2
+  %iw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
+  %ip = inttoptr i64 %iw to ptr
+  call ptr @memset(ptr %ip, i32 255, i64 %bytes)
+  ret i64 %old
+}
+
+define void @__mir_hmap_dropall(i64 %h, i64 %old, i64 %used, i64 %rev) {
+entry:
+  %base = inttoptr i64 %old to ptr
+  %st = call i64 @__mir_hmap_stride(i64 %h)
+  %isr = icmp ne i64 %rev, 0
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %used
+  br i1 %c, label %body, label %done
+body:
+  %r = sub i64 %used, 1
+  %ri = sub i64 %r, %i
+  %e = select i1 %isr, i64 %ri, i64 %i
+  %o = mul i64 %e, %st
+  %ep = getelementptr inbounds i8, ptr %base, i64 %o
+  call void @__mir_hmap_dropent(i64 %h, ptr %ep)
+  %i2 = add i64 %i, 1
+  br label %loop
+done:
+  call void @free(ptr %base)
+  ret void
+}
+
 define void @__mir_hmap_free(i64 %h) {
 entry:
   %z = icmp eq i64 %h, 0
   br i1 %z, label %done, label %go
 go:
   %used = call i64 @__mir_hmap_hld(i64 %h, i64 {USED})
-  br label %loop
-loop:
-  %i = phi i64 [ %used, %go ], [ %e, %body ]
-  %c = icmp sgt i64 %i, 0
-  br i1 %c, label %body, label %fr
-body:
-  %e = sub i64 %i, 1
-  %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)
-  call void @__mir_hmap_dropent(i64 %h, ptr %ep)
-  br label %loop
+  %old = call i64 @__mir_hmap_detach(i64 %h)
+  call void @__mir_hmap_dropall(i64 %h, i64 %old, i64 %used, i64 1)
+  br label %fr
 fr:
   %ew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
   %iw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
@@ -6738,7 +6778,7 @@ entry:
 define i64 @__mir_hmap_val(i64 %h, i64 %e) {
 entry:
   %fl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
-  %iss = and i64 %fl, 1
+  %iss = and i64 %fl, {FSET}
   %isn = icmp ne i64 %iss, 0
   br i1 %isn, label %set, label %map
 set:
@@ -6759,7 +6799,7 @@ entry:
   br i1 %hit, label %upd, label %miss
 upd:
   %fl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
-  %iss = and i64 %fl, 1
+  %iss = and i64 %fl, {FSET}
   %isn = icmp ne i64 %iss, 0
   br i1 %isn, label %retz, label %upd2
 upd2:
@@ -6821,7 +6861,7 @@ app:
   call void @__mir_cell_retain(i64 %key)
   store i64 %key, ptr %kp
   %fl2 = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
-  %iss2 = and i64 %fl2, 1
+  %iss2 = and i64 %fl2, {FSET}
   %isn2 = icmp ne i64 %iss2, 0
   br i1 %isn2, label %fin, label %wval
 wval:
@@ -6849,7 +6889,20 @@ miss:
   ret i64 0
 go:
   %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)
-  call void @__mir_hmap_dropent(i64 %h, ptr %ep)
+  %dkp = getelementptr inbounds i8, ptr %ep, i64 {EKEY}
+  %dk = load i64, ptr %dkp
+  %dfl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
+  %diss = and i64 %dfl, {FSET}
+  %disn = icmp ne i64 %diss, 0
+  br i1 %disn, label %dset, label %dmap
+dmap:
+  %dvp = getelementptr inbounds i8, ptr %ep, i64 {EVAL}
+  %dmv = load i64, ptr %dvp
+  br label %dgo
+dset:
+  br label %dgo
+dgo:
+  %dv = phi i64 [ %dmv, %dmap ], [ {NULL}, %dset ]
   store i64 {TOMB}, ptr %ep
   %l0 = call i64 @__mir_hmap_hld(i64 %h, i64 {LEN})
   %l1 = sub i64 %l0, 1
@@ -6860,7 +6913,7 @@ go:
   %s0 = and i64 %hash, %mask
   br label %find
 find:
-  %s = phi i64 [ %s0, %go ], [ %s2, %fnext ]
+  %s = phi i64 [ %s0, %dgo ], [ %s2, %fnext ]
   %fp = getelementptr inbounds i32, ptr %ixp, i64 %s
   %fl = load i32, ptr %fp
   %fe = zext i32 %fl to i64
@@ -6900,6 +6953,8 @@ mv:
 done:
   %ip = getelementptr inbounds i32, ptr %ixp, i64 %i
   store i32 -1, ptr %ip
+  call void @__mir_cell_drop(i64 %dk)
+  call void @__mir_cell_drop(i64 %dv)
   ret i64 1
 }
 
@@ -6928,28 +6983,8 @@ miss:
 define void @__mir_hmap_clear(i64 %h) {
 entry:
   %used = call i64 @__mir_hmap_hld(i64 %h, i64 {USED})
-  br label %loop
-loop:
-  %e = phi i64 [ 0, %entry ], [ %e2, %body ]
-  %c = icmp slt i64 %e, %used
-  br i1 %c, label %body, label %done
-body:
-  %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)
-  call void @__mir_hmap_dropent(i64 %h, ptr %ep)
-  %e2 = add i64 %e, 1
-  br label %loop
-done:
-  call void @__mir_hmap_hst(i64 %h, i64 {USED}, i64 0)
-  call void @__mir_hmap_hst(i64 %h, i64 {LEN}, i64 0)
-  %ep0 = call i64 @__mir_hmap_hld(i64 %h, i64 {EPOCH})
-  %ep1 = add i64 %ep0, 1
-  call void @__mir_hmap_hst(i64 %h, i64 {EPOCH}, i64 %ep1)
-  %mask = call i64 @__mir_hmap_hld(i64 %h, i64 {MASK})
-  %slots = add i64 %mask, 1
-  %bytes = shl i64 %slots, 2
-  %iw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
-  %ip = inttoptr i64 %iw to ptr
-  call ptr @memset(ptr %ip, i32 255, i64 %bytes)
+  %old = call i64 @__mir_hmap_detach(i64 %h)
+  call void @__mir_hmap_dropall(i64 %h, i64 %old, i64 %used, i64 0)
   ret void
 }
 
@@ -7003,6 +7038,7 @@ done:
             '{EPOCH}' => (string)\Compile\MemoryAbi::HMAP_EPOCH_OFFSET,
             '{ENTRIES}' => (string)\Compile\MemoryAbi::HMAP_ENTRIES_OFFSET,
             '{INDEX}' => (string)\Compile\MemoryAbi::HMAP_INDEX_OFFSET,
+            '{FSET}' => (string)\Compile\MemoryAbi::HMAP_FLAG_SET,
             '{HDR}' => (string)\Compile\MemoryAbi::HMAP_HEADER_SIZE,
             '{EKEY}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_KEY,
             '{EVAL}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_VAL,

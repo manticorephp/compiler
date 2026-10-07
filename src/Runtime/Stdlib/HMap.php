@@ -38,16 +38,16 @@ function __mc_hmap_find(int $h, mixed $key): int
 }
 
 function __mc_hmap_key(int $h, int $e): mixed { return __mc_hmap_tab($h)['k'][$e]; }
-function __mc_hmap_val(int $h, int $e): mixed { return __mc_hmap_tab($h)['v'][$e]; }
+function __mc_hmap_val(int $h, int $e): mixed { $t = &__mc_hmap_tab($h); return $t['set'] !== 0 ? null : $t['v'][$e]; }
 
 function __mc_hmap_put(int $h, mixed $key, mixed $val): int
 {
     $t = &__mc_hmap_tab($h);
     $ek = __mc_hmap_ekey($key);
-    if (isset($t['ix'][$ek])) { $t['v'][$t['ix'][$ek]] = $val; return 0; }
+    if (isset($t['ix'][$ek])) { if ($t['set'] === 0) { $t['v'][$t['ix'][$ek]] = $val; } return 0; }
     $used = \count($t['k']);
     if ($used >= 8 && ($used - $t['len']) * 2 > $t['len']) { __mc_hmap_compact($t); $used = \count($t['k']); }
-    $t['k'][] = $key; $t['v'][] = $val; $t['alive'][] = true;
+    $t['k'][] = $key; $t['v'][] = $t['set'] !== 0 ? null : $val; $t['alive'][] = true;
     $t['ix'][$ek] = $used; $t['len']++;
     return 1;
 }
@@ -71,7 +71,9 @@ function __mc_hmap_del(int $h, mixed $key): int
     if (!isset($t['ix'][$ek])) { return 0; }
     $e = $t['ix'][$ek];
     unset($t['ix'][$ek]);
+    $old = $t['v'][$e];
     $t['alive'][$e] = false; $t['k'][$e] = null; $t['v'][$e] = null; $t['len']--;
+    $old = null;
     return 1;
 }
 
@@ -85,7 +87,9 @@ function __mc_hmap_next(int $h, int $e): int
 function __mc_hmap_clear(int $h): void
 {
     $t = &__mc_hmap_tab($h);
+    $old = $t['v'];
     $t['k'] = []; $t['v'] = []; $t['alive'] = []; $t['ix'] = []; $t['len'] = 0; $t['epoch']++;
+    $old = null;
 }
 
 function __mc_hmap_clone(int $h): int
