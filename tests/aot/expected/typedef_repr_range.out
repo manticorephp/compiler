@@ -1,0 +1,13 @@
+in range: -128 127
+new I8(300): ValueError: Value 300 is out of range for I8 (-128..127)
+new I8(-129): ValueError: Value -129 is out of range for I8 (-128..127)
+add 100+100: ValueError: Value 200 is out of range for I8 (-128..127)
+wrapping add 100+100: -56
+property 300: ValueError: Value 300 is out of range for I8 (-128..127)
+property 99: 99
+port 8080: 8080
+port 0 (normaliser result checked): ValueError: Value 65536 is out of range for Port (0..65535)
+f32 0.1: 0.10000000149011612
+f32 1e39: ValueError: Value 1.0E+39 is out of range for F32 (-3.4028234663852886E+38..3.4028234663852886E+38)
+f32 -INF: -INF
+f32 NAN: nan

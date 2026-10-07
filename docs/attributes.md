@@ -181,6 +181,20 @@ the carrier (sign-extending for the signed reprs, zero-extending for the unsigne
 `fpext` for an `f32`), so the value your program sees is unchanged — only the bytes
 on the heap differ.
 
+That holds because the range is **enforced when the value is created**: every
+`new I8(…)` checks the value its constructor (or normaliser) produced, and one
+outside the repr is a `ValueError` — never a silent wrap:
+
+```php
+new I8(300);                         // ValueError: Value 300 is out of range for I8 (-128..127)
+new I8($a->value + $b->value);       // throws when the sum leaves -128..127
+new I8((($x + 128) & 0xFF) - 128);   // wrap-around, written out
+```
+
+An `f32` value is rounded to binary32 at creation (so a register and a slot hold
+the same number); a finite value beyond binary32's range is the `ValueError`,
+infinities and NaN pass. `i64`, `u64` and `f64` narrow nothing and check nothing.
+
 Omit `repr` for a plain newtype: then the property is a full word, and the type is
 about meaning, not layout.
 

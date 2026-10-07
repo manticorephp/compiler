@@ -1191,6 +1191,10 @@ trait LowerClasses
                 ),
             ));
         }
+        if ($isTypeDefDecl) {
+            $rangeFn = $this->typeDefRangeFn($decl->name);
+            if ($rangeFn !== null) { $module->addFunction($rangeFn); }
+        }
         // The declared property defaults (own, inherited, mixed-in) as their own
         // function, which every allocation runs before any constructor — php
         // builds the object from the class's default property table. Not the

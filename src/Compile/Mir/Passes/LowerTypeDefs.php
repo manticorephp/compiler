@@ -380,6 +380,97 @@ trait LowerTypeDefs
             . " does not fit an '" . $want . "' element. Bind it to an array at least that wide and of the same signedness");
     }
 
+    /** The `[min, max]` of a narrow integer repr, null for any other repr. */
+    private function reprIntRange(string $repr): ?array
+    {
+        if ($repr === 'i8')  { return [-128, 127]; }
+        if ($repr === 'i16') { return [-32768, 32767]; }
+        if ($repr === 'i32') { return [-2147483648, 2147483647]; }
+        if ($repr === 'u8')  { return [0, 255]; }
+        if ($repr === 'u16') { return [0, 65535]; }
+        if ($repr === 'u32') { return [0, 4294967295]; }
+        return null;
+    }
+
+    /**
+     * `C____range(carrier): C` — the one place a narrow `repr` is enforced.
+     * Every `new C(…)` runs it on the value its normaliser produced
+     * ({@see lowerNew}), so a value of the type is in range wherever it lives:
+     * a register holds the same number a 1-byte property slot or an `i8`
+     * array element can. Out of range is a `ValueError` — never a silent
+     * wrap; a programmer who wants wrap-around writes the mask. `f32` rounds
+     * to binary32 here for the same reason, and a finite value beyond its
+     * range is the error. null for a repr that narrows nothing.
+     */
+    private function typeDefRangeFn(string $cls): ?\Compile\Mir\FunctionDef
+    {
+        $cls = \ltrim($cls, '\\');
+        $repr = $this->typeDefReprs[$cls] ?? '';
+        $range = $this->reprIntRange($repr);
+        if ($range === null && $repr !== 'f32') { return null; }
+        $carrier = $this->typeDefCarrier($cls);
+        $plain = $carrier->stripTypeDef();
+        // Each use gets its own nodes: a pass may annotate a node in place.
+        $raw = static fn (): \Compile\Mir\Node => new \Compile\Mir\LoadLocal('raw', $plain);
+        $short = \strrpos($cls, '\\') !== false ? \substr($cls, (int)\strrpos($cls, '\\') + 1) : $cls;
+        $bounds = $range !== null
+            ? ' (' . (string)$range[0] . '..' . (string)$range[1] . ')'
+            : ' (-3.4028234663852886E+38..3.4028234663852886E+38)';
+        $throw = static fn (): \Compile\Mir\Node => new \Compile\Mir\Throw_(new \Compile\Mir\NewObj('ValueError', [
+            new \Compile\Mir\Concat(
+                new \Compile\Mir\Concat(
+                    new \Compile\Mir\StringConst('Value ', Type::string_()),
+                    new \Compile\Mir\Cast('string', $raw(), Type::string_()),
+                ),
+                new \Compile\Mir\StringConst(' is out of range for ' . $short . $bounds, Type::string_()),
+            ),
+        ], Type::obj('ValueError')), Type::void());
+        $stmts = [];
+        if ($range !== null) {
+            foreach ([['<', $range[0]], ['>', $range[1]]] as [$op, $lim]) {
+                $stmts[] = new \Compile\Mir\If_(
+                    new \Compile\Mir\Cmp($raw(), new \Compile\Mir\IntConst($lim, Type::int_()), $op),
+                    new \Compile\Mir\Block([$throw()], Type::void()),
+                    null,
+                );
+            }
+            $stmts[] = new \Compile\Mir\Return_($raw(), $carrier);
+        } else {
+            $max = 3.4028234663852886e38;
+            foreach ([[$max, '>', \INF, '<'], [-$max, '<', -\INF, '>']] as [$lim, $op, $inf, $op2]) {
+                // Infinity stays infinity; only a finite value that binary32
+                // cannot hold is refused (NaN compares false and passes).
+                $stmts[] = new \Compile\Mir\If_(
+                    new \Compile\Mir\Cmp($raw(), new \Compile\Mir\FloatConst($lim, Type::float_()), $op),
+                    new \Compile\Mir\Block([new \Compile\Mir\If_(
+                        new \Compile\Mir\Cmp($raw(), new \Compile\Mir\FloatConst($inf, Type::float_()), $op2),
+                        new \Compile\Mir\Block([$throw()], Type::void()),
+                        null,
+                    )], Type::void()),
+                    null,
+                );
+            }
+            $bits = new \Compile\Mir\Call('__mc_nbuf_f_bits', [$raw(), new \Compile\Mir\IntConst(4, Type::int_())], Type::int_());
+            $stmts[] = new \Compile\Mir\Return_(
+                new \Compile\Mir\Call('__mc_nbuf_bits_f', [$bits, new \Compile\Mir\IntConst(4, Type::int_())], $carrier),
+                $carrier,
+            );
+        }
+        return new \Compile\Mir\FunctionDef(
+            name: $cls . '____range',
+            params: [new \Compile\Mir\Param(name: 'raw', type: $plain, byRef: false, variadic: false)],
+            returnType: $carrier,
+            body: new \Compile\Mir\Block($stmts, Type::void()),
+        );
+    }
+
+    /** Whether `new C(…)` must pass its value through `C____range` ({@see typeDefRangeFn}). */
+    private function typeDefIsNarrow(string $cls): bool
+    {
+        $repr = $this->typeDefReprs[\ltrim($cls, '\\')] ?? '';
+        return $repr === 'f32' || $this->reprIntRange($repr) !== null;
+    }
+
     private function typeDefError(string $cls, string $why): void
     {
         throw new \RuntimeException('#[TypeDef] ' . $cls . ': ' . $why);
