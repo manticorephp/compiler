@@ -21,7 +21,7 @@ final class FunctionTextSink
     private int $bytes = 0;
     /** @var string[] */
     private array $chunks = [];
-    private $fp = null;
+    private ?\Ffi\Ptr $fp = null;
     private bool $finished = false;
 
     public function __construct(string $path, int $threshold = 262144)

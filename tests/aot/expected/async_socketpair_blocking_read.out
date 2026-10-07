@@ -1,0 +1,5 @@
+A: A-line1 + A-tail eof=y
+B: B-line1 + B-tail eof=y
+C: C-line1 + C-tail eof=y
+finish order: C,B,A
+concurrent: yes

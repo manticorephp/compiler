@@ -134,7 +134,7 @@ trait EmitLlvmGenerator
             $genParamNames[$p->name] = true;
             if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
         }
-        $this->initRcObjSlots($fn->body, $genParamNames);
+        $this->initOwnSlots($fn->body, $genParamNames);
 
         // ── creator ──
         // A generator CLOSURE composes two frame mechanisms: it is invoked with
@@ -203,7 +203,7 @@ trait EmitLlvmGenerator
         $bn = $this->ssa->allocReg();
         $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
         $out .= $this->genStoreAt($fr, 40, $bn);                      // sent@40 = null cell
-        $out .= $this->genStoreAt($fr, 48, '0');                      // retval@48 = 0
+        $out .= $this->genStoreAt($fr, 48, $bn);                     // retval@48 = null cell
         $paramNames = [];
         $paramTypeByName = [];
         $paramByRef = [];
@@ -217,8 +217,8 @@ trait EmitLlvmGenerator
                       . (string)($capIndex[$name] + 1) . "\n";
                 $cv = $this->ssa->allocReg();
                 $out .= '  ' . $cv . ' = load i64, ptr ' . $gep . "\n";
-                $out .= $this->genParamCoOwn($name, $cv);
                 $out .= $this->genStoreAt($fr, $off, $cv);
+                $out .= $this->genParamOwn($fn, $name, $cv);
             } elseif (isset($paramNames[$name])) {
                 // A CLOSURE generator's caller (emitInvoke) boxed every scalar
                 // arg to a cell — unbox a concrete-scalar param before seeding
@@ -232,17 +232,19 @@ trait EmitLlvmGenerator
                     $out .= $this->unboxCellToType($pt);
                     $out .= $this->coerceToI64();
                     $pv = $this->lastValue;
-                    $out .= $this->genParamCoOwn($name, $pv);
                     $out .= $this->genStoreAt($fr, $off, $pv);
+                    $out .= $this->genParamOwn($fn, $name, $pv);
+                } elseif (isset($fn->ownGenParams[$name])) {
+                    $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
+                    $out .= $this->genParamOwn($fn, $name, '%arg.' . $name);
                 } else {
-                    $out .= $this->genParamCoOwn($name, '%arg.' . $name);
                     $out .= $this->genStoreAt($fr, $off, '%arg.' . $name);
                     // The frame outlives this call and reads the param later, so
                     // it must co-own it: `(new D(5))->it()` freed the receiver
                     // before the first resume and `$this->n` read 0 (symfony
-                    // Finder's `new LazyIterator(fn …)` yielded no files). Frame
-                    // locals are never dropped yet, so this is the same bounded
-                    // residual leak as the rest of the frame — never a UAF.
+                    // Finder's `new LazyIterator(fn …)` yielded no files). A param
+                    // {@see OwnershipFlow} does not track (the arm above takes the
+                    // ones it does) is never dropped: a bounded leak, never a UAF.
                     $fl = $pt !== null ? $this->discardReleaseFlavor($pt) : '';
                     if ($fl !== '' && !($paramByRef[$name] ?? false)) {
                         $out .= $this->rcRetainReg('%arg.' . $name, $fl);
@@ -262,7 +264,10 @@ trait EmitLlvmGenerator
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
-        $out .= 'define ' . $defLinkage . 'i64 ' . $resume . "(ptr %frame) {\nentry:\n";
+        $this->frame->erasedArrayReturn = false;
+        $this->frame->erasedCond = null;
+        $this->ehBegin($fn, true);
+        $out .= 'define ' . $defLinkage . 'i64 ' . $resume . '(ptr %frame)' . $this->personalityClause() . " {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
         foreach ($locals as $name => $idx) {
             $off = self::GEN_HEADER + 8 * $idx;
@@ -283,41 +288,78 @@ trait EmitLlvmGenerator
         $out .= '  ' . $this->gen->sentPtr . " = getelementptr inbounds i8, ptr %frame, i64 40\n";
         $this->gen->retvalPtr = $this->ssa->allocReg();
         $out .= '  ' . $this->gen->retvalPtr . " = getelementptr inbounds i8, ptr %frame, i64 48\n";
-        // The consumer's jmp depth, captured per INVOCATION in the entry block.
-        // A generator re-arms its trys on resume ({@see rearmGeneratorTrys}) and so
-        // bumps the global depth; it has to put it back on the way out, or the slot
-        // it armed stays live after the suspension and steals the next exception
-        // raised at that depth — including one meant for a DIFFERENT generator.
-        $this->gen->entryDepthPtr = $this->ssa->allocReg();
-        $out .= '  ' . $this->gen->entryDepthPtr . " = alloca i64\n";
-        $ed = $this->ssa->allocReg();
-        $out .= '  ' . $ed . " = load i64, ptr @__mir_jmp_depth\n";
-        $out .= '  store i64 ' . $ed . ', ptr ' . $this->gen->entryDepthPtr . "\n";
+
+        $this->gen->entryArenaSp = '';
+        if ($this->locals->hasTry) {
+            $this->rt->needsArena = true;
+            $this->gen->entryArenaSp = $this->ssa->allocReg();
+            $out .= '  ' . $this->gen->entryArenaSp . " = load i64, ptr @__mir_arena_sp\n";
+        }
         $st = $this->ssa->allocReg();
         $out .= '  ' . $st . ' = load i64, ptr ' . $this->gen->statePtr . "\n";
-        $nYields = $this->countYields($fn->body);
         $startLabel = $this->ssa->allocLabel('gen.start');
-        $cases = '';
-        for ($k = 1; $k <= $nYields; $k = $k + 1) {
-            $cases .= '    i64 ' . (string)$k . ', label %gen.resume.' . (string)$k . "\n";
-        }
-        $out .= '  switch i64 ' . $st . ', label %' . $startLabel . " [\n" . $cases . "  ]\n";
-        $out .= $startLabel . ":\n";
 
+        // The body first: the switch below has one entry per yield EMITTED, and
+        // a `finally` holding a yield is emitted once per jump that leaves it
+        // (a `return`, a destroy) besides its own place.
         $savedInGen = $this->gen->inGenerator;
         $savedCounter = $this->gen->yieldCounter;
         $this->gen->inGenerator = true;
         $this->gen->yieldCounter = 0;
-        $out .= $this->emitNode($fn->body);
+        $bodyIr = $this->ehLower($this->emitNode($fn->body));
+        $nYields = $this->gen->yieldCounter;
         $this->gen->inGenerator = $savedInGen;
         $this->gen->yieldCounter = $savedCounter;
 
-        // Fell off the end → finished. The depth goes back here too: a generator
-        // that ran to completion must not leave the consumer's jmp depth raised.
+        $cases = '';
+        for ($k = 1; $k <= $nYields; $k = $k + 1) {
+            $cases .= '    i64 ' . (string)$k . ', label %gen.resume.' . (string)$k . "\n";
+        }
+        // Destroying a frame that is not finished re-enters it at `-2 - state`
+        // ({@see EmitLlvmRuntime}'s `__mir_gen_destroy`): each yield carries the
+        // exit of a generator abandoned there, and a frame nobody started gives
+        // back the params it owns.
+        for ($k = 1; $k <= $nYields; $k = $k + 1) {
+            $cases .= '    i64 ' . (string)(-2 - $k) . ', label %gen.destroy.' . (string)$k . "\n";
+        }
+        $cases .= "    i64 -2, label %gen.destroy.0\n";
+        $cases .= "    i64 -1, label %gen.done\n";
+        // FINISHED unless it yields again: an exception that leaves the body
+        // ends the generator, as in php, and nothing re-enters a frame whose
+        // locals the unwind already gave back.
+        $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
+        $out .= '  switch i64 ' . $st . ', label %' . $startLabel . " [\n" . $cases . "  ]\n";
+        $out .= "gen.destroy.0:\n" . $this->genOwnDropsIr($fn->ownGenParams) . "  br label %gen.done\n";
+        $out .= "gen.done:\n  ret i64 0\n";
+        $out .= $startLabel . ":\n" . $bodyIr;
+
+        // Fell off the end → finished.
         $out .= $this->genFinishCurrent();
         $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
-        $out .= $this->genRestoreEntryDepth();
-        $out .= "  ret i64 0\n}\n\n";
+        $out .= "  ret i64 0\n" . $this->ehEnd() . "}\n\n";
+        return $out;
+    }
+
+    /** Take the +1 of a param the frame owns ({@see FunctionDef::$ownGenParams}), at the depth its drop gives back. */
+    private function genParamOwn(FunctionDef $fn, string $name, string $reg): string
+    {
+        $op = $fn->ownGenParams[$name] ?? null;
+        if ($op === null) { return ''; }
+        return $this->rcRetainReg($reg, $this->rcReleaseFlavor($op));
+    }
+
+    /**
+     * The drops of a frame abandoned with `$ops` Own — the flow's set at that
+     * point, read out of the frame slots.
+     * @param array<string, \Compile\Mir\MemoryOp_> $ops
+     */
+    private function genOwnDropsIr(array $ops): string
+    {
+        $out = '';
+        foreach ($ops as $name => $op) {
+            if (isset($this->locals->refLocals[$name]) || !isset($this->locals->slots[$name])) { continue; }
+            $out .= $this->ownDropIr($this->locals->slots[$name], $op);
+        }
         return $out;
     }
 
@@ -329,6 +371,34 @@ trait EmitLlvmGenerator
              . $this->rcReleaseReg($old, 'cell');
     }
 
+    /** Drop the key the frame holds in `key`@24 (a tagged cell, or 0). */
+    private function genDropKey(): string
+    {
+        $old = $this->ssa->allocReg();
+        return '  ' . $old . ' = load i64, ptr ' . $this->gen->keyPtr . "\n"
+             . $this->rcReleaseReg($old, 'cell');
+    }
+
+    /**
+     * Box the value `$v` just emitted into a cell the FRAME owns: a fresh
+     * producer's +1 moves in, a borrow is co-owned. `$deep` cellifies an array
+     * payload — the cell channel's shape; else the box only tags.
+     */
+    private function genBoxOwned(Node $v, bool $deep): string
+    {
+        if ($deep && $v->type->kind !== Type::KIND_UNKNOWN) {
+            $out = $this->retainCellPayload($v);
+            $out .= $this->boxToCell($v->type, $v);
+            return $out . $this->coerceToI64();
+        }
+        $out = $this->boxToCellShallow($v->type);
+        $out .= $this->coerceToI64();
+        if (!$this->yieldValueFresh($v)) {
+            $out .= $this->rcRetainReg($this->lastValue, 'cell');
+        }
+        return $out;
+    }
+
     /**
      * A generator that finishes lets go of its last value: `current()` and
      * `key()` are null from here on, as in php, and the frame no longer holds
@@ -337,7 +407,7 @@ trait EmitLlvmGenerator
     private function genFinishCurrent(): string
     {
         $this->rt->needsTagged = true;
-        $out = $this->genDropCurrent();
+        $out = $this->genDropCurrent() . $this->genDropKey();
         $bn = $this->ssa->allocReg();
         $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
         $out .= '  store i64 ' . $bn . ', ptr ' . $this->gen->keyPtr . "\n";
@@ -366,21 +436,6 @@ trait EmitLlvmGenerator
             || $vk === Node::KIND_CLOSURE || \Compile\Mir\BitOp::mintsFresh($v);
     }
 
-    /**
-     * A param (or capture) the body owns — reassigned, or released at the end
-     * — holds the caller's BORROWED value, so the frame takes its own +1 as it
-     * seeds the slot: the entry retain {@see initRcObjSlots} gives an ordinary
-     * function, placed in the creator because the resume entry runs on every
-     * resume.
-     */
-    private function genParamCoOwn(string $name, string $val): string
-    {
-        if (isset($this->locals->refLocals[$name])) { return ''; }
-        $mo = $this->frame->rcObjLocals[$name] ?? null;
-        if ($mo === null) { return ''; }
-        $fl = $this->rcReleaseFlavor($mo);
-        return $fl === '' ? '' : $this->rcRetainReg($val, $fl);
-    }
 
     /** `store i64 <val>, ptr (base + off)` — a frame header/local write. */
     private function genStoreAt(string $base, int $off, string $val): string
@@ -465,15 +520,6 @@ trait EmitLlvmGenerator
         }
     }
 
-    /** Put the consumer's jmp depth back before suspending or returning.
-     *  {@see GeneratorContext::$entryDepthPtr} for why it must not be left raised. */
-    private function genRestoreEntryDepth(): string
-    {
-        if ($this->gen->entryDepthPtr === '') { return ''; }
-        $v = $this->ssa->allocReg();
-        return '  ' . $v . ' = load i64, ptr ' . $this->gen->entryDepthPtr . "\n"
-             . '  store i64 ' . $v . ", ptr @__mir_jmp_depth\n";
-    }
 
     /**
      * `yield`, `yield $v`, `yield $k => $v` inside a resume body: store the
@@ -541,17 +587,7 @@ trait EmitLlvmGenerator
             // — every message of `foreach ($ws as $m)` leaked. The cell channel
             // is a cell-slot store like any other: co-own a borrow, and a
             // rebuilt array's fresh source is dropped by the box itself.
-            if ($cellChannel && $y->value->type->kind !== Type::KIND_UNKNOWN) {
-                $out .= $this->retainCellPayload($y->value);
-                $out .= $this->boxToCell($y->value->type, $y->value);
-                $out .= $this->coerceToI64();
-            } else {
-                $out .= $this->boxToCellShallow($y->value->type);
-                $out .= $this->coerceToI64();
-                if (!$this->yieldValueFresh($y->value)) {
-                    $out .= $this->rcRetainReg($this->lastValue, 'cell');
-                }
-            }
+            $out .= $this->genBoxOwned($y->value, $cellChannel);
             $val = $this->lastValue;
         }
         // Key: explicit `$k =>`, else the auto-increment counter (then bump it).
@@ -559,16 +595,22 @@ trait EmitLlvmGenerator
         // type (`yield "a" => 1` beside an auto-incrementing int), so a raw
         // carrier left the reader guessing and a string key came back as its
         // pointer. The foreach key var is typed cell to match.
+        // ★ The frame OWNS `key` exactly as it owns `current`: it drops the
+        // previous one here and the last when it finishes, and every reader
+        // takes its own +1.
         if ($y->key !== null) {
             $out .= $this->emitNode($y->key);
-            $out .= $this->boxToCell($y->key->type);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->gen->keyPtr . "\n";
+            $out .= $this->genBoxOwned($y->key, true);
+            $nkv = $this->lastValue;
+            $out .= $this->genDropKey();
+            $out .= '  store i64 ' . $nkv . ', ptr ' . $this->gen->keyPtr . "\n";
         } else {
             $nk = $this->ssa->allocReg();
             $out .= '  ' . $nk . ' = load i64, ptr ' . $this->gen->nextKeyPtr . "\n";
             $this->rt->needsTagged = true;
             $nkb = $this->ssa->allocReg();
             $out .= '  ' . $nkb . ' = call i64 @__manticore_box_int(i64 ' . $nk . ")\n";
+            $out .= $this->genDropKey();
             $out .= '  store i64 ' . $nkb . ', ptr ' . $this->gen->keyPtr . "\n";
             $nk1 = $this->ssa->allocReg();
             $out .= '  ' . $nk1 . ' = add i64 ' . $nk . ", 1\n";
@@ -579,18 +621,21 @@ trait EmitLlvmGenerator
         $k = $this->gen->yieldCounter + 1;
         $this->gen->yieldCounter = $k;
         $out .= '  store i64 ' . (string)$k . ', ptr ' . $this->gen->statePtr . "\n";
-        $out .= $this->genRestoreEntryDepth();
         $out .= "  ret i64 1\n";
+        // Destroyed while suspended here: php runs the `finally` of every try
+        // the yield sits in (no catch), then the frame lets go of its locals —
+        // the path of an exception nothing catches, so the drops are the ones
+        // the flow gives that unwind.
+        $out .= 'gen.destroy.' . (string)$k . ":\n";
+        $nFin = $this->cf->finallyCount();
+        $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($nFin);
+        $out .= $this->genOwnDropsIr($nFin > 0 ? $this->cf->finallyOwn(0) : $y->ownLive);
+        $out .= "  ret i64 0\n";
         $out .= 'gen.resume.' . (string)$k . ":\n";
-        // FIRST, before anything can throw: re-arm the enclosing trys in THIS
-        // frame. The setjmp that guarded them belongs to the invocation that
-        // entered the try, and that frame died when this yield returned.
-        // {@see rearmGeneratorTrys}
-        $out .= $this->rearmGeneratorTrys();
         // `$gen->throw($e)` injection: on resume, a pending exception makes the
         // suspended `yield` expression raise — caught by an enclosing try in the
-        // generator (its landing pad was just re-armed above, so depth-1 is ours
-        // and points at a LIVE frame), else propagated to the consumer.
+        // generator (the raise is an invoke to its landing pad, in this same
+        // resume function), else propagated to the consumer.
         if ($this->gen->throwUsed) {
             $gt = $this->ssa->allocReg();
             $out .= '  ' . $gt . " = load ptr, ptr @__mir_gen_throw\n";
@@ -601,19 +646,19 @@ trait EmitLlvmGenerator
             $out .= '  br i1 ' . $inj . ', label %' . $thrL . ', label %' . $contL . "\n";
             $out .= $thrL . ":\n";
             $out .= "  store ptr null, ptr @__mir_gen_throw\n";
-            $out .= '  store ptr ' . $gt . ", ptr @__mir_thrown\n";
-            $d = $this->ssa->allocReg();
-            $out .= '  ' . $d . " = load i64, ptr @__mir_jmp_depth\n";
-            $s = $this->ssa->allocReg();
-            $out .= '  ' . $s . ' = sub i64 ' . $d . ", 1\n";
-            $out .= $this->jmpBufExpr($s);
-            $out .= '  call void @_longjmp(ptr ' . $this->jmpScratch . ", i32 1)\n";
-            $out .= "  unreachable\n";
+            $out .= $this->ehMarkRaise($this->emitRethrowAt($gt), $y->ownLive);
             $out .= $contL . ":\n";
         }
         // Resumed: the yield expression evaluates to the sent-in value.
+        // It MOVES out of the frame's slot — the expression owns it ({@see
+        // \Compile\Mir\Ownership::tempCellOwned}) and the next resume nobody
+        // sends into reads null.
         $sent = $this->ssa->allocReg();
         $out .= '  ' . $sent . ' = load i64, ptr ' . $this->gen->sentPtr . "\n";
+        $this->rt->needsTagged = true;
+        $sn = $this->ssa->allocReg();
+        $out .= '  ' . $sn . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $sn . ', ptr ' . $this->gen->sentPtr . "\n";
         $this->lastValue = $sent;
         $this->lastValueType = 'i64';
         return $out;

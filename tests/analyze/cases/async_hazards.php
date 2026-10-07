@@ -31,11 +31,16 @@ function counter(bool $on): int
 
 async(function () {
     spawn(function () {
-        $a = file_get_contents('/etc/hostname');   // filesystem: blocks the loop
+        $a = file_get_contents('/etc/hostname');   // pooled: not reported
         $b = file_get_contents('https://example.com/x');  // network: async, fine
         $c = file_get_contents($GLOBALS['path']);  // computed: no claim made
         file_put_contents('/tmp/out', $a . $b . $c);
-        $d = scandir('/tmp');
-        return count($d);
+        $d = scandir('/tmp');                      // pooled: not reported
+        $e = file('/etc/hosts');
+        readfile('/etc/hostname');
+        copy('/etc/hosts', '/tmp/hosts');          // inline: blocks the loop
+        copy($GLOBALS['path'], '/tmp/x');          // computed: no claim made
+        $g = glob('/tmp/*.log');                   // pooled: scandir + stat
+        return count($d) + count($e) + count($g);
     });
 });

@@ -1,0 +1,46 @@
+fin1 vaaa
+vaaa
+fin2
+2
+3
+inner
+outer
+10
+body 0 0
+f-in 0 0
+f-out 0 0
+f-in 0 1
+f-out 0 1
+after break 2
+v1
+fin v1
+fin v2
+v3
+fin v3
+sw-cont
+sw-break
+k=1
+in
+goto-fin
+landed
+24
+y1
+gen-fin
+5
+caught from-fin 1
+outer caught fr
+7
+ok nsc
+fin t0 ss
+drop t0
+fin t1 sss
+drop t1
+fin t2 ssss
+end owned
+drop t2
+drop u1
+fin b
+drop b
+a
+drop a
+done

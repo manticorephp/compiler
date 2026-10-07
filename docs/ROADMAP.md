@@ -2,7 +2,7 @@
 
 **Single source of truth for "where the compiler is and what's next."**
 
-_Last updated: 2026-09-21 · branch `main` · HEAD `49ced4d`._
+_Last updated: 2026-10-06 · branch `ownership-2` (PR #15)._
 
 ## Current state
 
@@ -54,8 +54,19 @@ Built on branch `ci` (2026-09-07): **`bin/build --fast`** (`-O1`, apps only, to
 `bin/manticore.fast`, never the canonical slot — 71 s vs 83 s), **`tests/aot/run.sh -O <n>`**,
 and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, consumed by
 `tools/docker/run_tests.sh` and by `.github/workflows/{ci,nightly}.yml`.
+
+### Recently completed (2026-10)
+
+- ✅ **Ownership redesign (PR #15, ABI 16)** — every local, property, static property, global and `catch` variable has one owner at each program point (a flow-sensitive ownership analysis over MIR): the old value is released on overwrite, a borrow is never freed as owned, and a by-ref write goes through the reference box with the retype checked (typed property passed to `string &` throws `TypeError`). Array elements held in a cell keep their own ownership. Exceptions are zero-cost: the throw runs a forced unwind through per-frame cleanup pads, so owned locals of unwound frames are released and their destructors run in php order; `finally` runs on every exit (`break`, `continue`, `return`, throw); a throw inside `finally` chains the pending exception as `previous`; an uncaught throw unwinds before the fatal. Closes #17 #20 #21 #24 #25 #26 #31 #40 #42 #68 #77 (repros promoted into `tests/aot/cases/`). #67 (`array_eq_nested_lists_null_rows`) is fixed on macOS only and stays an xfail on Alpine.
 ### Recently completed (2026-09)
 
+- ✅ **Blocking-offload pool** — under the scheduler, regular-file I/O (`fopen` paths, `file_get_contents`/
+  `file_put_contents`, stat family, dirs, unlink/rename/mkdir/rmdir) and `getaddrinfo` run on a
+  lazy per-process thread pool (`MANTICORE_BLOCKING_THREADS`, default 4) and park the task, so
+  a slow or blocking file no longer stalls the loop. Threads run only fixed libc calls, never
+  PHP. `file_get_contents` of a FIFO now reads to EOF; `posix_mkfifo` added. Still inline:
+  `access`-based checks, `fgets`, `stream_get_contents`, `copy`, `rewinddir`, pipes, sockets.
+  `docs/async.md`.
 - ✅ **`Http\WebSocket`** — RFC 6455 server (`upgrade()` over `Http\Server`'s new
   `Response::takeover()`/`Server::onStop()` hooks) and client (`connect()`, `ws://`/
   `wss://`), plus permessage-deflate (RFC 7692, all four parameters). Superset —
@@ -150,7 +161,6 @@ with no dependency and no seed, ~10 need a compiler or runtime seam, ~40 are an 
 | `/` exact-int on variables | `$a/$b`, both int, divisible | `float` | `int`. Literal `6/2` already folds to `int(3)`; the variable case cascades through a numeric cell — low value |
 | `echo` / concat of `INF`/`NAN` | — | renders lowercase | uppercase, as php does. `var_dump` is already correct. **No repro exists — write one first** |
 | A reference to a by-REF parameter dangles | `function f(&$x) { return [&$x]; }` | the REF cell points at the caller's slot | the caller has to box the argument it passes |
-| A by-ref write that retypes a `foreach` value variable double-frees (found 2026-09-28) | `function f(&$x) { $x = 5; } foreach ([new stdClass] as $d) {} f($d); var_dump($d);` | SIGSEGV (a string element too) | `int(5)`. The loop variable holds a BORROW (see the foreach-borrow gap); the retyping write releases it as owned |
 | A zone written in a date string is not adopted (found 2026-09-28) | `new DateTime("2000-01-01T00:00:00Z")`, `"… UTC"`, `"… EST"`, `"… +02:30"`, `"… Europe/Paris"` | the instant is right, but `getTimezone()` is the default zone | php adopts it: type 3 for an identifier / `UTC`, type 2 for an abbreviation (`Z`, `GMT`, `EST`), type 1 for an offset — the DateTimeZone class has no type-2 form yet |
 | `print_r` of an object prints no properties | `class A { public $x = 1; } print_r(new A);` | `A Object ( )` | `[x] => 1`, visibility suffixes (`:protected`, `:A:private`) and `__debugInfo`, as var_dump's per-class arms already do |
 | An int local that a loop or one branch turns float reads float everywhere (found 2026-09-28) | `$s = 1; if ($b) { $s = $s + 1.5; }` with `$b` false; `$s = 0; foreach ([] as $x) { $s += 1.5; }` | `float(1)`, `float(0)` | `int(1)`, `int(0)`. The accumulator shape makes the whole slot a float (InferScans float slots, the loop merge's widenNumeric); php keeps int until the float store runs — needs a numeric cell there, a perf question |
@@ -169,6 +179,30 @@ as a string-keyed assoc; `tests/aot/cases/object_cast_bag_repr.php` names it.
 
 `['a'] === ['a']` compares pointers rather than contents, and `extract()` is unimplemented
 (dynamic symbol-table writes the typed frame does not model). `compact()` works.
+
+### Ownership redesign — what PR #15 leaves open (2026-10-06)
+
+**Tasks 10–11 — done (branch `ownership-gen`, ABI v17).** A generator frame owns its params, locals, key, sent value and return value, and gives them back however it ends: destroyed before the first resume, destroyed while suspended (the `finally` blocks around the yield run first, as in php), finished, or left by an exception — which now marks it finished (#43) and drops its locals through cleanup pads. `send()` no longer leaks and the slot is cleared (#22, #44); a yielded key object is released; a loop variable two iterator loops bind at different classes no longer keeps a reference per iteration (#23). Found by the close-out soak and fixed with it: a task's arena (chunks + mark stack) is freed with its fiber context (was ~5 KB per task that reached an arena scope); the generator `getIterator()` hands a `foreach` over an `IteratorAggregate` is released when the loop ends; a string a compare operand mints against a cell (`(string)(int)$key === $key`, so every `array_key_exists()` with a string key) is freed by every operator; a closure aliased into a local of a monomorphized `callable` callee (`Closure::fromCallable()`) gives its reference back; an exception out of a loop's own iterator step (a generator resume, `current()` / `next()`) drops the frame's locals and the iterator the loop holds (#103). WS soak (`docs/audit/ownership/ws_soak.php`): 5000 connect/echo/close, no per-connection block left under `leaks`. **Still open:** a fresh `new X` written inline as a `foreach` subject is not released when an exception leaves the loop (a local or a call result is); `strlen()` of an int in a cell crashes (#102); a `yield` reached in a `finally` while the generator is being destroyed suspends it once more instead of raising php's `Cannot yield from finally in a force-closed generator`; a `try` in a generator does not unwind the arena mark stack. Carried over — self-build max RSS is +12% vs main (+4% vs `cbf73c0a`, cause not investigated); `tools/libclass_smoke.sh` cross-module class constant `Acme\Point::NAME` is `Undefined constant` (also on main); `\Ffi\Ptr` in an untyped slot is boxed as an object cell; temps and `__main` have no cleanup pads; `isset`/`??` on an object or string base with a code-running offset still evaluates the base before the key; a fiber argument's throwing destructor fires at shutdown, not from `start()`.
+
+| Gap | Repro / shape | Today | Want |
+|---|---|---|---|
+| Destructor timing of a spilled property-read temp | `$this->f($this->p)` where `f` overwrites `p` | temp released at statement end | released right after the call, as php does |
+| Call-result iterable elements | `foreach (f() as $x) { break; }` | elements destructed at return | destructed at `break` |
+| Container of erased elements never drops them | `$m = [$q]` of an `erase()` result; foreach literal; `array_map` | leak | released with the container |
+| Union-of-object locals stored into containers | `$a[] = $cond ? new A : new B;` | leak | released |
+| Self-box of a non-shallow array rebuilds and leaks the old buffer | array of enum/nested/closure elements into a cell | leak (also on main) | released |
+| `move` mode leaks the nested source buffer; union `vec[cell]` with raw closure words; closure non-constant array default in a cell param keeps the box; `.sig`-imported interface `: array` method decls leak | | leaks (some on main) | released |
+| Conditional arms of different classes typed from the THEN arm | `$o = $c ? new A : new B; $o->onlyOnB();` | mistyped, stays a borrow | joined type |
+| Null in an array slot treated as empty by `count`/`foreach`/`array_merge` | | silent | Zend `TypeError` ⇒ throw (also on main) |
+| By-ref-captured local joining an erased array with string/null (`scanByRefCaptureWiden`) | | wrong answers (also on main) | Zend answer |
+| Erased `: mixed` return boxes a raw array as an INT (`boxUnknownIfRaw`); null ⊔ erased join `is_null` wrong | | silent wrong (re-verify) | Zend answer |
+| `array<string,mixed>` param given a nested array, then `$m['k'] = 'str'` | | throws `array{k: string[]} key k must be of type string[]` (#50) | assigns |
+| `[...$x]` with string keys typed `vec`; enum argument to a dynamic `mixed` closure param crosses as its ordinal | | wrong (also on main) | php answer |
+| Typed property → `mixed &` param whose callee writes another kind | | coerces | php `Cannot assign … to reference held by property …`; the TypeError for typed-prop → `string &` also misses closures, nullable/union params, static props, array elements, and fires at address-take instead of at RECV |
+| By-ref retype: a subclass override with a different by-ref param retype is not seen; nested base `$a[0][1]` passed by-ref not widened | | static `resolveMethodClass` | resolved per class |
+| `catch (A\|B $e)` whose union joins to a non-object | | falls back to the first class | union type |
+| Build cache stamp write non-atomic; split stdlib key lacks `.sig` hash; `--runtime` without `--emit-library` skips the stdlib import | | concurrent sessions can read a mismatched artifact | atomic temp+rename; hash in the key |
+| Generator / async task cancelled mid-throw | | untested (possible double release) | test |
 
 ## Tier 2 — semantic depth
 
@@ -232,6 +266,14 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
   class ships (`prelude/reflection.php`).
 - **Static properties are external-linkage globals only**, so two compilation units cannot
   disagree about one.
+- **A user `global $x` shared by a library and an application has its type inferred per
+  module.** Each module unifies only the stores it sees, so a library storing an int
+  element into an array global the application typed `array<string,string>` disagrees on
+  the buffer contract. The superglobals are pinned to `array<string, mixed>` for exactly
+  this reason; user globals crossing modules need the same (or a `.sig` record).
+- **A library base class dispatching to an application override** does not reach the
+  override (`(new AppChild)->call($x)` where `LibBase::call` invokes `$this->m($x)` runs
+  the base's `m`).
 - **Element representation is half done.** The array flags word carries an element-repr
   nibble that release / retain / COW read, but the erased element channel is not yet a cell,
   so a concrete `string[]` parameter fed a cell-element array still misreads.

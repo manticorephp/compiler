@@ -41,6 +41,7 @@ clean finish before trusting anything.
 bash tests/aot/run.sh                # AOT suite: cases/*.php + expected/*.out, auto-discovered
 bash tests/aot/run.sh -k <substr>    # filter cases (do this first — the full suite is minutes)
 bash tests/aot/run.sh -j 0           # all cores (note: `-j 0` is two args)
+bash tests/aot/xfail.sh              # known-bug repros (tests/aot/repro): XFAIL = still open, XPASS = fixed, promote it
 bash tools/difftest.sh               # byte parity vs the `php` interpreter over the corpus
 bash tools/selfhost_fixpoint.sh      # gen2 IR == gen3 IR, self-host suite, rebuild stability
 bash tools/install_smoke.sh          # an INSTALLED compiler (on $PATH, behind a symlink) finds its own lib/
@@ -70,6 +71,39 @@ Rules of evidence:
 Create `tests/aot/cases/<name>.php` + `tests/aot/expected/<name>.out`. No manifest.
 The expected output should be what `php` prints (`php -d xdebug.mode=off` — xdebug
 poisons the oracle). Run it with `bash tests/aot/run.sh -k <name>`.
+
+### Reporting a bug you are not fixing now
+
+A bug found on the way to something else is **a repro plus a GitHub issue** — never
+a line in a ledger, a memory note or a `TODO`. A note cannot be run, so nobody
+learns when it stops being true: the first sweep of the old ledgers found 46 of
+~100 "open" entries no longer reproducing.
+
+1. Minimise it to one self-contained file: `tests/aot/repro/{wrong,crash,leak}/<name>.php`
+   — `wrong` = runs, output differs; `crash` = SIGSEGV / SIGBUS / invalid IR;
+   `leak` = memory php releases and the binary does not. Line 2 is a one-sentence
+   comment that becomes the issue title.
+2. Record the oracle beside it: `php -d xdebug.mode=off -d display_errors=stderr <name>.php > <name>.expected`.
+   A leak repro measures itself — `memory_get_peak_usage()` (peak RSS natively)
+   around the loop, printing `flat` under a threshold — copy `repro/leak/throw_path.php`.
+   A superset feature has no oracle: write the `.expected` by hand.
+3. `bash tests/aot/xfail.sh -k <name>` must say `XFAIL`. An `XPASS` means the
+   repro does not show the bug; a claim without a red repro is not filed.
+4. `bash tools/file_bug.sh tests/aot/repro/<kind>/<name>.php` (`-n` prints the
+   body and files nothing). It refuses a repro that passes, files the issue with
+   the PHP source, php's output and the actual output in the body (labels `bug` +
+   `wrong-answer` / `crash` / `leak`), and writes `// issue: #N` into the repro.
+   Commit the repro and its `.expected`.
+
+Fixing one: `git mv` the repro to `tests/aot/cases/<name>.php` and its
+`.expected` to `tests/aot/expected/<name>.out`, drop the `// issue:` line, and
+put `Fixes #N` in the commit. `xfail.sh` exits 1 on an `XPASS` — a bug fixed as a
+side effect of other work shows up there, and gets the same treatment. The gate
+(`tools/docker/gate.sh`, so CI too) runs it after the suite and reports an
+`XPASS` in the job summary; `MC_XFAIL=strict` makes it fail the gate.
+
+A bug that is red on one platform only keeps its repro where it is; say which
+platform in the issue and label it.
 
 ## Pipeline
 

@@ -1,0 +1,21 @@
+int(2)
+int(9)
+int(1)
+int(4)
+int(3)
+int(8)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(3)
+}
+TypeError: min(): Argument #1 ($value) must be of type array, int given
+ArgumentCountError: min() expects at least 1 argument, 0 given
+int(10)

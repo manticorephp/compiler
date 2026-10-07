@@ -1,0 +1,51 @@
+array(1) {
+  [0]=>
+  int(1)
+}
+array(1) {
+  [0]=>
+  int(0)
+}
+array(1) {
+  [0]=>
+  int(3)
+}
+int(2)
+array(1) {
+  [0]=>
+  int(5)
+}
+int(2)
+array(1) {
+  [0]=>
+  int(5)
+}
+int(7)
+int(2)
+int(7)
+string(3) "abc"
+int(2)
+string(3) "abc"
+int(2)
+NULL
+int(1)
+float(2.5)
+int(2)
+float(2.5)
+int(-5)
+NULL
+int(4)
+int(3)
+string(3) "abc"
+int(9)
+bool(true)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+string(1) "c"
+float(2.5)
+float(1.5)
+int(9)

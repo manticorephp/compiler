@@ -96,6 +96,8 @@ namespace Runtime {
 
 namespace {
 
+    use Manticore\Attr\RefOut;
+
     /**
      * Install a handler for $signal. $handler is a callable, or SIG_DFL / SIG_IGN
      * to hand the signal back to the OS. A callable is NOT run asynchronously:
@@ -468,7 +470,7 @@ namespace Process {
             }
             if ($pid > 0) {
                 $this->pids[$idx] = $pid;
-                $this->bornAt[$idx] = \microtime(true);
+                $this->bornAt[$idx] = \__mc_monotonic_f();
             }
             // pid < 0: fork failed — carry on with fewer workers.
         }
@@ -485,7 +487,7 @@ namespace Process {
          */
         private function schedule(int $idx): void
         {
-            $now = \microtime(true);
+            $now = \__mc_monotonic_f();
             $born = $this->bornAt[$idx] ?? $now;
             $n = ($now - $born) >= self::HEALTHY_AFTER ? 0 : ($this->fails[$idx] ?? 0);
             $n = $n + 1;
@@ -502,7 +504,7 @@ namespace Process {
         private function startDue(callable $worker): void
         {
             if (\count($this->dueAt) === 0) { return; }
-            $now = \microtime(true);
+            $now = \__mc_monotonic_f();
             /** @var array<int, float> $keep */
             $keep = [];
             foreach ($this->dueAt as $idx => $when) {

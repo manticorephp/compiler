@@ -27,6 +27,11 @@ final class Param
      *  the call site. Serialized into the interface `.sig`. */
     public bool $cellArg = false;
 
+    /** A by-ref variadic `&...$xs`: the param itself is a by-value pack of
+     *  REFERENCES (byRef false). Serialized into the `.sig` as `byref` so a
+     *  caller in another module packs references too. */
+    public bool $refPack = false;
+
     public function __construct(
         public readonly string $name,
         public Type $type,
@@ -70,6 +75,9 @@ final class Param
      * it makes has to be MONOTONE or it is not a retraction at all.
      */
     public bool $elemGuessWithdrawn = false;
+
+    /** A typed scalar by-ref param ({@see Passes\InferScans::scanRefParamRetype}) widened to a cell because its body stores another kind. Unlike the uniform closure ABI cell, its callers hand it a cell slot, so even a closure boxes the stores. Declared after the constructor: property order is layout. */
+    public bool $retypedByRef = false;
 
     /**
      * The ERASED type this param had before {@see Passes\InferScans::scanCallSiteArrayElems}

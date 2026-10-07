@@ -33,7 +33,7 @@ $name = stream_socket_get_name($l, false);
 $port = (int)substr($name, strrpos($name, ':') + 1);
 
 async(function () use ($l, $port) {
-    spawn(function () use ($l) {
+    $srv = spawn(function () use ($l) {
         $c = stream_socket_accept($l, 5.0);
         stream_set_blocking($c, false);
         $total = 0;
@@ -71,6 +71,10 @@ async(function () use ($l, $port) {
     $n = fwrite($c, $payload);
     echo 'client sent=', $n, "\n";
 
+    // Close only once the server has drained: closing right after fwrite raced
+    // the server's last reads on loaded x86 runners (a close with unread TLS 1.3
+    // session tickets in our receive buffer can end in an RST, dropping the tail).
+    $srv->await();
     \fclose($c);
     \fclose($l);
 });

@@ -95,6 +95,10 @@ public bool $needsClosureRc = false;
     /** The program asks the clock (time/microtime/hrtime): emit the
      *  clock_gettime wrapper. */
     public bool $needsClock = false;
+
+    /** The program starts the blocking-offload pool (`__mc_pool_start`): emit
+     *  the worker thread body and its start helper. */
+    public bool $needsPool = false;
     public bool $needsStdStreams = false;
 
     /**
@@ -126,6 +130,14 @@ public bool $needsClosureRc = false;
      * extra parameter anyway.
      */
     public bool $needsFuncArgs = false;
+
+    /**
+     * The closure ARITY channel: a dynamic closure call stores the fn it calls
+     * and how many arguments it wrote into `@__mir_clo_fp` / `@__mir_clo_argc`;
+     * a closure with optional parameters takes them in its prologue and fills
+     * the defaults the call left out ({@see EmitLlvmModule::closureArityPrologue}).
+     */
+    public bool $needsCloArgc = false;
 
     /**
      * The program asks `function_exists($var)` with a non-literal name — emit
@@ -240,20 +252,16 @@ public bool $needsClosureRc = false;
         }
         if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
         if ($this->needsExceptions) {
-            // `_setjmp`/`_longjmp`, NOT `setjmp`/`longjmp`, and it is worth
-            // 20% of a server's CPU. The plain pair saves and restores the
-            // SIGNAL MASK: on glibc `setjmp` is `__sigsetjmp(env, 1)`, and on
-            // Darwin it calls `sigprocmask` AND `sigaltstack` — two syscalls
-            // on every `try` ENTERED, not on every throw. Profiled under load:
-            // 875 of 4374 samples were exactly those two, with `_setjmp` in
-            // the same profile costing one sample and no children.
-            //
-            // Nothing here needs the mask: a longjmp out of a SIGNAL HANDLER
-            // is the only case that does, and the exception runtime never
-            // unwinds from one — the SIGSEGV/SIGBUS handler the fiber guard
-            // installs aborts, it does not resume.
-            $decls['setjmp'] = "declare i32 @_setjmp(ptr) returns_twice";
-            $decls['longjmp'] = "declare void @_longjmp(ptr, i32) noreturn";
+            // The unwinder ({@see \Compile\Runtime\UnwindRuntime}): libSystem on
+            // Darwin, libgcc_eh on Linux (`-static-libgcc` at the link).
+            $decls['_Unwind_RaiseException'] = "declare i32 @_Unwind_RaiseException(ptr)";
+            $decls['_Unwind_ForcedUnwind'] = "declare i32 @_Unwind_ForcedUnwind(ptr, ptr, ptr)";
+            $decls['_Unwind_GetIP'] = "declare i64 @_Unwind_GetIP(ptr)";
+            $decls['_Unwind_GetRegionStart'] = "declare i64 @_Unwind_GetRegionStart(ptr)";
+            $decls['_Unwind_GetLanguageSpecificData'] = "declare ptr @_Unwind_GetLanguageSpecificData(ptr)";
+            $decls['_Unwind_SetGR'] = "declare void @_Unwind_SetGR(ptr, i32, i64)";
+            $decls['_Unwind_SetIP'] = "declare void @_Unwind_SetIP(ptr, i64)";
+            $decls['abort'] = "declare void @abort() noreturn";
         }
         if ($this->needsStrtodDecl()) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
         // Unified PhpArray runtime libc deps (docs/16).

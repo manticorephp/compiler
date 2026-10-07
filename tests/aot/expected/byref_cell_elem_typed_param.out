@@ -1,0 +1,13 @@
+one
+two
+string(2) "qa"
+object(stdClass)#1 (1) {
+  ["v"]=>
+  int(5)
+}
+array(2) {
+  [0]=>
+  string(2) "3a"
+  [1]=>
+  string(2) "za"
+}

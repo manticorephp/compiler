@@ -114,7 +114,7 @@ final class Debug
      *
      * The veto exists because a property read normally hands out a raw borrow,
      * and dropping the old value would strand it. A RETURN is not that case:
-     * `EmitLlvmModule::emitReturn` already gates on `isBorrowedObjReturn` and
+     * `EmitLlvmModule::emitReturn` already gates on `Ownership::returnRetain` and
      * retains a borrowed property read before handing it back, so the caller
      * owns a reference of its own. This is `tools/prof/propleak.php`'s stated
      * ordering — a property READ must own what it reads BEFORE a property WRITE
@@ -161,18 +161,14 @@ final class Debug
     public static bool $rcBaseTemp = true;
 
     /**
-     * Let a property slot drop what it overwrites even when the property was
-     * handed to a USER function, provided that function keeps none of its
-     * arguments ({@see Mir\Passes\EmitLlvm::computeKeepsNoArg}).
+     * Judge what a USER function may do to a property slot — park, write it
+     * ({@see Mir\EscapeSummaries}) — so a property read held across a call to
+     * it stays a borrow when the call can do neither.
      *
-     * The veto was a name list of BUILTINS only, so one call — `splitStr("\r\n",
-     * $this->block)` inside Http\Headers::lines() — vetoed the slot for the
-     * whole program, and every rebuild of that block leaked the old string
-     * (735 B per response on the http bench, and it never had a reader).
-     *
-     * MANTICORE_PROP_BORROW_ESCAPE=0 restores the name-list-only behaviour.
+     * MANTICORE_ESCAPE_SUMMARIES=0 judges no body: every held read across a
+     * call that is not a listed builtin co-owns.
      */
-    public static bool $propBorrowEscape = true;
+    public static bool $escapeSummaries = true;
 
     /**
      * Give a dynamic-property BAG to a class this module stores an undeclared
@@ -192,7 +188,7 @@ final class Debug
      * An element read is a real borrow (it emits no retain — `retain_element`
      * counts element STORES), so the veto is load-bearing in general. But the
      * value of a StoreLocal is retained by rcRetainByType and a returned one by
-     * isBorrowedObjReturn; those own what they read. Vetoing the DECLARING CLASS
+     * Ownership::returnBorrowsObj; those own what they read. Vetoing the DECLARING CLASS
      * for them leaks every element of the slot — `Parser::$tokens` is the case
      * that put 9,236,608 Lexer\\Token allocations against ~0 reclaims.
      *
@@ -442,6 +438,11 @@ final class Debug
      *  builds instead of by hypothesis. */
     public static string $feOnly = '';
 
+    /** BISECT ONLY: `MANTICORE_OWNFLOW_ONLY=a,b` — OwnershipFlow manages only the
+     *  functions whose name contains one of the substrings; `!a,b` manages all
+     *  but those. Unmanaged functions keep every retain and get no drop (they leak, never free). */
+    public static string $ownFlowOnly = '';
+
 
     /**
      * `MANTICORE_ARR_RC_TRACE=1` — print every array retain / release with the
@@ -454,6 +455,13 @@ final class Debug
      * array ops.
      */
     public static bool $arrRcTrace = false;
+
+    /**
+     * `MANTICORE_BT_TOP_SKIP=N` — the `fn=` a trace line names is N frames BELOW
+     * the top of the backtrace stack: a leak attributed to a prelude/stdlib
+     * helper (`preg_match`) names the user frame that called it instead.
+     */
+    public static int $btTopSkip = 0;
 
     /**
      * Drain the cycle-collector root buffer at a threshold, the way php does.
@@ -653,8 +661,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcRecvTemp = false; }
         $env = \getenv('MANTICORE_DYN_PROP_BAG');
         if ($env === '0' || $env === 'off') { self::$dynPropBag = false; }
-        $env = \getenv('MANTICORE_PROP_BORROW_ESCAPE');
-        if ($env === '0' || $env === 'off') { self::$propBorrowEscape = false; }
+        $env = \getenv('MANTICORE_ESCAPE_SUMMARIES');
+        if ($env === '0' || $env === 'off') { self::$escapeSummaries = false; }
         $env = \getenv('MANTICORE_RC_BASE_TEMP');
         if ($env === '0' || $env === 'off') { self::$rcBaseTemp = false; }
         $env = \getenv('MANTICORE_RC_ELEM_OWNS');
@@ -678,6 +686,8 @@ final class Debug
         if ($env !== false && $env !== '') { self::$tombRatio = (int)$env; }
         $env = \getenv('MANTICORE_FE_ONLY');
         if ($env !== false && $env !== '') { self::$feOnly = $env; }
+        $env = \getenv('MANTICORE_OWNFLOW_ONLY');
+        if ($env !== false && $env !== '') { self::$ownFlowOnly = $env; }
         $env = \getenv('MANTICORE_ELEM_DROP_KINDS');
         if ($env !== false && $env !== '') { self::$elemDropKinds = $env; }
         $env = \getenv('MANTICORE_RC_PACK_ELEM');
@@ -686,6 +696,8 @@ final class Debug
         if ($env === '0' || $env === 'off') { self::$rcSymElem = false; }
         $env = \getenv('MANTICORE_RC_BUF_ONLY');
         if ($env === '0' || $env === 'off') { self::$rcBufferOnly = false; }
+        $env = \getenv('MANTICORE_BT_TOP_SKIP');
+        if ($env !== false && \ctype_digit($env)) { self::$btTopSkip = (int)$env; }
         $env = \getenv('MANTICORE_ARR_RC_TRACE');
         if ($env !== false && $env !== '0' && $env !== '') { self::$arrRcTrace = true; }
         $env = \getenv('MANTICORE_CC_TRACE');

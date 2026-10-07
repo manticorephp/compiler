@@ -110,4 +110,52 @@ final class FunctionDef
      * ({@see \Compile\Mir\Passes\ResolveOverloads}). Carried across the `.sig`.
      */
     public string $overloadOf = '';
+
+    /**
+     * A free function declared `: array` / `: ?array` with no element type: its
+     * return erases to KIND_UNKNOWN, and the word it hands back is an array
+     * (raw, or a tagged cell). Such a function returns +1 on every path, so a
+     * caller's local owns what it stores ({@see Ownership::erasedArrayReturn}).
+     */
+    public bool $returnArrayHinted = false;
+
+    /**
+     * Generated from THIS module's class table (`__mir_obj_to_str` and its arms):
+     * another module's body under the same name dispatches over different
+     * classes, so it is emitted `internal`, never `linkonce_odr` — the stdlib's
+     * copy, knowing no user class, won the link and every `(string)` of a user
+     * object threw "Object of class  could not be converted".
+     */
+    public bool $moduleLocal = false;
+
+    /**
+     * A first-class callable `$recv->m(...)` whose receiver class lowering
+     * could not see: the method name, and the closure is a one-param
+     * placeholder until {@see Passes\ResolveMethodFcc} rebuilds it from the
+     * method's parameters. '' for every other function.
+     */
+    public string $fccMethod = '';
+
+    /**
+     * Set by {@see Passes\OwnershipFlow}: the leaf statements a raise inside
+     * may leave the frame from while locals the statement never names are
+     * Own — a throw the emitter synthesises (a division by zero, a TypeError)
+     * belongs to no call node. Statement `i` drops
+     * `$ownStmtDrops[$ownStmtStart[i] .. $ownStmtEnd[i])`.
+     * @var Node[]
+     */
+    public array $ownStmtNodes = [];
+    /** @var int[] */
+    public array $ownStmtStart = [];
+    /** @var int[] */
+    public array $ownStmtEnd = [];
+    /** @var MemoryOp_[] */
+    public array $ownStmtDrops = [];
+    /**
+     * Set by {@see Passes\OwnershipFlow} on a generator: the params its frame
+     * OWNS from creation (the creator takes their +1), name → the `drop` op —
+     * what destroying a generator nobody started drops.
+     * @var array<string, MemoryOp_>
+     */
+    public array $ownGenParams = [];
 }

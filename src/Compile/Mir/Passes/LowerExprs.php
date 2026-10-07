@@ -216,7 +216,7 @@ trait LowerExprs
             // builder; a direct call would be tree-shaken (undefined at link). The
             // single-arg `getenv($name)` stays the codegen builtin.
             if ($fnBare === 'getenv' && \count($expr->args) === 0 && !$this->hasNamespacedGetenv()) {
-                return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::string_()));
+                return new LoadLocal('_ENV', Type::assoc(Type::string_(), Type::cell()));
             }
             if ($fnBare === 'sscanf' && \count($expr->args) > 2) {
                 $s = $this->lowerExpr($expr->args[0]);
@@ -450,6 +450,12 @@ trait LowerExprs
                 $this->sawDynFnExists = true;
                 return new Call('__mir_fn_exists', [$this->lowerExpr($a0)], Type::bool_());
             }
+            // The function set is closed at compile time: a literal, built once
+            // every declaration is known ({@see definedFunctionsSource}).
+            if ($fnBare === 'get_defined_functions') {
+                $this->sawGetDefinedFns = true;
+                return new Call('__mc_defined_functions', [], Type::assoc(Type::string_(), Type::vec(Type::string_())));
+            }
             // `var_dump($a, $b, …)` stays a `var_dump` call — EmitLlvm's biVarDump
             // dumps each arg by its static type (a typed FLOAT goes straight to a
             // shortest-round-trip format instead of through the lossy cell box;
@@ -478,6 +484,8 @@ trait LowerExprs
                 return $this->lowerFcc($expr->function);
             }
             $callee = $this->resolveCallName($expr->function);
+            $mm = $this->minMaxSpreadCall($callee, $expr->args);
+            if ($mm !== null) { return $this->lowerExpr($mm); }
             $savedPost = $this->pendingCallPost;
             $this->pendingCallPost = [];
             $args = $this->lowerCallArgs($callee, $expr->args);
@@ -507,7 +515,7 @@ trait LowerExprs
             // collide with other subclasses' same-named fields at different
             // offsets, so read them through a typed param (T5 pattern) — else
             // a garbage class/name misses the enum table and falls through to
-            // the "unsupported expression" throw (uncaught → longjmp crash).
+            // the "unsupported expression" throw (uncaught → fatal).
             $saClass = $this->staticAccessClass($expr);
             $saName = $this->staticAccessName($expr);
             // `Class::class` / `self::class` / `parent::class` → the fully

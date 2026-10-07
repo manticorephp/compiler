@@ -1,0 +1,11 @@
+TypeError: app(): Argument #1 ($x) must be of type string, int given
+int(5)
+TypeError: fl(): Argument #1 ($f) must be of type float, int given
+TypeError: app(): Argument #1 ($x) must be of type string, null given
+TypeError: app(): Argument #1 ($x) must be of type string, float given
+TypeError: P::bump(): Argument #1 ($x) must be of type string, int given
+int(5)
+NULL
+float(1.5)
+string(3) "12a"
+string(1) "7"

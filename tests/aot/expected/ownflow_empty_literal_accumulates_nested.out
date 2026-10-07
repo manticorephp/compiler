@@ -1,0 +1,25 @@
+array(2) {
+  [2]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    int(2)
+  }
+  [4]=>
+  array(2) {
+    [0]=>
+    string(1) "a"
+    [1]=>
+    int(4)
+  }
+}
+array(1) {
+  [0]=>
+  array(2) {
+    ["type"]=>
+    string(6) "method"
+    ["n"]=>
+    int(12)
+  }
+}

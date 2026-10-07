@@ -71,6 +71,7 @@ use Compile\Mir\Return_;
 use Compile\Mir\StaticCall_;
 use Compile\Mir\StoreElement;
 use Compile\Mir\StoreLocal;
+use Compile\Mir\CaughtValue_;
 use Compile\Mir\StoreProperty;
 use Compile\Mir\DynProp_;
 use Compile\Mir\StoreDynProp_;
@@ -96,7 +97,10 @@ trait LowerStmts
         foreach ($stmt->catches as $c) {
             $types = [];
             foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); }
-            $body = [];
+            // The arm takes the thrown object's +1 out of `@__mir_thrown`
+            // first: into its variable, or discarded (released) without one.
+            $caught = new CaughtValue_($types, Type::obj(\count($types) > 0 ? $types[0] : 'Throwable'));
+            $body = [$c->name === null ? $caught : new StoreLocal($c->name, $caught, $caught->type)];
             foreach ($c->body->statements as $s) { $body[] = $this->lowerStmt($s); }
             $catches[] = new MirCatch($types, $c->name, $body);
         }

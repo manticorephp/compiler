@@ -158,7 +158,6 @@ trait EmitLlvmControl
         $stepLabel = $this->ssa->allocLabel('feg.step');
         $endLabel  = $this->ssa->allocLabel('feg.end');
 
-        $out .= $this->foreachOwnedSlotReset($fe);
         // rewind: resume once if not yet started (state == 0).
         $out .= $this->genFieldLoad($g, 8);
         $st0 = $this->lastValue;
@@ -166,7 +165,7 @@ trait EmitLlvmControl
         $out .= '  ' . $fresh . ' = icmp eq i64 ' . $st0 . ", 0\n";
         $out .= '  br i1 ' . $fresh . ', label %' . $rewindLabel . ', label %' . $condLabel . "\n";
         $out .= $rewindLabel . ":\n";
-        $out .= $this->genResumeCall($g);
+        $out .= $this->ehMarkRaise($this->genResumeCall($g), $fe->ownLive);
         $out .= '  br label %' . $condLabel . "\n";
 
         $out .= $condLabel . ":\n";
@@ -201,17 +200,21 @@ trait EmitLlvmControl
             $gf = ($gelem->kind === Type::KIND_CELL || $gelem->kind === Type::KIND_UNKNOWN)
                 ? 'cell' : $this->discardReleaseFlavor($gelem);
             if ($gf !== '') { $out .= $this->rcRetainReg($cur, $gf); }
+            $out .= $this->foreachPrevDrop($fe, false);
         }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
+            $kw = $this->lastValue;
+            if ($fe->ownKey) { $out .= $this->rcRetainReg($kw, 'cell'); }
+            $out .= $this->foreachPrevDrop($fe, true);
+            $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
         $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, true);
 
         $out .= $stepLabel . ":\n";
         if ($framed) { $out .= $this->genReloadArr($gSlot); $g = $this->lastValue; }
-        $out .= $this->genResumeCall($g);
+        $out .= $this->ehMarkRaise($this->genResumeCall($g), $fe->ownLive);
         $out .= '  br label %' . $condLabel . "\n";
 
         $out .= $endLabel . ":\n";
@@ -393,14 +396,22 @@ trait EmitLlvmControl
         $subjName = '@fe.subj.' . (string)$this->iterCounter;
         $iterName = '@fe.it.' . (string)$this->iterCounter;
         $this->iterCounter = $this->iterCounter + 1;
+        $nsh = \count($this->feShared);
+        $sh = ($nsh > 0 && $this->feShared[$nsh - 1]->fe === $fe) ? $this->feShared[$nsh - 1] : null;
+        $shared = $sh !== null && $sh->aggOwnSlot !== '';
         $subjSlot = $this->ssa->allocReg();
-        $iterSlot = $this->ssa->allocReg();
+        $iterSlot = $shared ? $sh->aggIterSlot : $this->ssa->allocReg();
         $this->locals->slots[$subjName] = $subjSlot;
         $this->locals->slots[$iterName] = $iterSlot;
         $out  = '  ' . $subjSlot . " = alloca i64\n";
-        $out .= '  ' . $iterSlot . " = alloca i64\n";
+        if (!$shared) { $out .= '  ' . $iterSlot . " = alloca i64\n"; }
         $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
         $out .= '  store i64 ' . $word . ', ptr ' . $iterSlot . "\n";
+        // Whether the slot holds getIterator()'s result (+1, the loop's to give
+        // back) or the subject itself (borrowed).
+        $ownSlot = $shared ? $sh->aggOwnSlot : $this->ssa->allocReg();
+        if (!$shared) { $out .= '  ' . $ownSlot . " = alloca i1\n"; }
+        $out .= '  store i1 0, ptr ' . $ownSlot . "\n";
         $aggL = $this->ssa->allocLabel('fe.agg');
         $joinL = $this->ssa->allocLabel('fe.agg.end');
         $probe = new \Compile\Mir\Instanceof_(
@@ -418,10 +429,21 @@ trait EmitLlvmControl
         $out .= $this->emitNode($gi);
         $out .= $this->coerceToI64();
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $out .= '  store i1 1, ptr ' . $ownSlot . "\n";
         $out .= '  br label %' . $joinL . "\n";
         $out .= $joinL . ":\n";
-        return $out . $this->emitIterProtocolLoop(
+        // The getIterator() result was never given back — not even at the end
+        // label — so every erased foreach over an IteratorAggregate leaked it,
+        // and with it the subject (php-cs-fixer: a Tokens and all its tokens
+        // per erased `foreach ($tokens …)`).
+        $this->cf->pushAggIter($iterSlot, true, $ownSlot);
+        $out .= $this->emitIterProtocolLoop(
             $fe, $iterSlot, $iterName, \Compile\Mir\Type::obj('Iterator'), true);
+        $this->cf->popAggIter();
+        $out .= $this->releaseAggIterSlot($iterSlot, true, $ownSlot);
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     private function genFrameProbeIr(string $iw): string
@@ -610,7 +632,11 @@ trait EmitLlvmControl
         $iterSlot = $this->locals->slots[$iterName];
         $out .= $this->emitNode($fe->array);
         $out .= $this->coerceToI64();
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $iterSlot . "\n";
+        $subj = $this->lastValue;
+        if ($fe->ownDropIter !== null) {
+            $out .= $this->ownDropIr($iterSlot, $fe->ownDropIter);
+        }
+        $out .= '  store i64 ' . $subj . ', ptr ' . $iterSlot . "\n";
         $iterType = \Compile\Mir\Type::obj($fe->iterClass);
         if ($fe->iterAggregate) {
             $subjNode = new \Compile\Mir\LoadLocal($iterName, $fe->array->type);
@@ -622,9 +648,103 @@ trait EmitLlvmControl
         // An interface-typed iterator may be a Generator at runtime, so each
         // protocol step classifies and branches. The body is still emitted
         // exactly once.
-        return $out . $this->emitIterProtocolLoop(
-            $fe, $iterSlot, $iterName, $iterType,
-            $this->iterNeedsRuntimeClass($fe->iterClass));
+        $dyn = $this->iterNeedsRuntimeClass($fe->iterClass);
+        // The iterator `getIterator()` handed back is the loop's own (+1): give
+        // it back when the loop ends — it held the subject, and with it every
+        // element (a SplFixedArray's). A Generator frame is given back the same
+        // way: the object release routes on the header, and the frame lets go
+        // of what it holds ({@see EmitLlvmGenerator}). A `return` / `break N` /
+        // `continue N` out of the body branches past the end label, so it
+        // releases the same slot on its way out ({@see ControlFlow::aggItersLeftBy}).
+        $owns = $fe->iterAggregate
+            && ($fe->iterClass === 'Generator' || $dyn || isset($this->classes[$fe->iterClass]));
+        if ($owns) { $this->cf->pushAggIter($iterSlot, $dyn); }
+        $out .= $this->emitIterProtocolLoop($fe, $iterSlot, $iterName, $iterType, $dyn);
+        if ($owns) {
+            $this->cf->popAggIter();
+            $out .= $this->releaseAggIterSlot($iterSlot, $dyn);
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+        }
+        return $out;
+    }
+
+    /**
+     * Give back an aggregate foreach's iterator and clear its slot. `$flag`,
+     * when set, is an i1 slot saying whether the loop owns the iterator at all
+     * — the erased foreach drives a subject that IS an Iterator (borrowed) or
+     * one it got from getIterator() (owned) through the same slot.
+     */
+    /**
+     * The release flavor of a foreach's iterable when the loop owns it: a fresh
+     * +1 array ({@see \Compile\Mir\Ownership::tempArgFlavor}) that nothing
+     * past the loop can still borrow from — a by-value walk whose value var the
+     * flow co-owns (or holds a non-rc scalar) and whose keys are ints. ''
+     * otherwise: a borrowed element or string key read after the loop would
+     * die with the array.
+     */
+    private function ownedIterableFlavor(\Compile\Mir\Foreach_ $fe): string
+    {
+        if ($fe->byRef || $fe->genSlotBase >= 0) { return ''; }
+        $at = $fe->array->type;
+        if (!$at->isArray()) { return ''; }
+        $el = $at->element;
+        if (!$fe->ownCoOwn && ($el === null || $el->kind === Type::KIND_UNKNOWN
+            || $el->kind === Type::KIND_CELL || $this->own->flavorOf($el) > 0)) { return ''; }
+        if ($fe->keyVar !== null && !$at->isVec()) { return ''; }
+        // A literal holds one reference on each array element (a fresh one
+        // transferred, a borrowed one retained); `vecbuf` is the ARGUMENT
+        // answer, where the call gives those back. Here nobody else does: the
+        // loop is the literal's sole owner, as a local slot is, so it drops
+        // them by the local slot's element walk ({@see rcReleaseFlavorPlain}).
+        if ($fe->array->kind === Node::KIND_ARRAY_LIT && $el !== null && $el->isArray()) {
+            return $this->nestedArrFlavor($el, $at->isAssoc() ? 'assoc' : 'vec');
+        }
+        return $this->freshRcArgFlavor($fe->array);
+    }
+
+    private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
+    {
+        $out = '';
+        if ($flavor !== '') {
+            // A fresh array iterable the loop owns ({@see ownedIterableFlavor}).
+            $a = $this->ssa->allocReg();
+            $out .= '  ' . $a . ' = load i64, ptr ' . $iterSlot . "\n";
+            $out .= $this->rcReleaseReg($a, $flavor);
+            $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+            return $out;
+        }
+        $skipL = '';
+        if ($flag !== '') {
+            $fv = $this->ssa->allocReg();
+            $out .= '  ' . $fv . ' = load i1, ptr ' . $flag . "\n";
+            $relL = $this->ssa->allocLabel('aggit.rel');
+            $skipL = $this->ssa->allocLabel('aggit.skip');
+            $out .= '  br i1 ' . $fv . ', label %' . $relL . ', label %' . $skipL . "\n";
+            $out .= $relL . ":\n";
+            $out .= '  store i1 0, ptr ' . $flag . "\n";
+        }
+        $it = $this->ssa->allocReg();
+        $out .= '  ' . $it . ' = load i64, ptr ' . $iterSlot . "\n";
+        // An object or — `getIterator(): Iterator` may hand one back at run
+        // time — a Generator frame: `__mir_rc_release` routes on the header.
+        $out .= $this->rcReleaseReg($it, 'obj');
+        $out .= '  store i64 0, ptr ' . $iterSlot . "\n";
+        if ($skipL !== '') {
+            $out .= '  br label %' . $skipL . "\n" . $skipL . ":\n";
+        }
+        return $out;
+    }
+
+    /** Release the open aggregate iterators a jump to loop `$level` leaves (0: a return). */
+    private function releaseAggItersLeftBy(int $level): string
+    {
+        $out = '';
+        foreach ($this->cf->aggItersLeftBy($level) as $i) {
+            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i),
+                $this->cf->aggIterFlag($i), $this->cf->aggIterFlavor($i));
+        }
+        return $out;
     }
 
     /**
@@ -637,8 +757,7 @@ trait EmitLlvmControl
         string $iterName, \Compile\Mir\Type $iterType, bool $dyn): string
     {
         $iterNode = new \Compile\Mir\LoadLocal($iterName, $iterType);
-        $out = $this->foreachOwnedSlotReset($fe);
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind');
+        $out = $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'rewind'), $fe->ownLive);
 
         $condL = $this->ssa->allocLabel('feo.cond');
         $bodyL = $this->ssa->allocLabel('feo.body');
@@ -647,14 +766,14 @@ trait EmitLlvmControl
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $condL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'valid'), $fe->ownLive);
         $out .= $this->coerceToI64();
         $v = $this->ssa->allocReg();
         $out .= '  ' . $v . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
         $out .= '  br i1 ' . $v . ', label %' . $bodyL . ', label %' . $endL . "\n";
 
         $out .= $bodyL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current'), $fe->ownLive);
         $out .= $this->coerceToI64();
         $cur = $this->lastValue;
         // `current()` is +1 on every arm — a method's return convention, and
@@ -662,17 +781,21 @@ trait EmitLlvmControl
         // only gives back the previous iteration's.
         if ($this->foreachValueOwns($fe)) {
             $out .= $this->foreachOwnedRebind($fe, $cur, false);
+        } else {
+            $out .= $this->foreachPrevDrop($fe, false);
         }
         $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
         if ($fe->keyVar !== null) {
-            $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key');
+            $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key'), $fe->ownLive);
             $out .= $this->coerceToI64();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
+            $kw = $this->lastValue;
+            $out .= $this->foreachPrevDrop($fe, true);
+            $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
         }
         $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);
 
         $out .= $stepL . ":\n";
-        $out .= $this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next');
+        $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'next'), $fe->ownLive);
         $out .= '  br label %' . $condL . "\n";
 
         $out .= $endL . ":\n";
@@ -769,7 +892,9 @@ trait EmitLlvmControl
     private function armRetainPostBox(Node $res, Node $arm, string $i64reg): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
-        $flavor = $this->condFlavor($res->type);
+        // {@see armCoerce} rebuilt it: a fresh +1 already.
+        if (\Compile\Mir\Ownership::needsCellify($res->type, $arm->type)) { return ''; }
+        $flavor = $this->condResFlavor($res);
         if ($flavor === '' || $flavor === 'cell') { return ''; }
         if ($this->armIsFresh($arm, $flavor)) { return ''; }
         return $this->rcRetainReg($i64reg, $flavor);
@@ -783,7 +908,7 @@ trait EmitLlvmControl
     private function armRetainLast(Node $res, Node $arm): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
-        $flavor = $this->condFlavor($res->type);
+        $flavor = $this->condResFlavor($res);
         if ($flavor === '') { return ''; }
         if ($flavor === 'cell') { return $this->armRetainPreBox($res, $arm); }
         if ($this->armIsFresh($arm, $flavor)) { return ''; }
@@ -805,9 +930,25 @@ trait EmitLlvmControl
     private function armRetainPreBox(Node $res, Node $arm): string
     {
         if (!$this->condOwnsResult($res)) { return ''; }
-        if ($this->condFlavor($res->type) !== 'cell') { return ''; }
+        if ($this->condResFlavor($res) !== 'cell') { return ''; }
         if ($this->armIsFresh($arm, 'cell')) { return ''; }
         return $this->retainCellPayload($arm);
+    }
+
+    /**
+     * An arm of a non-cell conditional, onto the i64 carrier. A concrete-element
+     * array arm under a CELL-element result (the arms' element join,
+     * {@see InferNodes::armArrayJoin}) is rebuilt into a fresh cell buffer first,
+     * so the buffer IS what the result's type claims; the rebuild is the arm's
+     * +1 ({@see armRetainPostBox} skips it). `lastValue` holds the arm's value.
+     */
+    private function armCoerce(Node $res, Node $arm): string
+    {
+        $out = '';
+        if (\Compile\Mir\Ownership::needsCellify($res->type, $arm->type)) {
+            $out .= $this->emitCellifyArrayRaw($arm->type->element, $this->cellifySourceFlavor($arm));
+        }
+        return $out . $this->coerceToI64();
     }
 
     private function emitTernary(Ternary $n): string
@@ -852,7 +993,7 @@ trait EmitLlvmControl
                 $out .= $this->armRetainPreBox($n, $thenArm);
                 $out .= $this->boxToCell($t->then->type, $t->then);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $t->then);
             }
             $thenVal = $this->lastValue;
         } elseif ($wantCell) {
@@ -873,7 +1014,7 @@ trait EmitLlvmControl
             $out .= $this->armRetainPreBox($n, $t->else_);
             $out .= $this->boxToCell($t->else_->type, $t->else_);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($n, $t->else_);
         }
         $elseVal = $this->lastValue;
         $out .= $this->armRetainPostBox($n, $t->else_, $elseVal);
@@ -948,24 +1089,6 @@ trait EmitLlvmControl
         return $base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name;
     }
 
-    /**
-     * Before an ITERATOR loop that co-owns its value: drop what the slot holds
-     * (an earlier loop's last value over the same name is still +1) and zero
-     * it, so the first iteration's drop is a no-op — the array loop's rule.
-     */
-    private function foreachOwnedSlotReset(Foreach_ $fe): string
-    {
-        if (!$this->foreachValueOwns($fe)) { return ''; }
-        $slot = $this->locals->slots[$fe->valueVar];
-        $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
-        $out = '';
-        if ($fl !== '') {
-            $stale = $this->ssa->allocReg();
-            $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
-            $out .= $this->rcReleaseReg($stale, $fl);
-        }
-        return $out . '  store i64 0, ptr ' . $slot . "\n";
-    }
 
     /**
      * A co-owning iterator loop binding `$cur`: take its +1 when the step
@@ -974,12 +1097,10 @@ trait EmitLlvmControl
      */
     private function foreachOwnedRebind(Foreach_ $fe, string $cur, bool $retain): string
     {
-        $fl = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
+        $fl = $this->rcReleaseFlavor($fe->ownBind ?? $this->frame->ownLocals[$fe->valueVar]);
         if ($fl === '') { return ''; }
         $out = $retain ? $this->rcRetainReg($cur, $fl) : '';
-        $prev = $this->ssa->allocReg();
-        $out .= '  ' . $prev . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
-        return $out . $this->rcReleaseReg($prev, $fl);
+        return $out . $this->foreachPrevDrop($fe, false);
     }
 
     /**
@@ -992,10 +1113,10 @@ trait EmitLlvmControl
         if (\Compile\Debug::$feOnly !== ''
             && !\str_contains($this->frame->name, \Compile\Debug::$feOnly)) { return false; }
         if (!InsertMemoryOps::foreachValueCoOwns($fe, $this->enums, $this->classes)) { return false; }
-        // ★★★ THE PASS DECIDES; THE EMITTER OBEYS. `rcObjLocals` IS that
-        // decision, already transported through the IR and collected per
-        // function ({@see EmitLlvmMemory::initRcObjSlots}) — so the retain here
-        // and the scope-exit release there cannot disagree about a name.
+        // ★★★ THE PASS DECIDES; THE EMITTER OBEYS. `ownCoOwn` + `ownLocals` ARE
+        // that decision, already transported through the IR and collected per
+        // function ({@see EmitLlvmMemory::initOwnSlots}) — so the retain here
+        // and the pass's drops cannot disagree about a name.
         //
         // This used to RE-DERIVE the answer from `frame->body`, cached on that
         // body's identity. `EmitLlvmModule` NULLS `frame->body` at five points
@@ -1006,7 +1127,21 @@ trait EmitLlvmControl
         // rc underflow to catch it. Every `InferTypes` method family reproduced
         // it independently, which is what a per-function bookkeeping bug looks
         // like and what a per-site one never does.
-        return isset($this->frame->rcObjLocals[$fe->valueVar]);
+        if (!$fe->ownCoOwn) { return false; }
+        return isset($this->frame->ownLocals[$fe->valueVar]);
+    }
+
+    /**
+     * {@see OwnershipFlow}'s drop of what the value (`$key` false) or key slot
+     * still holds at a binding — present only where the flow owns it at the
+     * loop head.
+     */
+    private function foreachPrevDrop(Foreach_ $fe, bool $key): string
+    {
+        $mo = $key ? $fe->ownDropKey : $fe->ownDropValue;
+        if ($mo === null) { return ''; }
+        $slot = $this->ownOpSlot($mo);
+        return $slot === '' ? '' : $this->ownDropIr($slot, $mo);
     }
 
     /**
@@ -1087,6 +1222,20 @@ trait EmitLlvmControl
     private array $feShared = [];
     private int $feSharedSeq = 0;
 
+    /**
+     * A loop the emitter does not reset must hold no arena allocation of its
+     * own: {@see ApplyMemoryMode} asked the same question on the same stamps and
+     * demoted every allocation of a loop it refused. A disagreement would grow
+     * the arena every iteration until the frame returns — never silently.
+     */
+    private function arenaBoundedOrFail(?Node $cond, Node $body, ?Node $step, Node $loop): void
+    {
+        if (!$this->arena->holdsArena($cond, $body, $step)) { return; }
+        throw new \RuntimeException('EmitLlvm: ' . $this->frame->name . ': the loop at line '
+            . (string)$loop->line . ' keeps arena allocations but takes no per-iteration reset'
+            . ' (ApplyMemoryMode and the emitter disagree on ArenaContext::canResetPerIteration)');
+    }
+
     private function inSharedForeach(\Compile\Mir\Foreach_ $fe): bool
     {
         $n = \count($this->feShared);
@@ -1118,9 +1267,11 @@ trait EmitLlvmControl
         if (!$sh->bodyEmitted) {
             $sh->bodyEmitted = true;
             $out .= $sh->bodyLabel . ":\n";
+            if ($sh->aggOwnSlot !== '') { $this->cf->pushAggIter($sh->aggIterSlot, true, $sh->aggOwnSlot); }
             $this->cf->enterLoop($sh->brkLabel, $sh->contLabel);
             $out .= $this->emitNode($fe->body);
             $this->cf->leave();
+            if ($sh->aggOwnSlot !== '') { $this->cf->popAggIter(); }
             $out .= '  br label %' . $sh->contLabel . "\n";
         }
         return $out;
@@ -1173,6 +1324,36 @@ trait EmitLlvmControl
             $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
         }
+        // A by-ref loop writes $v back: record whether the body left it a CELL.
+        // Registered BEFORE any arm is emitted: over an erased base the body is
+        // shared ({@see emitForeachBodyArm}) and is emitted inside whichever arm
+        // comes first, so a flag allocated in the array arm was never the one the
+        // body's stores recorded into. Only a YIELDING body cannot keep it (the
+        // alloca does not survive a resume).
+        $feFlag = '';
+        $fePrev = $this->feCellFlags[$fe->valueVar] ?? null;
+        $fePrevSet = isset($this->feCellFlagSet[$fe->valueVar]);
+        if ($fe->byRef && !$this->foreachBodyYields($fe->body) && !isset($this->locals->refLocals[$fe->valueVar])) {
+            $feFlag = $this->ssa->allocReg();
+            $out .= '  ' . $feFlag . " = alloca i64\n";
+            $this->feCellFlags[$fe->valueVar] = $feFlag;
+            unset($this->feCellFlagSet[$fe->valueVar]);
+        }
+        // The live walk's slots exist before every arm: an erased base's body
+        // is shared and may be emitted inside the generator arm, where its
+        // write-backs must see "no array arm" (a null base).
+        $live = $fe->byRef && !$this->foreachBodyYields($fe->body) && $this->unsetBaseIsWritable($fe->array);
+        $liveSlot = '';
+        $liveKey = '';
+        if ($live) {
+            $liveSlot = $this->ssa->allocReg();
+            $out .= '  ' . $liveSlot . " = alloca ptr\n";
+            $out .= '  store ptr null, ptr ' . $liveSlot . "\n";
+            $liveKey = $this->ssa->allocReg();
+            $out .= '  ' . $liveKey . " = alloca i64\n";
+            $out .= '  store i64 0, ptr ' . $liveKey . "\n";
+            $this->liveByRef[] = new \Compile\Mir\LiveByRefLoop($fe, $this->frame->name, $liveSlot, $liveKey, $feFlag);
+        }
         $out .= $this->emitNode($fe->array);
         // An ERASED base (`mixed` cell, or an element read out of an untyped
         // array) is NOT known to be an array. Stripping the tag unconditionally
@@ -1219,6 +1400,17 @@ trait EmitLlvmControl
             $this->feShared[] = new \Compile\Mir\ForeachSharedBody($fe, $armSlot,
                 $this->ssa->allocLabel('fe.sh.body'), $this->ssa->allocLabel('fe.sh.cont'),
                 $this->ssa->allocLabel('fe.sh.brk'));
+            // The shared body may be emitted inside ANY arm (the first to reach
+            // it), so the Traversable arm's owned iterator is registered for the
+            // body itself: its slots exist, flag clear, before every arm.
+            if ($this->hasTraversableClasses()) {
+                $sh = $this->feShared[\count($this->feShared) - 1];
+                $sh->aggIterSlot = $this->ssa->allocReg();
+                $sh->aggOwnSlot = $this->ssa->allocReg();
+                $out .= '  ' . $sh->aggIterSlot . " = alloca i64\n";
+                $out .= '  ' . $sh->aggOwnSlot . " = alloca i1\n";
+                $out .= '  store i1 0, ptr ' . $sh->aggOwnSlot . "\n";
+            }
             // The shared body joins every arm and dispatches back to each arm's
             // step, so no arm's entry block dominates its own loop blocks any
             // more — exactly the generator-resume situation. Run the arms in
@@ -1278,6 +1470,17 @@ trait EmitLlvmControl
             $out .= $this->coerceToPtr();
         }
         $arr = $this->lastValue;
+        // A fresh array iterable (a literal, a call result) is the loop's own:
+        // given back at the end and on every jump out of the body.
+        $iterFlavor = $this->ownedIterableFlavor($fe);
+        $iterSlot = '';
+        if ($iterFlavor !== '') {
+            $iterSlot = $this->ssa->allocReg();
+            $out .= '  ' . $iterSlot . " = alloca i64\n";
+            $iw = $this->ssa->allocReg();
+            $out .= '  ' . $iw . ' = ptrtoint ptr ' . $arr . " to i64\n";
+            $out .= '  store i64 ' . $iw . ', ptr ' . $iterSlot . "\n";
+        }
         // `foreach ($a as $k => $v) { … unset($a[$k]); … }` — PHP iterates a
         // SNAPSHOT of a by-value foreach, so the deletions do not disturb the
         // walk. That is not free here: an unset on a packed buffer promotes it
@@ -1307,9 +1510,12 @@ trait EmitLlvmControl
         // freed memory as soon as the body unset an element (an unset on a
         // packed buffer promotes and relocates) — symfony's
         // EventDispatcher::removeListener did exactly that on every run.
-        $live = $fe->byRef && $fe->genSlotBase < 0 && $this->unsetBaseIsWritable($fe->array);
-        $liveSlot = '';
-        $liveKey = '';
+        // An erased base runs FRAMED too ({@see $dynGen}: slots stand in for a
+        // frame because the shared body joins every arm) and that is no reason
+        // to walk the captured buffer: only a body that YIELDS needs its state
+        // in the generator frame, where the live slots below cannot live. The
+        // framed walk wrote `$list` back into the buffer an `unset($list[$k])`
+        // had just relocated — php-cs-fixer's EventDispatcher::removeListener.
         if ($live) {
             $out .= $this->emitSeparatedArray($fe->array, $bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN);
             $sep = $this->lastValue;
@@ -1317,11 +1523,7 @@ trait EmitLlvmControl
             $out .= '  ' . $snz . ' = icmp eq ptr ' . $sep . ", null\n";
             $arr = $this->ssa->allocReg();
             $out .= '  ' . $arr . ' = select i1 ' . $snz . ', ptr @__mir_zero_word, ptr ' . $sep . "\n";
-            $liveSlot = $this->ssa->allocReg();
-            $out .= '  ' . $liveSlot . " = alloca ptr\n";
             $out .= '  store ptr ' . $arr . ', ptr ' . $liveSlot . "\n";
-            $liveKey = $this->ssa->allocReg();
-            $out .= '  ' . $liveKey . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $liveKey . "\n";
             $this->rt->needsCellKey = true;
         }
@@ -1362,6 +1564,7 @@ trait EmitLlvmControl
         $bodyLabel = $this->ssa->allocLabel('fe.body');
         $stepLabel = $this->ssa->allocLabel('fe.step');
         $endLabel  = $this->ssa->allocLabel('fe.end');
+        if ($iterSlot !== '') { $this->cf->pushAggIter($iterSlot, false, '', $iterFlavor); }
         $this->cf->enterLoop($endLabel, $stepLabel);
 
         // Per-iteration arena reset. Safe because the save point is taken
@@ -1369,33 +1572,14 @@ trait EmitLlvmControl
         // are materialized, so a reset never frees the array being walked.
         // By-ref foreach writes the value slot back into the element, so an
         // arena value could escape into the (pre-save) array — skip it.
-        $reset = !$fe->byRef && !$this->inSharedForeach($fe)
-            && $this->arena->canResetPerIteration(null, $fe->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = !$this->inSharedForeach($fe)
+            && $this->arena->canResetForeach($fe, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail(null, $fe->body, null, $fe); }
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($fe) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
 
-        // The co-owning loop drops the slot's PREVIOUS word on every iteration,
-        // and on the first one that word is whatever the frame happened to hold
-        // — an uninitialised `alloca`, or a value from an outer use of the same
-        // name that this loop is about to overwrite anyway. Zero it here, where
-        // the store dominates the body: the drop then no-ops on iteration one,
-        // and php's rule that `$v` survives the loop is untouched (the slot is
-        // written before the body ever reads it).
-        if ($this->foreachValueOwns($fe)) {
-            // RELEASE, then zero. A second loop over the same NAME arrives here
-            // with the first loop's last element still held at +1 (the
-            // per-iteration drop only ever gives back the PREVIOUS one), and
-            // zeroing alone stranded it — one leaked ref per loop, which is
-            // exactly what `InferScans::scanByRefCaptureNode`'s two `$c` loops
-            // do on every node of every function.
-            $fvFlavor = $this->discardReleaseFlavor($fe->array->type->element);
-            $slot = $this->locals->slots[$fe->valueVar];
-            if ($fvFlavor !== '') {
-                $stale = $this->ssa->allocReg();
-                $out .= '  ' . $stale . ' = load i64, ptr ' . $slot . "\n";
-                $out .= $this->rcReleaseReg($stale, $fvFlavor);
-            }
-            $out .= '  store i64 0, ptr ' . $slot . "\n";
-        }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -1448,7 +1632,12 @@ trait EmitLlvmControl
         // for the same reason; the store side re-encodes, so a value written
         // back into a raw-hinted buffer lands raw again. An ERASED element is a
         // cell too since InferTypes types it so ({@see InferNodes::inferForeach}).
-        $fvT = $this->locals->localTypes[$fe->valueVar] ?? null;
+        // The loop variable then starts as the DECODED cell, so the `&$v`
+        // write-back must encode it again unless the body stored a raw value:
+        // a raw-hinted buffer (a `['c', 'a']` literal
+        // stored into an untyped property) got a tagged string where it keeps
+        // raw pointers, and its release freed the tag bits as an address.
+        $vDecodedCell = $fel === null || $fel->kind === Type::KIND_CELL || $fel->kind === Type::KIND_UNKNOWN;
         if (($fel !== null && ($fel->kind === Type::KIND_CELL || $fel->kind === Type::KIND_UNKNOWN))
             || $fel === null
             || $fe->array->type->kind === Type::KIND_CELL
@@ -1512,13 +1701,13 @@ trait EmitLlvmControl
             // inner buffers on every call — and a plain retain paired with that
             // release freed the inner arrays under the caller's literal
             // (`foreach ($others as $o)` over `[['a' => [3]]]`).
-            $fvFlavor = $this->rcReleaseFlavor($this->frame->rcObjLocals[$fe->valueVar]);
+            $fvFlavor = $this->rcReleaseFlavor($this->frame->ownLocals[$fe->valueVar]);
             if ($fvFlavor !== '') {
                 $out .= $this->rcRetainReg($ev, $fvFlavor);
-                $prev = $this->ssa->allocReg();
-                $out .= '  ' . $prev . ' = load i64, ptr ' . $valSlot . "\n";
-                $out .= $this->rcReleaseReg($prev, $fvFlavor);
+                $out .= $this->foreachPrevDrop($fe, false);
             }
+        } else {
+            $out .= $this->foreachPrevDrop($fe, false);
         }
         $out .= $this->foreachVarStore($fe->valueVar, $ev, $fe->array->type->element);
         if ($fe->keyVar !== null) {
@@ -1579,29 +1768,16 @@ trait EmitLlvmControl
             }
             $keyIsCell = $kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
                 || $vecErased || $keyK === Type::KIND_CELL;
+            $out .= $this->foreachPrevDrop($fe, true);
             $out .= $this->foreachVarStore($fe->keyVar, $kp,
                 $keyIsCell ? Type::cell() : $fe->array->type->key);
         }
-        // A by-ref loop writes $v back: record whether the body left it a CELL.
-        $feFlag = '';
-        $feFlagUsed = false;
-        $fePrev = $this->feCellFlags[$fe->valueVar] ?? null;
-        $fePrevSet = isset($this->feCellFlagSet[$fe->valueVar]);
-        if ($fe->byRef && $fe->genSlotBase < 0 && !isset($this->locals->refLocals[$fe->valueVar])) {
-            $feFlag = $this->ssa->allocReg();
-            $out .= '  ' . $feFlag . " = alloca i64\n";
-            $out .= '  store i64 0, ptr ' . $feFlag . "\n";
-            $this->feCellFlags[$fe->valueVar] = $feFlag;
-            unset($this->feCellFlagSet[$fe->valueVar]);
+        // The loop's own store left a cell exactly when it decoded one.
+        if ($feFlag !== '') {
+            $out .= '  store i64 ' . ($vDecodedCell ? '1' : '0') . ', ptr ' . $feFlag . "\n";
         }
         $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, false);
-        if ($feFlag !== '') {
-            $feFlagUsed = isset($this->feCellFlagSet[$fe->valueVar]);
-            if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
-            else { $this->feCellFlags[$fe->valueVar] = $fePrev; }
-            if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
-            else { unset($this->feCellFlagSet[$fe->valueVar]); }
-        }
+        $feFlagUsed = $feFlag !== '' && ($vDecodedCell || isset($this->feCellFlagSet[$fe->valueVar]));
 
         $out .= $stepLabel . ":\n";
         if ($framed && $fe->byRef) { $out .= $this->genReloadArr($arrSlot); $arr = $this->lastValue; }
@@ -1639,7 +1815,9 @@ trait EmitLlvmControl
             $wv = $this->ssa->allocReg();
             $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
             $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $this->feAddr . "\n";
+            $wb = $this->lastValue;
+            $out .= $this->foreachRefTargetAddr($this->feAddr, $fe->array->type);
+            $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
             $np = $this->ssa->allocReg();
             $out .= '  ' . $np . ' = add i64 ' . $pos . ", 1\n";
             $out .= '  store i64 ' . $np . ', ptr ' . $iSlot . "\n";
@@ -1651,7 +1829,9 @@ trait EmitLlvmControl
                 $wv = $this->ssa->allocReg();
                 $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
                 $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $arr, $wv, $fe->array->type->element);
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $wAddr . "\n";
+                $wb = $this->lastValue;
+                $out .= $this->foreachRefTargetAddr($wAddr, $fe->array->type);
+                $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
             }
             $si2 = $this->ssa->allocReg();
             $out .= '  ' . $si2 . ' = add i64 ' . $si . ", 1\n";
@@ -1659,14 +1839,26 @@ trait EmitLlvmControl
             $out .= '  br label %' . $condLabel . "\n";
         }
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
         if ($live) {
             // A `break` leaves the body's key still held.
             $lk = $this->ssa->allocReg();
             $out .= '  ' . $lk . ' = load i64, ptr ' . $liveKey . "\n";
             $out .= '  call void @__mir_cell_drop(i64 ' . $lk . ")\n";
         }
+        if ($iterSlot !== '') { $out .= $this->releaseAggIterSlot($iterSlot, false, '', $iterFlavor); }
 
         $this->cf->leave();
+        if ($iterSlot !== '') { $this->cf->popAggIter(); }
+        if ($feFlag !== '') {
+            if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }
+            else { $this->feCellFlags[$fe->valueVar] = $fePrev; }
+            if ($fePrevSet) { $this->feCellFlagSet[$fe->valueVar] = true; }
+            else { unset($this->feCellFlagSet[$fe->valueVar]); }
+        }
         // Rejoin the generator arm of the erased-base classify above.
         if ($dynEnd !== '') {
             $out .= '  br label %' . $dynEnd . "\n";
@@ -1675,6 +1867,101 @@ trait EmitLlvmControl
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
         }
+        if ($live) {
+            $out .= '  store ptr null, ptr ' . $liveSlot . "\n";
+            \array_pop($this->liveByRef);
+        }
+        return $out;
+    }
+
+    /**
+     * Write each enclosing live by-ref loop variable that statement `$s` names
+     * back into its element, as the loop's step does.
+     *
+     * The variable is a copy sharing the element's count, written back by key
+     * at the step. A write in between that RELOCATES it — an unset promoting a
+     * packed buffer, an append growing it — frees the buffer the element still
+     * names, and a body that then reaches the element another way read and
+     * dropped freed memory: `unset($list[$k]); if (!$list) { unset($this->ls[$e][$p]); }`
+     * (php-cs-fixer's EventDispatcher::removeListener). Keeping the element
+     * current after every statement that names the variable closes that window.
+     */
+    private function liveByRefSyncIr(Node $s): string
+    {
+        if ($this->liveByRef === []) { return ''; }
+        $k = $s->kind;
+        if ($k === Node::KIND_RETURN || $k === Node::KIND_BREAK || $k === Node::KIND_CONTINUE
+            || $k === Node::KIND_THROW || $k === Node::KIND_GOTO) { return ''; }
+        $out = '';
+        $lv = $this->lastValue;
+        $lt = $this->lastValueType;
+        foreach ($this->liveByRef as $lb) {
+            if ($lb->fnName !== $this->frame->name) { continue; }
+            if (!isset($this->locals->slots[$lb->fe->valueVar])) { continue; }
+            if (!self::namesLocal($s, $lb->fe->valueVar)) { continue; }
+            $out .= $this->liveByRefWriteBackIr($lb);
+        }
+        $this->lastValue = $lv;
+        $this->lastValueType = $lt;
+        return $out;
+    }
+
+    private static function namesLocal(Node $n, string $name): bool
+    {
+        if ($n instanceof LoadLocal && $n->name === $name) { return true; }
+        if ($n instanceof StoreLocal && $n->name === $name) { return true; }
+        if ($n->kind === Node::KIND_CLOSURE) { return false; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if (self::namesLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
+    private function liveByRefWriteBackIr(\Compile\Mir\LiveByRefLoop $lb): string
+    {
+        $fe = $lb->fe;
+        $bk = $fe->array->type->kind;
+        $doL = $this->ssa->allocLabel('fe.sync');
+        $wbL = $this->ssa->allocLabel('fe.syncwb');
+        $endL = $this->ssa->allocLabel('fe.syncend');
+        $cur = $this->ssa->allocReg();
+        $out = '  ' . $cur . ' = load ptr, ptr ' . $lb->liveSlot . "\n";
+        $off = $this->ssa->allocReg();
+        $out .= '  ' . $off . ' = icmp eq ptr ' . $cur . ", null\n";
+        $out .= '  br i1 ' . $off . ', label %' . $endL . ', label %' . $doL . "\n";
+        $out .= $doL . ":\n";
+        $out .= $this->emitNode($fe->array);
+        if ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $out .= $this->arrayPtrOrEmptyIr($this->lastValue);
+            $na = $this->arrayPtrReg;
+        } else {
+            $out .= $this->coerceToPtr();
+            $na = $this->lastValue;
+        }
+        $nnz = $this->ssa->allocReg();
+        $out .= '  ' . $nnz . ' = icmp eq ptr ' . $na . ", null\n";
+        $na2 = $this->ssa->allocReg();
+        $out .= '  ' . $na2 . ' = select i1 ' . $nnz . ', ptr @__mir_zero_word, ptr ' . $na . "\n";
+        $out .= '  store ptr ' . $na2 . ', ptr ' . $lb->liveSlot . "\n";
+        $lk = $this->ssa->allocReg();
+        $out .= '  ' . $lk . ' = load i64, ptr ' . $lb->liveKey . "\n";
+        $pos = $this->ssa->allocReg();
+        $out .= '  ' . $pos . ' = call i64 @__mir_array_pos_cell(ptr ' . $na2 . ', i64 ' . $lk . ")\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = icmp sge i64 ' . $pos . ", 0\n";
+        $out .= '  br i1 ' . $has . ', label %' . $wbL . ', label %' . $endL . "\n";
+        $out .= $wbL . ":\n";
+        $out .= $this->foreachElemAddrUnified($na2, $pos);
+        $addr = $this->feAddr;
+        $wv = $this->ssa->allocReg();
+        $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        $out .= $this->foreachWriteBackEncode($lb->feFlag, $na2, $wv, $fe->array->type->element);
+        $wb = $this->lastValue;
+        $out .= $this->foreachRefTargetAddr($addr, $fe->array->type);
+        $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
         return $out;
     }
 
@@ -1699,14 +1986,20 @@ trait EmitLlvmControl
         $f = $this->ssa->allocReg();
         $out .= '  ' . $f . ' = load i64, ptr ' . $flag . "\n";
         $c = $this->ssa->allocReg();
-        $out .= '  ' . $c . ' = icmp ne i64 ' . $f . ", 0\n";
+        $cellElT = $elT === null || $elT->kind === Type::KIND_CELL || $elT->kind === Type::KIND_UNKNOWN;
+        // Flag: 0 = raw word for a raw buffer, 1 = a decoded cell, else the
+        // element-hint code of a RAW value the body stored. A cell element
+        // buffer takes every one of them as a cell, never a bare payload.
+        $out .= '  ' . $c . ' = icmp ' . ($cellElT ? 'ne' : 'eq') . ' i64 ' . $f . ', ' . ($cellElT ? '0' : '1') . "\n";
         $encL = $this->ssa->allocLabel('fe.enc');
         $joinL = $this->ssa->allocLabel('fe.encj');
         $out .= '  br i1 ' . $c . ', label %' . $encL . ', label %' . $joinL . "\n";
         $out .= $encL . ":\n";
         if ($elT === null || $elT->kind === Type::KIND_CELL || $elT->kind === Type::KIND_UNKNOWN) {
+            $bx = $this->ssa->allocReg();
+            $out .= '  ' . $bx . ' = call i64 @__mir_box_by_repr(i64 ' . $word . ', i64 ' . $f . ")\n";
             $e = $this->ssa->allocReg();
-            $out .= '  ' . $e . ' = call i64 @__mir_elem_encode(ptr ' . $arr . ', i64 ' . $word . ")\n";
+            $out .= '  ' . $e . ' = call i64 @__mir_elem_encode(ptr ' . $arr . ', i64 ' . $bx . ")\n";
         } else {
             $this->lastValue = $word;
             $this->lastValueType = 'i64';
@@ -1766,6 +2059,44 @@ trait EmitLlvmControl
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
         $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
+        return $out;
+    }
+
+    /**
+     * Where a by-ref foreach writes `$v` back: the element slot, or — when the
+     * slot holds a REFERENCE cell (a `&...$xs` pack, `[&$a, &$b]`) — the box it
+     * points at, so the write reaches the bound variable and the binding stays.
+     * Writing the slot replaced the reference with the value and lost the
+     * write. Only a slot that holds cells can hold a reference; any other
+     * buffer keeps the plain slot. Leaves the address in {@see $feAddr}.
+     */
+    private function foreachRefTargetAddr(string $slot, Type $arrT): string
+    {
+        $this->feAddr = $slot;
+        // The predicate the element store's write-through uses
+        // ({@see EmitLlvmArrays::elemSlotMayHoldRef}): a cell or erased element
+        // (an erased one is what a bare `array &` holds, refs included); a
+        // concrete element buffer never holds a reference box.
+        if (!$this->elemSlotMayHoldRef($arrT)) { return ''; }
+        $cur = $this->ssa->allocReg();
+        $istag = $this->ssa->allocReg();
+        $sh = $this->ssa->allocReg();
+        $nib = $this->ssa->allocReg();
+        $isr = $this->ssa->allocReg();
+        $both = $this->ssa->allocReg();
+        $mask = $this->ssa->allocReg();
+        $boxp = $this->ssa->allocReg();
+        $dst = $this->ssa->allocReg();
+        $out  = '  ' . $cur . ' = load i64, ptr ' . $slot . "\n";
+        $out .= '  ' . $istag . ' = icmp ugt i64 ' . $cur . ", -4503599627370496\n";
+        $out .= '  ' . $sh . ' = lshr i64 ' . $cur . ", 48\n";
+        $out .= '  ' . $nib . ' = and i64 ' . $sh . ", 15\n";
+        $out .= '  ' . $isr . ' = icmp eq i64 ' . $nib . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_REF . "\n";
+        $out .= '  ' . $both . ' = and i1 ' . $istag . ', ' . $isr . "\n";
+        $out .= '  ' . $mask . ' = and i64 ' . $cur . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $out .= '  ' . $boxp . ' = inttoptr i64 ' . $mask . " to ptr\n";
+        $out .= '  ' . $dst . ' = select i1 ' . $both . ', ptr ' . $boxp . ', ptr ' . $slot . "\n";
+        $this->feAddr = $dst;
         return $out;
     }
 
@@ -2041,7 +2372,7 @@ trait EmitLlvmControl
                 $out .= $this->armRetainPreBox($n, $arm->body);
                 $out .= $this->boxToCell($arm->body->type, $arm->body);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $arm->body);
             }
             $out .= $this->armRetainPostBox($n, $arm->body, $this->lastValue);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
@@ -2116,9 +2447,13 @@ trait EmitLlvmControl
         $endLabel  = $this->ssa->allocLabel('loop.end');
         $this->cf->enterLoop($endLabel, $condLabel);
 
-        $reset = $this->arena->canResetPerIteration($w->cond, $w->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = $this->arena->canResetPerIteration($w->cond, $w->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail($w->cond, $w->body, null, $w); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($n) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -2131,6 +2466,10 @@ trait EmitLlvmControl
         $out .= $this->emitNode($w->body);
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
 
         $this->cf->leave();
         return $out;
@@ -2146,10 +2485,14 @@ trait EmitLlvmControl
         // `continue` runs the step before re-testing the condition.
         $this->cf->enterLoop($endLabel, $stepLabel);
 
-        $reset = $this->arena->canResetPerIteration($f->cond, $f->body, $f->step, $this->frame->body, $this->gen->inGenerator);
+        $reset = $this->arena->canResetPerIteration($f->cond, $f->body, $f->step, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail($f->cond, $f->body, $f->step, $f); }
         $out = '';
         if ($f->init !== null) { $out .= $this->emitNode($f->init); }
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($n) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $condLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -2169,6 +2512,10 @@ trait EmitLlvmControl
         if ($f->step !== null) { $out .= $this->emitNode($f->step); }
         $out .= '  br label %' . $condLabel . "\n";
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
 
         $this->cf->leave();
         return $out;
@@ -2182,9 +2529,13 @@ trait EmitLlvmControl
         $endLabel  = $this->ssa->allocLabel('do.end');
         $this->cf->enterLoop($endLabel, $condLabel);
 
-        $reset = $this->arena->canResetPerIteration($d->cond, $d->body, null, $this->frame->body, $this->gen->inGenerator);
+        $reset = $this->arena->canResetPerIteration($d->cond, $d->body, null, $this->frame->body, $this->gen->inGenerator, $this->frame->paramNames);
+        if (!$reset) { $this->arenaBoundedOrFail($d->cond, $d->body, null, $d); }
         $out = '';
         if ($reset) { $out .= $this->emitArenaSave(); }
+        $mark = $reset ? $this->arenaArmTryMark($n) : -1;
+        $out .= $this->arenaArmTryMarkIr($mark);
+        $saved = [$this->arena->saveCurReg, $this->arena->saveUsedReg];
         $out .= '  br label %' . $bodyLabel . "\n";
         $out .= $bodyLabel . ":\n";
         if ($reset) { $out .= $this->emitArenaReset(); }
@@ -2197,6 +2548,10 @@ trait EmitLlvmControl
         $out .= '  ' . $condBit . ' = icmp ne i64 ' . $cond . ", 0\n";
         $out .= '  br i1 ' . $condBit . ', label %' . $bodyLabel . ', label %' . $endLabel . "\n";
         $out .= $endLabel . ":\n";
+        // The last iteration (the final condition, a `break`) left its
+        // allocations above the save: reclaim them on the way out too.
+        if ($reset) { $out .= $this->arenaRestoreIr($saved[0], $saved[1]); }
+        $out .= $this->arenaDisarmTryMark($mark);
 
         $this->cf->leave();
         return $out;

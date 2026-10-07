@@ -139,7 +139,19 @@ trait EmitLlvmVisit
 
     public function visitLoadLocal(LoadLocal $n): string
     {
-        return $this->emitLoadLocal($n);
+        $out = $this->emitLoadLocal($n);
+        // A container store takes this word without a count while the local
+        // stays live: its +1, taken on the slot that still holds the word read.
+        $mo = $n->ownShare;
+        if ($mo === null) { return $out; }
+        $slot = $this->ownOpSlot($mo);
+        if ($slot === '') { return $out; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out .= $this->ownRetainSlot($slot, $mo);
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
     }
 
     public function visitStoreLocal(StoreLocal $n): string
@@ -150,17 +162,20 @@ trait EmitLlvmVisit
         // slotStoredType}), so every later release drops what is really there.
         $flag = $this->frame->mixedFlagSlots[$n->name] ?? '';
         if ($flag !== '') {
-            // 0 = a raw rc pointer; 1 = anything else (a cell, a raw scalar).
-            $sk = InsertMemoryOps::slotStoredType($n)->kind;
-            $raw = $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ || $sk === Type::KIND_ARRAY;
-            $out .= '  store i64 ' . ($raw ? '0' : '1') . ', ptr ' . $flag . "\n";
+            // 1 = anything but a raw rc pointer (a cell, a raw scalar); 0 / i + 1
+            // = a raw pointer of the slot's raw flavor [0] / [i].
+            $out .= '  store i64 ' . $this->mixedFlagCode($n->name, InsertMemoryOps::slotStoredType($n))
+                . ', ptr ' . $flag . "\n";
         }
         $ff = $this->feCellFlags[$n->name] ?? '';
         if ($ff !== '') {
             $fk = InsertMemoryOps::slotStoredType($n)->kind;
             $isCell = $fk === Type::KIND_CELL || $fk === Type::KIND_UNKNOWN;
-            if ($isCell) { $this->feCellFlagSet[$n->name] = true; }
-            $out .= '  store i64 ' . ($isCell ? '1' : '0') . ', ptr ' . $ff . "\n";
+            // 1 = a cell; a raw value records its element-hint code so the
+            // write-back can box it for a CELL buffer ({@see foreachWriteBackEncode}).
+            $fc = $isCell ? 1 : ($this->elementHintCodeForType(InsertMemoryOps::slotStoredType($n)) ?? 0);
+            if ($fc !== 0) { $this->feCellFlagSet[$n->name] = true; }
+            $out .= '  store i64 ' . $fc . ', ptr ' . $ff . "\n";
         }
         $this->checkCellSink('store_local', $n->type, $n, $n->value);
         return $out;
@@ -285,6 +300,7 @@ trait EmitLlvmVisit
             if (!$isValue || $i !== $last) {
                 $fragment .= $this->emitDiscardedCallRelease($s);
             }
+            if (!$isValue) { $fragment .= $this->liveByRefSyncIr($s); }
             if ($chunks === null) {
                 $out .= $fragment;
                 if (\strlen($out) >= 65536) {
@@ -331,6 +347,11 @@ trait EmitLlvmVisit
     public function visitIncDec(IncDec $n): string
     {
         return $this->emitIncDec($n);
+    }
+
+    public function visitCaughtValue(\Compile\Mir\CaughtValue_ $n): string
+    {
+        return $this->emitCaughtValue();
     }
 
     public function visitStaticProp(StaticProp_ $n): string
@@ -397,7 +418,8 @@ trait EmitLlvmVisit
 
     public function visitGoto(Goto_ $n): string
     {
-        return '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel();
+        return $this->emitFinallysLeaving($this->cf->finallysLeftByGoto($n->label))
+             . '  br label %' . $this->ssa->userLabel($n->label) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitLabel(Label_ $n): string
@@ -476,18 +498,19 @@ trait EmitLlvmVisit
         return $this->emitDoWhile($n);
     }
 
-    // A `break`/`continue` out of a try skips the fall-through pop exactly as a
-    // `return` does — and from a loop it leaks a jmp slot per ITERATION. Hand
-    // back every slot opened inside the target loop before branching.
+    // A `break`/`continue` runs every finally it leaves, then leaves every
+    // IteratorAggregate foreach strictly inside its target.
     public function visitBreak(Break_ $n): string
     {
-        return $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
+        return $this->emitFinallysLeaving($this->cf->finallysLeftByLevel($n->level))
+             . $this->releaseAggItersLeftBy($n->level)
              . '  br label %' . $this->cf->breakTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 
     public function visitContinue(Continue_ $n): string
     {
-        return $this->restoreJmpDepth($this->cf->loopDepthReg($n->level), $this->cf->loopDepthSlot($n->level))
+        return $this->emitFinallysLeaving($this->cf->finallysLeftByLevel($n->level))
+             . $this->releaseAggItersLeftBy($n->level)
              . '  br label %' . $this->cf->continueTarget($n->level) . "\n" . $this->emitDeadLabel();
     }
 

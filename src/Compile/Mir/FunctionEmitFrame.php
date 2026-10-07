@@ -27,44 +27,33 @@ final class FunctionEmitFrame
     /** The fn is a closure — uniform ABI: scalar params/returns travel as
      *  tagged cells. */
     public bool $isClosure = false;
+    /** @var array<string, bool> a closure's CAPTURE params (env-unpacked), as
+     *  opposed to the params its callers pass. */
+    public array $captureNames = [];
     /** The fn is a reflection invoke trampoline (`__mc_rtramp_*`), reached only
      *  through the indirect `__mc_refl_invoke` builtin — same uniform ABI as a
      *  closure for the RETURN: a scalar result must be boxed to a tagged cell,
      *  else the indirect caller reads a raw int as a cell. */
     public bool $isTrampoline = false;
+    /** Every `return` hands back an erased array at +1
+     *  ({@see \Compile\Mir\Ownership::erasedArrayReturn}). */
+    public bool $erasedArrayReturn = false;
+    /** The conditional a return of such a function is emitting: its arms are
+     *  each normalized to +1 of an erased array ({@see EmitLlvm::condOwnsResult}). */
+    public ?Node $erasedCond = null;
     /** The fn opened an arena scope: every `ret` must `@__mir_arena_leave` first. */
     public bool $hasArena = false;
-    /** @var array<string, bool> param names — transfer skips params, which are
-     *  retained-on-entry by initRcObjSlots (suppressing their release would
-     *  unbalance that entry retain). */
+    /** @var array<string, bool> param names — a param arrives holding the
+     *  caller's value, so it never pairs element refs of its own. */
     public array $paramNames = [];
-    /** @var array<string, MemoryOp_> owned RcHeap obj/vec/str locals → their
-     *  rc_release MemoryOp node (the flavor is re-derived per use via
-     *  rcReleaseFlavor; storing the flavor string here corrupts under the
-     *  self-host backend). Released before every `ret` except the returned one
-     *  (transfer); slots null-inited. */
-    public array $rcObjLocals = [];
+    /** @var array<string, MemoryOp_> {@see \Compile\Mir\Passes\OwnershipFlow}'s
+     *  managed locals → their `own_local` registration (the flavor is re-derived
+     *  per use via rcReleaseFlavor; storing the flavor string here corrupts
+     *  under the self-host backend). Slots null-inited. */
+    public array $ownLocals = [];
     /** @var array<string, bool> vec locals mutated in this fn (append / element
      *  store) — drive copy-on-assign value semantics. */
     public array $mutatedVecLocals = [];
-    /** @var array<string, bool> owned rcObj locals whose value flows into a
-     *  BORROWING container store (a vec/assoc/property/array-lit store that does
-     *  NOT retain it — erased element type, no usable fallback). Ownership
-     *  transfers to the container, so the local's scope-exit / pre-return /
-     *  reassign release is SUPPRESSED. This is B2 escape-driven ownership: it
-     *  kills the over-release UAF (the enum/arena heisenbug) by moving instead of
-     *  adding a retain (adding retains pushed the binary toward the corruption
-     *  boundary). Worst case is a leak (the safe direction), never a double-free. */
-    public array $transferredLocals = [];
-    /** @var array<string, bool> owned vec/assoc locals whose BUFFER is shared
-     *  with an outliving owner: passed as a (by-value) call argument, so the
-     *  callee co-owns the buffer AND its retained element refs (the +1 each
-     *  `array_append` adds). Their scope-exit release must drop the BUFFER ONLY
-     *  (plain `array_release`), never element-drop: `array_release_obj/_str`
-     *  walks and -1's every element, which on a co-owned buffer double-frees the
-     *  shared elements. Element-drop stays valid only for a SOLE-owner confined
-     *  vec (built and discarded, never shared). */
-    public array $elementSharedLocals = [];
     /** @var array<string, bool> locals whose value was acquired BY RETAIN — the
      *  `$saved = $this->map` property snapshot, the one read shape that takes a
      *  reference — and whose retain and release name the SAME flavor. Their
@@ -87,13 +76,13 @@ final class FunctionEmitFrame
     /** @var array<string, string> the same flags keyed by the local's SLOT, for
      *  the release helpers that only see the slot. Appended at the END. */
     public array $mixedFlagBySlot = [];
-    /** The shared return epilogue ({@see EmitLlvmModule::finishReturn}): its
-     *  label ('' = no return took it yet), the slot the returns store their value
-     *  into, and whether it closes the frame arena. Appended at the END. */
-    public string $retExitLabel = '';
-    public string $retExitSlot = '';
-    public bool $retExitArena = false;
-    /** @var array<string, bool> the locals the return being emitted hands back
-     *  ({@see EmitLlvmModule::returnedLocalNames}) */
-    public array $retExempt = [];
+    /** @var array<string, bool> OwnershipFlow locals some source of which is a
+     *  BORROW (a param, an alias, a non-co-owning binding): registered, but not
+     *  proven to hold element refs of their own. Appended at the END. */
+    public array $ownBorrowed = [];
+    /** @var array<string, string[]> a MIXED local's flag alloca → the release
+     *  flavors of the RAW representations its stores leave, index 0 the plan's
+     *  own. The flag holds 1 for a cell, 0 for raw [0], i + 1 for raw [i].
+     *  Appended at the END. */
+    public array $mixedRawByFlag = [];
 }

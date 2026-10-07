@@ -1,6 +1,9 @@
-# The heavy answer: the AOT suite PLUS difftest (byte parity against the `php`
-# interpreter), on both Linux arches and both C libraries (glibc on Debian,
-# musl on Alpine). Weekly, and on demand.
+# The heavy answer: difftest (byte parity against the `php` interpreter) and the
+# known-bug repros (tests/aot/xfail.sh, strict: a tracked bug that no longer
+# reproduces fails the run until its repro is promoted and its issue closed), on
+# both Linux arches and both C libraries (glibc on Debian, musl on Alpine).
+# Weekly, and on demand. NOT the AOT suite: ci.yml runs it on every push, and a
+# second run of the same commit cost 25 minutes a row for no new information.
 #
 # Why not nightly, and why no fixpoint by default: ci.yml already answers "is
 # the suite green" on every push, and the self-host fixpoint answers a question
@@ -75,7 +78,7 @@ jobs:
           path: ci-cache
           key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-
 
-      - name: Suite + difftest
+      - name: difftest + known bugs
         run: |
           # -R, not just the top directory: actions/cache restores the tree as the
           # RUNNER, and the container is uid 1000 — unlinking an entry needs write
@@ -86,6 +89,8 @@ jobs:
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
             -v "$PWD/ci-cache":/compiler-cache \
+            -e MC_SUITE=0 \
+            -e MC_XFAIL=strict \
             -e MC_DIFFTEST=1 \
             -e MC_FIXPOINT=${{ inputs.fixpoint && '1' || '0' }} \
             -e MC_JOBS=0 \
@@ -102,7 +107,7 @@ jobs:
           {
             echo "## linux-${{ matrix.tag }} — \`${GITHUB_SHA::12}\`"
             echo '```'
-            tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
+            grep -E '^(XPASS|xfail:)' ci-logs/xfail.log 2>/dev/null || echo 'no known-bug log'
             tail -8  ci-logs/difftest.log 2>/dev/null || true
             tail -12 ci-logs/fixpoint.log 2>/dev/null || true
             echo '```'

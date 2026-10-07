@@ -299,10 +299,21 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /** BY-REF parameter names of the body being lowered: such a name is already
+     *  defined — it IS the caller's variable — so a `#[RefOut]` argument init
+     *  must not overwrite it ({@see collectRefOutInits}).
+     *  @var array<string, bool> */
+    private array $currentRefParamNames = [];
+
 
     /** The program calls `function_exists()` with a NON-literal argument, so it
      *  needs the runtime name table rather than the compile-time fold. */
     private bool $sawDynFnExists = false;
+    /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
+    private bool $sawGetDefinedFns = false;
+    /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
+     *  get_defined_functions()['user']. */
+    private array $userFnNames = [];
 
     /** The body being lowered called one of the func-args family, so it needs
      *  the argument-count prologue. Saved/restored around every nested body the
@@ -596,6 +607,10 @@ final class LowerFromAst implements Pass
      */
     public array $externClassDecls = [];
 
+    /** @var array<string, bool> classes the RUNTIME library (stdlib) exports —
+     *  php's own classes as far as reflection is concerned. */
+    public array $runtimeClassNames = [];
+
     /** @var array<string, \Compile\Mir\ExternClassMeta> FQN → what the
      *  declaration alone cannot rebuild. */
     public array $externClassMeta = [];
@@ -638,8 +653,7 @@ final class LowerFromAst implements Pass
     }
 
     /** Name prefix of a hoisted foreach subject — the one owner of the
-     *  convention. {@see LowerStmts::hoistForeachSubject} makes them;
-     *  {@see EmitLlvmMemory::collectElementSharedLocals} reads them. */
+     *  convention. {@see LowerStmts::hoistForeachSubject} makes them. */
     public const FE_SUBJ_PREFIX = '__fe_subj_';
 
     private ?Module $module = null;
@@ -847,6 +861,9 @@ final class LowerFromAst implements Pass
                     $this->classDecls[$iname] = $cdecl;
                     $this->knownClassNames[$iname] = true;
                     $module->interfaceNames[\ltrim($iname, '\\')] = true;
+                    if ($sIdx < $preludeCount || $this->exportRuntimeTypes) {
+                        $module->internalInterfaceNames[\ltrim($iname, '\\')] = true;
+                    }
                     $ibs = \strrpos($iname, '\\');
                     if ($ibs !== false && $ibs >= 0) {
                         $ishort = \substr($iname, $ibs + 1, \strlen($iname) - $ibs - 1);
@@ -961,6 +978,8 @@ final class LowerFromAst implements Pass
                 if ($dkind !== 'class') { continue; }
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $cd->isPreludeClass = $this->inPreludeClass;
+                $cd->isInternal = $this->inPreludeClass || $this->exportRuntimeTypes
+                    || isset($this->runtimeClassNames[\ltrim($cd->name, '\\')]);
                 if (isset($this->externClassMeta[$cd->name])) {
                     $this->applyExternMeta($cd, $this->externClassMeta[$cd->name]);
                 }
@@ -986,6 +1005,7 @@ final class LowerFromAst implements Pass
             $this->collectInterfaceNames($ifn, $ian, $iav);
             $module->interfaceAncestors[$ifn] = \array_keys($ian);
         }
+        $this->recordMethodReturnShapes($module);
         // Reify every `Box<float>` the program's docblocks bind. Runs HERE: the
         // origin classes (and their parents) now exist, and no body has been
         // lowered yet — so a spec class is already in the class table when a body
@@ -1007,6 +1027,7 @@ final class LowerFromAst implements Pass
                 methodNames: [],
                 hasBag: true,
             );
+            $std->isInternal = true;
             $this->classTable['stdClass'] = $std;
             $this->knownClassNames['stdClass'] = true;
             $module->addClass($std);
@@ -1041,6 +1062,7 @@ final class LowerFromAst implements Pass
             $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
             $tfn = $this->lowerFunction($tstmt->decl);
             $tfn->isPrelude = true;
+            $tfn->moduleLocal = true;
             $module->addFunction($tfn);
         }
         $module->hasObjToStr = true;
@@ -1290,6 +1312,12 @@ final class LowerFromAst implements Pass
                 if ($measureLower) { $lowerFnNs += \Compile\Stats::now() - $lowerStart; }
                 $lowerFnCount = $lowerFnCount + 1;
                 if ($isPrelude) { $fn->isPrelude = true; }
+                elseif (!$this->exportRuntimeTypes) {
+                    $un = \ltrim($stmt->decl->name, '\\');
+                    if (\strncmp($un, '__mc_', 5) !== 0 && \strncmp($un, '__mir_', 6) !== 0) {
+                        $this->userFnNames[\strtolower($un)] = true;
+                    }
+                }
                 $module->addFunction($fn);
                 continue;
             }
@@ -1336,6 +1364,9 @@ final class LowerFromAst implements Pass
             $this->currentLowerClass = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
+            // …nor parameters: a preceding function's by-ref names would
+            // suppress a top-level out-argument's init.
+            $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $mainStmts[] = $this->lowerStmt($stmt);
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
@@ -1422,6 +1453,14 @@ final class LowerFromAst implements Pass
         }
         if ($this->sawDynFnExists) {
             $module->knownFnNames = $this->collectKnownFnNames();
+        }
+        if ($this->sawGetDefinedFns) {
+            $dfProg = \Parser\Parser::parseSource("<?php\n" . $this->definedFunctionsSource());
+            foreach ($dfProg->statements as $dfs) {
+                if ($dfs->kind !== 'Function') { continue; }
+                $this->fnDecls[$dfs->decl->name] = $dfs->decl;
+                $module->addFunction($this->lowerFunction($dfs->decl));
+            }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
@@ -1715,6 +1754,29 @@ final class LowerFromAst implements Pass
             $out[] = $n;
         }
         return $out;
+    }
+
+    /**
+     * `get_defined_functions()` as a function returning a LITERAL: the set of
+     * functions is closed at compile time. `internal` is every name php itself
+     * would provide that this build knows ({@see collectKnownFnNames} — the
+     * builtins, the stdlib, the prelude), `user` the program's own, lowercased
+     * as php reports them. php-cs-fixer's NativeFunctionCasingFixer reads it.
+     */
+    private function definedFunctionsSource(): string
+    {
+        $internal = [];
+        foreach ($this->collectKnownFnNames() as $fname) {
+            $lc = \strtolower($fname);
+            if (isset($this->userFnNames[$lc])) { continue; }
+            $internal[$lc] = true;
+        }
+        $iq = [];
+        foreach ($internal as $lc => $_) { $iq[] = var_export((string)$lc, true); }
+        $uq = [];
+        foreach ($this->userFnNames as $lc => $_) { $uq[] = var_export((string)$lc, true); }
+        return "/** @return array<string, string[]> */\nfunction __mc_defined_functions(): array\n{\n"
+            . "    return ['internal' => [" . \implode(', ', $iq) . "], 'user' => [" . \implode(', ', $uq) . "]];\n}\n";
     }
 
     /** Trailing segment of a possibly-namespaced name. */
@@ -2432,18 +2494,19 @@ final class LowerFromAst implements Pass
                 $outType ?? $this->docTagType($m->docComment, '@param', $p->name),
             );
             $pt = $isVar
-                ? Type::vec($this->lowerTypeHint($p->typeHint))
+                ? $this->variadicPackType($p)
                 : $this->lowerParamType($effHint);
             if ($magicName && $pi === 0) { $pt = Type::string_(); }
             if ($magicArgs && $pi === 1) { $pt = Type::vec(Type::cell()); }
             $mp = new Param(
                 name: $p->name,
                 type: $pt,
-                byRef: (bool)($p->byRef ?? false),
+                byRef: $this->paramBindsByRef($p),
                 variadic: $isVar,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $mp->refPack = $this->paramIsRefPack($p);
             // Variadic excluded for the same reason as the free-function path:
             // the pack's keys are the compiler's own 0..n.
             $mp->docList = !$isVar && $this->isElemOnlyArrayDoc($effHint);
@@ -2529,6 +2592,7 @@ final class LowerFromAst implements Pass
         );
         $mfn->isGenerator = $isGen;
         $mfn->usesFuncArgs = $usesFuncArgs;
+        $mfn->returnArrayHinted = $this->isBareArrayReturnHint($m->returnType);
         return $mfn;
     }
 
@@ -3032,6 +3096,7 @@ final class LowerFromAst implements Pass
         // enclosing function. Restored after, because the enclosing body keeps
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
+        $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         $this->setCurrentLowerParams($expr->params);
@@ -3044,6 +3109,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
             (bool)($expr->returnsByRef ?? false), $clUsesFa);
     }
@@ -3063,6 +3129,7 @@ final class LowerFromAst implements Pass
         }
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
+        $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         // A yield in the body makes it a GENERATOR, exactly as in a closure:
@@ -3082,6 +3149,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
             (bool)($expr->returnsByRef ?? false), $afUsesFa);
@@ -3291,11 +3359,12 @@ final class LowerFromAst implements Pass
             $dp = $declParams;
             foreach ($dp as $p) {
                 $t = ($p->variadic ?? false)
-                    ? Type::vec($this->lowerTypeHint($p->typeHint))
+                    ? $this->variadicPackType($p)
                     : $this->lowerParamType($p->typeHint);
-                $fp = new Param(name: $p->name, type: $t, byRef: (bool)($p->byRef ?? false), variadic: (bool)($p->variadic ?? false),
+                $fp = new Param(name: $p->name, type: $t, byRef: $this->paramBindsByRef($p), variadic: (bool)($p->variadic ?? false),
                     default: $this->lowerParamDefault($p, $defaultScope));
                 $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $t->isArray();
+                $fp->refPack = $this->paramIsRefPack($p);
                 $mir[] = $fp;
                 $loads[] = new LoadLocal($p->name, $t);
             }
@@ -3328,7 +3397,8 @@ final class LowerFromAst implements Pass
         }
         $call = new StaticCall_($class, $method, $loads, Type::unknown(), $scope);
         $body = new Block([new Return_($call, Type::void())], Type::void());
-        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class);
+        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class,
+            $this->methodDeclaresErasedArray($class, $method));
     }
 
     /** Closure capturing `$recv` and forwarding to `$recv->$method(...)`.
@@ -3344,10 +3414,33 @@ final class LowerFromAst implements Pass
         // `?array`. (The `?array` return-narrowing this pass now does made the
         // arm concrete, which is what triggers the ternary's cell-lift.)
         $declParams = null;
+        // `$this` is untyped until inference, but lowering knows whose method it
+        // is in: the static class of this copy, else the declaring one. Without
+        // it `$c = $this->m(...); $c('a', 'b')` took the one-param shim below
+        // and called `m('a')` — php-cs-fixer's worker-crash callback lost its
+        // reason.
+        if ($cls === '' && $recv instanceof LoadLocal && $recv->name === 'this') {
+            $cls = $this->currentStaticClass !== '' ? $this->currentStaticClass : $this->currentLowerClass;
+        }
         if ($cls !== '') { $declParams = $this->resolveMethodParams($cls, $method); }
+        if ($declParams === null) {
+            // Any other receiver has no class before inference: the shim is a
+            // placeholder {@see ResolveMethodFcc} rebuilds from the method's own
+            // parameters once the receiver is typed.
+            // Until then (and for good on an interface / abstract / erased
+            // receiver) it forwards EVERY argument: a variadic pass-through,
+            // never an arity cut.
+            $mir = [new Param(name: '__fa', type: Type::vec(Type::cell()), byRef: false, variadic: true)];
+            $loads = [new Spread_(new LoadLocal('__fa', Type::vec(Type::cell())), Type::unknown())];
+            $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
+            $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
+            $this->module->functions[\count($this->module->functions) - 1]->fccMethod = $method;
+            return $node;
+        }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
-        return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
+        return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
+            $cls !== '' && $this->methodDeclaresErasedArray($cls, $method));
     }
 
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */
@@ -3364,6 +3457,8 @@ final class LowerFromAst implements Pass
         // #[RefOut] out-params auto-vivify — `('preg_match')($p, $s, $matches)`
         // must define $matches by ref exactly like a direct `preg_match(...)`.
         $resolved = $this->resolveCallName($name);
+        $mm = $this->minMaxSpreadCall($resolved, $astArgs);
+        if ($mm !== null) { return $this->lowerExpr($mm); }
         $savedPost = $this->pendingCallPost;
         $this->pendingCallPost = [];
         $args = $this->lowerCallArgs($resolved, $astArgs);
@@ -4261,8 +4356,10 @@ final class LowerFromAst implements Pass
     {
         $this->currentLowerParams = [];
         $this->currentLowerParamHints = [];
+        $this->currentRefParamNames = [];
         foreach ($params as $p) {
             $this->currentLowerParams[] = $p->name;
+            if ($p->byRef) { $this->currentRefParamNames[$p->name] = true; }
             // The hint travels WITH the name: func_get_args() boxes each
             // parameter into a cell array, and a load typed `unknown` puts the
             // raw word in the slot — an int then renders as the float its bits
@@ -4991,6 +5088,12 @@ final class LowerFromAst implements Pass
             if (!isset($names[$this->paramName($p)]) && !$this->paramRefOut($p)
                 && !$this->paramHasRefOutAttr($p)) { continue; }
             if ($a->kind !== 'Variable') { continue; }
+            // A BY-REF parameter of this body is the caller's variable, already
+            // defined: the init would store `[]` THROUGH the reference, over a
+            // value the caller owns, with nothing to give it back — php-cs-fixer's
+            // Preg::match($re, $s, $matches) leaked the previous matches array
+            // on every call that reused the variable.
+            if (isset($this->currentRefParamNames[$this->variableName($a)])) { continue; }
             // The same variable READ by another argument is live at the call:
             // `preg_match_all($re, $s, $s)` passes `$s` as the subject first, and
             // an init stored ahead of the call replaced that subject with `[]`.
@@ -5113,7 +5216,11 @@ final class LowerFromAst implements Pass
         $this->rejectSpreadIntoBuiltin($fnName, $astArgs);
         $bare = $this->bareName($fnName);
         $isPreg = $bare === 'preg_match' || $bare === 'preg_match_all';
+        // Not through a BY-REF parameter of this body ({@see collectRefOutInits}):
+        // `Preg::match(…, &$matches)` stored `[]` over the caller's previous
+        // matches with nothing to give them back — the whole array, per call.
         if ($isPreg && \count($astArgs) >= 3 && $astArgs[2]->kind === 'Variable'
+                && !isset($this->currentRefParamNames[$this->variableName($astArgs[2])])
                 && !$this->varReadByOtherArg($this->variableName($astArgs[2]), $astArgs, 2)) {
             $name = $this->variableName($astArgs[2]);
             $init = new StoreLocal($name, new ArrayLit([], Type::vec(Type::cell())), Type::vec(Type::cell()));
@@ -5197,18 +5304,33 @@ final class LowerFromAst implements Pass
      * @param \Parser\Ast\Expr[] $astArgs
      * @return \Parser\Ast\Expr[]|null  rewritten arguments, or null to leave alone
      */
+    /**
+     * `min(...$p)` / `max(...$p)` as the stdlib `__mc_minmax_spread($p, 'min')`:
+     * the pack decides at run time — one element is the single-array form
+     * over THAT element (`min(...[[5, 2]])` is 2), two or more php's variadic
+     * loop (never the frameless two-argument body a direct call takes), none
+     * php's ArgumentCountError. The pack expression is evaluated once, so it
+     * may be an arbitrary call such as max(...array_map(...)). null when the
+     * call is anything else.
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
+    private function minMaxSpreadCall(string $fnName, array $astArgs): ?\Parser\Ast\CallExpr
+    {
+        if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
+        $bare = $this->constBareName(\strtolower($fnName));
+        if ($bare !== 'min' && $bare !== 'max') { return null; }
+        if (!$this->isCodegenBuiltin($fnName)) { return null; }
+        $span = $astArgs[0]->span;
+        return new \Parser\Ast\CallExpr('\\__mc_minmax_spread', [
+            $astArgs[0]->value, new \Parser\Ast\StringLiteral($bare, $span),
+        ], $span);
+    }
+
     private function expandBuiltinSpread(string $fnName, array $astArgs): ?array
     {
         if (\count($astArgs) !== 1 || $astArgs[0]->kind !== 'Spread') { return null; }
         if (!$this->isCodegenBuiltin($fnName)) { return null; }
         $bare = $this->constBareName(\strtolower($fnName));
-        // min/max are variadic, but their spread form is exactly the
-        // existing single-array "winner element" lowering. Keep the
-        // original array expression intact so it may be an arbitrary call
-        // such as max(...array_map(...)).
-        if ($bare === 'min' || $bare === 'max') {
-            return [$astArgs[0]->value];
-        }
         $arity = $this->fixedBuiltinArity($bare);
         if ($arity === 0) { return null; }
         $pack = $astArgs[0]->value;
@@ -5286,6 +5408,31 @@ final class LowerFromAst implements Pass
     private function namedArgValue(\Parser\Ast\NamedArg $a): \Parser\Ast\Expr { return $a->value; }
     private function paramName(\Parser\Ast\Param $p): string { return $p->name; }
     private function paramVariadic(\Parser\Ast\Param $p): bool { return (bool)($p->variadic ?? false); }
+
+    /**
+     * `&...$xs` is a by-VALUE pack whose elements are REFERENCES: the caller
+     * packs `[&$a, &$b]` ({@see defaultFillArgs}), so the pack is a cell vec
+     * and the param itself binds nothing by reference. As a by-ref pack of
+     * values the callee's writes landed in a throwaway and vanished.
+     */
+    private function variadicPackType(\Parser\Ast\Param $p): Type
+    {
+        if ((bool)($p->byRef ?? false)) { return Type::vec(Type::cell()); }
+        return Type::vec($this->lowerTypeHint($p->typeHint));
+    }
+
+    /** Whether a declared param binds its argument by reference (a variadic
+     *  pack never does — its ELEMENTS do, {@see variadicPackType}). */
+    private function paramBindsByRef(\Parser\Ast\Param $p): bool
+    {
+        return (bool)($p->byRef ?? false) && !(bool)($p->variadic ?? false);
+    }
+
+    /** `&...$xs` — {@see \Compile\Mir\Param::$refPack}. */
+    private function paramIsRefPack(\Parser\Ast\Param $p): bool
+    {
+        return (bool)($p->byRef ?? false) && (bool)($p->variadic ?? false);
+    }
     private function paramDefault(\Parser\Ast\Param $p): ?\Parser\Ast\Expr { return $p->default; }
     private function staticAccessClass(\Parser\Ast\StaticAccess $e): string { return $e->class; }
     private function staticAccessName(\Parser\Ast\StaticAccess $e): string { return $e->name; }
@@ -5492,6 +5639,57 @@ final class LowerFromAst implements Pass
     /** @return \Parser\Ast\Param[] */
     private function methodDeclParams(\Parser\Ast\MethodDecl $m): array { return $m->params; }
     private function methodDeclReturnType(\Parser\Ast\MethodDecl $m): ?string { return $m->returnType; }
+    private function methodDeclByRef(\Parser\Ast\MethodDecl $m): bool { return $m->returnsByRef; }
+    private function methodDeclBodiless(\Parser\Ast\MethodDecl $m): bool { return $m->body === null; }
+
+    /**
+     * What a CALLER needs of a method it cannot resolve to a body: an interface
+     * or abstract declaration of a bare `array` return ({@see Module::$bareArrayMethods}),
+     * and every name some declaration returns by reference ({@see Module::$byRefMethodNames}).
+     */
+    private function recordMethodReturnShapes(Module $module): void
+    {
+        foreach ($this->classDecls as $cname => $cd0) {
+            $cd = $this->classDeclOf($cd0);
+            $cn = \ltrim((string)$cname, '\\');
+            foreach ($this->classDeclMethods($cd) as $m) {
+                $mn = \strtolower($this->methodDeclName($m));
+                if ($this->methodDeclByRef($m)) {
+                    $module->byRefMethodNames[$mn] = true;
+                    if ($this->methodDeclBodiless($m)) { $module->byRefBodiless[$cn . '::' . $mn] = true; }
+                    continue;
+                }
+                if ($this->methodDeclBodiless($m) && $this->isBareArrayReturnHint($this->methodDeclReturnType($m))) {
+                    $module->bareArrayMethods[$cn . '::' . $mn] = true;
+                }
+            }
+        }
+        foreach ($this->traitTable as $td0) {
+            foreach ($this->classDeclMethods($this->classDeclOf($td0)) as $m) {
+                if ($this->methodDeclByRef($m)) { $module->byRefMethodNames[\strtolower($this->methodDeclName($m))] = true; }
+            }
+        }
+    }
+
+    /** The method `$class` resolves `$method` to declares a bare `array` return
+     *  by value: a first-class-callable wrapper of it forwards that +1. */
+    private function methodDeclaresErasedArray(string $class, string $method): bool
+    {
+        $c = $class;
+        while ($c !== '' && isset($this->classDecls[$c])) {
+            $cd = $this->classDeclOf($this->classDecls[$c]);
+            foreach ($this->classDeclMethods($cd) as $m) {
+                if ($this->methodDeclName($m) === $method) {
+                    return !$this->methodDeclByRef($m) && $this->isBareArrayReturnHint($this->methodDeclReturnType($m));
+                }
+            }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return false;
+    }
+
+    private function classDeclOf(\Parser\Ast\ClassDecl $d): \Parser\Ast\ClassDecl { return $d; }
 
     /**
      * `[$a, $b] = $rhs` / `["k" => $v] = $rhs` — stash the RHS in a

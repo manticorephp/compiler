@@ -1,0 +1,20 @@
+free a
+caught a
+after a
+caught b
+outer b
+free b
+--
+caught c
+free c
+caught d
+end overwrite
+free d
+free m
+E:m
+RuntimeException:r
+again n
+still n
+end nested
+free n
+done

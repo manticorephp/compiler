@@ -16,6 +16,11 @@ final class ForeachSharedBody
     /** @var string[] end label of each arm, by arm index */
     public array $ends = [];
     public bool $bodyEmitted = false;
+    /** The Traversable arm's iterator slot and its owned flag (i1), allocated
+     *  before the arms so the shared body can give getIterator()'s result back
+     *  on a `return` / `break N` whichever arm emitted it; '' when none. */
+    public string $aggIterSlot = '';
+    public string $aggOwnSlot = '';
 
     public function __construct(
         public Foreach_ $fe,

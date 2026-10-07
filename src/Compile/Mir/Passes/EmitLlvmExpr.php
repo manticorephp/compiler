@@ -470,6 +470,17 @@ trait EmitLlvmExpr
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r2 = call i64 @__mir_array_get_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
 
+        $out .= "define ptr @__mir_array_lookup_cell(ptr %arr, i64 %k) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
+        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
+        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
+        $out .= "  br i1 %isstr, label %s, label %i\n";
+        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
+        $out .= "  %r1 = call ptr @__mir_array_lookup_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret ptr %r1\n";
+        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
+        $out .= "  %r2 = call ptr @__mir_array_lookup_int(ptr %arr, i64 %ki)\n  ret ptr %r2\n}\n\n";
         $out .= "define i64 @__mir_array_isset_cell(ptr %arr, i64 %k) {\n";
         $out .= "entry:\n";
         $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
@@ -520,7 +531,7 @@ trait EmitLlvmExpr
         $out .= "  %isstr = icmp eq i64 %tag, 4\n";
         $out .= "  br i1 %isstr, label %s, label %i\n";
         $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret ptr %arr\n";
+        $out .= "  %r3 = call ptr @__mir_array_unset_str_at(ptr %arr, ptr %kp)\n  ret ptr %r3\n";
         $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
         $out .= "  %r = call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)\n  ret ptr %r\n}\n";
 
@@ -664,7 +675,18 @@ trait EmitLlvmExpr
         $out .= "    i64 4, label %asptr\n";
         $out .= "    i64 6, label %asfloat\n";
         $out .= "    i64 7, label %asarray\n";
+        $out .= "    i64 8, label %asobj\n";
         $out .= "  ]\n";
+        // An object: this body is shared by every module, so it cannot name the
+        // program's classes. The main module publishes its `__mir_obj_to_str` in
+        // the hook ({@see emitMain}); none = no __toString class anywhere.
+        $out .= "asobj:\n";
+        $out .= "  %oh = load ptr, ptr @__mir_obj_to_str_hook\n";
+        $out .= "  %ohn = icmp eq ptr %oh, null\n";
+        $out .= "  br i1 %ohn, label %asint, label %ohcall\n";
+        $out .= "ohcall:\n";
+        $out .= "  %os = call ptr %oh(i64 %v)\n";
+        $out .= "  ret ptr %os\n";
         $out .= "asint:\n";
         $out .= "  %i = call i64 @__manticore_unbox_int(i64 %v)\n";
         $out .= "  %is = call ptr @__mir_int_to_str(i64 %i)\n";
@@ -767,7 +789,7 @@ trait EmitLlvmExpr
         $out .= "asarray:\n";
         $out .= "  %ap = and i64 %v, 281474976710655\n";
         $out .= "  %aptr = inttoptr i64 %ap to ptr\n";
-        $out .= "  %alen = load i64, ptr %aptr\n";
+        $out .= $this->arrayLiveCountIr();
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %az = zext i1 %ane to i64\n";
         $out .= "  ret i64 %az\n";
@@ -864,7 +886,7 @@ trait EmitLlvmExpr
         $out .= "asarray:\n";
         $out .= "  %ap = and i64 %v, 281474976710655\n";
         $out .= "  %aptr = inttoptr i64 %ap to ptr\n";
-        $out .= "  %alen = load i64, ptr %aptr\n";
+        $out .= $this->arrayLiveCountIr();
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %az = uitofp i1 %ane to double\n";
         $out .= "  ret double %az\n";
@@ -1034,7 +1056,14 @@ trait EmitLlvmExpr
                 return true;
             }
             if (($na === self::EK_ARRAY) !== ($nb === self::EK_ARRAY)) {
-                return false;
+                // A raw array facing a CELL (an erased `list<T>` / array_map result
+                // holding the same arrays boxed) is comparable when the raw side's
+                // own elements ARE cells: boxing it then tells the tagged path the
+                // truth about its inner repr. `assoc[string,cell]` rows are the case.
+                $arrSide = $na === self::EK_ARRAY ? $a : $b;
+                $other = $na === self::EK_ARRAY ? $nb : $na;
+                return $other === self::EK_CELL && $i + 1 < 16 && (($arrSide >> (($i + 1) * 4)) & 15) === self::EK_CELL
+                    && ($i + 2 >= 16 || ($arrSide >> (($i + 2) * 4)) === 0);
             }
             if ($na !== self::EK_ARRAY) {
                 return true;
@@ -1409,7 +1438,23 @@ trait EmitLlvmExpr
     private function taggedCompareRuntime(): string
     {
         $out  = "\ndefine i64 @__manticore_tagged_compare(i64 %a, i64 %b) {\n";
+        // Two INLINE int cells compare their payloads directly — a loop bound
+        // over erased values (`$i >= $index` in php-cs-fixer's insertSlices)
+        // was 6% of the run in the general dispatch below.
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $out .= "entry:\n";
+        $out .= "  %qah = and i64 %a, -281474976710656\n";
+        $out .= "  %qbh = and i64 %b, -281474976710656\n";
+        $out .= "  %qai = icmp eq i64 %qah, " . $ih . "\n";
+        $out .= "  %qbi = icmp eq i64 %qbh, " . $ih . "\n";
+        $out .= "  %qii = and i1 %qai, %qbi\n";
+        $out .= "  br i1 %qii, label %qfast, label %slow\n";
+        $out .= "qfast:\n";
+        $out .= "  %qas = shl i64 %a, 16\n  %qa = ashr i64 %qas, 16\n";
+        $out .= "  %qbs = shl i64 %b, 16\n  %qb = ashr i64 %qbs, 16\n";
+        $out .= "  %qlt = icmp slt i64 %qa, %qb\n  %qgt = icmp sgt i64 %qa, %qb\n";
+        $out .= "  %qsel = select i1 %qgt, i64 1, i64 0\n  %qres = select i1 %qlt, i64 -1, i64 %qsel\n  ret i64 %qres\n";
+        $out .= "slow:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
         $out .= "  %tb = call i64 @__manticore_tag(i64 %b)\n";
         $out .= $this->juggleRows('c');
@@ -1459,7 +1504,22 @@ trait EmitLlvmExpr
         // agreed by accident — a string pointer happens to outrank a small int.
         $out .= "chkmix:\n";
         $out .= "  %anystr = or i1 %as, %bs\n";
-        $out .= "  br i1 %anystr, label %strcmp, label %fcmp\n";
+        $out .= "  br i1 %anystr, label %mixnum, label %fcmp\n";
+        // …unless that string IS numeric: php 8 compares a number with a
+        // numeric string numerically (`10 < "9"` is false), and only a
+        // non-numeric one as strings.
+        $out .= "mixnum:\n";
+        $out .= "  %msv = select i1 %as, i64 %a, i64 %b\n";
+        $out .= "  %msn = call i1 @__mir_cell_numeric(i64 %msv)\n";
+        $out .= "  br i1 %msn, label %fcmp, label %mixnan\n";
+        // A NAN against a non-numeric string is uncomparable in BOTH orders
+        // (zend_compare's DOUBLE/STRING arms answer 1 before any strcmp).
+        $out .= "mixnan:\n";
+        $out .= "  %mov = select i1 %as, i64 %b, i64 %a\n";
+        $out .= "  %mod = call double @__manticore_tagged_to_double(i64 %mov)\n";
+        $out .= "  %monan = fcmp uno double %mod, %mod\n";
+        $out .= "  br i1 %monan, label %mixun, label %strcmp\n";
+        $out .= "mixun:\n  ret i64 1\n";
         $out .= "icmp:\n";
         $out .= "  %ua = call i64 @__manticore_unbox_int(i64 %a)\n";
         $out .= "  %ub = call i64 @__manticore_unbox_int(i64 %b)\n";
@@ -1471,9 +1531,11 @@ trait EmitLlvmExpr
         $out .= "fcmp:\n";
         $out .= "  %da = call double @__manticore_tagged_to_double(i64 %a)\n";
         $out .= "  %db = call double @__manticore_tagged_to_double(i64 %b)\n";
+        // ZEND_THREEWAY_COMPARE: equal 0, less -1, anything else — a NAN on
+        // either side — 1 (uncomparable), not the 0 that made NAN "equal".
         $out .= "  %flt = fcmp olt double %da, %db\n";
-        $out .= "  %fgt = fcmp ogt double %da, %db\n";
-        $out .= "  %fsel = select i1 %fgt, i64 1, i64 0\n";
+        $out .= "  %feq = fcmp oeq double %da, %db\n";
+        $out .= "  %fsel = select i1 %feq, i64 0, i64 1\n";
         $out .= "  %fres = select i1 %flt, i64 -1, i64 %fsel\n";
         $out .= "  ret i64 %fres\n";
         $out .= "}\n";
@@ -1707,7 +1769,15 @@ trait EmitLlvmExpr
         $out .= "  %asez = zext i1 %ase to i64\n  ret i64 %asez\n";
         $out .= "chkstr2:\n";
         $out .= "  %isstr = icmp eq i64 %ta, 4\n";
-        $out .= "  br i1 %isstr, label %scmp, label %raw\n";
+        $out .= "  br i1 %isstr, label %scmp, label %chkflt\n";
+        // Two FLOATS by value: `NAN === NAN` is false in php (and `0.0 === -0.0`
+        // true) — the words compared raw said the opposite of both.
+        $out .= "chkflt:\n";
+        $out .= "  %isflt = icmp eq i64 %ta, 6\n";
+        $out .= "  br i1 %isflt, label %flts, label %raw\n";
+        $out .= "flts:\n";
+        $out .= "  %fa = call double @__manticore_tagged_to_double(i64 %a)\n  %fb = call double @__manticore_tagged_to_double(i64 %b)\n";
+        $out .= "  %fe = fcmp oeq double %fa, %fb\n  %fez = zext i1 %fe to i64\n  ret i64 %fez\n";
         $out .= "scmp:\n";
         $out .= "  %pa = and i64 %a, 281474976710655\n  %ppa = inttoptr i64 %pa to ptr\n";
         $out .= "  %pb = and i64 %b, 281474976710655\n  %ppb = inttoptr i64 %pb to ptr\n";
@@ -1796,7 +1866,29 @@ trait EmitLlvmExpr
         // double and box a float cell, mirroring Zend.
         $intr = $iop === 'add' ? 'sadd' : ($iop === 'sub' ? 'ssub' : 'smul');
         $out  = "\ndefine i64 @__manticore_tagged_" . $name . "(i64 %a, i64 %b) {\n";
+        // Two INLINE int cells (tag 1, 48-bit payload) — the loop counters and
+        // offsets of erased code — compute and re-box without a single call;
+        // only a result past the inline range (or a non-int operand) takes the
+        // general path below.
+        $ih = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
         $out .= "entry:\n";
+        $out .= "  %qah = and i64 %a, -281474976710656\n";
+        $out .= "  %qbh = and i64 %b, -281474976710656\n";
+        $out .= "  %qai = icmp eq i64 %qah, " . $ih . "\n";
+        $out .= "  %qbi = icmp eq i64 %qbh, " . $ih . "\n";
+        $out .= "  %qii = and i1 %qai, %qbi\n";
+        $out .= "  br i1 %qii, label %qfast, label %slow\n";
+        $out .= "qfast:\n";
+        $out .= "  %qas = shl i64 %a, 16\n  %qa = ashr i64 %qas, 16\n";
+        $out .= "  %qbs = shl i64 %b, 16\n  %qb = ashr i64 %qbs, 16\n";
+        $out .= "  %qov = call {i64, i1} @llvm." . $intr . ".with.overflow.i64(i64 %qa, i64 %qb)\n";
+        $out .= "  %qr = extractvalue {i64, i1} %qov, 0\n  %qo = extractvalue {i64, i1} %qov, 1\n";
+        $out .= "  %qrs = shl i64 %qr, 16\n  %qrb = ashr i64 %qrs, 16\n";
+        $out .= "  %qfit = icmp eq i64 %qrb, %qr\n  %qnov = xor i1 %qo, true\n  %qok = and i1 %qfit, %qnov\n";
+        $out .= "  br i1 %qok, label %qbox, label %slow\n";
+        $out .= "qbox:\n";
+        $out .= "  %qpl = and i64 %qr, 281474976710655\n  %qw = or i64 %qpl, " . $ih . "\n  ret i64 %qw\n";
+        $out .= "slow:\n";
         $out .= "  %aistag = icmp ugt i64 %a, -4503599627370496\n";
         $out .= "  %tas = lshr i64 %a, 48\n";
         $out .= "  %tan = and i64 %tas, 15\n";
@@ -1841,6 +1933,24 @@ trait EmitLlvmExpr
      * always true. A raw cell can't be tested with `icmp ne i64 v, 0` — a boxed
      * `0`/`false`/`""` has non-zero tag bits and would read truthy.
      */
+    /**
+     * `%alen` = the LIVE element count of the array at `%aptr`: the physical
+     * length minus the tombstone counter, exactly as count() reads it
+     * ({@see EmitLlvmBuiltins::biCount}). The bare length word counts every
+     * unset entry, so `$a = ['x']; unset($a[0]); if (!$a)` read the emptied
+     * array as truthy.
+     */
+    private function arrayLiveCountIr(): string
+    {
+        return "  %aphys = load i64, ptr %aptr\n"
+            . '  %aflp = getelementptr inbounds i8, ptr %aptr, i64 '
+            . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n"
+            . "  %afl = load i64, ptr %aflp\n"
+            . '  %atsh = lshr i64 %afl, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_SHIFT . "\n"
+            . '  %atomb = and i64 %atsh, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_VALUE_MASK . "\n"
+            . "  %alen = sub i64 %aphys, %atomb\n";
+    }
+
     private function taggedTruthyRuntime(): string
     {
         $out  = "\ndefine i64 @__manticore_tagged_truthy(i64 %v) {\n";
@@ -1878,7 +1988,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %anull, label %sfalse, label %aload\n";
         $out .= "aload:\n";
         $out .= "  %aptr = inttoptr i64 %ap to ptr\n";
-        $out .= "  %alen = load i64, ptr %aptr\n";
+        $out .= $this->arrayLiveCountIr();
         $out .= "  %ane = icmp ne i64 %alen, 0\n";
         $out .= "  %ar = zext i1 %ane to i64\n";
         $out .= "  ret i64 %ar\n";
@@ -2056,7 +2166,7 @@ trait EmitLlvmExpr
         // which is also what makes InferAllocKind/InsertMemoryOps own+release
         // the fresh result.
         if ($intOp === 'add' && $self->type->kind === Type::KIND_ARRAY) {
-            return $this->emitArrayUnion($left, $right);
+            return $this->emitArrayUnion($left, $right, $self->type);
         }
         $isFloat = $self->type->kind === Type::KIND_FLOAT;
         $target = $isFloat ? 'double' : 'i64';
@@ -2144,16 +2254,26 @@ trait EmitLlvmExpr
      * operand that arrives as a CELL (an erased/`mixed` local holding an array)
      * is unboxed by coerceToPtr, so a boxed and a raw side union alike.
      */
-    private function emitArrayUnion(Node $left, Node $right): string
+    private function emitArrayUnion(Node $left, Node $right, Type $resultType): string
     {
         $out = $this->emitNode($left);
+        // The union co-owns every element it copies: an owned temp operand
+        // (`$v + [5 => new A]`, `f() + $d`) is dead once it ran.
+        $lf = $this->mergedTempFlavor($left);
         $out .= $this->unionOperandPtr($left);
         $l = $this->lastValue;
+        $lw = $this->unionTempWord;
         $out .= $this->emitNode($right);
+        $rf = $this->mergedTempFlavor($right);
         $out .= $this->unionOperandPtr($right);
         $r = $this->lastValue;
+        $rw = $this->unionTempWord;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_array_union(ptr ' . $l . ', ptr ' . $r . ")\n";
+        // The result co-owns its elements the way its owner releases them.
+        $sym = '@__mir_array_union' . $this->ownerVariantSuffix($this->discardReleaseFlavor($resultType));
+        $out .= '  ' . $reg . ' = call ptr ' . $sym . '(ptr ' . $l . ', ptr ' . $r . ")\n";
+        if ($lf !== '') { $out .= $this->rcReleaseReg($lw, $lf); }
+        if ($rf !== '') { $out .= $this->rcReleaseReg($rw, $rf); }
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
@@ -2170,9 +2290,14 @@ trait EmitLlvmExpr
     {
         $k = $op->type->kind;
         if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN) {
-            return $this->coerceToPtr();
+            $out = $this->coerceToPtr();
+            $w = $this->ssa->allocReg();
+            $this->unionTempWord = $w;
+            return $out . '  ' . $w . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         }
         $out = $this->coerceToI64();
+        // The operand as it came: a cell temp drops by its tagged word.
+        $this->unionTempWord = $this->lastValue;
         $raw = $this->ssa->allocReg();
         $out .= '  ' . $raw . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
         $this->lastValue = $raw;
@@ -2540,6 +2665,173 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /** `$arr[$k] ?? d` over a statically-typed array base: the shape that probes once. */
+    private function coalesceFusable(Node $left): bool
+    {
+        if ($left->kind !== Node::KIND_ARRAY_ACCESS) { return false; }
+        $bk = $left->array->type->kind;
+        if ($bk === Type::KIND_STRING || $bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) { return false; }
+        if ($bk === Type::KIND_OBJ) { return false; }
+        return true;
+    }
+
+    /** {@see \Compile\Mir\ArrayAccess_::keyBeforeBase} */
+    private function keyBeforeBase(Node $n): bool { return \Compile\Mir\ArrayAccess_::keyBeforeBase($n); }
+
+    /**
+     * Evaluate the base and key of `$a[$k] ?? d` ONCE, probe once, and leave
+     * `present` (i64 0|1) in lastValue and the operands in {@see $coalescePre}
+     * for {@see emitArrayAccessUnified}. The found word is a BORROW of the
+     * element, like the one a plain `$a[$k]` read takes, so the left arm keeps
+     * the retain path of its ordinary read ({@see armRetainPreBox}).
+     */
+    private function emitCoalesceArrayLookup(\Compile\Mir\ArrayAccess_ $aa): string
+    {
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        // The key before a plain variable base, as php fetches it ({@see emitIssetTarget}).
+        $keyFirst = $this->keyBeforeBase($aa->array);
+        $out = '';
+        if ($keyFirst) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        }
+        $out .= $this->emitNode($aa->array);
+        $out .= $this->arrayBaseToPtr($aa->array->type);
+        $arr = $this->lastValue;
+        if (!$keyFirst) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        }
+        $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
+        $word = $this->lastValue;
+        $out .= $this->lookupPresent($aa, $word);
+        $this->coalescePre = ['node' => $aa, 'arr' => $arr, 'key' => $key, 'word' => $word];
+        return $out;
+    }
+
+    private string $peReg = '';
+    private string $peType = '';
+    private string $peRel = '';
+    private string $peFlavor = '';
+    private string $peRelKey = '';
+    /** @var array<string, mixed> */
+    private array $peBase = [];
+
+    private function popPreEval(int $mark): void
+    {
+        while (\count($this->preEvalNodes) > $mark) {
+            \array_pop($this->preEvalNodes);
+            \array_pop($this->preEvalRegs);
+            \array_pop($this->preEvalTypes);
+        }
+    }
+
+    /** Evaluate a `??` key into a register for {@see $preEvalNodes}; the release of a fresh temp goes to {@see $peRel}. */
+    private function preEvalKey(Node $idx, bool $keyIsCell, bool $keyIsString): string
+    {
+        $out = $this->emitNode($idx);
+        if ($keyIsString) { $out .= $this->coerceToPtr(); }
+        elseif ($keyIsCell) { $out .= $this->coerceToI64(); }
+        $this->peReg = $this->lastValue;
+        $this->peType = $this->lastValueType;
+        $this->peRel = ($keyIsCell || $keyIsString) ? $this->keyTempRelease($idx, $this->lastValue, $keyIsCell) : '';
+        return $out;
+    }
+
+    private function preEvalBase(Node $base, bool $isStr): string
+    {
+        if ($isStr) {
+            $out = $this->emitStrOffsetBase($base);
+            $out .= $this->coerceToPtr();
+            $this->peReg = $this->lastValue;
+            $this->peType = 'ptr';
+            $this->peRel = $this->freeStrTemp($base, $this->lastValue);
+            $this->peFlavor = '';
+            return $out;
+        }
+        $out = $this->emitNode($base);
+        $out .= $this->coerceToI64();
+        $this->peReg = $this->lastValue;
+        $this->peType = 'i64';
+        $this->peFlavor = $this->freshRcArgFlavor($base);
+        $this->peRel = '';
+        return $out;
+    }
+
+    /**
+     * The base temp release of a pre-evaluated `??`, generated afresh per arm (the
+     * helper allocates registers, so one text cannot serve two arms).
+     * @param array<string, mixed> $b
+     */
+    private function peBaseRelease(array $b, bool $found): string
+    {
+        if ($found && !$b['independent']) { return ''; }
+        if ($b['text'] !== '') { return $b['text']; }
+        if ($b['flavor'] !== '') { return $this->rcReleaseReg($b['reg'], $b['flavor']); }
+        return '';
+    }
+
+    /**
+     * `$base[$key] ?? d` over a string, an ArrayAccess object or an erased base:
+     * evaluate the base and the key once, php's way round (the key first when the
+     * base is a plain variable), register both for {@see emitNode}, and leave the
+     * temp releases in {@see $peRelKey} / {@see $peBase}.
+     * The found arm gives the base back only where the read result cannot borrow
+     * from it (a string char and an offsetGet result are independent; an erased
+     * array element is not, so a non-scalar result keeps the old leak-not-free).
+     */
+    private function emitCoalescePreEval(\Compile\Mir\ArrayAccess_ $aa): string
+    {
+        $base = $aa->array;
+        $bk = $base->type->kind;
+        $isStr = $bk === Type::KIND_STRING;
+        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyIsString = $aa->index->type->kind === Type::KIND_STRING
+            || $aa->index->kind === Node::KIND_STRING_CONST;
+        $out = '';
+        $kReg = ''; $kType = ''; $kRel = '';
+        $bReg = ''; $bType = ''; $bRel = ''; $bFlavor = '';
+        if ($this->keyBeforeBase($base)) {
+            $out .= $this->preEvalKey($aa->index, $keyIsCell, $keyIsString);
+            $kReg = $this->peReg; $kType = $this->peType; $kRel = $this->peRel;
+            $out .= $this->preEvalBase($base, $isStr);
+            $bReg = $this->peReg; $bType = $this->peType; $bRel = $this->peRel; $bFlavor = $this->peFlavor;
+        } else {
+            $out .= $this->preEvalBase($base, $isStr);
+            $bReg = $this->peReg; $bType = $this->peType; $bRel = $this->peRel; $bFlavor = $this->peFlavor;
+            $out .= $this->preEvalKey($aa->index, $keyIsCell, $keyIsString);
+            $kReg = $this->peReg; $kType = $this->peType; $kRel = $this->peRel;
+        }
+        $this->preEvalNodes[] = $base;
+        $this->preEvalRegs[] = $bReg;
+        $this->preEvalTypes[] = $bType;
+        $this->preEvalNodes[] = $aa->index;
+        $this->preEvalRegs[] = $kReg;
+        $this->preEvalTypes[] = $kType;
+        $rk = $aa->type->kind;
+        $independent = $isStr || $bk === Type::KIND_OBJ
+            || $rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_BOOL;
+        $this->peRelKey = $kRel;
+        $this->peBase = ['text' => $bRel, 'flavor' => $bFlavor, 'reg' => $bReg, 'independent' => $independent];
+        return $out;
+    }
+
+    /** The right arm of a fused `??`: no element was read, so give back the key and base temps. */
+    private function coalesceMissRelease(Node $left, array $pre): string
+    {
+        $out = '';
+        $ki = $left->index;
+        $keyIsCell = $this->keyRidesCellChannel($ki);
+        $keyIsString = $ki->type->kind === Type::KIND_STRING || $ki->kind === Node::KIND_STRING_CONST;
+        if ($keyIsCell || $keyIsString) {
+            $out .= $this->keyTempRelease($ki, $pre['key'], $keyIsCell);
+        }
+        return $out . $this->baseTempRelease($left->array, $pre['arr'], true, Type::int_());
+    }
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
         $nc = $n;
@@ -2565,14 +2857,34 @@ trait EmitLlvmExpr
             $wantCell = $n->type->kind === Type::KIND_CELL;
             $res = $this->ssa->allocReg();
             $out = '  ' . $res . " = alloca i64\n";
+            $fused = $this->coalesceFusable($nc->left);
+            $peMark = 0;
+            $peRelKey = '';
+            $peBase = [];
             // `$s[$k] ?? d` on a STRING is not isset: php throws for an array /
             // object key and warns on `"1x"` ({@see EmitLlvmArrays::coerceStrOffset}).
             $lft = $nc->left;
             $this->strOffsetCoalesce = $lft instanceof \Compile\Mir\ArrayAccess_
                 && $lft->array->type->kind === Type::KIND_STRING;
-            $out .= $this->emitIssetTarget($nc->left);
+            if ($fused) {
+                // One probe, base and key evaluated once: the left arm reads the
+                // word it found, the right arm gives the temps back.
+                $out .= $this->emitCoalesceArrayLookup($nc->left);
+                $pre = $this->coalescePre;
+                $present = $this->lastValue;
+            } else {
+                // A string / ArrayAccess / erased base: the presence test and the
+                // read are emitted by different paths, so evaluate the operands
+                // ONCE into registers both consume ({@see $preEvalNodes}).
+                $peMark = \count($this->preEvalNodes);
+                $out .= $this->emitCoalescePreEval($nc->left);
+                $peRelKey = $this->peRelKey;
+                $peBase = $this->peBase;
+                $out .= $this->emitIssetTarget($nc->left);
+                $pre = null;
+                $present = $this->lastValue;
+            }
             $this->strOffsetCoalesce = false;
-            $present = $this->lastValue;
             $bit = $this->ssa->allocReg();
             $out .= '  ' . $bit . ' = icmp ne i64 ' . $present . ", 0\n";
             $useL = $this->ssa->allocLabel('nc.left');
@@ -2580,7 +2892,13 @@ trait EmitLlvmExpr
             $end  = $this->ssa->allocLabel('nc.end');
             $out .= '  br i1 ' . $bit . ', label %' . $useL . ', label %' . $useR . "\n";
             $out .= $useL . ":\n";
+            $this->coalescePre = $pre;
             $out .= $this->emitNode($nc->left);
+            $this->coalescePre = null;
+            if (!$fused) {
+                $this->popPreEval($peMark);
+                $out .= $peRelKey . $this->peBaseRelease($peBase, true);
+            }
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->left);
                 // The arm NODE goes with the type: a concrete-element array is
@@ -2590,19 +2908,21 @@ trait EmitLlvmExpr
                 // the whole assoc `mk()` returned, once per call.
                 $out .= $this->boxToCell($nc->left->type, $nc->left);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $nc->left);
             }
             $leftVal = $this->lastValue;
             $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
             $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $end . "\n";
             $out .= $useR . ":\n";
+            if ($pre !== null) { $out .= $this->coalesceMissRelease($nc->left, $pre); }
+            if (!$fused) { $out .= $peRelKey . $this->peBaseRelease($peBase, false); }
             $out .= $this->emitNode($nc->right);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->right);
                 $out .= $this->boxToCell($nc->right->type, $nc->right);
             } else {
-                $out .= $this->coerceToI64();
+                $out .= $this->armCoerce($n, $nc->right);
             }
             $rightVal = $this->lastValue;
             $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
@@ -2666,9 +2986,12 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
             $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         } else {
-            $leftVal = $lv;
-            $out .= $this->armRetainPostBox($n, $nc->left, $lv);
-            $out .= '  store i64 ' . $lv . ', ptr ' . $res . "\n";
+            $this->lastValue = $lv;
+            $this->lastValueType = 'i64';
+            $out .= $this->armCoerce($n, $nc->left);
+            $leftVal = $this->lastValue;
+            $out .= $this->armRetainPostBox($n, $nc->left, $leftVal);
+            $out .= '  store i64 ' . $leftVal . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
@@ -2677,7 +3000,7 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPreBox($n, $nc->right);
             $out .= $this->boxToCell($nc->right->type, $nc->right);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($n, $nc->right);
         }
         $rightVal = $this->lastValue;
         $out .= $this->armRetainPostBox($n, $nc->right, $rightVal);
@@ -2771,8 +3094,12 @@ trait EmitLlvmExpr
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         } else {
             // The kept value is a raw property load — always a borrow.
-            $out .= $this->armRetainPostBox($nc, $leafPa, $cur);
-            $out .= '  store i64 ' . $cur . ', ptr ' . $res . "\n";
+            $this->lastValue = $cur;
+            $this->lastValueType = 'i64';
+            $out .= $this->armCoerce($nc, $leafPa);
+            $kept = $this->lastValue;
+            $out .= $this->armRetainPostBox($nc, $leafPa, $kept);
+            $out .= '  store i64 ' . $kept . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
@@ -2781,7 +3108,7 @@ trait EmitLlvmExpr
             $out .= $this->armRetainPreBox($nc, $nc->right);
             $out .= $this->boxToCell($nc->right->type);
         } else {
-            $out .= $this->coerceToI64();
+            $out .= $this->armCoerce($nc, $nc->right);
         }
         $out .= $this->armRetainPostBox($nc, $nc->right, $this->lastValue);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
@@ -3668,8 +3995,50 @@ trait EmitLlvmExpr
                 $fn = $d->op === '+' ? '@manticore___mir_str_increment' : '@manticore___mir_str_decrement';
                 $old = $this->ssa->allocReg();
                 $out .= '  ' . $old . ' = load i64, ptr ' . $ptr . "\n";
+                // An inline INT cell (tag 1, 48-bit payload) steps in place;
+                // only another kind — or a step out of the 48-bit range — takes
+                // the stdlib call. `$tokens[--$index]` over a `?int` index was
+                // 5.6% of php-cs-fixer's run spent in the PHP-level body.
+                $intHdr = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
+                $hi = $this->ssa->allocReg();
+                $out .= '  ' . $hi . ' = and i64 ' . $old . ", -281474976710656\n";
+                $isInt = $this->ssa->allocReg();
+                $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ', ' . $intHdr . "\n";
+                $sh = $this->ssa->allocReg();
+                $out .= '  ' . $sh . ' = shl i64 ' . $old . ", 16\n";
+                $pv = $this->ssa->allocReg();
+                $out .= '  ' . $pv . ' = ashr i64 ' . $sh . ", 16\n";
+                $nv = $this->ssa->allocReg();
+                $out .= '  ' . $nv . ' = ' . ($d->op === '+' ? 'add' : 'sub') . ' i64 ' . $pv . ", 1\n";
+                $sh2 = $this->ssa->allocReg();
+                $out .= '  ' . $sh2 . ' = shl i64 ' . $nv . ", 16\n";
+                $back = $this->ssa->allocReg();
+                $out .= '  ' . $back . ' = ashr i64 ' . $sh2 . ", 16\n";
+                $fits = $this->ssa->allocReg();
+                $out .= '  ' . $fits . ' = icmp eq i64 ' . $back . ', ' . $nv . "\n";
+                $fast = $this->ssa->allocReg();
+                $out .= '  ' . $fast . ' = and i1 ' . $isInt . ', ' . $fits . "\n";
+                $fastL = $this->ssa->allocLabel('incdec.fast');
+                $slowL = $this->ssa->allocLabel('incdec.slow');
+                $joinL = $this->ssa->allocLabel('incdec.join');
+                $res = $this->ssa->allocReg();
+                $out .= '  ' . $res . " = alloca i64\n";
+                $out .= '  br i1 ' . $fast . ', label %' . $fastL . ', label %' . $slowL . "\n";
+                $out .= $fastL . ":\n";
+                $pl = $this->ssa->allocReg();
+                $out .= '  ' . $pl . ' = and i64 ' . $nv . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $fw = $this->ssa->allocReg();
+                $out .= '  ' . $fw . ' = or i64 ' . $pl . ', ' . $intHdr . "\n";
+                $out .= '  store i64 ' . $fw . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $slowL . ":\n";
+                $sw = $this->ssa->allocReg();
+                $out .= '  ' . $sw . ' = call i64 ' . $fn . '(i64 ' . $old . ")\n";
+                $out .= '  store i64 ' . $sw . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $joinL . "\n";
+                $out .= $joinL . ":\n";
                 $new = $this->ssa->allocReg();
-                $out .= '  ' . $new . ' = call i64 ' . $fn . '(i64 ' . $old . ")\n";
+                $out .= '  ' . $new . ' = load i64, ptr ' . $res . "\n";
                 $out .= '  store i64 ' . $new . ', ptr ' . $ptr . "\n";
                 $this->lastValue = $d->prefix ? $new : $old;
                 $this->lastValueType = 'i64';
@@ -4207,6 +4576,29 @@ trait EmitLlvmExpr
      * juggles). Two arrays whose element representation the runtime can't
      * normalize keep the old pointer answer rather than guess.
      */
+    /** A raw number / bool operand of `<=>` as its php truth value, i64 0/1
+     *  (a NAN is true, as `(bool)NAN` is); lastValue ← it. */
+    private function spaceshipBoolWord(string $v, string $vt, string $kind): string
+    {
+        $b = $this->ssa->allocReg();
+        if ($vt === 'double' || $kind === Type::KIND_FLOAT) {
+            $out = '  ' . $b . ' = fcmp une double ' . $v . ", 0.0\n";
+        } elseif ($vt === 'i1') {
+            $this->lastValue = $v;
+            $z = $this->ssa->allocReg();
+            $this->lastValue = $z;
+            $this->lastValueType = 'i64';
+            return '  ' . $z . ' = zext i1 ' . $v . " to i64\n";
+        } else {
+            $out = '  ' . $b . ' = icmp ne i64 ' . $v . ", 0\n";
+        }
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $b . " to i64\n";
+        $this->lastValue = $z;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitSpaceship(\Compile\Mir\Spaceship $n): string
     {
         $out = $this->emitNode($n->left);
@@ -4248,6 +4640,16 @@ trait EmitLlvmExpr
         $lRawNum = $lk === Type::KIND_INT || $lk === Type::KIND_BOOL || $lk === Type::KIND_FLOAT;
         $rRawNum = $rk === Type::KIND_INT || $rk === Type::KIND_BOOL || $rk === Type::KIND_FLOAT;
         if ($lRawNum && $rRawNum) {
+            // A bool beside a number compares as two BOOLS (`true <=> 5` is 0,
+            // `false <=> 0.0` is 0): php converts the number, not the bool.
+            if (($lk === Type::KIND_BOOL) !== ($rk === Type::KIND_BOOL)) {
+                $out .= $this->spaceshipBoolWord($l, $lt, $lk);
+                $l = $this->lastValue; $lt = 'i64';
+                $out .= $this->spaceshipBoolWord($r, $rt, $rk);
+                $r = $this->lastValue; $rt = 'i64';
+                $lk = Type::KIND_BOOL;
+                $rk = Type::KIND_BOOL;
+            }
             $useF = $lk === Type::KIND_FLOAT || $rk === Type::KIND_FLOAT
                 || $lt === 'double' || $rt === 'double';
             if ($useF) {
@@ -4257,10 +4659,13 @@ trait EmitLlvmExpr
                 if ($rt !== 'double') { $rd = $this->ssa->allocReg(); $out .= '  ' . $rd . ' = sitofp i64 ' . $r . " to double\n"; }
                 $lt2 = $this->ssa->allocReg();
                 $out .= '  ' . $lt2 . ' = fcmp olt double ' . $ld . ', ' . $rd . "\n";
+                // php's ZEND_THREEWAY_COMPARE: `a == b ? 0 : (a < b ? -1 : 1)`,
+                // so a NAN on either side is UNCOMPARABLE, 1 — not the 0 an
+                // `ogt` test gave (which made `NAN <=> 1.0` "equal").
                 $gt = $this->ssa->allocReg();
-                $out .= '  ' . $gt . ' = fcmp ogt double ' . $ld . ', ' . $rd . "\n";
+                $out .= '  ' . $gt . ' = fcmp oeq double ' . $ld . ', ' . $rd . "\n";
                 $sel = $this->ssa->allocReg();
-                $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 1, i64 0' . "\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $gt . ', i64 0, i64 1' . "\n";
                 $res = $this->ssa->allocReg();
                 $out .= '  ' . $res . ' = select i1 ' . $lt2 . ', i64 -1, i64 ' . $sel . "\n";
                 $this->lastValue = $res;
@@ -4829,6 +5234,20 @@ trait EmitLlvmExpr
             $chunks = [$this->emitNode($cellNode)];
             $chunks[] = $this->coerceToI64();
             $v = $this->lastValue;
+            // LOOSE `$m == false` is php's `!$m` — 0, null, "", "0" and an empty
+            // array all equal false. Only the strict compare tests the tag.
+            if ($op === '==' || $op === '!=') {
+                $this->rt->needsTaggedTruthy = true;
+                $t = $this->ssa->allocReg();
+                $chunks[] = '  ' . $t . ' = call i64 @__manticore_tagged_truthy(i64 ' . $v . ")\n";
+                $cmpReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($op === '==' ? 'eq' : 'ne') . ' i64 ' . $t . ", 0\n";
+                $extReg = $this->ssa->allocReg();
+                $chunks[] = '  ' . $extReg . ' = zext i1 ' . $cmpReg . " to i64\n";
+                $this->lastValue = $extReg;
+                $this->lastValueType = 'i64';
+                return \implode('', $chunks);
+            }
             $chunks[] = $this->cellTagIr($v);
             $tag = $this->cellTagReg;
             $isBool = $this->ssa->allocReg();
@@ -4868,8 +5287,9 @@ trait EmitLlvmExpr
             if ($ak === Type::KIND_ARRAY || $ak === Type::KIND_UNKNOWN) {
                 $chunks = [$this->emitNode($arrNode)];
                 $chunks[] = $this->coerceToPtr();
-                $len = $this->ssa->allocReg();
-                $chunks[] = '  ' . $len . ' = load i64, ptr ' . $this->lastValue . "\n";
+                // The LIVE count: the length word still counts unset entries.
+                $chunks[] = $this->arrayCountFromPtrIr($this->lastValue);
+                $len = $this->lastValue;
                 $cmpReg = $this->ssa->allocReg();
                 $chunks[] = '  ' . $cmpReg . ' = icmp ' . ($isEq ? 'eq' : 'ne')
                       . ' i64 ' . $len . ", 0\n";
@@ -4981,6 +5401,10 @@ trait EmitLlvmExpr
             $chunks[] = $jnL . ":\n";
             $phi = $this->ssa->allocReg();
             $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
+            // A fresh string operand dies here, in the join, as on the
+            // string-vs-string path: `(string)(int)$key === $key` over an
+            // `int|string` key kept one buffer per `array_key_exists()` call.
+            $chunks[] = $this->freeStrTemp($leftIsStr ? $c->left : $c->right, $sp);
             $res = $phi;
             if ($op === '!==') { $res = $this->ssa->allocReg(); $chunks[] = '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
             $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";
@@ -5519,6 +5943,18 @@ trait EmitLlvmExpr
             }
         }
 
+        // An ORDERING with a bool on exactly one side compares two BOOLS:
+        // `true < 5` is false (both true), `false < -3` is true. The raw
+        // carriers ordered the number instead. (eq/ne took the tagged table.)
+        if (!$isEq && !$isNe && (($lk === Type::KIND_BOOL) !== ($rk === Type::KIND_BOOL))
+            && isset($rawScalar[$lk]) && isset($rawScalar[$rk])) {
+            $chunks[] = $this->spaceshipBoolWord($l, $lt, $lk);
+            $l = $this->lastValue; $lt = 'i64';
+            $chunks[] = $this->spaceshipBoolWord($r, $rt, $rk);
+            $r = $this->lastValue; $rt = 'i64';
+            $lk = Type::KIND_BOOL;
+            $rk = Type::KIND_BOOL;
+        }
         return $this->emitNumericCmpTail($c, \implode('', $chunks), $l, $r, $lt, $rt, $lk, $rk, $isEq, $isNe);
     }
     /**
@@ -5812,15 +6248,54 @@ trait EmitLlvmExpr
             $this->scalarStrArgTemp = $this->lastValue;
             return $out;
         }
-        if ($ak !== Type::KIND_CELL) { return ''; }
+        if ($ak !== Type::KIND_CELL) { return $this->nestedArgConform($a->type, $pt); }
         if ($pt === null) { return ''; }
         $out = $this->unboxCellToType($pt);
+        $out .= $this->nestedArgConform($a->type, $pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
         // leaves a `double` behind (the tag has to be read to get a real value
         // out of the cell) — carry it over as its bit pattern, or the call site
         // emits `i64 %d` for a double-typed register and clang rejects the
         // module. Every other kind already leaves an i64 and this is a no-op.
         return $out . $this->coerceToI64();
+    }
+
+    /**
+     * An array argument whose INNER buffers the caller cannot vouch for (its
+     * element is erased or a cell, at the outer or the nested level) bound to a
+     * param claiming a concrete nested element — `@param array<string, bool[]>`
+     * fed an `assoc[string, unknown]` built from boxed reads: the callee reads
+     * the inner words raw, and a boxed `false` is true. Conform the argument to
+     * the claim in place, both levels ({@see \Compile\Runtime\UnifiedArrayRuntime::emitArrayConform},
+     * a no-op on a buffer not hinted CELL), as a typed return already is. One
+     * level is the existing call-binding rebuild's; this is the level below.
+     * lastValue (the array word) is left as it was.
+     */
+    private function nestedArgConform(Type $at, ?Type $pt): string
+    {
+        if ($pt === null || !$at->isArray() || $at->isShape()) { return ''; }
+        if ((!$pt->isVec() && !$pt->isAssoc()) || $pt->isShape()) { return ''; }
+        $el = $pt->element;
+        if ($el === null || (!$el->isVec() && !$el->isAssoc()) || $el->isShape() || $el->element === null) { return ''; }
+        $outerCode = $this->elementHintCodeForType($el);
+        $innerCode = $this->elementHintCodeForType($el->element);
+        if ($outerCode === null || $innerCode === null
+            || $innerCode === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return ''; }
+        $ae = $at->element;
+        $loose = static fn (?Type $t): bool => $t === null || $t->kind === Type::KIND_UNKNOWN || $t->kind === Type::KIND_CELL;
+        if (!$loose($ae) && !($ae->isArray() && $loose($ae->element))) { return ''; }
+        $sv = $this->lastValue;
+        $st = $this->lastValueType;
+        $out = $this->coerceToI64();
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $out .= '  call void @__mir_array_conform(ptr ' . $p . ', i64 ' . (string)$outerCode . ")\n";
+        $out .= '  call void @__mir_array_conform_inner(ptr ' . $p . ', i64 ' . (string)$innerCode . ")\n";
+        $this->lastValue = $sv;
+        $this->lastValueType = $st;
+        return $out;
     }
 
     /**
@@ -5926,27 +6401,39 @@ trait EmitLlvmExpr
         // A CLOSURE is boxed like an object ({@see boxToCell}): left out, a
         // `\Closure` return or argument read out of a cell element handed the
         // tagged word on as the closure pointer.
-        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE) {
+        // An object UNION is the bare object pointer `obj<C>` is ({@see boxToCell}
+        // boxes both by box_object): left out, a cell stored into a `vec[A|C]`
+        // slot kept its tag bits under an `obj` hint.
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE || $pk === Type::KIND_UNION) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
-            // A cell array reaching a CONCRETE element claim (`/** @var
-            // list<array{…}> $p */ $p = $decoded['packages']` off json_decode)
-            // still holds CELL elements; the typed reader takes them raw.
-            // Conform the buffer to the claim — a no-op unless it is hinted CELL.
-            // Never a SHAPE: its reads check each field against the hint.
-            if (($pt->isVec() || $pt->isAssoc()) && !$pt->isShape() && $pt->element !== null) {
-                $code = $this->elementHintCodeForType($pt->element);
-                if ($code !== null && $code !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) {
-                    $cp = $this->ssa->allocReg();
-                    $out .= '  ' . $cp . ' = inttoptr i64 ' . $r . " to ptr\n";
-                    $out .= '  call void @__mir_array_conform(ptr ' . $cp . ', i64 ' . (string)$code . ")\n";
-                }
-            }
-            return $out;
+            return $out . $this->conformToClaim($pt, $r);
         }
         return '';
+    }
+
+    /**
+     * An array leaving a CELL channel for a CONCRETE element claim: the cell
+     * may hold a buffer a cell writer rebuilt as cells (a `: array<K,V>|null`
+     * return boxes its typed array that way), and the typed consumer reads raw
+     * words — a boxed 5 read as -4222124650659835. The static claim is
+     * re-established where the buffer comes back, exactly as after a by-ref
+     * erased callee ({@see \Compile\Runtime\UnifiedArrayRuntime::emitArrayConform}):
+     * a CELL-hinted buffer is unboxed in place to the claimed kind, any other
+     * hint is left alone.
+     */
+    private function conformToClaim(Type $pt, string $word): string
+    {
+        if ((!$pt->isVec() && !$pt->isAssoc()) || $pt->isShape()) { return ''; }
+        $el = $pt->element;
+        if ($el === null) { return ''; }
+        $code = $this->elementHintCodeForType($el);
+        if ($code === null || $code === \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { return ''; }
+        $p = $this->ssa->allocReg();
+        return '  ' . $p . ' = inttoptr i64 ' . $word . " to ptr\n"
+            . '  call void @__mir_array_conform(ptr ' . $p . ', i64 ' . (string)$code . ")\n";
     }
 
     /**

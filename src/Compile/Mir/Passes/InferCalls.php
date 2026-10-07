@@ -267,7 +267,8 @@ trait InferCalls
             return Type::obj('Ffi\\Ptr');
         }
         if ($n === '__mir_argc' || $n === '__mir_env_count'
-            || $n === '__mir_clock_ns' || $n === '__mc_errno') { return Type::int_(); }
+            || $n === '__mir_clock_ns' || $n === '__mc_errno'
+            || $n === '__mc_pool_start') { return Type::int_(); }
         if ($n === '__mir_to_cell') { return Type::cell(); }
         // Never actually returns — it throws php's `Undefined constant` Error.
         // Typed CELL so whatever position the constant stood in accepts it: the
@@ -361,29 +362,25 @@ trait InferCalls
             return Type::int_();
         }
         if ($n === '__ugt') { return Type::bool_(); }
-        // min/max: a float operand makes the result a numericCell (the winner's
-        // own type is preserved — {@see EmitLlvmBuiltins::biMinMax}); else int.
         if ($n === 'min' || $n === 'max') {
-            // PHP orders strings and arrays too, and returns a value of that
-            // TYPE — `max([1,2],[1,3])` is an array, not an int. Mirrors the
-            // uniform-kind rule in {@see EmitLlvmBuiltins::biMinMax}.
-            // A single array arg is the "max of its ELEMENTS" form: the winner
-            // is an erased element, so the result is a cell.
-            if (\count($args) === 1 && $args[0]->type->kind === Type::KIND_ARRAY) {
-                return Type::cell();
-            }
-            $allStr = \count($args) >= 2;
-            $allArr = \count($args) >= 2;
+            // Mirrors {@see EmitLlvmBuiltins::biMinMax}: one argument is the
+            // array form (an erased element); all ints / all floats / all
+            // strings compare inline and keep that type; anything else is
+            // php's comparison in the stdlib, whose winner is any operand.
+            if (\count($args) === 1) { return Type::cell(); }
+            $allStr = true;
+            $allFloat = true;
+            $allInt = true;
             foreach ($args as $a) {
-                if ($a->type->kind !== Type::KIND_STRING) { $allStr = false; }
-                if ($a->type->kind !== Type::KIND_ARRAY)  { $allArr = false; }
+                $k = $a->type->kind;
+                if ($k !== Type::KIND_STRING) { $allStr = false; }
+                if ($k !== Type::KIND_FLOAT) { $allFloat = false; }
+                if ($k !== Type::KIND_INT) { $allInt = false; }
             }
+            if ($allInt) { return Type::int_(); }
+            if ($allFloat) { return Type::float_(); }
             if ($allStr) { return Type::string_(); }
-            if ($allArr) { return $args[0]->type; }
-            foreach ($args as $a) {
-                if ($a->type->kind === Type::KIND_FLOAT) { return Type::numericCell(); }
-            }
-            return Type::int_();
+            return Type::cell();
         }
         // pow / `**`: php answers an int for int operands only when the exponent
         // is non-negative (`2 ** -1` is 0.5). A constant exponent decides it
@@ -820,8 +817,8 @@ trait InferCalls
             if ($node->method === 'call')   { $node->type = Type::cell();    return $node->type; }
         }
         // Generator iterator protocol: current()/send() yield the value type
-        // (the Generator's element); key() an int; valid() a bool. next()/
-        // rewind()/getReturn() are left as-is (void / unknown).
+        // (the Generator's element); key() and getReturn() a cell; valid() a
+        // bool. next()/rewind() are left as-is (void).
         //
         // No declared element means CELL, not unknown: `current`@16 holds a
         // shallow-boxed cell ({@see EmitLlvmGenerator::emitYield}), so a bare
@@ -849,6 +846,9 @@ trait InferCalls
                 $node->type = Type::cell();
             } elseif ($m === 'valid') {
                 $node->type = Type::bool_();
+            } elseif ($m === 'getReturn') {
+                // `retval`@48 is a tagged cell, like `key`.
+                $node->type = Type::cell();
             }
             return $node->type;
         }
@@ -1064,7 +1064,15 @@ trait InferCalls
             $seen[$c] = true;
             if ($c === $iface) { return true; }
             $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
+            // An interface has no ClassDef: its `extends` list is the ancestor
+            // map the emitter walks too ({@see EmitLlvm::classImplements}). Left
+            // out, `foreach` over an `Aware extends \Iterator` slot found no
+            // iterator class here while the emitter drove the protocol, and the
+            // binding was typed erased over the tagged cell `current()` answers.
+            if ($cd === null) {
+                foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
+                continue;
+            }
             if ($cd->parent !== '') { $stack[] = $cd->parent; }
             foreach ($cd->interfaces as $i) { $stack[] = $i; }
         }

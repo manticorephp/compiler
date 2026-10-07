@@ -1,0 +1,17 @@
+ifArr SK array SS
+2
+catchArr N- NULL NN
+retArr SK array SS
+ifStr SK string SS
+xy
+ifArr N- NULL NN
+0
+catchArr SK array SS
+retArr N- NULL NN
+ifStr N- NULL NN
+dflt
+swArr SK array SS
+swArr N- NULL NN
+loopArr SK array SS
+loopArr N- NULL NN
+done

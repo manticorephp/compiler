@@ -52,6 +52,21 @@ function __mc_env(): array
 }
 
 /**
+ * `$_ENV` as the variable it is: seeded from the environment (strings), but a
+ * program may store anything into it (symfony's `$_ENV['SHELL_VERBOSITY'] =
+ * $int`), and every module sharing `@g__ENV` must agree on one element
+ * representation — so it is MIXED from the start, exactly like `$_SERVER`.
+ * @return array<string, mixed>
+ */
+function __mc_env_mixed(): array
+{
+    /** @var array<string, mixed> $out */
+    $out = [];
+    foreach (__mc_env() as $ek => $ev) { $out[$ek] = $ev; }
+    return $out;
+}
+
+/**
  * `$_SERVER` for the CLI SAPI: the environment first, then the CLI keys PHP
  * adds on top of it (php.net/reserved.variables.server). Values are mixed —
  * argv is an ARRAY, argc an int — so the nested array is boxed to a cell, the

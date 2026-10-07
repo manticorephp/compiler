@@ -101,7 +101,7 @@ async(function () {
 | `Async\dump(): string` | every live task, what it is parked on, and where it was spawned |
 | `Async\dumpOn(int ...$signals)` | print that on a signal — `kill -QUIT <pid>` on a hung process |
 | `Async\watchdog(float $ms)` | name the task that HOLDS the loop longer than $ms |
-| `Async\stats(): array` | engine counters (spawned/wakes/reactor_waits/…) |
+| `Async\stats(): array` | engine counters (spawned/wakes/reactor_waits/offloaded/pool_threads/…) |
 | `Async\failure(): string` | which task raised the failure that escaped, and where it was spawned |
 | `Fiber::setStackSize(int)` | bytes of stack per fiber (`MANTICORE_FIBER_STACK` does the same) |
 | `MANTICORE_FIBER_GUARD=0` | one mapping per fiber instead of two — twice the task ceiling, no named overflow |
@@ -123,7 +123,9 @@ $rows = Async\async(fn() => Async\group(function (TaskGroup $g) {
 `timeout()` is a scope with a deadline. On expiry the body **and everything it spawned** is
 cancelled and joined before `TimeoutException` is thrown — a timeout that leaves work running
 is not a timeout. Nesting only ever tightens: a 30 s inner scope inside a 2 s outer one still
-dies at 2 s.
+dies at 2 s. Every deadline, timer, stream timeout and backoff runs on the **monotonic**
+clock, so an NTP or `date -s` step neither stalls a timer nor fires them all at once;
+`Context::deadline()` still reports a unix time.
 
 ```php
 $page = Async\timeout(2.0, fn() => file_get_contents($url));
@@ -260,14 +262,14 @@ Async\watchdog(50.0);         // or MANTICORE_ASYNC_WATCHDOG=50, no code change
 ```
 
 That is the failure mode a cooperative loop cannot report by itself: regular-file
-I/O (blocking by design here), a CPU-bound stretch with no suspend point, a library
+I/O on a call the pool does not cover, a CPU-bound stretch with no suspend point, a library
 falling back to a blocking call. It is reported *after* the stall — a cooperative
 loop has no way to preempt — and each task reports its first breach and then only a
 doubling, so a knowingly CPU-heavy worker cannot flood the log. Off costs one float
 compare per resume.
 
 `Async\stats()` is the machine-readable half — `spawned`, `settled`, `cancelled`,
-`wakes`, `reactor_waits`, `timer_fires`, `watchdog`, plus the `live` / `ready` /
+`wakes`, `reactor_waits`, `timer_fires`, `watchdog`, plus `offloaded` / `pool_threads` (the blocking pool, below) and the `live` / `ready` /
 `io_parked` / `timers` gauges.
 
 And for the third failure — something threw, and the trace points at the wrong
@@ -452,24 +454,91 @@ async(function () {
 });
 ```
 
-## ⚠ What is NOT async
+## Blocking calls run on a pool
 
-**Regular-file I/O.** `O_NONBLOCK` is a no-op for regular files on both Linux and macOS, and
-there is no thread pool / POSIX aio / io_uring here — so `file_get_contents('/path')`,
-`fopen()` + `fread()` on a file handle, `stat`, and directory walks block the whole loop for
-the duration of the call. Measured on a 64 MB page-cache-hot file: one `fread($h, 64MB)`
-stalls every other task **15-25 ms**; reading it in 1 MB chunks with a yield between them
-keeps the worst gap at **~2 ms**. So for anything big use
+`O_NONBLOCK` is a no-op for regular files on both Linux and macOS, so there is no readiness
+to wait on. Under the scheduler these calls are handed to a small pool of OS threads instead,
+and the task parks until the job finishes — the loop keeps running other tasks meanwhile:
+
+- files opened by `fopen()` on a path: `fread` / `fwrite` / `fflush` / `fclose` / `fsync`;
+- `file_get_contents()` / `file_put_contents()`;
+- `stat` / `lstat` and the rest of that family (`filesize`, `is_dir`, `filemtime`, …);
+- `opendir` / `readdir` / `closedir`, and `scandir` as one job for the whole directory;
+- `unlink` / `rename` / `mkdir` / `rmdir`;
+- the `getaddrinfo` path — `gethostbyname()` and the name resolution in connect / bind.
+
+**PHP never runs on a pool thread — the pool executes a fixed set of libc calls.** The rc is
+non-atomic, the arena is not thread-safe and the exception slot is process-global, so a worker
+touches none of them: the scheduler marshals plain integers and buffers to it and reads the
+result back on the loop thread. Nothing else changed for the program; output is byte-identical
+to the inline path, and outside `async()` every call runs inline as before.
+
+Not pooled, still inline: sockets (they have a readiness path), `popen` / `proc_open` pipes,
+`tmpfile`, `STDIN` / `STDOUT` / `STDERR`, and `file_exists` / `is_readable` (an `access`
+call), `fgets`, `stream_get_contents`, `copy`, `rewinddir` (`glob` walks through the pooled `scandir` and stat). A slow one of these still stalls
+the loop — measured on a 64 MB page-cache-hot file, a single inline `fread($h, 64MB)` holds
+every other task for **15-25 ms**. `Async\readFile()` / `Async\writeFile()` stay for
+that reason and for chunked progress: they read in 1 MB pieces with a yield between them
+(worst gap **~2 ms**) and are cancellation-aware.
 
 ```php
 $data = Async\readFile('/path/to/big');       // chunked + yields, cancellation-aware
 Async\writeFile('/path/out', $data);
 ```
 
-A fork+socketpair worker pool was measured against this and rejected: it copies every byte
-through a socket, which for a hot read costs more than the read, and it only pays off on a
-genuinely blocking (cold / networked) filesystem. Threads stay out entirely — non-atomic rc,
-a non-thread-safe arena and a process-global exception slot.
+The pool is lazy: it starts on the first covered call, is per process, and outlives an
+`async()` run. `MANTICORE_BLOCKING_THREADS` sets its size — default 4, clamped to 1..64,
+anything unparsable means 4. A forked child never inherits the parent's workers; its first
+covered call builds its own pool.
+
+Cancellation. A task parked on a pool job cannot be cancelled until the job finishes — a
+`read` on a FIFO with no writer holds it. A pooled call that holds nothing yet (`fopen`,
+`file_get_contents` / `file_put_contents`, the stat family, `opendir`, `scandir`, `unlink`,
+`rename`, `mkdir`, `rmdir`) is itself a cancellation point: a cancelled task throws there
+instead of submitting the job. Calls on a handle it already holds (`fread`, `fwrite`,
+`fflush`, `fclose`, `readdir`, `closedir`) and the `getaddrinfo` path are not, so a loop of
+them — `while (!feof($h)) fread(...)`, a `readdir` loop — runs on after `cancel()` until its
+next real suspend point.
+
+`fclose` / `closedir` wait for every in-flight job on that handle before they free it, so a
+sibling task's read never touches a freed `FILE*`, and a pooled `readdir` copies the name
+inside the job, so two tasks sharing one `DIR` never see a torn entry. `file_get_contents()`
+on a FIFO (where `ftell` is negative) reads to EOF, as php does.
+
+**Starvation.** The pool is small and shared by the whole process. N jobs that never finish
+— `open` on a FIFO nobody writes, a hung NFS hard mount, a dead resolver — hold all N workers,
+and every covered call in every task then queues behind them forever. The loop itself keeps
+running (timers, sockets, channels), so deadlock detection sees live I/O and reports nothing.
+With the default of 4, four tasks each opening a FIFO its sibling will write are enough: the
+writers' `fopen` jobs wait behind the readers' and never run. Size the pool above the number
+of calls that can block indefinitely at once with `MANTICORE_BLOCKING_THREADS`.
+
+**Cost.** A pooled call is two pipe writes, a reactor wake and two fiber switches — about
+10 µs, against ~60 ns for a buffered inline `fwrite` that never reaches the kernel. There is
+no size threshold: a call under the scheduler always goes to the pool, so a hot loop of tiny
+calls pays that per call. Measured with `tools/offload_bench.php` (Apple M1 Pro, macOS 27,
+page cache hot, best of 3):
+
+| work | outside `async()` | inside `async()` |
+|---|---|---|
+| 1M × 16-byte `fwrite` to a file | 60 ms | 9 560 ms |
+| `scandir` of 50k entries | 45 ms | 46 ms (one job; per-entry jobs were ~470 ms) |
+| 10k `file_get_contents` of 64 bytes | 126 ms | 532 ms |
+
+Batch small writes into one string (or write through `Async\writeFile()`) when a task writes
+in a hot loop.
+
+`Async\stats()` adds `offloaded` (jobs submitted) and `pool_threads` (0 until the pool is
+up); `Async\dump()` names a parked task by its call, e.g. `offload op=fopen`.
+
+A fork+socketpair worker pool was measured against the old inline path and rejected: it copies
+every byte through a socket, which for a hot read costs more than the read. Threads that never
+run PHP avoid that copy, which is why the pool is threads.
+
+## ⚠ What is NOT async
+
+Everything in the "still inline" list above, plus CPU-bound stretches with no suspend point.
+Those are what `Async\watchdog()` exists to name.
 
 `stream_select` / `socket_select` are reactor-native: the task registers a record per fd,
 parks once, and releases the lot on the way out — so a readiness edge costs one wake-up
@@ -562,7 +631,7 @@ is still there.
 
 ## Not yet
 
-Also: off-thread file I/O · shared-memory multithreading (a future compiler superset).
+Also: shared-memory multithreading (a future compiler superset).
 
 **Below two syscalls per request.** Those two are `recvfrom` + `sendto` and nothing else
 (measured above). `writev(2)` is already here — `fwrite($s, [$hdr, $body])` sends headers and

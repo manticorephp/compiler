@@ -1,0 +1,14 @@
+read s
+~s
+--
+read 0 l
+read 1 l
+read 2 l
+~l
+--
+read jt
+~jt
+skip
+read jf
+~jf
+done

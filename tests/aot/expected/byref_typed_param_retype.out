@@ -1,0 +1,23 @@
+int(1)
+int(3)
+int(5)
+abc
+bool(false)
+int(2)
+bool(false)
+string(2) "x7"
+float(1.5)
+float(2.5)
+int(4)
+bool(true)
+string(3) "pos"
+NULL
+int(1)
+int(1)
+bool(false)
+int(4)
+bool(false)
+int(13)
+int(19)
+string(3) "big"
+int(4)

@@ -210,15 +210,15 @@ namespace Async {
         /** The earliest deadline on this scope or an ancestor, as a unix time. */
         public function deadline(): ?float
         {
-            return $this->scope->deadlineAt();
+            return __wallDeadline($this->scope->deadlineAt());
         }
 
         /** Seconds left before the deadline (never negative); null when unbounded. */
         public function remaining(): ?float
         {
-            $d = $this->deadline();
+            $d = $this->scope->deadlineAt();
             if ($d === null) { return null; }
-            $left = $d - \microtime(true);
+            $left = $d - \__mc_monotonic_f();
             return $left > 0.0 ? $left : 0.0;
         }
 
@@ -313,6 +313,8 @@ namespace Async {
          * element-repr hazard) and pushes/pops in O(1).
          */
         public ?Task $ioNext = null;
+        /** The op of the pool job this task is parked on, or -1. Owned by the scheduler. */
+        public int $offloadOp = -1;
 
         /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
         public bool $timerActive = false;
@@ -441,6 +443,8 @@ namespace Async {
                 $what = 'done';
             } elseif ($this->state === self::FAILED) {
                 $what = 'failed(' . ($this->error === null ? '?' : \get_class($this->error)) . ')';
+            } elseif ($this->offloadOp >= 0) {
+                $what = 'offload op=' . \__mc_offload_op_name($this->offloadOp);
             } elseif ($this->ioFd >= 0) {
                 $what = ($this->ioWrite ? 'io-write fd=' : 'io-read fd=') . (string)$this->ioFd
                       . ($this->timerActive ? ' +deadline' : '');
@@ -514,6 +518,17 @@ namespace Async {
             $this->waiters[] = $w;
         }
 
+        /** Unregister $w — a waiter that stopped waiting before this settled. */
+        public function dropWaiter(Task $w): void
+        {
+            /** @var Task[] $keep */
+            $keep = [];
+            foreach ($this->waiters as $x) {
+                if ($x !== $w) { $keep[] = $x; }
+            }
+            $this->waiters = $keep;
+        }
+
         /**
          * Suspend the calling task until this one settles, then return its value
          * (or rethrow its error). Loops: a wake is a HINT, not a promise — the
@@ -562,7 +577,7 @@ namespace Async {
         {
             $sched = Scheduler::instance();
             $this->claimed = true;
-            if (!$sched->awaitDeadline($this, \microtime(true) + $seconds)) {
+            if (!$sched->awaitDeadline($this, \__mc_monotonic_f() + $seconds)) {
                 $sched->cancelTask($this);
                 $sched->shieldedJoinTask($this);
                 throw new TimeoutException('await timed out after ' . (string)$seconds . 's');
@@ -620,7 +635,8 @@ namespace Async {
         }
 
         /**
-         * The earliest deadline on this scope or an ancestor. A nested timeout
+         * The earliest deadline on this scope or an ancestor, on the MONOTONIC
+         * clock ({@see __wallDeadline()} for a unix time). A nested timeout
          * can only ever TIGHTEN the enclosing one — a 30s inner scope inside a
          * 2s outer one still dies at 2s.
          */
@@ -1596,15 +1612,16 @@ namespace Async {
         public static function deadline(): ?float
         {
             $group = self::currentScope();
-            return $group === null ? null : $group->deadlineAt();
+            return $group === null ? null : __wallDeadline($group->deadlineAt());
         }
 
         /** Seconds left before the deadline; null when unbounded. */
         public static function remaining(): ?float
         {
-            $d = self::deadline();
+            $group = self::currentScope();
+            $d = $group === null ? null : $group->deadlineAt();
             if ($d === null) { return null; }
-            $left = $d - \microtime(true);
+            $left = $d - \__mc_monotonic_f();
             return $left > 0.0 ? $left : 0.0;
         }
 
@@ -1673,6 +1690,30 @@ namespace Async {
         private array $selWaiter = [];
         /** Parked-on-I/O task count (NOT registered-fd count: an idle fd is not work). */
         private int $ioWaiters = 0;
+        /** @var array<int, Task[]> tasks parked in waitPoolIdle(), by Resource id */
+        private array $idleWaiters = [];
+
+        /**
+         * The blocking-offload pool. Per PROCESS, not per run: its threads and pipes
+         * outlive an async() run; a fork's child (threads do not survive fork)
+         * closes the inherited pipe ends and builds its own on first use.
+         * $poolIds holds each pipe end's identity (\__mc_fd_pipe_id) from creation:
+         * a child closes an inherited number only while it still names that pipe,
+         * never a file a daemonizing child has since opened on the same number.
+         */
+        private static int $poolPid = 0;
+        private static int $poolSubR = -1;
+        private static int $poolSubmit = -1;
+        private static int $poolDoneR = -1;
+        private static int $poolDoneW = -1;
+        private static int $poolThreads = 0;
+        /** @var array<int, string> fd → pipe identity */
+        private static array $poolIds = [];
+        /** True when the pool could not start (pipe or pthread failure): run inline. */
+        private static bool $poolInline = false;
+        /** @var array<int, Task> job address → the task parked on it */
+        private array $jobTask = [];
+        private int $nOffloaded = 0;
 
         /** @var float[] binary min-heap of deadlines, parallel to tmTask */
         private array $tmDeadline = [];
@@ -1823,7 +1864,7 @@ namespace Async {
                 return '';
             }
             $exp = $this->dnsExp[$host] ?? 0.0;
-            if ($exp <= \microtime(true)) {
+            if ($exp <= \__mc_monotonic_f()) {
                 unset($this->dnsIp[$host]);
                 unset($this->dnsExp[$host]);
                 return '';
@@ -1844,7 +1885,7 @@ namespace Async {
             }
             $secs = $ttl > 300 ? 300 : $ttl;
             $this->dnsIp[$host] = $ip;
-            $this->dnsExp[$host] = \microtime(true) + (float)$secs;
+            $this->dnsExp[$host] = \__mc_monotonic_f() + (float)$secs;
         }
 
         /**
@@ -1956,6 +1997,43 @@ namespace Async {
                 function (float $t): bool { return $this->selectWait($t); },
                 function (): void { $this->selectDone(); },
             );
+            \Runtime\AsyncHook::installBlocking(
+                function (int $op, int $a0, int $a1, int $a2, int $a3, int $a4): int {
+                    return $this->offload($op, $a0, $a1, $a2, $a3, $a4);
+                },
+                function (): void { $this->checkCancel(); },
+            );
+            \Runtime\AsyncHook::installIdle(
+                function (\Resource $r): void { $this->waitPoolIdle($r); },
+                function (\Resource $r): void { $this->wakePoolIdle($r); },
+            );
+        }
+
+        /**
+         * Park until no pool job uses $r. Shielded like the job park itself: the
+         * jobs it waits for always finish, and the close that follows must run.
+         */
+        public function waitPoolIdle(\Resource $r): void
+        {
+            $me = $this->running;
+            if ($me === null) { return; }
+            $me->shield = $me->shield + 1;
+            try {
+                while ($r->poolJobs > 0) {
+                    $this->idleWaiters[$r->id][] = $me;
+                    \Fiber::suspend();
+                }
+            } finally {
+                $me->shield = $me->shield - 1;
+            }
+        }
+
+        public function wakePoolIdle(\Resource $r): void
+        {
+            if (!isset($this->idleWaiters[$r->id])) { return; }
+            $waiters = $this->idleWaiters[$r->id];
+            unset($this->idleWaiters[$r->id]);
+            foreach ($waiters as $t) { $this->wake($t); }
         }
 
         private function clearNetpoller(): void
@@ -2126,8 +2204,8 @@ namespace Async {
             if (\function_exists('Manticore\\Sapi\\contextSwitch')) {
                 \Manticore\Sapi\contextSwitch($prev === null ? 0 : $prev->id, $task->id);
             }
-            // One float compare when the watchdog is off; microtime only when it is on.
-            $t0 = $this->watchdog > 0.0 ? \microtime(true) : 0.0;
+            // One float compare when the watchdog is off; the clock only when it is on.
+            $t0 = $this->watchdog > 0.0 ? \__mc_monotonic_f() : 0.0;
             try {
                 if (!$task->fiber->isStarted()) {
                     $task->fiber->start();
@@ -2176,7 +2254,7 @@ namespace Async {
          */
         private function watchdogCheck(Task $task, float $t0): void
         {
-            $held = \microtime(true) - $t0;
+            $held = \__mc_monotonic_f() - $t0;
             if ($held < $this->watchdog) { return; }
             // First breach, then only a doubling: see Task::$wdWorst.
             if ($task->wdWorst > 0.0 && $held < $task->wdWorst * 2.0) { return; }
@@ -2240,6 +2318,8 @@ namespace Async {
             $out['ready'] = \count($this->ready);
             $out['io_parked'] = $this->ioWaiters;
             $out['timers'] = $this->tmLive;
+            $out['offloaded'] = $this->nOffloaded;
+            $out['pool_threads'] = self::$poolThreads;
             return $out;
         }
 
@@ -2337,6 +2417,9 @@ namespace Async {
             $task->cancelRequested = true;
             $this->nCancelled = $this->nCancelled + 1;
             if ($task === $this->running) { return; }
+            // A pool job writes into memory the task owns and cannot be stopped:
+            // the task stays parked until the job is done ({@see offload()}).
+            if ($task->offloadOp >= 0) { return; }
             $this->releaseIo($task);
             if ($task->timerActive) {
                 $task->timerActive = false;
@@ -2461,7 +2544,7 @@ namespace Async {
             // the signal pump would keep every program alive forever. It still
             // rides the heap, so the loop wakes for it while other work exists.
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-            $this->timerPush(\microtime(true) + $seconds, $me);
+            $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             \Fiber::suspend();
             if ($me->timerActive) {
                 // Woken by something other than the timer (cancel already cleared
@@ -2472,7 +2555,7 @@ namespace Async {
         }
 
         /**
-         * Park until $t settles OR $deadline (a unix time) passes. Returns true
+         * Park until $t settles OR $deadline (monotonic, {@see \__mc_monotonic_f()}) passes. Returns true
          * when the task settled, false on expiry — it does NOT cancel or throw,
          * so the caller decides what a timeout means. The one primitive under
          * {@see Task::awaitWithin()} and {@see timeout()}.
@@ -2482,18 +2565,26 @@ namespace Async {
             $me = $this->running;
             $t->claimed = true;   // we are handling its outcome — do not escalate
             while ($t->state === Task::PENDING) {
-                if (\microtime(true) >= $deadline) {
+                if (\__mc_monotonic_f() >= $deadline) {
                     return false;
                 }
                 $this->checkCancel();
                 $t->addWaiter($me);
                 $me->timerActive = true;
-                $this->tmLive = $this->tmLive + 1;
+                if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
                 $this->timerPush($deadline, $me);
-                \Fiber::suspend();
-                if ($me->timerActive) {
-                    $me->timerActive = false;
-                    $this->tmLive = $this->tmLive - 1;
+                try {
+                    \Fiber::suspend();
+                } finally {
+                    // Woken by the timer or cancelled, $t is still pending and
+                    // still holds us: its settle() would later wake us wherever
+                    // we are parked by then — mid-send, say, which returns as if
+                    // delivered.
+                    $t->dropWaiter($me);
+                    if ($me->timerActive) {
+                        $me->timerActive = false;
+                        if (!$me->daemon) { $this->tmLive = $this->tmLive - 1; }
+                    }
                 }
             }
             return true;
@@ -2725,7 +2816,7 @@ namespace Async {
             $this->chainRead($fd, $me);
             $me->timerActive = true;
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-            $this->timerPush(\microtime(true) + $seconds, $me);
+            $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             \Fiber::suspend();
             // The reactor clears ioFd when IT wakes the task; fireTimers clears
             // timerActive when the deadline does. Read both before releasing.
@@ -2758,7 +2849,7 @@ namespace Async {
             }
             $me->timerActive = true;
             if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-            $this->timerPush(\microtime(true) + $seconds, $me);
+            $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             \Fiber::suspend();
             $ready = $me->ioFd === -1;
             $this->releaseIo($me);
@@ -2830,7 +2921,7 @@ namespace Async {
             if ($seconds >= 0.0) {
                 $me->timerActive = true;
                 if (!$me->daemon) { $this->tmLive = $this->tmLive + 1; }
-                $this->timerPush(\microtime(true) + $seconds, $me);
+                $this->timerPush(\__mc_monotonic_f() + $seconds, $me);
             }
             \Fiber::suspend();
             // cancelTask() releases the records AND the waiter count for a select
@@ -2942,13 +3033,163 @@ namespace Async {
             $this->wakeSelect($fd);
         }
 
+        // ── the blocking-offload pool ──────────────────────────────────────
+        /** Bring the pool up in this process once. False = run covered calls inline. */
+        private static function poolUp(): bool
+        {
+            $pid = \getmypid();
+            if (self::$poolPid === $pid) { return !self::$poolInline; }
+            if (self::$poolPid !== 0) {
+                foreach (self::$poolIds as $old => $id) {
+                    if (\__mc_fd_pipe_id($old) === $id) { \Runtime\Libc\sys_close($old); }
+                }
+                self::$poolIds = [];
+                self::$poolSubR = -1;
+                self::$poolSubmit = -1;
+                self::$poolDoneR = -1;
+                self::$poolDoneW = -1;
+                self::$poolThreads = 0;
+            }
+            self::$poolPid = $pid;
+            self::$poolInline = true;
+            $n = 4;
+            $env = \getenv('MANTICORE_BLOCKING_THREADS');
+            if ($env !== false && $env !== '' && \ctype_digit((string)$env)) {
+                $n = (int)(string)$env;
+                if ($n < 1) { $n = 1; }
+                if ($n > 64) { $n = 64; }
+            }
+            $fds = \Runtime\Libc\calloc(4, 4);
+            if (\Runtime\Libc\sys_pipe($fds) !== 0) {
+                \Runtime\Libc\free($fds);
+                return false;
+            }
+            if (\Runtime\Libc\sys_pipe(\ptr_offset($fds, 8)) !== 0) {
+                \Runtime\Libc\sys_close(\peek_i32($fds, 0));
+                \Runtime\Libc\sys_close(\peek_i32($fds, 4));
+                \Runtime\Libc\free($fds);
+                return false;
+            }
+            $subR = \peek_i32($fds, 0);
+            $subW = \peek_i32($fds, 4);
+            $doneR = \peek_i32($fds, 8);
+            $doneW = \peek_i32($fds, 12);
+            \Runtime\Libc\free($fds);
+            foreach ([$subR, $subW, $doneR, $doneW] as $fd) { \__mc_fd_cloexec($fd); }
+            // Only the done READ end: the loop drains it to EAGAIN. The worker's
+            // write end stays blocking — a failed done write ends the worker.
+            \__mc_fd_nonblock($doneR);
+            $started = 0;
+            for ($i = 0; $i < $n; $i++) {
+                if (\__mc_pool_start($subR, $doneW) !== 0) { break; }
+                $started = $started + 1;
+            }
+            if ($started === 0) {
+                foreach ([$subR, $subW, $doneR, $doneW] as $fd) { \Runtime\Libc\sys_close($fd); }
+                return false;
+            }
+            self::$poolSubR = $subR;
+            self::$poolSubmit = $subW;
+            self::$poolDoneR = $doneR;
+            self::$poolDoneW = $doneW;
+            self::$poolThreads = $started;
+            self::$poolIds = [];
+            foreach ([$subR, $subW, $doneR, $doneW] as $fd) { self::$poolIds[$fd] = \__mc_fd_pipe_id($fd); }
+            self::$poolInline = false;
+            return true;
+        }
+
+        /**
+         * Run one covered libc call on the pool, parking the running task until
+         * the worker is done with it. {@see \__mc_offload()} is the caller.
+         */
+        public function offload(int $op, int $a0, int $a1, int $a2, int $a3, int $a4): int
+        {
+            if (self::$poolPid !== 0 && self::$poolPid !== \getmypid()) {
+                $this->forgetParentPool();
+            }
+            if (!self::poolUp()) {
+                return \__mc_offload_inline($op, $a0, $a1, $a2, $a3, $a4);
+            }
+            $me = $this->running;
+            $job = \__mc_offload_job($op, $a0, $a1, $a2, $a3, $a4);
+            $addr = \ptr_to_int($job);
+            $rec = \Runtime\Libc\calloc(1, 8);
+            \poke_i64($rec, 0, $addr);
+            $w = \Runtime\Libc\sys_write_ptr(self::$poolSubmit, $rec, 8);
+            \Runtime\Libc\free($rec);
+            if ($w !== 8) {
+                \Runtime\Libc\free($job);
+                return \__mc_offload_inline($op, $a0, $a1, $a2, $a3, $a4);
+            }
+            $this->nOffloaded = $this->nOffloaded + 1;
+            $this->jobTask[$addr] = $me;
+            $me->offloadOp = $op;
+            $this->ensureWatcherFd(self::$poolDoneR);
+            $this->ioWaiters = $this->ioWaiters + 1;
+            // Shielded: the job cannot be stopped and writes into memory this task
+            // owns, so the task resumes only once the worker is done with it.
+            $me->shield = $me->shield + 1;
+            try {
+                while (isset($this->jobTask[$addr])) {
+                    \Fiber::suspend();
+                }
+            } finally {
+                $me->shield = $me->shield - 1;
+                $me->offloadOp = -1;
+            }
+            $ret = \__mc_offload_job_ret($job);
+            \Runtime\Libc\free($job);
+            return $ret;
+        }
+
+        /**
+         * A fork's child inherited the parent's pool registration: the done pipe's
+         * records belong to the parent's workers and the parent's tasks. Drop the
+         * watcher from THIS reactor only (the kernel registration may be the
+         * parent's own — a shared epoll instance) and abandon the inherited parks:
+         * no worker in this process will ever finish them, so they stop counting as
+         * I/O work and a loop left with only them reports a deadlock, not a hang.
+         */
+        private function forgetParentPool(): void
+        {
+            $fd = self::$poolDoneR;
+            if ($fd >= 0 && isset($this->connWatcher[$fd])) {
+                $this->connWatcher[$fd]->forget();
+                unset($this->connWatcher[$fd]);
+                unset($this->writeArmed[$fd]);
+            }
+            $this->ioWaiters = $this->ioWaiters - \count($this->jobTask);
+            $this->jobTask = [];
+        }
+
+        /** Wake every task whose job the workers finished. Records are whole 8-byte writes. */
+        private function drainPool(): void
+        {
+            $rec = \Runtime\Libc\calloc(64, 8);
+            while (true) {
+                $n = \Runtime\Libc\read(self::$poolDoneR, $rec, 512);
+                if ($n <= 0) { break; }
+                for ($off = 0; $off + 8 <= $n; $off = $off + 8) {
+                    $addr = \peek_i64($rec, $off);
+                    if (!isset($this->jobTask[$addr])) { continue; }
+                    $t = $this->jobTask[$addr];
+                    unset($this->jobTask[$addr]);
+                    $this->ioWaiters = $this->ioWaiters - 1;
+                    $this->wake($t);
+                }
+                if ($n < 512) { break; }
+            }
+            \Runtime\Libc\free($rec);
+        }
+
         // ── the blocking step: wait for fds / the next timer, wake tasks ────
         private function pollAndTick(): void
         {
             $this->timerPrune();
             $timeout = -1.0;
             if (\count($this->tmDeadline) > 0) {
-                $timeout = $this->tmDeadline[0] - \microtime(true);
+                $timeout = $this->tmDeadline[0] - \__mc_monotonic_f();
                 if ($timeout < 0) { $timeout = 0.0; }
             }
 
@@ -2972,6 +3213,14 @@ namespace Async {
                         // pcntl_signal_dispatch() is what consumes the signal, so we
                         // deliberately do NOT read it here.
                         $this->wakeSignalPump();
+                        continue;
+                    }
+                    if ($fd === self::$poolDoneR) {
+                        if (self::$poolPid !== \getmypid()) {
+                            $this->forgetParentPool();
+                            continue;
+                        }
+                        $this->drainPool();
                         continue;
                     }
                     $hup = $watcher->hasTriggered(\Io\Poll\Event::Error)
@@ -3002,7 +3251,7 @@ namespace Async {
 
         private function fireTimers(): void
         {
-            $now = \microtime(true);
+            $now = \__mc_monotonic_f();
             while (\count($this->tmDeadline) > 0) {
                 $this->timerPrune();
                 if (\count($this->tmDeadline) === 0) { return; }
@@ -3128,7 +3377,7 @@ namespace Async {
         $cur = $sched->current();
         $group = new TaskGroup($cur->scope);
         $group->site = $site;
-        $group->deadline = \microtime(true) + $seconds;
+        $group->deadline = \__mc_monotonic_f() + $seconds;
         $effective = $group->deadlineAt();   // an enclosing deadline still wins if nearer
         $cur->scope = $group;
 
@@ -3570,6 +3819,17 @@ namespace Async {
         return (string)\round($seconds * 1000.0, 1);
     }
 
+    /**
+     * @internal a monotonic deadline as the unix time the public API reports.
+     * Deadlines are kept monotonic because the wall clock steps; only this
+     * edge translates, so a step moves the reported time, never the expiry.
+     */
+    function __wallDeadline(?float $monotonic): ?float
+    {
+        if ($monotonic === null) { return null; }
+        return $monotonic - \__mc_monotonic_f() + \microtime(true);
+    }
+
     /** Suspend the current task for $seconds without blocking the loop. */
     function delay(float $seconds): void
     {
@@ -3623,7 +3883,7 @@ namespace Async {
      */
     function selectWithin(float $seconds, array $cases): ?Selected
     {
-        return __selectImpl($cases, true, \microtime(true) + $seconds);
+        return __selectImpl($cases, true, \__mc_monotonic_f() + $seconds);
     }
 
     /**

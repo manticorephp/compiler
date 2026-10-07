@@ -1,0 +1,157 @@
+array(6) {
+  [0]=>
+  string(1) "("
+  [1]=>
+  array(1) {
+    [0]=>
+    int(402)
+  }
+  [2]=>
+  string(1) ")"
+  [3]=>
+  string(1) "]"
+  [4]=>
+  string(1) ","
+  [5]=>
+  string(1) ";"
+}
+array(3) {
+  [0]=>
+  string(1) "["
+  [1]=>
+  string(1) "("
+  [2]=>
+  array(1) {
+    [0]=>
+    int(402)
+  }
+}
+bool(true)
+array(4) {
+  [0]=>
+  string(1) "x"
+  [1]=>
+  array(1) {
+    [0]=>
+    int(1)
+  }
+  [2]=>
+  string(1) "y"
+  [3]=>
+  string(1) "z"
+}
+array(4) {
+  [0]=>
+  string(1) "y"
+  [1]=>
+  string(1) "z"
+  [2]=>
+  string(1) "x"
+  [3]=>
+  array(1) {
+    [0]=>
+    int(1)
+  }
+}
+array(4) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  string(1) "y"
+  [3]=>
+  string(1) "z"
+}
+array(4) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "a"
+  [2]=>
+  float(1.5)
+  [3]=>
+  float(-0.25)
+}
+array(5) {
+  [0]=>
+  string(1) "k"
+  [1]=>
+  bool(true)
+  [2]=>
+  bool(false)
+  [3]=>
+  int(1)
+  [4]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  NULL
+  [1]=>
+  object(Box7)#1 (1) {
+    ["v"]=>
+    int(7)
+  }
+}
+array(3) {
+  [0]=>
+  string(1) "s"
+  [1]=>
+  array(2) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+  }
+  [2]=>
+  array(1) {
+    [0]=>
+    int(3)
+  }
+}
+array(3) {
+  ["k"]=>
+  int(1)
+  ["p"]=>
+  string(1) "q"
+  ["r"]=>
+  string(1) "s"
+}
+array(3) {
+  [0]=>
+  int(0)
+  [1]=>
+  string(2) "f1"
+  [2]=>
+  string(2) "f2"
+}
+[1,2,"y","z",1.5,-0.25]
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "p"
+  [2]=>
+  string(1) "q"
+}
+array(2) {
+  [0]=>
+  int(1)
+  ["k"]=>
+  float(2.5)
+}
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(2) "g1"
+  [2]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  string(2) "g1"
+  [1]=>
+  int(2)
+}

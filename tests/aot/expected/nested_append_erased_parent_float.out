@@ -1,0 +1,29 @@
+array(1) {
+  ["k"]=>
+  array(1) {
+    ["z"]=>
+    array(2) {
+      [0]=>
+      float(1.5)
+      [1]=>
+      float(2.5)
+    }
+  }
+}
+array(1) {
+  ["k"]=>
+  array(2) {
+    ["w"]=>
+    array(2) {
+      [0]=>
+      string(1) "a"
+      [1]=>
+      string(1) "b"
+    }
+    ["n"]=>
+    array(1) {
+      [0]=>
+      int(7)
+    }
+  }
+}

@@ -1,0 +1,41 @@
+int(1)
+int(1)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+array(2) {
+  ["a"]=>
+  string(1) "x"
+  ["n"]=>
+  int(1)
+}
+array(4) {
+  ["a"]=>
+  string(1) "x"
+  ["n"]=>
+  string(3) "str"
+  ["f"]=>
+  float(1.5)
+  ["l"]=>
+  array(2) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+  }
+}
+array(3) {
+  [0]=>
+  NULL
+  [1]=>
+  string(1) "q"
+  [2]=>
+  int(3)
+}
+array(2) {
+  ["init"]=>
+  string(3) "yes"
+  ["n"]=>
+  int(2)
+}

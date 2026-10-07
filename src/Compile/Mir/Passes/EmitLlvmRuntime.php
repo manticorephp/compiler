@@ -320,6 +320,7 @@ trait EmitLlvmRuntime
         // is unchanged. The rc helpers read ptr-8 to self-route (magic ⇒
         // obj/vec rc@+8; else ⇒ string). Free always releases ptr-8.
         $magic = (string)\Compile\MemoryAbi::RC_TAG_MAGIC;
+        $out .= $this->ccWeakHooks();
         $out .= "define ptr @__mir_alloc_tagged(i64 %n) {\n";
         $out .= "entry:\n";
         $out .= $this->profBump(21);
@@ -329,7 +330,7 @@ trait EmitLlvmRuntime
         $out .= $this->poolAllocCall('%base', '%t');
         $out .= "  store i64 " . $magic . ", ptr %base\n";
         $out .= "  %d = getelementptr inbounds i8, ptr %base, i64 8\n";
-        if (\Compile\Debug::$autoGc && $this->rt->needsCc) {
+        if (\Compile\Debug::$autoGc) {
             // ⚠ The collection runs HERE, at an allocation, and NOT where the
             // root is buffered. Triggering it from `cc_add_root` means running a
             // full mark/scan from INSIDE `__mir_rc_release` — the inliner even
@@ -341,15 +342,13 @@ trait EmitLlvmRuntime
             // nothing is half-released, and the object being allocated is not
             // yet reachable. The `active` guard still stands, because collection
             // frees objects, which allocates nothing but does release children.
-            $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
-            $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
-            $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
-            $out .= "gccheck:\n";
-            $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
-            $out .= '  %gchit = icmp sge i64 %gccnt, ' . (string)\Compile\Debug::$autoGcThreshold . "\n";
-            $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+            // Through a WEAK hook, not per-module IR: this body is linkonce_odr,
+            // so it must read the same in a module without the collector — which
+            // then finds the hook null ({@see ccWeakHooks}).
+            $out .= "  %gcon = icmp ne ptr @__manticore_cc_autogc, null\n";
+            $out .= "  br i1 %gcon, label %gcrun, label %gcskip\n";
             $out .= "gcrun:\n";
-            $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+            $out .= "  call void @__manticore_cc_autogc()\n";
             $out .= "  br label %gcskip\n";
             $out .= "gcskip:\n";
         }
@@ -613,7 +612,17 @@ trait EmitLlvmRuntime
         $out .= "  br label %df\n";
         $out .= "k1:\n";
         $out .= "  %is1 = icmp eq i64 %cap, " . $p1c . "\n";
-        $out .= "  br i1 %is1, label %p1, label %df\n";
+        $out .= "  br i1 %is1, label %p1, label %gchk\n";
+        // A Generator frame is freed through here too (its header is a
+        // string's, {@see \Compile\MemoryAbi::GENERATOR_TAG_MAGIC} in the cap
+        // word): it lets go of what it holds first.
+        $out .= "gchk:\n";
+        $out .= "  %isgen = icmp eq i64 %cap, " . (string)\Compile\MemoryAbi::GENERATOR_TAG_MAGIC . "\n";
+        $out .= "  br i1 %isgen, label %gen, label %df\n";
+        $out .= "gen:\n";
+        $out .= "  %gfr = getelementptr inbounds i8, ptr %sbase, i64 " . $H . "\n";
+        $out .= "  call void @__mir_gen_destroy(ptr %gfr)\n";
+        $out .= "  br label %df\n";
         $out .= "p1:\n";
         $out .= "  %pn1 = load i64, ptr @__mir_strpool1_n\n";
         $out .= "  %pfull1 = icmp uge i64 %pn1, " . $pmax . "\n";
@@ -629,6 +638,35 @@ trait EmitLlvmRuntime
         $out .= "  br label %df\n";
         $out .= "df:\n";
         $out .= "  call void @free(ptr %sbase)\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        // The last reference to a Generator frame is gone. One that is not
+        // finished (state ≥ 0: never started, or suspended at yield k) is
+        // re-entered at `-2 - state`, where the resume function carries the exit
+        // of a generator abandoned there ({@see EmitLlvmGenerator}) — the
+        // `finally` blocks around the yield and the drops of its owned locals.
+        // Then the header's own cells go: current@16, key@24, sent@40, retval@48.
+        $this->rt->needsTagged = true;
+        $out .= "define void @__mir_gen_destroy(ptr %g) {\n";
+        $out .= "entry:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %g, i64 8\n";
+        $out .= "  %s = load i64, ptr %sp\n";
+        $out .= "  %live = icmp sge i64 %s, 0\n";
+        $out .= "  br i1 %live, label %run, label %drop\n";
+        $out .= "run:\n";
+        $out .= "  %ds = sub i64 -2, %s\n";
+        $out .= "  store i64 %ds, ptr %sp\n";
+        $out .= "  %fnw = load i64, ptr %g\n";
+        $out .= "  %fn = inttoptr i64 %fnw to ptr\n";
+        $out .= "  call i64 %fn(ptr %g)\n";
+        $out .= "  br label %drop\n";
+        $out .= "drop:\n";
+        foreach ([16, 24, 40, 48] as $goff) {
+            $gs = (string)$goff;
+            $out .= "  %hp" . $gs . " = getelementptr inbounds i8, ptr %g, i64 " . $gs . "\n";
+            $out .= "  %hv" . $gs . " = load i64, ptr %hp" . $gs . "\n";
+            $out .= "  call void @__mir_cell_drop(i64 %hv" . $gs . ")\n";
+        }
         $out .= "  ret void\n";
         $out .= "}\n";
         $out .= $this->lib->stringCore();
@@ -748,6 +786,7 @@ trait EmitLlvmRuntime
                 $out .= '@.orc.rel = private unnamed_addr constant ['
                     . (string)(\strlen($orcRaw) + 2) . ' x i8] c"' . $orcRaw . '\0A\00", align 1' . "\n";
             }
+            $out .= $this->ccWeakHooks();
             $out .= "define void @__mir_rc_release(ptr %p) {\n";
             $out .= "entry:\n";
             $out .= "  %z = icmp eq ptr %p, null\n";
@@ -798,13 +837,14 @@ trait EmitLlvmRuntime
             $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
             $out .= "  br i1 %zero, label %free, label %keep\n";
             $out .= "keep:\n";
-            if ($this->rt->needsCc) {
-                // On `rc>0` after a dec the object MIGHT be a cycle root
-                // (Bacon-Rajan PossibleRoot). Only a module that carries the
-                // collector can register one — a module without it simply does
-                // not participate, which costs cycle collection, never safety.
-                $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
-            }
+            // On `rc>0` after a dec the object MIGHT be a cycle root (Bacon-Rajan
+            // PossibleRoot). The collector's hooks are WEAK: this body is
+            // linkonce_odr and must read the same in every module, and one
+            // without the collector finds them null ({@see ccWeakHooks}).
+            $out .= "  %ccon = icmp ne ptr @__manticore_cc_add_root, null\n";
+            $out .= "  br i1 %ccon, label %addroot, label %done\n";
+            $out .= "addroot:\n";
+            $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
             $out .= "  br label %done\n";
             $out .= "free:\n";
             // A *buffered* object is NOT freed here even at rc<=0 — the
@@ -815,6 +855,12 @@ trait EmitLlvmRuntime
             $out .= "  br i1 %isbuf, label %blocked, label %dofree\n";
             $out .= "blocked:\n";
             $out .= $this->ccTrace('blocked', 'ptr %p');
+            // DEAD NOW, not at the next collection ({@see ccDropDeadIr}) — through
+            // the weak hook for the same linkonce_odr reason as the root push.
+            $out .= "  %ccdd = icmp ne ptr @__manticore_cc_drop_dead, null\n";
+            $out .= "  br i1 %ccdd, label %bdrop, label %done\n";
+            $out .= "bdrop:\n";
+            $out .= "  call void @__manticore_cc_drop_dead(ptr %p)\n";
             $out .= "  br label %done\n";
             $out .= "dofree:\n";
             if ($this->rt->needsCc) { $out .= $this->ccTrace('rcfree', 'ptr %p'); }
@@ -1239,6 +1285,21 @@ trait EmitLlvmRuntime
         $out .= "fin:\n";
         $out .= "  ret void\n";
         $out .= "}\n";
+        // unwind: a try landing pops the marks of the frames a throw skipped
+        // (their `leave` never ran) and rewinds to the first one's entry.
+        $out .= "define void @__mir_arena_unwind(i64 %sp0) {\n";
+        $out .= "entry:\n";
+        $out .= "  %sp = load i64, ptr @__mir_arena_sp\n";
+        $out .= "  %more = icmp sgt i64 %sp, %sp0\n";
+        $out .= "  br i1 %more, label %pop, label %done\n";
+        $out .= "pop:\n";
+        $out .= "  %sp1 = add i64 %sp0, 1\n";
+        $out .= "  store i64 %sp1, ptr @__mir_arena_sp\n";
+        $out .= "  call void @__mir_arena_leave()\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
         if ($this->rt->needsArenaReset) {
             // Per-loop iteration reset: save the bump position before the
             // loop, restore it at the top of each iteration so confined
@@ -1416,6 +1477,285 @@ trait EmitLlvmRuntime
     }
 
     /**
+     * The registry of live objects whose class declares `__destruct`, and the
+     * sweep that runs the destructors still owed at process end. php calls every
+     * remaining destructor at shutdown (`zend_call_destructors`), in creation
+     * order, for objects the script's scope exit never released: a static
+     * property, a function static, a cycle, anything alive at `exit()`.
+     *
+     * An open-addressing table keyed by object address (`ptr`, `creation seq`),
+     * linear probing, backward-shift deletion: register and unregister are O(1)
+     * and the table is bounded by the PEAK live count, so a loop that allocates
+     * and frees a destructible object forever stays at its first 16 slots.
+     * An entry leaves the table the moment its destructor starts (the drop body
+     * calls `__mir_dtor_unreg`), so a registered object is live and undestructed.
+     *
+     * The sweep snapshots the table sorted by sequence and runs each destructor
+     * through the class's own drop function in one-shot "destructor only" mode
+     * (`__mir_dtor_only`, cleared by the drop body on read): members are NOT
+     * released, since other destructors may still read them. An entry a previous
+     * destructor already destroyed is skipped (its unregister answers false).
+     * The sweep is driven from `main`'s module ({@see emitMain}), which owns the
+     * landing pad for a destructor that throws.
+     * linkonce_odr: one registry across every separately-linked object.
+     */
+    private function dtorRegRuntime(): string
+    {
+        $out  = "@__mir_dtor_tab = linkonce_odr global ptr null\n";
+        $out .= "@__mir_dtor_live = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_cap = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_seq = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_only = linkonce_odr global i64 0\n";
+        $out .= "@__mir_dtor_done = linkonce_odr global i64 0\n";
+        $out .= "@__mir_obj_to_str_hook = linkonce_odr global ptr null\n";
+        $out .= "@__mir_dtor_inh = linkonce_odr global i64 0\n";
+        $out .= "define i64 @__mir_dtor_hash(ptr %p, i64 %mask) {\n";
+        $out .= "entry:\n";
+        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %a = lshr i64 %pi, 4\n";
+        $out .= "  %b = mul i64 %a, -7046029254386353131\n";
+        $out .= "  %c = lshr i64 %b, 32\n";
+        $out .= "  %d = and i64 %c, %mask\n";
+        $out .= "  ret i64 %d\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_dtor_ins(ptr %tab, i64 %mask, ptr %p, i64 %seq) {\n";
+        $out .= "entry:\n";
+        $out .= "  %h = call i64 @__mir_dtor_hash(ptr %p, i64 %mask)\n";
+        $out .= "  br label %probe\n";
+        $out .= "probe:\n";
+        $out .= "  %i = phi i64 [ %h, %entry ], [ %i1, %busy ]\n";
+        $out .= "  %off = shl i64 %i, 4\n";
+        $out .= "  %ep = getelementptr i8, ptr %tab, i64 %off\n";
+        $out .= "  %cur = load ptr, ptr %ep\n";
+        $out .= "  %free = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %free, label %put, label %busy\n";
+        $out .= "busy:\n";
+        $out .= "  %n = add i64 %i, 1\n";
+        $out .= "  %i1 = and i64 %n, %mask\n";
+        $out .= "  br label %probe\n";
+        $out .= "put:\n";
+        $out .= "  store ptr %p, ptr %ep\n";
+        $out .= "  %sp = getelementptr i8, ptr %ep, i64 8\n";
+        $out .= "  store i64 %seq, ptr %sp\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_dtor_reg(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %live = load i64, ptr @__mir_dtor_live\n";
+        $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %l1 = add i64 %live, 1\n";
+        $out .= "  %dbl = shl i64 %l1, 1\n";
+        $out .= "  %need = icmp ugt i64 %dbl, %cap\n";
+        $out .= "  br i1 %need, label %grow, label %ins\n";
+        $out .= "grow:\n";
+        $out .= "  %c2 = shl i64 %cap, 1\n";
+        $out .= "  %small = icmp ult i64 %c2, 16\n";
+        $out .= "  %ncap = select i1 %small, i64 16, i64 %c2\n";
+        $out .= "  %nt = call ptr @calloc(i64 %ncap, i64 16)\n";
+        $out .= "  %old = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %nmask = sub i64 %ncap, 1\n";
+        $out .= "  br label %mv\n";
+        $out .= "mv:\n";
+        $out .= "  %j = phi i64 [ 0, %grow ], [ %j1, %mvn ]\n";
+        $out .= "  %jm = icmp ult i64 %j, %cap\n";
+        $out .= "  br i1 %jm, label %mvt, label %mvd\n";
+        $out .= "mvt:\n";
+        $out .= "  %jo = shl i64 %j, 4\n";
+        $out .= "  %jp = getelementptr i8, ptr %old, i64 %jo\n";
+        $out .= "  %je = load ptr, ptr %jp\n";
+        $out .= "  %jn = icmp eq ptr %je, null\n";
+        $out .= "  br i1 %jn, label %mvn, label %mvc\n";
+        $out .= "mvc:\n";
+        $out .= "  %jsp = getelementptr i8, ptr %jp, i64 8\n";
+        $out .= "  %jseq = load i64, ptr %jsp\n";
+        $out .= "  call void @__mir_dtor_ins(ptr %nt, i64 %nmask, ptr %je, i64 %jseq)\n";
+        $out .= "  br label %mvn\n";
+        $out .= "mvn:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %mv\n";
+        $out .= "mvd:\n";
+        $out .= "  call void @free(ptr %old)\n";
+        $out .= "  store ptr %nt, ptr @__mir_dtor_tab\n";
+        $out .= "  store i64 %ncap, ptr @__mir_dtor_cap\n";
+        $out .= "  br label %ins\n";
+        $out .= "ins:\n";
+        $out .= "  %tab = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %cap2 = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %mask = sub i64 %cap2, 1\n";
+        $out .= "  %seq = load i64, ptr @__mir_dtor_seq\n";
+        $out .= "  %seq1 = add i64 %seq, 1\n";
+        $out .= "  store i64 %seq1, ptr @__mir_dtor_seq\n";
+        $out .= "  call void @__mir_dtor_ins(ptr %tab, i64 %mask, ptr %p, i64 %seq1)\n";
+        $out .= "  store i64 %l1, ptr @__mir_dtor_live\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        $out .= "define i1 @__mir_dtor_unreg(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %hole = alloca i64\n";
+        $out .= "  %jv = alloca i64\n";
+        $out .= "  %live = load i64, ptr @__mir_dtor_live\n";
+        $out .= "  %z = icmp eq i64 %live, 0\n";
+        $out .= "  br i1 %z, label %notfound, label %start\n";
+        $out .= "start:\n";
+        $out .= "  %tab = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %mask = sub i64 %cap, 1\n";
+        $out .= "  %h = call i64 @__mir_dtor_hash(ptr %p, i64 %mask)\n";
+        $out .= "  br label %probe\n";
+        $out .= "probe:\n";
+        $out .= "  %i = phi i64 [ %h, %start ], [ %i1, %step ]\n";
+        $out .= "  %off = shl i64 %i, 4\n";
+        $out .= "  %ep = getelementptr i8, ptr %tab, i64 %off\n";
+        $out .= "  %cur = load ptr, ptr %ep\n";
+        $out .= "  %isnull = icmp eq ptr %cur, null\n";
+        $out .= "  br i1 %isnull, label %notfound, label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %hit = icmp eq ptr %cur, %p\n";
+        $out .= "  br i1 %hit, label %found, label %step\n";
+        $out .= "step:\n";
+        $out .= "  %n = add i64 %i, 1\n";
+        $out .= "  %i1 = and i64 %n, %mask\n";
+        $out .= "  br label %probe\n";
+        $out .= "found:\n";
+        $out .= "  store i64 %i, ptr %hole\n";
+        $out .= "  store i64 %i, ptr %jv\n";
+        $out .= "  br label %shift\n";
+        $out .= "shift:\n";
+        $out .= "  %j0 = load i64, ptr %jv\n";
+        $out .= "  %jn = add i64 %j0, 1\n";
+        $out .= "  %j1 = and i64 %jn, %mask\n";
+        $out .= "  store i64 %j1, ptr %jv\n";
+        $out .= "  %jo = shl i64 %j1, 4\n";
+        $out .= "  %jp = getelementptr i8, ptr %tab, i64 %jo\n";
+        $out .= "  %je = load ptr, ptr %jp\n";
+        $out .= "  %jnull = icmp eq ptr %je, null\n";
+        $out .= "  br i1 %jnull, label %fin, label %mv\n";
+        $out .= "mv:\n";
+        $out .= "  %k = call i64 @__mir_dtor_hash(ptr %je, i64 %mask)\n";
+        $out .= "  %hv = load i64, ptr %hole\n";
+        $out .= "  %le = icmp ule i64 %hv, %j1\n";
+        $out .= "  %c1 = icmp ugt i64 %k, %hv\n";
+        $out .= "  %c2 = icmp ule i64 %k, %j1\n";
+        $out .= "  %inA = and i1 %c1, %c2\n";
+        $out .= "  %inB = or i1 %c1, %c2\n";
+        $out .= "  %inr = select i1 %le, i1 %inA, i1 %inB\n";
+        $out .= "  br i1 %inr, label %shift, label %domove\n";
+        $out .= "domove:\n";
+        $out .= "  %ho = shl i64 %hv, 4\n";
+        $out .= "  %hp = getelementptr i8, ptr %tab, i64 %ho\n";
+        $out .= "  %jsp = getelementptr i8, ptr %jp, i64 8\n";
+        $out .= "  %jseq = load i64, ptr %jsp\n";
+        $out .= "  %hsp = getelementptr i8, ptr %hp, i64 8\n";
+        $out .= "  store ptr %je, ptr %hp\n";
+        $out .= "  store i64 %jseq, ptr %hsp\n";
+        $out .= "  store i64 %j1, ptr %hole\n";
+        $out .= "  br label %shift\n";
+        $out .= "fin:\n";
+        $out .= "  %hv2 = load i64, ptr %hole\n";
+        $out .= "  %ho2 = shl i64 %hv2, 4\n";
+        $out .= "  %hp2 = getelementptr i8, ptr %tab, i64 %ho2\n";
+        $out .= "  store ptr null, ptr %hp2\n";
+        $out .= "  %lv = sub i64 %live, 1\n";
+        $out .= "  store i64 %lv, ptr @__mir_dtor_live\n";
+        $out .= "  ret i1 true\n";
+        $out .= "notfound:\n";
+        $out .= "  ret i1 false\n";
+        $out .= "}\n";
+        $out .= "define i32 @__mir_dtor_cmp(ptr %a, ptr %b) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ap = getelementptr i8, ptr %a, i64 8\n";
+        $out .= "  %bp = getelementptr i8, ptr %b, i64 8\n";
+        $out .= "  %av = load i64, ptr %ap\n";
+        $out .= "  %bv = load i64, ptr %bp\n";
+        $out .= "  %lt = icmp ult i64 %av, %bv\n";
+        $out .= "  %gt = icmp ugt i64 %av, %bv\n";
+        $out .= "  %x = zext i1 %lt to i32\n";
+        $out .= "  %y = zext i1 %gt to i32\n";
+        $out .= "  %r = sub i32 %y, %x\n";
+        $out .= "  ret i32 %r\n";
+        $out .= "}\n";
+        $out .= "define void @__mir_dtor_sweep() {\n";
+        $out .= "entry:\n";
+        $out .= "  br label %outer\n";
+        $out .= "outer:\n";
+        $out .= "  %live = load i64, ptr @__mir_dtor_live\n";
+        $out .= "  %none = icmp eq i64 %live, 0\n";
+        $out .= "  br i1 %none, label %done, label %snap\n";
+        $out .= "snap:\n";
+        $out .= "  %tab = load ptr, ptr @__mir_dtor_tab\n";
+        $out .= "  %cap = load i64, ptr @__mir_dtor_cap\n";
+        $out .= "  %bytes = shl i64 %live, 4\n";
+        $out .= "  %tmp = call ptr @malloc(i64 %bytes)\n";
+        $out .= "  br label %collect\n";
+        $out .= "collect:\n";
+        $out .= "  %i = phi i64 [ 0, %snap ], [ %i1, %cnext ]\n";
+        $out .= "  %k = phi i64 [ 0, %snap ], [ %k2, %cnext ]\n";
+        $out .= "  %more = icmp ult i64 %i, %cap\n";
+        $out .= "  br i1 %more, label %cget, label %csort\n";
+        $out .= "cget:\n";
+        $out .= "  %io = shl i64 %i, 4\n";
+        $out .= "  %ep = getelementptr i8, ptr %tab, i64 %io\n";
+        $out .= "  %e = load ptr, ptr %ep\n";
+        $out .= "  %isn = icmp eq ptr %e, null\n";
+        $out .= "  br i1 %isn, label %cskip, label %cput\n";
+        $out .= "cput:\n";
+        $out .= "  %sp = getelementptr i8, ptr %ep, i64 8\n";
+        $out .= "  %seq = load i64, ptr %sp\n";
+        $out .= "  %ko = shl i64 %k, 4\n";
+        $out .= "  %tp = getelementptr i8, ptr %tmp, i64 %ko\n";
+        $out .= "  %tsp = getelementptr i8, ptr %tp, i64 8\n";
+        $out .= "  store ptr %e, ptr %tp\n";
+        $out .= "  store i64 %seq, ptr %tsp\n";
+        $out .= "  %k1 = add i64 %k, 1\n";
+        $out .= "  br label %cnext\n";
+        $out .= "cskip:\n";
+        $out .= "  br label %cnext\n";
+        $out .= "cnext:\n";
+        $out .= "  %k2 = phi i64 [ %k, %cskip ], [ %k1, %cput ]\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %collect\n";
+        $out .= "csort:\n";
+        $out .= "  call void @qsort(ptr %tmp, i64 %k, i64 16, ptr @__mir_dtor_cmp)\n";
+        $out .= "  br label %run\n";
+        $out .= "run:\n";
+        $out .= "  %j = phi i64 [ 0, %csort ], [ %j1, %rnext ]\n";
+        $out .= "  %rmore = icmp ult i64 %j, %k\n";
+        $out .= "  br i1 %rmore, label %rget, label %rdone\n";
+        $out .= "rget:\n";
+        $out .= "  %jo = shl i64 %j, 4\n";
+        $out .= "  %rp = getelementptr i8, ptr %tmp, i64 %jo\n";
+        $out .= "  %o = load ptr, ptr %rp\n";
+        $out .= "  %found = call i1 @__mir_dtor_unreg(ptr %o)\n";
+        $out .= "  br i1 %found, label %rdo, label %rnext\n";
+        $out .= "rdo:\n";
+        $out .= "  %rwp = getelementptr i8, ptr %o, i64 8\n";
+        $out .= "  %rw = load i64, ptr %rwp\n";
+        $out .= "  %rwh = add i64 %rw, 1\n";
+        $out .= "  store i64 %rwh, ptr %rwp\n";
+        $out .= "  %di = load i64, ptr %o\n";
+        $out .= "  %dp = inttoptr i64 %di to ptr\n";
+        $out .= "  %dfp = getelementptr i8, ptr %dp, i64 8\n";
+        $out .= "  %df = load ptr, ptr %dfp\n";
+        $out .= "  store i64 1, ptr @__mir_dtor_only\n";
+        $out .= "  call void %df(ptr %o)\n";
+        $out .= "  store i64 0, ptr @__mir_dtor_only\n";
+        $out .= "  %rw2 = load i64, ptr %rwp\n";
+        $out .= "  %rwd = sub i64 %rw2, 1\n";
+        $out .= "  store i64 %rwd, ptr %rwp\n";
+        $out .= "  br label %rnext\n";
+        $out .= "rnext:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %run\n";
+        $out .= "rdone:\n";
+        $out .= "  call void @free(ptr %tmp)\n";
+        $out .= "  br label %outer\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /**
      * Per-class object destructors + a class_id dispatch, used by
      * `__mir_rc_release` to recursively release an object's obj-typed
      * properties before freeing it. Struct classes and struct-typed
@@ -1453,7 +1793,8 @@ trait EmitLlvmRuntime
             $out .= $this->reflNameOnly($ename, \Compile\MemoryAbi::RMETA_FLAG_ENUM, $reflIds, $seen);
         }
         foreach ($this->interfaceNames as $iname => $_) {
-            $out .= $this->reflNameOnly($iname, \Compile\MemoryAbi::RMETA_FLAG_INTERFACE, $reflIds, $seen);
+            $out .= $this->reflNameOnly($iname, \Compile\MemoryAbi::RMETA_FLAG_INTERFACE
+                | (isset($this->internalInterfaceNames[$iname]) ? \Compile\MemoryAbi::RMETA_FLAG_INTERNAL : 0), $reflIds, $seen);
         }
         foreach ($this->traitNames as $tname => $_) {
             $out .= $this->reflNameOnly($tname, \Compile\MemoryAbi::RMETA_FLAG_TRAIT, $reflIds, $seen);
@@ -1977,12 +2318,29 @@ trait EmitLlvmRuntime
                 // it. A second rc → 0 skips the destructor (bit 62).
                 $rcMask = (string)\Compile\MemoryAbi::RC_MASK;
                 $dtorBit = (string)\Compile\MemoryAbi::DTOR_CALLED_MASK;
+                // Shutdown sweep (@__mir_dtor_sweep): destructor only, one shot,
+                // members and storage untouched.
+                $body .= "  %dsm = load i64, ptr @__mir_dtor_only\n";
+                $body .= "  store i64 0, ptr @__mir_dtor_only\n";
+                $body .= "  %dso = icmp ne i64 %dsm, 0\n";
+                $body .= "  br i1 %dso, label %sweepd, label %dchk\n";
+                $body .= "sweepd:\n";
+                $body .= "  %swp = getelementptr i8, ptr %o, i64 8\n";
+                $body .= "  %sw0 = load i64, ptr %swp\n";
+                $body .= "  %sw1 = or i64 %sw0, " . (string)\Compile\MemoryAbi::DTOR_CALLED_MASK . "\n";
+                $body .= "  store i64 %sw1, ptr %swp\n";
+                $body .= '  %swi = ptrtoint ptr %o to i64' . "\n";
+                $body .= '  %swr = call i64 @manticore_' . $this->mangle($dtorCls)
+                       . '____destruct(i64 %swi)' . "\n";
+                $body .= "  ret void\n";
+                $body .= "dchk:\n";
                 $body .= "  %dwp = getelementptr i8, ptr %o, i64 8\n";
                 $body .= "  %dw0 = load i64, ptr %dwp\n";
                 $body .= "  %dcb = and i64 %dw0, " . $dtorBit . "\n";
                 $body .= "  %dcalled = icmp ne i64 %dcb, 0\n";
                 $body .= "  br i1 %dcalled, label %members, label %dtor\n";
                 $body .= "dtor:\n";
+                $body .= "  call i1 @__mir_dtor_unreg(ptr %o)\n";
                 $body .= "  %dfl = and i64 %dw0, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
                 $body .= "  %dhold = or i64 %dfl, " . (string)(\Compile\MemoryAbi::DTOR_CALLED_MASK | 1) . "\n";
                 $body .= "  store i64 %dhold, ptr %dwp\n";
@@ -2179,6 +2537,7 @@ trait EmitLlvmRuntime
             $flags = 0;
             if ($cls->isFinal)    { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_FINAL; }
             if ($cls->isAbstract) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ABSTRACT; }
+            if ($cls->isInternal) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_INTERNAL; }
             // An enum with methods DOES get a ClassDef and lands here; one
             // without is registered separately below. php reports an enum as a
             // class (class_exists('E') is true), so the ENUM bit is additive,
@@ -2391,7 +2750,9 @@ trait EmitLlvmRuntime
     {
         $o  = '  %' . $tag . "btd = load i64, ptr @__mir_bt_depth\n";
         $o .= '  %' . $tag . 'btok = icmp sgt i64 %' . $tag . "btd, 0\n";
-        $o .= '  %' . $tag . 'btr = sub i64 %' . $tag . "btd, 1\n";
+        $o .= '  %' . $tag . 'btc = icmp slt i64 %' . $tag . "btd, 4096\n";
+        $o .= '  %' . $tag . 'btm = select i1 %' . $tag . 'btc, i64 %' . $tag . 'btd, i64 4096' . "\n";
+        $o .= '  %' . $tag . 'btr = sub i64 %' . $tag . "btm, 1\n";
         $o .= '  %' . $tag . 'bti = select i1 %' . $tag . 'btok, i64 %' . $tag . "btr, i64 0\n";
         $o .= '  %' . $tag . 'btg = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %'
             . $tag . "bti\n";
@@ -2424,6 +2785,98 @@ trait EmitLlvmRuntime
 
     /** Unique register suffix for the {@see ccTrace} function-pointer load. */
     private int $ccTraceSeq = 0;
+
+    /**
+     * The collector's entry points a SHARED runtime body calls. `__mir_rc_release`
+     * and `__mir_alloc_tagged` are linkonce_odr: a program links ONE copy, which
+     * may come from a module that carries no collector (the stdlib). Their bodies
+     * must therefore not depend on this module's features — they call these
+     * hooks, declared `extern_weak` where the collector is absent and null-tested
+     * before each call. A program with the collector anywhere resolves them.
+     */
+    private function ccWeakHooks(): string
+    {
+        if ($this->rt->needsCc || $this->ccHooksDeclared) { return ''; }
+        $this->ccHooksDeclared = true;
+        $this->weakSyms['__manticore_cc_add_root'] = true;
+        $this->weakSyms['__manticore_cc_drop_dead'] = true;
+        $this->weakSyms['__manticore_cc_autogc'] = true;
+        return "declare extern_weak void @__manticore_cc_add_root(ptr)\n"
+            . "declare extern_weak void @__manticore_cc_drop_dead(ptr)\n"
+            . "declare extern_weak void @__manticore_cc_autogc()\n";
+    }
+
+    /** {@see ccWeakHooks} declares the hooks once per module. */
+    private bool $ccHooksDeclared = false;
+
+    /**
+     * A buffered object whose count reached zero outside a collection: DEAD NOW,
+     * not at the next collection. It used to wait, with everything it held, until
+     * the root buffer hit its threshold — and every such wait made the collector
+     * walk it. Drop it as php does (destructor, children) and keep only the SHELL
+     * for the buffer's sake ({@see MemoryAbi::COLOR_DEAD}). During a collection
+     * the collector still decides (its CollectRoots arm).
+     */
+    private function ccDropDeadIr(): string
+    {
+        $DEAD = (string)\Compile\MemoryAbi::COLOR_DEAD;
+        $out = "define void @__manticore_cc_drop_dead(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %bact = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %bbusy = icmp ne i64 %bact, 0\n";
+        $out .= "  br i1 %bbusy, label %done, label %bchk\n";
+        $out .= "bchk:\n";
+        $out .= "  %bcol = call i64 @__cc_color(ptr %p)\n";
+        $out .= "  %bdead = icmp eq i64 %bcol, " . $DEAD . "\n";
+        $out .= "  br i1 %bdead, label %done, label %bdrop\n";
+        $out .= "bdrop:\n";
+        $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $DEAD . ")\n";
+        $out .= $this->profBump(25);
+        $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
+    /**
+     * Auto-collection at an allocation ({@see __mir_alloc_tagged}): when the root
+     * buffer reaches the adaptive threshold, collect, then adjust the threshold as
+     * php's gc_adjust_threshold does.
+     */
+    private function ccAutoGcIr(): string
+    {
+        $out = "define void @__manticore_cc_autogc() {\n";
+        $out .= "entry:\n";
+        $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+        $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
+        $out .= "gccheck:\n";
+        $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
+        $out .= "  %gcthr = load i64, ptr @__manticore_cc_threshold\n";
+        $out .= "  %gchit = icmp sge i64 %gccnt, %gcthr\n";
+        $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+        $out .= "gcrun:\n";
+        $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+        // php's gc_adjust_threshold: under 100 freed, +10000 (to 1e9); a
+        // productive run steps back toward the default. Every Token of a
+        // php-cs-fixer run is a root, and a fixed threshold re-walked the
+        // live token graph every 10000 of them.
+        $out .= "  %gcfew = icmp slt i64 %gcfreed, 100\n";
+        $out .= "  %gcup = add i64 %gcthr, 10000\n";
+        $out .= "  %gccap = icmp sgt i64 %gcup, 1000000000\n";
+        $out .= "  %gcupc = select i1 %gccap, i64 %gcthr, i64 %gcup\n";
+        $out .= "  %gcabove = icmp sgt i64 %gcthr, " . (string)\Compile\Debug::$autoGcThreshold . "\n";
+        $out .= "  %gcdn = sub i64 %gcthr, 10000\n";
+        $out .= "  %gcdnc = select i1 %gcabove, i64 %gcdn, i64 %gcthr\n";
+        $out .= "  %gcnew = select i1 %gcfew, i64 %gcupc, i64 %gcdnc\n";
+        $out .= "  store i64 %gcnew, ptr @__manticore_cc_threshold\n";
+        $out .= "  br label %gcskip\n";
+        $out .= "gcskip:\n";
+        $out .= "  ret void\n}\n";
+        return $out;
+    }
+
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -2444,6 +2897,9 @@ trait EmitLlvmRuntime
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
+        // The auto-collection threshold, ADAPTIVE as php's: a run that frees
+        // almost nothing raises it, a productive one lowers it back.
+        $out .= "@__manticore_cc_threshold = linkonce_odr global i64 " . (string)\Compile\Debug::$autoGcThreshold . "\n";
         // The GARBAGE list: what CollectWhite decided is dead this cycle. Freed
         // only after the whole root loop — a white root freed while another
         // white root still points at it is walked again as that root's child
@@ -2457,6 +2913,9 @@ trait EmitLlvmRuntime
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         $this->libcExtra['free'] = 'declare void @free(ptr)';
+
+        $out .= $this->ccDropDeadIr();
+        $out .= $this->ccAutoGcIr();
 
         // ── header-word accessors (rc word @ ptr+8) ──
         $out .= "define i64 @__cc_color(ptr %s) {\n";
@@ -2953,6 +3412,14 @@ trait EmitLlvmRuntime
         $out .= "  br label %mrn\n";
         $out .= "mrdrop:\n";
         $out .= "  call void @__cc_setbuffered(ptr %s, i64 0)\n";
+        // A DEAD root was dropped when it died; its shell is all that is left.
+        $out .= "  %isdd = icmp eq i64 %col, " . (string)\Compile\MemoryAbi::COLOR_DEAD . "\n";
+        $out .= "  br i1 %isdd, label %mrshell, label %mrlive\n";
+        $out .= "mrshell:\n";
+        $out .= "  %shbase = getelementptr i8, ptr %s, i64 -8\n";
+        $out .= $this->poolFreeCall('%shbase');
+        $out .= "  br label %mrn\n";
+        $out .= "mrlive:\n";
         $out .= "  %isbk = icmp eq i64 %col, " . $BLACK . "\n";
         $out .= "  %rcv = call i64 @__cc_rcval(ptr %s)\n";
         $out .= "  %rc0 = icmp eq i64 %rcv, 0\n";

@@ -1,0 +1,7 @@
+float(4)
+float(1.5)
+string(3) "str"
+array(1) {
+  [0]=>
+  int(1)
+}

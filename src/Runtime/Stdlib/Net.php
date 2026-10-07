@@ -222,6 +222,16 @@ function __mc_fd_nonblock(int $fd): bool
     return \Runtime\Libc\sys_fcntl($fd, \__mc_sock_const(7), $fl | \__mc_sock_const(5)) >= 0;
 }
 
+/** Set FD_CLOEXEC on $fd. F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1 on Darwin, glibc and musl. */
+function __mc_fd_cloexec(int $fd): bool
+{
+    $fl = \Runtime\Libc\sys_fcntl($fd, 1, 0);
+    if ($fl < 0) {
+        return false;
+    }
+    return \Runtime\Libc\sys_fcntl($fd, 2, $fl | 1) >= 0;
+}
+
 /** Clear O_NONBLOCK on $fd. The undo of {@see __mc_fd_nonblock}: a socket made
  *  non-blocking only to bound its connect must go back to blocking, or every
  *  later read on it returns EAGAIN to a caller that never asked for that. */
@@ -489,6 +499,20 @@ function __mc_resolve_cache_put(string $host, string $ip, int $ttl): void
     $p($host, $ip, $ttl);
 }
 
+/** getaddrinfo, on the offload pool under a scheduler. Same contract as the binding. */
+function __mc_getaddrinfo(string $node, string $service, \Ffi\Ptr $hints, \Ffi\Ptr $res): int
+{
+    if (!\__mc_offload_active()) {
+        return \Runtime\Libc\sys_getaddrinfo($node, $service, $hints, $res);
+    }
+    $n = \Runtime\Libc\strdup($node);
+    $s = \Runtime\Libc\strdup($service);
+    $rc = \__mc_offload(__MC_OFF_GETADDRINFO, \ptr_to_int($n), \ptr_to_int($s), \ptr_to_int($hints), \ptr_to_int($res));
+    \Runtime\Libc\free($n);
+    \Runtime\Libc\free($s);
+    return $rc;
+}
+
 function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $timeout = 0.0)
 {
     // $wantType is the socket type to select from the resolver's list: 1
@@ -515,7 +539,7 @@ function __mc_tcp_connect(string $host, int $port, int $wantType = 1, float $tim
     }
     // hints = NULL: see the file header. The result list then also carries
     // the OTHER socktypes, which the ai_socktype filter below drops.
-    $rc = \Runtime\Libc\sys_getaddrinfo($lookup, (string)$port, \int_to_ptr(0), $res);
+    $rc = \__mc_getaddrinfo($lookup, (string)$port, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
         return false;
@@ -658,7 +682,7 @@ function __mc_tls_drive_connect(\Resource $sock, int $ssl, float $timeout = 0.0)
     // an SSL error, so the old loop parked forever — a trivial way to wedge a
     // client. 0.0 = no explicit timeout → the same 60 s default_socket_timeout
     // floor the connect and read paths use.
-    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $deadline = \__mc_monotonic_f() + ($timeout > 0.0 ? $timeout : 60.0);
     $rf = \Runtime\AsyncHook::readableFor();
     $wf = \Runtime\AsyncHook::writableFor();
     while ($rc !== 1) {
@@ -666,7 +690,7 @@ function __mc_tls_drive_connect(\Resource $sock, int $ssl, float $timeout = 0.0)
         if ($err !== 2 && $err !== 3) {
             return $rc;   // a real handshake failure (bad chain, wrong host, reset)
         }
-        $left = $deadline - \__mc_microtime_f();
+        $left = $deadline - \__mc_monotonic_f();
         if ($left <= 0.0) {
             \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
             return -1;
@@ -928,7 +952,7 @@ function __mc_tls_drive_accept(\Resource $sock, int $ssl, float $timeout = 0.0):
     if ($rc === 1 || !\Runtime\AsyncHook::active()) {
         return $rc;
     }
-    $deadline = \__mc_microtime_f() + ($timeout > 0.0 ? $timeout : 60.0);
+    $deadline = \__mc_monotonic_f() + ($timeout > 0.0 ? $timeout : 60.0);
     $rf = \Runtime\AsyncHook::readableFor();
     $wf = \Runtime\AsyncHook::writableFor();
     while ($rc !== 1) {
@@ -936,7 +960,7 @@ function __mc_tls_drive_accept(\Resource $sock, int $ssl, float $timeout = 0.0):
         if ($err !== 2 && $err !== 3) {
             return $rc;   // a real handshake failure (no cert, bad client, reset)
         }
-        $left = $deadline - \__mc_microtime_f();
+        $left = $deadline - \__mc_monotonic_f();
         if ($left <= 0.0) {
             \__mc_net_errno(true, \__mc_sock_const(13));   // ETIMEDOUT
             return -1;
@@ -1212,7 +1236,7 @@ function __mc_tcp_listen(string $host, int $port, int $backlog = 16, int $wantTy
     if ($res === null) {
         return false;
     }
-    $rc = \Runtime\Libc\sys_getaddrinfo($host, (string)$port, \int_to_ptr(0), $res);
+    $rc = \__mc_getaddrinfo($host, (string)$port, \int_to_ptr(0), $res);
     if ($rc !== 0) {
         \Runtime\Libc\free($res);
         return false;
@@ -1418,7 +1442,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null,
         // not even trip the watchdog (it suspends every iteration); it shows only as
         // an exploding `wakes` counter, while every sibling task starves.
         $deadline = ($timeout !== null && $timeout >= 0.0)
-            ? \__mc_microtime_f() + $timeout : -1.0;
+            ? \__mc_monotonic_f() + $timeout : -1.0;
         $fd = \Runtime\Libc\sys_accept($server->addr, \int_to_ptr(0), \int_to_ptr(0));
         $backoff = 0.0;
         $fast = 0;
@@ -1440,7 +1464,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null,
                 \__mc_net_errno(true, $e);
                 $backoff = \__mc_accept_backoff($backoff);
                 if ($deadline >= 0.0) {
-                    $left = $deadline - \__mc_microtime_f();
+                    $left = $deadline - \__mc_monotonic_f();
                     if ($left <= 0.0) { return false; }
                     if ($backoff > $left) { $backoff = $left; }
                 }
@@ -1450,7 +1474,7 @@ function stream_socket_accept(\Resource $server, ?float $timeout = null,
                 continue;
             }
             if ($deadline >= 0.0) {
-                $left = $deadline - \__mc_microtime_f();
+                $left = $deadline - \__mc_monotonic_f();
                 if ($left <= 0.0) { return false; }
                 $hf = \Runtime\AsyncHook::readableFor();
                 // `=== true`: the hook is an untyped slot, so its result arrives as
@@ -1549,7 +1573,7 @@ function gethostbyname(string $hostname): string
     if ($res === null) {
         return $hostname;
     }
-    if (\Runtime\Libc\sys_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
+    if (\__mc_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
         \Runtime\Libc\free($res);
         return $hostname;
     }
@@ -1581,7 +1605,7 @@ function gethostbynamel(string $hostname)
     if ($res === null) {
         return false;
     }
-    if (\Runtime\Libc\sys_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
+    if (\__mc_getaddrinfo($hostname, "0", \int_to_ptr(0), $res) !== 0) {
         \Runtime\Libc\free($res);
         return false;
     }
@@ -1922,7 +1946,7 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
     if ($rc !== 0 || $timeoutMs === 0) {
         return $rc;
     }
-    $deadline = $timeoutMs < 0 ? -1.0 : \__mc_microtime_f() + (float)$timeoutMs / 1000.0;
+    $deadline = $timeoutMs < 0 ? -1.0 : \__mc_monotonic_f() + (float)$timeoutMs / 1000.0;
     if (!\Runtime\AsyncHook::selectReady()) {
         return \__mc_select_poll_park($pfds, $count, $deadline);
     }
@@ -1942,7 +1966,7 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
         }
         $left = -1.0;
         if ($deadline >= 0.0) {
-            $left = $deadline - \__mc_microtime_f();
+            $left = $deadline - \__mc_monotonic_f();
             if ($left <= 0.0) { $done(); return 0; }
         }
         $wait($left);
@@ -1951,7 +1975,7 @@ function __mc_select_wait(\Ffi\Ptr $pfds, int $count, int $timeoutMs): int
         if ($rc !== 0) {
             return $rc;   // ready fds, or a poll error for the caller to report
         }
-        if ($deadline >= 0.0 && $deadline - \__mc_microtime_f() <= 0.0) {
+        if ($deadline >= 0.0 && $deadline - \__mc_monotonic_f() <= 0.0) {
             return 0;
         }
         // A wake with nothing ready is a HINT, not an answer (level-triggered, and
@@ -1975,7 +1999,7 @@ function __mc_select_poll_park(\Ffi\Ptr $pfds, int $count, float $deadline): int
             return $rc;
         }
         if ($deadline >= 0.0) {
-            $left = $deadline - \__mc_microtime_f();
+            $left = $deadline - \__mc_monotonic_f();
             if ($left <= 0.0) {
                 return 0;
             }
@@ -2184,7 +2208,7 @@ function __mc_sendfile(\Resource $out, \Resource $in, int $offset, int $len): in
  * The local ("host:port") name of a socket, or the peer's when $want_peer.
  * @return string|false
  */
-function stream_socket_get_name(\Resource $handle, bool $want_peer)
+function stream_socket_get_name(\Resource $handle, bool $want_peer): string|false
 {
     if (!\__mc_stream_is_net($handle)) {
         return false;
@@ -2267,7 +2291,7 @@ function stream_socket_sendto(\Resource $handle, string $data, int $flags = 0, s
     if ($res === null) {
         return -1;
     }
-    if (\Runtime\Libc\sys_getaddrinfo($host, $port, \int_to_ptr(0), $res) !== 0) {
+    if (\__mc_getaddrinfo($host, $port, \int_to_ptr(0), $res) !== 0) {
         \Runtime\Libc\free($res);
         return -1;
     }

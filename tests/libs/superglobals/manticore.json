@@ -1,0 +1,14 @@
+{
+  "libraries": [
+    { "name": "acmegpc", "src": "tests/libs/superglobals/lib", "output": "tests/libs/superglobals/.work/gpc.o" }
+  ],
+  "applications": [
+    {
+      "name": "gpcapp",
+      "src": "tests/libs/superglobals/app",
+      "output": "tests/libs/superglobals/.work/gpcapp",
+      "entry": "tests/libs/superglobals/app/main.php",
+      "libraries": ["acmegpc"]
+    }
+  ]
+}

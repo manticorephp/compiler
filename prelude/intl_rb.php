@@ -77,6 +77,7 @@ class ResourceBundle implements IteratorAggregate, Countable, ArrayAccess
 
     public function __clone()
     {
+        $this->__mcMe = 0;
         throw new \Error("Trying to clone an uncloneable object of class ResourceBundle");
     }
 

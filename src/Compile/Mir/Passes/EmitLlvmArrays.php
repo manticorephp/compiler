@@ -253,6 +253,7 @@ trait EmitLlvmArrays
             $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
             if ($fast !== null) { return $fast; }
+            if ($this->fixedArrayIsPlain($aa)) { return $this->emitFixedArrayCallBorrow($mc); }
             return $this->emitMethodCall($mc);
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
@@ -279,28 +280,21 @@ trait EmitLlvmArrays
     /**
      * `$fixed[$i]` on a SplFixedArray whose `offsetGet` is the prelude's own,
      * with an INT index: read `__data[$i]` in place when `0 <= $i < __size`,
-     * else call `offsetGet` (which throws php's error). The fast arm hands back
-     * exactly what `offsetGet` does — the element decoded to a cell and
-     * retained, a +1 the caller owns — so nothing downstream can tell the
-     * difference. php-cs-fixer's `Tokens` is a SplFixedArray and `$tokens[$i]`
-     * is its hottest expression; in Zend it is C.
+     * else call `offsetGet` (which throws php's error). php-cs-fixer's `Tokens`
+     * is a SplFixedArray and `$tokens[$i]` is its hottest expression; in Zend
+     * it is C.
+     *
+     * The result is a BORROW, as every element read is: the node is an
+     * ArrayAccess_, and every consumer — the ownership plan, argument and
+     * receiver temps, returns — reads it as one. `__data` keeps the word alive,
+     * so the call arm gives its +1 straight back. Handing out the call's +1
+     * instead leaked every token each `$tokens[$i]->…` touched.
      * null when the shape does not apply.
      */
     private function emitFixedArrayGet(ArrayAccess_ $aa, \Compile\Mir\MethodCall_ $mc): ?string
     {
+        if (!$this->fixedArrayIsPlain($aa)) { return null; }
         $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
-        if ($cls === '' || !$this->classIsA($cls, 'SplFixedArray')) { return null; }
-        // Every class the receiver can be must read through the prelude's own
-        // offsetGet: a subclass override owns the semantics.
-        if (!isset($this->fixedArrayPlain[$cls])) {
-            $plain = true;
-            foreach ($this->classes as $sub) {
-                if ($this->classIsA($sub->name, $cls)
-                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
-            }
-            $this->fixedArrayPlain[$cls] = $plain;
-        }
-        if (!$this->fixedArrayPlain[$cls]) { return null; }
         $ik = $aa->index->type->kind;
         if ($ik !== Type::KIND_INT && $ik !== Type::KIND_CELL) { return null; }
         $cd = $this->classes[$cls] ?? null;
@@ -357,12 +351,10 @@ trait EmitLlvmArrays
         $out .= '  ' . $cv . ' = call i64 @__mir_elem_decode(ptr ' . $data . ', i64 ' . $w . ")\n";
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
-        $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
         $out .= '  store i64 ' . $cv . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $slowL . ":\n";
-        $out .= $this->emitMethodCall($mc);
-        $out .= $this->coerceToI64();
+        $out .= $this->emitFixedArrayCallBorrow($mc);
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -371,6 +363,138 @@ trait EmitLlvmArrays
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /** Whether every class `$aa`'s receiver can be reads through the
+     *  prelude SplFixedArray::offsetGet (a subclass override owns its own
+     *  semantics, and its own return convention). */
+    private function fixedArrayIsPlain(ArrayAccess_ $aa): bool
+    {
+        $cls = \ltrim((string)($aa->array->type->class ?? ''), '\\');
+        if ($cls === '' || !$this->classIsA($cls, 'SplFixedArray')) { return false; }
+        if (!isset($this->fixedArrayPlain[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classIsA($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayPlain[$cls] = $plain;
+        }
+        return $this->fixedArrayPlain[$cls];
+    }
+
+    /** `offsetGet` on a plain SplFixedArray as the BORROW an element read is:
+     *  its +1 dropped at once — `__data` still holds the word
+     *  ({@see emitFixedArrayGet}). */
+    private function emitFixedArrayCallBorrow(\Compile\Mir\MethodCall_ $mc): string
+    {
+        $out = $this->emitMethodCall($mc);
+        $out .= $this->coerceToI64();
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_drop(i64 ' . $this->lastValue . ")\n";
+        return $out;
+    }
+
+    /**
+     * A call of the prelude's own `SplFixedArray::offsetSet`, already lowered
+     * to `$callIr` over `$argList` (`this`, the index cell, the value cell),
+     * with an in-place store in front of it: an INT index inside `__size`, a
+     * `__data` buffer this object alone holds (rc 1), packed, of CELL
+     * elements, long enough — the store the method body would do, minus the
+     * call, the offset rule, the copy-on-write test and the element encoding.
+     * Anything else runs the call. php-cs-fixer's Tokens::insertSlices shifts
+     * the whole tail through `parent::offsetSet` on every insertion; that call
+     * was a fifth of the run. null when the class layout does not apply.
+     */
+    private function fixedArraySetInline(string $argList, string $callIr, string $callReg, string $resReg): ?string
+    {
+        $cd = $this->classes['SplFixedArray'] ?? null;
+        if ($cd === null) { return null; }
+        $dataOff = $cd->propertyOffset('__data');
+        $sizeOff = $cd->propertyOffset('__size');
+        if ($dataOff < 0 || $sizeOff < 0) { return null; }
+        $parts = \explode(', ', $argList);
+        if (\count($parts) !== 3) { return null; }
+        $regs = [];
+        foreach ($parts as $p) {
+            if (!\str_starts_with($p, 'i64 ')) { return null; }
+            $regs[] = \substr($p, 4);
+        }
+        $thisW = $regs[0];
+        $idxW = $regs[1];
+        $valW = $regs[2];
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $intHdr = (string)((1 << 48) | \PHP_INT_MIN | 0x7FF0000000000000);
+        $r = fn (): string => $this->ssa->allocReg();
+        $obj = $r(); $hi = $r(); $isInt = $r(); $sh = $r(); $iv = $r(); $sp = $r(); $size = $r();
+        $inb = $r(); $ok1 = $r();
+        $out = '  ' . $obj . ' = inttoptr i64 ' . $thisW . " to ptr\n";
+        $out .= '  ' . $hi . ' = and i64 ' . $idxW . ", -281474976710656\n";
+        $out .= '  ' . $isInt . ' = icmp eq i64 ' . $hi . ', ' . $intHdr . "\n";
+        $out .= '  ' . $sh . ' = shl i64 ' . $idxW . ", 16\n";
+        $out .= '  ' . $iv . ' = ashr i64 ' . $sh . ", 16\n";
+        $out .= '  ' . $sp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$sizeOff . "\n";
+        $out .= '  ' . $size . ' = load i64, ptr ' . $sp . "\n";
+        $out .= '  ' . $inb . ' = icmp ult i64 ' . $iv . ', ' . $size . "\n";
+        $out .= '  ' . $ok1 . ' = and i1 ' . $isInt . ', ' . $inb . "\n";
+        $chkL = $this->ssa->allocLabel('sfaset.chk');
+        $fastL = $this->ssa->allocLabel('sfaset.fast');
+        $slowL = $this->ssa->allocLabel('sfaset.slow');
+        $endL = $this->ssa->allocLabel('sfaset.end');
+        $out .= '  br i1 ' . $ok1 . ', label %' . $chkL . ', label %' . $slowL . "\n";
+        $out .= $chkL . ":\n";
+        $dp = $r(); $dw = $r(); $data = $r(); $nn = $r(); $rcp = $r(); $rc = $r(); $one = $r();
+        $fp = $r(); $fl = $r(); $hm = $r(); $cellH = $r(); $hsh = $r(); $packed = $r(); $len = $r(); $inl = $r();
+        $a1 = $r(); $a2 = $r(); $a3 = $r(); $a4 = $r();
+        $out .= '  ' . $dp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$dataOff . "\n";
+        $out .= '  ' . $dw . ' = load i64, ptr ' . $dp . "\n";
+        $out .= '  ' . $data . ' = inttoptr i64 ' . $dw . " to ptr\n";
+        $out .= '  ' . $nn . ' = icmp ne i64 ' . $dw . ", 0\n";
+        $out .= '  ' . $rcp . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_RC_OFFSET . "\n";
+        $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        // Only dereference a non-null buffer: select a harmless address first.
+        $safe = $r(); $safeRc = $r(); $safeFl = $r(); $safeLen = $r();
+        $out .= '  ' . $safe . ' = select i1 ' . $nn . ', ptr ' . $data . ", ptr @__mir_zero_word\n";
+        $out .= '  ' . $safeRc . ' = select i1 ' . $nn . ', ptr ' . $rcp . ", ptr @__mir_zero_word\n";
+        $out .= '  ' . $safeFl . ' = select i1 ' . $nn . ', ptr ' . $fp . ", ptr @__mir_zero_word\n";
+        $out .= '  ' . $rc . ' = load i64, ptr ' . $safeRc . "\n";
+        $out .= '  ' . $one . ' = icmp eq i64 ' . $rc . ", 1\n";
+        $out .= '  ' . $fl . ' = load i64, ptr ' . $safeFl . "\n";
+        $out .= '  ' . $hm . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+        $out .= '  ' . $cellH . ' = icmp eq i64 ' . $hm . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+        $out .= '  ' . $hsh . ' = and i64 ' . $fl . ', ' . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
+        $out .= '  ' . $packed . ' = icmp eq i64 ' . $hsh . ", 0\n";
+        $out .= '  ' . $len . ' = load i64, ptr ' . $safe . "\n";
+        $out .= '  ' . $inl . ' = icmp ult i64 ' . $iv . ', ' . $len . "\n";
+        $out .= '  ' . $a1 . ' = and i1 ' . $nn . ', ' . $one . "\n";
+        $out .= '  ' . $a2 . ' = and i1 ' . $a1 . ', ' . $cellH . "\n";
+        $out .= '  ' . $a3 . ' = and i1 ' . $a2 . ', ' . $packed . "\n";
+        $out .= '  ' . $a4 . ' = and i1 ' . $a3 . ', ' . $inl . "\n";
+        $out .= '  br i1 ' . $a4 . ', label %' . $fastL . ', label %' . $slowL . "\n";
+        $out .= $fastL . ":\n";
+        $off = $r(); $off2 = $r(); $slot = $r(); $old = $r();
+        $out .= '  ' . $off . ' = mul i64 ' . $iv . ", 8\n";
+        $out .= '  ' . $off2 . ' = add i64 ' . $off . ', ' . (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE . "\n";
+        $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr ' . $data . ', i64 ' . $off2 . "\n";
+        $out .= '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
+        $out .= '  call void @__mir_cell_retain(i64 ' . $valW . ")\n";
+        $out .= '  store i64 ' . $valW . ', ptr ' . $slot . "\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $old . ")\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $slowL . ":\n";
+        $out .= $callIr;
+        // The call may end in another block — an `invoke` inside a `try`
+        // continues at its normal destination — so the phi names a block of
+        // its own that only the call's fall-through reaches.
+        $slowEndL = $this->ssa->allocLabel('sfaset.slowend');
+        $out .= '  br label %' . $slowEndL . "\n";
+        $out .= $slowEndL . ":\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $out .= '  ' . $resReg . ' = phi i64 [ 0, %' . $fastL . ' ], [ ' . $callReg . ', %' . $slowEndL . " ]\n";
         return $out;
     }
 
@@ -391,6 +515,13 @@ trait EmitLlvmArrays
     /** Set by `??` around its presence test on a string base; read and cleared
      *  by the isset arm ({@see coerceStrOffset} 'coalesce'). */
     private bool $strOffsetCoalesce = false;
+
+    /** @var array{node: ArrayAccess_, arr: string, key: string, word: string}|null */
+    private ?array $coalescePre = null;
+    /** The address register of the last {@see emitLookupWord} probe. */
+    private string $lookupAddr = '';
+    /** The array register of the last {@see emitLookupWord} probe. */
+    private string $lookupArr = '';
 
     /** Set by {@see emitStrOffsetBase} for the probe string fetch it is about to
      *  emit; read and cleared at the top of that fetch. */
@@ -549,7 +680,10 @@ trait EmitLlvmArrays
             $base = $this->ssa->allocReg();
             $out .= '  ' . $base . ' = inttoptr i64 ' . $bp . " to ptr\n";
             $out .= $this->emitNode($se->index);
-            $out .= $this->coerceToI64();
+            // A CELL index (`$s[$i + $j]` over erased locals) is a tagged word;
+            // read raw it was a vast offset and the write fell off the string
+            // (symfony's Normalizer::decompose then looped forever).
+            $out .= $this->coerceStrOffset($se->index, 'read');
             $idx = $this->lastValue;
             $out .= $this->emitNode($se->value);
             if ($se->value->type->kind === Type::KIND_CELL) {
@@ -633,7 +767,14 @@ trait EmitLlvmArrays
 
     private function emitArrayLitValue(Node $value, bool $cellVals, bool $inShape = false): string
     {
+        // A value boxed into a CELL is owned by that cell, and the argument's
+        // cell release drops it — nested literals and all. Collecting a nested
+        // literal's elements for the call's post-release as well freed them
+        // twice (`array_replace_recursive(['x' => ['y' => ['z' => [...]]]], …)`).
+        $wasCollect = $this->litElemCollect;
+        if ($cellVals) { $this->litElemCollect = false; }
         $out = $this->emitNode($value);
+        $this->litElemCollect = $wasCollect;
         $shallow = $cellVals && $inShape && $value->type->isArray()
             && $this->hintDecodesExactly($value->type);
         if ($shallow) {
@@ -770,9 +911,20 @@ trait EmitLlvmArrays
         $init = $this->ssa->allocReg();
         $out .= '  ' . $init . ' = call ptr @' . $allocFn . '(i64 ' . (string)$count . ")\n";
         $out .= '  store ptr ' . $init . ', ptr ' . $slot . "\n";
+        // A spread merges words the literal did not write: describe the buffer
+        // BEFORE it, so `__mir_array_spread_into` converts a source whose hint
+        // disagrees, and never re-stamp it after — the merge may have
+        // cellified it.
+        $litHint = $this->elementHintCodeForType($al->type->element);
+        $this->unstampedElemCensus($al->type->element, $litHint);
+        $hasSpread = false;
+        foreach ($al->elements as $el) {
+            if ($el->value->kind === Node::KIND_SPREAD) { $hasSpread = true; }
+        }
+        if ($hasSpread && $litHint !== null) { $out .= $this->emitElemHintStamp($init, $litHint); }
         foreach ($al->elements as $el) {
             if ($el->value->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitArraySpreadUnified($slot, $el->value);
+                $out .= $this->emitArraySpreadUnified($slot, $el->value, $cellVals);
                 continue;
             }
             if ($el->key !== null) {
@@ -825,8 +977,7 @@ trait EmitLlvmArrays
         // Self-describe a cell-valued literal, and record the element SHAPE for
         // every rc-shaped one (see emitArrayLitDirect).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
-        $litHint = $this->elementHintCodeForType($al->type->element);
-        if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($res, $litHint); }
+        if ($litHint !== null && $count > 0 && !$hasSpread) { $out .= $this->emitElemHintStamp($res, $litHint); }
         if (!$cellVals && $this->closureLiteral($al)) { $out .= $this->emitReprStamp($res, \Compile\MemoryAbi::ARRAY_REPR_CLO); }
         $this->lastValue = $res;
         $this->lastValueType = 'ptr';
@@ -960,6 +1111,7 @@ trait EmitLlvmArrays
         // (symfony's Table rows are a concrete `vec[string]` read as cells).
         if ($cellVals && $count > 0) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CELL); }
         $litHint = $this->elementHintCodeForType($al->type->element);
+        $this->unstampedElemCensus($al->type->element, $litHint);
         if ($litHint !== null && $count > 0) { $out .= $this->emitElemHintStamp($arr, $litHint); }
         if (!$cellVals && $this->closureLiteral($al)) { $out .= $this->emitReprStamp($arr, \Compile\MemoryAbi::ARRAY_REPR_CLO); }
         $this->lastValue = $arr;
@@ -1394,21 +1546,38 @@ trait EmitLlvmArrays
 
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
     {
-        $out = $this->emitNode($aa->array);
-        // A `mixed`/cell base (e.g. a nested value out of json_decode) — and an
-        // ERASED one, which may hold the very same boxed word — carries the
-        // array pointer NaN-boxed ({@see arrayBaseToPtr}).
-        $out .= $this->arrayBaseToPtr($aa->array->type);
-        $arrPtr = $this->lastValue;
+        // `$a[$k] ?? d` probed the key already ({@see emitCoalesceArrayLookup}):
+        // base, key and the found word arrive evaluated, and only the decode below
+        // runs. Consumed here so nothing nested can see it.
+        $pre = $this->coalescePre;
+        $this->coalescePre = null;
+        if ($pre !== null && $pre['node'] !== $aa) { $pre = null; }
+        $out = '';
+        if ($pre === null) {
+            $out = $this->emitNode($aa->array);
+            // A `mixed`/cell base (e.g. a nested value out of json_decode) — and an
+            // ERASED one, which may hold the very same boxed word — carries the
+            // array pointer NaN-boxed ({@see arrayBaseToPtr}).
+            $out .= $this->arrayBaseToPtr($aa->array->type);
+            $arrPtr = $this->lastValue;
+        } else {
+            $arrPtr = $pre['arr'];
+        }
         // A `mixed`/cell index (int-OR-string at runtime) → dispatch helper.
         $keyIsCell = $this->keyRidesCellChannel($aa->index);
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
-        $out .= $this->emitNode($aa->index);
-        $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
-        $key = $this->lastValue;
-        $reg = $this->ssa->allocReg();
-        if ($keyIsCell) {
+        if ($pre === null) {
+            $out .= $this->emitNode($aa->index);
+            $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
+            $key = $this->lastValue;
+        } else {
+            $key = $pre['key'];
+        }
+        $reg = $pre !== null ? $pre['word'] : $this->ssa->allocReg();
+        if ($pre !== null) {
+            // the word came from the probe
+        } elseif ($keyIsCell) {
             $this->rt->needsCellKey = true;
             $out .= '  ' . $reg . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
         } elseif ($keyIsString) {
@@ -1509,7 +1678,7 @@ trait EmitLlvmArrays
                 $out .= '  call i64 @manticore___mir_shape_type_error(i64 ' . $given
                       . ', i64 ptrtoint (ptr ' . $this->strRef($where) . ' to i64)'
                       . ', i64 ptrtoint (ptr ' . $this->strRef($expected) . " to i64))\n";
-                // The prelude fn throws (longjmp) and never returns; the edge
+                // The prelude fn throws and never returns; the edge
                 // only satisfies the verifier.
                 $out .= '  br label %' . $contL . "\n";
                 $out .= $contL . ":\n";
@@ -1669,7 +1838,7 @@ trait EmitLlvmArrays
     {
         $base = $se->array;
         if ($base->kind !== Node::KIND_LOAD_LOCAL) { return $base->type; }
-        $mo = $this->frame->rcObjLocals[$base->name] ?? null;
+        $mo = $this->frame->ownLocals[$base->name] ?? null;
         if ($mo === null) { return $base->type; }
         // A MIXED slot's recorded type is only its RAW half; the load's flow
         // type says which half this store sees.
@@ -1689,6 +1858,23 @@ trait EmitLlvmArrays
      * ride raw, exactly as it does today. A scalar has a code too: a raw int
      * found through a cell channel is otherwise a tag-0 word.
      */
+    /**
+     * Census `own.residual.elem-unstamped`: a literal whose element type owns
+     * an rc value yet names no hint leaves its buffer undescribed, and every
+     * copy of it then adopts by repr bits nobody stamped while its typed owner
+     * releases by flavor — the pairing {@see EmitLlvmMemory::arrayValueCopyIr}
+     * relies on. Expected 0: the all-object union was the last such producer.
+     */
+    private function unstampedElemCensus(?Type $el, ?int $hint): void
+    {
+        if (!\Compile\Stats::$on || $hint !== null || $el === null) { return; }
+        $k = $el->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN || $this->isClosureValueType($el)) { return; }
+        $f = $this->discardReleaseFlavor($el);
+        if ($f === '' || $f === 'buf') { return; }
+        \Compile\Stats::bump('own.residual.elem-unstamped', 1);
+    }
+
     private function elementHintCodeForType(?Type $el): ?int
     {
         if ($el === null) { return null; }
@@ -1708,6 +1894,7 @@ trait EmitLlvmArrays
             if ($this->isEnumClass($cls)) { return null; }
             return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ;
         }
+        if ($this->own->objUnionElem($el)) { return \Compile\MemoryAbi::ARRAY_ELEM_HINT_OBJ; }
         return null;
     }
 
@@ -1831,16 +2018,13 @@ trait EmitLlvmArrays
     /**
      * Is `$base` a SUPERGLOBAL cell under the ownership contract — every
      * reference it holds taken at the cell flavor and every release the `ownel`
-     * one ({@see EmitLlvmLocals::globalCellOwnIr})? A cell some store vetoed
-     * ({@see EmitLlvm::scanGlobalCellStores}) is not, and keeps the plain paths.
+     * one ({@see EmitLlvmLocals::globalCellOwnIr})?
      */
     private function superglobalCellBase(Node $base): bool
     {
         if ($base->kind !== Node::KIND_LOAD_LOCAL) { return false; }
         if (!$this->isSuperglobalName($base->name)) { return false; }
-        $cell = $this->locals->globalBacked[$base->name] ?? '';
-        if ($cell === '') { return false; }
-        return !isset($this->globalCellVeto[$cell]);
+        return ($this->locals->globalBacked[$base->name] ?? '') !== '';
     }
 
     private function cowSymbolPlain(Type $t): string
@@ -1888,112 +2072,20 @@ trait EmitLlvmArrays
      * An UNKNOWN value is raw, and that is the one the element type must cover
      * (`$out[] = $s` off a bare-`array` property, whose caller sees `Node[]`).
      */
-    /** Both ends of this element store are erased: the value carries a cell /
-     *  unknown and the destination's element channel names no type either. Such
-     *  a store copies a WORD whose ownership nobody static can speak for, which
-     *  is precisely when the runtime tag has to. */
-    private function erasedElemCopy(StoreElement $se): bool
-    {
-        $vk = $se->value->type->kind;
-        if ($vk !== Type::KIND_CELL && $vk !== Type::KIND_UNKNOWN) { return false; }
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return true; }
-        $el = $at->element;
-        return $el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN;
-    }
+    /** {@see \Compile\Mir\Ownership::erasedElemCopy} */
+    private function erasedElemCopy(StoreElement $se): bool { return \Compile\Mir\Ownership::erasedElemCopy($se); }
 
-    private function storeRetainFallback(StoreElement $se): ?Type
-    {
-        if ($se->value->type->kind === Type::KIND_CELL) { return null; }
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
-        $el = $at->element;
-        if ($el !== null && ($el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN)) {
-            return null;
-        }
-        return $el;
-    }
+    /** {@see \Compile\Mir\Ownership::storeRetainFallback} */
+    private function storeRetainFallback(StoreElement $se): ?Type { return \Compile\Mir\Ownership::storeRetainFallback($se); }
 
-    /**
-     * The element type a CELL value must be UNBOXED to before it lands in a
-     * CONCRETE-element array — the per-ELEMENT analogue of the whole-array
-     * {@see needsDeCellify} reabstraction.
-     *
-     * Without it the tagged bits are stored raw into a slot whose retain /
-     * release / read all treat them as that raw type, and a later
-     * `__mir_array_retain_str` DEREFERENCES a NaN-boxed cell (a `?string`
-     * ternary — `isset($a[$k]) ? $a[$k] : null`, which `nullableOf` lifts to a
-     * cell — stored into a declared `array<string,string>`; it SIGSEGV'd the
-     * self-host in `ClassDecl::__construct`). Once unboxed the payload is a bare
-     * pointer, so the caller retains per THIS type instead of
-     * {@see storeRetainFallback}'s null (which is right only for a value that
-     * stays boxed — rc-bumping tagged bits would corrupt them).
-     *
-     * Null when nothing to do: a non-cell value, or a cell/unknown destination
-     * element (which legitimately stores the value boxed).
-     */
-    private function storeElemDeCellifyType(StoreElement $se): ?Type
-    {
-        if ($se->value->type->kind !== Type::KIND_CELL) { return null; }
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) { return null; }
-        $el = $at->element;
-        if ($el === null) { return null; }
-        $ek = $el->kind;
-        if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { return null; }
-        return $el;
-    }
+    /** {@see \Compile\Mir\Ownership::storeElemDeCellifyType} */
+    private function storeElemDeCellifyType(StoreElement $se): ?Type { return \Compile\Mir\Ownership::storeElemDeCellifyType($se); }
 
-    /**
-     * Does a StoreElement NaN-box its value into the slot? A cell BASE (a
-     * `mixed` property / param holding the array) or a cell ELEMENT type both
-     * store boxed, and that path co-owns the payload through
-     * {@see EmitLlvm::retainCellPayload} instead of {@see rcRetainByType}.
-     *
-     * ⚠ The ONE owner of that question: {@see emitStoreElementUnified} reads it
-     * to pick the arm, and {@see EmitLlvmMemory::collectTransferredLocals} reads
-     * it to pick the matching retain predicate. Two copies drift, and a drift
-     * here is a leak (pass says borrowed, emitter retains) or a double free.
-     */
-    private function storeElemBoxesValue(StoreElement $se): bool
-    {
-        $at = $se->array->type;
-        if ($at->kind === Type::KIND_CELL) { return true; }
-        $et = $at->element;
-        // ⚠ KNOWN GAP, deliberately NOT widened to KIND_UNKNOWN here.
-        //
-        // The READ side decodes an `unknown` element as a TAGGED cell
-        // ({@see arrayBaseToPtr}, {@see storeElemDeCellifyType} both pair
-        // UNKNOWN with CELL), while this predicate stores raw — so a container
-        // whose two ends are inferred apart disagrees about the repr. The shape
-        // that shows it: `$a = []; $f = function () use (&$a) { $a[] = 'lit'; };`
-        // leaves the outer local vec[unknown] while the closure body still sees
-        // a `string`, and `echo $a[0]` then prints the ADDRESS (var_dump says
-        // float(2.1E-314)). See tests/aot/cases/array_erased_elem_repr_gap.php.
-        //
-        // Making this arm return true for UNKNOWN was tried and does NOT work:
-        // the container's repr nibble is fixed at ALLOCATION, so boxed values in
-        // a raw-repr vec make the release path free tagged words — the self-host
-        // gen-2 compiler segfaults on its own smoke test. Closing it needs the
-        // erased element channel RETYPED to cell end-to-end, which is the parked
-        // element-repr epic, not a change to this predicate.
-        if ($et !== null && $et->kind === Type::KIND_CELL) { return true; }
-        if ($se->value->type->kind === Type::KIND_CELL && ($et === null || $et->kind === Type::KIND_UNKNOWN)) { return true; }
-        if ($se->value instanceof \Compile\Mir\Call) {
-            $fn = $se->value->function;
-            $p = \strrpos($fn, \chr(92));
-            $bare = $p === false ? $fn : \substr($fn, $p + 1);
-            if ($bare === 'key' || $bare === 'current' || $bare === 'pos') { return true; }
-        }
-        return false;
-    }
+    /** {@see \Compile\Mir\Ownership::storeElemBoxesValue} — the one owner of which store arm NaN-boxes. */
+    private function storeElemBoxesValue(StoreElement $se): bool { return \Compile\Mir\Ownership::storeElemBoxesValue($se); }
 
-    /** As {@see storeElemBoxesValue} for an array LITERAL — its `$cellVals`. */
-    private function litBoxesValues(ArrayLit $al): bool
-    {
-        $el = $al->type->element;
-        return $el !== null && $el->kind === Type::KIND_CELL;
-    }
+    /** {@see \Compile\Mir\Ownership::litBoxesValues} */
+    private function litBoxesValues(ArrayLit $al): bool { return \Compile\Mir\Ownership::litBoxesValues($al); }
 
     /**
      * The VALUE half of an element store, shared by all four arms of
@@ -2039,6 +2131,27 @@ trait EmitLlvmArrays
             $this->lastValueType = $savedValueType;
             $out .= $this->boxToCell($se->value->type, $se->value);
             $this->elemValReg = $this->lastValue;
+            return $out;
+        }
+        // The WHOLE-array de-cellify, as {@see EmitLlvmLocals::emitStoreLocal}
+        // does for a local: a cell-element array stored into a slot whose
+        // element is a CONCRETE-element array (`$s->ref[$name] = $mask` with
+        // `$mask` a `vec[cell]` over an `array<string, bool[]>`) is rebuilt
+        // with each element unboxed. Stored as is, the typed reader took a boxed
+        // `false` for a non-zero word — true. The rebuild CO-OWNS the elements
+        // and an owned temp source goes back whole ({@see decellifyFromTemp});
+        // the rebuilt +1 is the slot's outright, so no retain follows.
+        $elT0 = $se->array->type->element ?? null;
+        if ($elT0 !== null && $this->needsDeCellify($elT0, $se->value->type)) {
+            $out .= $this->coerceToPtr();
+            $deSrc = $this->lastValue;
+            $out .= $this->emitCellArrayToTyped($elT0, true);
+            $out .= $this->coerceToI64();
+            $dv = $this->lastValue;
+            $out .= $this->decellifyFromTemp($deSrc, $this->cellifySourceFlavor($se->value));
+            $this->lastValue = $dv;
+            $this->lastValueType = 'i64';
+            $this->elemValReg = $dv;
             return $out;
         }
         $dcT = $this->storeElemDeCellifyType($se);
@@ -2210,6 +2323,13 @@ trait EmitLlvmArrays
             $this->rt->needsClosureRc = true;
             return '  call void @__mir_array_clo_drop(ptr ' . $arr . ', i64 ' . $word . ")\n";
         }
+        if ($flavor === 'cell') {
+            // The slot's word as the buffer's HINT describes it: a raw-hinted
+            // buffer holds untagged payloads a cell drop would misread.
+            $dec = $this->ssa->allocReg();
+            return '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arr . ', i64 ' . $word . ")\n"
+                . $this->rcReleaseReg($dec, 'cell');
+        }
         return $this->rcReleaseReg($word, $flavor);
     }
 
@@ -2311,8 +2431,10 @@ trait EmitLlvmArrays
         $dropFlavor = $isAppend ? '' : $this->elemSlotDropFlavor($se->array->type, $sgBase);
         // A REF-cell value (`$a[$k] = &$v`) REBINDS the slot: php replaces the
         // element's binding, it does not write through the reference the slot
-        // held. So the old word is neither read for write-through nor treated
-        // as a value to drop — the binding it was is simply gone from this slot.
+        // held. So the old word is never read for write-through — but the slot
+        // still gives it up: an owned value, or this slot's count on the box
+        // (`__mir_cell_drop`'s REF arm), drops by the slot's flavor like any
+        // overwrite.
         $rebinds = $se->value->kind === Node::KIND_REF_CELL;
         if ($rebinds) {
             $el = $se->array->type->element ?? null;
@@ -2325,7 +2447,7 @@ trait EmitLlvmArrays
                 );
             }
         }
-        $readsOld = !$rebinds && ($dropFlavor !== '' || $this->rt->needsRefCells);
+        $readsOld = $dropFlavor !== '' || (!$rebinds && $this->rt->needsRefCells);
         $this->elemWroteThroughRef = '';
         $next = $this->ssa->allocReg();
         if ($isAppend) {
@@ -2410,6 +2532,13 @@ trait EmitLlvmArrays
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";
             if ($dropFlavor !== '') { $out .= $this->emitElemSlotDrop($curE, $dropFlavor, $next); }
+        }
+        // A boxed store into a level that did not exist yet: the cow of an absent
+        // nested level is NULL, `__mir_elem_encode` has no buffer to stamp, and
+        // the set/append below mints the buffer — so it comes back unstamped
+        // with a cell inside, and a typed reader trusts the raw claim.
+        if ($boxVal && $se->array->kind === Node::KIND_ARRAY_ACCESS) {
+            $out .= $this->emitElemHintStamp($next, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         }
         // Stamp the element repr on the persisted buffer ($next may be a
         // realloced / promoted / deimmortalised buffer) so the plain repr

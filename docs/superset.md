@@ -141,9 +141,11 @@ pcntl layer exists at all.
 
 ### 1.5 What is deliberately NOT async
 
-Regular-file I/O blocks the loop: `O_NONBLOCK` is a no-op for regular files on both targets,
-and there is no thread pool (rejected: non-atomic rc, a non-thread-safe arena, a process-global
-exception slot) and no io_uring (Linux-only would leave macOS behind). `Async\readFile()` /
+Regular-file I/O has no readiness (`O_NONBLOCK` is a no-op for regular files on both targets),
+so the common calls run on a blocking-offload pool: OS threads that execute a fixed set of libc
+calls and never PHP (the rc, the arena and the exception slot are not thread-safe). See
+`async.md` § Blocking calls run on a pool. Calls the pool does not cover still block, and there
+is no io_uring (Linux-only would leave macOS behind). `Async\readFile()` /
 `Async\writeFile()` chunk and yield. Saying this plainly is part of the superset's contract:
 a runtime that claims "everything is async" and blocks anyway is worse than one that names
 the exception.
@@ -273,7 +275,7 @@ Kept here so the boundary stays honest:
 - **Shared-memory threads** — a future compiler superset, and a much larger one: it invalidates
   the non-atomic rc, the arena and the process-global exception slot that everything above is
   built on.
-- **Off-thread / `io_uring` file I/O** — see §1.5 for why not yet.
+- **`io_uring` file I/O** — Linux-only; the offload pool (§1.5) covers regular files on both targets.
 
 ---
 

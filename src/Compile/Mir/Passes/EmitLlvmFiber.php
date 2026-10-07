@@ -52,12 +52,12 @@ trait EmitLlvmFiber
     {
         $out  = "@__mir_current_fiber = linkonce_odr global ptr null\n";
         // Per-context save area (64B): the 5 arena globals (head/cur/marks/sp/mcap)
-        // + the 3 exception globals (jmp_base/jmp_depth/thrown). Both the bump
-        // arena+mark-stack and the try-slot jmp stack are process-global, so a
-        // fiber suspending mid-scope / mid-try would desync main's ⇒ heap
-        // corruption / aliased jmp_buf. Each fiber runs on its OWN arena + jmp
-        // stack; main's state lives here. {@see prelude/fiber.php} brackets every
-        // jump with save/load.
+        // + the exception slot `@__mir_thrown` (bytes 40..55 unused). The bump
+        // arena+mark-stack is process-global, so a fiber suspending mid-scope
+        // would desync main's ⇒ heap corruption. Each fiber runs on its OWN
+        // arena; main's state lives here. Exceptions need no per-fiber state:
+        // the unwinder walks the running stack only. {@see prelude/fiber.php}
+        // brackets every jump with save/load.
         $out .= "@__mir_fiber_main_ctx = linkonce_odr global [64 x i8] zeroinitializer\n";
         // Fiber-stack free-list: mmap'd stacks (guard page already set) returned by
         // a destroyed fiber are POOLED here instead of munmap'd, so a new fiber
@@ -246,11 +246,17 @@ trait EmitLlvmFiber
             'mov x4, #0',
             'str x4, [x0, #0x50]',
             'ret',
+            // The base frame of a fiber stack: its return address is UNDEFINED in
+            // the CFI, so an unwind that reaches it stops here (end of stack)
+            // instead of reading the fcontext words as a caller frame.
             $u . 'mc_fiber_trampoline:',
+            '.cfi_startproc',
+            '.cfi_undefined x30',
             'mov x1, x0',
             'mov x0, x20',
             'blr x19',
             'brk #0',
+            '.cfi_endproc',
         ];
     }
 
@@ -287,10 +293,13 @@ trait EmitLlvmFiber
             'movq %rdi, %rax',
             'ret',
             $u . 'mc_fiber_trampoline:',
+            '.cfi_startproc',
+            '.cfi_undefined %rip',
             'movq %r13, %rdi',
             'movq %rax, %rsi',
             'call *%r12',
             'ud2',
+            '.cfi_endproc',
         ];
     }
 
@@ -581,82 +590,80 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_ctx_free(ctx) : void — free the fiber's jmp_stack buffer
-     *  (ctx+40) then the ctx block itself. */
+    /**
+     * __mir_fiber_ctx_free(ctx) : void — free the ctx block AND the arena it
+     * saved: the fiber ran on its own chunk chain (head@0, each chunk's next at
+     * its offset 0) and mark stack (@16), which nothing else points to once the
+     * fiber is gone — every task that reached an arena scope kept its chunks.
+     */
     private function biFiberCtxFree(array $args): string
     {
         $this->rt->needsFibers = true;
         $out = $this->emitIntArg($args[0]);
         $cp = $this->ssa->allocReg();
         $out .= '  ' . $cp . ' = inttoptr i64 ' . $this->lastValue . ' to ptr' . "\n";
-        $jbslot = $this->ssa->allocReg();
-        $out .= '  ' . $jbslot . ' = getelementptr i8, ptr ' . $cp . ', i64 40' . "\n";
-        $js = $this->ssa->allocReg();
-        $out .= '  ' . $js . ' = load ptr, ptr ' . $jbslot . "\n";
-        $out .= '  call void @free(ptr ' . $js . ")\n";
+        $pre = $this->ssa->allocLabel('fcf.pre');
+        $head = $this->ssa->allocLabel('fcf.chunk');
+        $body = $this->ssa->allocLabel('fcf.free');
+        $tail = $this->ssa->allocLabel('fcf.marks');
+        $done = $this->ssa->allocLabel('fcf.done');
+        $nn = $this->ssa->allocReg();
+        $h = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $ce = $this->ssa->allocReg();
+        $nx = $this->ssa->allocReg();
+        $mp = $this->ssa->allocReg();
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $nn . ' = icmp eq ptr ' . $cp . ", null\n";
+        $out .= '  br i1 ' . $nn . ', label %' . $done . ', label %' . $pre . "\n";
+        $out .= $pre . ":\n";
+        $out .= '  ' . $h . ' = load ptr, ptr ' . $cp . "\n";
+        $out .= '  br label %' . $head . "\n";
+        $out .= $head . ":\n";
+        $out .= '  ' . $c . ' = phi ptr [ ' . $h . ', %' . $pre . ' ], [ ' . $nx . ', %' . $body . " ]\n";
+        $out .= '  ' . $ce . ' = icmp eq ptr ' . $c . ", null\n";
+        $out .= '  br i1 ' . $ce . ', label %' . $tail . ', label %' . $body . "\n";
+        $out .= $body . ":\n";
+        $out .= '  ' . $nx . ' = load ptr, ptr ' . $c . "\n";
+        $out .= '  call void @free(ptr ' . $c . ")\n";
+        $out .= '  br label %' . $head . "\n";
+        $out .= $tail . ":\n";
+        $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $cp . ", i64 16\n";
+        $out .= '  ' . $m . ' = load ptr, ptr ' . $mp . "\n";
+        $out .= '  call void @free(ptr ' . $m . ")\n";
         $out .= '  call void @free(ptr ' . $cp . ")\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
     }
 
-    /** The saved globals, in ctx order: 5 arena + 3 exception. ptr | i64. */
+    /** The saved globals, in ctx order: 5 arena + the exception slot. ptr | i64.
+     *  Bytes 40..55 are unused (they held the sjlj try-slot stack). */
     private const FIBER_CTX_GLOBALS = [
         ['@__mir_arena_head', 'ptr', 0],
         ['@__mir_arena_cur', 'ptr', 8],
         ['@__mir_arena_marks', 'ptr', 16],
         ['@__mir_arena_sp', 'i64', 24],
         ['@__mir_arena_mcap', 'i64', 32],
-        ['@__mir_jmp_base', 'ptr', 40],
-        ['@__mir_jmp_depth', 'i64', 48],
         ['@__mir_thrown', 'ptr', 56],
     ];
 
-    /** __mir_fiber_ctx_new() : int — a fresh 64B save area for a new fiber. Arena
-     *  fields stay zeroed (the arena lazily self-builds). The jmp stack is its OWN
-     *  8KB buffer with depth 1 (slot 0 reserved, like main) so fiber tries never
-     *  alias main's jmp_buf; thrown starts null. */
+    /** __mir_fiber_ctx_new() : int — a fresh 64B save area for a new fiber. Every
+     *  field starts zeroed: the arena lazily self-builds, thrown starts null.
+     *  0 when the allocation fails. */
     private function biFiberCtxNew(array $args): string
     {
         $this->rt->needsFibers = true;
-        $okl = $this->ssa->allocLabel('fibctx.ok');
-        $badl = $this->ssa->allocLabel('fibctx.bad');
-        $nojs = $this->ssa->allocLabel('fibctx.nojs');
-        $donel = $this->ssa->allocLabel('fibctx.done');
-        $joinl = $this->ssa->allocLabel('fibctx.join');
         $p = $this->ssa->allocReg();
-        $out = '  ' . $p . ' = call ptr @calloc(i64 64, i64 1)' . "\n";
         // Under memory pressure this is where a 100k-task process died: a null ctx
-        // was stored into and a null jmp stack installed, so the SIGSEGV landed
-        // nowhere near the allocation that failed. 0 comes back instead, and
-        // Fiber::start() raises FiberError — the same contract the stack has.
-        $pnull = $this->ssa->allocReg();
-        $out .= '  ' . $pnull . ' = icmp eq ptr ' . $p . ", null\n";
-        $out .= '  br i1 ' . $pnull . ', label %' . $badl . ', label %' . $okl . "\n";
-        $out .= $okl . ":\n";
-        $js = $this->ssa->allocReg();
-        $out .= '  ' . $js . ' = call ptr @malloc(i64 8192)' . "\n";
-        $jsnull = $this->ssa->allocReg();
-        $out .= '  ' . $jsnull . ' = icmp eq ptr ' . $js . ", null\n";
-        $out .= '  br i1 ' . $jsnull . ', label %' . $nojs . ', label %' . $donel . "\n";
-        $out .= $nojs . ":\n";
-        $out .= '  call void @free(ptr ' . $p . ")\n";
-        $out .= '  br label %' . $badl . "\n";
-        $out .= $donel . ":\n";
-        $jbslot = $this->ssa->allocReg();
-        $out .= '  ' . $jbslot . ' = getelementptr i8, ptr ' . $p . ', i64 40' . "\n";
-        $out .= '  store ptr ' . $js . ', ptr ' . $jbslot . "\n";
-        $jdslot = $this->ssa->allocReg();
-        $out .= '  ' . $jdslot . ' = getelementptr i8, ptr ' . $p . ', i64 48' . "\n";
-        $out .= '  store i64 1, ptr ' . $jdslot . "\n";
-        $ok = $this->ssa->allocReg();
-        $out .= '  ' . $ok . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
-        $out .= '  br label %' . $joinl . "\n";
-        $out .= $badl . ":\n";
-        $out .= '  br label %' . $joinl . "\n";
-        $out .= $joinl . ":\n";
+        // was stored into, so the SIGSEGV landed nowhere near the allocation that
+        // failed. 0 comes back instead, and Fiber::start() raises FiberError —
+        // the same contract the stack has.
+        $out = '  ' . $p . ' = call ptr @calloc(i64 64, i64 1)' . "\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = phi i64 [ ' . $ok . ', %' . $donel . ' ], [ 0, %' . $badl . " ]\n";
+        $out .= '  ' . $r . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;

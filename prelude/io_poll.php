@@ -256,6 +256,19 @@ namespace Io\Poll {
             $this->context = null;
         }
 
+        /**
+         * Drop this watcher from its context WITHOUT telling the kernel. For a
+         * registration another process owns: a fork's child shares the parent's
+         * epoll instance, where EPOLL_CTL_DEL would unwatch the fd for both.
+         */
+        public function forget(): void
+        {
+            $this->requireActive();
+            $this->context->__forget($this);
+            $this->active = false;
+            $this->context = null;
+        }
+
         // ── internal (Context-facing) ──
         public function __bits(): int { return $this->bits; }
         public function __setTriggered(int $bits): void { $this->triggered = $bits; }
@@ -531,6 +544,13 @@ namespace Io\Poll {
             } elseif ($this->backend === Backend::Kqueue) {
                 $this->__kqueueSet($fd, $w->__bits(), 0);
             }
+            unset($this->watchers[$fd]);
+            unset($this->fds[$fd]);
+        }
+
+        public function __forget(Watcher $w): void
+        {
+            $fd = $this->handleFd($w->getHandle());
             unset($this->watchers[$fd]);
             unset($this->fds[$fd]);
         }

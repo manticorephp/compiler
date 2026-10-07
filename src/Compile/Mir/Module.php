@@ -33,10 +33,28 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, true> the interfaces php itself declares (prelude /
+     *  runtime library) — ReflectionClass::isInternal(). */
+    public array $internalInterfaceNames = [];
+
     /** @var array<string, string[]> interface → every interface it extends,
      *  transitively: `foreach` over an `Aware extends \Iterator` slot must know
      *  it is Traversable (it walked the object as an array) */
     public array $interfaceAncestors = [];
+
+    /** @var array<string, bool> `Class::method` (method lower-cased) → a BODILESS
+     *  declaration (interface / abstract) that declares a bare `array` return by
+     *  value: every implementation returns +1 ({@see Ownership::erasedArrayReturn}) */
+    public array $bareArrayMethods = [];
+
+    /** @var array<string, bool> lower-cased method names some class, interface or
+     *  trait declares returning BY REFERENCE: a call by that name is never
+     *  owned as an erased-array result */
+    public array $byRefMethodNames = [];
+
+    /** @var array<string, bool> `Class::method` (lower-cased) → a BODILESS
+     *  (interface / abstract) declaration returning by reference */
+    public array $byRefBodiless = [];
 
     /** @var array<string, true> declared trait names (compile-time
      *  `trait_exists` fold). */
@@ -63,6 +81,9 @@ final class Module
 
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
+
+    /** Some `$callable(name: …)` call carries named arguments to bind. */
+    public bool $namedInvokes = false;
 
     /** @var array<string, bool> closure fn name → capture slot 0 is `$this`
      *  (struct slot 1) — where Closure::bind/->bindTo/->call inject the object. */
@@ -253,6 +274,11 @@ final class Module
      * @var array<string, array<string, bool>>
      */
     public array $inferByRefCellElemLocals = [];
+    /** By-ref array params whose element channel became a cell because the body
+     *  hands an element to a by-ref sink of another kind ({@see
+     *  Passes\InferScans::scanRefCellArgWiden}); their callers' arrays follow.
+     *  "fn#idx" => true. @var array<string, bool> */
+    public array $inferByRefElemRetyped = [];
     /** @var array<string, array<string, bool>> by-ref CAPTURE locals that ride a cell, kept for the same reason ({@see Passes\InferScans::scanByRefCaptureWiden}) */
     public array $inferByRefCaptureCellLocals = [];
     /** @var array<string, Type> the unified type of each `global $x`, kept for the same reason ({@see Passes\InferScans::scanGlobalTypes}) */
@@ -391,9 +417,8 @@ final class Module
      * and an importing module may do anything with them.
      *
      * The one question a whole-module analysis has to ask before it may act on
-     * "nobody borrows this": whether "nobody" can be answered at all. A library's
+     * "nobody else can see this": whether it can be answered at all. A library's
      * answer is always "unknown", so any such analysis must decline here.
-     * {@see Passes\EmitLlvm::$propRawBorrow} is the first caller.
      */
     public bool $isLibraryModule = false;
 
@@ -402,6 +427,13 @@ final class Module
      *  an alias registered at run time. Declared LAST: a field added
      *  mid-struct shifts every later offset. */
     public bool $hasClassAlias = false;
+
+    /** {@see Passes\OwnershipFlow}'s refusals — a flavor mismatch at a join, a
+     *  body the flow cannot walk. {@see Passes\Verify} fails the build on any.
+     *  Declared LAST, as above.
+     *  @var string[] */
+    public array $ownFlowErrors = [];
+
 
     public function markPassApplied(string $name): void
     {

@@ -124,7 +124,7 @@ trait LowerSuperglobals
     {
         $t = Type::assoc(Type::string_(), Type::cell());
         if ($sg === '_SERVER') { return new Call('__mc_server', [], $t); }
-        if ($sg === '_ENV') { return new Call('__mc_env', [], Type::assoc(Type::string_(), Type::string_())); }
+        if ($sg === '_ENV') { return new Call('__mc_env_mixed', [], $t); }
         return new ArrayLit([], $t);
     }
 

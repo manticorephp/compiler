@@ -18,8 +18,23 @@ final class MemoryAbi
 {
     /**
      * Bump on any layout / encoding change.
+     *
+     * v16: both v15 lineages at once — the int bucket hash is
+     * (k ^ k>>12) * golden and a bucket word is `(h32 << 32) | (entry_index + 1)`
+     * (h32 = low 32 bits of the key hash), not a bare `entry_index + 1`; the
+     * bucket index is trusted, not validated, so a library built with the old
+     * hash or word would miss keys in the arrays it built. AND the exception
+     * object is the zero-cost `_Unwind_Exception` header + Throwable pointer
+     * (`EXC_*`, docs/design/memory-abi.md §7b). Either v15 alone is a
+     * different layout, so neither may link with a v16 object.
+     *
+     * v17: a Generator frame OWNS every cell of its header — current@16,
+     * key@24, sent@40 and retval@48 (now a tagged cell, was a raw word) — and
+     * `__mir_str_reclaim` destroys a frame it frees (`__mir_gen_destroy`):
+     * state ≥ 0 re-enters the resume function at `-2 - state`. A v16 resume
+     * function has no such entry and its readers take retval raw.
      */
-    public const VERSION = 14;
+    public const VERSION = 17;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -80,6 +95,16 @@ final class MemoryAbi
      * pointer. {@see LowerClasses} registers this constant for those cells.
      */
     public const CELL_NULL = -3659174697238528;
+
+    /**
+     * The MISS word of `__mir_array_lookup_{int,str,cell}`: those return the
+     * ADDRESS of an element's value word, and on a miss the address of this
+     * global, which holds {@see CELL_NULL}. A caller loads the word and tests it
+     * against CELL_NULL — one test for "absent" and "present but NULL" (both are
+     * unset to `isset` and `??`). The address, not a value, is the sentinel
+     * because a raw int element can hold any i64. Never store through it.
+     */
+    public const ARRAY_LOOKUP_MISS_SYMBOL = '__mir_array_miss_word';
 
     /** `0xFFF8000000000000`: OR'd onto a raw object pointer, the OBJECT cell
      *  that carries it — what an `object`-hinted PHP parameter expects when
@@ -569,6 +594,8 @@ final class MemoryAbi
     public const RMETA_FLAG_INTERFACE = 4;
     public const RMETA_FLAG_ENUM      = 8;
     public const RMETA_FLAG_TRAIT     = 16;
+    /** php's own class (prelude / runtime library): ReflectionClass::isInternal(). */
+    public const RMETA_FLAG_INTERNAL  = 32;
 
     // Member flags — a row's `flags` word. Visibility is an enum, not a
     // bitfield: PHP has exactly one per member, and three bits that could
@@ -922,4 +949,62 @@ final class MemoryAbi
     public const COLOR_PURPLE = 1;
     public const COLOR_GRAY = 2;
     public const COLOR_WHITE = 3;
+
+    /** A buffered root whose count reached zero outside a collection: already
+     *  DROPPED (destructor run, children released) the moment it died, as php
+     *  frees it; only its SHELL waits in the root buffer for the collector. */
+    public const COLOR_DEAD = 4;
+
+    // ─── Blocking-offload job record ──────────────────────────────
+
+    /**
+     * Blocking-offload job record, shared by the IR pool worker and stdlib Offload.php
+     * (mirrored there as `__MC_OFF_*`). A new op needs the worker arm, the mirror and
+     * the inline twin; `php tools/check_offload_abi.php` fails on any drift.
+     */
+    public const OFFLOAD_JOB_SIZE = 64;
+    public const OFFLOAD_OP = 0;
+    public const OFFLOAD_ARG0 = 8;
+    public const OFFLOAD_RET = 48;
+    public const OFFLOAD_ERR = 56;
+    public const OFFLOAD_OP_NOP = 0;
+    public const OFFLOAD_OP_FOPEN = 1;
+    public const OFFLOAD_OP_FREAD = 2;
+    public const OFFLOAD_OP_FWRITE = 3;
+    public const OFFLOAD_OP_FFLUSH = 4;
+    public const OFFLOAD_OP_FCLOSE = 5;
+    public const OFFLOAD_OP_FSYNC = 6;
+    public const OFFLOAD_OP_STAT = 7;
+    public const OFFLOAD_OP_LSTAT = 8;
+    public const OFFLOAD_OP_OPENDIR = 9;
+    public const OFFLOAD_OP_READDIR = 10;
+    public const OFFLOAD_OP_CLOSEDIR = 11;
+    public const OFFLOAD_OP_UNLINK = 12;
+    public const OFFLOAD_OP_RENAME = 13;
+    public const OFFLOAD_OP_MKDIR = 14;
+    public const OFFLOAD_OP_RMDIR = 15;
+    public const OFFLOAD_OP_GETADDRINFO = 16;
+    public const OFFLOAD_OP_OPEN = 17;
+    public const OFFLOAD_OP_READDIR_NAME = 18;
+    public const OFFLOAD_OP_SCANDIR = 19;
+
+    // ─── exception object (zero-cost unwinding) ───────────────────
+
+    /**
+     * `_Unwind_Exception::exception_class` of a PHP throw ("MNTCPHP\0"). The
+     * personality catches only this class; a foreign exception (C++, forced
+     * unwind) passes through every PHP catch pad.
+     */
+    public const EXC_CLASS = 0x4D4E544350485000;
+
+    /**
+     * The exception object `@__mc_throw` hands `_Unwind_RaiseException`:
+     * the Itanium `_Unwind_Exception` header (class@0, cleanup@8,
+     * private_1@16, private_2@24 — 32 bytes on every 64-bit target) followed
+     * by the thrown Throwable's address. malloc'd per raise, freed by the
+     * landing pad that takes the payload ({@see \Compile\Runtime\UnwindRuntime}).
+     */
+    public const EXC_HEADER_SIZE = 32;
+    public const EXC_PAYLOAD_OFFSET = 32;
+    public const EXC_SIZE = 48;
 }

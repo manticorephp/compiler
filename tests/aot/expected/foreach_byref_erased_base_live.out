@@ -1,0 +1,47 @@
+array(2) {
+  ["e"]=>
+  array(2) {
+    [0]=>
+    array(1) {
+      [1]=>
+      string(1) "b"
+    }
+    [7]=>
+    array(2) {
+      [0]=>
+      string(1) "c"
+      [2]=>
+      string(1) "d"
+    }
+  }
+  ["f"]=>
+  array(1) {
+    [1]=>
+    array(3) {
+      [1]=>
+      string(1) "x"
+      [3]=>
+      string(1) "y"
+      [4]=>
+      string(1) "z"
+    }
+  }
+}
+array(1) {
+  ["e"]=>
+  array(1) {
+    [0]=>
+    array(1) {
+      [1]=>
+      string(1) "b"
+    }
+  }
+}
+array(1) {
+  ["q"]=>
+  array(1) {
+    [1]=>
+    string(1) "B"
+  }
+}
+done
