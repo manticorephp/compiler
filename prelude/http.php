@@ -3747,7 +3747,7 @@ final class Server
     private mixed $onError = null;
 
     private int $workerCount = 0;
-    private int $maxConnections = 256;
+    private int $maxConnections = 4096;
     private bool $compat = false;
     private bool $captureEcho = true;
     private float $idleTimeout = 5.0;
@@ -3766,7 +3766,7 @@ final class Server
      *  down and rebuilt it — accept, close, and a TLS handshake if any — every
      *  hundred requests; nginx's equivalent default is 1000. It is a DoS knob,
      *  not a correctness one. */
-    private int $keepAliveMax = 1000;
+    private int $keepAliveMax = 0;
     private int $backlog = 511;
     private string $serverName = 'manticore';
     private bool $secure = false;
@@ -3856,6 +3856,7 @@ final class Server
         $this->compressLevel = $level;
         return $this;
     }
+    /** Close a connection after N requests; 0 (the default) never does. */
     public function keepAliveMax(int $n): Server { $this->keepAliveMax = $n; return $this; }
     /** The listen() queue; the kernel clamps it to somaxconn. A context's own `socket.backlog` wins. */
     public function backlog(int $n): Server { $this->backlog = $n; return $this; }
@@ -4061,6 +4062,12 @@ final class Server
                             \fclose($conn);
                         }
                     });
+                    // Let the connection run before the next accept. Without
+                    // it one wakeup drains the whole backlog, and with
+                    // workers(N) the first worker to wake takes every pending
+                    // connection while its siblings idle — measured 1.65 of 4
+                    // cores busy on a CPU-bound handler, 3.9 with the yield.
+                    \Async\delay(0.0);
                 }
             });
         } catch (\Async\CancelledException $e) {
@@ -4269,7 +4276,7 @@ final class Server
         $keep = $req->isKeepAlive()
             && !$res->wantsClose()
             && !$this->stopped
-            && $handled < $this->keepAliveMax;
+            && ($this->keepAliveMax === 0 || $handled < $this->keepAliveMax);
         // A streamed body an HTTP/1.0 peer cannot frame has only the close
         // to end it.
         if ($res->isStreaming() && $req->version !== '1.1') {
