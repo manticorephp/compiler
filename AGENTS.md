@@ -20,20 +20,50 @@ are gitignored.
 
 ```bash
 bin/build                      # self-host rebuild via the manifest — THE normal loop
-bin/build --seed               # cold bootstrap (Zend runs the compiler once to seed it)
+                               # (no bin/manticore: fetch the pinned release, build, rebuild)
 bin/build --verify             # rebuild, then the fixpoint + suite gate
-bin/build --auto-seed          # on a bootstrap gap, escalate to the seed (CI)
 bin/build --fast               # -O1, application only, to bin/manticore.fast — NOT gate evidence
-bin/compile                    # cold seed + stdlib build; fallback only, not the loop
+bin/build --seed               # Zend cold seed — opt-in recovery, only while src/ runs under php
 ```
 
-Iterate with `bin/build`, not `bin/compile`. `bin/compile` runs the whole compiler
-under Zend (~8 min); `bin/build` uses the installed native compiler (~1–2 min).
+Iterate with `bin/build`. It uses the installed native compiler (~1–2 min); a
+clean clone needs no php — `bin/build` starts from the pinned release (below).
 
 **A failed `bin/build` poisons `bin/manticore` and `lib/*.o`.** The build refuses
 to write a library `.o` that contains an undefined-function trap, but a build that
 died half-way leaves the previous artifacts in an unknown state. Re-run it to a
 clean finish before trusting anything.
+
+## Bootstrap: the pinned release
+
+`BOOTSTRAP_VERSION` names the bootstrap compiler (stage0): the oldest release
+that can build this tree. It is the one source every consumer reads:
+
+- `bin/build` with no `bin/manticore` fetches it (`tools/fetch_bootstrap.sh`,
+  checked against the release's `SHA256SUMS`), builds the tree with it, and lets
+  the result rebuild itself once;
+- CI warm-starts from its cache, then the published `main` image, then the pin —
+  never Zend; the `bootstrap-from-pin` job builds from the pin **alone** on every
+  push;
+- the release workflow builds every platform from the pin only.
+
+**The two-step rule.** A feature ships in release N; `src/` may use it only after
+`BOOTSTRAP_VERSION` is raised to N.
+
+1. Land the feature (compiler, runtime, stdlib) without using it in `src/`.
+   Release N — on every platform in the matrix.
+2. Raise `BOOTSTRAP_VERSION` to N in its own commit. `bootstrap-from-pin` must
+   be green.
+3. Only then use the feature in `src/`.
+
+A merge that needs a newer compiler than the pin fails `bootstrap-from-pin`
+(and `bin/build` from the pin) with a bootstrap-gap error naming both versions.
+The cached and published compilers are newer than the pin, so the other CI rows
+may stay green over the same merge — that row is the one that answers.
+
+The Zend seed (`bin/build --seed`, `MC_ZEND_SEED=1` for `gate.sh`) stays as an
+opt-in recovery path for as long as `src/` happens to run under php. Nothing
+depends on it, and `src/` is free to stop being Zend-runnable.
 
 ## Test
 
@@ -174,16 +204,14 @@ this way. `bin/build` preflights with `bin/manticore analyze src --only
 undefined.,parse.error` and refuses to write a library `.o` containing a trap.
 
 Corollaries:
-- **A memory-ABI change needs no seed.** The previous generation compiles the new
-  source with its OWN runtime inside the compiler (which links no stdlib), and
-  pass 2 rebuilds `lib/*.o` with the NEW binary, so no program ever mixes two
-  layouts. The seed needs php; a compiler that can only move forward through
-  Zend is not self-hosted. Verified on the v8 → v9 bump: a v8 compiler's
-  `bin/build` reached the fixpoint byte-identical to the Zend-seeded binary.
-- **New syntax has no escape.** It is unusable inside `src/` until the generation
-  that parses it is installed. Never ship a parser change together with tree code
-  that needs it — the previous generation cannot build the tree, and only a cold
-  seed recovers.
+- **A memory-ABI change needs no pin raise.** The previous generation compiles
+  the new source with its OWN runtime inside the compiler (which links no
+  stdlib), and pass 2 rebuilds `lib/*.o` with the NEW binary, so no program ever
+  mixes two layouts. Verified on the v8 → v9 bump: a v8 compiler's `bin/build`
+  reached the fixpoint byte-identical to the Zend-seeded binary.
+- **New syntax goes through the two-step rule.** It is unusable inside `src/`
+  until `BOOTSTRAP_VERSION` names a release that parses it. Never ship a parser
+  change together with tree code that needs it — `bootstrap-from-pin` goes red.
 - A stdlib default value must not spell a NEW constant's name (same reason).
 - **A prelude body of a builtin's name REPLACES the builtin** — desugar under
   another name. The reverse holds for stdlib: a strong stdlib symbol beats a

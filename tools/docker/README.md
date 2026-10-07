@@ -37,7 +37,7 @@ bash tools/docker/run_tests.sh --alpine   # musl (Alpine) instead of glibc — a
 bash tools/docker/run_tests.sh --shell    # interactive container
 bash tools/docker/run_tests.sh --gate     # the HEAVY gate, on Linux
 bash tools/docker/run_tests.sh -k http_    # one case (or a substring)
-bash tools/docker/run_tests.sh --cold     # force a Zend cold seed
+bash tools/docker/run_tests.sh --cold     # ignore the cache: build from the pinned release
 ```
 
 `--gate` adds `tools/difftest.sh` (php is in the image) and
@@ -68,9 +68,12 @@ with Linux ones. The copy is wiped of host artifacts first, then the runner rest
 a self-hosted Linux compiler from an architecture-specific Docker volume when its
 architecture, PHP version, and clang version match. It rebuilds the current sources
 with that compiler and refreshes the volume. A missing, incompatible, or failing
-cache automatically falls back to `bin/compile`; use `--cold` to force that path.
+cache falls back to the pinned release (`BOOTSTRAP_VERSION`, fetched by
+`tools/fetch_bootstrap.sh`); use `--cold` to force that path. A tree the pin cannot
+build fails with a bootstrap-gap error; `MC_ZEND_SEED=1` opts into the Zend seed
+(`bin/compile`) before failing.
 
-`bin/compile` is never piped: it is redirected to a log. `set -euo pipefail`
+The build is never piped: it is redirected to a log. `set -euo pipefail`
 would report `tail`'s exit code and hide a failed build.
 
 ### Current state: the Linux build is GREEN

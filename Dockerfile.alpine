@@ -84,7 +84,7 @@ COPY --chown=manticore:manticore . /build/manticore
 WORKDIR /build/manticore
 
 RUN rm -rf bin/manticore lib tests/aot/tmp \
-    && bin/compile
+    && bin/build
 
 ENV PATH="/build/manticore/bin:${PATH}"
 CMD ["/bin/bash"]

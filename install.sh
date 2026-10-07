@@ -10,13 +10,13 @@
 #   * a PUBLISHED build for this platform (linux/linux-musl/macos × arm64/amd64), verified
 #     against the release's SHA256SUMS. Needs no php: the compiler is native and
 #     CI already paid the bootstrap. MANTICORE_FROM_SOURCE=1 skips it.
-#   * otherwise Manticore compiles ITSELF from PHP source:
-#   * first install (no $MANTICORE_HOME/bin/manticore yet): cold bootstrap via
-#     the Zend seed (bin/compile).
+#   * otherwise Manticore compiles ITSELF from PHP source (bin/build):
 #   * upgrade (a working binary already installed): the installed compiler
-#     rebuilds the new version itself (bin/build, self-host) — faster, and the
-#     whole point of a self-hosting compiler; falls back to the cold seed if the
-#     self build fails.
+#     rebuilds the new version itself — the whole point of a self-hosting
+#     compiler.
+#   * first install, or the installed compiler is too old: bin/build fetches
+#     the pinned bootstrap release (BOOTSTRAP_VERSION) and builds from it.
+#   * only if that fails too, and php 8.5 is here: the cold Zend seed.
 #
 # Layout it produces (argv0-relative, so the binary finds its runtime with no
 # env vars — see src/Manticore/Main.php find_stdlib_object / find_prelude_src):
@@ -141,15 +141,14 @@ PREBUILT=0
 if try_prebuilt; then PREBUILT=1; fi
 
 # ---- 2. toolchain ---------------------------------------------------------
-# Hard requirements to BUILD the compiler: php (seed), clang>=15, cc. The
+# Hard requirements to BUILD the compiler: clang>=15, cc. The
 # stdlib's preg/TLS/hash bindings are declare-only in the object, resolved at
 # link time — so pcre2/openssl/pkg-config are only needed later, when a USER
 # program actually calls preg_*/https/hash. Missing them is a warning, not a
 # blocker.
 hard=()
-# php seeds the bootstrap and nothing else — a published build has already been
-# through it, so an install that took the fast path does not want php at all.
-[ "$PREBUILT" = 1 ] || have php || hard+=("php 8.5        (the cold-bootstrap seed)")
+# php is not on the list: a source build starts from the pinned release, and
+# the Zend seed is only a last resort below, taken when php happens to be here.
 have clang || hard+=("clang/LLVM>=15  (opaque-pointer IR)")
 have cc    || hard+=("cc             (final link driver)")
 soft=()
@@ -214,9 +213,15 @@ if [ -x "$PREFIX/bin/manticore" ]; then
     log "existing install found -> self-host rebuild (installed compiler builds the new version)"
     cp "$PREFIX/bin/manticore" "$SRC/bin/manticore"
     if ( cd "$SRC" && bin/build ); then built=1
-    else warn "self-host build failed -> falling back to the cold seed"; rm -rf "$SRC/bin/manticore" "$SRC/lib"; fi
+    else warn "self-host build failed -> starting from the pinned release"; rm -rf "$SRC/bin/manticore" "$SRC/lib"; fi
 fi
 if [ "$built" = 0 ]; then
+    log "bootstrap from the pinned release (bin/build, BOOTSTRAP_VERSION)"
+    if ( cd "$SRC" && bin/build ); then built=1
+    else rm -rf "$SRC/bin/manticore" "$SRC/lib"; fi
+fi
+if [ "$built" = 0 ]; then
+    have php || die "cannot fetch the bootstrap release, and no php 8.5 for the Zend seed."
     log "cold bootstrap via the Zend seed (bin/compile)"
     ( cd "$SRC" && bin/compile )
 fi
