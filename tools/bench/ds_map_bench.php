@@ -17,7 +17,9 @@ for ($i = 0; $i < $n; $i++) { $s += $a["k$i"]; }
 for ($i = 0; $i < $n; $i++) { unset($a["k$i"]); }
 report('array<string,int>', $t, $s + count($a)); $a = [];
 
-$t = hrtime(true); $m = new Map(); $s = 0;
+$t = hrtime(true);
+/** @var Map<string,int> $m */
+$m = new Map(); $s = 0;
 for ($i = 0; $i < $n; $i++) { $m->set("k$i", $i); }
 for ($i = 0; $i < $n; $i++) { $s += $m->get("k$i"); }
 for ($i = 0; $i < $n; $i++) { $m->remove("k$i"); }
@@ -29,7 +31,9 @@ for ($i = 0; $i < $n; $i++) { $s += $a[$i * 7]; }
 for ($i = 0; $i < $n; $i++) { unset($a[$i * 7]); }
 report('array<int,int>', $t, $s + count($a)); $a = [];
 
-$t = hrtime(true); $m = new Map(); $s = 0;
+$t = hrtime(true);
+/** @var Map<int,int> $m */
+$m = new Map(); $s = 0;
 for ($i = 0; $i < $n; $i++) { $m->set($i * 7, $i); }
 for ($i = 0; $i < $n; $i++) { $s += $m->get($i * 7); }
 for ($i = 0; $i < $n; $i++) { $m->remove($i * 7); }
@@ -44,8 +48,20 @@ foreach ($objs as $o) { if (isset($a[spl_object_id($o)])) { $s++; } }
 foreach ($objs as $o) { unset($a[spl_object_id($o)]); }
 report('array<id,true>', $t, $s + count($a)); $a = [];
 
-$t = hrtime(true); $set = new Set(); $s = 0;
+$t = hrtime(true);
+/** @var Set<stdClass> $set */
+$set = new Set(); $s = 0;
 foreach ($objs as $o) { $set->add($o); }
 foreach ($objs as $o) { if ($set->has($o)) { $s++; } }
 foreach ($objs as $o) { $set->remove($o); }
 report('Set<object>', $t, $s + count($set));
+
+/** @var Map<int,int> $m */
+$m = new Map(); for ($i = 0; $i < $n; $i++) { $m->set($i, $i); }
+$t = hrtime(true); $s = 0;
+foreach ($m as $k => $v) { $s += $v; }
+report('foreach Map<int,int>', $t, $s);
+$a = []; for ($i = 0; $i < $n; $i++) { $a[$i] = $i; }
+$t = hrtime(true); $s = 0;
+foreach ($a as $k => $v) { $s += $v; }
+report('foreach array<int,int>', $t, $s); $m = null; $a = [];
