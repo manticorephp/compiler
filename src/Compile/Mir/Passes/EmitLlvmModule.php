@@ -978,6 +978,10 @@ trait EmitLlvmModule
         }
         $this->writtenNames = [];
         $this->writtenNamesFn = $fn->name;
+        $this->wnFnBody = $fn->body;
+        $this->wnFnParams = [];
+        foreach ($fn->params as $wp) { $this->wnFnParams[$wp->name] = true; }
+        $this->arrayKeyLocalsFn = '';
         if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
         $this->locals->collectStatics($fn->body);

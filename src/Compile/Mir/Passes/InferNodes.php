@@ -2018,8 +2018,13 @@ trait InferNodes
         // key implied an erased element. The moment the element narrowed to a
         // concrete int, the key silently took the vec path and every string key
         // came back as its pointer read as an integer (`4364574184=10`).
+        // A STRING-keyed array holds int keys too: php canonicalises a numeric
+        // string key to an int at the store (`$m["11"]` is `$m[11]`), so a key
+        // READ back is int|string — a tagged cell, whatever the static key type
+        // says. Typed string, the loop rendered every int key into a minted,
+        // unowned string (`is_string($k)` folded true, and the strings leaked).
         if ($at->isArray() && $at->key !== null
-            && $at->key->kind === Type::KIND_CELL) {
+            && ($at->key->kind === Type::KIND_CELL || $at->key->kind === Type::KIND_STRING)) {
             $keyT = Type::cell();
         }
         // `foreach ($a as &$v)` over CELL elements: the loop writes `$v`'s slot

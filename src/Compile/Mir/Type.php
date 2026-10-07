@@ -913,9 +913,7 @@ final class Type
     private static function joinArrayKey(Type $a, Type $b): ?Type
     {
         if ($a->key === null && $b->key === null) { return null; }
-        if ($a->key !== null && $b->key !== null) {
-            return $a->joinElement($a->key, $b->key);
-        }
+        if ($a->key !== null && $b->key !== null) { return self::joinKey($a->key, $b->key); }
         $keyed = $a->key !== null ? $a : $b;
         $vec = $a->key !== null ? $b : $a;
         $unrefined = $vec->element === null || $vec->element->kind === self::KIND_UNKNOWN;
@@ -923,6 +921,19 @@ final class Type
         $kk = $keyed->key->kind;
         if ($kk === self::KIND_INT || $kk === self::KIND_UNKNOWN) { return $keyed->key; }
         return self::cell();
+    }
+
+    /**
+     * Join two concrete KEY types: an unknown defers, two different channels
+     * (int vs string, string vs cell) are a CELL — the one key repr that carries
+     * its own tag. A scalar join would answer `unknown`, which every key reader
+     * takes for packed int keys.
+     */
+    public static function joinKey(Type $a, Type $b): Type
+    {
+        if ($a->kind === self::KIND_UNKNOWN) { return $b; }
+        if ($b->kind === self::KIND_UNKNOWN) { return $a; }
+        return $a->kind === $b->kind ? $a->unionWith($b) : self::cell();
     }
 
     /** Join two optional element/key types; `unknown`/null defers to the other. */

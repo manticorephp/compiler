@@ -1163,6 +1163,49 @@ trait EmitLlvmControl
         return !isset($this->writtenNames[$name]);
     }
 
+    /** @var array<string, bool> array-foreach key bindings, kept apart by {@see isArrayKeyLocal} */
+    private array $wnArrayKeys = [];
+    private bool $wnArrayKeysApart = false;
+    /** @var array<string, bool> {@see isArrayKeyLocal}'s answer for {@see $arrayKeyLocalsFn} */
+    private array $arrayKeyLocals = [];
+    private string $arrayKeyLocalsFn = '';
+    /** The body and parameter names of the function {@see $writtenNamesFn} names. */
+    private ?Node $wnFnBody = null;
+    /** @var array<string, bool> */
+    private array $wnFnParams = [];
+
+    /**
+     * Is `$n` a local whose only writes are ARRAY foreach key bindings? Its
+     * value is then an int, a string, or the null before the first binding —
+     * whatever type its slot was given. A type cannot say that: a join of two
+     * cells keeps either side, so `$c ? $k : $obj` would carry the claim onto
+     * an object. The name can, because nothing else ever stores into it.
+     */
+    private function isArrayKeyLocal(Node $n): bool
+    {
+        if (!($n instanceof \Compile\Mir\LoadLocal) || $this->wnFnBody === null) { return false; }
+        if ($this->writtenNamesFn !== $this->frame->name) { return false; }
+        if ($this->arrayKeyLocalsFn !== $this->frame->name) {
+            $saved = $this->writtenNames;
+            $this->writtenNames = [];
+            $this->wnArrayKeys = [];
+            $this->wnArrayKeysApart = true;
+            $this->collectWrittenNames($this->wnFnBody);
+            $this->wnArrayKeysApart = false;
+            $this->arrayKeyLocals = [];
+            foreach ($this->wnArrayKeys as $kn => $unused) {
+                if (!isset($this->writtenNames[$kn]) && !isset($this->wnFnParams[$kn])) {
+                    $this->arrayKeyLocals[$kn] = true;
+                }
+            }
+            $this->arrayKeyLocalsFn = $this->frame->name;
+            $this->writtenNames = $saved;
+        }
+        $name = $n->name;
+        return isset($this->arrayKeyLocals[$name])
+            && !isset($this->locals->globalBacked[$name]) && !isset($this->locals->refLocals[$name]);
+    }
+
     /** @var array<string, bool> locals the current body may rebind ({@see collectWrittenNames}),
      *  collected at function entry — emission detaches statements as it goes */
     private array $writtenNames = [];
@@ -1181,7 +1224,13 @@ trait EmitLlvmControl
             $this->writtenNames[$n->name] = true;
         } elseif ($n instanceof Foreach_) {
             $this->writtenNames[$n->valueVar] = true;
-            if ($n->keyVar !== null) { $this->writtenNames[$n->keyVar] = true; }
+            if ($n->keyVar !== null) {
+                if ($this->wnArrayKeysApart && $n->array->type->isArray()) {
+                    $this->wnArrayKeys[$n->keyVar] = true;
+                } else {
+                    $this->writtenNames[$n->keyVar] = true;
+                }
+            }
         } elseif ($n instanceof \Compile\Mir\StaticLocalDecl_) {
             $this->writtenNames[$n->name] = true;
         } elseif ($n instanceof \Compile\Mir\RefAlias_ || $n instanceof \Compile\Mir\RefBind_
@@ -1201,6 +1250,8 @@ trait EmitLlvmControl
             $refs = null;
             if ($n instanceof \Compile\Mir\Call && isset($this->sigs->paramTypes[$n->function])) {
                 $refs = $this->sigs->refParams[$n->function] ?? [];
+            } elseif ($n instanceof \Compile\Mir\Call && \strtolower(\ltrim($n->function, '\\')) === 'var_export') {
+                $refs = [];
             }
             $args = $n instanceof \Compile\Mir\Call ? $n->args : \Compile\Mir\Walk::children($n);
             foreach ($args as $i => $c) {
@@ -1725,49 +1776,14 @@ trait EmitLlvmControl
             // Must mirror InferTypes::inferForeach's key-type decision exactly,
             // or a cell-typed key var would be read with the raw key_at (or vice
             // versa). Key is a tagged cell over: a cell/unknown source, a vec with
-            // an erased (cell/unknown) element, or a cell-keyed assoc.
+            // an erased (cell/unknown) element, or a cell- or STRING-keyed array
+            // (a string-keyed one holds canonicalised int keys too).
             $vecErased = $fe->array->type->isVec()
                 && ($elemK === Type::KIND_CELL || $elemK === Type::KIND_UNKNOWN);
-            if ($kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
-                || $vecErased || $keyK === Type::KIND_CELL) {
-                $out .= '  ' . $kp . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
-            } elseif ($keyK === Type::KIND_STRING) {
-                // A STRING-keyed array can still hold an INT entry — a `"0"`
-                // literal key canonicalises to 0 at lowering, an int store
-                // reaches an `array<string,_>` through erasure — and a packed
-                // buffer has only indexes. The raw key_at handed that int back
-                // as the "string pointer": key 0 read as NULL, and
-                // `$_FILES[$k] = $v` over it SIGSEGVed. Box by entry kind and
-                // render the scalar, exactly as a cell reaching a STRING consumer
-                // does ({@see unboxCellToTypeRaw}); a real string key is stripped
-                // back to its pointer, nothing more.
-                //
-                // ⚠ The rendered key is a MINTED heap string with no owner: the
-                // key slot is a borrow slot ({@see InsertMemoryOps} blocks it,
-                // it normally holds the hash entry's own key), so nothing
-                // releases it — one small string per int entry met under a
-                // string-typed key. This branch is the repair for a static key
-                // type the array violates, not a hot path: every GPC-shaped
-                // producer keys its arrays int|string (a tagged cell, the
-                // `$keyIsCell` arm above, no mint). The arena is NOT an option —
-                // an arena string is rc=-1, a container store keeps the raw
-                // pointer and arena_leave reclaims it (the KEY case in
-                // {@see InferAllocKind}) — and a per-loop release is not either:
-                // a borrow copy of `$k` in the body outlives the next iteration.
-                // The sound closure is co-owning the key slot the way
-                // {@see InsertMemoryOps::foreachValueCoOwns} co-owns the value.
-                $this->rt->needsCellToStrPtr = true;
-                $this->rt->needsTaggedToStr = true;
-                $kc = $this->ssa->allocReg();
-                $out .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
-                $ks = $this->ssa->allocReg();
-                $out .= '  ' . $ks . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $kc . ")\n";
-                $out .= '  ' . $kp . ' = ptrtoint ptr ' . $ks . " to i64\n";
-            } else {
-                $out .= '  ' . $kp . ' = call i64 @__mir_array_key_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
-            }
             $keyIsCell = $kk === Type::KIND_CELL || $kk === Type::KIND_UNKNOWN
-                || $vecErased || $keyK === Type::KIND_CELL;
+                || $vecErased || $keyK === Type::KIND_CELL || $keyK === Type::KIND_STRING;
+            $out .= '  ' . $kp . ' = call i64 @__mir_array_key' . ($keyIsCell ? '_cell' : '')
+                . '_at(ptr ' . $arr . ', i64 ' . $i . ")\n";
             $out .= $this->foreachPrevDrop($fe, true);
             $out .= $this->foreachVarStore($fe->keyVar, $kp,
                 $keyIsCell ? Type::cell() : $fe->array->type->key);

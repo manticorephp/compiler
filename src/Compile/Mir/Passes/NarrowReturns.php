@@ -347,7 +347,7 @@ final class NarrowReturns implements Pass
             $elem = $elem === null ? $t->element : $this->joinElem($elem, $t->element);
             if ($isKeyed) {
                 $k = $t->key ?? Type::unknown();
-                $key = $key === null ? $k : $key->unionWith($k);
+                $key = $key === null ? $k : Type::joinKey($key, $k);
             }
         }
         if ($elem === null) { $elem = Type::unknown(); }

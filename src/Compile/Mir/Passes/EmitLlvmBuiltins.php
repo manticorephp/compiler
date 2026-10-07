@@ -8689,6 +8689,56 @@ trait EmitLlvmBuiltins
             $s = $this->lastValue;
             return $out . $this->quoteOrNull($s);
         }
+        if ($k === Type::KIND_CELL && $this->isArrayKeyLocal($args[0])) {
+            // A local only ever bound as an ARRAY foreach key holds int, string or
+            // (before its first binding) null: three tags cover it — an int renders
+            // bare, a string quotes. The walker below would also do, but it
+            // reaches the per-class object exporter, which a program that never
+            // exports an object then compiles for every class it declares.
+            $this->rt->needsTaggedToStr = true;
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            $v = $this->lastValue;
+            $nib = $this->ssa->allocReg();
+            $out .= '  ' . $nib . ' = lshr i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n";
+            $tg = $this->ssa->allocReg();
+            $out .= '  ' . $tg . ' = and i64 ' . $nib . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n";
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tg . ", 4\n";
+            $lInt = $this->ssa->allocLabel('ke.int');
+            $lStr = $this->ssa->allocLabel('ke.str');
+            $lEnd = $this->ssa->allocLabel('ke.end');
+            $out .= '  br i1 ' . $isStr . ', label %' . $lStr . ', label %' . $lInt . "\n";
+            $out .= $lInt . ":\n";
+            $ir = $this->ssa->allocReg();
+            $out .= '  ' . $ir . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
+            $isNull = $this->ssa->allocReg();
+            $isNt = $this->ssa->allocReg();
+            $out .= '  ' . $isNt . ' = icmp eq i64 ' . $tg . ", 3\n";
+            $isZ = $this->ssa->allocReg();
+            $out .= '  ' . $isZ . ' = icmp eq i64 ' . $v . ", 0\n";
+            $out .= '  ' . $isNull . ' = or i1 ' . $isNt . ', ' . $isZ . "\n";
+            $ip = $this->ssa->allocReg();
+            $out .= '  ' . $ip . ' = select i1 ' . $isNull . ', ptr ' . $this->litStr('NULL') . ', ptr ' . $ir . "\n";
+            $out .= '  br label %' . $lEnd . "\n";
+            $out .= $lStr . ":\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $out .= $this->quoteOrNull($pp);
+            $q = $this->lastValue;
+            $lQ = $this->ssa->allocLabel('ke.q');
+            $out .= '  br label %' . $lQ . "\n" . $lQ . ":\n";
+            $out .= '  br label %' . $lEnd . "\n";
+            $out .= $lEnd . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = phi ptr [ ' . $ip . ', %' . $lInt . ' ], [ ' . $q . ', %' . $lQ . " ]\n";
+            $out .= $this->cellBoxTempDrop($args[0]->type, $v, $args[0]);
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         // Arrays, objects, `mixed` and unions: the type is only known from the
         // NaN tag at runtime, so hand off to the recursive walker rather than
         // emitting the walk inline. boxToCell rebuilds a homogeneous array with

@@ -1,0 +1,50 @@
+int(11)
+integer -I
+string(2) "ab"
+string S-
+string(3) "012"
+string S-
+int(-5)
+integer -I
+array(4) {
+  [0]=>
+  int(11)
+  [1]=>
+  string(2) "ab"
+  [2]=>
+  string(3) "012"
+  [3]=>
+  int(-5)
+}
+int(11)
+int(11)
+int(-5)
+int(11)
+int(10)
+not-string integer int
+int(11)
+not-string integer int
+int(12)
+not-string integer int
+string(1) "x"
+string string not-int
+int(42)
+int(43)
+499500
+flat
+7 7
+'it\'s' 'it\'s'
+'-0' '-0'
+'08' '08'
+5
+5
+\KO::__set_state(array(
+   'a' => 1,
+))
+array (
+  0 => 1,
+)
+7 7
+'it\'s' 'it\'s'
+'-0' '-0'
+'08' '08'
