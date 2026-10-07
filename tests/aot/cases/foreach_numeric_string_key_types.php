@@ -80,3 +80,17 @@ function export_keys(array $q): void
     foreach ($q as $k => $_) { echo var_export($k, true), ' '; var_export($k); echo "\n"; }
 }
 export_keys($q);
+foreach (['5' => 1, 'x' => 2] as $k => $v) {
+    $ka = &$k;
+    $ka = 1.5;
+    echo var_export($k, true), "\n";
+}
+unset($ka);
+foreach (['5' => 1, 'x' => 2] as $k => $v) {
+    $k++;
+    echo var_export($k, true), "\n";
+}
+foreach ([10 => 1, 11 => 2] as $k => $v) {
+    --$k;
+    echo var_export($k, true), "\n";
+}

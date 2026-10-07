@@ -1233,7 +1233,12 @@ trait EmitLlvmControl
             }
         } elseif ($n instanceof \Compile\Mir\StaticLocalDecl_) {
             $this->writtenNames[$n->name] = true;
-        } elseif ($n instanceof \Compile\Mir\RefAlias_ || $n instanceof \Compile\Mir\RefBind_
+        } elseif ($n instanceof \Compile\Mir\IncDec) {
+            $this->writtenNames[$n->name] = true;
+        } elseif ($n instanceof \Compile\Mir\RefAlias_) {
+            $this->writtenNames[$n->target] = true;
+            $this->writtenNames[$n->source] = true;
+        } elseif ($n instanceof \Compile\Mir\RefBind_
             || $n instanceof \Compile\Mir\RefAddr_ || $n instanceof \Compile\Mir\RefCell_) {
             $this->markLocalsWritten($n);
         } elseif ($n instanceof \Compile\Mir\Closure_) {

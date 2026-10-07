@@ -617,7 +617,7 @@ trait EmitLlvmExpr
     /**
      * `__manticore_cell_to_strptr` — a cell at a typed-`string` boundary.
      *
-     * ONLY a tagged INT (inline tag 1 / heap tag 5) or BOOL (2) renders — the
+     * A tagged INT (inline tag 1 / heap tag 5), BOOL (2) or a FLOAT renders — the
      * kinds whose payload is not a pointer and would arrive as a bare number
      * (key 0 → NULL). Everything else takes the plain payload strip, which is
      * what this boundary always did: null must stay a NULL pointer (a `?string`
@@ -625,8 +625,9 @@ trait EmitLlvmExpr
      * business, and — the reason UNTAGGED cannot render — a `cell`-typed slot
      * often carries a RAW string pointer at runtime (an erased prelude body
      * hands raw values to an FCC trampoline whose params are declared cell).
-     * An untagged value is indistinguishable from a raw double, so rendering it
-     * would turn every such pointer into a float's decimal form.
+     * An untagged word with a nonzero top 16 bits is a FLOAT (a raw pointer has
+     * them clear: its double reading is a denormal) and renders as php does; an
+     * untagged word below 2^48 stays a pointer.
      */
     private function cellToStrPtrRuntime(): string
     {
@@ -640,7 +641,11 @@ trait EmitLlvmExpr
         $out .= "  %e2 = icmp eq i64 %nib, 2\n";
         $out .= "  %o1 = or i1 %e1, %e5\n";
         $out .= "  %o2 = or i1 %o1, %e2\n";
-        $out .= "  %scalar = and i1 %istag, %o2\n";
+        $out .= "  %tagged = and i1 %istag, %o2\n";
+        $out .= "  %untag = xor i1 %istag, true\n";
+        $out .= "  %hi = icmp ne i64 %ts, 0\n";
+        $out .= "  %isflt = and i1 %untag, %hi\n";
+        $out .= "  %scalar = or i1 %tagged, %isflt\n";
         $out .= "  br i1 %scalar, label %render, label %strip\n";
         $out .= "strip:\n";
         $out .= "  %m = and i64 %v, 281474976710655\n";
