@@ -34,7 +34,7 @@ FROM alpine:${ALPINE_TAG} AS base
 # does not have. The oracle is the host's php, so the binary uses the host's iconv.
 RUN apk add --no-cache \
         clang lld gcc musl-dev binutils \
-        pcre2-dev openssl-dev curl-dev sqlite-dev pkgconf \
+        pcre2-dev openssl-dev zlib-dev curl-dev sqlite-dev pkgconf \
         bash file make curl ca-certificates \
         tzdata libxml2-dev icu-dev icu-data-full
 

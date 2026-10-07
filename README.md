@@ -20,8 +20,8 @@ a module system, compile-time attributes.
 ## Requirements
 
 **Emitted binaries carry no PHP runtime**; they link dynamically against libc plus
-the two system libraries the stdlib rides on — PCRE2 (`preg_*`) and OpenSSL 3
-(TLS, `hash`/`hmac`) — and, on macOS, libiconv. A program that binds a native
+the system libraries the stdlib rides on — PCRE2 (`preg_*`), OpenSSL 3
+(TLS, `hash`/`hmac`) and zlib (`gz*`) — and, on macOS, libiconv. A program that binds a native
 library through FFI (`PDO` → sqlite3, `curl_*` → libcurl, …) adds that library to
 its link line on demand. The *compiler* needs the same libraries as dev packages,
 plus a real toolchain, because it ends in `clang` and `cc`:
@@ -32,6 +32,7 @@ plus a real toolchain, because it ends in `clang` and `cc`:
 | `php` | **8.5** | optional — only the `tools/difftest.sh` oracle (and a few Zend-hosted dev tools); building needs none |
 | libpcre2 (**dev** package) | 10.x | `preg_*` rides host PCRE2; needs `pcre2-config`; emitted binaries link it |
 | OpenSSL 3 (**dev** package) | 3.x | TLS, `hash`/`hmac`; needs `pkg-config`; emitted binaries link it |
+| zlib (**dev** package) | 1.2+ | `gz*`, `deflate_*`/`inflate_*`; emitted binaries link it |
 | libxml2, libsqlite3, libcurl, libicu (**dev** packages) | — | only for a program that uses `DOM*`/`SimpleXML`, `PDO`, `curl_*`, or ext/intl (`Normalizer`, …) — each is demand-gated and linked (dynamically) on mention; Homebrew's keg-only `icu4c` is found by itself |
 
 The `-dev` / `-devel` half matters: the headers are what the build looks for, not just

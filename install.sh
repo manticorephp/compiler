@@ -158,9 +158,9 @@ show_hints() {
     case "$OS" in
         Darwin) echo "  xcode-select --install; brew install php pcre2 openssl@3 pkg-config" >&2;;
         Linux)  if [ "$MUSL" = 1 ]; then
-                    echo "  apk add clang lld gcc musl-dev pcre2-dev openssl-dev pkgconf tzdata libxml2-dev php85 php85-ctype" >&2
+                    echo "  apk add clang lld gcc musl-dev pcre2-dev openssl-dev zlib-dev pkgconf tzdata libxml2-dev php85 php85-ctype" >&2
                 else
-                    echo "  apt-get install -y gcc libc6-dev libpcre2-dev libssl-dev pkg-config netbase php8.5-cli" >&2
+                    echo "  apt-get install -y gcc libc6-dev libpcre2-dev libssl-dev zlib1g-dev pkg-config netbase php8.5-cli" >&2
                     echo "  # plus clang/LLVM >= 15 (clang-NN from the distribution archive)" >&2
                 fi;;
     esac
