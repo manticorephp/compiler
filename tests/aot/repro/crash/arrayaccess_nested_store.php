@@ -1,5 +1,5 @@
 <?php
-// Nested store through an ArrayAccess object with a string first-level key (`$o['x'][2] = 1`) crashes the binary.
+// A nested store through an ArrayAccess object (`$o[1][2] = 1`, any key) crashes the binary.
 class Inner implements ArrayAccess {
     public function offsetExists(mixed $o): bool { return true; }
     public function offsetGet(mixed $o): mixed { return 'v'; }
@@ -15,4 +15,4 @@ class Outer implements ArrayAccess {
     public function offsetUnset(mixed $o): void {}
 }
 $n = new Outer;
-$n['x'][2] = 1;
+$n[1][2] = 1;

@@ -170,6 +170,14 @@ trait EmitLlvmArrays
         return null;
     }
 
+    /** A bool/float/null offset is neither the int nor the string channel: an ERASED subject
+     *  that turns out to be an ArrayAccess object must receive it boxed, as written. */
+    private function keyNeedsBoxing(Node $index): bool
+    {
+        $k = $index->type->kind;
+        return $k === Type::KIND_BOOL || $k === Type::KIND_FLOAT || $k === Type::KIND_NULL;
+    }
+
     /**
      * Does this subscript key have to ride the CELL key channel — the one that
      * dispatches int-vs-string on the NaN tag at runtime?
@@ -183,14 +191,6 @@ trait EmitLlvmArrays
      * EmitLlvmExpr::cellKeyRuntime} → `__mir_ckey_unbox_int`), so this is the
      * identity on a key that really was a raw int.
      */
-    /** A bool/float/null offset is neither the int nor the string channel: an ERASED subject
-     *  that turns out to be an ArrayAccess object must receive it boxed, as written. */
-    private function keyNeedsBoxing(Node $index): bool
-    {
-        $k = $index->type->kind;
-        return $k === Type::KIND_BOOL || $k === Type::KIND_FLOAT || $k === Type::KIND_NULL;
-    }
-
     private function keyRidesCellChannel(Node $index): bool
     {
         $k = $index->type->kind;
@@ -237,7 +237,6 @@ trait EmitLlvmArrays
     private function emitArrayAccess(ArrayAccess_ $n): string
     {
         $aa = $n;
-        $aa->index = $this->keyAsWritten($aa->array, $aa->index);
         // `$s[$i]` on a string → fresh 1-char string. Negative index counts
         // from the end; out-of-range yields "" (both handled by the helper).
         if ($aa->array->type->kind === Type::KIND_STRING) {
@@ -269,7 +268,7 @@ trait EmitLlvmArrays
         // `$obj[$k]` on an ArrayAccess object → `$obj->offsetGet($k)`.
         if ($aa->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
-            $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$aa->index], $n->type);
+            $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$this->keyAsWritten($aa->array, $aa->index)], $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
             if ($fast !== null) { return $fast; }
             $fast = $this->emitNbufGet($aa, $mc);
@@ -992,7 +991,6 @@ trait EmitLlvmArrays
     private function emitStoreElement(StoreElement $n): string
     {
         $se = $n;
-        $se->index = $this->keyAsWritten($se->array, $se->index);
         // `$s[$i] = $c` on a string → set byte $i to $c's first byte and write
         // the new string back into the base. Growing past the end pads with
         // spaces; negative $i counts from the end (all in the helper). The `[]`
@@ -1079,7 +1077,7 @@ trait EmitLlvmArrays
         // its index to a NullConst, so `$se->index` is the right key as-is.
         if ($se->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($se->array->type->class ?? '', 'ArrayAccess')) {
-            $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$se->index, $se->value], Type::void());
+            $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$this->keyAsWritten($se->array, $se->index), $se->value], Type::void());
             $fast = $se->index->kind === Node::KIND_NULL_CONST
                 ? $this->emitNbufAppend($se->array, $se->value, $mc)
                 : $this->emitNbufSet($se->array, $se->index, $se->value, $mc);
@@ -1096,23 +1094,50 @@ trait EmitLlvmArrays
      * store took the object for a buffer header and wrote through it (SIGBUS).
      * Each arm evaluates the key and the value once; only one arm runs.
      */
+    /** An erased base that can be tested for "is an object" and then re-evaluated by the arm
+     *  that runs: a plain local, or a property chain over one (loads only, no side effects). */
+    private function erasedBaseMayBeObject(Node $b): bool
+    {
+        $bk = $b->type->kind;
+        if (($bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN) || !$this->moduleHasArrayAccess()) { return false; }
+        return $this->reevaluableBase($b);
+    }
+
+    private function reevaluableBase(Node $b): bool
+    {
+        if ($b->kind === Node::KIND_PROPERTY_ACCESS) { return $this->reevaluableBase($b->object); }
+        return $b->kind === Node::KIND_LOAD_LOCAL
+            && isset($this->locals->slots[$b->name])
+            && !isset($this->locals->refLocals[$b->name])
+            && !isset($this->locals->globalBacked[$b->name]);
+    }
+
+    private string $objTestReg = '';
+
+    /** IR testing the NaN-box tag of erased base `$b` for an object; the i1 lands in {@see $objTestReg}. */
+    private function erasedBaseObjTest(Node $b): string
+    {
+        if ($b->kind === Node::KIND_LOAD_LOCAL) {
+            $cur = $this->ssa->allocReg();
+            $out = '  ' . $cur . ' = load i64, ptr ' . $this->locals->slots[$b->name] . "\n";
+        } else {
+            $out = $this->emitNode($b);
+            $out .= $this->coerceToI64();
+            $cur = $this->lastValue;
+        }
+        $out .= $this->cellTagIr($cur);
+        $this->objTestReg = $this->ssa->allocReg();
+        $out .= '  ' . $this->objTestReg . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        return $out;
+    }
+
     private function emitStoreElementErased(StoreElement $se): string
     {
-        $bk = $se->array->type->kind;
-        if (($bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN)
-            || $se->array->kind !== Node::KIND_LOAD_LOCAL
-            || !isset($this->locals->slots[$se->array->name])
-            || isset($this->locals->refLocals[$se->array->name])
-            || isset($this->locals->globalBacked[$se->array->name])
-            || !$this->moduleHasArrayAccess()) {
+        if (!$this->erasedBaseMayBeObject($se->array)) {
             return $this->emitStoreElementUnified($se);
         }
-        $slot = $this->locals->slots[$se->array->name];
-        $cur = $this->ssa->allocReg();
-        $out = '  ' . $cur . ' = load i64, ptr ' . $slot . "\n";
-        $out .= $this->cellTagIr($cur);
-        $isObj = $this->ssa->allocReg();
-        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        $out = $this->erasedBaseObjTest($se->array);
+        $isObj = $this->objTestReg;
         $objL = $this->ssa->allocLabel('eset.obj');
         $arrL = $this->ssa->allocLabel('eset.arr');
         $endL = $this->ssa->allocLabel('eset.end');
@@ -1758,52 +1783,22 @@ trait EmitLlvmArrays
         // an UNKNOWN result is not (its consumers deref the word raw), so the
         // two are DIFFERENT bodies — the `c` suffix keeps them apart by name.
         if ($self->type->kind === Type::KIND_CELL) { $variant .= 'c'; }
-        $this->eidxNeeded[$variant] = true;
-        $r = $this->ssa->allocReg();
-        // A numeric-string literal was folded to its ARRAY key; an ArrayAccess object
-        // at run time must still get the string as written, so the object arm of a
-        // subject test takes it, and only the array arm calls the shared body.
+        // A numeric-string literal was folded to its ARRAY key; an ArrayAccess object at
+        // run time must still get the string as written. It rides in as one more argument
+        // of the shared body (variant prefix `w_`), so there is still ONE object arm.
         $asWritten = $aa->index instanceof \Compile\Mir\IntConst && $aa->index->fromStr
             && $this->ifaceMethodHolders('ArrayAccess', 'offsetGet') !== [];
         if ($asWritten) {
-            $slot = $this->ssa->allocReg();
-            $out .= '  ' . $slot . " = alloca i64\n";
-            $isBox = $this->ssa->allocReg();
-            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
-            $ts = $this->ssa->allocReg();
-            $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
-            $nib = $this->ssa->allocReg();
-            $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
-            $isObjNib = $this->ssa->allocReg();
-            $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
-            $isObj = $this->ssa->allocReg();
-            $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
-            $objL = $this->ssa->allocLabel('eidx.sobj');
-            $arrL = $this->ssa->allocLabel('eidx.sarr');
-            $endL = $this->ssa->allocLabel('eidx.send');
-            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
-            $out .= $objL . ":\n";
-            $pm = $this->ssa->allocReg();
-            $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
-            $pp = $this->ssa->allocReg();
-            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
             $out .= $this->emitNode(\Compile\Mir\IntConst::asWritten($aa->index));
             $out .= $this->coerceToPtr();
             $out .= $this->boxToCell(Type::string_());
-            $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetGet', [$this->lastValue]);
-            $out .= $this->boxUnknownShallowIr();
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
-            $out .= '  br label %' . $endL . "\n";
-            $out .= $arrL . ":\n";
+            $args .= ', i64 ' . $this->lastValue;
+            $variant = 'w_' . $variant;
         }
-        $rc = $asWritten ? $this->ssa->allocReg() : $r;
-        $out .= '  ' . $rc . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
+        $this->eidxNeeded[$variant] = true;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
               . '(' . $args . ")\n";
-        if ($asWritten) {
-            $out .= '  store i64 ' . $rc . ', ptr ' . $slot . "\n";
-            $out .= '  br label %' . $endL . "\n" . $endL . ":\n";
-            $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
-        }
         // CELLGUARD: the `c` body decodes its array arm by the buffer hint and
         // boxes its string/object arms — a cell read, `opaque`.
         if ($self->type->kind === Type::KIND_CELL) { $this->markCellOpaque($r); }
@@ -1843,8 +1838,10 @@ trait EmitLlvmArrays
     {
         $out = '';
         foreach ($this->eidxNeeded as $variant => $ignoredFlag) {
-            $decode = \str_ends_with($variant, 'c');
-            $keyKind = $decode ? \substr($variant, 0, -1) : $variant;
+            $wKey = \str_starts_with($variant, 'w_');
+            $vbase = $wKey ? \substr($variant, 2) : $variant;
+            $decode = \str_ends_with($vbase, 'c');
+            $keyKind = $decode ? \substr($vbase, 0, -1) : $vbase;
             $keyIsString = $keyKind === 'str';
             $keyIsCell = $keyKind === 'cell';
             $params = 'i64 %eix.a, i64 %eix.k';
@@ -1853,6 +1850,7 @@ trait EmitLlvmArrays
                 $params .= ', i64 %eix.h, i64 %eix.hh';
                 $hashArgs = ', i64 %eix.h, i64 %eix.hh';
             }
+            if ($wKey) { $params .= ', i64 %eix.o'; }
             $body = '';
             $key = '%eix.k';
             if ($keyIsString) {
@@ -1860,7 +1858,7 @@ trait EmitLlvmArrays
                 $body .= '  ' . $kp . " = inttoptr i64 %eix.k to ptr\n";
                 $key = $kp;
             }
-            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs, $decode);
+            $body .= $this->erasedIndexCoreIr('%eix.a', $key, $keyIsCell, $keyIsString, $hashArgs, $decode, $wKey ? '%eix.o' : '');
             $out .= 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
                   . '(' . $params . ") noinline {\nentry:\n" . $body
                   . '  ret i64 ' . $this->lastValue . "\n}\n\n";
@@ -1880,14 +1878,15 @@ trait EmitLlvmArrays
         bool $keyIsString,
         string $hashArgs,
         bool $decode = false,
+        string $objKeyCell = '',
     ): string {
         $holders = $this->ifaceMethodHolders('ArrayAccess', 'offsetGet');
         $out = '';
         // offsetGet takes `mixed $offset`, so the object arm needs the key BOXED.
         // Boxing is pure — doing it up front keeps both arms off a second emit.
         // Only worth emitting when there IS an object arm.
-        $keyCell = $key;
-        if (!$keyIsCell && $holders !== []) {
+        $keyCell = $objKeyCell !== '' ? $objKeyCell : $key;
+        if ($objKeyCell === '' && !$keyIsCell && $holders !== []) {
             $this->lastValue = $key;
             $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
             $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());

@@ -110,3 +110,9 @@ string(1) "x"
 bool(true)
 string(1) "x"
 int(2)
+S string(1) "1"
+S int(1)
+E string(1) "1"
+G string(1) "1"
+U string(1) "1"
+U int(1)

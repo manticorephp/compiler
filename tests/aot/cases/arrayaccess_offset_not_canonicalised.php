@@ -50,3 +50,6 @@ $n['1']['2']; unset($n['1']);
 function arrk($a) { $a['1'] = 'x'; $a['01'] = 'y'; var_dump(array_keys($a), $a['1'], isset($a['1']), $a[1] ?? 'none'); unset($a['1']); var_dump(count($a)); }
 arrk([]);
 arrk([5 => 'z']);
+class H2 { public $q; }
+$h = new H2; $h->q = new AA;
+$h->q['1'] = 1; $h->q[1] = 1; isset($h->q['1']); $h->q['1']; unset($h->q['1']); unset($h->q[1]);

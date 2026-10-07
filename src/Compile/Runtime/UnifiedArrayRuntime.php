@@ -3402,10 +3402,18 @@ final class UnifiedArrayRuntime
         $e->store(Value::int(Type::i64(), 0), $iSlot);
         // NULL-safe: a null arr (lazy dynprop bag) allocates a fresh packed
         // array first, so set_str doubles as the from-scratch builder.
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $fresh, $chk);
+        $sProbe = $fn->block('s_probe');
+        $sCanon = $fn->block('s_canon_int');
+        $sOut = $e->alloca(Type::i64(), 'canon_out');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $fresh, $sProbe);
         $f = $fresh->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
         $fresh->store($f, $arrSlot);
-        $fresh->br($chk);
+        $fresh->br($sProbe);
+        // php stores a canonical int-string key as the INT key (`$a["5"]` IS `$a[5]`);
+        // the readers already probe it ({@see canonKeyProbe}), so the writer must agree.
+        $this->canonKeyProbe($fn, $sProbe, $key, $haveHash, $sOut, $sCanon, $chk);
+        $sa = $sCanon->load(Type::ptr(), $arrSlot);
+        $sCanon->ret($sCanon->call('__mir_array_set_int', Type::ptr(), [$sa, $sCanon->load(Type::i64(), $sOut), $val]));
         $a0 = $chk->load(Type::ptr(), $arrSlot);
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $a0, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $chk->brIf($chk->icmp('ne', $this->hashedBit($chk, $flags), Value::int(Type::i64(), 0)), $idxtry, $maybeProm);
@@ -6070,7 +6078,12 @@ final class UnifiedArrayRuntime
         $next = $fn->block('next');
         $hit = $fn->block('hit');
         $z = $fn->block('z');
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $fbk = $fn->block('first_byte');
+        $canonI = $fn->block('canon_int');
+        $cOut = $e->alloca(Type::i64(), 'canon_out');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $fbk);
+        $this->canonKeyProbe($fn, $fbk, $key, $haveHash, $cOut, $canonI, $chk);
+        $canonI->ret($canonI->call('__mir_array_isset_int', Type::i64(), [$arr, $canonI->load(Type::i64(), $cOut)]));
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
@@ -6338,7 +6351,12 @@ final class UnifiedArrayRuntime
         $next = $fn->block('next');
         $hit = $fn->block('hit');
         $z = $fn->block('z');
-        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $fbk = $fn->block('first_byte');
+        $canonI = $fn->block('canon_int');
+        $cOut = $e->alloca(Type::i64(), 'canon_out');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $fbk);
+        $this->canonKeyProbe($fn, $fbk, $key, $haveHash, $cOut, $canonI, $chk);
+        $canonI->ret($canonI->call('__mir_array_pos_int', Type::i64(), [$arr, $canonI->load(Type::i64(), $cOut)]));
         $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
         $len = $chk->load(Type::i64(), $arr);
         $iSlot = $chk->alloca(Type::i64(), 'i');
