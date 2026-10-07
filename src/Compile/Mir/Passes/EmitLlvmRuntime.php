@@ -2906,7 +2906,7 @@ trait EmitLlvmRuntime
     /**
      * The cycle-collector walker of a native-buffer slot: `@__cc_hmap_walk` for
      * the table behind Manticore\Ds\Map / Set, `@__cc_nbuf_walk` for a
-     * SplFixedArray CELL buffer, '' for any other property. Both take the
+     * SplFixedArray / Ds\Vec CELL buffer, '' for any other property. Both take the
      * handle and the walk action (0..3 as {@see ccRuntime}'s child apply; -1
      * releases the non-object cells and frees the buffer, for a collected node
      * whose object children the walk reclaims itself).
@@ -2917,7 +2917,7 @@ trait EmitLlvmRuntime
         if ($this->classIsA($cls->name, 'Manticore\\Ds\\Map') || $this->classIsA($cls->name, 'Manticore\\Ds\\Set')) {
             return '@__cc_hmap_walk';
         }
-        if ($this->classIsA($cls->name, 'SplFixedArray')) { return '@__cc_nbuf_walk'; }
+        if ($this->classIsA($cls->name, 'SplFixedArray') || $this->classIsA($cls->name, 'Manticore\\Ds\\Vec')) { return '@__cc_nbuf_walk'; }
         return '';
     }
 

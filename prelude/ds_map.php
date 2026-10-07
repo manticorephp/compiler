@@ -102,6 +102,22 @@ namespace Manticore\Ds {
         }
         public function __debugInfo(): array { return $this->__serialize(); }
         public function jsonSerialize(): mixed { return (object) $this->toArray(); }
+
+        /** @return Vec<K> */
+        public function keys(): Vec
+        {
+            $out = new Vec();
+            for ($e = __mc_hmap_next($this->__mcbuf, 0); $e >= 0; $e = __mc_hmap_next($this->__mcbuf, $e + 1)) { $out->push(__mc_hmap_key($this->__mcbuf, $e)); }
+            return $out;
+        }
+
+        /** @return Vec<V> */
+        public function values(): Vec
+        {
+            $out = new Vec();
+            for ($e = __mc_hmap_next($this->__mcbuf, 0); $e >= 0; $e = __mc_hmap_next($this->__mcbuf, $e + 1)) { $out->push(__mc_hmap_val($this->__mcbuf, $e)); }
+            return $out;
+        }
     }
 
     /**
@@ -156,6 +172,80 @@ namespace Manticore\Ds {
 
         public function __serialize(): array { return $this->toArray(); }
         public function __unserialize(array $data): void { $this->__mcbuf = __mc_hmap_alloc(1); foreach ($data as $v) { $this->add($v); } }
+        public function __debugInfo(): array { return $this->toArray(); }
+        public function jsonSerialize(): mixed { return $this->toArray(); }
+    }
+
+    /**
+     * @template T
+     * @implements \ArrayAccess<int, T>
+     * @implements \IteratorAggregate<int, T>
+     */
+    final class Vec implements \ArrayAccess, \Countable, \IteratorAggregate, \JsonSerializable
+    {
+        private int $__mcbuf = 0;
+
+        // 11 = MemoryAbi::BUF_KIND_CELL (prelude cannot read MemoryAbi)
+        public function __construct() { $this->__mcbuf = __mc_nbuf_alloc(11, 0); }
+        public function __destruct() { if ($this->__mcbuf !== 0) { __mc_nbuf_free($this->__mcbuf); $this->__mcbuf = 0; } }
+        public function __clone() { $this->__mcbuf = __mc_nbuf_clone($this->__mcbuf); }
+
+        /** @param array<T> $values @return Vec<T> */
+        public static function fromArray(array $values): Vec { $v = new Vec(); foreach ($values as $x) { $v->push($x); } return $v; }
+
+        /** @param T $value */
+        public function push(mixed $value): void
+        {
+            $n = __mc_nbuf_len($this->__mcbuf);
+            $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $n + 1);
+            __mc_nbuf_set_c($this->__mcbuf, $n, $value);
+        }
+
+        /** @return T */
+        public function pop(): mixed
+        {
+            $n = __mc_nbuf_len($this->__mcbuf);
+            if ($n === 0) { throw new \UnderflowException('Cannot pop from an empty Vec'); }
+            $v = __mc_nbuf_get_c($this->__mcbuf, $n - 1);
+            $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $n - 1);
+            return $v;
+        }
+
+        public function count(): int { return __mc_nbuf_len($this->__mcbuf); }
+        public function isEmpty(): bool { return __mc_nbuf_len($this->__mcbuf) === 0; }
+        public function clear(): void { $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, 0); }
+
+        private function at(mixed $offset): int
+        {
+            if (!\is_int($offset)) { throw new \TypeError('Cannot access offset of type ' . \get_debug_type($offset) . ' on Vec'); }
+            if ($offset < 0 || $offset >= __mc_nbuf_len($this->__mcbuf)) { throw new \OutOfBoundsException('Index invalid or out of range'); }
+            return $offset;
+        }
+
+        public function offsetExists(mixed $offset): bool { return \is_int($offset) && $offset >= 0 && $offset < __mc_nbuf_len($this->__mcbuf); }
+        public function offsetGet(mixed $offset): mixed { return __mc_nbuf_get_c($this->__mcbuf, $this->at($offset)); }
+        public function offsetSet(mixed $offset, mixed $value): void
+        {
+            if ($offset === null) { $this->push($value); return; }
+            __mc_nbuf_set_c($this->__mcbuf, $this->at($offset), $value);
+        }
+        public function offsetUnset(mixed $offset): void { throw new \Error('Cannot unset a Vec element; use pop()'); }
+
+        /** @return list<T> */
+        public function toArray(): array
+        {
+            $out = [];
+            for ($i = 0, $n = __mc_nbuf_len($this->__mcbuf); $i < $n; $i++) { $out[] = __mc_nbuf_get_c($this->__mcbuf, $i); }
+            return $out;
+        }
+
+        public function getIterator(): \Generator
+        {
+            for ($i = 0; $i < __mc_nbuf_len($this->__mcbuf); $i++) { yield $i => __mc_nbuf_get_c($this->__mcbuf, $i); }
+        }
+
+        public function __serialize(): array { return $this->toArray(); }
+        public function __unserialize(array $data): void { $this->__mcbuf = __mc_nbuf_alloc(11, 0); foreach ($data as $x) { $this->push($x); } }
         public function __debugInfo(): array { return $this->toArray(); }
         public function jsonSerialize(): mixed { return $this->toArray(); }
     }
