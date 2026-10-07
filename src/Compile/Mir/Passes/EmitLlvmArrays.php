@@ -183,6 +183,14 @@ trait EmitLlvmArrays
      * EmitLlvmExpr::cellKeyRuntime} → `__mir_ckey_unbox_int`), so this is the
      * identity on a key that really was a raw int.
      */
+    /** A bool/float/null offset is neither the int nor the string channel: an ERASED subject
+     *  that turns out to be an ArrayAccess object must receive it boxed, as written. */
+    private function keyNeedsBoxing(Node $index): bool
+    {
+        $k = $index->type->kind;
+        return $k === Type::KIND_BOOL || $k === Type::KIND_FLOAT || $k === Type::KIND_NULL;
+    }
+
     private function keyRidesCellChannel(Node $index): bool
     {
         $k = $index->type->kind;
@@ -216,9 +224,20 @@ trait EmitLlvmArrays
         return $this->coerceToPtr();
     }
 
+    /** PHP canonicalises a numeric-string offset only for ARRAYS: a statically-known ArrayAccess
+     *  object gets the literal as written. An ERASED base keeps the folded key for its array arm;
+     *  its object arms rebuild the string themselves ({@see \Compile\Mir\IntConst::asWritten}). */
+    private function keyAsWritten(Node $base, Node $idx): Node
+    {
+        if ($base->type->kind !== Type::KIND_OBJ
+            || !$this->classImplements($base->type->class ?? '', 'ArrayAccess')) { return $idx; }
+        return \Compile\Mir\IntConst::asWritten($idx);
+    }
+
     private function emitArrayAccess(ArrayAccess_ $n): string
     {
         $aa = $n;
+        $aa->index = $this->keyAsWritten($aa->array, $aa->index);
         // `$s[$i]` on a string → fresh 1-char string. Negative index counts
         // from the end; out-of-range yields "" (both handled by the helper).
         if ($aa->array->type->kind === Type::KIND_STRING) {
@@ -973,6 +992,7 @@ trait EmitLlvmArrays
     private function emitStoreElement(StoreElement $n): string
     {
         $se = $n;
+        $se->index = $this->keyAsWritten($se->array, $se->index);
         // `$s[$i] = $c` on a string → set byte $i to $c's first byte and write
         // the new string back into the base. Growing past the end pads with
         // spaces; negative $i counts from the end (all in the helper). The `[]`
@@ -1098,7 +1118,7 @@ trait EmitLlvmArrays
         $endL = $this->ssa->allocLabel('eset.end');
         $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
         $out .= $objL . ":\n";
-        $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$se->index, $se->value], Type::void());
+        $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [\Compile\Mir\IntConst::asWritten($se->index), $se->value], Type::void());
         $out .= $this->emitMethodCall($mc);
         $out .= '  br label %' . $endL . "\n";
         $out .= $arrL . ":\n";
@@ -1713,10 +1733,12 @@ trait EmitLlvmArrays
         $out .= $this->coerceToI64();
         $cv = $this->lastValue;
 
-        $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyBoxed = $this->keyNeedsBoxing($aa->index);
+        $keyIsCell = $this->keyRidesCellChannel($aa->index) || $keyBoxed;
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         $out .= $this->emitNode($aa->index);
+        if ($keyBoxed) { $out .= $this->boxToCell($aa->index->type); }
         $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
         $key = $this->lastValue;
 
@@ -1738,8 +1760,50 @@ trait EmitLlvmArrays
         if ($self->type->kind === Type::KIND_CELL) { $variant .= 'c'; }
         $this->eidxNeeded[$variant] = true;
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
+        // A numeric-string literal was folded to its ARRAY key; an ArrayAccess object
+        // at run time must still get the string as written, so the object arm of a
+        // subject test takes it, and only the array arm calls the shared body.
+        $asWritten = $aa->index instanceof \Compile\Mir\IntConst && $aa->index->fromStr
+            && $this->ifaceMethodHolders('ArrayAccess', 'offsetGet') !== [];
+        if ($asWritten) {
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $isBox = $this->ssa->allocReg();
+            $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $cv . ", -4503599627370496\n";
+            $ts = $this->ssa->allocReg();
+            $out .= '  ' . $ts . ' = lshr i64 ' . $cv . ", 48\n";
+            $nib = $this->ssa->allocReg();
+            $out .= '  ' . $nib . ' = and i64 ' . $ts . ", 15\n";
+            $isObjNib = $this->ssa->allocReg();
+            $out .= '  ' . $isObjNib . ' = icmp eq i64 ' . $nib . ", 8\n";
+            $isObj = $this->ssa->allocReg();
+            $out .= '  ' . $isObj . ' = and i1 ' . $isBox . ', ' . $isObjNib . "\n";
+            $objL = $this->ssa->allocLabel('eidx.sobj');
+            $arrL = $this->ssa->allocLabel('eidx.sarr');
+            $endL = $this->ssa->allocLabel('eidx.send');
+            $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $arrL . "\n";
+            $out .= $objL . ":\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $cv . ", 281474976710655\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $out .= $this->emitNode(\Compile\Mir\IntConst::asWritten($aa->index));
+            $out .= $this->coerceToPtr();
+            $out .= $this->boxToCell(Type::string_());
+            $out .= $this->emitErasedIfaceCall($pp, 'ArrayAccess', 'offsetGet', [$this->lastValue]);
+            $out .= $this->boxUnknownShallowIr();
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $arrL . ":\n";
+        }
+        $rc = $asWritten ? $this->ssa->allocReg() : $r;
+        $out .= '  ' . $rc . ' = call i64 @' . $this->mirHelperSym('__mir_eidx_' . $variant)
               . '(' . $args . ")\n";
+        if ($asWritten) {
+            $out .= '  store i64 ' . $rc . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $endL . "\n" . $endL . ":\n";
+            $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        }
         // CELLGUARD: the `c` body decodes its array arm by the buffer hint and
         // boxes its string/object arms — a cell read, `opaque`.
         if ($self->type->kind === Type::KIND_CELL) { $this->markCellOpaque($r); }

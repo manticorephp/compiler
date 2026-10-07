@@ -1,0 +1,4 @@
+Outer::exists
+Outer::get
+Inner::exists
+bool(true)

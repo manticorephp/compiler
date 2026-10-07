@@ -66,7 +66,7 @@ final class NodeClone
         $k = $n->kind;
 
         // ── Leaves (copy payload, no children) ────────────────────
-        if ($k === Node::KIND_INT_CONST)    { $x = self::asInt($n);    return new IntConst($x->value, $n->type); }
+        if ($k === Node::KIND_INT_CONST)    { $x = self::asInt($n);    return new IntConst($x->value, $n->type, $x->fromStr); }
         if ($k === Node::KIND_FLOAT_CONST)  { $x = self::asFloat($n);  return new FloatConst($x->value, $n->type); }
         if ($k === Node::KIND_STRING_CONST) { $x = self::asStr($n);    return new StringConst($x->value, $n->type); }
         if ($k === Node::KIND_BOOL_CONST)   { $x = self::asBool($n);   return new BoolConst($x->value, $n->type); }

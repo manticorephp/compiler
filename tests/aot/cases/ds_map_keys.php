@@ -2,7 +2,7 @@
 use Manticore\Ds\Map;
 
 $m = new Map();
-$m[1] = 'int'; $m->set('1', 'str'); $m[''] = 'empty'; $m['01'] = 'zero-one';
+$m[1] = 'int'; $m['1'] = 'str'; $m[''] = 'empty'; $m['01'] = 'zero-one';
 echo count($m), "\n";
 foreach ($m as $k => $v) { var_dump($k); echo $v, "\n"; }
 foreach ([1.0, true, null, [1]] as $bad) {

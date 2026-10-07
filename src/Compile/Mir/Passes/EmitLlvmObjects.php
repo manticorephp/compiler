@@ -5443,12 +5443,15 @@ trait EmitLlvmObjects
     private function emitErasedIssetElem(\Compile\Mir\ArrayAccess_ $aa): string
     {
         $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyBoxed = $this->keyNeedsBoxing($aa->index);
+        $keyIsCell = $keyIsCell || $keyBoxed;
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         $out = '';
         $keyFirst = $this->keyBeforeBase($aa->array);
         if ($keyFirst) {
             $out .= $this->emitNode($aa->index);
+            if ($keyBoxed) { $out .= $this->boxToCell($aa->index->type); }
             $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
             $key = $this->lastValue;
         }
@@ -5457,6 +5460,7 @@ trait EmitLlvmObjects
         $cv = $this->lastValue;
         if (!$keyFirst) {
             $out .= $this->emitNode($aa->index);
+            if ($keyBoxed) { $out .= $this->boxToCell($aa->index->type); }
             $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
             $key = $this->lastValue;
         }
@@ -5482,7 +5486,13 @@ trait EmitLlvmObjects
         // an ArrayAccess object took the array path and answered false.
         if ($this->ifaceMethodHolders('ArrayAccess', 'offsetExists') !== []) {
             $keyCell = $key;
-            if (!$keyIsCell) {
+            if ($aa->index instanceof \Compile\Mir\IntConst && $aa->index->fromStr) {
+                // folded for the ARRAY arm; the object arm gets the literal as written
+                $out .= $this->emitNode(\Compile\Mir\IntConst::asWritten($aa->index));
+                $out .= $this->coerceToPtr();
+                $out .= $this->boxToCell(Type::string_());
+                $keyCell = $this->lastValue;
+            } elseif (!$keyIsCell) {
                 $this->lastValue = $key;
                 $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
                 $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());
@@ -5629,6 +5639,7 @@ trait EmitLlvmObjects
     {
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $t;
+            $aa->index = $this->keyAsWritten($aa->array, $aa->index);
             // `isset($obj[$k])` on an ArrayAccess object → `offsetExists()`.
             if ($aa->array->type->kind === Type::KIND_OBJ
                 && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
@@ -5958,6 +5969,32 @@ trait EmitLlvmObjects
             }
             if ($t->kind === Node::KIND_ARRAY_ACCESS) {
                 $aa = $t;
+                $aa->index = $this->keyAsWritten($aa->array, $aa->index);
+                // An ERASED local base may hold an ArrayAccess object at run time:
+                // test the tag, an object arm calls offsetUnset (the array arm
+                // below took the object for a buffer header: SIGSEGV).
+                $uEndL = '';
+                $ubk = $aa->array->type->kind;
+                if (($ubk === Type::KIND_CELL || $ubk === Type::KIND_UNKNOWN)
+                    && $aa->array->kind === Node::KIND_LOAD_LOCAL
+                    && isset($this->locals->slots[$aa->array->name])
+                    && !isset($this->locals->refLocals[$aa->array->name])
+                    && !isset($this->locals->globalBacked[$aa->array->name])
+                    && $this->moduleHasArrayAccess()) {
+                    $uCur = $this->ssa->allocReg();
+                    $out .= '  ' . $uCur . ' = load i64, ptr ' . $this->locals->slots[$aa->array->name] . "\n";
+                    $out .= $this->cellTagIr($uCur);
+                    $uIsObj = $this->ssa->allocReg();
+                    $out .= '  ' . $uIsObj . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+                    $uObjL = $this->ssa->allocLabel('eunset.obj');
+                    $uArrL = $this->ssa->allocLabel('eunset.arr');
+                    $uEndL = $this->ssa->allocLabel('eunset.end');
+                    $out .= '  br i1 ' . $uIsObj . ', label %' . $uObjL . ', label %' . $uArrL . "\n";
+                    $out .= $uObjL . ":\n";
+                    $out .= $this->emitMethodCall(new \Compile\Mir\MethodCall_($aa->array, 'offsetUnset', [\Compile\Mir\IntConst::asWritten($aa->index)], Type::void()));
+                    $out .= '  br label %' . $uEndL . "\n";
+                    $out .= $uArrL . ":\n";
+                }
                 // `unset($obj[$k])` on an ArrayAccess object → `offsetUnset()`.
                 if ($aa->array->type->kind === Type::KIND_OBJ
                     && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
@@ -6048,6 +6085,9 @@ trait EmitLlvmObjects
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
                     if ($dropFlavor !== '') { $out .= $this->elemSlotReleaseIr($curE, $dropFlavor, $dropArr); }
+                }
+                if ($uEndL !== '') {
+                    $out .= '  br label %' . $uEndL . "\n" . $uEndL . ":\n";
                 }
             }
             // Property overloading: `unset($obj->undeclaredProp)` on a class

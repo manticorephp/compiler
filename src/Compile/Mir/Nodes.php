@@ -18,9 +18,21 @@ namespace Compile\Mir;
 
 final class IntConst extends Node
 {
-    public function __construct(public readonly int $value, Type $type)
+    /** `$fromStr`: folded from a canonical numeric-string literal (`$a["1"]`). Only an ARRAY
+     *  canonicalises it; an ArrayAccess object gets the string back, see {@see asWritten}. */
+    public function __construct(public readonly int $value, Type $type, public readonly bool $fromStr = false)
     {
         parent::__construct(Node::KIND_INT_CONST, $type);
+    }
+
+    /** The offset an ArrayAccess object (static, or erased cell/unknown base) must receive:
+     *  the string literal as written, not its array-key canonicalisation. */
+    public static function asWritten(Node $idx): Node
+    {
+        if ($idx instanceof IntConst && $idx->fromStr) {
+            return new StringConst((string)$idx->value, Type::string_());
+        }
+        return $idx;
     }
 
     /** Whether `$n` is an int constant — a literal, or a negated one. Two calls,

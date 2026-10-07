@@ -1,0 +1,112 @@
+-- typed
+S string(1) "1"
+G string(1) "1"
+E string(1) "1"
+U string(1) "1"
+E string(1) "1"
+G string(1) "1"
+G string(1) "1"
+S string(1) "1"
+S string(2) "01"
+G string(2) "01"
+E string(2) "01"
+U string(2) "01"
+E string(2) "01"
+G string(2) "01"
+S bool(true)
+G bool(true)
+E bool(true)
+U bool(true)
+S float(1.5)
+G float(1.5)
+E float(1.5)
+U float(1.5)
+S NULL
+G NULL
+E NULL
+U NULL
+S int(1)
+G int(1)
+E int(1)
+U int(1)
+S string(2) "-0"
+S string(2) " 1"
+-- erased
+S string(1) "1"
+G string(1) "1"
+E string(1) "1"
+U string(1) "1"
+E string(1) "1"
+G string(1) "1"
+G string(1) "1"
+S string(1) "1"
+S string(2) "01"
+G string(2) "01"
+E string(2) "01"
+U string(2) "01"
+E string(2) "01"
+G string(2) "01"
+S bool(true)
+G bool(true)
+E bool(true)
+U bool(true)
+S float(1.5)
+G float(1.5)
+E float(1.5)
+U float(1.5)
+S NULL
+G NULL
+E NULL
+U NULL
+S int(1)
+G int(1)
+E int(1)
+U int(1)
+S string(2) "-0"
+S string(2) " 1"
+-- prop
+S string(1) "1"
+G string(1) "1"
+E string(1) "1"
+U string(1) "1"
+E string(1) "1"
+G string(1) "1"
+G string(1) "1"
+S string(1) "1"
+S string(2) "01"
+G string(2) "01"
+E string(2) "01"
+U string(2) "01"
+S bool(true)
+S float(1.5)
+S NULL
+array(1) {
+  [0]=>
+  int(1)
+}
+OG string(1) "1"
+G string(1) "2"
+OG string(1) "1"
+G string(1) "2"
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(2) "01"
+}
+string(1) "x"
+bool(true)
+string(1) "x"
+int(1)
+array(3) {
+  [0]=>
+  int(5)
+  [1]=>
+  int(1)
+  [2]=>
+  string(2) "01"
+}
+string(1) "x"
+bool(true)
+string(1) "x"
+int(2)
