@@ -7969,6 +7969,8 @@ trait EmitLlvmObjects
 
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
     {
+        $hm = $this->emitHmapCall($n);
+        if ($hm !== null) { return $hm; }
         $depDiag = $this->deprecatedMethodDiag($this->staticClassOf($n->object), $n->method, $n->line);
         if ($depDiag !== '') { return $depDiag . $this->emitMethodCallInner($n); }
         return $this->emitMethodCallInner($n);

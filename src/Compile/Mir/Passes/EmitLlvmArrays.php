@@ -273,6 +273,8 @@ trait EmitLlvmArrays
             if ($fast !== null) { return $fast; }
             $fast = $this->emitNbufGet($aa, $mc);
             if ($fast !== null) { return $fast; }
+            $fast = $this->emitHmapCall($mc, true);
+            if ($fast !== null) { return $fast; }
             if ($this->fixedArrayIsPlain($aa)) { return $this->emitFixedArrayCallBorrow($mc); }
             return $this->emitMethodCall($mc);
         }
