@@ -2361,6 +2361,17 @@ trait EmitLlvmRuntime
                 $body .= "members:\n";
             }
             foreach ($cls->propertyNames as $pn) {
+                // The native buffer dies with the object ({@see isBufSlot}); a
+                // null handle is a no-op in the runtime.
+                if ($this->isBufSlot($cls, $pn)) {
+                    $s = (string)$i;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %o, i64 '
+                        . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__mir_nbuf_free(i64 %v' . $s . ")\n";
+                    $i = $i + 1;
+                    continue;
+                }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 // Release obj / string / vec / assoc props (flavor picks the
@@ -2511,9 +2522,15 @@ trait EmitLlvmRuntime
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
             // `ptr null` in its descriptor and emits no full reflection block.
+            $jsonFld = 'ptr null';
+            $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn((int)$id);
+            if (isset($this->sigs->paramTypes[$jsonFn])
+                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name]))) {
+                $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
+            }
             if (!$this->reflectWants($cls->name)) {
                 $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
+                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -2582,7 +2599,7 @@ trait EmitLlvmRuntime
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
-                $dynFld, $propsFld, $cmpViewFld, $cmpGroup);
+                $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;
@@ -4056,12 +4073,14 @@ trait EmitLlvmRuntime
         if ($this->rt->needsStrBitop) { $out .= $this->lib->strBitop(); }
         if ($this->rt->needsCellBitop) { $out .= $this->lib->cellBitop(); }
         if ($this->rt->needsIpow) { $out .= $this->lib->ipow(); }
+        if ($this->rt->needsBuf) { $out .= $this->lib->nbuf(); }
         if ($this->rt->needsStrtolower) { $out .= $this->lib->caseConv('__mir_strtolower', 65, 90, 32); }
         if ($this->rt->needsStrtoupper) { $out .= $this->lib->caseConv('__mir_strtoupper', 97, 122, -32); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
+        if ($this->rt->needsJsonEnc || $this->rt->needsJsonSer) { $out .= $this->lib->jsonSer(); }
         if ($this->rt->needsJsonDec) {
             // stdClass's layout is a constant of the compiler (it declares no
             // properties), so the emitted text is identical in every module and

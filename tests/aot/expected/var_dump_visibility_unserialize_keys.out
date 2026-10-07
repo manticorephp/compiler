@@ -1,0 +1,30 @@
+object(Base)#1 (3) {
+  ["secret":"Base":private]=>
+  int(1)
+  ["kept":protected]=>
+  string(1) "k"
+  ["open"]=>
+  float(1.5)
+}
+object(Child)#1 (4) {
+  ["secret":"Base":private]=>
+  int(1)
+  ["kept":protected]=>
+  string(1) "k"
+  ["open"]=>
+  float(1.5)
+  ["own":"Child":private]=>
+  int(2)
+}
+array(3) {
+  [0]=>
+  int(0)
+  [1]=>
+  int(1)
+  [2]=>
+  string(5) "named"
+}
+bool(true)
+int(7)
+bool(true)
+Child 7

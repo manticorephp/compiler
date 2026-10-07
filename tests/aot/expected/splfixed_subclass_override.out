@@ -1,0 +1,12 @@
+o:v 3 2
+x x2 plain plain ["ctor","cloned"]
+plain changed
+tokens gone copy
+tok x2
+b gone
+tokens gone tok
+tok x
+a gone
+0
+OutOfBoundsException: Index invalid or out of range
+6 0

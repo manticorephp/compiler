@@ -2127,6 +2127,22 @@ trait EmitLlvmExpr
      * given target type. Emits an instruction when a real cast is
      * needed; otherwise returns ''.
      */
+    /**
+     * The merged `??` value travels in an i64 slot. A FLOAT-typed result went
+     * in as its bit pattern, so it has to come out as a double again: left as
+     * `i64`, the next conversion read the bits as an integer (`(float)($a[0]
+     * ?? 0.0)` over a float list answered 4.59e18 for 0.1).
+     */
+    private function coalesceFloatResult(Node $n, bool $wantCell): string
+    {
+        if ($wantCell || $n->type->kind !== Type::KIND_FLOAT) { return ''; }
+        $d = $this->ssa->allocReg();
+        $out = '  ' . $d . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+        $this->lastValue = $d;
+        $this->lastValueType = 'double';
+        return $out;
+    }
+
     private function coerceTo(string $target): string
     {
         if ($this->lastValueType === $target) { return ''; }
@@ -2934,7 +2950,7 @@ trait EmitLlvmExpr
             if ($wantCell) { $this->joinCellProvenance([$leftVal, $rightVal], $loaded); }
             $this->lastValue = $loaded;
             $this->lastValueType = 'i64';
-            return $out;
+            return $out . $this->coalesceFloatResult($n, $wantCell);
         }
         $lk = $nc->left->type->kind;
         if ($lk === Type::KIND_NULL) {
@@ -3012,7 +3028,7 @@ trait EmitLlvmExpr
         if ($wantCell) { $this->joinCellProvenance([$leftVal, $rightVal], $loaded); }
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
-        return $out;
+        return $out . $this->coalesceFloatResult($n, $wantCell);
     }
 
     private function emitCoalesceChain(NullCoalesce_ $nc, Type $resultType): string

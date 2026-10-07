@@ -1286,29 +1286,31 @@ class RecursiveDirectoryIterator extends FilesystemIterator implements Recursive
     }
 }
 
-class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
+class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSerializable
 {
-    /** @var array<int, mixed> */
-    private array $__data = [];
-    private int $__size = 0;
+    /** The native CELL buffer (MemoryAbi::BUF_KIND_CELL) holding the elements.
+     *  The compiler owns its lifetime: freed with the object, deep-copied by
+     *  `clone`, hidden from every property view — so a subclass's own
+     *  `__destruct` / `__clone` / `__construct` need not know about it. 0 until
+     *  the first sizing (a subclass constructor that skips parent's). */
+    private int $__mcbuf = 0;
 
     public function __construct(int $size = 0)
     {
         if ($size < 0) {
             throw new ValueError('SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0');
         }
-        $this->__size = $size;
-        for ($i = 0; $i < $size; $i++) { $this->__data[] = null; }
+        $this->__mcbuf = __mc_nbuf_alloc(11, $size);
     }
 
     public function count(): int
     {
-        return $this->__size;
+        return __mc_nbuf_len($this->__mcbuf);
     }
 
     public function getSize(): int
     {
-        return $this->__size;
+        return __mc_nbuf_len($this->__mcbuf);
     }
 
     public function setSize(int $size): bool
@@ -1316,25 +1318,22 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
         if ($size < 0) {
             throw new ValueError('SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0');
         }
-        if ($size < $this->__size) {
-            // Trim IN PLACE. Replacing the buffer with a slice copied every kept
-            // element with a reference of its own, while the old buffer — whose
-            // elements offsetGet lends out — was given back as a buffer only:
-            // every element it held stayed counted (php-cs-fixer's
-            // Tokens::clearEmptyTokens shrinks once per file and kept all its
-            // tokens). A pop hands each dropped element back to be released.
-            for ($i = $this->__size; $i > $size; $i--) { \array_pop($this->__data); }
+        if ($this->__mcbuf === 0) {
+            $this->__mcbuf = __mc_nbuf_alloc(11, $size);
         } else {
-            for ($i = $this->__size; $i < $size; $i++) { $this->__data[] = null; }
+            // Shrinking releases each dropped element; growing null-fills.
+            $this->__mcbuf = __mc_nbuf_resize($this->__mcbuf, $size);
         }
-        $this->__size = $size;
         return true;
     }
 
     /** @return array<int, mixed> */
     public function toArray(): array
     {
-        return $this->__data;
+        $out = [];
+        $n = __mc_nbuf_len($this->__mcbuf);
+        for ($i = 0; $i < $n; $i++) { $out[] = __mc_nbuf_get_c($this->__mcbuf, $i); }
+        return $out;
     }
 
     public static function fromArray(array $array, bool $preserveKeys = true): SplFixedArray
@@ -1344,17 +1343,17 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
             $max = -1;
             foreach ($array as $k => $_) {
                 if (!\is_int($k) || $k < 0) {
-                    throw new ValueError('array must contain only positive integer keys');
+                    throw new InvalidArgumentException('array must contain only positive integer keys');
                 }
                 if ($k > $max) { $max = $k; }
             }
             $out = new SplFixedArray($max + 1);
-            foreach ($array as $k => $v) { $out->__data[$k] = $v; }
+            foreach ($array as $k => $v) { __mc_nbuf_set_c($out->__mcbuf, (int)$k, $v); }
             return $out;
         }
         $out = new SplFixedArray(\count($array));
         $i = 0;
-        foreach ($array as $v) { $out->__data[$i] = $v; $i = $i + 1; }
+        foreach ($array as $v) { __mc_nbuf_set_c($out->__mcbuf, $i, $v); $i = $i + 1; }
         return $out;
     }
 
@@ -1366,34 +1365,41 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
     public function offsetExists(mixed $index): bool
     {
         if (\is_int($index)) {
-            if ($index >= 0 && $index < $this->__size) { return $this->__data[$index] !== null; }
+            if ($index >= 0 && $index < __mc_nbuf_len($this->__mcbuf)) {
+                return __mc_nbuf_get_c($this->__mcbuf, $index) !== null;
+            }
         }
         $i = $this->__index($index, false);
-        return $i >= 0 && $this->__data[$i] !== null;
+        return $i >= 0 && __mc_nbuf_get_c($this->__mcbuf, $i) !== null;
     }
 
     public function offsetGet(mixed $index): mixed
     {
         if (\is_int($index)) {
-            if ($index >= 0 && $index < $this->__size) { return $this->__data[$index]; }
+            if ($index >= 0 && $index < __mc_nbuf_len($this->__mcbuf)) {
+                return __mc_nbuf_get_c($this->__mcbuf, $index);
+            }
         }
-        return $this->__data[$this->__index($index, true)];
+        return __mc_nbuf_get_c($this->__mcbuf, $this->__index($index, true));
     }
 
     public function offsetSet(mixed $index, mixed $value): void
     {
         if (\is_int($index)) {
-            if ($index >= 0 && $index < $this->__size) { $this->__data[$index] = $value; return; }
+            if ($index >= 0 && $index < __mc_nbuf_len($this->__mcbuf)) {
+                __mc_nbuf_set_c($this->__mcbuf, $index, $value);
+                return;
+            }
         }
         if ($index === null) {
-            throw new RuntimeException('[] operator not supported for SplFixedArray');
+            throw new Error('[] operator not supported for SplFixedArray');
         }
-        $this->__data[$this->__index($index, true)] = $value;
+        __mc_nbuf_set_c($this->__mcbuf, $this->__index($index, true), $value);
     }
 
     public function offsetUnset(mixed $index): void
     {
-        $this->__data[$this->__index($index, true)] = null;
+        __mc_nbuf_set_c($this->__mcbuf, $this->__index($index, true), null);
     }
 
     public function getIterator(): Iterator
@@ -1402,9 +1408,44 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
     }
 
     /** @return array<int, mixed> */
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
+    }
+
+    /** @return array<int, mixed> */
     public function __serialize(): array
     {
-        return $this->__data;
+        return $this->toArray();
+    }
+
+    /** @param array<int|string, mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        // The elements, in order (the keys are their positions).
+        $this->setSize(0);
+        $this->setSize(\count($data));
+        $i = 0;
+        foreach ($data as $v) { __mc_nbuf_set_c($this->__mcbuf, $i, $v); $i = $i + 1; }
+    }
+
+    /** @return array<int, mixed> */
+    public function __debugInfo(): array
+    {
+        return $this->toArray();
+    }
+
+    /** The stored element at the valid position `$i`, past any override of
+     *  offsetGet — what php's own iterator reads. */
+    final public function __mcAt(int $i): mixed
+    {
+        return __mc_nbuf_get_c($this->__mcbuf, $i);
+    }
+
+    /** The stored size, past any override of getSize. */
+    final public function __mcLen(): int
+    {
+        return __mc_nbuf_len($this->__mcbuf);
     }
 
     /** php's offset rule: an int, or a string/float/bool that reads as one; in range. */
@@ -1417,10 +1458,9 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable
         } elseif (\is_float($index) || \is_bool($index)) {
             $i = (int)$index;
         } else {
-            if (!$strict && \is_string($index)) { return -1; }
             throw new TypeError('Cannot access offset of type ' . \get_debug_type($index) . ' on SplFixedArray');
         }
-        if ($i < 0 || $i >= $this->__size) {
+        if ($i < 0 || $i >= __mc_nbuf_len($this->__mcbuf)) {
             if (!$strict) { return -1; }
             throw new OutOfBoundsException('Index invalid or out of range');
         }
@@ -1435,11 +1475,11 @@ final class __McFixedArrayIterator implements Iterator
 
     public function __construct(private SplFixedArray $array) {}
 
-    public function current(): mixed { return $this->array[$this->__pos]; }
+    public function current(): mixed { return $this->array->__mcAt($this->__pos); }
     public function key(): mixed { return $this->__pos; }
     public function next(): void { $this->__pos = $this->__pos + 1; }
     public function rewind(): void { $this->__pos = 0; }
-    public function valid(): bool { return $this->__pos < $this->array->getSize(); }
+    public function valid(): bool { return $this->__pos < $this->array->__mcLen(); }
 }
 
 class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess
@@ -1449,117 +1489,195 @@ class SplDoublyLinkedList implements Iterator, Countable, ArrayAccess
     public const IT_MODE_DELETE = 1;
     public const IT_MODE_KEEP = 0;
 
-    /** @var array<int, mixed> */
-    private array $__items = [];
-    private int $__mode = 0;
+    private int $flags = 0;
+    /** @var array<int, mixed> head to tail; the live elements start at `$__off` */
+    private array $dllist = [];
+    /** Slots at the front already shifted out: a shift is O(1), the list is compacted when half of it is dead. */
+    private int $__off = 0;
     private int $__pos = 0;
+    /** The cursor points at an element (php's traverse pointer is not NULL). */
+    private bool $__live = false;
 
-    public function push(mixed $value): void { $this->__items[] = $value; }
+    public function push(mixed $value): void { $this->dllist[] = $value; }
 
-    public function unshift(mixed $value): void { \array_unshift($this->__items, $value); }
+    public function unshift(mixed $value): void
+    {
+        if ($this->__off > 0) {
+            $this->__off = $this->__off - 1;
+            $this->dllist[$this->__off] = $value;
+            return;
+        }
+        \array_unshift($this->dllist, $value);
+    }
 
     public function pop(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't pop from an empty datastructure"); }
-        return \array_pop($this->__items);
+        if (\count($this->dllist) === $this->__off) { throw new RuntimeException("Can't pop from an empty datastructure"); }
+        $v = \array_pop($this->dllist);
+        if (\count($this->dllist) === $this->__off) { $this->dllist = []; $this->__off = 0; }
+        return $v;
     }
 
     public function shift(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't shift from an empty datastructure"); }
-        return \array_shift($this->__items);
+        $n = \count($this->dllist);
+        if ($n === $this->__off) { throw new RuntimeException("Can't shift from an empty datastructure"); }
+        $v = $this->dllist[$this->__off];
+        $this->dllist[$this->__off] = null;
+        $this->__off = $this->__off + 1;
+        if ($this->__off === $n) {
+            $this->dllist = [];
+            $this->__off = 0;
+        } elseif ($this->__off >= 16 && $this->__off * 2 >= $n) {
+            $this->dllist = \array_slice($this->dllist, $this->__off);
+            $this->__off = 0;
+        }
+        return $v;
     }
 
     public function top(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't peek at an empty datastructure"); }
-        return $this->__items[\count($this->__items) - 1];
+        $n = \count($this->dllist);
+        if ($n === $this->__off) { throw new RuntimeException("Can't peek at an empty datastructure"); }
+        return $this->dllist[$n - 1];
     }
 
     public function bottom(): mixed
     {
-        if ($this->__items === []) { throw new RuntimeException("Can't peek at an empty datastructure"); }
-        return $this->__items[0];
+        if (\count($this->dllist) === $this->__off) { throw new RuntimeException("Can't peek at an empty datastructure"); }
+        return $this->dllist[$this->__off];
     }
 
-    public function isEmpty(): bool { return $this->__items === []; }
+    public function isEmpty(): bool { return \count($this->dllist) === $this->__off; }
 
-    public function count(): int { return \count($this->__items); }
-
-    /** @return array<int, mixed> */
-    public function toArray(): array { return $this->__items; }
+    public function count(): int { return \count($this->dllist) - $this->__off; }
 
     public function setIteratorMode(int $mode): int
     {
-        $this->__mode = $mode;
-        return $mode;
+        $fixed = $this->__mcFixed();
+        if ($fixed !== 0 && ($mode & 2) !== ($fixed & 2)) {
+            throw new RuntimeException("Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen");
+        }
+        $this->flags = $mode & 3;
+        return $this->flags | $fixed;
     }
 
-    public function getIteratorMode(): int { return $this->__mode; }
+    public function getIteratorMode(): int { return $this->flags | $this->__mcFixed(); }
 
     public function offsetExists(mixed $index): bool
     {
-        return \is_numeric($index) && (int)$index >= 0 && (int)$index < \count($this->__items);
+        $k = $this->__mcIndex($index, 'offsetExists');
+        return $k >= 0 && $k < \count($this->dllist) - $this->__off;
     }
 
     public function offsetGet(mixed $index): mixed
     {
-        if (!$this->offsetExists($index)) { throw new OutOfRangeException('SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range'); }
-        return $this->__items[(int)$index];
+        return $this->dllist[$this->__mcSlot($this->__mcIndex($index, 'offsetGet'), 'offsetGet')];
     }
 
     public function offsetSet(mixed $index, mixed $value): void
     {
-        if ($index === null) { $this->__items[] = $value; return; }
-        if (!$this->offsetExists($index)) { throw new OutOfRangeException('SplDoublyLinkedList::offsetSet(): Argument #1 ($index) is out of range'); }
-        $this->__items[(int)$index] = $value;
+        if ($index === null) { $this->dllist[] = $value; return; }
+        $this->dllist[$this->__mcSlot($this->__mcIndex($index, 'offsetSet'), 'offsetSet')] = $value;
     }
 
     public function offsetUnset(mixed $index): void
     {
-        if (!$this->offsetExists($index)) { throw new OutOfRangeException('SplDoublyLinkedList::offsetUnset(): Argument #1 ($index) is out of range'); }
-        \array_splice($this->__items, (int)$index, 1);
+        \array_splice($this->dllist, $this->__mcSlot($this->__mcIndex($index, 'offsetUnset'), 'offsetUnset'), 1);
+    }
+
+    /** Inserts `$value` so that it becomes element `$index` (counted from the top in LIFO mode). */
+    public function add(int $index, mixed $value): void
+    {
+        $n = \count($this->dllist) - $this->__off;
+        if ($index < 0 || $index > $n) { throw new OutOfRangeException('SplDoublyLinkedList::add(): Argument #1 ($index) is out of range'); }
+        if ($index === $n) { $this->dllist[] = $value; return; }
+        \array_splice($this->dllist, $this->__mcSlot($index, 'add'), 0, [$value]);
     }
 
     public function rewind(): void
     {
-        $this->__pos = ($this->__mode & self::IT_MODE_LIFO) !== 0 ? \count($this->__items) - 1 : 0;
+        $n = \count($this->dllist) - $this->__off;
+        $this->__pos = (($this->flags | $this->__mcFixed()) & 2) !== 0 ? $n - 1 : 0;
+        $this->__live = $n > 0;
     }
 
-    public function valid(): bool
-    {
-        return $this->__pos >= 0 && $this->__pos < \count($this->__items);
-    }
+    public function valid(): bool { return $this->__live; }
 
     public function current(): mixed
     {
-        return $this->valid() ? $this->__items[$this->__pos] : null;
+        // A cursor whose element was removed under it reads null, as php's does.
+        if (!$this->__live || $this->__pos < 0 || $this->__pos >= \count($this->dllist) - $this->__off) { return null; }
+        return $this->dllist[$this->__off + $this->__pos];
     }
 
-    public function key(): mixed
+    public function key(): int { return $this->__pos; }
+
+    public function next(): void { $this->__mcStep((($this->flags | $this->__mcFixed()) & 2) !== 0); }
+
+    public function prev(): void { $this->__mcStep((($this->flags | $this->__mcFixed()) & 2) === 0); }
+
+    /** @return array<int, mixed> */
+    public function __serialize(): array
     {
-        return $this->__pos;
+        return [$this->flags | $this->__mcFixed(), \array_slice($this->dllist, $this->__off), []];
     }
 
-    public function next(): void
+    /** @param array<int, mixed> $data */
+    public function __unserialize(array $data): void
     {
-        $lifo = ($this->__mode & self::IT_MODE_LIFO) !== 0;
-        if (($this->__mode & self::IT_MODE_DELETE) !== 0) {
-            if ($lifo) {
-                \array_pop($this->__items);
-                $this->__pos = \count($this->__items) - 1;
-            } else {
-                \array_shift($this->__items);
-            }
-            return;
+        $this->flags = ((int)$data[0]) & 3;
+        $this->dllist = \array_values($data[1]);
+        $this->__off = 0;
+    }
+
+    /** @return array<string, mixed> */
+    public function __debugInfo(): array
+    {
+        return [
+            "\0SplDoublyLinkedList\0flags" => $this->flags | $this->__mcFixed(),
+            "\0SplDoublyLinkedList\0dllist" => \array_slice($this->dllist, $this->__off),
+        ];
+    }
+
+    /** One cursor step toward the head (`$back`) or the tail, deleting the end it leaves in DELETE mode. */
+    private function __mcStep(bool $back): void
+    {
+        if (!$this->__live) { return; }
+        $delete = ($this->flags & 1) !== 0;
+        if ($back) {
+            $this->__pos = $this->__pos - 1;
+            if ($delete) { $this->pop(); }
+        } elseif ($delete) {
+            $this->shift();
+        } else {
+            $this->__pos = $this->__pos + 1;
         }
-        $this->__pos = $lifo ? $this->__pos - 1 : $this->__pos + 1;
+        $this->__live = $this->__pos >= 0 && $this->__pos < \count($this->dllist) - $this->__off;
     }
 
-    public function prev(): void
+    /** The mode bits an SplStack / SplQueue cannot change. */
+    private function __mcFixed(): int
     {
-        $lifo = ($this->__mode & self::IT_MODE_LIFO) !== 0;
-        $this->__pos = $lifo ? $this->__pos + 1 : $this->__pos - 1;
+        if ($this instanceof SplStack) { return 6; }
+        if ($this instanceof SplQueue) { return 4; }
+        return 0;
+    }
+
+    /** php's `int $index` coercion. */
+    private function __mcIndex(mixed $index, string $fn): int
+    {
+        if (\is_int($index)) { return $index; }
+        if (\is_bool($index) || \is_float($index) || $index === null || (\is_string($index) && \is_numeric($index))) { return (int)$index; }
+        throw new TypeError('SplDoublyLinkedList::' . $fn . '(): Argument #1 ($index) must be of type int, ' . \get_debug_type($index) . ' given');
+    }
+
+    /** The storage slot of element `$k`, counted from the top in LIFO mode. */
+    private function __mcSlot(int $k, string $fn): int
+    {
+        $n = \count($this->dllist) - $this->__off;
+        if ($k < 0 || $k >= $n) { throw new OutOfRangeException('SplDoublyLinkedList::' . $fn . '(): Argument #1 ($index) is out of range'); }
+        return $this->__off + ((($this->flags | $this->__mcFixed()) & 2) !== 0 ? $n - 1 - $k : $k);
     }
 }
 
@@ -1572,10 +1690,6 @@ class SplQueue extends SplDoublyLinkedList
 
 class SplStack extends SplDoublyLinkedList
 {
-    public function __construct()
-    {
-        $this->setIteratorMode(self::IT_MODE_LIFO);
-    }
 }
 
 class SplObjectStorage implements Countable, SeekableIterator, ArrayAccess
@@ -1733,5 +1847,285 @@ function __mc_yf_wrap(mixed $src): \Generator
             yield $src->key() => $src->current();
             $src->next();
         }
+    }
+}
+
+/**
+ * php's binary heap, with its exact sift order (equal elements come out in
+ * the order Zend gives them). The root is the element `compare()` ranks
+ * highest. A `compare()` that throws leaves the heap corrupted: every later
+ * read or write throws until recoverFromCorruption().
+ */
+abstract class SplHeap implements Iterator, Countable
+{
+    private int $flags = 0;
+    private bool $isCorrupted = false;
+    /** @var array<int, mixed> */
+    private array $heap = [];
+
+    abstract protected function compare(mixed $value1, mixed $value2): int;
+
+    public function insert(mixed $value): true
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        $err = null;
+        $i = \count($this->heap);
+        $this->heap[] = $value;
+        while ($i > 0) {
+            $p = \intdiv($i - 1, 2);
+            if ($this->__mcCmp($this->heap[$p], $value, $err) >= 0) { break; }
+            $this->heap[$i] = $this->heap[$p];
+            $i = $p;
+        }
+        $this->heap[$i] = $value;
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return true;
+    }
+
+    public function extract(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't extract from an empty heap"); }
+        $err = null;
+        $top = $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return $top;
+    }
+
+    public function top(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't peek at an empty heap"); }
+        return $this->heap[0];
+    }
+
+    public function isEmpty(): bool { return $this->heap === []; }
+
+    public function count(): int { return \count($this->heap); }
+
+    public function rewind(): void {}
+
+    public function valid(): bool { return $this->heap !== []; }
+
+    public function current(): mixed { return $this->heap === [] ? null : $this->heap[0]; }
+
+    public function key(): int { return \count($this->heap) - 1; }
+
+    public function next(): void
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { return; }
+        $err = null;
+        $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+    }
+
+    public function recoverFromCorruption(): true
+    {
+        $this->isCorrupted = false;
+        return true;
+    }
+
+    public function isCorrupted(): bool { return $this->isCorrupted; }
+
+    /** @return array<int, mixed> */
+    public function __serialize(): array
+    {
+        return [[], ['flags' => $this->flags, 'heap_elements' => $this->heap]];
+    }
+
+    /** @param array<int, mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        $this->flags = (int)$data[1]['flags'];
+        $this->heap = \array_values($data[1]['heap_elements']);
+    }
+
+    private function __mcCmp(mixed $a, mixed $b, ?Throwable &$err): int
+    {
+        if ($err !== null) { return 0; }
+        try {
+            return $this->compare($a, $b);
+        } catch (Throwable $e) {
+            $err = $e;
+            return 0;
+        }
+    }
+
+    private function __mcDeleteTop(?Throwable &$err): mixed
+    {
+        $top = $this->heap[0];
+        $bottom = \array_pop($this->heap);
+        $n = \count($this->heap);
+        if ($n === 0) { return $top; }
+        $limit = \intdiv($n, 2);
+        $i = 0;
+        while ($i < $limit) {
+            $j = 2 * $i + 1;
+            if ($j !== $n && $this->__mcCmp($this->__mcAt($j + 1, $n, $bottom), $this->heap[$j], $err) > 0) { $j = $j + 1; }
+            if ($this->__mcCmp($bottom, $this->__mcAt($j, $n, $bottom), $err) >= 0) { break; }
+            $this->heap[$i] = $this->__mcAt($j, $n, $bottom);
+            $i = $j;
+        }
+        $this->heap[$i] = $bottom;
+        return $top;
+    }
+
+    /** Element `$j` as Zend sees it mid-removal: slot `$n` still holds the old last element. */
+    private function __mcAt(int $j, int $n, mixed $bottom): mixed
+    {
+        return $j === $n ? $bottom : $this->heap[$j];
+    }
+}
+
+class SplMinHeap extends SplHeap
+{
+    protected function compare(mixed $value1, mixed $value2): int { return $value2 <=> $value1; }
+}
+
+class SplMaxHeap extends SplHeap
+{
+    protected function compare(mixed $value1, mixed $value2): int { return $value1 <=> $value2; }
+}
+
+/** A heap of `[data, priority]` pairs ranked by `compare()` over the priorities. */
+class SplPriorityQueue implements Iterator, Countable
+{
+    public const EXTR_BOTH = 3;
+    public const EXTR_PRIORITY = 2;
+    public const EXTR_DATA = 1;
+
+    private int $flags = 1;
+    private bool $isCorrupted = false;
+    /** @var array<int, array<string, mixed>> */
+    private array $heap = [];
+
+    public function compare(mixed $priority1, mixed $priority2): int { return $priority1 <=> $priority2; }
+
+    public function insert(mixed $value, mixed $priority): true
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        $err = null;
+        $el = ['data' => $value, 'priority' => $priority];
+        $i = \count($this->heap);
+        $this->heap[] = $el;
+        while ($i > 0) {
+            $p = \intdiv($i - 1, 2);
+            if ($this->__mcCmp($this->heap[$p], $el, $err) >= 0) { break; }
+            $this->heap[$i] = $this->heap[$p];
+            $i = $p;
+        }
+        $this->heap[$i] = $el;
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return true;
+    }
+
+    public function setExtractFlags(int $flags): int
+    {
+        if (($flags & 3) === 0) { throw new RuntimeException('Must specify at least one extract flag'); }
+        $this->flags = $flags & 3;
+        return $this->flags;
+    }
+
+    public function getExtractFlags(): int { return $this->flags; }
+
+    public function extract(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't extract from an empty heap"); }
+        $err = null;
+        $top = $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+        return $this->__mcView($top);
+    }
+
+    public function top(): mixed
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { throw new RuntimeException("Can't peek at an empty heap"); }
+        return $this->__mcView($this->heap[0]);
+    }
+
+    public function isEmpty(): bool { return $this->heap === []; }
+
+    public function count(): int { return \count($this->heap); }
+
+    public function rewind(): void {}
+
+    public function valid(): bool { return $this->heap !== []; }
+
+    public function current(): mixed { return $this->heap === [] ? null : $this->__mcView($this->heap[0]); }
+
+    public function key(): int { return \count($this->heap) - 1; }
+
+    public function next(): void
+    {
+        if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        if ($this->heap === []) { return; }
+        $err = null;
+        $this->__mcDeleteTop($err);
+        if ($err !== null) { $this->isCorrupted = true; throw $err; }
+    }
+
+    public function recoverFromCorruption(): true
+    {
+        $this->isCorrupted = false;
+        return true;
+    }
+
+    public function isCorrupted(): bool { return $this->isCorrupted; }
+
+    /** @return array<int, mixed> */
+    public function __serialize(): array
+    {
+        return [[], ['flags' => $this->flags, 'heap_elements' => $this->heap]];
+    }
+
+    /** @param array<int, mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        $this->flags = (int)$data[1]['flags'];
+        $this->heap = \array_values($data[1]['heap_elements']);
+    }
+
+    /** @param array<string, mixed> $el */
+    private function __mcView(array $el): mixed
+    {
+        if ($this->flags === 1) { return $el['data']; }
+        if ($this->flags === 2) { return $el['priority']; }
+        return $el;
+    }
+
+    /** @param array<string, mixed> $a  @param array<string, mixed> $b */
+    private function __mcCmp(array $a, array $b, ?Throwable &$err): int
+    {
+        if ($err !== null) { return 0; }
+        try {
+            return $this->compare($a['priority'], $b['priority']);
+        } catch (Throwable $e) {
+            $err = $e;
+            return 0;
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function __mcDeleteTop(?Throwable &$err): array
+    {
+        $top = $this->heap[0];
+        $bottom = \array_pop($this->heap);
+        $n = \count($this->heap);
+        if ($n === 0) { return $top; }
+        $limit = \intdiv($n, 2);
+        $i = 0;
+        while ($i < $limit) {
+            $j = 2 * $i + 1;
+            if ($j !== $n && $this->__mcCmp($j + 1 === $n ? $bottom : $this->heap[$j + 1], $this->heap[$j], $err) > 0) { $j = $j + 1; }
+            $child = $j === $n ? $bottom : $this->heap[$j];
+            if ($this->__mcCmp($bottom, $child, $err) >= 0) { break; }
+            $this->heap[$i] = $child;
+            $i = $j;
+        }
+        $this->heap[$i] = $bottom;
+        return $top;
     }
 }

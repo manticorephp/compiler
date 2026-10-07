@@ -1,0 +1,10 @@
+yny 8
+9
+5 1 y 3 15 8
+Manticore\Ds\UInt16Array is [7,0,8]
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+200 200
+1.5 0.25 2
+10 5 Manticore\Ds\Int32Array
+2

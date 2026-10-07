@@ -1,0 +1,59 @@
+object(SplFixedArray)#1 (4) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "x"
+  [2]=>
+  NULL
+  [3]=>
+  array(2) {
+    [0]=>
+    int(2)
+    [1]=>
+    int(3)
+  }
+}
+SplFixedArray Object
+(
+    [0] => 1
+    [1] => x
+    [2] => 
+    [3] => Array
+        (
+            [0] => 2
+            [1] => 3
+        )
+
+)
+[1,"x",null,[2,3]] {"k":[1,"x",null,[2,3]]}
+bool(true)
+int(4)
+int(4)
+O:13:"SplFixedArray":4:{i:0;i:1;i:1;s:1:"x";i:2;N;i:3;a:2:{i:0;i:2;i:1;i:3;}}
+SplFixedArray 4 x [1,"x",null,[2,3]]
+0=1
+1='x'
+2=NULL
+3=array (
+  0 => 2,
+  1 => 3,
+)
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+bool(false)
+4 [null,"one",null,"three"]
+[1,2]
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+TypeError: Cannot access offset of type string on SplFixedArray
+ok 'x'
+ValueError: SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0
+ValueError: SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0
+InvalidArgumentException: array must contain only positive integer keys
+OutOfBoundsException: Index invalid or out of range
+Error: [] operator not supported for SplFixedArray
+OutOfBoundsException: Index invalid or out of range
+[1,"x",null,[2,3],null,"tail"]
+0 []

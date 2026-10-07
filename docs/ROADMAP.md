@@ -116,7 +116,7 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
   Not implemented, each with a named throw: `CURLFile`/`CURLOPT_MIMEPOST` multipart,
   the `*_BLOB` options, `CURLMOPT_PUSHFUNCTION`, and a real `CURLINFO_CERTINFO`.
   Every float `CURLINFO` is read through its `_T` sibling — this build cannot read a
-  C `double` out of memory (no `peek_f64`, no bitcast builtin, no `unpack('d')`), which
+  C `double` out of memory (no `peek_f64`, no bitcast builtin; `unpack('d')` over bytes read out works), which
   is the one gap worth closing if a caller ever needs a genuine double from C.
 - **`Http\` — an HTTP/1.1 server** (`docs/http.md`). A handler is
   `callable(Request): Response`; one process serves many requests at once, and php's
@@ -125,6 +125,12 @@ and CI — `tools/docker/gate.sh` is the single definition of a Linux gate, cons
   `compat(true)`. Streamed request and response bodies, chunked framing,
   `Expect: 100-continue`, keep-alive with pipelining, and every limit answered by a
   precomputed refusal. `Buffer\ByteBuffer`/`Reader`/`Writer` underneath.
+- **`Manticore\Ds` — typed fixed-width arrays** (`docs/ds.md`). `Int8Array` … `Int64Array`,
+  `UInt8Array` … `UInt32Array`, `Float32Array`/`Float64Array`, `BitArray` over one native
+  buffer runtime (`__mc_nbuf_*`, `MemoryAbi::BUF_*`); no silent wrap; the same source is the
+  `manticorephp/ds` Zend polyfill and the oracle. Element access on a local
+  receiver is inline (bounds test + width load/store). Open: `SplFixedArray` on the same
+  buffer (after the ownership epic lands), `#[TypeDef(repr)]` element types.
 - **`serialize` / `unserialize` + magic methods** — `__serialize`/`__unserialize`,
   `allowed_classes`, `__PHP_Incomplete_Class`, `__debugInfo`, `var_export` of objects, and
   `__get`/`__set`/`__isset`/`__unset`/`__call` firing on an **erased** receiver.

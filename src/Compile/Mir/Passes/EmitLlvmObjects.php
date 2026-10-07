@@ -914,11 +914,13 @@ trait EmitLlvmObjects
      * `clone` over an interface-typed receiver: compare the instance's
      * descriptor word (slot 0) against each candidate's and run that class's
      * own clone. The default arm keeps the historical pass-through, so an
-     * implementer this module cannot see behaves exactly as it did.
+     * implementer this module cannot see behaves exactly as it did — unless
+     * `$fallback` names the receiver's own concrete static class, which is
+     * then what an instance matching no listed subclass is.
      *
      * @param string[] $impls
      */
-    private function emitCloneDispatch(\Compile\Mir\Clone_ $n, string $src, array $impls): string
+    private function emitCloneDispatch(\Compile\Mir\Clone_ $n, string $src, array $impls, string $fallback = ''): string
     {
         $slot = $this->ssa->allocReg();
         $out  = '  ' . $slot . " = alloca i64\n";
@@ -944,11 +946,18 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $endL . "\n";
             $out .= $next . ":\n";
         }
-        // The pass-through arm hands the SOURCE back. A `clone` is a +1
-        // value to every consumer, so this arm takes one too — else the
-        // consumer's release freed an object its owner still held.
-        $this->rt->needsRc = true;
-        $out .= '  call void @__mir_rc_retain(ptr ' . $src . ")\n";
+        if ($fallback !== '') {
+            $out .= $this->emitCloneOfClass($n, $this->classes[$fallback], $fallback, $src);
+            $fi = $this->ssa->allocReg();
+            $out .= '  ' . $fi . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $out .= '  store i64 ' . $fi . ', ptr ' . $slot . "\n";
+        } else {
+            // The pass-through arm hands the SOURCE back. A `clone` is a +1
+            // value to every consumer, so this arm takes one too — else the
+            // consumer's release freed an object its owner still held.
+            $this->rt->needsRc = true;
+            $out .= '  call void @__mir_rc_retain(ptr ' . $src . ")\n";
+        }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $res = $this->ssa->allocReg();
@@ -992,7 +1001,34 @@ trait EmitLlvmObjects
             $this->lastValue = $src; $this->lastValueType = 'ptr';
             return $out;
         }
+        // A class-typed receiver is any SUBCLASS at run time. Cloning by the
+        // static class copied the base's slots under the base's descriptor: the
+        // copy lost its class, so `static::class` named the base and a virtual
+        // call on it ran whichever override the base's table held. Dispatch
+        // over the known subclasses; the static class is the default arm.
+        $subs = $this->cloneSubclasses($cls);
+        if ($subs !== []) {
+            return $out . $this->emitCloneDispatch($n, $src, $subs, $cd->isAbstract ? '' : $cls);
+        }
         return $out . $this->emitCloneOfClass($n, $cd, $cls, $src);
+    }
+
+    /**
+     * The proper subclasses of `$cls` this module knows — what a `clone` of a
+     * `$cls`-typed receiver has to tell apart at run time.
+     *
+     * @return string[]
+     */
+    private function cloneSubclasses(string $cls): array
+    {
+        $out = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($name === $cls || $cd->isStruct) { continue; }
+            if ($this->isEnumClass($name) || $this->isClosureClass($name)) { continue; }
+            if (!$this->classIsA($name, $cls)) { continue; }
+            $out[] = $name;
+        }
+        return $out;
     }
 
     /**
@@ -1083,6 +1119,15 @@ trait EmitLlvmObjects
             $out .= '  ' . $v . ' = load i64, ptr ' . $sg . "\n";
             $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
+            // The native buffer is the object's own: the copy gets a deep copy
+            // (each element co-owned), before any `__clone()` runs.
+            if ($this->isBufSlot($cd, $pname)) {
+                $this->rt->needsBuf = true;
+                $bc = $this->ssa->allocReg();
+                $out .= '  ' . $bc . ' = call i64 @__mir_nbuf_clone(i64 ' . $v . ")\n";
+                $out .= '  store i64 ' . $bc . ', ptr ' . $dg . "\n";
+                continue;
+            }
             $pt = $cd->propertyTypes[$pname] ?? null;
             // PHP arrays are VALUES: `clone` must copy each array property (a
             // fresh rc=1 owned buffer, no extra retain), not co-own the handle —
@@ -6126,7 +6171,7 @@ trait EmitLlvmObjects
     private function emitStaticProp(\Compile\Mir\StaticProp_ $n): string
     {
         $reg = $this->ssa->allocReg();
-        $out = '  ' . $reg . ' = load i64, ptr ' . $n->global . "\n";
+        $out = '  ' . $reg . ' = load i64, ptr ' . $n->global . ($this->nbufSlotTag ? $this->nbufTbaa(false) : '') . "\n";
         if ($n->type->kind === Type::KIND_FLOAT) {
             $regF = $this->ssa->allocReg();
             $out .= '  ' . $regF . ' = bitcast i64 ' . $reg . " to double\n";
@@ -8874,7 +8919,7 @@ trait EmitLlvmObjects
             $reg = $this->ssa->allocReg();
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
-            return '  ' . $reg . ' = load i64, ptr ' . $gep . "\n";
+            return '  ' . $reg . ' = load i64, ptr ' . $gep . ($this->nbufSlotTag ? $this->nbufTbaa(false) : '') . "\n";
         }
         // ALWAYS hands back i64 BITS, exactly as a full-word load does — every
         // caller then applies its own coercion (a float property bitcasts, an

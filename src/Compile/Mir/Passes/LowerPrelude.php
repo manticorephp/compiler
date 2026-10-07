@@ -121,12 +121,6 @@ trait LowerPrelude
             // After spl_arrays.php: AppendIterator hands out an ArrayIterator.
             $src .= $this->splIteratorsSrc;
         }
-        if ($this->includeArrayFns) {
-            $src .= $this->arrayFnsSrc;
-        }
-        if ($this->includeArrayFnsExt) {
-            $src .= $this->arrayFnsExtSrc;
-        }
         if ($this->includeCli) {
             $src .= $this->cliSrc;
         }
@@ -239,6 +233,36 @@ trait LowerPrelude
             // ArrayAccess, Countable and IteratorAggregate.
             $src .= $this->weakSrc;
         }
+        // The array functions come last, because the prelude calls them too
+        // (`SplQueue` slices its list, `SplDoublyLinkedList::add` splices):
+        // the program's own demand decided the two flags, and a prelude file
+        // that is in counts like the program. Without this its call compiled
+        // to an undefined-function trap in any program that did not happen to
+        // call the same function itself.
+        if (!$this->includeArrayFns || !$this->includeArrayFnsExt) {
+            $own = new \Compile\Mir\PreludeDemand([
+                "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
+                "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc,
+            ]);
+            if (!$this->includeArrayFnsExt
+                && $own->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsExtSrc))) {
+                $this->includeArrayFnsExt = true;
+            }
+            if (!$this->includeArrayFns) {
+                $base = \Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsSrc);
+                if ($own->callsAny($base) || ($this->includeArrayFnsExt
+                        && (new \Compile\Mir\PreludeDemand(["<?php\n" . $this->arrayFnsExtSrc]))->callsAny($base))) {
+                    $this->includeArrayFns = true;
+                }
+            }
+        }
+        if ($this->includeArrayFns) {
+            $src .= $this->arrayFnsSrc;
+        }
+        if ($this->includeArrayFnsExt) {
+            $src .= $this->arrayFnsExtSrc;
+        }
         // Belt and braces: the concatenation ALREADY starts with the Throwable
         // prelude's own `<?php`, so this leading tag is redundant today and the
         // parser skips the duplicate. It is here so that the invariant — this
@@ -287,6 +311,11 @@ trait LowerPrelude
             $ws = \Parser\Parser::parseSource("<?php\n" . $this->wsSrc);
             foreach ($ws->statements as $s) { $stmts[] = $s; }
         }
+        // Manticore\Ds — braced namespace, names nothing outside the core.
+        if ($this->dsSrc !== '') {
+            $ds = \Parser\Parser::parseSource("<?php\n" . $this->dsSrc);
+            foreach ($ds->statements as $s) { $stmts[] = $s; }
+        }
         return $stmts;
     }
 
@@ -330,6 +359,34 @@ trait LowerPrelude
         }
         return $body . $dispatch . "  }\n"
             . "  throw new \\Error('Object of class ' . \\get_class(\$v) . ' could not be converted to string');\n}\n";
+    }
+
+    /**
+     * PHP source of the per-class `jsonSerialize()` helpers the class
+     * descriptors point at ({@see \Compile\MemoryAbi::DESCRIPTOR_JSON_FN_OFFSET}):
+     * one `__mc_jsonser_<id>(mixed): mixed` per class that has the method. A
+     * pure function of the class, so every module that emits it agrees.
+     */
+    private function jsonSerSrc(): string
+    {
+        $src = '';
+        foreach ($this->classTable as $cname => $cd) {
+            if ($cname === 'stdClass' || $cd->isStruct || $cd->isAbstract) { continue; }
+            if ($this->isTypeDef($cname)) { continue; }
+            if (!$this->declaresMethod($cname, 'jsonSerialize')) { continue; }
+            $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($cd->classId) . "(mixed \$v): mixed {\n"
+                . "  if (\$v instanceof \\" . $cname . ") { return \$v->jsonSerialize(); }\n"
+                . "  return null;\n}\n";
+        }
+        // A backed enum case encodes as its backing value (php's rule). Read
+        // off the un-narrowed cell's property view — the one shape that
+        // answers it for a case held in a cell.
+        foreach ($this->enumTable as $ename => $ed) {
+            if ($ed->backing !== 'int' && $ed->backing !== 'string') { continue; }
+            $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($ed->classId) . "(mixed \$v): mixed {\n"
+                . "  \$d = (array)\$v;\n  return \$d['value'];\n}\n";
+        }
+        return $src;
     }
 
     /**
@@ -377,7 +434,16 @@ trait LowerPrelude
                     $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
                 }
                 foreach ($props as $p) {
-                    $body .= "    echo \$pad, '  [\"" . $p . "\"]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
+                    // php marks a non-public slot: `["p":protected]`, `["p":"Declaring":private]`.
+                    $vis = '';
+                    if (isset($cd->propertyMeta[$p])) {
+                        $pm = $cd->propertyMeta[$p];
+                        if ($pm->visibility === 'protected') { $vis = ':protected'; }
+                        if ($pm->visibility === 'private') {
+                            $vis = ':"' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . '":private';
+                        }
+                    }
+                    $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
                 }
                 if ($cd->usesBag()) {
                     $body .= "    foreach (\$bag as \$bk => \$bv) {\n"
@@ -409,9 +475,19 @@ trait LowerPrelude
                 . "  \$pad = ''; \$jj = 0; while (\$jj < \$indent) { \$pad = \$pad . '  '; \$jj = \$jj + 1; }\n"
                 . "  foreach (\$d as \$k => \$val) {\n"
                 . "    if (is_int(\$k)) { echo \$pad, '  [', (string)\$k, \"]=>\\n\", \$pad, '  '; }\n"
-                . "    else { echo \$pad, '  [\"', \$k, \"\\\"]=>\\n\", \$pad, '  '; }\n"
+                . "    else { echo \$pad, '  [', __mir_dump_debug_key((string)\$k), \"]=>\\n\", \$pad, '  '; }\n"
                 . "    __mir_var_dump(\$val, \$indent + 1);\n"
-                . "  }\n}\n";
+                . "  }\n}\n"
+                // A mangled key names a non-public property, as in php's own
+                // debug table: "\0*\0p" protected, "\0Class\0p" private.
+                . "function __mir_dump_debug_key(string \$k): string {\n"
+                . "  if (\$k === '' || \$k[0] !== \"\\0\") { return '\"' . \$k . '\"'; }\n"
+                . "  \$p = strpos(\$k, \"\\0\", 1);\n"
+                . "  if (\$p === false) { return '\"' . \$k . '\"'; }\n"
+                . "  \$c = substr(\$k, 1, \$p - 1);\n"
+                . "  \$n = substr(\$k, \$p + 1);\n"
+                . "  if (\$c === '*') { return '\"' . \$n . '\":protected'; }\n"
+                . "  return '\"' . \$n . '\":\"' . \$c . '\":private';\n}\n";
         }
         return $body . $dispatch;
     }
@@ -445,6 +521,19 @@ trait LowerPrelude
      *
      * @return string[]
      */
+    private function walkerReaches(string $cname): bool
+    {
+        if (isset($this->walkerReachableClasses[$cname])) { return true; }
+        // The roots are names AS WRITTEN in the source — `new A` inside
+        // `namespace App` roots `A`, not `App\A`. Matching the last segment
+        // over-approximates (every class of that short name keeps its arm) and
+        // never misses: a namespaced class without an arm fell to the bag walk
+        // and var_dump / serialize / var_export read a declared object as a
+        // bag (SIGSEGV).
+        $p = \strrpos($cname, '\\');
+        return $p !== false && isset($this->walkerReachableClasses[\substr($cname, $p + 1)]);
+    }
+
     private function walkableClassesDerivedFirst(): array
     {
         $names = [];
@@ -460,10 +549,10 @@ trait LowerPrelude
                 // The unconditional files (the Throwable tree) stay demand-rooted:
                 // an arm for each would grow every var_dump program by ~70 KB.
                 $keep = ($cd->isPreludeClass && !$this->isBasePreludeClass($cname))
-                    || isset($this->walkerReachableClasses[$cname]);
+                    || $this->walkerReaches($cname);
                 $cur = $cd->parent;
                 while (!$keep && $cur !== "" && isset($this->classTable[$cur])) {
-                    $keep = isset($this->walkerReachableClasses[$cur]);
+                    $keep = $this->walkerReaches($cur);
                     $cur = $this->classTable[$cur]->parent;
                 }
                 // The XML prelude is demand-loaded from builtin calls, so its
@@ -612,7 +701,7 @@ trait LowerPrelude
                 $cd = $this->classTable[$cname];
                 $props = $cd->propertyNames;
                 $disp = $cd->display();
-                $head = 'O:' . (string)strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+                $head = 'O:' . (string)strlen($disp) . ':"' . $disp . '":';
                 $entries = '';
                 foreach ($props as $p) {
                     $key = $this->serPropKey($cname, $p);
@@ -684,7 +773,7 @@ trait LowerPrelude
             $props = $cd->propertyNames;
             $disp = $cd->display();
             $helper = '__mc_ser_object_arm_' . (string)$arm;
-            $head = 'O:' . (string)strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+            $head = 'O:' . (string)strlen($disp) . ':"' . $disp . '":';
             $entries = '';
             foreach ($props as $p) {
                 $key = $this->serPropKey($cname, $p);
@@ -764,7 +853,7 @@ trait LowerPrelude
             $cd = $this->classTable[$cname];
             $props = $cd->propertyNames;
             $disp = $cd->display();
-            $head = 'O:' . (string)\strlen($disp) . ':"' . $this->dqBody($disp) . '":';
+            $head = 'O:' . (string)\strlen($disp) . ':"' . $disp . '":';
             $entries = '';
             foreach ($props as $p) {
                 $key = $this->serPropKey($cname, $p);
@@ -824,6 +913,91 @@ trait LowerPrelude
             // is this exact exception, so throw rather than deref.
             . "  throw new \\Exception(\"Serialization of 'Closure' is not allowed\");\n}\n";
         return $body;
+    }
+
+    /**
+     * PHP source for `__mir_print_r_object` — print_r's object arm, written
+     * from the complete class table, same point and pattern as
+     * {@see dumpObjectSrc}. php's shape: `Class Object\n<pad>(\n` then one
+     * `<pad>    [name] => value\n` per property — a protected one keyed
+     * `[name:protected]`, a private one `[name:Declaring:private]` — and
+     * `<pad>)\n`. `__debugInfo()` replaces the walk; an enum case prints
+     * `Enum Enum[:backing]` over `name` (and `value`).
+     */
+    private function printRObjectSrc(): string
+    {
+        $names = $this->walkableClassesDerivedFirst();
+        $body = "function __mir_print_r_obj_map(string \$head, mixed \$d, int \$indent, string \$pad): string {\n"
+            . "  \$out = \$head . \"\\n\" . \$pad . \"(\\n\";\n"
+            . "  foreach (\$d as \$k => \$val) {\n"
+            . "    \$out = \$out . \$pad . '    [' . __mir_print_r_debug_key((string)\$k) . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n"
+            . "  }\n"
+            . "  return \$out . \$pad . \")\\n\";\n}\n"
+            // A mangled key ({@see dumpObjectSrc}): `p:protected`, `p:Class:private`.
+            . "function __mir_print_r_debug_key(string \$k): string {\n"
+            . "  if (\$k === '' || \$k[0] !== \"\\0\") { return \$k; }\n"
+            . "  \$p = strpos(\$k, \"\\0\", 1);\n"
+            . "  if (\$p === false) { return \$k; }\n"
+            . "  \$c = substr(\$k, 1, \$p - 1);\n"
+            . "  \$n = substr(\$k, \$p + 1);\n"
+            . "  if (\$c === '*') { return \$n . ':protected'; }\n"
+            . "  return \$n . ':' . \$c . ':private';\n}\n";
+        $dispatch = "function __mir_print_r_object(mixed \$v, int \$indent): string {\n"
+            . "  \$pad = str_repeat(' ', \$indent);\n"
+            // An enum case, before the class-id dispatch (enums are not classes
+            // here): `Enum Enum[:backing]` over its property view. The view is
+            // taken off the un-narrowed cell — the one shape that answers it.
+            . "  \$en = __mir_enum_name(\$v);\n"
+            . "  if (\$en !== '') {\n"
+            . "    \$d = (array)\$v;\n"
+            . "    \$head = substr(\$en, 0, (int)strrpos(\$en, '::')) . ' Enum';\n"
+            . "    if (array_key_exists('value', \$d)) { \$head = \$head . (is_int(\$d['value']) ? ':int' : ':string'); }\n"
+            . "    return __mir_print_r_obj_map(\$head, \$d, \$indent, \$pad);\n"
+            . "  }\n"
+            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $arm = 0;
+        foreach ($names as $cname) {
+            $cd = $this->classTable[$cname];
+            $helper = '__mir_print_r_object_arm_' . (string)$arm;
+            $head = $this->dqBody($cd->display() . ' Object');
+            $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad): string {\n"
+                . "  if (\$v instanceof \\" . $cname . ") {\n";
+            if ($this->declaresMethod($cname, '__debugInfo')) {
+                // Through a local, then a `mixed` parameter: a bare-`array`
+                // return erases its element ({@see dumpObjectSrc}).
+                $body .= "    \$d = \$v->__debugInfo();\n"
+                    . "    return __mir_print_r_obj_map(\"" . $head . "\", \$d, \$indent, \$pad);\n";
+            } else {
+                $body .= "    \$out = \"" . $head . "\\n\" . \$pad . \"(\\n\";\n";
+                foreach ($cd->propertyNames as $p) {
+                    $key = $p;
+                    if (isset($cd->propertyMeta[$p])) {
+                        $pm = $cd->propertyMeta[$p];
+                        if ($pm->visibility === 'protected') { $key = $p . ':protected'; }
+                        if ($pm->visibility === 'private') {
+                            $key = $p . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
+                        }
+                    }
+                    $body .= "    \$out = \$out . \$pad . \"    [" . $this->dqBody($key) . "] => \" . __mir_print_r_str(\$v->"
+                        . $p . ", \$indent + 8) . \"\\n\";\n";
+                }
+                if ($cd->usesBag()) {
+                    $body .= "    foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
+                        . "      \$out = \$out . \$pad . '    [' . \$bk . '] => ' . __mir_print_r_str(\$bv, \$indent + 8) . \"\\n\";\n"
+                        . "    }\n";
+                }
+                $body .= "    return \$out . \$pad . \")\\n\";\n";
+            }
+            $body .= "  }\n  return '';\n}\n";
+            $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad);\n";
+            $arm = $arm + 1;
+        }
+        $dispatch .= "  }\n";
+        // A closure carries no property table; everything else left is a
+        // dynamic (stdClass / bag) object.
+        $dispatch .= "  if (\$v instanceof \\Closure) { return \"Closure Object\\n\" . \$pad . \"(\\n\" . \$pad . \")\\n\"; }\n"
+            . "  return __mir_print_r_obj_map(get_class(\$v) . ' Object', \\__mir_obj_bag(\$v), \$indent, \$pad);\n}\n";
+        return $body . $dispatch;
     }
 
     /**

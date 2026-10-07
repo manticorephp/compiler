@@ -1,0 +1,14 @@
+n=Spades v=s l=S
+n=Hearts v=h l=H
+dir Down down
+dir Up not-down
+other
+Spades Hearts
+array(2) {
+  [0]=>
+  enum(Suit::Spades)
+  [1]=>
+  string(1) "s"
+}
+n=Hearts v=h l=H|other|dir Up not-down|n=Spades v=s l=S|
+Spades sp

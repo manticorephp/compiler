@@ -1,0 +1,22 @@
+0 5 5
+1 -1 18446744073709551615
+2 -9223372036854775808 9223372036854775808
+3 9223372036854775807 9223372036854775807
+4 -4096 18446744073709547520
+5 -1 18446744073709551615
+5 5 | max 18446744073709551615 | sum 18446744073709547522
+1-101
+1 5 -1
+18446744073709551615 ne
+8 1 42
+ValueError: Value 18446744073709551616 is out of range for UInt64Array (0..18446744073709551615)
+ValueError: Value -1 is out of range for UInt64Array (0..18446744073709551615)
+TypeError: Manticore\Ds\UInt64Array element must be of type int, float given
+TypeError: Manticore\Ds\UInt64Array element must be of type int, float given
+ValueError: Value 1.844674407371E+19 is out of range for UInt64Array (0..18446744073709551615)
+TypeError: Manticore\Ds\UInt64Array element must be of type int, string given
+TypeError: Manticore\Ds\UInt64Array element must be of type int, array given
+ValueError: UInt64Array::min(): array must contain at least one element
+5
+7953373077175590384 18428018166833543691
+ffffffffffffffff 0000010000000000 807 0000010000000000

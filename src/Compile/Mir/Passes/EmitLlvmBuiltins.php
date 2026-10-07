@@ -446,6 +446,10 @@ trait EmitLlvmBuiltins
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
         if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
+        if (\strncmp($name, '__mc_nbuf_', 10) === 0) {
+            $nbufSig = \Compile\Mir\RuntimeLibrary::nbufSig(\substr($name, 10));
+            if (\strlen($nbufSig) === \count($args) + 1) { return $this->biNbuf(\substr($name, 10), $nbufSig, $args); }
+        }
         if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
         if ($name === 'current' && \count($args) === 1) { return $this->biArrayCursor($args, 'current'); }
@@ -475,6 +479,7 @@ trait EmitLlvmBuiltins
         // semantics, which is how the compiled-PHP encoder came to behave as if
         // JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE were always set.
         if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
+        if ($name === '__mc_json_ser' && \count($args) === 1) { return $this->biJsonSer($args); }
         if ($name === 'json_encode' && \count($args) >= 1
             && $this->argIsDefaultInt($args, 1, 0)
             && $this->argIsDefaultInt($args, 2, 512)) { return $this->biJsonEncode($args); }
@@ -2906,6 +2911,57 @@ trait EmitLlvmBuiltins
         $out .= '  call void @__mir_array_reindex_inplace(ptr ' . $p . ")\n";
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_nbuf_<op>` — one native fixed-width buffer op ({@see
+     * \Compile\Mir\RuntimeLibrary::nbuf}); the stdlib bodies of the same names
+     * (src/Runtime/Stdlib/Buf.php) are the bootstrap twins. `$sig`: {@see
+     * \Compile\Mir\RuntimeLibrary::nbufSig}. A cell operand is retained by
+     * the runtime when it is kept; a cell result is the caller's +1.
+     * @param Node[] $args
+     */
+    private function biNbuf(string $op, string $sig, array $args): string
+    {
+        $this->rt->needsBuf = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $n = \count($args);
+        $out = '';
+        $list = '';
+        $after = '';
+        for ($i = 0; $i < $n; $i++) {
+            $a = $args[$i];
+            $c = $sig[$i];
+            if ($i > 0) { $list .= ', '; }
+            if ($c === 'f') {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceTo('double');
+                $list .= 'double ' . $this->lastValue;
+            } elseif ($c === 'c') {
+                $out .= $this->emitNode($a);
+                $out .= $this->boxToCell($a->type, $a);
+                $list .= 'i64 ' . $this->lastValue;
+                $after .= $this->cellBoxTempDrop($a->type, $this->lastValue, $a);
+            } else {
+                $out .= $this->emitIntArg($a);
+                $list .= 'i64 ' . $this->lastValue;
+            }
+        }
+        $ret = $sig[$n];
+        $call = 'call ' . ($ret === 'v' ? 'void' : ($ret === 'f' ? 'double' : 'i64')) . ' @__mir_nbuf_' . $op . '(' . $list . ")\n";
+        if ($ret === 'v') {
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out . '  ' . $call . $after;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = ' . $call . $after;
+        $this->lastValue = $r;
+        $this->lastValueType = $ret === 'f' ? 'double' : 'i64';
+        if ($ret === 'c') { $this->markCellBoxed($r); }
         return $out;
     }
 
@@ -8372,6 +8428,7 @@ trait EmitLlvmBuiltins
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
+                if ($this->isBufSlot($cd, $pn)) { continue; }
                 if ($forCompare && $this->isEnumType($pt)) {
                     $off = (string)$cd->propertyOffset($pn);
                     $g = $this->ssa->allocReg();
@@ -8402,6 +8459,21 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
+                // An enum-typed slot holds the case ORDINAL; every view of the
+                // object shows the case itself (its immortal singleton). Boxed
+                // as a raw value the ordinal reached json_encode / (array) /
+                // get_object_vars as a denormal float.
+                if ($this->isEnumType($pt)) {
+                    $pp = '';
+                    $out .= $this->emitEnumSingletonPtr((string)$pt->class, $v, $pp);
+                    $boxed = $this->ssa->allocReg();
+                    $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+                    $next = $this->ssa->allocReg();
+                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
+                          . $cur . ', ptr ' . $key . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
+                    $cur = $next;
+                    continue;
+                }
                 // boxRawValue and NOT boxToCell: the slot holds a RAW carrier, and
                 // a float slot's carrier is a double's BIT PATTERN. boxToCell
                 // treats its input as a value of `$pt` already in cell shape, so a
@@ -8791,6 +8863,7 @@ trait EmitLlvmBuiltins
     private function biJsonEncode(array $args): string
     {
         $this->rt->needsJsonEnc = true;
+        $this->rt->needsRc = true;        // __mir_cell_retain / _drop (the JsonSerializable arm)
         $this->rt->needsIntStr = true;    // __mir_int_len / __mir_int_fmt + unbox_int
         $this->rt->needsStrRc = true;     // __mir_rc_release_str (float / object temps)
         $this->rt->needsConcat = true;    // __mir_strlen + string runtime decls
@@ -8828,6 +8901,30 @@ trait EmitLlvmBuiltins
         $this->markCellBoxed($res);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `__mc_json_ser($obj)` — the value json encodes in the object's place
+     * ({@see \Compile\Mir\RuntimeLibrary::jsonSer}); the stdlib identity body
+     * is the bootstrap twin. The result is the caller's +1.
+     * @param Node[] $args
+     */
+    private function biJsonSer(array $args): string
+    {
+        $this->rt->needsJsonSer = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type, $args[0]);
+        $cell = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_json_ser(i64 ' . $cell . ")\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($r);
         return $out;
     }
 

@@ -1,0 +1,67 @@
+[4,6,0]
+RuntimeException: Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen
+RuntimeException: Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen
+7
+6
+3
+0
+object(SplQueue)#1 (2) {
+  ["flags":"SplDoublyLinkedList":private]=>
+  int(4)
+  ["dllist":"SplDoublyLinkedList":private]=>
+  array(3) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+    [2]=>
+    int(3)
+  }
+}
+SplStack Object
+(
+    [flags:SplDoublyLinkedList:private] => 6
+    [dllist:SplDoublyLinkedList:private] => Array
+        (
+            [0] => 1
+            [1] => 2
+            [2] => 3
+        )
+
+)
+O:8:"SplQueue":3:{i:0;i:4;i:1;a:3:{i:0;i:1;i:1;i:2;i:2;i:3;}i:2;a:0:{}}
+O:8:"SplStack":3:{i:0;i:6;i:1;a:3:{i:0;i:1;i:1;i:2;i:2;i:3;}i:2;a:0:{}}
+[3,1,1,2,2]
+TypeError: SplDoublyLinkedList::offsetGet(): Argument #1 ($index) must be of type int, string given
+TypeError: SplDoublyLinkedList::offsetExists(): Argument #1 ($index) must be of type int, string given
+[false,true,false]
+OutOfRangeException: SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
+OutOfRangeException: SplDoublyLinkedList::offsetSet(): Argument #1 ($index) is out of range
+OutOfRangeException: SplDoublyLinkedList::offsetUnset(): Argument #1 ($index) is out of range
+OutOfRangeException: SplDoublyLinkedList::add(): Argument #1 ($index) is out of range
+O:8:"SplStack":3:{i:0;i:6;i:1;a:4:{i:0;i:1;i:1;s:1:"n";i:2;i:2;i:3;i:3;}i:2;a:0:{}}
+O:8:"SplQueue":3:{i:0;i:4;i:1;a:5:{i:0;i:1;i:1;s:1:"n";i:2;i:2;i:3;i:3;i:4;s:1:"e";}i:2;a:0:{}}
+O:8:"SplStack":3:{i:0;i:6;i:1;a:3:{i:0;i:1;i:1;s:1:"n";i:2;i:2;}i:2;a:0:{}}
+O:8:"SplQueue":3:{i:0;i:4;i:1;a:4:{i:0;s:1:"n";i:1;i:2;i:2;i:3;i:3;s:1:"e";}i:2;a:0:{}}
+O:19:"SplDoublyLinkedList":3:{i:0;i:0;i:1;a:4:{i:0;i:0;i:1;s:3:"one";i:2;i:2;i:3;i:3;}i:2;a:0:{}}
+[3,0,3,0,2,false]
+RuntimeException: Can't pop from an empty datastructure
+RuntimeException: Can't shift from an empty datastructure
+RuntimeException: Can't peek at an empty datastructure
+RuntimeException: Can't peek at an empty datastructure
+["SplStack",6,3,2]
+[null,0,false]
+["n",0,true]
+[null,-1,false]
+2=2 1=n 0=1 | 3
+0=a 0=b 0=c | 0
+2=c 1=b 0=a | 0
+50011 11249925000 front 150000 -9
+SplDoublyLinkedList Object
+(
+    [flags:SplDoublyLinkedList:private] => 0
+    [dllist:SplDoublyLinkedList:private] => Array
+        (
+        )
+
+)

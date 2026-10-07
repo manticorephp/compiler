@@ -238,9 +238,10 @@ function __mc_unser_val(\__McUnSt $st): mixed
             $k = __mc_un_key($st);
             $val = __mc_unser_val($st);
             if (!$st->ok) { return null; }
-            $kk = __mc_un_demangle((string)$k);
-            if ($magic) { $props[$kk] = $val; }
-            else { __mc_unser_set($o, $kk, $val); }
+            // __unserialize gets the array __serialize returned: its keys as
+            // written (an int stays an int), nothing demangled.
+            if ($magic) { $props[$k] = $val; }
+            else { __mc_unser_set($o, __mc_un_demangle((string)$k), $val); }
             $i = $i + 1;
         }
         __mc_un_lit($st, '}');

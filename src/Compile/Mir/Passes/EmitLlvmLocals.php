@@ -502,6 +502,29 @@ trait EmitLlvmLocals
                 $masked = $this->ssa->allocReg();
                 $out .= '  ' . $masked . ' = and i64 ' . $reg . ", 281474976710655\n";
                 $this->lastValue = $masked;
+                // An ENUM-typed load travels as the case ORDINAL. A slot that
+                // flow-narrowed from a cell (`$m instanceof Suit`) holds the
+                // boxed case SINGLETON instead, and its masked address read as
+                // an ordinal indexed the name table out of bounds (SIGBUS on
+                // `$m->name`). A tagged word is the singleton: take its
+                // ordinal ({@see emitEnumCellSingletons}: data+16). A genuine
+                // enum local is a small int and passes through.
+                if ($ll->type->class !== null && isset($this->enums[$ll->type->class])) {
+                    $isBox = $this->ssa->allocReg();
+                    $out .= '  ' . $isBox . ' = icmp ugt i64 ' . $reg . ', '
+                          . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+                    $sp = $this->ssa->allocReg();
+                    $out .= '  ' . $sp . ' = inttoptr i64 ' . $masked . " to ptr\n";
+                    $op = $this->ssa->allocReg();
+                    $out .= '  ' . $op . ' = getelementptr i8, ptr ' . $sp . ", i64 16\n";
+                    $safe = $this->ssa->allocReg();
+                    $out .= '  ' . $safe . ' = select i1 ' . $isBox . ', ptr ' . $op . ", ptr @__mir_zero_word\n";
+                    $ord = $this->ssa->allocReg();
+                    $out .= '  ' . $ord . ' = load i64, ptr ' . $safe . "\n";
+                    $sel = $this->ssa->allocReg();
+                    $out .= '  ' . $sel . ' = select i1 ' . $isBox . ', i64 ' . $ord . ', i64 ' . $reg . "\n";
+                    $this->lastValue = $sel;
+                }
             }
         }
         if ($ll->type->kind === Type::KIND_CELL) {

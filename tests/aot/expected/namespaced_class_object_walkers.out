@@ -1,0 +1,8 @@
+object(App\A)#1 (1) {
+  ["x"]=>
+  int(1)
+}
+\App\A::__set_state(array(
+   'x' => 1,
+))
+O:5:"App\A":1:{s:1:"x";i:1;}

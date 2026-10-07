@@ -93,12 +93,15 @@ for f in "${FILES[@]}"; do
     # installed reported 335 DIFFs against a tree whose AOT suite had been green
     # 1026/1028 minutes earlier — and each one looked like a real regression.
     # The oracle is the LANGUAGE, not this host's extension set.
+    # A `.prepend` sidecar is php-only: it loads the PHP twins of a superset
+    # feature (the polyfill), which the native side has built in.
+    pre=(); [[ -f "${f%.php}.prepend" ]] && pre=(-d "auto_prepend_file=${f%.php}.prepend")
     if [[ -f "${f%.php}.diag" ]]; then
         ref="$(mc_limit "$REF_TIMEOUT" php -d xdebug.mode=off -d error_reporting=E_ALL -d display_errors=STDOUT \
-                   -d html_errors=0 -d log_errors=0 "$f" 2>"$WORK/ref.err")"; rrc=$?
+                   -d html_errors=0 -d log_errors=0 ${pre[@]+"${pre[@]}"} "$f" 2>"$WORK/ref.err")"; rrc=$?
     else
         ref="$(mc_limit "$REF_TIMEOUT" php -d xdebug.mode=off -d error_reporting=0 -d display_errors=0 \
-                   "$f" 2>"$WORK/ref.err")"; rrc=$?
+                   ${pre[@]+"${pre[@]}"} "$f" 2>"$WORK/ref.err")"; rrc=$?
     fi
     # 124 FIRST: a php side that ran out of time produces no stdout, which the
     # test below would otherwise read as "php cannot run this" and skip — hiding

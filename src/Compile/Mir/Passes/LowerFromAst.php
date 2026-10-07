@@ -558,6 +558,9 @@ final class LowerFromAst implements Pass
     public bool $includeCli = false;
     /** CLI prelude source, read by Main from `prelude/cli.php`. */
     public string $cliSrc = '';
+    /** Manticore\Ds (typed fixed-width arrays over the native buffer) —
+     *  DEMAND-GATED. Braced-namespace tree with no dependencies of its own. */
+    public string $dsSrc = '';
 
     /**
      * Bundled-stdlib function declarations (parsed from `src/Runtime/**`)
@@ -1066,6 +1069,33 @@ final class LowerFromAst implements Pass
             $module->addFunction($tfn);
         }
         $module->hasObjToStr = true;
+
+        // The `jsonSerialize()` entries of the class descriptors — one helper
+        // per class that has the method, reached by the json encoders through
+        // the descriptor, never by name.
+        $jsSrc = $this->jsonSerSrc();
+        if ($jsSrc !== '') {
+            $jsProg = \Parser\Parser::parseSource("<?php\n" . $jsSrc);
+            foreach ($jsProg->statements as $jstmt) {
+                if ($jstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$jstmt->decl->name] = $jstmt->decl;
+                $jfn = $this->lowerFunction($jstmt->decl);
+                $jfn->isPrelude = true;
+                $module->addFunction($jfn);
+            }
+        }
+
+        // print_r()'s object arm — same point and pattern as __mir_dump_object.
+        if ($this->includePrintR) {
+            $prProg = \Parser\Parser::parseSource("<?php\n" . $this->printRObjectSrc());
+            foreach ($prProg->statements as $pstmt) {
+                if ($pstmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$pstmt->decl->name] = $pstmt->decl;
+                $pfn = $this->lowerFunction($pstmt->decl);
+                $pfn->isPrelude = true;
+                $module->addFunction($pfn);
+            }
+        }
 
         // var_export()'s object arm — same point and pattern as
         // __mir_dump_object. It prints a `\C::__set_state(array(…))` literal; php
@@ -2554,16 +2584,20 @@ final class LowerFromAst implements Pass
         $this->sawYield = $savedSawYield;
         $usesFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = $savedSawFuncArgs;
-        $mret = $this->lowerTypeHint($this->effectiveHint(
-            $m->returnType,
-            $this->docTagType($m->docComment, '@return', ''),
-        ));
+        $mretDoc = $this->docTagType($m->docComment, '@return', '');
+        $mret = $this->lowerTypeHint($this->effectiveHint($m->returnType, $mretDoc));
         // `@return T` on a generic class: the shared body must see the ERASED
         // type (exactly what it saw before generics), so keep the un-erased form
         // aside for call sites to substitute against their receiver's binding.
         if ($mret->hasTypeVar()) {
             $cd->genericReturns[$m->name] = $mret;
             $mret = $mret->eraseTypeVars();
+        } elseif ($m->returnType !== null && $mretDoc !== null && $mretDoc !== '') {
+            // A real hint kept the body's type (`offsetGet(): int` + `@return T`),
+            // and the docblock still says WHICH parameter the value is: a call
+            // site that bound it names the result by it.
+            $mdocT = $this->lowerTypeHint($mretDoc);
+            if ($mdocT->hasTypeVar()) { $cd->genericReturns[$m->name] = $mdocT; }
         }
         if ($isGen) {
             $elem = $mret->isGenerator() ? $mret->element : null;

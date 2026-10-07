@@ -1,0 +1,18 @@
+dtor b
+overwritten
+dtor a
+unset
+dtor b2
+dtor c
+shrunk
+count 1 1
+NULL
+dtor z
+a gone
+b gone
+dtor late
+end
+dtor nested
+dtor scoped
+after scope
+flat

@@ -345,6 +345,11 @@ trait LowerReify
     /** A type as a hint the lowerer can read back (`float`, `\App\Tag`). */
     private function typeSpelling(Type $t): string
     {
+        // A `#[TypeDef]` is spelled by its NAME: its carrier alone (`int`) would
+        // build the specialization over the bare scalar and the value would
+        // come back out of it without its type.
+        $td = $t->typeDefClass();
+        if ($td !== null) { return '\\' . $td; }
         $k = $t->kind;
         if ($k === Type::KIND_INT)    { return 'int'; }
         if ($k === Type::KIND_FLOAT)  { return 'float'; }
@@ -390,6 +395,8 @@ trait LowerReify
      */
     private function reifyTypeKey(Type $t): string
     {
+        $td = $t->typeDefClass();
+        if ($td !== null) { return 't_' . $this->sanitizeSym($td); }
         $k = $t->kind;
         if ($k === Type::KIND_INT)    { return 'int'; }
         if ($k === Type::KIND_FLOAT)  { return 'float'; }

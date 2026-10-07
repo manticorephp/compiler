@@ -1,0 +1,12 @@
+int(-6)
+float(1.5)
+bool(true)
+string(3) "spl"
+float(6)
+float(2)
+float(1)
+int(7)
+float(0.5)
+bool(false)
+322
+OutOfBoundsException: Index invalid or out of range

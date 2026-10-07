@@ -34,8 +34,8 @@ function __mir_print_r_str(mixed $v, int $indent): string
         return 'Resource id #' . (string)$v->id;
     }
     if (is_object($v)) {
-        $pad = str_repeat(' ', $indent);
-        return get_class($v) . " Object\n" . $pad . "(\n" . $pad . ")\n";
+        // Written from the class table ({@see LowerPrelude::printRObjectSrc}).
+        return __mir_print_r_object($v, $indent);
     }
     if (is_string($v)) {
         // The is_* guard NARROWS $v to the concrete type in-branch, so the cast

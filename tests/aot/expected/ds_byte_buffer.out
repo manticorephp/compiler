@@ -1,0 +1,64 @@
+abfe34121234eb32a4f8deadbeef0000
+int(171)
+int(-85)
+int(-2)
+int(4660)
+int(13330)
+int(13330)
+int(-123456789)
+int(4171510507)
+int(3735928559)
+int(-559038737)
+int(171)
+int(18)
+int(16)
+int(2086)
+0500000000000080010203040506070800000000404a93c0cdcccc3dc0200000
+int(-9223372036854775803)
+int(72623859790382856)
+int(578437695752307201)
+float(-1234.5625)
+float(0.10000000149011612)
+float(-2.5)
+000000000000000000000000 float(0)
+float(0)
+000000000000008000000080 float(-0)
+float(-0)
+000000000000f07f0000807f float(INF)
+float(INF)
+000000000000f0ff000080ff float(-INF)
+float(-INF)
+e80700000000000000000000 float(1.0E-320)
+float(0)
+ffffffffffffef7f0000807f float(1.7976931348623157E+308)
+float(INF)
+1d4a9cf4878207480000807f float(1.0E+39)
+float(INF)
+bool(true)
+int(11)
+int(67324752)
+int(20555)
+string(5) "hello"
+int(255)
+string(4) "00ff"
+504b030448454c4c4f00ff210a 13 10 6
+bool(false)
+int(19280)
+int(0)
+string(0) ""
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+ValueError: Value 70000 is out of range for uint16 (0..65535)
+ValueError: Value 128 is out of range for int8 (-128..127)
+ValueError: Value -1 is out of range for uint32 (0..4294967295)
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+ValueError: Value 256 is out of range for ByteBuffer (0..255)
+int(0)
+int(128)
+int(2677972380)
+int(12742320)

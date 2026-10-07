@@ -347,6 +347,39 @@ trait LowerTypeDefs
         }
     }
 
+    /**
+     * `UInt8Array<Kind>` — a typed array bound to an element type. The element
+     * is stored at the ARRAY's width, so the binding is refused unless every
+     * value of the element fits it: a `#[TypeDef]` by its repr (no repr = the
+     * whole carrier), a plain scalar by its family.
+     *
+     * @param Type[] $args
+     */
+    private function checkNbufBinding(string $cls, array $args): void
+    {
+        $kind = \Compile\Mir\NbufInline::kindOf($cls);
+        if ($kind === 0 || $args === []) { return; }
+        $el = $args[0];
+        // `@extends IntTypedArray<T>` in the classes' own declarations.
+        if ($el->hasTypeVar()) { return; }
+        $want = \Compile\Mir\NbufInline::elementOf($kind);
+        if ($want === '') {
+            throw new \RuntimeException(\ltrim($cls, '\\') . ' takes no element type');
+        }
+        $carrier = $el->kind === Type::KIND_INT ? 'int' : ($el->kind === Type::KIND_FLOAT ? 'float' : '');
+        $td = $el->typeDefClass();
+        if ($td === null) {
+            if ($carrier !== '' && ($carrier === 'float') === ($want[0] === 'f')) { return; }
+            throw new \RuntimeException(\ltrim($cls, '\\') . '<…>: the element must be '
+                . ($want[0] === 'f' ? 'float' : 'int') . ' or a #[TypeDef] over it');
+        }
+        $repr = $this->typeDefReprs[$td] ?? '';
+        if ($carrier !== '' && \Compile\Mir\NbufInline::holds($kind, $repr, $carrier)) { return; }
+        $this->typeDefError($td, 'cannot be the element of ' . \ltrim($cls, '\\') . ' — '
+            . ($repr !== '' ? "repr '" . $repr . "'" : 'a ' . ($carrier !== '' ? $carrier : 'non-scalar') . ' with no repr')
+            . " does not fit an '" . $want . "' element. Bind it to an array at least that wide and of the same signedness");
+    }
+
     private function typeDefError(string $cls, string $why): void
     {
         throw new \RuntimeException('#[TypeDef] ' . $cls . ': ' . $why);

@@ -802,6 +802,12 @@ trait EmitLlvmModule
         }
         $out .= $this->emitEnumTables();
         $out .= "\n";
+        if ($this->rt->needsNbufTbaa) {
+            // The module's only metadata: header vs element of a native buffer
+            // ({@see nbufTbaa}). Unnamed top-level lines ride in every split part.
+            $out .= "!0 = !{!\"manticore tbaa\"}\n!1 = !{!\"nbuf.hdr\", !0, i64 0}\n!2 = !{!\"nbuf.elem\", !0, i64 0}\n"
+                  . "!3 = !{!1, !1, i64 0}\n!4 = !{!2, !2, i64 0}\n";
+        }
         return $out;
     }
 
@@ -2423,7 +2429,15 @@ trait EmitLlvmModule
         // (boxToCell would rebuild an array) — they fall through to the normal
         // return path below. Generators never reach here (the inGenerator branch
         // returns first).
-        if (($this->frame->isClosure || $this->frame->isTrampoline) && \Compile\Mir\Ownership::cellBoxableKind($v->type)) {
+        //
+        // A CELL value under a declared OBJECT / ARRAY return is not one of
+        // those scalars: the caller reads that return raw, so the tagged word
+        // handed back as-is was released through its tag bits (SIGSEGV in
+        // `(function ($s): P { return unserialize($s); })(…)`). It takes the
+        // normal path below, which unboxes a cell to the declared type.
+        $rawRet = $this->frame->returnType !== null && $v->type->kind === Type::KIND_CELL
+            && ($this->frame->returnType->kind === Type::KIND_OBJ || $this->frame->returnType->isArray());
+        if (($this->frame->isClosure || $this->frame->isTrampoline) && !$rawRet && \Compile\Mir\Ownership::cellBoxableKind($v->type)) {
             // The same +1 the `: mixed` path below takes: a BORROWED string
             // (`return $o->n;`) boxed as-is handed the caller a cell over a
             // buffer the object still owned, and the caller's release freed it

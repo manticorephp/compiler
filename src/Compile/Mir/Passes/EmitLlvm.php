@@ -1432,8 +1432,13 @@ final class EmitLlvm implements EmitVisitor
         if (!isset($this->classes[$name])) {
             // Same spelling as the ordinary path — the symbol coalesces by name,
             // so a type that disagreed would be one symbol defined two ways.
+            $jsonFld = 'ptr null';
+            $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn($ed->classId);
+            if (isset($this->sigs->paramTypes[$jsonFn])) {
+                $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
+            }
             $out .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld, 'ptr null', 0);
+                $ed->classId, 'ptr null', 'ptr null', 'ptr null', $propsFld, 'ptr null', 0, $jsonFld);
         }
         $descI = 'ptrtoint (ptr @__mir_cd_' . $cid . ' to i64)';
         // LLVM symbol infix must fold `\` (namespaced enums like Io\Poll\Backend
@@ -3306,6 +3311,13 @@ final class EmitLlvm implements EmitVisitor
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             foreach ($cls->propertyNames as $pn) {
+                if ($this->isBufSlot($cls, $pn)) {
+                    // The class drop frees the buffer through the nbuf runtime.
+                    $this->rt->needsBuf = true;
+                    $this->rt->needsTagged = true;
+                    $this->rt->needsRc = true;
+                    $this->rt->needsStrRc = true;
+                }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 $flavor = $this->discardReleaseFlavor($pt);
