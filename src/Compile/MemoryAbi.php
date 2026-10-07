@@ -44,7 +44,13 @@ final class MemoryAbi
      * DESCRIPTOR_VISIT_FN_OFFSET}); a v18 descriptor is 8 bytes short and the
      * json encoder would read past it.
      *
-     * v20: Manticore\Ds hash table block (`HMAP_*`, `__mir_hmap_*`).
+     * v20: Manticore\Ds hash table block (`HMAP_*`, `__mir_hmap_*`); the
+     * cell object-tag constants (`CELL_TAG_OBJ` / `CELL_TAG_SHIFT` /
+     * `CELL_TAG_MASK`, `CELL_OBJ_MIN_PAYLOAD`) the cycle-collector walkers read;
+     * and the linkonce `__mir_array_set_str` / `isset_str` / `pos_str` /
+     * `ref_slot_str` canonicalise a numeric-string key to its int key at run
+     * time (#86) — a v19 body of the same name stores "11" as a string key,
+     * so a v19 object must not coalesce with them.
      */
     public const VERSION = 20;
 

@@ -1,5 +1,5 @@
 <?php
-// A dynamic numeric-string array key stays a string: $h[$s] with $s="5" is not stored as int 5
+// A dynamic numeric-string array key is canonicalised like php's: $h[$s] with $s="5" is stored as int 5
 $s = '5';
 $h = [];
 $h[$s] = 1;

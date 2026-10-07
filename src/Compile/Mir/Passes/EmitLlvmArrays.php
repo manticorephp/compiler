@@ -1120,7 +1120,8 @@ trait EmitLlvmArrays
         }
         $out .= $this->cellTagIr($cur);
         $this->objTestReg = $this->ssa->allocReg();
-        $out .= '  ' . $this->objTestReg . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+        $out .= '  ' . $this->objTestReg . ' = icmp eq i64 ' . $this->cellTagReg . ', '
+            . (string)\Compile\MemoryAbi::CELL_TAG_OBJ . "\n";
         return $out;
     }
 

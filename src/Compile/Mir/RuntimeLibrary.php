@@ -6375,6 +6375,17 @@ done:
     public function hmap(): string
     {
         $ir = '
+define ptr @__mir_hmap_chk(ptr %p) {
+entry:
+  %nul = icmp eq ptr %p, null
+  br i1 %nul, label %oom, label %ok
+oom:
+  call void @abort()
+  unreachable
+ok:
+  ret ptr %p
+}
+
 define i64 @__mir_hmap_hld(i64 %h, i64 %off) {
 entry:
   %p = inttoptr i64 %h to ptr
@@ -6558,7 +6569,8 @@ entry:
   %op = inttoptr i64 %old to ptr
   call void @free(ptr %op)
   %bytes = shl i64 %slots, 2
-  %np = call ptr @malloc(i64 %bytes)
+  %np.raw = call ptr @malloc(i64 %bytes)
+  %np = call ptr @__mir_hmap_chk(ptr %np.raw)
   call ptr @memset(ptr %np, i32 255, i64 %bytes)
   %nw = ptrtoint ptr %np to i64
   call void @__mir_hmap_hst(i64 %h, i64 {INDEX}, i64 %nw)
@@ -6622,7 +6634,8 @@ done:
 
 define i64 @__mir_hmap_alloc(i64 %isSet) {
 entry:
-  %p = call ptr @calloc(i64 1, i64 {HDR})
+  %p.raw = call ptr @calloc(i64 1, i64 {HDR})
+  %p = call ptr @__mir_hmap_chk(ptr %p.raw)
   %h = ptrtoint ptr %p to i64
   %f = and i64 %isSet, 1
   call void @__mir_hmap_hst(i64 %h, i64 {FLAGS}, i64 %f)
@@ -6630,10 +6643,12 @@ entry:
   call void @__mir_hmap_hst(i64 %h, i64 {MASK}, i64 {MINMASK})
   %st = call i64 @__mir_hmap_stride(i64 %h)
   %eb = mul i64 %st, {MINCAP}
-  %ep = call ptr @malloc(i64 %eb)
+  %ep.raw = call ptr @malloc(i64 %eb)
+  %ep = call ptr @__mir_hmap_chk(ptr %ep.raw)
   %ew = ptrtoint ptr %ep to i64
   call void @__mir_hmap_hst(i64 %h, i64 {ENTRIES}, i64 %ew)
-  %ip = call ptr @malloc(i64 {MINSLOTS4})
+  %ip.raw = call ptr @malloc(i64 {MINSLOTS4})
+  %ip = call ptr @__mir_hmap_chk(ptr %ip.raw)
   call ptr @memset(ptr %ip, i32 255, i64 {MINSLOTS4})
   %iw = ptrtoint ptr %ip to i64
   call void @__mir_hmap_hst(i64 %h, i64 {INDEX}, i64 %iw)
@@ -6690,7 +6705,8 @@ entry:
   %cap = call i64 @__mir_hmap_hld(i64 %h, i64 {CAP})
   %st = call i64 @__mir_hmap_stride(i64 %h)
   %eb = mul i64 %cap, %st
-  %np = call ptr @malloc(i64 %eb)
+  %np.raw = call ptr @malloc(i64 %eb)
+  %np = call ptr @__mir_hmap_chk(ptr %np.raw)
   %nw = ptrtoint ptr %np to i64
   call void @__mir_hmap_hst(i64 %h, i64 {ENTRIES}, i64 %nw)
   call void @__mir_hmap_hst(i64 %h, i64 {USED}, i64 0)
@@ -6869,7 +6885,8 @@ regrow:
   %nb = mul i64 %nc, %st
   %ob = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
   %obp = inttoptr i64 %ob to ptr
-  %np = call ptr @realloc(ptr %obp, i64 %nb)
+  %np.raw = call ptr @realloc(ptr %obp, i64 %nb)
+  %np = call ptr @__mir_hmap_chk(ptr %np.raw)
   %nw = ptrtoint ptr %np to i64
   call void @__mir_hmap_hst(i64 %h, i64 {ENTRIES}, i64 %nw)
   call void @__mir_hmap_hst(i64 %h, i64 {CAP}, i64 %nc)
@@ -7024,7 +7041,8 @@ entry:
 
 define i64 @__mir_hmap_clone(i64 %h) {
 entry:
-  %np = call ptr @calloc(i64 1, i64 {HDR})
+  %np.raw = call ptr @calloc(i64 1, i64 {HDR})
+  %np = call ptr @__mir_hmap_chk(ptr %np.raw)
   %nh = ptrtoint ptr %np to i64
   %op = inttoptr i64 %h to ptr
   call ptr @memcpy(ptr %np, ptr %op, i64 {HDR})
@@ -7034,7 +7052,8 @@ entry:
   %st = call i64 @__mir_hmap_stride(i64 %h)
   %eb = mul i64 %cap, %st
   %ub = mul i64 %used, %st
-  %nep = call ptr @malloc(i64 %eb)
+  %nep.raw = call ptr @malloc(i64 %eb)
+  %nep = call ptr @__mir_hmap_chk(ptr %nep.raw)
   %oew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
   %oep = inttoptr i64 %oew to ptr
   call ptr @memcpy(ptr %nep, ptr %oep, i64 %ub)
@@ -7042,7 +7061,8 @@ entry:
   call void @__mir_hmap_hst(i64 %nh, i64 {ENTRIES}, i64 %new)
   %slots = add i64 %mask, 1
   %ib = shl i64 %slots, 2
-  %nip = call ptr @malloc(i64 %ib)
+  %nip.raw = call ptr @malloc(i64 %ib)
+  %nip = call ptr @__mir_hmap_chk(ptr %nip.raw)
   %oiw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
   %oip = inttoptr i64 %oiw to ptr
   call ptr @memcpy(ptr %nip, ptr %oip, i64 %ib)

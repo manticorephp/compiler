@@ -213,6 +213,7 @@ The binding is written in a docblock (`@var` on a local or a property,
 nothing at run time: `get_class($kinds)` is still `Manticore\Ds\UInt16Array`.
 An array with no binding reads plain `int` / `float`, as before. `foreach`
 over a bound array still yields the plain scalar.
+
 ## `Map`, `Set`, `Vec`
 
 Insertion-ordered containers over native tables (`Map`, `Set`) and a native

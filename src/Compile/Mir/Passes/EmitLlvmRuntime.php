@@ -2996,7 +2996,8 @@ entry:
   br i1 %z, label %end, label %go
 go:
   %used = call i64 @__mir_hmap_hld(i64 %h, i64 {USED})
-  %set = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
+  %fl = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
+  %set = and i64 %fl, {FSET}
   %isn = icmp ne i64 %set, 0
   %st = call i64 @__mir_hmap_stride(i64 %h)
   %ew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
