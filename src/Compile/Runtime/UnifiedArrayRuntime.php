@@ -4179,7 +4179,13 @@ final class UnifiedArrayRuntime
 
         $b0i = $e->load(Type::i64(), $slotAddr);
         $b0 = $e->inttoptr($b0i, Type::ptr());
-        $e->brIf($e->icmp('eq', $b0, Value::null()), $miss, $live);
+        // A canonical int-string key IS the int key (set_str / isset_str agree): the int slot body.
+        $fbk = $fn->block('first_byte');
+        $canonI = $fn->block('canon_int');
+        $cOut = $e->alloca(Type::i64(), 'canon_out');
+        $e->brIf($e->icmp('eq', $b0, Value::null()), $miss, $fbk);
+        $this->canonKeyProbe($fn, $fbk, $key, Value::int(Type::i64(), 0), $cOut, $canonI, $live);
+        $canonI->ret($canonI->call('__mir_array_ref_slot', Type::ptr(), [$slotAddr, $canonI->load(Type::i64(), $cOut)]));
 
         $cow = $live->call('__mir_array_cow', Type::ptr(), [$b0]);
         $live->store($live->ptrtoint($cow, Type::i64()), $slotAddr);

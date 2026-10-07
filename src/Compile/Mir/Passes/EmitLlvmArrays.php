@@ -1087,13 +1087,6 @@ trait EmitLlvmArrays
         return $this->emitStoreElementErased($se);
     }
 
-    /**
-     * `$erased[$k] = $v` — the array store, behind one test when the base is
-     * a cell LOCAL that may hold an ArrayAccess object at run time: an object
-     * (tag 8) is `$base->offsetSet($k, $v)` on its runtime class. The array
-     * store took the object for a buffer header and wrote through it (SIGBUS).
-     * Each arm evaluates the key and the value once; only one arm runs.
-     */
     /** An erased base that can be tested for "is an object" and then re-evaluated by the arm
      *  that runs: a plain local, or a property chain over one (loads only, no side effects). */
     private function erasedBaseMayBeObject(Node $b): bool
@@ -1131,6 +1124,13 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    /**
+     * `$erased[$k] = $v` — the array store, behind one test when the base is
+     * a cell local (or property of one) that may hold an ArrayAccess object at run time: an object
+     * (tag 8) is `$base->offsetSet($k, $v)` on its runtime class. The array
+     * store took the object for a buffer header and wrote through it (SIGBUS).
+     * Each arm evaluates the key and the value once; only one arm runs.
+     */
     private function emitStoreElementErased(StoreElement $se): string
     {
         if (!$this->erasedBaseMayBeObject($se->array)) {
