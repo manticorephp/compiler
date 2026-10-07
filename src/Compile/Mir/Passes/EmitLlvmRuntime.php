@@ -2903,6 +2903,184 @@ trait EmitLlvmRuntime
         return $out;
     }
 
+    /**
+     * The cycle-collector walker of a native-buffer slot: `@__cc_hmap_walk` for
+     * the table behind Manticore\Ds\Map / Set, `@__cc_nbuf_walk` for a
+     * SplFixedArray CELL buffer, '' for any other property. Both take the
+     * handle and the walk action (0..3 as {@see ccRuntime}'s child apply; -1
+     * releases the non-object cells and frees the buffer, for a collected node
+     * whose object children the walk reclaims itself).
+     */
+    private function ccBufWalker(\Compile\Mir\ClassDef $cls, string $pn): string
+    {
+        if ($pn !== '__mcbuf') { return ''; }
+        if ($this->classIsA($cls->name, 'Manticore\\Ds\\Map') || $this->classIsA($cls->name, 'Manticore\\Ds\\Set')) {
+            return '@__cc_hmap_walk';
+        }
+        if ($this->classIsA($cls->name, 'SplFixedArray')) { return '@__cc_nbuf_walk'; }
+        return '';
+    }
+
+    /** The two walker bodies, emitted only when a class owns such a slot. */
+    private function ccBufWalkers(): string
+    {
+        $used = false;
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            foreach ($cls->propertyNames as $pn) {
+                if ($this->ccBufWalker($cls, $pn) !== '') { $used = true; }
+            }
+        }
+        if (!$used) { return ''; }
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $r = [
+            '{TAGMIN}' => (string)\Compile\MemoryAbi::CELL_TAGGED_MIN,
+            '{PAY}' => (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK,
+            '{MAGIC}' => (string)\Compile\MemoryAbi::RC_TAG_MAGIC,
+            '{USED}' => (string)\Compile\MemoryAbi::HMAP_USED_OFFSET,
+            '{FLAGS}' => (string)\Compile\MemoryAbi::HMAP_FLAGS_OFFSET,
+            '{ENTRIES}' => (string)\Compile\MemoryAbi::HMAP_ENTRIES_OFFSET,
+            '{INDEX}' => (string)\Compile\MemoryAbi::HMAP_INDEX_OFFSET,
+            '{FSET}' => (string)\Compile\MemoryAbi::HMAP_FLAG_SET,
+            '{EKEY}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_KEY,
+            '{EVAL}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_VAL,
+            '{ESM}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_SIZE_MAP,
+            '{ESD}' => (string)(\Compile\MemoryAbi::HMAP_ENTRY_SIZE_MAP - \Compile\MemoryAbi::HMAP_ENTRY_SIZE_SET),
+            '{TOMB}' => (string)\Compile\MemoryAbi::HMAP_TOMB_HASH,
+            '{KIND}' => (string)\Compile\MemoryAbi::BUF_KIND_OFFSET,
+            '{DATA}' => (string)\Compile\MemoryAbi::BUF_DATA_OFFSET,
+            '{CELL}' => (string)\Compile\MemoryAbi::BUF_KIND_CELL,
+        ];
+        $ir = '
+define void @__cc_cell_step(i64 %v, i64 %a) {
+entry:
+  %tg = icmp ugt i64 %v, {TAGMIN}
+  br i1 %tg, label %tagged, label %raw
+tagged:
+  %sh = lshr i64 %v, 48
+  %nib = and i64 %sh, 15
+  %isobj = icmp eq i64 %nib, 8
+  br i1 %isobj, label %obj, label %raw
+obj:
+  %neg = icmp slt i64 %a, 0
+  br i1 %neg, label %done, label %chk
+chk:
+  %pl = and i64 %v, {PAY}
+  %big = icmp ugt i64 %pl, 65535
+  br i1 %big, label %mg, label %done
+mg:
+  %op = inttoptr i64 %pl to ptr
+  %hp = getelementptr inbounds i8, ptr %op, i64 -8
+  %hv = load i64, ptr %hp
+  %ok = icmp eq i64 %hv, {MAGIC}
+  br i1 %ok, label %go, label %done
+go:
+  call void @__manticore_cc_child_apply(ptr %op, i64 %a)
+  br label %done
+raw:
+  %rn = icmp slt i64 %a, 0
+  br i1 %rn, label %rel, label %done
+rel:
+  call void @__mir_cell_drop(i64 %v)
+  br label %done
+done:
+  ret void
+}
+
+define void @__cc_hmap_walk(i64 %h, i64 %a) {
+entry:
+  %z = icmp eq i64 %h, 0
+  br i1 %z, label %end, label %go
+go:
+  %p = inttoptr i64 %h to ptr
+  %up = getelementptr inbounds i8, ptr %p, i64 {USED}
+  %used = load i64, ptr %up
+  %fp = getelementptr inbounds i8, ptr %p, i64 {FLAGS}
+  %fl = load i64, ptr %fp
+  %set = and i64 %fl, {FSET}
+  %sb = mul i64 %set, {ESD}
+  %st = sub i64 {ESM}, %sb
+  %ep = getelementptr inbounds i8, ptr %p, i64 {ENTRIES}
+  %ents = load ptr, ptr %ep
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %go ], [ %i2, %next ]
+  %c = icmp slt i64 %i, %used
+  br i1 %c, label %body, label %fin
+body:
+  %o = mul i64 %i, %st
+  %e = getelementptr inbounds i8, ptr %ents, i64 %o
+  %eh = load i64, ptr %e
+  %t = icmp eq i64 %eh, {TOMB}
+  br i1 %t, label %next, label %live
+live:
+  %kp = getelementptr inbounds i8, ptr %e, i64 {EKEY}
+  %k = load i64, ptr %kp
+  call void @__cc_cell_step(i64 %k, i64 %a)
+  %isn = icmp ne i64 %set, 0
+  br i1 %isn, label %next, label %val
+val:
+  %vp = getelementptr inbounds i8, ptr %e, i64 {EVAL}
+  %v = load i64, ptr %vp
+  call void @__cc_cell_step(i64 %v, i64 %a)
+  br label %next
+next:
+  %i2 = add i64 %i, 1
+  br label %loop
+fin:
+  %neg = icmp slt i64 %a, 0
+  br i1 %neg, label %fr, label %end
+fr:
+  %ip = getelementptr inbounds i8, ptr %p, i64 {INDEX}
+  %idx = load ptr, ptr %ip
+  call void @free(ptr %ents)
+  call void @free(ptr %idx)
+  call void @free(ptr %p)
+  br label %end
+end:
+  ret void
+}
+
+define void @__cc_nbuf_walk(i64 %h, i64 %a) {
+entry:
+  %z = icmp eq i64 %h, 0
+  br i1 %z, label %end, label %go
+go:
+  %p = inttoptr i64 %h to ptr
+  %kp = getelementptr inbounds i8, ptr %p, i64 {KIND}
+  %k32 = load i32, ptr %kp
+  %k = zext i32 %k32 to i64
+  %isc = icmp eq i64 %k, {CELL}
+  br i1 %isc, label %cell, label %fin
+cell:
+  %len = load i64, ptr %p
+  %d = getelementptr inbounds i8, ptr %p, i64 {DATA}
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %cell ], [ %i2, %body ]
+  %c = icmp slt i64 %i, %len
+  br i1 %c, label %body, label %fin
+body:
+  %sp = getelementptr inbounds i64, ptr %d, i64 %i
+  %v = load i64, ptr %sp
+  call void @__cc_cell_step(i64 %v, i64 %a)
+  %i2 = add i64 %i, 1
+  br label %loop
+fin:
+  %neg = icmp slt i64 %a, 0
+  br i1 %neg, label %fr, label %end
+fr:
+  call void @free(ptr %p)
+  br label %end
+end:
+  ret void
+}
+';
+        return \strtr($ir, $r);
+    }
+
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -3134,6 +3312,7 @@ trait EmitLlvmRuntime
         // {@see discardReleaseFlavor} owns the question "is this slot an rc obj
         // handle", and the drop body asks it through {@see classDropFlavor}. The
         // walker asks the same one, so the two cannot drift.
+        $out .= $this->ccBufWalkers();
         $defs = '';
         $cases = '';
         $dispatch = '';
@@ -3142,6 +3321,15 @@ trait EmitLlvmRuntime
             $body = '';
             $k = 0;
             foreach ($cls->propertyNames as $pn) {
+                $bw = $this->ccBufWalker($cls, $pn);
+                if ($bw !== '') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void ' . $bw . '(i64 %v' . $s . ", i64 %a)\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 if ($this->discardReleaseFlavor($pt) !== 'obj') { continue; }
@@ -3221,7 +3409,22 @@ trait EmitLlvmRuntime
             if ($cls->isStruct) { continue; }
             $body = '';
             $k = 0;
+            // A collected node never runs its drop, so it would stay in the
+            // shutdown destructor registry as a dangling entry.
+            if ($this->resolveMethodClass($cls->name, '__destruct') !== '') {
+                $body .= "  call i1 @__mir_dtor_unreg(ptr %s)\n";
+                $k = 1;
+            }
             foreach ($cls->propertyNames as $pn) {
+                $bw = $this->ccBufWalker($cls, $pn);
+                if ($bw !== '') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void ' . $bw . '(i64 %v' . $s . ", i64 -1)\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 $flavor = $this->classDropFlavor($cls, $pn, $pt);

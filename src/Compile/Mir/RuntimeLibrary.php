@@ -6736,10 +6736,38 @@ entry:
   %z = icmp eq i64 %h, 0
   br i1 %z, label %done, label %go
 go:
+  br label %again
+again:
   %used = call i64 @__mir_hmap_hld(i64 %h, i64 {USED})
-  %old = call i64 @__mir_hmap_detach(i64 %h)
+  %emp = icmp eq i64 %used, 0
+  br i1 %emp, label %fr, label %drop
+drop:
+  %old = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
+  %st = call i64 @__mir_hmap_stride(i64 %h)
+  %eb = mul i64 %st, {MINCAP}
+  %np = call ptr @malloc(i64 %eb)
+  %nul = icmp eq ptr %np, null
+  br i1 %nul, label %oom, label %swap
+oom:
+  store volatile i64 0, ptr null
+  unreachable
+swap:
+  %nw = ptrtoint ptr %np to i64
+  call void @__mir_hmap_hst(i64 %h, i64 {ENTRIES}, i64 %nw)
+  call void @__mir_hmap_hst(i64 %h, i64 {CAP}, i64 {MINCAP})
+  call void @__mir_hmap_hst(i64 %h, i64 {USED}, i64 0)
+  call void @__mir_hmap_hst(i64 %h, i64 {LEN}, i64 0)
+  %ep0 = call i64 @__mir_hmap_hld(i64 %h, i64 {EPOCH})
+  %ep1 = add i64 %ep0, 1
+  call void @__mir_hmap_hst(i64 %h, i64 {EPOCH}, i64 %ep1)
+  %mask = call i64 @__mir_hmap_hld(i64 %h, i64 {MASK})
+  %slots = add i64 %mask, 1
+  %bytes = shl i64 %slots, 2
+  %iw0 = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
+  %ip0 = inttoptr i64 %iw0 to ptr
+  call ptr @memset(ptr %ip0, i32 255, i64 %bytes)
   call void @__mir_hmap_dropall(i64 %h, i64 %old, i64 %used, i64 1)
-  br label %fr
+  br label %again
 fr:
   %ew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
   %iw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
