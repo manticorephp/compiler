@@ -23,8 +23,9 @@ name: ci
 # The cost of getting this wrong is asymmetric: a skipped run over a doc edit
 # saves ~20 runner-minutes, while a skipped run over a build script means the
 # next person to touch code inherits someone else's untested change.
-# The list is spelled out twice on purpose: GitHub Actions does not expand YAML
-# anchors, and a workflow the runner cannot parse is a repository with no CI.
+# Only on push: a PR is NOT filtered. The suite rows and bootstrap-from-pin are
+# REQUIRED status checks on main (ruleset "Protected branches"), and a required
+# check a skipped workflow never reports leaves the PR unmergeable for ever.
 on:
   push:
     branches: [main]
@@ -36,13 +37,6 @@ on:
       - '.gitattributes'
       - '.claude/**'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.gitattributes'
-      - '.claude/**'
   workflow_dispatch:
 
 env:
