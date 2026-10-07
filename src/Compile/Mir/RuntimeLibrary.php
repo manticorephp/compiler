@@ -7149,7 +7149,7 @@ done:
         } elseif ($r === 's') {
             $pre = "  %z = icmp eq ptr %k, null\n  br i1 %z, label %bad, label %hs\nbad:\n  ret i64 -2\nhs:\n  %sx = call i64 @__mir_array_hash_str(ptr %k)\n  %hash = call i64 @__mir_hmap_mix(i64 %sx)\n  br label %go\n";
             $eq = "  %kd = call i64 @__manticore_deref(i64 %kk)\n  %kt = call i64 @__manticore_tag(i64 %kd)\n  %ki = icmp eq i64 %kt, 4\n  br i1 %ki, label %ci, label %next\nci:\n"
-                . "  %km = and i64 %kd, {PMASK}\n  %kpp = inttoptr i64 %km to ptr\n  %q = call i1 @__mir_str_eq(ptr %kpp, ptr %k)\n  br i1 %q, label %hit, label %next\n";
+                . "  %km = and i64 %kd, {PMASK}\n  %kpp = inttoptr i64 %km to ptr\n  %pe = icmp eq ptr %kpp, %k\n  br i1 %pe, label %hit, label %sq\nsq:\n  %q = call i1 @__mir_str_eq(ptr %kpp, ptr %k)\n  br i1 %q, label %hit, label %next\n";
         } else {
             $pre = "  %z = icmp eq ptr %k, null\n  br i1 %z, label %bad, label %ho\nbad:\n  ret i64 -2\nho:\n  %oi = ptrtoint ptr %k to i64\n  %ox = lshr i64 %oi, 4\n  %hash = call i64 @__mir_hmap_mix(i64 %ox)\n  br label %go\n";
             $eq = "  %kd = call i64 @__manticore_deref(i64 %kk)\n  %kt = call i64 @__manticore_tag(i64 %kd)\n  %ki = icmp eq i64 %kt, 8\n  br i1 %ki, label %ci, label %next\nci:\n"

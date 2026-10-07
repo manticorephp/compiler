@@ -1,0 +1,17 @@
+0 1 2 3 4 5 6 
+7 7 8 8 9 
+10 11 12 -1 -1 -1
+v0 0 v1 1 v2 2 v3 3 v4 4 v5 5 v6 6 
+1 8 1 1 8 1 3 10 1 3 10 1 4 11 1 
+12130
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+0 1 2 3 4 5 6 
+bool(false)
+bool(false)
+bool(false)
+int(6)
+int(2)
+int(1)
