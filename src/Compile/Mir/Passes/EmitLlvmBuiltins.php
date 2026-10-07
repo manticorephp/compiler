@@ -918,7 +918,16 @@ trait EmitLlvmBuiltins
      */
     private function cellBoxTempDrop(Type $t, string $cellReg, ?Node $src = null): string
     {
-        if ($t->kind === Type::KIND_CELL) { return ''; }
+        if ($t->kind === Type::KIND_CELL) {
+            // An already-a-cell argument is a borrow of the caller's value —
+            // unless it is a FRESH +1 (a call returning `mixed`, a normalized
+            // conditional…): nobody owns that but this site, and the callee only
+            // co-owns what it keeps. `__mir_cell_drop` is tag-dispatched.
+            if ($src === null || $this->freshRcArgFlavor($src) !== 'cell') { return ''; }
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
+        }
         // An INT box is the call site's own: inline it owns nothing, past the
         // 48-bit form it is a counted heap block ({@see
         // \Compile\MemoryAbi::CELL_TAG_BIGINT}) the callee co-owns if it keeps it.

@@ -6731,6 +6731,19 @@ done:
   ret void
 }
 
+define void @__mir_hmap_freebuf(i64 %h) {
+entry:
+  %ew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
+  %iw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
+  %ep2 = inttoptr i64 %ew to ptr
+  %ip2 = inttoptr i64 %iw to ptr
+  %hp = inttoptr i64 %h to ptr
+  call void @free(ptr %ep2)
+  call void @free(ptr %ip2)
+  call void @free(ptr %hp)
+  ret void
+}
+
 define void @__mir_hmap_free(i64 %h) {
 entry:
   %z = icmp eq i64 %h, 0
@@ -6749,7 +6762,7 @@ drop:
   %nul = icmp eq ptr %np, null
   br i1 %nul, label %oom, label %swap
 oom:
-  store volatile i64 0, ptr null
+  call void @abort()
   unreachable
 swap:
   %nw = ptrtoint ptr %np to i64
@@ -6769,14 +6782,7 @@ swap:
   call void @__mir_hmap_dropall(i64 %h, i64 %old, i64 %used, i64 1)
   br label %again
 fr:
-  %ew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
-  %iw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})
-  %ep2 = inttoptr i64 %ew to ptr
-  %ip2 = inttoptr i64 %iw to ptr
-  %hp = inttoptr i64 %h to ptr
-  call void @free(ptr %ep2)
-  call void @free(ptr %ip2)
-  call void @free(ptr %hp)
+  call void @__mir_hmap_freebuf(i64 %h)
   br label %done
 done:
   ret void

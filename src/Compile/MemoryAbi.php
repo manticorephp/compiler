@@ -229,6 +229,12 @@ final class MemoryAbi
      * EmitLlvmExpr::cellTagIr}. 9 is the first free one.
      */
     public const CELL_TAG_REF = 9;
+    public const CELL_TAG_OBJ = 8;
+    /** A cell's tag nibble is `(word >> CELL_TAG_SHIFT) & CELL_TAG_MASK`. */
+    public const CELL_TAG_SHIFT = 48;
+    public const CELL_TAG_MASK = 15;
+    /** An object payload at or below this is a boxed enum ordinal, not a heap object. */
+    public const CELL_OBJ_MIN_PAYLOAD = 65535;
 
     /**
      * BIGINT (tag 5): an int past the signed-48 inline form lives in a heap box

@@ -6,9 +6,9 @@
 namespace Manticore\Ds {
 
     /** @internal key validation shared by Map and Set */
-    function __hkey(mixed $key, string $cls): void
+    function __hkey(mixed $key, string $cls): mixed
     {
-        if (\is_int($key) || \is_string($key) || \is_object($key)) { return; }
+        if (\is_int($key) || \is_string($key) || \is_object($key)) { return $key; }
         throw new \TypeError('Cannot use a key of type ' . \get_debug_type($key) . ' in ' . $cls);
     }
 
@@ -29,22 +29,22 @@ namespace Manticore\Ds {
         /** @param K $key @return V */
         public function get(mixed $key, mixed $default = null): mixed
         {
-            __hkey($key, 'Map'); $e = __mc_hmap_find($this->__mcbuf, $key);
+            $e = __mc_hmap_find($this->__mcbuf, __hkey($key, 'Map'));
             if ($e >= 0) { return __mc_hmap_val($this->__mcbuf, $e); }
             if (\func_num_args() > 1) { return $default; }
             throw new \OutOfBoundsException('Key not found');
         }
 
         /** @param K $key @param V $value */
-        public function set(mixed $key, mixed $value): void { __hkey($key, 'Map'); __mc_hmap_put($this->__mcbuf, $key, $value); }
+        public function set(mixed $key, mixed $value): void { __mc_hmap_put($this->__mcbuf, __hkey($key, 'Map'), $value); }
 
         /** @param K $key */
-        public function has(mixed $key): bool { __hkey($key, 'Map'); return __mc_hmap_find($this->__mcbuf, $key) >= 0; }
+        public function has(mixed $key): bool { return __mc_hmap_find($this->__mcbuf, __hkey($key, 'Map')) >= 0; }
 
         /** @param K $key @return V */
         public function remove(mixed $key): mixed
         {
-            __hkey($key, 'Map'); $e = __mc_hmap_find($this->__mcbuf, $key);
+            $e = __mc_hmap_find($this->__mcbuf, __hkey($key, 'Map'));
             if ($e < 0) { throw new \OutOfBoundsException('Key not found'); }
             $v = __mc_hmap_val($this->__mcbuf, $e);
             __mc_hmap_del($this->__mcbuf, $key);
@@ -85,7 +85,7 @@ namespace Manticore\Ds {
             if ($offset === null) { throw new \Error('Cannot append to a Map; use set()'); }
             $this->set($offset, $value);
         }
-        public function offsetUnset(mixed $offset): void { __hkey($offset, 'Map'); __mc_hmap_del($this->__mcbuf, $offset); }
+        public function offsetUnset(mixed $offset): void { __mc_hmap_del($this->__mcbuf, __hkey($offset, 'Map')); }
 
         /** @return list<array{0: K, 1: V}> */
         public function __serialize(): array
@@ -117,14 +117,13 @@ namespace Manticore\Ds {
         public function __clone() { $this->__mcbuf = __mc_hmap_clone($this->__mcbuf); }
 
         /** @param T $value */
-        public function add(mixed $value): void { __hkey($value, 'Set'); __mc_hmap_put($this->__mcbuf, $value, null); }
+        public function add(mixed $value): void { __mc_hmap_put($this->__mcbuf, __hkey($value, 'Set'), null); }
         /** @param T $value */
-        public function has(mixed $value): bool { __hkey($value, 'Set'); return __mc_hmap_find($this->__mcbuf, $value) >= 0; }
+        public function has(mixed $value): bool { return __mc_hmap_find($this->__mcbuf, __hkey($value, 'Set')) >= 0; }
         /** @param T $value */
         public function remove(mixed $value): void
         {
-            __hkey($value, 'Set');
-            if (__mc_hmap_del($this->__mcbuf, $value) === 0) { throw new \OutOfBoundsException('Value not found'); }
+            if (__mc_hmap_del($this->__mcbuf, __hkey($value, 'Set')) === 0) { throw new \OutOfBoundsException('Value not found'); }
         }
         public function count(): int { return __mc_hmap_len($this->__mcbuf); }
         public function isEmpty(): bool { return __mc_hmap_len($this->__mcbuf) === 0; }

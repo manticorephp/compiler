@@ -2935,22 +2935,23 @@ trait EmitLlvmRuntime
         $this->rt->needsTagged = true;
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
+        $this->rt->needsHmap = true;
+        $this->rt->needsBuf = true;
         $r = [
             '{TAGMIN}' => (string)\Compile\MemoryAbi::CELL_TAGGED_MIN,
+            '{TSH}' => (string)\Compile\MemoryAbi::CELL_TAG_SHIFT,
+            '{TMASK}' => (string)\Compile\MemoryAbi::CELL_TAG_MASK,
+            '{TOBJ}' => (string)\Compile\MemoryAbi::CELL_TAG_OBJ,
+            '{MINPTR}' => (string)\Compile\MemoryAbi::CELL_OBJ_MIN_PAYLOAD,
             '{PAY}' => (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK,
             '{MAGIC}' => (string)\Compile\MemoryAbi::RC_TAG_MAGIC,
             '{USED}' => (string)\Compile\MemoryAbi::HMAP_USED_OFFSET,
             '{FLAGS}' => (string)\Compile\MemoryAbi::HMAP_FLAGS_OFFSET,
             '{ENTRIES}' => (string)\Compile\MemoryAbi::HMAP_ENTRIES_OFFSET,
-            '{INDEX}' => (string)\Compile\MemoryAbi::HMAP_INDEX_OFFSET,
             '{FSET}' => (string)\Compile\MemoryAbi::HMAP_FLAG_SET,
             '{EKEY}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_KEY,
             '{EVAL}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_VAL,
-            '{ESM}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_SIZE_MAP,
-            '{ESD}' => (string)(\Compile\MemoryAbi::HMAP_ENTRY_SIZE_MAP - \Compile\MemoryAbi::HMAP_ENTRY_SIZE_SET),
             '{TOMB}' => (string)\Compile\MemoryAbi::HMAP_TOMB_HASH,
-            '{KIND}' => (string)\Compile\MemoryAbi::BUF_KIND_OFFSET,
-            '{DATA}' => (string)\Compile\MemoryAbi::BUF_DATA_OFFSET,
             '{CELL}' => (string)\Compile\MemoryAbi::BUF_KIND_CELL,
         ];
         $ir = '
@@ -2959,16 +2960,16 @@ entry:
   %tg = icmp ugt i64 %v, {TAGMIN}
   br i1 %tg, label %tagged, label %raw
 tagged:
-  %sh = lshr i64 %v, 48
-  %nib = and i64 %sh, 15
-  %isobj = icmp eq i64 %nib, 8
+  %sh = lshr i64 %v, {TSH}
+  %nib = and i64 %sh, {TMASK}
+  %isobj = icmp eq i64 %nib, {TOBJ}
   br i1 %isobj, label %obj, label %raw
 obj:
   %neg = icmp slt i64 %a, 0
   br i1 %neg, label %done, label %chk
 chk:
   %pl = and i64 %v, {PAY}
-  %big = icmp ugt i64 %pl, 65535
+  %big = icmp ugt i64 %pl, {MINPTR}
   br i1 %big, label %mg, label %done
 mg:
   %op = inttoptr i64 %pl to ptr
@@ -2994,16 +2995,12 @@ entry:
   %z = icmp eq i64 %h, 0
   br i1 %z, label %end, label %go
 go:
-  %p = inttoptr i64 %h to ptr
-  %up = getelementptr inbounds i8, ptr %p, i64 {USED}
-  %used = load i64, ptr %up
-  %fp = getelementptr inbounds i8, ptr %p, i64 {FLAGS}
-  %fl = load i64, ptr %fp
-  %set = and i64 %fl, {FSET}
-  %sb = mul i64 %set, {ESD}
-  %st = sub i64 {ESM}, %sb
-  %ep = getelementptr inbounds i8, ptr %p, i64 {ENTRIES}
-  %ents = load ptr, ptr %ep
+  %used = call i64 @__mir_hmap_hld(i64 %h, i64 {USED})
+  %set = call i64 @__mir_hmap_hld(i64 %h, i64 {FLAGS})
+  %isn = icmp ne i64 %set, 0
+  %st = call i64 @__mir_hmap_stride(i64 %h)
+  %ew = call i64 @__mir_hmap_hld(i64 %h, i64 {ENTRIES})
+  %ents = inttoptr i64 %ew to ptr
   br label %loop
 loop:
   %i = phi i64 [ 0, %go ], [ %i2, %next ]
@@ -3019,7 +3016,6 @@ live:
   %kp = getelementptr inbounds i8, ptr %e, i64 {EKEY}
   %k = load i64, ptr %kp
   call void @__cc_cell_step(i64 %k, i64 %a)
-  %isn = icmp ne i64 %set, 0
   br i1 %isn, label %next, label %val
 val:
   %vp = getelementptr inbounds i8, ptr %e, i64 {EVAL}
@@ -3033,11 +3029,7 @@ fin:
   %neg = icmp slt i64 %a, 0
   br i1 %neg, label %fr, label %end
 fr:
-  %ip = getelementptr inbounds i8, ptr %p, i64 {INDEX}
-  %idx = load ptr, ptr %ip
-  call void @free(ptr %ents)
-  call void @free(ptr %idx)
-  call void @free(ptr %p)
+  call void @__mir_hmap_freebuf(i64 %h)
   br label %end
 end:
   ret void
@@ -3049,14 +3041,12 @@ entry:
   br i1 %z, label %end, label %go
 go:
   %p = inttoptr i64 %h to ptr
-  %kp = getelementptr inbounds i8, ptr %p, i64 {KIND}
-  %k32 = load i32, ptr %kp
-  %k = zext i32 %k32 to i64
+  %k = call i64 @__mir_nbuf_kindof(i64 %h)
   %isc = icmp eq i64 %k, {CELL}
   br i1 %isc, label %cell, label %fin
 cell:
   %len = load i64, ptr %p
-  %d = getelementptr inbounds i8, ptr %p, i64 {DATA}
+  %d = call ptr @__mir_nbuf_data(i64 %h)
   br label %loop
 loop:
   %i = phi i64 [ 0, %cell ], [ %i2, %body ]
