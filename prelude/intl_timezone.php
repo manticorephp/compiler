@@ -38,7 +38,9 @@ function __mc_icu_ucal_getTimeZoneDisplayName(\Ffi\Ptr $cal, #[\Ffi\CType('int')
 function __mc_icu_ucal_getCanonicalTimeZoneID(\Ffi\Ptr $id, #[\Ffi\CType('int')] int $len, \Ffi\Ptr $out,
     #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $isSystem, \Ffi\Ptr $err): int { return 0; }
 
-#[\Ffi\Library('icui18n'), \Ffi\Symbol('ucal_getIanaTimeZoneID'), \Ffi\CType('int')]
+// ICU 74+ only (php defines getIanaID() only then): bound weak, so an older
+// ICU still links, and called only after {@see __mc_intltz_has_iana} says it exists.
+#[\Ffi\Library('icui18n'), \Ffi\Symbol('ucal_getIanaTimeZoneID'), \Ffi\CType('int'), \Ffi\Weak]
 function __mc_icu_ucal_getIanaTimeZoneID(\Ffi\Ptr $id, #[\Ffi\CType('int')] int $len, \Ffi\Ptr $out,
     #[\Ffi\CType('int')] int $cap, \Ffi\Ptr $err): int { return 0; }
 
@@ -932,8 +934,25 @@ function __mc_intltz_get_canonical_id(string $fn, string $id, mixed &$isSystemId
     return $out;
 }
 
+#[\Ffi\Library('icuuc'), \Ffi\Symbol('u_getVersion')]
+function __mc_icu_tz_u_getVersion(\Ffi\Ptr $v): void {}
+
+/** Whether the linked ICU has ucal_getIanaTimeZoneID (added in ICU 74). */
+function __mc_intltz_has_iana(): bool
+{
+    $v = \__mc_icu_malloc(4);
+    \__mc_icu_tz_u_getVersion($v);
+    $major = \peek_u8($v, 0);
+    \__mc_icu_free($v);
+    return $major >= 74;
+}
+
 function __mc_intltz_get_iana_id(string $fn, string $id): string|false
 {
+    // On an older ICU php has no such function or method at all.
+    if (!\__mc_intltz_has_iana()) {
+        throw new \Error(\str_contains($fn, '::') ? 'Call to undefined method ' . $fn . '()' : 'Call to undefined function ' . $fn . '()');
+    }
     \__mc_intl_reset();
     $u = \__mc_intltz_u16($fn, $id);
     if ($u === null) { return false; }
