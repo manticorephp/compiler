@@ -66,8 +66,8 @@ trait EmitLlvmHmap
      * with a typed key, run in place: the probe and the entry read without the
      * facade's frame. A miss or a bad key runs the real method, which owns
      * every error and the default argument. `$borrow`: an `$m[$k]` read, a
-     * BORROW like every element read (the table keeps the value alive) — the
-     * slow arm can only throw there. Otherwise the result is the +1 the
+     * BORROW like every element read (the table keeps the value alive), so a
+     * slow arm that returns gives its +1 back. Otherwise the result is the +1 the
      * method's `return` hands out. null when the shape does not apply.
      */
     private function emitHmapCall(\Compile\Mir\MethodCall_ $mc, bool $borrow = false): ?string
@@ -104,8 +104,17 @@ trait EmitLlvmHmap
         // The slow arm first: its result type is the merge slot's.
         $slow = $slowL . ":\n" . $this->emitMethodCallInner($mc);
         if ($borrow) {
-            $slow .= $this->nbufNoReturn();
-            $ty = $this->hmapResultTy($mc->type);
+            // The facade may still return (a reified key param coerced the key the
+            // probe missed, #133): its +1 goes back, the table keeps the value.
+            $ty = $this->lastValueType;
+            $sv = $this->lastValue;
+            $fl = $this->discardReleaseFlavor($mc->type);
+            if ($fl !== '') {
+                $slow .= $this->coerceToI64();
+                $slow .= $this->rcReleaseReg($this->lastValue, $fl);
+            }
+            $this->lastValue = $sv;
+            $this->lastValueType = $ty;
         } elseif ($op === 'has') {
             $slow .= $this->coerceToI64();
             $nz = $this->ssa->allocReg();
@@ -120,10 +129,8 @@ trait EmitLlvmHmap
         }
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . ' = alloca ' . $ty . "\n";
-        if (!$borrow) {
-            $slow .= '  store ' . $ty . ' ' . $this->lastValue . ', ptr ' . $slot . "\n";
-            $slow .= '  br label %' . $endL . "\n";
-        }
+        $slow .= '  store ' . $ty . ' ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $slow .= '  br label %' . $endL . "\n";
         $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
         $out .= $fastL . ":\n";
         if ($op === 'has') {
@@ -149,18 +156,6 @@ trait EmitLlvmHmap
             if ($borrow) { $this->markCellOpaque($res); } else { $this->markCellBoxed($res); }
         }
         return $out;
-    }
-
-    /** The LLVM type a value of `$t` travels in. */
-    private function hmapResultTy(Type $t): string
-    {
-        $k = $t->kind;
-        if ($k === Type::KIND_FLOAT) { return 'double'; }
-        if ($k === Type::KIND_STRING || $k === Type::KIND_ARRAY || $k === Type::KIND_OBJ
-            || $k === Type::KIND_CLOSURE) {
-            return $k === Type::KIND_OBJ && $t->class !== null && isset($this->enums[$t->class]) ? 'i64' : 'ptr';
-        }
-        return 'i64';
     }
 
     private function hmapIsCell(Type $t): bool
