@@ -746,7 +746,7 @@ final class Ownership
         if (BitOp::mintsFresh($n)) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }
         $fn = $n->function;
-        // `json_encode` boxes a buffer `__mir_json_enc` just allocated;
+        // `json_encode` boxes a buffer `__mir_json_encf` just allocated;
         // `json_decode` boxes the value its parser just built. Both are fresh
         // whichever path ran — the native builtin (flags 0) and the stdlib body
         // alike — so the name answers for both.

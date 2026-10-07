@@ -2445,6 +2445,7 @@ trait EmitLlvmRuntime
             // Derived from the class alone — identical bytes in every module
             // that emits it, which is what the linkonce_odr coalescing needs.
             $propsFld = 'ptr null';
+            $visitFld = 'ptr null';
             // A METHOD enum owns a class row here, and an enum declares no
             // properties — so this loop would leave its descriptor pointing at
             // nothing while {@see EmitLlvm::emitEnumCellSingletons} emitted the
@@ -2482,6 +2483,13 @@ trait EmitLlvmRuntime
                     . '  %pri = ptrtoint ptr ' . $pRes . " to i64\n"
                     . "  ret i64 %pri\n}\n";
                 $propsFld = 'ptr ' . $sym;
+                // The same view WALKED ({@see \Compile\MemoryAbi::
+                // DESCRIPTOR_VISIT_FN_OFFSET}): what the json encoder reads, so
+                // an object costs no map.
+                $vsym = \Compile\Mir\RuntimeLibrary::visitFnSymbol((int)$id);
+                $defs .= 'define void ' . $vsym . "(ptr %o, ptr %ctx, ptr %cb) {\nentry:\n"
+                    . $this->emitDeclaredPropsVisit($cls->name) . "  ret void\n}\n";
+                $visitFld = 'ptr ' . $vsym;
             }
             // The COMPARE view and group ({@see \Compile\MemoryAbi::
             // DESCRIPTOR_CMP_VIEW_FN_OFFSET}). Same derivation rule as the props
@@ -2525,12 +2533,13 @@ trait EmitLlvmRuntime
             $jsonFld = 'ptr null';
             $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn((int)$id);
             if (isset($this->sigs->paramTypes[$jsonFn])
-                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name]))) {
+                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name])
+                    || $cls->name === 'Resource')) {
                 $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
             }
             if (!$this->reflectWants($cls->name)) {
                 $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
-                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld);
+                    (int)$id, $dropFld, 'ptr null', $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld, $visitFld);
                 continue;
             }
             // Every field is derived from the class itself, never from anything
@@ -2599,7 +2608,7 @@ trait EmitLlvmRuntime
                 $constsFnFld, $ifacesFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
-                $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld);
+                $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld, $visitFld);
             // Registry entry, so a NAME can find this class at runtime.
             $descs .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($id);
             $reflIds[] = $id;
@@ -4080,6 +4089,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
+        if ($this->rt->needsJsonEnc || $this->rt->needsJsonDec) { $out .= $this->lib->jsonUtf8(); }
         if ($this->rt->needsJsonEnc || $this->rt->needsJsonSer) { $out .= $this->lib->jsonSer(); }
         if ($this->rt->needsJsonDec) {
             // stdClass's layout is a constant of the compiler (it declares no

@@ -738,7 +738,7 @@ trait EmitLlvmExpr
         $out .= "  %f2 = or i1 %f1, %isE\n";
         $out .= "  br i1 %f2, label %asflt, label %done\n";
         $out .= "asflt:\n";
-        $out .= "  %d = call double @strtod(ptr %s, ptr null)\n";
+        $out .= "  %d = call double @__mir_php_strtod(ptr %s, ptr null)\n";
         $out .= "  %fi = fptosi double %d to i64\n";
         $out .= "  ret i64 %fi\n";
         $out .= "done:\n";
@@ -878,7 +878,7 @@ trait EmitLlvmExpr
         $out .= "asstr:\n";
         $out .= "  %sp = and i64 %v, 281474976710655\n";
         $out .= "  %sptr = inttoptr i64 %sp to ptr\n";
-        $out .= "  %sv = call double @strtod(ptr %sptr, ptr null)\n";
+        $out .= "  %sv = call double @__mir_php_strtod(ptr %sptr, ptr null)\n";
         $out .= "  ret double %sv\n";
         $out .= "asfloat:\n";
         $out .= "  %fd = bitcast i64 %v to double\n";
@@ -1658,7 +1658,7 @@ trait EmitLlvmExpr
     private function taggedEqRuntime(): string
     {
         $this->rt->needsStrcmp = true;
-        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+        $this->libcExtra['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl();
         $out0 = $this->objCompareRuntime();
         // __mir_is_numeric_str(s) -> i1
         $out  = $out0 . "\ndefine i1 @__mir_is_numeric_str(ptr %s) {\nentry:\n";
@@ -1671,7 +1671,7 @@ trait EmitLlvmExpr
         $out .= "  br i1 %empty, label %no, label %parse\n";
         $out .= "parse:\n";
         $out .= "  %end = alloca ptr\n";
-        $out .= "  %d = call double @strtod(ptr %s, ptr %end)\n";
+        $out .= "  %d = call double @__mir_php_strtod(ptr %s, ptr %end)\n";
         $out .= "  %ep = load ptr, ptr %end\n";
         $out .= "  %noparse = icmp eq ptr %ep, %s\n";
         $out .= "  br i1 %noparse, label %no, label %tail\n";
@@ -1706,6 +1706,18 @@ trait EmitLlvmExpr
         $out .= "  %sn = call i1 @__mir_is_numeric_str(ptr %pp)\n  ret i1 %sn\n";
         $out .= "y:\n  ret i1 true\n  n:\n  ret i1 false\n}\n";
 
+        // __mir_inf_str_eq(d, s) -> i1: a float against a NON-numeric string is
+        // compared as strings (php 8), and the only floats whose string form is
+        // not numeric are the infinities — `INF == "INF"` is true.
+        $out .= "@.mir.inf = private unnamed_addr constant [4 x i8] c\"INF\\00\"\n";
+        $out .= "@.mir.ninf = private unnamed_addr constant [5 x i8] c\"-INF\\00\"\n";
+        $out .= "define i1 @__mir_inf_str_eq(double %d, ptr %s) {\nentry:\n";
+        $out .= "  %pi = fcmp oeq double %d, 0x7FF0000000000000\n  %ni = fcmp oeq double %d, 0xFFF0000000000000\n";
+        $out .= "  %inf = or i1 %pi, %ni\n  br i1 %inf, label %cmp, label %no\n";
+        $out .= "cmp:\n  %w = select i1 %pi, ptr @.mir.inf, ptr @.mir.ninf\n";
+        $out .= "  %c = call i32 @strcmp(ptr %s, ptr %w)\n  %e = icmp eq i32 %c, 0\n  ret i1 %e\n";
+        $out .= "no:\n  ret i1 false\n}\n";
+
         // __manticore_tagged_loose_eq(a,b) -> i64 (0/1)
         $out .= "define i64 @__manticore_tagged_loose_eq(i64 %a, i64 %b) {\nentry:\n";
         $out .= "  %ta = call i64 @__manticore_tag(i64 %a)\n";
@@ -1724,11 +1736,21 @@ trait EmitLlvmExpr
         $out .= "chkstr:\n";
         $out .= "  %sa = icmp eq i64 %ta, 4\n  %sb = icmp eq i64 %tb, 4\n";
         $out .= "  %bothstr = and i1 %sa, %sb\n";
-        $out .= "  br i1 %bothstr, label %scmp, label %raw\n";
+        $out .= "  br i1 %bothstr, label %scmp, label %fschk\n";
         $out .= "scmp:\n";
         $out .= "  %pa = and i64 %a, 281474976710655\n  %ppa = inttoptr i64 %pa to ptr\n";
         $out .= "  %pb = and i64 %b, 281474976710655\n  %ppb = inttoptr i64 %pb to ptr\n";
         $out .= "  %se = call i1 @__mir_str_eq(ptr %ppa, ptr %ppb)\n  %sz = zext i1 %se to i64\n  ret i64 %sz\n";
+        // A float against a non-numeric string: only ±INF can match.
+        $out .= "fschk:\n";
+        $out .= "  %fa = icmp eq i64 %ta, 6\n  %fb = icmp eq i64 %tb, 6\n";
+        $out .= "  %fs1 = and i1 %fa, %sb\n  %fs2 = and i1 %fb, %sa\n  %fs = or i1 %fs1, %fs2\n";
+        $out .= "  br i1 %fs, label %fsc, label %raw\n";
+        $out .= "fsc:\n";
+        $out .= "  %fv = select i1 %fs1, i64 %a, i64 %b\n  %sv = select i1 %fs1, i64 %b, i64 %a\n";
+        $out .= "  %fd = call double @__manticore_tagged_to_double(i64 %fv)\n";
+        $out .= "  %svp = and i64 %sv, 281474976710655\n  %svpp = inttoptr i64 %svp to ptr\n";
+        $out .= "  %fse = call i1 @__mir_inf_str_eq(double %fd, ptr %svpp)\n  %fsz = zext i1 %fse to i64\n  ret i64 %fsz\n";
         $out .= "raw:\n";
         $out .= "  %req = icmp eq i64 %a, %b\n  %rz = zext i1 %req to i64\n  ret i64 %rz\n}\n";
 
@@ -1799,8 +1821,8 @@ trait EmitLlvmExpr
         $out .= "  %both = and i1 %an, %bn\n";
         $out .= "  br i1 %both, label %num, label %no\n";
         $out .= "num:\n";
-        $out .= "  %da = call double @strtod(ptr %a, ptr null)\n";
-        $out .= "  %db = call double @strtod(ptr %b, ptr null)\n";
+        $out .= "  %da = call double @__mir_php_strtod(ptr %a, ptr null)\n";
+        $out .= "  %db = call double @__mir_php_strtod(ptr %b, ptr null)\n";
         $out .= "  %eq = fcmp oeq double %da, %db\n  ret i1 %eq\n";
         $out .= "yes:\n  ret i1 true\n";
         $out .= "no:\n  ret i1 false\n}\n";
@@ -2358,7 +2380,7 @@ trait EmitLlvmExpr
             $this->rt->needsStrtod = true;
             $out = $this->coerceToPtr();
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $this->lastValue . ', ptr null)' . "\n";
+            $out .= '  ' . $reg . ' = call double @__mir_php_strtod(ptr ' . $this->lastValue . ', ptr null)' . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'double';
             return $out;
@@ -3656,7 +3678,7 @@ trait EmitLlvmExpr
                 $out .= $this->coerceToPtr();
                 $sp = $this->lastValue;
                 $reg = $this->ssa->allocReg();
-                $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $sp . ', ptr null)' . "\n";
+                $out .= '  ' . $reg . ' = call double @__mir_php_strtod(ptr ' . $sp . ', ptr null)' . "\n";
                 $out .= $this->freeStrTemp($c->operand, $sp);
                 $this->lastValue = $reg; $this->lastValueType = 'double';
                 return $out;
@@ -5489,9 +5511,9 @@ trait EmitLlvmExpr
         }
         // Loose ==/!= between a STRING and a NUMBER (int/float): PHP numeric-string
         // juggling. A numeric string ("10", "1e2") compares BY VALUE; a
-        // non-numeric string ("abc") is never == a number (PHP 8 casts the number
-        // to string, which a non-numeric string can't match). A null `?string`
-        // carrier coerces to numeric 0.
+        // non-numeric string ("abc") compares with the number cast to string
+        // (PHP 8) — which only an infinity's "INF" / "-INF" can match
+        // (`__mir_inf_str_eq`). A null `?string` carrier coerces to numeric 0.
         // LOOSE only — `"10" === 10` stays false (distinct types).
         $looseEqNum = $op === '==' || $op === '!=';
         if ($looseEqNum
@@ -5524,16 +5546,18 @@ trait EmitLlvmExpr
             $isn = $this->ssa->allocReg(); $chunks[] = '  ' . $isn . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
             $chunks[] = '  br i1 ' . $isn . ', label %' . $numL . ', label %' . $nnumL . "\n";
             $chunks[] = $numL . ":\n";
-            $sd = $this->ssa->allocReg(); $chunks[] = '  ' . $sd . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
+            $sd = $this->ssa->allocReg(); $chunks[] = '  ' . $sd . ' = call double @__mir_php_strtod(ptr ' . $sp . ", ptr null)\n";
             $eqn = $this->ssa->allocReg(); $chunks[] = '  ' . $eqn . ' = fcmp oeq double ' . $sd . ', ' . $nd . "\n";
             $chunks[] = '  br label %' . $joinL . "\n";
-            $chunks[] = $nnumL . ":\n  br label %" . $joinL . "\n";
+            $chunks[] = $nnumL . ":\n";
+            $ise = $this->ssa->allocReg(); $chunks[] = '  ' . $ise . ' = call i1 @__mir_inf_str_eq(double ' . $nd . ', ptr ' . $sp . ")\n";
+            $chunks[] = '  br label %' . $joinL . "\n";
             $chunks[] = $nullL . ":\n";
             $eqz = $this->ssa->allocReg(); $chunks[] = '  ' . $eqz . ' = fcmp oeq double 0.0, ' . $nd . "\n";
             $chunks[] = '  br label %' . $joinL . "\n";
             $chunks[] = $joinL . ":\n";
             $phi = $this->ssa->allocReg();
-            $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $eqn . ', %' . $numL . ' ], [ false, %' . $nnumL . ' ], [ ' . $eqz . ', %' . $nullL . " ]\n";
+            $chunks[] = '  ' . $phi . ' = phi i1 [ ' . $eqn . ', %' . $numL . ' ], [ ' . $ise . ', %' . $nnumL . ' ], [ ' . $eqz . ', %' . $nullL . " ]\n";
             $res = $phi;
             if ($isNe) { $res = $this->ssa->allocReg(); $chunks[] = '  ' . $res . ' = xor i1 ' . $phi . ", true\n"; }
             $z = $this->ssa->allocReg(); $chunks[] = '  ' . $z . ' = zext i1 ' . $res . " to i64\n";

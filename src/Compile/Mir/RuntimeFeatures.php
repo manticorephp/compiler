@@ -254,7 +254,7 @@ public bool $needsClosureRc = false;
         if ($this->needsStrtol) {
             $decls['strtol'] = "declare i64 @strtol(ptr, ptr, i32)";
             // `__mir_str_to_int` falls back to strtod for a float-literal prefix.
-            $decls['strtod'] = "declare double @strtod(ptr, ptr)";
+            $decls['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl();
         }
         if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
         if ($this->needsExceptions) {
@@ -269,7 +269,7 @@ public bool $needsClosureRc = false;
             $decls['_Unwind_SetIP'] = "declare void @_Unwind_SetIP(ptr, i64)";
             $decls['abort'] = "declare void @abort() noreturn";
         }
-        if ($this->needsStrtodDecl()) { $decls['strtod'] = "declare double @strtod(ptr, ptr)"; }
+        if ($this->needsStrtodDecl()) { $decls['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl(); }
         // Unified PhpArray runtime libc deps (docs/16).
         $decls['realloc'] = "declare ptr @realloc(ptr, i64)";
         $decls['memset']  = "declare ptr @memset(ptr, i32, i64)";

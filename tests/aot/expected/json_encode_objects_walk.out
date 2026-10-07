@@ -1,0 +1,47 @@
+[{"id":1,"name":"item\/1","price":1.5,"active":true,"note":null,"tags":["a","b"],"meta":{"k":1},"suit":"H","leaf":{"n":1,"next":null}},{"id":2,"name":"item\/2","price":2.5,"active":true,"note":null,"tags":["a","b"],"meta":{"k":1},"suit":"H","leaf":{"n":1,"next":null}}]
+{
+    "id": 1,
+    "name": "item/1",
+    "price": 1.5,
+    "active": true,
+    "note": null,
+    "tags": [
+        "a",
+        "b"
+    ],
+    "meta": {
+        "k": 1
+    },
+    "suit": "H",
+    "leaf": {
+        "n": 1,
+        "next": null
+    }
+}
+{"a":1,"b":[1,2],"7":"seven","c d":null} {
+    "a": 1,
+    "b": [
+        1,
+        2
+    ],
+    "7": "seven",
+    "c d": null
+}
+{"x":1,"y":{"z":[true]}} {"a":{"b":[1,{"c":"d"}]},"0":5}
+{}{}[{}]
+bool(false)
+int(1)
+string(133) "{"id":3,"name":"item\/3","price":3.5,"active":true,"note":null,"tags":["a","b"],"meta":{"k":1},"suit":"H","leaf":{"n":1,"next":null}}"
+int(0)
+bool(false)
+int(6)
+string(19) "{"n":1,"next":null}"
+bool(false)
+int(11)
+string(13) "{"p":0,"q":2}"
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+}

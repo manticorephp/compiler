@@ -1,0 +1,25 @@
+"0x1A" false
+"0X1a" false
+"inf" false
+"-INF" false
+"nan" false
+"infinity" false
+" 12" true
+"12 " true
+"1e5" true
+".5" true
+"5." true
+"-0" true
+"1e" false
+"" false
+" " false
+"0b1" false
+"1_000" false
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+bool(false)
+truetruefalsefalse
