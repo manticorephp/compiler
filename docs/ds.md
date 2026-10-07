@@ -133,6 +133,19 @@ echo UInt64Array::toDecimal($h->max());
   `ValueError`; a fractional float is a `TypeError`.
 - `UInt64Array<T>` takes a `#[TypeDef(repr: 'u64')]`; an `i64` TypeDef does not
   fit, nor does a `u64` one fit an `Int64Array`.
+- **JSON writes the value, not the bits.** JSON numbers have no width, so
+  `json_encode($h)` gives `[18446744073709551615, …]` — what a Go, Rust or
+  JS-BigInt consumer expects. `toArray()`, `var_dump()`, `print_r()` and
+  `serialize()` stay on bits (the in-program contract). The lossless way back is
+  `JSON_BIGINT_AS_STRING`, whose decimal strings `fromArray()` accepts:
+
+  ```php
+  $back = UInt64Array::fromArray(json_decode($json, true, 512, JSON_BIGINT_AS_STRING));
+  ```
+
+  Without the flag, php decodes a value past `PHP_INT_MAX` as a float, which
+  `fromArray()` accepts only when it is exact. Under Zend (the polyfill) the
+  large values encode as quoted strings — nothing there can write them bare.
 
 ## `ByteBuffer`
 

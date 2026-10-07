@@ -23,6 +23,33 @@ namespace Compile\Mir;
 final class ClassDef
 {
     /**
+     * Stable, cross-object class identity: same FQN → same id in EVERY compiled
+     * object. A per-module sequential class_id collides across the user.o /
+     * stdlib.o boundary (id N = a different class in each object), which
+     * corrupts cross-object drop / method-dispatch / instanceof — the rc=139
+     * two-object fault. A content hash of the FQN is identical everywhere, so
+     * the boundary is safe (worst case for a class only one object knows = a
+     * missing drop case = a leak, never a wrong-layout free) — and a generic
+     * runtime helper may recognise a class by it.
+     *
+     * Bounded polynomial hash: `h*131` stays far under PHP_INT_MAX, so the
+     * value is IDENTICAL under Zend (which promotes int overflow to float) and
+     * the native self-host runtime (which wraps i64) — otherwise the seed and
+     * the self-built compiler would assign different ids and the byte-identical
+     * fixpoint would break. Positive + non-zero (0 is the "no class" sentinel).
+     */
+    public static function stableId(string $fqn): int
+    {
+        $h = 0;
+        $n = \strlen($fqn);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $h = ($h * 131 + \ord(\substr($fqn, $i, 1))) % 1000000000000037;
+        }
+        if ($h === 0) { $h = 1; }
+        return $h;
+    }
+
+    /**
      * @param string[]            $propertyNames ordered, for offsets
      * @param array<string, Type> $propertyTypes name → type
      * @param array<string, true> $methodNames   declared method names

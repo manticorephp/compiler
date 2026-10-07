@@ -532,6 +532,27 @@ namespace Manticore\Ds {
             return ($a ^ \PHP_INT_MIN) <=> ($b ^ \PHP_INT_MIN);
         }
 
+        /**
+         * Every element as its unsigned decimal value: JSON numbers have no
+         * width, so one past 2^63 is written exactly — a Go / Rust / BigInt
+         * consumer reads 18446744073709551615, not -1. `toArray()` stays on
+         * bits. Decode it back losslessly with JSON_BIGINT_AS_STRING and
+         * `fromArray()`.
+         * @return array<int, mixed>
+         */
+        public function jsonSerialize(): array
+        {
+            // Off the raw buffer, not toArray(): an element typed `T` (a
+            // TypeDef) must not flow through a mixed-typed list here.
+            $out = [];
+            $n = __mc_nbuf_len($this->__mcbuf);
+            for ($k = 0; $k < $n; $k++) {
+                $bits = __mc_nbuf_get_i($this->__mcbuf, $k);
+                $out[] = $bits < 0 ? new JsonNumber(self::toDecimal($bits)) : $bits;
+            }
+            return $out;
+        }
+
         /** The unsigned decimal value of 64 bits. */
         public static function toDecimal(int $bits): string
         {
@@ -776,5 +797,18 @@ namespace Manticore\Ds {
         {
             return __mc_nbuf_same($this->__mcbuf, $other->__mcbuf) !== 0;
         }
+    }
+
+    /**
+     * A JSON number php's int cannot hold, as its decimal text. The native
+     * encoder writes the digits BARE (it knows the class by its stable id);
+     * under Zend, where nothing does, it degrades to the quoted string.
+     * @internal
+     */
+    final class JsonNumber implements \JsonSerializable
+    {
+        public function __construct(public readonly string $digits) {}
+
+        public function jsonSerialize(): mixed { return $this->digits; }
     }
 }

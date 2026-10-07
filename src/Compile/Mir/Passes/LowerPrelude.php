@@ -373,6 +373,13 @@ trait LowerPrelude
         foreach ($this->classTable as $cname => $cd) {
             if ($cname === 'stdClass' || $cd->isStruct || $cd->isAbstract) { continue; }
             if ($this->isTypeDef($cname)) { continue; }
+            // A resource is not encodable: JSON_ERROR_UNSUPPORTED_TYPE, and
+            // `null` in its place (what JSON_PARTIAL_OUTPUT_ON_ERROR keeps).
+            if ($cname === 'Resource') {
+                $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($cd->classId) . "(mixed \$v): mixed {\n"
+                    . "  \\__mc_json_err(8);\n  return null;\n}\n";
+                continue;
+            }
             if (!$this->declaresMethod($cname, 'jsonSerialize')) { continue; }
             $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($cd->classId) . "(mixed \$v): mixed {\n"
                 . "  if (\$v instanceof \\" . $cname . ") { return \$v->jsonSerialize(); }\n"
@@ -1353,6 +1360,7 @@ trait LowerPrelude
             'JSON_HEX_QUOT' => 8, 'JSON_FORCE_OBJECT' => 16, 'JSON_NUMERIC_CHECK' => 32,
             'JSON_UNESCAPED_SLASHES' => 64, 'JSON_PRETTY_PRINT' => 128,
             'JSON_UNESCAPED_UNICODE' => 256, 'JSON_PARTIAL_OUTPUT_ON_ERROR' => 512,
+            'JSON_UNESCAPED_LINE_TERMINATORS' => 2048,
             'JSON_PRESERVE_ZERO_FRACTION' => 1024, 'JSON_INVALID_UTF8_IGNORE' => 1048576,
             'JSON_INVALID_UTF8_SUBSTITUTE' => 2097152, 'JSON_THROW_ON_ERROR' => 4194304,
             'JSON_OBJECT_AS_ARRAY' => 1, 'JSON_BIGINT_AS_STRING' => 2, 'JSON_ERROR_NONE' => 0,

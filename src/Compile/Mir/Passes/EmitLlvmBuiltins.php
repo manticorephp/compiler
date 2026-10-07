@@ -480,10 +480,13 @@ trait EmitLlvmBuiltins
         // JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE were always set.
         if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
         if ($name === '__mc_json_ser' && \count($args) === 1) { return $this->biJsonSer($args); }
-        if ($name === 'json_encode' && \count($args) >= 1
-            && $this->argIsDefaultInt($args, 1, 0)
-            && $this->argIsDefaultInt($args, 2, 512)) { return $this->biJsonEncode($args); }
-        if ($name === 'json_decode' && $this->jsonDecodeNative($args)) { return $this->biJsonDecode($args); }
+        if ($name === '__mc_json_encode_native' && \count($args) === 3) { return $this->biJsonEncodeNative($args); }
+        if ($name === 'json_encode' && $this->jsonInline($args, 3, false)) { return $this->biJsonEncode($args); }
+        if ($name === 'json_decode' && $this->jsonInline($args, 4, true)
+            && $this->jsonDepthOk($args, 2)) { return $this->biJsonDecode($args); }
+        if ($name === 'json_validate' && $this->jsonInline($args, 3, false) && $this->jsonDepthOk($args, 1)
+            && \in_array(Node::literalInt($args[2] ?? null) ?? 0, [0, 1048576], true)
+            && (!isset($args[2]) || Node::literalInt($args[2]) !== null)) { return $this->biJsonValidate($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'putenv')                       { return $this->biPutenv($args); }
@@ -3946,13 +3949,13 @@ trait EmitLlvmBuiltins
         // to cancel the binary representation error before the final round —
         // PHP's php_round pre-rounding, so round(1.005, 2) → 1.01 not 1.
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
-        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+        $this->libcExtra['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl();
         $pbuf = $this->ssa->allocReg();
         $out .= '  ' . $pbuf . " = alloca [40 x i8]\n";
         $out .= '  call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $pbuf
               . ', i64 40, ptr @.fmt.p15, double ' . $scaled . ")\n";
         $cleaned = $this->ssa->allocReg();
-        $out .= '  ' . $cleaned . ' = call double @strtod(ptr ' . $pbuf . ", ptr null)\n";
+        $out .= '  ' . $cleaned . ' = call double @__mir_php_strtod(ptr ' . $pbuf . ", ptr null)\n";
         $rounded = $this->ssa->allocReg();
         $out .= '  ' . $rounded . ' = call double @llvm.round.f64(double ' . $cleaned . ")\n";
         $reg = $this->ssa->allocReg();
@@ -4098,11 +4101,11 @@ trait EmitLlvmBuiltins
         // raw string POINTER would hand back garbage. A CELL/UNKNOWN routes
         // through the tagged decoder (which itself strtod's a string cell).
         if ($ak === Type::KIND_STRING) {
-            $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
+            $this->libcExtra['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl();
             $out .= $this->coerceToPtr();
             $sp = $this->lastValue;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call double @strtod(ptr ' . $sp . ", ptr null)\n";
+            $out .= '  ' . $reg . ' = call double @__mir_php_strtod(ptr ' . $sp . ", ptr null)\n";
             $out .= $this->freeStrTemp($args[0], $sp);
             $this->lastValue = $reg; $this->lastValueType = 'double';
             return $out;
@@ -8418,8 +8421,29 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsTagged = true;
         $out = '';
+        // Sized and HASHED from the start: the map is string-keyed by
+        // construction, and growing from capacity 0 cost a realloc per
+        // property plus the promotion to hashed — per object, on every
+        // json_encode / get_object_vars / (array) of it.
+        $n = 0;
+        if ($cls !== '' && isset($this->classes[$cls])) {
+            $cd = $this->classes[$cls];
+            $keyed = $forCompare ? $this->cmpKeyProps($cd) : [];
+            foreach ($cd->propertyNames as $pn) {
+                if (($cd->propertyTypes[$pn] ?? null) === null) { continue; }
+                if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
+                if ($this->isBufSlot($cd, $pn)) { continue; }
+                if ($publicOnly && !$forCompare) {
+                    $pm = $cd->propertyMeta[$pn] ?? null;
+                    if ($pm !== null && $pm->visibility !== 'public') { continue; }
+                }
+                $n = $n + 1;
+            }
+        }
         $initg = $this->ssa->allocReg();
-        $out .= '  ' . $initg . " = call ptr @__mir_array_alloc(i64 0)\n";
+        $out .= '  ' . $initg . ($n > 0
+            ? ' = call ptr @__mir_array_alloc_hashed(i64 ' . (string)$n . ")\n"
+            : " = call ptr @__mir_array_alloc(i64 0)\n");
         $cur = $initg;
         if ($cls !== '' && isset($this->classes[$cls])) {
             $cd = $this->classes[$cls];
@@ -8738,129 +8762,122 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * `json_encode($value)` — native single-buffer encoder. Boxes the arg to a
-     * cell and recurses through `@__mir_json_enc`, which walks the value into ONE
-     * growing buffer (php smart_str style): ints via `__mir_int_fmt` and string
-     * escaping written straight into the buffer (no per-node temp), floats via
-     * the Ryu shortest-decimal formatter `manticore___mc_dtoa_bits` (byte-exact
-     * with php's serialize_precision=-1). An OBJECT cell falls back to the
-     * compiled reference `@manticore___mc_json_enc` for parity. @param Node[] $args
-     */
-    /**
-     * Can this `json_decode()` call take the native path? Every argument after
-     * the first is FOLDED at compile time ({@see jsonAssocMode}), so they may
-     * only be literals — anything else has a side effect the builtin would drop,
-     * and falls through to the compiled PHP parser.
-     * @param Node[] $args
-     */
-    private function jsonDecodeNative(array $args): bool
-    {
-        $c = \count($args);
-        if ($c < 1 || $c > 4) { return false; }
-        if ($c >= 2) {
-            $k = $args[1]->kind;
-            if ($k !== Node::KIND_BOOL_CONST && $k !== Node::KIND_INT_CONST
-                && $k !== Node::KIND_NULL_CONST) { return false; }
-        }
-        // The native decoder has no depth limit and reads no flags, so it may
-        // only take a call that asks for neither.
-        return $this->argIsDefaultInt($args, 2, 512)
-            && $this->argIsDefaultInt($args, 3, 0);
-    }
-
-    /**
-     * Is argument `$i` absent, or the literal int `$want`?
+     * Can this json_* call take the INLINE native path? Every optional argument
+     * must be absent, a literal, or a plain local: the JSON_THROW_ON_ERROR arm
+     * reads `$flags` a second time ({@see jsonThrowTail}), so it may only be a
+     * value that reading twice cannot change. Anything else — a call, a
+     * property — keeps the compiled-PHP body. `$assocLit` additionally pins
+     * json_decode's `$associative` to a literal.
      *
      * ⚠ Ask what an argument IS, never how many there are. Lowering PADS
      * omitted defaults, so giving a stdlib function a new defaulted parameter
      * rewrites every existing call site into a wider one — and an arity-counting
      * gate then hands the whole builtin back to the compiled-PHP body without a
-     * word. Widening `json_encode` to `($value, $flags = 0, $depth = 512)` moved
-     * EVERY `json_encode($v)` in every program off the native single-buffer
-     * encoder, and `json_decode($s, true)` off the native decoder onto a parser
-     * that does not combine surrogate pairs.
+     * word. Widening `json_encode` to `($value, $flags = 0, $depth = 512)` once
+     * moved EVERY `json_encode($v)` in every program off the native encoder.
      * @param Node[] $args
      */
-    private function argIsDefaultInt(array $args, int $i, int $want): bool
+    private function jsonInline(array $args, int $max, bool $assocLit): bool
     {
-        if (!isset($args[$i])) { return true; }
-        if ($args[$i]->kind !== Node::KIND_INT_CONST) { return false; }
-        return Node::literalInt($args[$i]) === $want;
+        $n = \count($args);
+        if ($n < 1 || $n > $max) { return false; }
+        for ($i = 1; $i < $n; $i = $i + 1) {
+            $k = $args[$i]->kind;
+            $lit = $k === Node::KIND_INT_CONST || $k === Node::KIND_BOOL_CONST
+                || $k === Node::KIND_NULL_CONST;
+            if ($assocLit && $i === 1 && !$lit) { return false; }
+            if (!$lit && $k !== Node::KIND_LOAD_LOCAL) { return false; }
+        }
+        return true;
     }
 
     /**
-     * 1 when this `json_decode` call wants assoc ARRAYS, 0 when it wants
-     * stdClass OBJECTS. php's rule is `$associative === true`, or `null` with
-     * JSON_OBJECT_AS_ARRAY set in `$flags` — and `null` is the DEFAULT, so a bare
-     * `json_decode($s)` builds objects. Folded here because {@see
-     * jsonDecodeNative} only admits literals; anything else took the PHP body.
-     * @param Node[] $args
+     * Optional int argument `$i` as an i64 operand, left in lastValue: the
+     * literal, `$default` when absent (or a null literal), else the emitted
+     * value. Returns the IR. @param Node[] $args
      */
-    private function jsonAssocMode(array $args): int
+    private function jsonIntOperand(array $args, int $i, int $default): string
     {
-        $flags = Node::literalInt($args[3] ?? null) ?? 0;
-        $objectAsArray = ($flags & 1) !== 0;      // JSON_OBJECT_AS_ARRAY
-        // A php `null` $associative means "objects, unless JSON_OBJECT_AS_ARRAY".
-        // literalBool answers null for BOTH a null literal and a runtime value,
-        // so the gate's literals-only guarantee is what makes reading it here
-        // unambiguous: anything non-literal never reaches this function.
-        $assoc = Node::literalBool($args[1] ?? null);
-        if ($assoc === null) { return $objectAsArray ? 1 : 0; }
-        return $assoc ? 1 : 0;
-    }
-
-    /**
-     * `json_decode($json)` — native recursive-descent decoder
-     * ({@see \Compile\Mir\RuntimeLibrary::jsonDec}). Returns a NaN-boxed cell:
-     * objects become cell-repr assoc arrays, arrays cell-repr vecs, scalars
-     * their boxed selves. Replaces the five-PHP-calls-per-value
-     * `\Runtime\Json\Parser`, which stayed at php's own speed because every key
-     * and value cost a `substr` malloc. @param Node[] $args
-     */
-    private function biJsonDecode(array $args): string
-    {
-        $this->rt->needsJsonDec = true;
-        $this->rt->needsStrRc = true;     // __mir_rc_release_str on the key temp
-        $this->rt->needsConcat = true;    // __mir_strlen / __mir_str_new / set_len
-        $this->rt->needsTagged = true;    // the box_* helpers
-        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
-        $this->libcExtra['strtod'] = 'declare double @strtod(ptr, ptr)';
-        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
-        $out = $this->emitPtrArg($args[0]);
-        $sp = $this->lastValue;
-        // php clears json_last_error() on entry. The builtin REPLACES the whole
-        // call, so the PHP body never runs and without this the slot would keep
-        // reporting whatever some earlier json call left in it.
-        $out .= $this->jsonErrSet('0');
-        $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__mir_json_decodea(ptr ' . $sp
-              . ', i64 ' . (string)$this->jsonAssocMode($args) . ")\n";
-        $out .= $this->freeStrTemp($args[0], $sp);
-        // php answers null when the document was rejected. The decoder reports
-        // through the shared slot rather than by propagating a failure out of
-        // its recursion, so the verdict is read here.
-        $err = $this->ssa->allocReg();
-        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
-        $bad = $this->ssa->allocReg();
-        $out .= '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
-        $nul = $this->ssa->allocReg();
-        $out .= '  ' . $nul . " = call i64 @__manticore_box_null()\n";
-        $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $nul
-              . ', i64 ' . $reg . "\n";
-        // Both operands box by construction: $nul is box_null right above,
-        // and $reg is __mir_json_decodea's own result — every `ret` in that
-        // function and its recursive helpers (__mir_json_deca, __mir_jd_num,
-        // the object/array/string/keyword arms) tags via a box_* call, with
-        // no raw-passthrough arm anywhere in the decoder (verified by
-        // reading every `ret i64` in RuntimeLibrary.php's json-decode family).
-        $this->markCellBoxed($res);
-        $this->lastValue = $res;
         $this->lastValueType = 'i64';
+        if (!isset($args[$i]) || $args[$i]->kind === Node::KIND_NULL_CONST) {
+            $this->lastValue = (string)$default;
+            return '';
+        }
+        $lit = Node::literalInt($args[$i]);
+        if ($lit !== null) {
+            $this->lastValue = (string)$lit;
+            return '';
+        }
+        return $this->emitIntArg($args[$i]);
+    }
+
+    /**
+     * Can this call run under JSON_THROW_ON_ERROR? A literal `$flags` says;
+     * a runtime one might. @param Node[] $args
+     */
+    private function jsonMayThrow(array $args, int $i): bool
+    {
+        if (!isset($args[$i]) || $args[$i]->kind === Node::KIND_NULL_CONST) { return false; }
+        $lit = Node::literalInt($args[$i]);
+        return $lit === null || ($lit & 4194304) !== 0;
+    }
+
+    /**
+     * JSON_THROW_ON_ERROR's bracket around an inline call: before it, snapshot
+     * the error slot (php leaves json_last_error() untouched in this mode);
+     * after it, the stdlib `__mc_json_throw` restores the slot and raises
+     * JsonException with php's message and code when the call failed. It reads
+     * the `$flags` ARGUMENT again, which {@see jsonInline} guarantees is safe,
+     * and decides the mode itself, so a runtime `$flags` needs no IR test —
+     * except to free the call's own result (`$release`) on the path that
+     * throws. `$enc`: json_encode, where JSON_PARTIAL_OUTPUT_ON_ERROR turns the
+     * mode off. Nothing when a literal rules the mode out.
+     * @param Node[] $args
+     */
+    private function jsonThrowSnap(array $args, int $i): string
+    {
+        if (!$this->jsonMayThrow($args, $i)) { return ''; }
+        $r = $this->ssa->allocReg();
+        return '  ' . $r . " = call i64 @manticore___mc_json_err(i64 -2)\n";
+    }
+
+    /** @param Node[] $args */
+    private function jsonThrowTail(array $args, int $i, string $flags, string $err,
+                                   int $enc, string $release): string
+    {
+        if (!$this->jsonMayThrow($args, $i)) { return ''; }
+        $this->rt->needsExceptions = true;
+        $mask = $enc !== 0 ? (4194304 | 512) : 4194304;
+        $thrL = $this->ssa->allocLabel('json.throw');
+        $okL = $this->ssa->allocLabel('json.ok');
+        $joinL = $this->ssa->allocLabel('json.join');
+        $bad = $this->ssa->allocReg();
+        $out = '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = and i64 ' . $flags . ', ' . (string)$mask . "\n";
+        $on = $this->ssa->allocReg();
+        $out .= '  ' . $on . ' = icmp eq i64 ' . $m . ", 4194304\n";
+        $cond = $this->ssa->allocReg();
+        $out .= '  ' . $cond . ' = and i1 ' . $bad . ', ' . $on . "\n";
+        $out .= '  br i1 ' . $cond . ', label %' . $thrL . ', label %' . $okL . "\n";
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $flagArg = $args[$i];
+        $encArg = new \Compile\Mir\IntConst($enc, Type::int_());
+        $out .= $thrL . ":\n" . $release;
+        $out .= $this->emitNode(new \Compile\Mir\Call('__mc_json_throw', [$flagArg, $encArg], Type::void()));
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $okL . ":\n";
+        $out .= $this->emitNode(new \Compile\Mir\Call('__mc_json_throw', [$flagArg, $encArg], Type::void()));
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $joinL . ":\n";
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
         return $out;
     }
 
-    private function biJsonEncode(array $args): string
+    /** The runtime the native encoder links. */
+    private function jsonEncNeeds(): void
     {
         $this->rt->needsJsonEnc = true;
         $this->rt->needsRc = true;        // __mir_cell_retain / _drop (the JsonSerializable arm)
@@ -8869,39 +8886,217 @@ trait EmitLlvmBuiltins
         $this->rt->needsConcat = true;    // __mir_strlen + string runtime decls
         $this->rt->needsTagged = true;    // box helpers for boxToCell
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
-        // NB: manticore___mc_json_enc is auto-injected as a stdlib extern
-        // (declare i64 @…(i64)); do NOT re-declare it here (signature clash).
-        $out = $this->emitNode($args[0]);
+        // NB: manticore___mc_json_enc / _numcheck are auto-injected as stdlib
+        // externs (declare i64 @…(i64…)); do NOT re-declare them here.
+    }
+
+    /**
+     * `json_encode($value, $flags, $depth)` — the native single-buffer encoder
+     * ({@see \Compile\Mir\RuntimeLibrary::jsonEnc}) with every flag php has,
+     * read at RUNTIME, so a `$flags` local costs nothing over a literal. The
+     * result is `string|false`, a CELL: false when the walk failed, unless
+     * JSON_PARTIAL_OUTPUT_ON_ERROR keeps what it wrote.
+     * @param Node[] $args
+     */
+    private function biJsonEncode(array $args): string
+    {
+        $this->jsonEncNeeds();
+        $out = $this->jsonIntOperand($args, 1, 0);
+        $flags = $this->lastValue;
+        $out .= $this->jsonIntOperand($args, 2, 512);
+        $depth = $this->lastValue;
+        $out .= $this->emitNode($args[0]);
         $out .= $this->boxToCell($args[0]->type);
         $cell = $this->lastValue;
-        $out .= $this->jsonErrSet('0');
+        $out .= $this->jsonThrowSnap($args, 1);
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_json_enc(i64 ' . $cell . ")\n";
+        $out .= '  ' . $reg . ' = call ptr @__mir_json_encf(i64 ' . $cell . ', i64 ' . $flags
+              . ', i64 ' . $depth . ")\n";
         // The encoder READ the cell into its own buffer and kept nothing.
         $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
-        // `json_encode(): string|false` — a UNION, so the call site expects a
-        // CELL and handing back a raw pointer would be a representation
-        // mismatch. The only failure the native encoder can reach on this gate
-        // (flags 0, depth 512) is INF/NAN, which `__mc_dtoa_bits` flags in the
-        // shared error slot, so read it back and select.
-        $sc = $this->ssa->allocReg();
-        $out .= '  ' . $sc . ' = call i64 @__manticore_box_ptr(ptr ' . $reg . ")\n";
         $err = $this->ssa->allocReg();
         $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
-        $bad = $this->ssa->allocReg();
-        $out .= '  ' . $bad . ' = icmp ne i64 ' . $err . ", 0\n";
+        $out .= $this->jsonThrowTail($args, 1, $flags, $err, 1,
+            '  call void @__mir_rc_release_str(ptr ' . $reg . ")\n");
+        $pf = $this->ssa->allocReg();
+        $out .= '  ' . $pf . ' = and i64 ' . $flags . ", 512\n";
+        $part = $this->ssa->allocReg();
+        $out .= '  ' . $part . ' = icmp ne i64 ' . $pf . ", 0\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp eq i64 ' . $err . ", 0\n";
+        $keep = $this->ssa->allocReg();
+        $out .= '  ' . $keep . ' = or i1 ' . $ok . ', ' . $part . "\n";
+        $keepL = $this->ssa->allocLabel('jenc.keep');
+        $failL = $this->ssa->allocLabel('jenc.fail');
+        $joinL = $this->ssa->allocLabel('jenc.join');
+        $out .= '  br i1 ' . $keep . ', label %' . $keepL . ', label %' . $failL . "\n";
+        $out .= $keepL . ":\n";
+        $sc = $this->ssa->allocReg();
+        $out .= '  ' . $sc . ' = call i64 @__manticore_box_ptr(ptr ' . $reg . ")\n";
+        $out .= '  br label %' . $joinL . "\n";
+        // A failed call answers false and the buffer it wrote is nobody's.
+        $out .= $failL . ":\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $reg . ")\n";
         $fc = $this->ssa->allocReg();
         $out .= '  ' . $fc . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $out .= '  br label %' . $joinL . "\n";
+        $out .= $joinL . ":\n";
         $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . ' = select i1 ' . $bad . ', i64 ' . $fc
-              . ', i64 ' . $sc . "\n";
-        // Both operands are a direct box call right above ($fc = box_bool,
-        // $sc = box_ptr of the encoder's own output) — boxed by construction
-        // on both arms of the select.
+        $out .= '  ' . $res . ' = phi i64 [' . $sc . ', %' . $keepL . '], [' . $fc . ', %' . $failL . "]\n";
+        // Both incoming values are a direct box call right above — boxed by
+        // construction on both arms.
         $this->markCellBoxed($res);
         $this->lastValue = $res;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * `__mc_json_encode_native($value, $flags, $depth)` — the encoder alone,
+     * for the stdlib `json_encode` body (the call the inline path declined):
+     * the raw buffer, with the outcome left in the error slot. Its PHP twin is
+     * the compiled walker, for a compiler that does not know this builtin.
+     * @param Node[] $args
+     */
+    private function biJsonEncodeNative(array $args): string
+    {
+        $this->jsonEncNeeds();
+        $out = $this->emitIntArg($args[1]);
+        $flags = $this->lastValue;
+        $out .= $this->emitIntArg($args[2]);
+        $depth = $this->lastValue;
+        $out .= $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type);
+        $cell = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_json_encf(i64 ' . $cell . ', i64 ' . $flags
+              . ', i64 ' . $depth . ")\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** The runtime the native decoder links. */
+    private function jsonDecNeeds(): void
+    {
+        $this->rt->needsJsonDec = true;
+        $this->rt->needsStrRc = true;     // __mir_rc_release_str on the key temp
+        $this->rt->needsConcat = true;    // __mir_strlen / __mir_str_new / set_len
+        $this->rt->needsTagged = true;    // the box_* helpers
+        $this->rt->needsRc = true;        // __mir_cell_drop of a rejected document
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $this->libcExtra['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl();
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+    }
+
+    /**
+     * Inline json_decode / json_validate need a `$depth` php accepts: a
+     * literal one is checked here (a bad literal keeps the PHP body, which
+     * throws), a runtime one at the call. @param Node[] $args
+     */
+    private function jsonDepthOk(array $args, int $i): bool
+    {
+        if (!isset($args[$i])) { return true; }
+        $lit = Node::literalInt($args[$i]);
+        if ($lit === null) { return $args[$i]->kind === Node::KIND_LOAD_LOCAL; }
+        return $lit > 0 && $lit < 2147483647;
+    }
+
+    /** php's ValueErrors for a runtime `$depth`. */
+    private function jsonDepthGuard(string $fn, string $depth, bool $literal): string
+    {
+        if ($literal) { return ''; }
+        $lo = $this->ssa->allocReg();
+        $out = '  ' . $lo . ' = icmp sle i64 ' . $depth . ", 0\n";
+        $out .= $this->emitThrowIf($lo, 'ValueError',
+            $fn . '(): Argument #' . ($fn === 'json_validate' ? '2' : '3') . ' ($depth) must be greater than 0');
+        $hi = $this->ssa->allocReg();
+        $out .= '  ' . $hi . ' = icmp sge i64 ' . $depth . ", 2147483647\n";
+        $out .= $this->emitThrowIf($hi, 'ValueError',
+            $fn . '(): Argument #' . ($fn === 'json_validate' ? '2' : '3') . ' ($depth) must be less than 2147483647');
+        return $out;
+    }
+
+    /**
+     * `json_decode($json, $associative, $depth, $flags)` — native recursive
+     * descent ({@see \Compile\Mir\RuntimeLibrary::jsonDec}): a strict parser
+     * with php's error codes, `$depth`, JSON_BIGINT_AS_STRING,
+     * JSON_OBJECT_AS_ARRAY and the INVALID_UTF8 flags, all at RUNTIME. Returns
+     * a NaN-boxed cell — null when the document was rejected, and the decoder
+     * frees whatever it had built. `$associative` must be a literal (php's rule:
+     * true → arrays; null → JSON_OBJECT_AS_ARRAY decides; false → stdClass).
+     *
+     * Inline in the PROGRAM's module, never through the stdlib body: building
+     * a stdClass needs the class's layout and descriptor, which only a module
+     * that has the class table can spell. @param Node[] $args
+     */
+    private function biJsonDecode(array $args): string
+    {
+        $this->jsonDecNeeds();
+        $out = $this->jsonIntOperand($args, 3, 0);
+        $flags = $this->lastValue;
+        $out .= $this->jsonIntOperand($args, 2, 512);
+        $depth = $this->lastValue;
+        $out .= $this->jsonDepthGuard('json_decode', $depth,
+            !isset($args[2]) || Node::literalInt($args[2]) !== null);
+        $assoc = Node::literalBool($args[1] ?? null);
+        if ($assoc !== null) {
+            $mode = $assoc ? '1' : '0';
+        } elseif (Node::literalInt($args[3] ?? null) !== null || !isset($args[3])) {
+            $mode = ((Node::literalInt($args[3] ?? null) ?? 0) & 1) !== 0 ? '1' : '0';
+        } else {
+            $mode = $this->ssa->allocReg();
+            $out .= '  ' . $mode . ' = and i64 ' . $flags . ", 1\n";
+        }
+        $out .= $this->emitPtrArg($args[0]);
+        $sp = $this->lastValue;
+        $out .= $this->jsonThrowSnap($args, 3);
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_json_decf(ptr ' . $sp . ', i64 ' . $mode
+              . ', i64 ' . $depth . ', i64 ' . $flags . ")\n";
+        $out .= $this->freeStrTemp($args[0], $sp);
+        $err = $this->ssa->allocReg();
+        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
+        // A rejected document already answered null — nothing to release.
+        $out .= $this->jsonThrowTail($args, 3, $flags, $err, 0, '');
+        // Every `ret` of __mir_json_decf and its helpers is a box_* call: boxed
+        // by construction.
+        $this->markCellBoxed($reg);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `json_validate($json, $depth, $flags)` — the native decoder's verdict,
+     * the value discarded. php allows only JSON_INVALID_UTF8_IGNORE in
+     * `$flags`; anything else keeps the PHP body, which says so.
+     * @param Node[] $args
+     */
+    private function biJsonValidate(array $args): string
+    {
+        $this->jsonDecNeeds();
+        $out = $this->jsonIntOperand($args, 2, 0);
+        $flags = $this->lastValue;
+        $out .= $this->jsonIntOperand($args, 1, 512);
+        $depth = $this->lastValue;
+        $out .= $this->jsonDepthGuard('json_validate', $depth,
+            !isset($args[1]) || Node::literalInt($args[1]) !== null);
+        $out .= $this->emitPtrArg($args[0]);
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_json_decf(ptr ' . $sp . ', i64 1, i64 '
+              . $depth . ', i64 ' . $flags . ")\n";
+        $out .= $this->freeStrTemp($args[0], $sp);
+        $out .= '  call void @__mir_cell_drop(i64 ' . $reg . ")\n";
+        $err = $this->ssa->allocReg();
+        $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp eq i64 ' . $err . ", 0\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $ok . " to i64\n";
+        return $this->finishI64($out, $z);
     }
 
     /**
@@ -8926,15 +9121,6 @@ trait EmitLlvmBuiltins
         $this->lastValueType = 'i64';
         $this->markCellBoxed($r);
         return $out;
-    }
-
-    /** Store `$code` into the ONE json error slot — the function-local static in
-     *  `manticore_stdlib.o`. Always a call, never an inlined store to a
-     *  module-local global: that would give the app module a second slot. */
-    private function jsonErrSet(string $code): string
-    {
-        $r = $this->ssa->allocReg();
-        return '  ' . $r . ' = call i64 @manticore___mc_json_err(i64 ' . $code . ")\n";
     }
 
     /**

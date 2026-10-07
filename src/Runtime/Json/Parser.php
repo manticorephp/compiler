@@ -63,9 +63,9 @@ final class Parser
         if ($this->pos >= $this->len) { return null; }
         $c = $this->src[$this->pos];
         if ($c === '{') {
-            // php counts CONTAINERS: at $depth the next one is one too many, and
-            // the whole call fails rather than the node degrading.
-            if ($this->depth >= $this->maxDepth) { \__mc_json_err(1); return null; }
+            // php counts the scalar level too: a container at nesting d needs
+            // $depth > d, and the whole call fails rather than the node degrading.
+            if ($this->depth + 1 >= $this->maxDepth) { \__mc_json_err(1); return null; }
             $this->depth = $this->depth + 1;
             $o = $this->parseObject();
             $this->depth = $this->depth - 1;
@@ -74,7 +74,7 @@ final class Parser
             return $this->assoc ? $o : (object)$o;
         }
         if ($c === '[') {
-            if ($this->depth >= $this->maxDepth) { \__mc_json_err(1); return null; }
+            if ($this->depth + 1 >= $this->maxDepth) { \__mc_json_err(1); return null; }
             $this->depth = $this->depth + 1;
             $a = $this->parseArray();
             $this->depth = $this->depth - 1;

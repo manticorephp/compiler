@@ -2525,7 +2525,8 @@ trait EmitLlvmRuntime
             $jsonFld = 'ptr null';
             $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn((int)$id);
             if (isset($this->sigs->paramTypes[$jsonFn])
-                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name]))) {
+                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name])
+                    || $cls->name === 'Resource')) {
                 $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
             }
             if (!$this->reflectWants($cls->name)) {
@@ -4080,6 +4081,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
+        if ($this->rt->needsJsonEnc || $this->rt->needsJsonDec) { $out .= $this->lib->jsonUtf8(); }
         if ($this->rt->needsJsonEnc || $this->rt->needsJsonSer) { $out .= $this->lib->jsonSer(); }
         if ($this->rt->needsJsonDec) {
             // stdClass's layout is a constant of the compiler (it declares no

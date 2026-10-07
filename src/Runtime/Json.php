@@ -11,19 +11,24 @@
 
 /**
  * json_last_error() state. Pass -1 to read, >= 0 to set; returns the current
- * code. Same shape as {@see \__preg_error}: a function-local static becomes one
+ * code. -2 snapshots the slot and -3 restores the snapshot: a call under
+ * JSON_THROW_ON_ERROR leaves json_last_error() as it found it (php's rule),
+ * while its own outcome still travels through the slot. Same shape as {@see \__preg_error}: a function-local static becomes one
  * module global with EXTERNAL linkage in `manticore_stdlib.o`, so the whole
  * program shares ONE slot. ⚠ A caller must never inline its own store to that
  * global — it would split the slot in two.
  */
 function __mc_json_err(int $set = -1): int {
     static $err = 0;
+    static $saved = 0;
     // The FIRST error wins, php's rule — a later check must not relabel it.
     // `json_decode('[[[1]]]', true, 2)` hits the depth limit and then leaves
     // input unconsumed, and the trailing-garbage check was overwriting
     // JSON_ERROR_DEPTH with JSON_ERROR_SYNTAX. Only an explicit 0 resets.
     if ($set === 0) { $err = 0; }
     elseif ($set > 0 && $err === 0) { $err = $set; }
+    elseif ($set === -2) { $saved = $err; }
+    elseif ($set === -3) { $err = $saved; }
     return $err;
 }
 
@@ -48,27 +53,66 @@ function json_last_error_msg(): string {
     return "Non-backed enums have no default serialization";
 }
 
-/** JSON_THROW_ON_ERROR: raise, and leave the slot at NONE — php's rule, so a
- *  caught exception is not followed by a stale json_last_error(). */
-function __mc_json_throw(int $flags): void {
-    $e = \__mc_json_err(-1);
-    if ($e === 0) { return; }
+/**
+ * JSON_THROW_ON_ERROR, after a call that snapshotted the slot (-2): restore
+ * json_last_error() to what it was — php neither sets nor clears it in this
+ * mode — and raise JsonException when the call failed. `$enc`: json_encode,
+ * where JSON_PARTIAL_OUTPUT_ON_ERROR turns the mode off.
+ */
+function __mc_json_throw(int $flags, int $enc = 0): void {
     if (($flags & 4194304) === 0) { return; }
+    if ($enc !== 0 && ($flags & 512) !== 0) { return; }
+    $e = \__mc_json_err(-1);
     $msg = \json_last_error_msg();
-    \__mc_json_err(0);
+    \__mc_json_err(-3);
+    if ($e === 0) { return; }
     throw new \JsonException($msg, $e);
 }
 
 /**
  * Encode a value as JSON, or `false` when it cannot be encoded — php's own
- * contract. Clears the error slot on entry, as php does.
+ * contract. A call the compiler can see is inlined onto the native encoder
+ * (EmitLlvmBuiltins::biJsonEncode); this body serves the rest — a computed
+ * `$flags`, a callable string — through the same encoder.
  */
 function json_encode(mixed $value, int $flags = 0, int $depth = 512): string|false {
-    \__mc_json_err(0);
-    $s = __mc_json_enc($value, $flags, $depth, 0);
-    \__mc_json_throw($flags);
-    if (\__mc_json_err(-1) !== 0 && ($flags & 512) === 0) { return false; }
+    \__mc_json_err(-2);
+    $s = \__mc_json_encode_native($value, $flags, $depth);
+    $e = \__mc_json_err(-1);
+    \__mc_json_throw($flags, 1);
+    // php keeps the partial result under JSON_PARTIAL_OUTPUT_ON_ERROR.
+    if ($e !== 0 && ($flags & 512) === 0) { return false; }
     return $s;
+}
+
+/**
+ * The encoder alone: the JSON text, the outcome left in the error slot (reset
+ * on entry). A codegen builtin over the native encoder; this compiled walker is
+ * its bootstrap twin, for a compiler that does not know the builtin.
+ */
+function __mc_json_encode_native(mixed $value, int $flags, int $depth): string {
+    \__mc_json_err(0);
+    return __mc_json_enc($value, $flags, $depth, 0);
+}
+
+/**
+ * JSON_NUMERIC_CHECK's reading of a string: the int or float it is numeric as
+ * (php's is_numeric_string — surrounding whitespace allowed, no hex), or null
+ * when it stays a string, which includes a value that overflows to INF. Called
+ * by the native encoder for every string while the flag is set.
+ */
+function __mc_json_numcheck(mixed $s): mixed {
+    if (!\is_numeric($s)) { return null; }
+    $t = \trim((string)$s, " \t\n\r\v\f");
+    if (\strpbrk($t, ".eE") === false) {
+        $neg = $t !== "" && $t[0] === "-";
+        $d = \ltrim(\ltrim($t, "+-"), "0");
+        $limit = $neg ? "9223372036854775808" : "9223372036854775807";
+        if (\strlen($d) < 19 || (\strlen($d) === 19 && \strcmp($d, $limit) <= 0)) { return (int)$t; }
+    }
+    $f = (float)$t;
+    if (\is_infinite($f) || \is_nan($f)) { return null; }
+    return $f;
 }
 
 /** `$w` lowercase hex digits of `$v` (JSON `\u` escapes are lowercase). */
@@ -178,30 +222,38 @@ function __mc_json_escape(string $s, int $flags = 0): string {
  */
 function json_decode(string $json, ?bool $associative = null, int $depth = 512,
                      int $flags = 0): mixed {
+    if ($depth <= 0) { throw new \ValueError('json_decode(): Argument #3 ($depth) must be greater than 0'); }
+    if ($depth >= 2147483647) { throw new \ValueError('json_decode(): Argument #3 ($depth) must be less than 2147483647'); }
     // php's rule: arrays when $associative is true, or when it is null (the
     // DEFAULT) and JSON_OBJECT_AS_ARRAY is set. Otherwise stdClass.
     $assoc = $associative === true
         || ($associative === null && ($flags & 1) !== 0);
+    \__mc_json_err(-2);
     \__mc_json_err(0);
     $parser = new \Runtime\Json\Parser($json, $assoc, $depth);
     $v = $parser->parse();
+    $e = \__mc_json_err(-1);
     \__mc_json_throw($flags);
-    if (\__mc_json_err(-1) !== 0) { return null; }
+    if ($e !== 0) { return null; }
     return $v;
 }
 
 /**
  * json_validate() (php 8.3+). Parses without keeping the result and reports
  * whether the document was accepted, leaving json_last_error() set exactly as a
- * decode would. ⚠ It shares the DECODER's strictness, which is still partial —
- * see the note in docs/audit/json-baseline.md — so it currently answers false
- * only for what the parser actually detects.
+ * decode would. A call the compiler can see runs the strict native decoder
+ * (EmitLlvmBuiltins::biJsonValidate); this body, like json_decode's, is the
+ * compiled parser — the bootstrap twin, laxer than php.
  */
 function json_validate(string $json, int $depth = 512, int $flags = 0): bool {
+    if ($flags !== 0 && $flags !== 1048576) {
+        throw new \ValueError('json_validate(): Argument #3 ($flags) must be a valid flag (allowed flags: JSON_INVALID_UTF8_IGNORE)');
+    }
+    if ($depth <= 0) { throw new \ValueError('json_validate(): Argument #2 ($depth) must be greater than 0'); }
+    if ($depth >= 2147483647) { throw new \ValueError('json_validate(): Argument #2 ($depth) must be less than 2147483647'); }
     \__mc_json_err(0);
     $parser = new \Runtime\Json\Parser($json, true, $depth);
     $parser->parse();
-    \__mc_json_throw($flags);
     return \__mc_json_err(-1) === 0;
 }
 

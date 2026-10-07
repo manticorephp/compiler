@@ -21,13 +21,15 @@ self-contained compiler.
   `strcpy`, `strcat`), stdio (`puts`, `write`, `read`), and
   files/filesystem (`fopen`, `fclose`, `fread`, `fwrite`, `fseek`,
   `ftell`, `access`, `sys_unlink`, `sys_getcwd`).
-- `Json.php` — global-namespace `json_encode` / `json_decode`. A
-  `json_encode($x)` call is lowered to the native single-buffer codegen
-  builtin `@__mir_json_enc` (a recursive cell walk into one growing
-  buffer — see `EmitLlvmBuiltins::jsonEncRuntime`); the PHP walker
-  `__mc_json_enc` (null/bool/int/float/string/object/array) stays as the
-  reference and the object-cell fallback. `json_decode` delegates to
-  `Runtime\Json\Parser`.
+- `Json.php` — global-namespace `json_encode` / `json_decode` /
+  `json_validate`. A call whose optional arguments are literals or locals is
+  inlined onto the native runtime (`RuntimeLibrary::jsonEnc` / `jsonDec`, every
+  flag read at runtime, JSON_THROW_ON_ERROR included); these bodies serve the
+  rest (a computed argument, a callable string). `json_encode`'s body runs the
+  same native encoder through `__mc_json_encode_native`; the PHP walker
+  `__mc_json_enc` is its bootstrap twin and the object-cell fallback.
+  `json_decode`'s body delegates to `Runtime\Json\Parser` — it cannot use the
+  native decoder, whose stdClass needs the program's class table.
 - `Json/Parser.php` — `Runtime\Json\Parser`, a recursive-descent JSON
   parser. Position is **instance state** (`$pos` field), not a by-ref
   param, because the self-host compiler drops writes through `&$pos`
@@ -51,7 +53,7 @@ self-contained compiler.
 
 | Group | Functions |
 |-------|-----------|
-| JSON | `json_encode`, `json_decode($json, $associative = true)` |
+| JSON | `json_encode`, `json_decode`, `json_validate`, `json_last_error`, `json_last_error_msg` |
 | File / OS (`Stdlib/Io.php`) | `file_get_contents`, `file_put_contents`, `file_exists`, `is_readable`, `unlink`, `getcwd` |
 | Strings (`Stdlib/Strings.php`) | `str_starts_with`, `str_ends_with`, `str_contains`, `ltrim`, `rtrim`, `trim`, `strpos`, `strrpos`, `str_replace`, `explode` |
 | Arrays (`Stdlib/Arrays.php`) | `in_array`, `array_key_exists`, `array_keys`, `array_values`, `array_merge`, `array_slice`, `reset`, `end` (`array_map`/`array_filter` → `prelude/array_fns.php`) |
@@ -79,10 +81,9 @@ lives in the global namespace so an unqualified user call
   namespace** (no `namespace` decl) and fire only when the compiler's
   inline `tryCompileBuiltin` table does NOT handle the call. The inline
   path always wins; these catch the fall-through.
-- `json_decode`'s `$associative` flag is accepted for PHP compatibility
-  but **ignored** — it always returns arrays (no `stdClass`), which is
-  what the manifest reader and config consumers want. The parser is not
-  a strict validator: malformed input degrades, it does not throw.
+- `Runtime\Json\Parser` (the stdlib `json_decode` body) is laxer than php:
+  it is the bootstrap twin and the fallback for a call the compiler cannot
+  inline, and the native decoder is the strict one.
 - `strpos` / `strrpos` return **`int|false`**, exactly as php does — the
   union is modelled now. `strpos` also treats a null haystack/needle as
   no-match (self-host `?string`→`string` coercion robustness).
