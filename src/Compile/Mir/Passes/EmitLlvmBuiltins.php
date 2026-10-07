@@ -8453,87 +8453,122 @@ trait EmitLlvmBuiltins
                 if ($pt === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
                 if ($this->isBufSlot($cd, $pn)) { continue; }
-                if ($forCompare && $this->isEnumType($pt)) {
-                    $off = (string)$cd->propertyOffset($pn);
-                    $g = $this->ssa->allocReg();
-                    $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
-                    $v = $this->ssa->allocReg();
-                    $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
-                    $pp = '';
-                    $out .= $this->emitEnumSingletonPtr((string)$pt->class, $v, $pp);
-                    $boxed = $this->ssa->allocReg();
-                    $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
-                    $next = $this->ssa->allocReg();
-                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
-                          . $cur . ', ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
-                    $cur = $next;
-                    continue;
-                }
                 // php serializes ONLY public properties from an object; a
                 // missing meta entry is a compiler-synthesised slot, which is
                 // public by construction. `(array)$o` and an in-scope
                 // get_object_vars() still want them all, so this is opt-in.
-                if ($publicOnly) {
+                // The compare view takes every enum-typed property regardless.
+                if ($publicOnly && !($forCompare && $this->isEnumType($pt))) {
                     $pm = $cd->propertyMeta[$pn] ?? null;
                     if ($pm !== null && $pm->visibility !== 'public') { continue; }
                 }
-                $off = (string)$cd->propertyOffset($pn);
-                $key = $this->litStr($pn);
-                $g = $this->ssa->allocReg();
-                $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
-                $v = $this->ssa->allocReg();
-                $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
-                // An enum-typed slot holds the case ORDINAL; every view of the
-                // object shows the case itself (its immortal singleton). Boxed
-                // as a raw value the ordinal reached json_encode / (array) /
-                // get_object_vars as a denormal float.
-                if ($this->isEnumType($pt)) {
-                    $pp = '';
-                    $out .= $this->emitEnumSingletonPtr((string)$pt->class, $v, $pp);
-                    $boxed = $this->ssa->allocReg();
-                    $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
-                    $next = $this->ssa->allocReg();
-                    $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
-                          . $cur . ', ptr ' . $key . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
-                    $cur = $next;
-                    continue;
-                }
-                // boxRawValue and NOT boxToCell: the slot holds a RAW carrier, and
-                // a float slot's carrier is a double's BIT PATTERN. boxToCell
-                // treats its input as a value of `$pt` already in cell shape, so a
-                // `public float $f = 2.5` came back as float(4.6128119E+18) — the
-                // bits of 2.5 boxed as an integer. boxRawValue is the raw-slot →
-                // cell converter the property READ path already uses
-                // ({@see EmitLlvmObjects::emitFixedPropLoad}).
-                $out .= $this->boxRawValue($v, $pt);
+                $out .= $this->emitDeclaredPropCell($objp, $cd, $pn, $pt);
                 $boxed = $this->lastValue;
-                // ⚠ THE MAP OWNS ITS ELEMENTS. Every branch of boxRawValue that
-                // passes the slot's word THROUGH — a cell, a string, an object,
-                // an already-cell-repr array — hands this map a BORROWED payload,
-                // while the map is an `assoc[string,cell]` and its release walks
-                // the elements and runs `__mir_cell_drop` on each. Without the
-                // mirror retain every `get_object_vars()` (and every `(array)$o`,
-                // which lands here too) SILENTLY DROPPED one reference from every
-                // object-valued property of the receiver: `$o->in->v` printed ""
-                // three calls later, and `Parser\Dump::payload()` — one
-                // get_object_vars per AST node — is what took an `Ast\Span` to
-                // rc 0 under a live `FunctionDecl`. Same root and same fix as
-                // `array_merge`'s erased element COPY ({@see retainCellPayload}).
-                // Skipped where the box MINTS a fresh +1 (a nested concrete array
-                // is rebuilt), which would leak instead.
-                if ($this->boxRawValueBorrows($pt)) {
+                // ⚠ THE MAP OWNS ITS ELEMENTS. A cell that BORROWS the slot's
+                // reference — a cell, a string, an object, an already-cell-repr
+                // array — needs the mirror retain: the map is an
+                // `assoc[string,cell]` and its release runs `__mir_cell_drop` on
+                // each element. Without it every `get_object_vars()` (and every
+                // `(array)$o`, which lands here too) SILENTLY DROPPED one
+                // reference from every object-valued property of the receiver:
+                // `$o->in->v` printed "" three calls later, and
+                // `Parser\Dump::payload()` — one get_object_vars per AST node —
+                // is what took an `Ast\Span` to rc 0 under a live
+                // `FunctionDecl`. Same root and same fix as `array_merge`'s
+                // erased element COPY ({@see retainCellPayload}). A minted cell
+                // (a nested concrete array is rebuilt) is the map's already, and
+                // an enum case is an immortal singleton.
+                if ($this->propCellMode === 1) {
                     $this->rt->needsRc = true;
                     $this->rt->needsStrRc = true;
                     $out .= '  call void @__mir_cell_retain(i64 ' . $boxed . ")\n";
                 }
                 $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
-                      . $cur . ', ptr ' . $key . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
+                      . $cur . ', ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
                 $cur = $next;
             }
         }
         $this->lastValue = $cur;
         $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** How the cell {@see emitDeclaredPropCell} left in lastValue holds its
+     *  payload: 0 an immortal enum singleton, 1 BORROWED from the slot,
+     *  2 MINTED (a fresh +1, or a plain scalar). */
+    private int $propCellMode = 0;
+
+    /**
+     * Declared property `$pn` of the object at `$objp` as a CELL, in lastValue;
+     * {@see $propCellMode} says who owns it. An enum-typed slot holds the case
+     * ORDINAL, and every view of the object shows the case itself (its
+     * immortal singleton): boxed as a raw value the ordinal reached
+     * json_encode / (array) / get_object_vars as a denormal float. Any other
+     * slot goes through boxRawValue and NOT boxToCell: the slot holds a RAW
+     * carrier, and a float slot's carrier is a double's BIT PATTERN — boxToCell
+     * treats its input as a value already in cell shape, so a
+     * `public float $f = 2.5` came back as float(4.6128119E+18). boxRawValue is
+     * the raw-slot → cell converter the property READ path already uses
+     * ({@see EmitLlvmObjects::emitFixedPropLoad}).
+     */
+    private function emitDeclaredPropCell(string $objp, \Compile\Mir\ClassDef $cd, string $pn, Type $pt): string
+    {
+        $off = (string)$cd->propertyOffset($pn);
+        $g = $this->ssa->allocReg();
+        $out = '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = load i64, ptr ' . $g . "\n";
+        if ($this->isEnumType($pt)) {
+            $pp = '';
+            $out .= $this->emitEnumSingletonPtr((string)$pt->class, $v, $pp);
+            $boxed = $this->ssa->allocReg();
+            $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+            $this->propCellMode = 0;
+            $this->lastValue = $boxed;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        $out .= $this->boxRawValue($v, $pt);
+        $this->propCellMode = $this->boxRawValueBorrows($pt) ? 1 : 2;
+        return $out;
+    }
+
+    /**
+     * The body of `@__mir_pvisit_<id>` ({@see \Compile\MemoryAbi::
+     * DESCRIPTOR_VISIT_FN_OFFSET}): the public view {@see
+     * emitDeclaredPropsArray} builds for json_encode, WALKED instead — one
+     * `cb(ctx, name, cell)` per property in declaration order, the cell
+     * borrowed for the call (a minted one is dropped after it), then
+     * `cb(ctx, null, bag)` with the dynamic bag. Expects `%o`, `%ctx`, `%cb`.
+     */
+    private function emitDeclaredPropsVisit(string $cls): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $out = '';
+        if ($cls === '' || !isset($this->classes[$cls])) { return $out; }
+        $cd = $this->classes[$cls];
+        foreach ($cd->propertyNames as $pn) {
+            $pt = $cd->propertyTypes[$pn] ?? null;
+            if ($pt === null) { continue; }
+            if ($this->isBufSlot($cd, $pn)) { continue; }
+            $pm = $cd->propertyMeta[$pn] ?? null;
+            if ($pm !== null && $pm->visibility !== 'public') { continue; }
+            $out .= $this->emitDeclaredPropCell('%o', $cd, $pn, $pt);
+            $boxed = $this->lastValue;
+            $out .= '  call void %cb(ptr %ctx, ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ")\n";
+            if ($this->propCellMode === 2) {
+                $out .= '  call void @__mir_cell_drop(i64 ' . $boxed . ")\n";
+            }
+        }
+        if ($cd->usesBag()) {
+            $bg = $this->ssa->allocReg();
+            $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr %o, i64 ' . (string)$cd->bagOffset() . "\n";
+            $bv = $this->ssa->allocReg();
+            $out .= '  ' . $bv . ' = load i64, ptr ' . $bg . "\n";
+            $out .= '  call void %cb(ptr %ctx, ptr null, i64 ' . $bv . ")\n";
+        }
         return $out;
     }
 

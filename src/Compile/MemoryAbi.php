@@ -39,8 +39,12 @@ final class MemoryAbi
      * class descriptor's `json_fn@56` slot, and buffer kind 12 (`U64`). That lineage also called itself v17
      * on its own branch, so the two v17s are different layouts and neither may
      * link with a v18 object.
+     *
+     * v19: the class descriptor grows `visit_fn@64` ({@see
+     * DESCRIPTOR_VISIT_FN_OFFSET}); a v18 descriptor is 8 bytes short and the
+     * json encoder would read past it.
      */
-    public const VERSION = 18;
+    public const VERSION = 19;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -458,6 +462,17 @@ final class MemoryAbi
      * method of an application or prelude class.
      */
     public const DESCRIPTOR_JSON_FN_OFFSET = 56;
+
+    /**
+     * `ptr` — `@__mir_pvisit_<id>(ptr obj, ptr ctx, ptr cb)`, or null exactly
+     * where {@see DESCRIPTOR_PROPS_FN_OFFSET} is: the same public view, but
+     * walked instead of built. It calls `cb(ctx, key, cell)` once per declared
+     * public property — `key` an immortal name, `cell` BORROWED for the call —
+     * then `cb(ctx, null, bag)` with the dynamic bag's raw array (or 0). No
+     * map is allocated, which is what an encoder walking every object of a
+     * record list wants. A pure function of the class, so it coalesces.
+     */
+    public const DESCRIPTOR_VISIT_FN_OFFSET = 64;
 
     /** The compare group of every class with `#[CompareKey]` properties. */
     public const CMP_GROUP_KEYED = -1;

@@ -19,3 +19,9 @@ $s = json_encode($vals);
 echo count($vals), " ", strlen($s), " ", md5($s), "\n";
 echo json_encode(array_slice($vals, 0, 17)), "\n";
 echo json_encode([1.5, 100.0, -0.25], JSON_PRESERVE_ZERO_FRACTION), "\n";
+// …and back: the decoder's short-decimal path must land on the same doubles.
+$back = json_decode($s, true);
+$bad = 0;
+foreach ($vals as $i => $v) { if (is_float($v) && (float)$back[$i] !== $v) { $bad++; } }
+echo count($back), " mismatches: ", $bad, "\n";
+var_dump(json_decode('[-0.0, 0.1, 9.5, 123456789012.25, 0.30000000000000004, 1.7976931348623157e308, 4.9e-324, 2.5e-3]'));

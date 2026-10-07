@@ -69,7 +69,7 @@ offset 8  : i64  rc_word               -- packed rc | color | buffered
 offset 16 : ...  properties
 ```
 
-The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr, ptr, i64 }`, 56 bytes) is a static global, `linkonce_odr`
+The descriptor (`@__mir_cd_<id>`, `{ i64, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr }`, 72 bytes) is a static global, `linkonce_odr`
 so each class has exactly one across every separately-linked object:
 
 ```
@@ -89,6 +89,13 @@ descriptor + 48 : i64  cmp_group    -- objects compare through their views only 
                                        #[CompareKey] class, 0 (identity only) for an enum and
                                        an #[Uncomparable] class. #[CompareNone]: a null
                                        cmp_view_fn under the class-id group (any two equal)
+descriptor + 56 : ptr  json_fn      -- `i64 (i64 cell)`: the jsonSerialize() result (a backed
+                                       enum: its value; Resource: raises UNSUPPORTED_TYPE),
+                                       or null (v18)
+descriptor + 64 : ptr  visit_fn     -- @__mir_pvisit_<id>(obj, ctx, cb): props_fn's public view
+                                       WALKED — cb(ctx, name, cell) per declared public prop
+                                       (cell borrowed for the call), then cb(ctx, null, bag).
+                                       Null exactly where props_fn is (v19)
 ```
 
 `instanceof`, method dispatch and exception catch read `class_id` at descriptor offset 0;

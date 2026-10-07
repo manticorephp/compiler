@@ -35,11 +35,11 @@ final class RuntimeLibrary
      *
      * Layout is owned by {@see \Compile\MemoryAbi}: class_id@0, drop_fn@8,
      * rmeta@16, dynamic_method_table@24, props_fn@32, cmp_view_fn@40,
-     * cmp_group@48.
+     * cmp_group@48, json_fn@56, visit_fn@64.
      */
     public static function descriptorType(): string
     {
-        return '{ i64, ptr, ptr, ptr, ptr, ptr, i64, ptr }';
+        return '{ i64, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr }';
     }
 
     /** `@__mir_cmpview_<id>(ptr %o) -> i64` ({@see \Compile\MemoryAbi::DESCRIPTOR_CMP_VIEW_FN_OFFSET}). */
@@ -64,10 +64,18 @@ final class RuntimeLibrary
         string $cmpViewFld = 'ptr null',
         ?int $cmpGroup = null,
         string $jsonFld = 'ptr null',
+        string $visitFld = 'ptr null',
     ): string {
         return '@__mir_cd_' . (string)$id . ' = linkonce_odr global ' . self::descriptorType()
             . ' { i64 ' . (string)$id . ', ' . $dropFld . ', ' . $rmetaFld . ', ' . $dynFld
-            . ', ' . $propsFld . ', ' . $cmpViewFld . ', i64 ' . (string)($cmpGroup ?? $id) . ', ' . $jsonFld . " }\n";
+            . ', ' . $propsFld . ', ' . $cmpViewFld . ', i64 ' . (string)($cmpGroup ?? $id) . ', ' . $jsonFld
+            . ', ' . $visitFld . " }\n";
+    }
+
+    /** {@see \Compile\MemoryAbi::DESCRIPTOR_VISIT_FN_OFFSET} */
+    public static function visitFnSymbol(int $id): string
+    {
+        return '@__mir_pvisit_' . (string)$id;
     }
 
     /** The synthesized PHP helper behind {@see \Compile\MemoryAbi::DESCRIPTOR_JSON_FN_OFFSET}. */
@@ -3206,7 +3214,48 @@ no:
         $out .= "  %odesc = load ptr, ptr %optr\n";
         $out .= "  %odn = icmp eq ptr %odesc, null\n";
         $out .= "  br i1 %odn, label %tobjpunt, label %tobjpf\n";
+        // visit_fn ({@see \Compile\MemoryAbi::DESCRIPTOR_VISIT_FN_OFFSET}):
+        // the public properties walked straight into the buffer through
+        // `@__mir_json_pcb` — no map per object. props_fn (a FRESH map) is the
+        // fallback for a class whose descriptor has no walker.
         $out .= "tobjpf:\n";
+        $out .= "  %ovfp = getelementptr inbounds i8, ptr %odesc, i64 " . (string)\Compile\MemoryAbi::DESCRIPTOR_VISIT_FN_OFFSET . "\n";
+        $out .= "  %ovf = load ptr, ptr %ovfp\n";
+        $out .= "  %ovh = icmp ne ptr %ovf, null\n";
+        $out .= "  br i1 %ovh, label %tobjvis, label %tobjpf2\n";
+        $out .= "tobjvis:\n";
+        $out .= "  %vl = call i64 @__mir_json_enter(ptr %slotp, ptr %lp, i64 %opay)\n";
+        $out .= "  %vok = icmp ne i64 %vl, 0\n";
+        $out .= "  br i1 %vok, label %tobjvis2, label %tobjvret\n";
+        $out .= "tobjvret:\n";
+        $out .= "  ret void\n";
+        $out .= "tobjvis2:\n";
+        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 123)\n";
+        $out .= "  %vctx = alloca [4 x i64]\n";
+        $out .= "  store ptr %slotp, ptr %vctx\n";
+        $out .= "  %vc1 = getelementptr inbounds i64, ptr %vctx, i64 1\n";
+        $out .= "  store ptr %lp, ptr %vc1\n";
+        $out .= "  %vc2 = getelementptr inbounds i64, ptr %vctx, i64 2\n";
+        $out .= "  store i64 0, ptr %vc2\n";
+        $out .= "  %vc3 = getelementptr inbounds i64, ptr %vctx, i64 3\n";
+        $out .= "  store i64 %vl, ptr %vc3\n";
+        $out .= "  call void %ovf(ptr %optr, ptr %vctx, ptr @__mir_json_pcb)\n";
+        $out .= "  %vcnt = load i64, ptr %vc2\n";
+        $out .= "  %vfl = load i64, ptr @__mir_je_flags\n";
+        $out .= "  %vpf = and i64 %vfl, 128\n";
+        $out .= "  %vpr = icmp ne i64 %vpf, 0\n";
+        $out .= "  %vne = icmp sgt i64 %vcnt, 0\n";
+        $out .= "  %vpnl = and i1 %vpr, %vne\n";
+        $out .= "  %vl0 = sub i64 %vl, 1\n";
+        $out .= "  br i1 %vpnl, label %tobjvnl, label %tobjvcl\n";
+        $out .= "tobjvnl:\n";
+        $out .= "  call void @__mir_json_nl(ptr %slotp, ptr %lp, i64 %vl0)\n";
+        $out .= "  br label %tobjvcl\n";
+        $out .= "tobjvcl:\n";
+        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 125)\n";
+        $out .= "  store i64 %vl0, ptr @__mir_je_lvl\n";
+        $out .= "  ret void\n";
+        $out .= "tobjpf2:\n";
         $out .= "  %opfp = getelementptr inbounds i8, ptr %odesc, i64 "
               . (string)\Compile\MemoryAbi::DESCRIPTOR_PROPS_FN_OFFSET . "\n";
         $out .= "  %opf = load ptr, ptr %opfp\n";
@@ -3266,55 +3315,74 @@ no:
         // out-of-line value_at calls, no per-element key (re)boxing: keys read
         // RAW, which also keeps int keys > 2^47 exact. Upfront reserve of
         // ~8 B/element cuts buffer regrows on big documents.
+        // Entering a container — an array, or an object walked through its
+        // descriptor — is one rule: `@__mir_json_enter` raises the level,
+        // applies the depth limit and the recursion check, and answers the new
+        // level, or 0 when it wrote `null` instead and the caller must skip.
+        $out .= '
+define i64 @__mir_json_enter(ptr %slotp, ptr %lp, i64 %ident) {
+entry:
+  %fl = load i64, ptr @__mir_je_flags
+  %lvl0 = load i64, ptr @__mir_je_lvl
+  %lvl = add i64 %lvl0, 1
+  store i64 %lvl, ptr @__mir_je_lvl
+  %max = load i64, ptr @__mir_je_max
+  %over = icmp sgt i64 %lvl, %max
+  br i1 %over, label %deep, label %rchk
+deep:
+  %de = call i64 @manticore___mc_json_err(i64 1)
+  %dpf = and i64 %fl, 512
+  %dnp = icmp eq i64 %dpf, 0
+  %dhard = icmp sgt i64 %lvl, 10000
+  %dbail = or i1 %dnp, %dhard
+  br i1 %dbail, label %bail, label %rchk
+bail:
+  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.jkw.null, i64 4)
+  store i64 %lvl0, ptr @__mir_je_lvl
+  ret i64 0
+rchk:
+  %inst = icmp slt i64 %lvl0, 512
+  %lim = select i1 %inst, i64 %lvl0, i64 512
+  br label %rl
+rl:
+  %rk = phi i64 [0, %rchk], [%rk2, %rn]
+  %rdone = icmp sge i64 %rk, %lim
+  br i1 %rdone, label %rpush, label %rb
+rb:
+  %rp = getelementptr [512 x i64], ptr @__mir_je_stk, i64 0, i64 %rk
+  %rv = load i64, ptr %rp
+  %rhit = icmp eq i64 %rv, %ident
+  br i1 %rhit, label %recur, label %rn
+rn:
+  %rk2 = add i64 %rk, 1
+  br label %rl
+recur:
+  %re = call i64 @manticore___mc_json_err(i64 6)
+  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.jkw.null, i64 4)
+  store i64 %lvl0, ptr @__mir_je_lvl
+  ret i64 0
+rpush:
+  br i1 %inst, label %rst, label %ok
+rst:
+  %rsp = getelementptr [512 x i64], ptr @__mir_je_stk, i64 0, i64 %lvl0
+  store i64 %ident, ptr %rsp
+  br label %ok
+ok:
+  ret i64 %lvl
+}
+';
+        // ponytail: the 10000-level floor above is a hard stop under
+        // PARTIAL_OUTPUT so a reference cycle longer than the 512-entry path
+        // stack cannot recurse off the C stack.
         $out .= "\ndefine void @__mir_json_cont(ptr %slotp, ptr %lp, ptr %arr, i64 %ident, i64 %isobj) {\n";
         $out .= "entry:\n";
         $out .= "  %fl = load i64, ptr @__mir_je_flags\n";
-        $out .= "  %lvl0 = load i64, ptr @__mir_je_lvl\n";
-        $out .= "  %lvl = add i64 %lvl0, 1\n";
-        $out .= "  store i64 %lvl, ptr @__mir_je_lvl\n";
-        $out .= "  %max = load i64, ptr @__mir_je_max\n";
-        $out .= "  %over = icmp sgt i64 %lvl, %max\n";
-        $out .= "  br i1 %over, label %deep, label %rchk\n";
-        $out .= "deep:\n";
-        $out .= "  %de = call i64 @manticore___mc_json_err(i64 1)\n";
-        $out .= "  %dpf = and i64 %fl, 512\n";
-        $out .= "  %dnp = icmp eq i64 %dpf, 0\n";
-        // ponytail: a hard floor under PARTIAL_OUTPUT so a reference cycle
-        // longer than the 512-entry path stack cannot recurse off the C stack.
-        $out .= "  %dhard = icmp sgt i64 %lvl, 10000\n";
-        $out .= "  %dbail = or i1 %dnp, %dhard\n";
-        $out .= "  br i1 %dbail, label %bail, label %rchk\n";
-        $out .= "bail:\n";
-        $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.jkw.null, i64 4)\n";
-        $out .= "  store i64 %lvl0, ptr @__mir_je_lvl\n";
+        $out .= "  %lvl = call i64 @__mir_json_enter(ptr %slotp, ptr %lp, i64 %ident)\n";
+        $out .= "  %entered = icmp ne i64 %lvl, 0\n";
+        $out .= "  %lvl0 = sub i64 %lvl, 1\n";
+        $out .= "  br i1 %entered, label %body, label %skip\n";
+        $out .= "skip:\n";
         $out .= "  ret void\n";
-        $out .= "rchk:\n";
-        $out .= "  %inst = icmp slt i64 %lvl0, 512\n";
-        $out .= "  %lim = select i1 %inst, i64 %lvl0, i64 512\n";
-        $out .= "  br label %rl\n";
-        $out .= "rl:\n";
-        $out .= "  %rk = phi i64 [0, %rchk], [%rk2, %rn]\n";
-        $out .= "  %rdone = icmp sge i64 %rk, %lim\n";
-        $out .= "  br i1 %rdone, label %rpush, label %rb\n";
-        $out .= "rb:\n";
-        $out .= "  %rp = getelementptr [512 x i64], ptr @__mir_je_stk, i64 0, i64 %rk\n";
-        $out .= "  %rv = load i64, ptr %rp\n";
-        $out .= "  %rhit = icmp eq i64 %rv, %ident\n";
-        $out .= "  br i1 %rhit, label %recur, label %rn\n";
-        $out .= "rn:\n";
-        $out .= "  %rk2 = add i64 %rk, 1\n";
-        $out .= "  br label %rl\n";
-        $out .= "recur:\n";
-        $out .= "  %re = call i64 @manticore___mc_json_err(i64 6)\n";
-        $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.jkw.null, i64 4)\n";
-        $out .= "  store i64 %lvl0, ptr @__mir_je_lvl\n";
-        $out .= "  ret void\n";
-        $out .= "rpush:\n";
-        $out .= "  br i1 %inst, label %rst, label %body\n";
-        $out .= "rst:\n";
-        $out .= "  %rsp = getelementptr [512 x i64], ptr @__mir_je_stk, i64 0, i64 %lvl0\n";
-        $out .= "  store i64 %ident, ptr %rsp\n";
-        $out .= "  br label %body\n";
         $out .= "body:\n";
         // Compact out tombstones first so the list/object walk sees no holes.
         $out .= "  %alen = call i64 @__mir_array_live_len(ptr %arr)\n";
@@ -3456,70 +3524,7 @@ no:
         // estr call chain, the dominant object-emit cost.
         $out .= "okS:\n";
         $out .= "  %oksptr = load ptr, ptr %oyp\n";
-        $out .= "  %oklenp = getelementptr inbounds i8, ptr %oksptr, i64 -16\n";
-        $out .= "  %oklen = load i64, ptr %oklenp\n";
-        // A literal key is IMMORTAL (rc -1, never freed, so its address is
-        // never reused): one known clean is clean for the rest of the program.
-        // A record list repeats the same few literal keys per row, and the
-        // scan used to run once per row.
-        $out .= "  %okrcp = getelementptr inbounds i8, ptr %oksptr, i64 " . (string)\Compile\MemoryAbi::STRING_RC_OFFSET . "\n";
-        $out .= "  %okrc = load i64, ptr %okrcp\n";
-        $out .= "  %okimm = icmp eq i64 %okrc, -1\n";
-        $out .= "  %okpi = ptrtoint ptr %oksptr to i64\n";
-        $out .= "  %okh0 = lshr i64 %okpi, 4\n";
-        $out .= "  %okh = and i64 %okh0, 63\n";
-        $out .= "  %okcp = getelementptr [64 x i64], ptr @__mir_je_kc, i64 0, i64 %okh\n";
-        $out .= "  %okcv = load i64, ptr %okcp\n";
-        $out .= "  %okch = icmp eq i64 %okcv, %okpi\n";
-        $out .= "  br i1 %hexany, label %kslow, label %kcache\n";
-        $out .= "kcache:\n";
-        $out .= "  br i1 %okch, label %kclean, label %ksscan\n";
-        $out .= "ksscan:\n";
-        $out .= "  %ksi = phi i64 [0, %kcache], [%ksi2, %ksn]\n";
-        $out .= "  %ksdone = icmp sge i64 %ksi, %oklen\n";
-        $out .= "  br i1 %ksdone, label %kclean, label %ksb\n";
-        $out .= "ksb:\n";
-        $out .= "  %ksp = getelementptr inbounds i8, ptr %oksptr, i64 %ksi\n";
-        $out .= "  %ksc = load i8, ptr %ksp\n";
-        $out .= "  %ksz = zext i8 %ksc to i64\n";
-        $out .= "  %kslt = icmp ult i64 %ksz, 32\n";
-        $out .= "  %ksq = icmp eq i64 %ksz, 34\n";
-        $out .= "  %ksbs = icmp eq i64 %ksz, 92\n";
-        $out .= "  %kssl = icmp eq i64 %ksz, 47\n";
-        $out .= "  %kshi = icmp uge i64 %ksz, 128\n";
-        $out .= "  %ksd1 = or i1 %kslt, %ksq\n";
-        $out .= "  %ksd2 = or i1 %ksd1, %ksbs\n";
-        $out .= "  %ksd3 = or i1 %ksd2, %kssl\n";
-        $out .= "  %ksdirty = or i1 %ksd3, %kshi\n";
-        $out .= "  br i1 %ksdirty, label %kslow, label %ksn\n";
-        $out .= "ksn:\n";
-        $out .= "  %ksi2 = add i64 %ksi, 1\n";
-        $out .= "  br label %ksscan\n";
-        $out .= "kslow:\n";
-        $out .= "  call void @__mir_json_estr(ptr %slotp, ptr %lp, ptr %oksptr)\n";
-        $out .= "  br label %okdone\n";
-        $out .= "kclean:\n";
-        $out .= "  br i1 %okimm, label %kremember, label %kwrite\n";
-        $out .= "kremember:\n";
-        $out .= "  store i64 %okpi, ptr %okcp\n";
-        $out .= "  br label %kwrite\n";
-        $out .= "kwrite:\n";
-        $out .= "  %krsv = add i64 %oklen, 3\n";
-        $out .= "  %kbuf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %krsv)\n";
-        $out .= "  %kw0 = load i64, ptr %lp\n";
-        $out .= "  %kq0 = getelementptr inbounds i8, ptr %kbuf, i64 %kw0\n";
-        $out .= "  store i8 34, ptr %kq0\n";
-        $out .= "  %kw1 = add i64 %kw0, 1\n";
-        $out .= "  %kdst = getelementptr inbounds i8, ptr %kbuf, i64 %kw1\n";
-        $out .= "  call void @__mir_json_cpy(ptr %kdst, ptr %oksptr, i64 %oklen)\n";
-        $out .= "  %kw2 = add i64 %kw1, %oklen\n";
-        $out .= "  %kq1 = getelementptr inbounds i8, ptr %kbuf, i64 %kw2\n";
-        $out .= "  store i8 34, ptr %kq1\n";
-        $out .= "  %kw3 = add i64 %kw2, 1\n";
-        $out .= "  %kq2 = getelementptr inbounds i8, ptr %kbuf, i64 %kw3\n";
-        $out .= "  store i8 58, ptr %kq2\n";
-        $out .= "  %kw4 = add i64 %kw3, 1\n";
-        $out .= "  store i64 %kw4, ptr %lp\n";
+        $out .= "  call void @__mir_json_skey(ptr %slotp, ptr %lp, ptr %oksptr)\n";
         $out .= "  br label %okcolon\n";
         $out .= "okI:\n";
         $out .= $inlinePutc(34);
@@ -3558,6 +3563,201 @@ no:
         $out .= "  store i64 %lvl0, ptr @__mir_je_lvl\n";
         $out .= "  ret void\n}\n";
 
+        // `"key":` for a string object key. The hot repeated case: a key is
+        // almost always a short escape-free identifier, so it is scanned here
+        // and, when clean, written with one reserve and a short copy; the
+        // moment a byte needs escaping (control / " / \\ / / / non-ASCII), or
+        // a JSON_HEX_* flag is set, it goes through estr. A literal key is
+        // IMMORTAL (rc -1, never freed, so its address is never reused): one
+        // found clean is remembered by address for the rest of the program —
+        // a record list repeats the same few keys per row.
+        $out .= '
+define void @__mir_json_skey(ptr %slotp, ptr %lp, ptr %k) alwaysinline {
+entry:
+  %fl = load i64, ptr @__mir_je_flags
+  %hxf = and i64 %fl, 15
+  %hexany = icmp ne i64 %hxf, 0
+  %klenp = getelementptr inbounds i8, ptr %k, i64 -16
+  %klen = load i64, ptr %klenp
+  %krcp = getelementptr inbounds i8, ptr %k, i64 ' . (string)\Compile\MemoryAbi::STRING_RC_OFFSET . '
+  %krc = load i64, ptr %krcp
+  %kimm = icmp eq i64 %krc, -1
+  %kpi = ptrtoint ptr %k to i64
+  %kh0 = lshr i64 %kpi, 4
+  %kh = and i64 %kh0, 63
+  %kcp = getelementptr [64 x i64], ptr @__mir_je_kc, i64 0, i64 %kh
+  %kcv = load i64, ptr %kcp
+  %kch = icmp eq i64 %kcv, %kpi
+  br i1 %hexany, label %kslow, label %kcache
+kcache:
+  br i1 %kch, label %kclean, label %ksscan
+ksscan:
+  %ksi = phi i64 [0, %kcache], [%ksi2, %ksn]
+  %ksdone = icmp sge i64 %ksi, %klen
+  br i1 %ksdone, label %kclean, label %ksb
+ksb:
+  %ksp = getelementptr inbounds i8, ptr %k, i64 %ksi
+  %ksc = load i8, ptr %ksp
+  %ksz = zext i8 %ksc to i64
+  %kslt = icmp ult i64 %ksz, 32
+  %ksq = icmp eq i64 %ksz, 34
+  %ksbs = icmp eq i64 %ksz, 92
+  %kssl = icmp eq i64 %ksz, 47
+  %kshi = icmp uge i64 %ksz, 128
+  %ksd1 = or i1 %kslt, %ksq
+  %ksd2 = or i1 %ksd1, %ksbs
+  %ksd3 = or i1 %ksd2, %kssl
+  %ksdirty = or i1 %ksd3, %kshi
+  br i1 %ksdirty, label %kslow, label %ksn
+ksn:
+  %ksi2 = add i64 %ksi, 1
+  br label %ksscan
+kslow:
+  call void @__mir_json_estr(ptr %slotp, ptr %lp, ptr %k)
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 58)
+  ret void
+kclean:
+  br i1 %kimm, label %kremember, label %kwrite
+kremember:
+  store i64 %kpi, ptr %kcp
+  br label %kwrite
+kwrite:
+  %krsv = add i64 %klen, 3
+  %kbuf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %krsv)
+  %kw0 = load i64, ptr %lp
+  %kq0 = getelementptr inbounds i8, ptr %kbuf, i64 %kw0
+  store i8 34, ptr %kq0
+  %kw1 = add i64 %kw0, 1
+  %kdst = getelementptr inbounds i8, ptr %kbuf, i64 %kw1
+  call void @__mir_json_cpy(ptr %kdst, ptr %k, i64 %klen)
+  %kw2 = add i64 %kw1, %klen
+  %kq1 = getelementptr inbounds i8, ptr %kbuf, i64 %kw2
+  store i8 34, ptr %kq1
+  %kw3 = add i64 %kw2, 1
+  %kq2 = getelementptr inbounds i8, ptr %kbuf, i64 %kw3
+  store i8 58, ptr %kq2
+  %kw4 = add i64 %kw3, 1
+  store i64 %kw4, ptr %lp
+  ret void
+}
+
+';
+        // One `key: value` of an object walked through its descriptor's
+        // visit_fn. `%ctx` is the walk: [slotp, lp, count, level]. A null
+        // `%k` is the int key `%ik` (a dynamic property named by a number).
+        $out .= '
+define void @__mir_json_pair(ptr %ctx, ptr %k, i64 %ik, i64 %cell) {
+entry:
+  %slotp = load ptr, ptr %ctx
+  %lpp = getelementptr inbounds i64, ptr %ctx, i64 1
+  %lp = load ptr, ptr %lpp
+  %cp = getelementptr inbounds i64, ptr %ctx, i64 2
+  %cnt = load i64, ptr %cp
+  %cnt1 = add i64 %cnt, 1
+  store i64 %cnt1, ptr %cp
+  %fl = load i64, ptr @__mir_je_flags
+  %pf = and i64 %fl, 128
+  %pretty = icmp ne i64 %pf, 0
+  %first = icmp eq i64 %cnt, 0
+  br i1 %first, label %sep, label %comma
+comma:
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 44)
+  br label %sep
+sep:
+  br i1 %pretty, label %nl, label %key
+nl:
+  %lvp = getelementptr inbounds i64, ptr %ctx, i64 3
+  %lv = load i64, ptr %lvp
+  call void @__mir_json_nl(ptr %slotp, ptr %lp, i64 %lv)
+  br label %key
+key:
+  %isn = icmp eq ptr %k, null
+  br i1 %isn, label %ikey, label %skey
+skey:
+  call void @__mir_json_skey(ptr %slotp, ptr %lp, ptr %k)
+  br label %val
+ikey:
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 34)
+  call void @__mir_json_int(ptr %slotp, ptr %lp, i64 %ik)
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 34)
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 58)
+  br label %val
+val:
+  br i1 %pretty, label %sp, label %app
+sp:
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 32)
+  br label %app
+app:
+  call void @__mir_json_app(ptr %slotp, ptr %lp, i64 %cell)
+  ret void
+}
+
+';
+        // The visit_fn callback: a declared property, or (null key) the
+        // dynamic bag as a raw array — every entry, string or int keyed.
+        $out .= '
+define void @__mir_json_pcb(ptr %ctx, ptr %key, i64 %cell) {
+entry:
+  %isbag = icmp eq ptr %key, null
+  br i1 %isbag, label %bag, label %one
+one:
+  call void @__mir_json_pair(ptr %ctx, ptr %key, i64 0, i64 %cell)
+  ret void
+bag:
+  %arr = inttoptr i64 %cell to ptr
+  %nul = icmp eq ptr %arr, null
+  br i1 %nul, label %done, label %walk
+walk:
+  %alen = call i64 @__mir_array_live_len(ptr %arr)
+  %hfp = getelementptr inbounds i8, ptr %arr, i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . '
+  %hfl = load i64, ptr %hfp
+  %hint = and i64 %hfl, ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . '
+  %hashed = call i64 @__mir_array_is_hashed(ptr %arr)
+  %ishash = icmp ne i64 %hashed, 0
+  br label %lp
+lp:
+  %i = phi i64 [0, %walk], [%i1, %next]
+  %fin = icmp sge i64 %i, %alen
+  br i1 %fin, label %done, label %ent
+ent:
+  br i1 %ishash, label %eh, label %ep
+ep:
+  %po0 = shl i64 %i, 3
+  %po = add i64 %po0, ' . $H . '
+  %pvp = getelementptr inbounds i8, ptr %arr, i64 %po
+  %pv0 = load i64, ptr %pvp
+  %pv = call i64 @__mir_box_by_repr(i64 %pv0, i64 %hint)
+  call void @__mir_json_pair(ptr %ctx, ptr null, i64 %i, i64 %pv)
+  br label %next
+eh:
+  %e0 = mul i64 %i, ' . $ES . '
+  %e1 = add i64 %e0, ' . $H . '
+  %kp = getelementptr inbounds i8, ptr %arr, i64 %e1
+  %kind = load i64, ptr %kp
+  %e2 = add i64 %e1, ' . $KEY_OFF . '
+  %kyp = getelementptr inbounds i8, ptr %arr, i64 %e2
+  %kw = load i64, ptr %kyp
+  %e3 = add i64 %e1, ' . $VAL_OFF . '
+  %vp = getelementptr inbounds i8, ptr %arr, i64 %e3
+  %v0 = load i64, ptr %vp
+  %v = call i64 @__mir_box_by_repr(i64 %v0, i64 %hint)
+  %isstr = icmp eq i64 %kind, ' . $KIND_STR . '
+  br i1 %isstr, label %es, label %ei
+es:
+  %ks = inttoptr i64 %kw to ptr
+  call void @__mir_json_pair(ptr %ctx, ptr %ks, i64 0, i64 %v)
+  br label %next
+ei:
+  call void @__mir_json_pair(ptr %ctx, ptr null, i64 %kw, i64 %v)
+  br label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %lp
+done:
+  ret void
+}
+
+';
         // Entry: install the options (saving the outer walk's — a
         // jsonSerialize() may call json_encode itself), reset the error slot as
         // php does, walk into ONE growing buffer and commit len/NUL once.
@@ -3961,6 +4161,10 @@ bad4:
         $out = "\n@__mir_jd_depth = linkonce_odr global i64 0\n";
         $out .= "@__mir_jd_max = linkonce_odr global i64 512\n";
         $out .= "@__mir_jd_flags = linkonce_odr global i64 0\n";
+        // 10^0..10^22, every one exact in a double: `m / 10^k` with `m` < 2^53
+        // is then ONE correctly rounded division — strtod's own answer
+        // (Clinger's fast path), without strtod.
+        $out .= "@__mir_jd_p10 = private unnamed_addr constant [23 x double] [double 1.0e0, double 1.0e1, double 1.0e2, double 1.0e3, double 1.0e4, double 1.0e5, double 1.0e6, double 1.0e7, double 1.0e8, double 1.0e9, double 1.0e10, double 1.0e11, double 1.0e12, double 1.0e13, double 1.0e14, double 1.0e15, double 1.0e16, double 1.0e17, double 1.0e18, double 1.0e19, double 1.0e20, double 1.0e21, double 1.0e22]\n";
         $out .= "@.jdkw.true = private unnamed_addr constant [5 x i8] c\"true\\00\", align 1\n";
         $out .= "@.jdkw.false = private unnamed_addr constant [6 x i8] c\"false\\00\", align 1\n";
         $out .= "@.jdkw.null = private unnamed_addr constant [5 x i8] c\"null\\00\", align 1\n";
@@ -4058,7 +4262,8 @@ no:
 ';
 
         // ── skip space / tab / LF / CR ──
-        $out .= "\ndefine void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp) {\n";
+        // Inlined at every token boundary: the common answer is "no blank".
+        $out .= "\ndefine void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp) alwaysinline {\n";
         $out .= "entry:\n  br label %lp\n";
         $out .= "lp:\n";
         $out .= "  %i = load i64, ptr %pp\n";
@@ -4300,9 +4505,22 @@ no:
         $out .= "  br i1 %same, label %cmpb, label %miss\n";
         $out .= "cmpb:\n";
         $out .= "  %rp = getelementptr inbounds i8, ptr %s, i64 %st\n";
-        $out .= "  %cr = call i32 @memcmp(ptr %occ, ptr %rp, i64 %len)\n";
-        $out .= "  %eqb = icmp eq i32 %cr, 0\n";
-        $out .= "  br i1 %eqb, label %hit, label %miss\n";
+        // Keys are short: a byte loop beats libc's memcmp through the PLT.
+        $out .= "  br label %cmpl\n";
+        $out .= "cmpl:\n";
+        $out .= "  %ci = phi i64 [0, %cmpb], [%ci1, %cmpn]\n";
+        $out .= "  %cdone = icmp sge i64 %ci, %len\n";
+        $out .= "  br i1 %cdone, label %hit, label %cmpc\n";
+        $out .= "cmpc:\n";
+        $out .= "  %cap = getelementptr inbounds i8, ptr %occ, i64 %ci\n";
+        $out .= "  %cav = load i8, ptr %cap\n";
+        $out .= "  %cbp = getelementptr inbounds i8, ptr %rp, i64 %ci\n";
+        $out .= "  %cbv = load i8, ptr %cbp\n";
+        $out .= "  %ceq = icmp eq i8 %cav, %cbv\n";
+        $out .= "  br i1 %ceq, label %cmpn, label %miss\n";
+        $out .= "cmpn:\n";
+        $out .= "  %ci1 = add i64 %ci, 1\n";
+        $out .= "  br label %cmpl\n";
         $out .= "hit:\n";
         $out .= "  call void @__mir_rc_retain_str(ptr %occ)\n";
         $out .= "  ret ptr %occ\n";
@@ -4677,10 +4895,15 @@ entry:
   %acc = alloca i64
   %ovf = alloca i64
   %flt = alloca i64
+  %fm = alloca i64
+  %fk = alloca i64
+  %fslow = alloca i64
   %st = load i64, ptr %pp
   store i64 0, ptr %acc
   store i64 0, ptr %ovf
   store i64 0, ptr %flt
+  store i64 0, ptr %fk
+  store i64 0, ptr %fslow
   %c0 = call i64 @__mir_json_bat(ptr %s, i64 %st, i64 %n)
   %neg = icmp eq i64 %c0, 45
   %st1 = add i64 %st, 1
@@ -4729,6 +4952,14 @@ intdone:
   br i1 %isdot, label %frac, label %expchk
 frac:
   store i64 1, ptr %flt
+  %fa0 = load i64, ptr %acc
+  store i64 %fa0, ptr %fm
+  %fov0 = load i64, ptr %ovf
+  %fbig0 = icmp ugt i64 %fa0, 9007199254740992
+  %fov1 = icmp ne i64 %fov0, 0
+  %fs0 = or i1 %fbig0, %fov1
+  %fs0z = zext i1 %fs0 to i64
+  store i64 %fs0z, ptr %fslow
   %if1 = add i64 %ie, 1
   store i64 %if1, ptr %ii
   %bf = call i64 @__mir_json_bat(ptr %s, i64 %if1, i64 %n)
@@ -4744,6 +4975,20 @@ fl:
 flstep:
   %fi1 = add i64 %fi, 1
   store i64 %fi1, ptr %ii
+  %fmv = load i64, ptr %fm
+  %fm10 = mul i64 %fmv, 10
+  %fm2 = add i64 %fm10, %fbd
+  store i64 %fm2, ptr %fm
+  %fkv = load i64, ptr %fk
+  %fk1 = add i64 %fkv, 1
+  store i64 %fk1, ptr %fk
+  %fmbig = icmp ugt i64 %fm2, 9007199254740992
+  %fkbig = icmp ugt i64 %fk1, 22
+  %fsl = or i1 %fmbig, %fkbig
+  %fslo = load i64, ptr %fslow
+  %fslz = zext i1 %fsl to i64
+  %fsln = or i64 %fslo, %fslz
+  store i64 %fsln, ptr %fslow
   br label %fl
 expchk:
   %xe = load i64, ptr %ii
@@ -4753,6 +4998,7 @@ expchk:
   br i1 %isx, label %exp, label %fin
 exp:
   store i64 1, ptr %flt
+  store i64 1, ptr %fslow
   %xe1 = add i64 %xe, 1
   %xs = call i64 @__mir_json_bat(ptr %s, i64 %xe1, i64 %n)
   %xsp = icmp eq i64 %xs, 43
@@ -4802,6 +5048,23 @@ bigstr:
   %bsc = call i64 @__manticore_box_ptr(ptr %bstr)
   ret i64 %bsc
 asdouble:
+  %qk = load i64, ptr %fk
+  %qsl = load i64, ptr %fslow
+  %qfr = icmp ne i64 %qk, 0
+  %qok0 = icmp eq i64 %qsl, 0
+  %qok = and i1 %qfr, %qok0
+  br i1 %qok, label %clinger, label %slowd
+clinger:
+  %qm = load i64, ptr %fm
+  %qmf = uitofp i64 %qm to double
+  %qpp = getelementptr [23 x double], ptr @__mir_jd_p10, i64 0, i64 %qk
+  %qp = load double, ptr %qpp
+  %qd = fdiv double %qmf, %qp
+  %qn = fneg double %qd
+  %qv = select i1 %neg, double %qn, double %qd
+  %qbx = call i64 @__manticore_box_float(double %qv)
+  ret i64 %qbx
+slowd:
   %tl0 = sub i64 %e, %st
   %tbig = icmp sgt i64 %tl0, 79
   %tl = select i1 %tbig, i64 79, i64 %tl0

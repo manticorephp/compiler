@@ -1,0 +1,7 @@
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  int(7)
+}
+bool(true)
