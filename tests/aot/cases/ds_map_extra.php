@@ -28,3 +28,6 @@ try { $col->toArray(); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 $sj = new Map(); $sj->set("a", 1);
 echo json_encode($sj), "\n";
 echo json_encode(new Set()), "\n";
+echo json_encode(new Manticore\Ds\Map()), "\n";
+$ji = new Map(); $ji->set(0, 'a'); $ji->set(5, 'b');
+echo json_encode($ji), "\n";

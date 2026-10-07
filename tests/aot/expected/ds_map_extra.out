@@ -8,3 +8,5 @@ Map modified during iteration
 Map::toArray(): keys collide in a PHP array
 {"a":1}
 []
+{}
+{"0":"a","5":"b"}

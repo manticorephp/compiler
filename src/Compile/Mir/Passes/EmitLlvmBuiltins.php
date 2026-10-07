@@ -448,7 +448,11 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
         if (\strncmp($name, '__mc_nbuf_', 10) === 0) {
             $nbufSig = \Compile\Mir\RuntimeLibrary::nbufSig(\substr($name, 10));
-            if (\strlen($nbufSig) === \count($args) + 1) { return $this->biNbuf(\substr($name, 10), $nbufSig, $args); }
+            if (\strlen($nbufSig) === \count($args) + 1) { return $this->biNbuf('nbuf', \substr($name, 10), $nbufSig, $args); }
+        }
+        if (\strncmp($name, '__mc_hmap_', 10) === 0) {
+            $hmapSig = \Compile\Mir\RuntimeLibrary::hmapSig(\substr($name, 10));
+            if (\strlen($hmapSig) === \count($args) + 1) { return $this->biNbuf('hmap', \substr($name, 10), $hmapSig, $args); }
         }
         if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
@@ -2925,9 +2929,9 @@ trait EmitLlvmBuiltins
      * the runtime when it is kept; a cell result is the caller's +1.
      * @param Node[] $args
      */
-    private function biNbuf(string $op, string $sig, array $args): string
+    private function biNbuf(string $prefix, string $op, string $sig, array $args): string
     {
-        $this->rt->needsBuf = true;
+        if ($prefix === 'hmap') { $this->rt->needsHmap = true; } else { $this->rt->needsBuf = true; }
         $this->rt->needsTagged = true;
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
@@ -2954,7 +2958,7 @@ trait EmitLlvmBuiltins
             }
         }
         $ret = $sig[$n];
-        $call = 'call ' . ($ret === 'v' ? 'void' : ($ret === 'f' ? 'double' : 'i64')) . ' @__mir_nbuf_' . $op . '(' . $list . ")\n";
+        $call = 'call ' . ($ret === 'v' ? 'void' : ($ret === 'f' ? 'double' : 'i64')) . ' @__mir_' . $prefix . '_' . $op . '(' . $list . ")\n";
         if ($ret === 'v') {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';

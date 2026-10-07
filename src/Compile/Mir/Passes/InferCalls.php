@@ -454,6 +454,15 @@ trait InferCalls
                 return Type::int_();
             }
         }
+        if (\strncmp($n, '__mc_hmap_', 10) === 0) {
+            $hmapSig = \Compile\Mir\RuntimeLibrary::hmapSig(\substr($n, 10));
+            if (\strlen($hmapSig) === \count($args) + 1) {
+                $hmapRet = $hmapSig[\count($args)];
+                if ($hmapRet === 'v') { return Type::void(); }
+                if ($hmapRet === 'c') { return Type::cell(); }
+                return Type::int_();
+            }
+        }
         if ($n === '__mc_obj_from_addr' && \count($args) === 1) { return Type::cell(); }
         if (($n === 'array_first' || $n === 'array_last'
             || $n === 'array_key_first' || $n === 'array_key_last')

@@ -4083,6 +4083,7 @@ trait EmitLlvmRuntime
         if ($this->rt->needsCellBitop) { $out .= $this->lib->cellBitop(); }
         if ($this->rt->needsIpow) { $out .= $this->lib->ipow(); }
         if ($this->rt->needsBuf) { $out .= $this->lib->nbuf(); }
+        if ($this->rt->needsHmap) { $out .= $this->lib->hmap(); }
         if ($this->rt->needsStrtolower) { $out .= $this->lib->caseConv('__mir_strtolower', 65, 90, 32); }
         if ($this->rt->needsStrtoupper) { $out .= $this->lib->caseConv('__mir_strtoupper', 97, 122, -32); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
