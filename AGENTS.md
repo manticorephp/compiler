@@ -35,6 +35,8 @@ clean finish before trusting anything.
 
 ## Bootstrap: the pinned release
 
+Why it works this way: [`docs/design/stage0-bootstrap.md`](docs/design/stage0-bootstrap.md).
+
 `BOOTSTRAP_VERSION` names the bootstrap compiler (stage0): the oldest release
 that can build this tree. It is the one source every consumer reads:
 
