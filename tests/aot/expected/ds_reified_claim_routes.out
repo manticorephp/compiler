@@ -7,9 +7,11 @@ null
 null
 int
 string
+1:int 2:int|int 1:string 2:string|float
 2 x,int:3
 3 x,int:3,string:9
 float string null
+1:int 2:int|int 1:string 2:string|float
 Cannot use a key of type float in Map
 Key not found
 dflt

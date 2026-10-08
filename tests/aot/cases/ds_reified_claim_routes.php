@@ -18,6 +18,12 @@ final class Sink
 
     /** @param T $v */
     public function put(mixed $v = null): string { return get_debug_type($v); }
+
+    /** @param T $v */
+    public function args(mixed $v, mixed $w = 'dw'): string
+    {
+        return func_num_args() . ':' . implode('|', array_map('get_debug_type', func_get_args()));
+    }
 }
 
 /** @template T */
@@ -47,6 +53,7 @@ function viaErasedSink(Sink $s): void
     echo $s->f(5, $out), ' ', implode(',', $out), "\n";
     echo $s->f("s", $out, 9), ' ', implode(',', $out), "\n";
     echo $s->put(1.5), ' ', $s->put("t"), ' ', $s->put(), "\n";
+    echo $s->args(5), ' ', $s->args(5, 6), ' ', $s->args("x"), ' ', $s->args("x", 2.5), "\n";
 }
 
 /** @var Sink<string> $s */
@@ -62,6 +69,7 @@ echo $s->put(), "\n";
 echo $s->put(null), "\n";
 echo $s->put(3), "\n";
 echo $s->put("z"), "\n";
+echo $s->args(5), ' ', $s->args(5, 6), ' ', $s->args("x"), ' ', $s->args("x", 2.5), "\n";
 viaErasedSink($s);
 
 /** @var Map<string,int> $m */
