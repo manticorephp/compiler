@@ -1472,7 +1472,7 @@ class ReflectionFunction
 
     private bool $internal = false;
 
-    private mixed $closure = null;
+    private ?\Closure $closure = null;
 
     public function __construct(mixed $name)
     {
@@ -1607,7 +1607,10 @@ class ReflectionFunction
 
     public function getClosureThis(): ?object
     {
-        return null;
+        if ($this->closure === null) { return null; }
+        $t = __mc_refl_clo_this($this->closure);
+        if (!\is_object($t)) { return null; }
+        return $t;
     }
 
     public function getClosureCalledClass(): ?object

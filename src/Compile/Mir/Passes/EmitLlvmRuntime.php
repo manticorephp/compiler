@@ -2274,7 +2274,7 @@ trait EmitLlvmRuntime
         foreach ($this->reflClosureMeta as $fn => $mm) {
             $id = $this->mangle($fn);
             $nameSym = '@.fnmeta.name.' . $id;
-            $out .= $this->strGlobalDef($nameSym, $mm->name);
+            $out .= $this->strGlobalDef($nameSym, '{closure}');
             $pp = $this->rmetaParamTable($mm, $id, 0);
             $out .= $pp[0];
             $rsym = '@.fnmeta.ret.' . $id;

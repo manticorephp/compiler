@@ -1,0 +1,15 @@
+1 1 [a]
+1 0 [x=3]
+2 1 [s @Tag(mm); n=5]
+2 1 [a; k=NULL]
+2 1 [a; b='dflt' @Tag(pp)]
+2 1 [q @Tag(lit); z=array (
+  0 => 1,
+  1 => 2,
+)]
+K
+K
+NULL
+NULL
+10
+a2

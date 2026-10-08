@@ -1461,6 +1461,20 @@ final class LowerFromAst implements Pass
         if ($this->includeReflection) {
             $this->collectReflFnNames($module);
             if (!$this->reflFnDynamic) { $module->reflClosureMeta = []; }
+            $module->reflClosureWanted = $this->reflFnDynamic;
+            $fi = 0;
+            foreach ($this->closureReflFactories as $fd) {
+                $scope = $this->closureReflFactoryScope[$fi];
+                $fi = $fi + 1;
+                if (!$this->reflFnDynamic) { continue; }
+                $this->fnDecls[$fd->name] = $fd;
+                $prevCls = $this->currentLowerClass;
+                $this->currentLowerClass = $scope;
+                $module->addFunction($this->lowerFunction($fd));
+                $this->currentLowerClass = $prevCls;
+            }
+            $this->closureReflFactories = [];
+            $this->closureReflFactoryScope = [];
             $fnTrampSrc = '';
             foreach ($module->reflFnMeta as $fn => $mm) {
                 $variadic = false; $byRef = false;
@@ -1961,6 +1975,12 @@ final class LowerFromAst implements Pass
     }
 
     private bool $reflFnDynamic = false;
+
+    /** @var \Parser\Ast\FunctionDecl[] closure-parameter attribute / default factories, kept when the program reflects a computed name */
+    private array $closureReflFactories = [];
+
+    /** @var string[] the class scope each of {@see $closureReflFactories} was written in */
+    private array $closureReflFactoryScope = [];
 
     private function scanReflFn(\Compile\Mir\Node $n, Module $module, bool $literals): void
     {
@@ -3135,7 +3155,10 @@ final class LowerFromAst implements Pass
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
         $this->setCurrentLowerParams($expr->params);
+        $savedHasThis = $this->currentLowerFnHasThis;
+        if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $body = $this->lowerBlockNode($expr->body);
+        $this->currentLowerFnHasThis = $savedHasThis;
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
         $clUsesFa = $this->sawFuncArgs;
@@ -3146,7 +3169,7 @@ final class LowerFromAst implements Pass
         $this->currentLowerParams = $savedParams;
         $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
-            (bool)($expr->returnsByRef ?? false), $clUsesFa);
+            (bool)($expr->returnsByRef ?? false), $clUsesFa, null, false, $expr->isStatic);
     }
 
     private function lowerArrowFn(\Parser\Ast\ArrowFn $expr): Node
@@ -3175,7 +3198,10 @@ final class LowerFromAst implements Pass
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
         $this->setCurrentLowerParams($expr->params);
+        $savedHasThis = $this->currentLowerFnHasThis;
+        if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $this->currentLowerFnHasThis = $savedHasThis;
         $afIsGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
         $afUsesFa = $this->sawFuncArgs;
@@ -3187,7 +3213,7 @@ final class LowerFromAst implements Pass
         $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
-            (bool)($expr->returnsByRef ?? false), $afUsesFa);
+            (bool)($expr->returnsByRef ?? false), $afUsesFa, null, false, $expr->isStatic);
     }
 
     /** Whether the lowered node tree reads the local `$this`. */
@@ -3475,7 +3501,7 @@ final class LowerFromAst implements Pass
         [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
         return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
-            $cls !== '' && $this->methodDeclaresErasedArray($cls, $method));
+            $cls !== '' && $this->methodDeclaresErasedArray($cls, $method), $declParams);
     }
 
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */

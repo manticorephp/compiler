@@ -338,7 +338,7 @@ trait InferCalls
         // The boxed result of an indirect trampoline call — a mixed cell the
         // prelude's ReflectionMethod::invoke / newInstance hand back to the user.
         if ($n === '__mc_refl_invoke' || $n === '__mc_refl_call1'
-            || $n === '__mc_refl_call0') { return Type::cell(); }
+            || $n === '__mc_refl_call0' || $n === '__mc_refl_clo_this') { return Type::cell(); }
         if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }

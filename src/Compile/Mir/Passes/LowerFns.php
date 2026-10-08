@@ -492,7 +492,7 @@ trait LowerFns
      * @param \Parser\Ast\Param[] $declParams
      * @param array<string,bool>  $capByRef  capture name → by-reference?
      */
-    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null, bool $forwardsErasedArray = false): Node
+    private function finishClosure(array $capNames, array $declParams, Block $body, ?string $retHint, array $capByRef = [], bool $isGenerator = false, bool $returnsByRef = false, bool $usesFuncArgs = false, ?string $defaultScope = null, bool $forwardsErasedArray = false, bool $isStatic = false): Node
     {
         // A closure / arrow fn in an instance method auto-binds `$this`
         // (PHP semantics — no `use ($this)` needed). If the body reads it
@@ -503,7 +503,11 @@ trait LowerFns
             ? Type::obj($this->currentLowerClass) : Type::unknown();
         $hasThis = false;
         foreach ($capNames as $cn) { if ($cn === 'this') { $hasThis = true; } }
-        if (!$hasThis && $this->nodeReadsThis($body)) {
+        // A reflecting program also binds `$this` into a closure that never reads it,
+        // as php does: ReflectionFunction::getClosureThis() answers from the env.
+        $bindThis = $this->includeReflection && $this->currentLowerFnHasThis && !$isStatic
+            && $this->currentLowerClass !== '';
+        if (!$hasThis && ($bindThis || $this->nodeReadsThis($body))) {
             $prepended = ['this'];
             foreach ($capNames as $cn) { $prepended[] = $cn; }
             $capNames = $prepended;
@@ -571,7 +575,8 @@ trait LowerFns
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
         if ($this->includeReflection) {
-            $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($declParams, $retHint);
+            $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($fnName, $declParams, $retHint);
+            $this->queueClosureFactories($fnName, $declParams);
         }
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
         // ->call inject the bound object there (see emit). Prepended first, so
@@ -602,7 +607,7 @@ trait LowerFns
      *
      * @param \Parser\Ast\Param[] $declParams
      */
-    private function closureMethodMeta(array $declParams, ?string $retHint): \Compile\Mir\MethodMeta
+    private function closureMethodMeta(string $fnName, array $declParams, ?string $retHint): \Compile\Mir\MethodMeta
     {
         $params = [];
         foreach ($declParams as $p) {
@@ -612,11 +617,44 @@ trait LowerFns
                 $p->default !== null,
                 $p->byRef,
                 $p->variadic,
-                '', []);
+                '', $this->attrNames($p->attributes));
         }
         return new \Compile\Mir\MethodMeta(
-            '{closure}', 'public', false, false, false,
+            $fnName, 'public', false, false, false,
             $retHint === null ? '' : $retHint, $params, [], '');
+    }
+
+    /**
+     * The attribute and default-value factories of a closure's parameters, deferred
+     * until the program is known to reflect a computed name ({@see collectReflFnNames}).
+     * The site key is `<__closure_N>_<position>`, what the row emission rebuilds.
+     *
+     * @param \Parser\Ast\Param[] $declParams
+     */
+    private function queueClosureFactories(string $fnName, array $declParams): void
+    {
+        $out = [];
+        $pi = -1;
+        foreach ($declParams as $p) {
+            $pi = $pi + 1;
+            if ($p->attributes !== []) {
+                $this->attrFactoriesFor('', 'a', $fnName . '_' . (string)$pi, $p->attributes, $out);
+            }
+            if ($p->default !== null) {
+                $dbody = new \Parser\Ast\Block([
+                    \Parser\Ast\Stmt::return_(
+                        \Parser\Ast\Expr::call('__mir_to_cell', [$p->default], $p->default->span),
+                        $p->default->span),
+                ]);
+                $out[] = new \Parser\Ast\FunctionDecl(
+                    \Compile\Mir\Passes\ReflectSynth::paramDefaultFn('', $fnName, $pi),
+                    [], 'mixed', $dbody, $p->default->span);
+            }
+        }
+        foreach ($out as $fd) {
+            $this->closureReflFactories[] = $fd;
+            $this->closureReflFactoryScope[] = $this->currentLowerClass;
+        }
     }
 
     /**
@@ -629,7 +667,7 @@ trait LowerFns
      * @param Type[]   $capTypes
      * @param Node[]   $capVals
      */
-    private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false): Node
+    private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false, ?array $metaParams = null): Node
     {
         $id = $this->closureCounter;
         $this->closureCounter = $id + 1;
@@ -650,6 +688,11 @@ trait LowerFns
         $clFn->returnArrayHinted = $forwardsErasedArray;
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
+        if ($this->includeReflection && $metaParams !== null) {
+            /** @var \Parser\Ast\Param[] $metaParams */
+            $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($fnName, $metaParams, null);
+            $this->queueClosureFactories($fnName, $metaParams);
+        }
         $byRef = [];
         foreach ($capNames as $cn) { $byRef[] = false; }
         return new Closure_($id, $capVals, Type::obj($fnName), $byRef);

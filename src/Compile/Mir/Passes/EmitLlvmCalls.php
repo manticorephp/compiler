@@ -1639,6 +1639,12 @@ trait EmitLlvmCalls
                 // Declared ARGUMENT arity — the captures are not call slots.
                 $nparams = \count($calleeParams) - $capCnt;
                 $base = $pi;
+                // The array may be shorter than the declared arity: a closure with an
+                // optional parameter pads what is missing from the arity pair.
+                $spreadLen = $this->ssa->allocReg();
+                $out .= '  ' . $spreadLen . ' = call i64 @__mir_array_live_len(ptr ' . $arr . ")\n";
+                $spreadCnt = $this->ssa->allocReg();
+                $out .= '  ' . $spreadCnt . ' = add i64 ' . $spreadLen . ', ' . (string)$base . "\n";
                 while ($pi < $nparams) {
                     $ev = $this->ssa->allocReg();
                     $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
@@ -1653,6 +1659,14 @@ trait EmitLlvmCalls
                     $argList .= ', i64 ' . $ev;
                     $argTypes .= ', i64';
                     $pi = $pi + 1;
+                }
+                $spreadDefaults = $this->sigs->paramDefaults[$fn] ?? [];
+                $hasOpt = false;
+                foreach ($spreadDefaults as $di => $dv) {
+                    if ($di >= $capCnt && $dv !== null) { $hasOpt = true; }
+                }
+                if ($hasOpt) {
+                    $out .= $this->cloArityStoreReg($spreadCnt, '@manticore_' . $this->mangle($fn));
                 }
                 continue;
             }
@@ -2156,6 +2170,15 @@ trait EmitLlvmCalls
      *  The module-local pad chain below still serves a caller that can name
      *  the closures (it also drops an omitted by-ref default's slot); the
      *  pair is what a PRELUDE caller, which may not, relies on. */
+    private function cloArityStoreReg(string $cntReg, string $fnSym): string
+    {
+        $this->rt->needsCloArgc = true;
+        $fp = $this->ssa->allocReg();
+        return '  store i64 ' . $cntReg . ", ptr @__mir_clo_argc\n"
+             . '  ' . $fp . ' = ptrtoint ptr ' . $fnSym . " to i64\n"
+             . '  store i64 ' . $fp . ", ptr @__mir_clo_fp\n";
+    }
+
     private function cloArityStore(string $fpi, int $argc): string
     {
         $this->rt->needsCloArgc = true;
@@ -2900,6 +2923,8 @@ trait EmitLlvmCalls
                 $argList .= ', i64 ' . $ev;
                 $argTypes .= ', i64';
             }
+            // The arity pair, so a parameter this arm leaves out takes its default.
+            $out .= $this->cloArityStore($fpi, $k);
             $rk = $this->ssa->allocReg();
             $out .= '  ' . $rk . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
             $out .= '  store i64 ' . $rk . ', ptr ' . $res . "\n";

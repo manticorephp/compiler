@@ -439,6 +439,10 @@ final class Module
      *  reflects a computed name (the closure may be what it names). Declared LAST. */
     public array $reflClosureMeta = [];
 
+    /** Whether the program reflects a computed name, so a closure built after lowering
+     *  ({@see Passes\ResolveMethodFcc}) must record its shape too. Declared LAST. */
+    public bool $reflClosureWanted = false;
+
 
     public function markPassApplied(string $name): void
     {
