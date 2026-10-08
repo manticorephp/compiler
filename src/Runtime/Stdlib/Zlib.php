@@ -70,7 +70,11 @@ function __mc_zl_encode(string $data, int $level, int $encoding): string|false
         return false;
     }
     $n = \strlen($data);
+    // deflateBound is short for level 0 on zlib 1.2.13 (Debian): deflate(Z_FINISH) answers Z_OK, not Z_STREAM_END,
+    // for 0..2 bytes. php sizes the buffer 1.015 * n + 24 (PHP_ZLIB_BUFFER_SIZE_GUESS); take the larger of the two.
     $cap = \Runtime\Zlib\deflateBound($z, $n);
+    $guess = (int) ($n * 1.015) + 24;
+    if ($guess > $cap) { $cap = $guess; }
     $in = \__mc_zl_in($data);
     $out = \Runtime\Libc\malloc($cap);
     \__mc_zl_set_in($z, $in, $n);
