@@ -630,6 +630,8 @@ trait EmitLlvmControl
             $out .= '  ' . $iterSlot . " = alloca i64\n";
         }
         $iterSlot = $this->locals->slots[$iterName];
+        $ds = $this->emitForeachDs($fe, $iterSlot);
+        if ($ds !== null) { return $out . $ds; }
         $out .= $this->emitNode($fe->array);
         $out .= $this->coerceToI64();
         $subj = $this->lastValue;
@@ -779,18 +781,11 @@ trait EmitLlvmControl
         // `current()` is +1 on every arm — a method's return convention, and
         // the generator arm retains to match — so a co-owning loop variable
         // only gives back the previous iteration's.
-        if ($this->foreachValueOwns($fe)) {
-            $out .= $this->foreachOwnedRebind($fe, $cur, false);
-        } else {
-            $out .= $this->foreachPrevDrop($fe, false);
-        }
-        $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        $out .= $this->foreachBindValue($fe, $cur);
         if ($fe->keyVar !== null) {
             $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'key'), $fe->ownLive);
             $out .= $this->coerceToI64();
-            $kw = $this->lastValue;
-            $out .= $this->foreachPrevDrop($fe, true);
-            $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
+            $out .= $this->foreachBindKey($fe, $this->lastValue);
         }
         $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);
 
@@ -802,6 +797,19 @@ trait EmitLlvmControl
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Bind an iterator step's +1 `$cur` to the loop's value variable. */
+    private function foreachBindValue(Foreach_ $fe, string $cur): string
+    {
+        $out = $this->foreachValueOwns($fe) ? $this->foreachOwnedRebind($fe, $cur, false) : $this->foreachPrevDrop($fe, false);
+        return $out . '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+    }
+
+    /** Bind an iterator step's +1 key `$kw` to the loop's key variable. */
+    private function foreachBindKey(Foreach_ $fe, string $kw): string
+    {
+        return $this->foreachPrevDrop($fe, true) . '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[(string)$fe->keyVar] . "\n";
     }
 
     /**

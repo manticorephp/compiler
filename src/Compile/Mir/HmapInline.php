@@ -22,6 +22,24 @@ final class HmapInline
         return '';
     }
 
+    /**
+     * 'map' / 'set' / 'vec' when `$fe` walks a `Manticore\Ds` container whose
+     * loop the emitter runs over the native storage
+     * ({@see Passes\EmitLlvmHmap::emitForeachDs}), '' otherwise.
+     */
+    public static function foreachKind(Foreach_ $fe): string
+    {
+        $t = $fe->array->type;
+        if ($t->kind !== Type::KIND_OBJ || !$fe->iterAggregate || $fe->iterClass !== 'Generator') { return ''; }
+        $cls = \ltrim((string)($t->class ?? ''), '\\');
+        $p = \strpos($cls, '__of__');
+        if ($p !== false) { $cls = \substr($cls, 0, $p); }
+        if ($cls === 'Manticore\\Ds\\Map') { return 'map'; }
+        if ($cls === 'Manticore\\Ds\\Set') { return 'set'; }
+        if ($cls === 'Manticore\\Ds\\Vec') { return 'vec'; }
+        return '';
+    }
+
     /** 'i' / 's' / 'o' when the key's static type picks a specialised probe, '' for the erased one. */
     public static function keyRepr(Node $key): string
     {

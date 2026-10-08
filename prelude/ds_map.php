@@ -12,6 +12,18 @@ namespace Manticore\Ds {
         throw new \TypeError('Cannot use a key of type ' . \get_debug_type($key) . ' in ' . $cls);
     }
 
+    /** @internal a Map/Set foreach saw the table move under it (the Generator and the native loop) */
+    function __iter_modified(string $cls): never
+    {
+        throw new \RuntimeException($cls . ' modified during iteration');
+    }
+
+    /** @internal `foreach ($ds as &$v)`: Zend's answer for a by-value Generator */
+    function __iter_byref(): never
+    {
+        throw new \Exception('You can only iterate a generator by-reference if it declared that it yields by-reference');
+    }
+
     /**
      * @template K
      * @template V
@@ -83,7 +95,7 @@ namespace Manticore\Ds {
             $epoch = __mc_hmap_epoch($h);
             for ($e = __mc_hmap_next($h, 0); $e >= 0; $e = __mc_hmap_next($h, $e + 1)) {
                 yield __mc_hmap_key($h, $e) => __mc_hmap_val($h, $e);
-                if (__mc_hmap_epoch($h) !== $epoch) { throw new \RuntimeException('Map modified during iteration'); }
+                if (__mc_hmap_epoch($h) !== $epoch) { __iter_modified('Map'); }
             }
         }
 
@@ -190,7 +202,7 @@ namespace Manticore\Ds {
             $epoch = __mc_hmap_epoch($h);
             for ($e = __mc_hmap_next($h, 0); $e >= 0; $e = __mc_hmap_next($h, $e + 1)) {
                 yield __mc_hmap_key($h, $e);
-                if (__mc_hmap_epoch($h) !== $epoch) { throw new \RuntimeException('Set modified during iteration'); }
+                if (__mc_hmap_epoch($h) !== $epoch) { __iter_modified('Set'); }
             }
         }
 
