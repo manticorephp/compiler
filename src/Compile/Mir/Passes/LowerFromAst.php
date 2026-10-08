@@ -1460,6 +1460,7 @@ final class LowerFromAst implements Pass
         // lowered MIR bodies, which the early class-synthesis block predates.
         if ($this->includeReflection) {
             $this->collectReflFnNames($module);
+            if (!$this->reflFnDynamic) { $module->reflClosureMeta = []; }
             $fnTrampSrc = '';
             foreach ($module->reflFnMeta as $fn => $mm) {
                 $variadic = false; $byRef = false;

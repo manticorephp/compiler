@@ -2538,11 +2538,10 @@ trait EmitLlvmCalls
         $this->dynRefTmp = '';
         $this->dynRefBit = '';
         $out = $this->emitNode($a);
-        if ($this->isCellBoxableArg($a->type)) {
-            $out .= $this->boxToCell($a->type);
-        } else {
-            $out .= $this->coerceToI64();
-        }
+        // The by-value alternative is the SAME word every other dynamic call hands
+        // over: an object / closure / array arg is boxed too, or a closure whose
+        // param is a cell read the raw pointer as a float.
+        $out .= $this->closureArgRepr($a->type, null, $a);
         $val = $this->lastValue;
 
         $pure = ($a->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->slots[$a->name]))

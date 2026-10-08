@@ -433,6 +433,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_rettype')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_RETTYPE_OFFSET, true); }
         if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
         if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
+        if ($name === '__mc_refl_clo_find')           { return $this->biMcReflCloFind($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
@@ -5983,6 +5984,24 @@ trait EmitLlvmBuiltins
         $sp = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_fn_find(ptr ' . $sp . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_clo_find($closure)` — the metadata-row address (as an int) of a
+     * closure literal, keyed by the code pointer at env slot 0, or 0.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCloFind(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $env = $this->lastValue;
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = load i64, ptr ' . $env . "\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_clo_find(i64 ' . $fp . ")\n";
         return $this->finishI64($out, $reg);
     }
 

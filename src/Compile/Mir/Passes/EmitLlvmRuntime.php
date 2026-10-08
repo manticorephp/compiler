@@ -2267,6 +2267,45 @@ trait EmitLlvmRuntime
             $out .= "  br label %skip\nskip:\n  ret void\n}\n";
             $fnRegCtors[] = '@__mc_reflfn_reg_' . $id;
         }
+        // Closures: no name registry (a closure has no name); the lookup key is
+        // the code pointer at env slot 0. One `{fn, row}` pair per closure the
+        // program literally spells, scanned linearly by `__mc_refl_clo_find`.
+        $cloEntries = [];
+        foreach ($this->reflClosureMeta as $fn => $mm) {
+            $id = $this->mangle($fn);
+            $nameSym = '@.fnmeta.name.' . $id;
+            $out .= $this->strGlobalDef($nameSym, $mm->name);
+            $pp = $this->rmetaParamTable($mm, $id, 0);
+            $out .= $pp[0];
+            $rsym = '@.fnmeta.ret.' . $id;
+            $out .= $this->strGlobalDef($rsym, $mm->returnType);
+            $row = \Compile\Mir\RuntimeLibrary::rmetaRow(
+                $this->strSymBytes($nameSym), 0, 'null',
+                $this->methodArity($mm), \count($mm->params), $pp[1],
+                0, 'null', $this->strSymBytes($rsym));
+            $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";
+            $cloEntries[] = '{ ptr, ptr } { ptr @manticore_' . $id . ', ptr @__mc_fnmeta_' . $id . ' }';
+        }
+        $nclo = \count($cloEntries);
+        if ($nclo > 0) {
+            $out .= '@__mc_refl_clo_tab = linkonce_odr constant [' . (string)$nclo . ' x { ptr, ptr }] ['
+                  . \implode(', ', $cloEntries) . "]\n";
+        }
+        $out .= "define i64 @__mc_refl_clo_find(i64 %fp) {\nentry:\n";
+        if ($nclo === 0) {
+            $out .= "  ret i64 0\n}\n";
+        } else {
+            $out .= "  br label %loop\n";
+            $out .= "loop:\n  %i = phi i64 [ 0, %entry ], [ %in, %cont ]\n";
+            $out .= '  %end = icmp eq i64 %i, ' . (string)$nclo . "\n  br i1 %end, label %miss, label %body\n";
+            $out .= "body:\n  %ep = getelementptr { ptr, ptr }, ptr @__mc_refl_clo_tab, i64 %i, i32 0\n";
+            $out .= "  %ev = load ptr, ptr %ep\n  %ei = ptrtoint ptr %ev to i64\n";
+            $out .= "  %eq = icmp eq i64 %ei, %fp\n  br i1 %eq, label %hit, label %cont\n";
+            $out .= "hit:\n  %rp = getelementptr { ptr, ptr }, ptr @__mc_refl_clo_tab, i64 %i, i32 1\n";
+            $out .= "  %rv = load ptr, ptr %rp\n  %r = ptrtoint ptr %rv to i64\n  ret i64 %r\n";
+            $out .= "cont:\n  %in = add i64 %i, 1\n  br label %loop\n";
+            $out .= "miss:\n  ret i64 0\n}\n";
+        }
         $noff = (string)\Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET;
         $out .= "@__mc_refl_fn_head = linkonce_odr global ptr null\n";
         $out .= "define i64 @__mc_refl_fn_find(ptr %name) {\nentry:\n";

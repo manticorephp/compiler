@@ -570,6 +570,9 @@ trait LowerFns
         $clFn->returnArrayHinted = $forwardsErasedArray || $this->isBareArrayReturnHint($retHint);
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
+        if ($this->includeReflection) {
+            $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($declParams, $retHint);
+        }
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
         // ->call inject the bound object there (see emit). Prepended first, so
         // it is always struct slot 1.
@@ -591,6 +594,29 @@ trait LowerFns
             $captureByRef[] = $capByRef[$cn] ?? false;
         }
         return new Closure_($id, $captures, Type::obj($fnName), $captureByRef);
+    }
+
+    /**
+     * A closure literal's declared shape (captures excluded) as a {@see MethodMeta},
+     * so `ReflectionFunction($closure)` reuses the method row emission.
+     *
+     * @param \Parser\Ast\Param[] $declParams
+     */
+    private function closureMethodMeta(array $declParams, ?string $retHint): \Compile\Mir\MethodMeta
+    {
+        $params = [];
+        foreach ($declParams as $p) {
+            $params[] = new \Compile\Mir\ParamMeta(
+                $p->name,
+                $p->typeHint === null ? '' : $p->typeHint,
+                $p->default !== null,
+                $p->byRef,
+                $p->variadic,
+                '', []);
+        }
+        return new \Compile\Mir\MethodMeta(
+            '{closure}', 'public', false, false, false,
+            $retHint === null ? '' : $retHint, $params, [], '');
     }
 
     /**
