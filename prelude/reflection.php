@@ -1472,8 +1472,20 @@ class ReflectionFunction
 
     private bool $internal = false;
 
-    public function __construct(string $name)
+    private ?\Closure $closure = null;
+
+    public function __construct(mixed $name)
     {
+        if ($name instanceof \Closure) {
+            $h = __mc_refl_clo_find($name);
+            if ($h === 0) {
+                throw new ReflectionException("Closure is not reflectable");
+            }
+            $this->row = $h;
+            $this->name = "{closure}";
+            $this->closure = $name;
+            return;
+        }
         $n = __mc_refl_unqualify($name);
         $h = __mc_refl_fn_find($n);
         if ($h === 0) {
@@ -1572,6 +1584,9 @@ class ReflectionFunction
 
     public function invoke(mixed ...$args): mixed
     {
+        if ($this->closure !== null) {
+            return ($this->closure)(...$args);
+        }
         if ($this->tramp === 0) {
             throw new ReflectionException("Function " . $this->name . " is not invokable");
         }
@@ -1581,6 +1596,9 @@ class ReflectionFunction
     /** @param mixed[] $args */
     public function invokeArgs(array $args): mixed
     {
+        if ($this->closure !== null) {
+            return ($this->closure)(...$args);
+        }
         if ($this->tramp === 0) {
             throw new ReflectionException("Function " . $this->name . " is not invokable");
         }
@@ -1589,7 +1607,10 @@ class ReflectionFunction
 
     public function getClosureThis(): ?object
     {
-        return null;
+        if ($this->closure === null) { return null; }
+        $t = __mc_refl_clo_this($this->closure);
+        if (!\is_object($t)) { return null; }
+        return $t;
     }
 
     public function getClosureCalledClass(): ?object
@@ -1599,7 +1620,7 @@ class ReflectionFunction
 
     public function isAnonymous(): bool
     {
-        return false;
+        return $this->closure !== null;
     }
 
     /** @return mixed[] */

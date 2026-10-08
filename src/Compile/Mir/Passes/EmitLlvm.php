@@ -610,6 +610,9 @@ final class EmitLlvm implements EmitVisitor
      *  layout hazard (the ClassDef::$isPreludeClass lesson). */
     private array $reflFnMeta = [];
 
+    /** @var array<string, \Compile\Mir\MethodMeta> */
+    private array $reflClosureMeta = [];
+
     /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
      *  Keyed by function name / "DeclaringClass::method".
      *  @var array<string, string> */
@@ -687,6 +690,7 @@ final class EmitLlvm implements EmitVisitor
         $this->interfaceAncestors = $module->interfaceAncestors;
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
+        $this->reflClosureMeta = $module->reflClosureMeta;
         $this->deprecatedFns = $module->deprecatedFns;
         $this->deprecatedMethods = $module->deprecatedMethods;
         $this->noDiscardFns = $module->noDiscardFns;

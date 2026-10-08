@@ -433,6 +433,8 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_rettype')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_RETTYPE_OFFSET, true); }
         if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
         if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
+        if ($name === '__mc_refl_clo_find')           { return $this->biMcReflCloFind($args); }
+        if ($name === '__mc_refl_clo_this')           { return $this->biMcReflCloThis($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
@@ -5984,6 +5986,79 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_fn_find(ptr ' . $sp . ")\n";
         return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_clo_find($closure)` — the metadata-row address (as an int) of a
+     * closure literal, keyed by the code pointer at env slot 0, or 0.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCloFind(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $env = $this->lastValue;
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = load i64, ptr ' . $env . "\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mc_refl_clo_find(i64 ' . $fp . ")\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mc_refl_clo_this($closure)` — the `$this` a closure env carries (shape bit 0
+     * of the env's magic word, object at slot 1), as a counted object cell, or the
+     * null cell for an unbound / static closure.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCloThis(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $env = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $nullV = $this->ssa->allocReg();
+        $out .= '  ' . $nullV . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $nullV . ', ptr ' . $res . "\n";
+        $mp = $this->ssa->allocReg();
+        $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $env . ', i64 ' . (string)\Compile\MemoryAbi::STRING_HASH_OFFSET . "\n";
+        $mw = $this->ssa->allocReg();
+        $out .= '  ' . $mw . ' = load i64, ptr ' . $mp . "\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $mw . ', ' . (string)\Compile\MemoryAbi::CLOSURE_SHAPE_SHIFT . "\n";
+        $bit = $this->ssa->allocReg();
+        $out .= '  ' . $bit . ' = and i64 ' . $sh . ", 1\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = getelementptr inbounds i64, ptr ' . $env . ", i64 1\n";
+        $sv = $this->ssa->allocReg();
+        $out .= '  ' . $sv . ' = load i64, ptr ' . $sp . "\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = icmp ne i64 ' . $bit . ", 0\n";
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $sv . ", 0\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = and i1 ' . $has . ', ' . $nz . "\n";
+        $yes = $this->ssa->allocLabel('cth.yes');
+        $done = $this->ssa->allocLabel('cth.done');
+        $out .= '  br i1 ' . $ok . ', label %' . $yes . ', label %' . $done . "\n";
+        $out .= $yes . ":\n";
+        $op = $this->ssa->allocReg();
+        $out .= '  ' . $op . ' = inttoptr i64 ' . $sv . " to ptr\n";
+        $out .= '  call void @__mir_rc_retain(ptr ' . $op . ")\n";
+        $bo = $this->ssa->allocReg();
+        $out .= '  ' . $bo . ' = call i64 @__manticore_box_object(ptr ' . $op . ")\n";
+        $out .= '  store i64 ' . $bo . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->rt->needsRc = true;
+        $out = $this->finishI64($out, $r);
+        $this->markCellOpaque($this->lastValue);
+        return $out;
     }
 
     /**

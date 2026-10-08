@@ -434,6 +434,15 @@ final class Module
      *  @var string[] */
     public array $ownFlowErrors = [];
 
+    /** @var array<string, \Compile\Mir\MethodMeta> closure fn (`__closure_N`) → its declared
+     *  shape, for `new ReflectionFunction($closure)`. Kept only when the program
+     *  reflects a computed name (the closure may be what it names). Declared LAST. */
+    public array $reflClosureMeta = [];
+
+    /** Whether the program reflects a computed name, so a closure built after lowering
+     *  ({@see Passes\ResolveMethodFcc}) must record its shape too. Declared LAST. */
+    public bool $reflClosureWanted = false;
+
 
     public function markPassApplied(string $name): void
     {

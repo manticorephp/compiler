@@ -77,6 +77,10 @@ final class ResolveMethodFcc implements Pass
                 continue;
             }
             $module->functions[$i] = $this->rebuild($fn, $target);
+            if ($module->reflClosureWanted) {
+                $mm = $this->methodMetaFor($module, $cls, $fn->fccMethod);
+                if ($mm !== null) { $module->reflClosureMeta[$fn->name] = $mm; }
+            }
         }
         if ($module->namedInvokes) { $this->bindNamedInvokes($module); }
         return $module;
@@ -187,6 +191,22 @@ final class ResolveMethodFcc implements Pass
             if ($hit !== null) { return $hit; }
             $cd = $module->classes[$c] ?? null;
             if ($cd === null) { return null; }
+            $c = $cd->parent;
+            $guard = $guard + 1;
+        }
+        return null;
+    }
+
+    /** The reflection shape of `$cls::$method`, walking up the parents. */
+    private function methodMetaFor(Module $module, string $cls, string $method): ?\Compile\Mir\MethodMeta
+    {
+        $c = $cls;
+        $guard = 0;
+        while ($c !== '' && $guard < 64) {
+            $cd = $module->classes[$c] ?? null;
+            if ($cd === null) { return null; }
+            $hit = $cd->methodMeta[$method] ?? ($cd->methodMeta[\strtolower($method)] ?? null);
+            if ($hit !== null) { return $hit; }
             $c = $cd->parent;
             $guard = $guard + 1;
         }
