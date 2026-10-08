@@ -296,13 +296,16 @@ not (the buffers live in a static registry).
 a new container of the same kind.
 
 ```php
-$total = $m->reduce(fn(int $c, int $v, int $k): int => $c + $v, 0);
+$total = $m->reduce(fn($c, $v) => $c + $v, 0);   // fused
 ```
 
-A literal closure passed directly to one of these is fused into a loop at
-compile time (no closure call per element); a closure held in a variable is
-called per element. Both are correct; the literal form is the fast one.
-
+A closure literal passed directly to one of these is fused into a loop at
+compile time (no closure call per element) when **all** hold: it is a literal
+(not a variable), captures nothing, its parameters are untyped, it has no
+return type, its body is safe to splice, and the receiver is statically a
+`Map` / `Set` / `Vec`. Anything else (a `$f` variable, typed parameters or a
+return type, a `use` capture, an untyped receiver) is called per element:
+correct, slower.
 - `find` returns `null` when nothing matches, indistinguishable from a stored
   `null` match. Use `any` or `has` when that matters.
 - A callback must not mutate the container it walks (the `foreach` rule).
@@ -334,19 +337,29 @@ operation); P2 specialises keys, inlines lookups and walks natively.
 | int keys | 82 | 145 | 85 |
 | objects (`spl_object_id` array vs `Set`) | 99 | 168 | 93 |
 | `foreach` over 1e6 int entries | 2 | 6 | 3 |
-| `reduce`, literal closure / `$f` variable | | | 6 / 6 |
+| `reduce`, literal `fn($c, $v)` (fused) | | | 3 |
+| `reduce`, `$f` variable | | | 5 |
+| `reduce`, typed closure literal (not fused) | | | 6 |
 
-`Map<string,int>` and `Set<object>` beat the array idiom. `Map<int,int>` ties it
-(85 vs 82 ms, inside the noise).
+Run back to back (not interleaved) on a shared machine. The P1 column is from
+P1's own run. The three insert/lookup/remove rows are from a quiet run; a later
+run under load (other jobs running) scattered them by up to 40% but kept the
+ordering.
 
+`Map<string,int>` (270 vs 284 ms, -5%) and `Set<object>`
+(93 vs 99, -6%) are at or below the array idiom, `Map<int,int>` (85 vs 82, +4%) just above: all three are parity within noise.
+The remaining `Map<int,int>` gap is insert-miss cost: index growth and rehash,
+first-touch page faults, and entry dereferences on a miss probe. A hash tag in
+the index slot would remove the dereferences; that is a layout change, deferred.
 ### Known open issues
 
 - #137: a bound `V` (`Map<string,int>`) is a static claim; a stored value that
   does not fit `V` is reinterpreted when read back.
 - #140: by-ref `foreach` over a by-value `Generator` iterates instead of
   throwing (the `Map` case throws correctly).
-- #143, #144, #145: an exception thrown from a callback in `map` / `reduce`
-  leaks (memory only; semantics are right).
+- #143, #144, #145: general throw-path leaks (method-argument receiver,
+  assignment RHS target, temporary call argument), visible through a `map` /
+  `reduce` callback that throws (memory only; semantics are right).
 
 ## Polyfill
 
@@ -374,4 +387,4 @@ registry, so a cycle through one is not collected under Zend.
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
-- `Map` / `Set` / `Vec` values are boxed cells (no raw-word value columns yet).
+- No per-type value layout yet: values are stored as 8-byte cells.

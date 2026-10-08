@@ -66,12 +66,15 @@ $t = hrtime(true); $s = 0;
 foreach ($a as $k => $v) { $s += $v; }
 report('foreach array<int,int>', $t, $s); $m = null; $a = [];
 
-/** @var Map<int,int> $m */
-$m = new Map(); for ($i = 0; $i < $n; $i++) { $m->set($i, $i); }
+/** @var Map<int,int> $m2 */
+$m2 = new Map(); for ($i = 0; $i < $n; $i++) { $m2->set($i, $i); }
 $t = hrtime(true);
-$s = $m->reduce(fn(int $c, int $v, int $k): int => $c + $v, 0);
-report('reduce literal', $t, $s);
-$f = fn(int $c, int $v, int $k): int => $c + $v;
+$s = $m2->reduce(fn($c, $v) => $c + $v, 0);
+report('reduce literal (fused)', $t, $s);
+$f = fn($c, $v) => $c + $v;
 $t = hrtime(true);
-$s = $m->reduce($f, 0);
+$s = $m2->reduce($f, 0);
 report('reduce $f', $t, $s);
+$t = hrtime(true);
+$s = $m2->reduce(fn(int $c, int $v, int $k): int => $c + $v, 0);
+report('reduce typed (not fused)', $t, $s);
