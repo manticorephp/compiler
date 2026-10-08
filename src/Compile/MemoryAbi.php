@@ -51,6 +51,9 @@ final class MemoryAbi
      * `ref_slot_str` canonicalise a numeric-string key to its int key at run
      * time (#86) — a v19 body of the same name stores "11" as a string key,
      * so a v19 object must not coalesce with them.
+     * The hash index also uses `HMAP_SLOT_DEAD` (u32 0xFFFFFFFE): a delete
+     * leaves a dead slot instead of back-shifting; lookups skip it, an insert
+     * reuses it after a miss.
      */
     public const VERSION = 20;
 
