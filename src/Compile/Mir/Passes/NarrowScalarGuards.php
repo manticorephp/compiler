@@ -55,7 +55,7 @@ final class NarrowScalarGuards
     ];
 
     /** Internal functions with a by-reference parameter somewhere. */
-    public const BYREF_BUILTINS = [
+    private const BYREF_BUILTINS = [
         'settype', 'sort', 'rsort', 'usort', 'uasort', 'uksort', 'asort', 'arsort', 'ksort', 'krsort',
         'natsort', 'natcasesort', 'shuffle', 'array_multisort', 'array_push', 'array_pop', 'array_shift',
         'array_unshift', 'array_splice', 'array_walk', 'array_walk_recursive', 'end', 'reset', 'next',

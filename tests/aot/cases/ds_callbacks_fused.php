@@ -33,6 +33,27 @@ echo implode(',', $m->map(fn(string $v) => $v . '!')->toArray()), "\n";
 try { $m->map(fn($v, $k) => $v === 2 ? throw new RuntimeException("at $k") : $v); }
 catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
 
+// The accumulator changes type under a scalar seed.
+$m3 = new Map(); $m3->set('a', 1); $m3->set('b', 2); $m3->set('c', 3);
+echo show($m3->reduce(fn($c, $v) => $c . $v, 0)), ' ', show($m3->reduce(fn($c, $v) => $c ?? $v, null)), ' ';
+echo json_encode($m3->reduce(fn($c, $v) => [$c, $v], 0)), ' ', show($m3->reduce(fn($c, $v) => $c + $v, '5')), ' ', show($m3->reduce(fn($c, $v) => $c / 2 + $v, 1)), "\n";
+
+// An empty-string seed under `+` must throw TypeError: #147, not fusion's (the method path answers the same).
+
+// A side-effecting receiver and seed run once each, receiver first.
+function mk3(): Map { echo '[mk]'; $m = new Map(); $m->set('x', 1); $m->set('y', 2); return $m; }
+function seed(): int { echo '[seed]'; return 10; }
+echo mk3()->reduce(fn($c, $v) => $c + $v, seed()), ' ', show(mk3()->find(fn($v) => $v > 1)), "\n";
+
+// A bound Map<string,int> whose literal callback answers another type.
+/** @var Map<string,int> $bm2 */
+$bm2 = new Map();
+$bm2->set('p', 7); $bm2->set('q', 8);
+echo implode(',', $bm2->map(fn($v, $k) => $k . '#' . $v)->toArray()), ' ', show($bm2->reduce(fn($c, $v) => $c . $v, 's')), ' ', show($bm2->find(fn($v) => $v === 'z')), "\n";
+
+// A param handed to a callee that may write it is not spliced.
+echo show($m3->reduce(fn($c, $v) => $c + preg_match('/x/', 'x', $v), 0)), "\n";
+
 // A literal callback that throws: the exception propagates, the loop's key and
 // value copies are released (map/reduce throwing shapes leak on #143/#144, both
 // spliced and not, and are left out).

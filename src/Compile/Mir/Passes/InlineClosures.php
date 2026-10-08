@@ -492,6 +492,22 @@ final class InlineClosures implements Pass
     // coercion), a return type that is the body's own (no coercion), and no
     // write or by-ref pass that could reach the method's locals.
 
+    /** Builtins that read their arguments by value only (no out-param). */
+    private const BYVAL_BUILTINS = [
+        'strlen', 'mb_strlen', 'count', 'sizeof', 'ord', 'chr', 'trim', 'ltrim', 'rtrim',
+        'strtolower', 'strtoupper', 'ucfirst', 'lcfirst', 'ucwords', 'strrev', 'md5', 'sha1', 'crc32',
+        'intval', 'floatval', 'boolval', 'strval', 'is_string', 'is_int', 'is_float', 'is_bool',
+        'is_array', 'is_object', 'is_null', 'is_numeric', 'is_scalar', 'is_iterable',
+        'strpos', 'stripos', 'strrpos', 'str_contains', 'str_starts_with', 'str_ends_with',
+        'substr_count', 'substr', 'mb_substr', 'str_repeat', 'str_pad', 'explode', 'implode', 'join',
+        'number_format', 'dechex', 'hexdec', 'abs', 'floor', 'ceil', 'round', 'sqrt', 'intdiv',
+        'max', 'min', 'sprintf', 'printf', 'strcmp', 'in_array', 'array_key_exists', 'array_sum',
+        'array_keys', 'array_values', 'var_export', 'json_encode', 'gettype', 'get_debug_type',
+    ];
+
+    /** Builtins that see the calling scope's locals by name. */
+    private const SCOPE_READERS = ['compact', 'extract', 'get_defined_vars', 'func_get_args', 'func_get_arg', 'func_num_args'];
+
     private function tryFuseDsMethod(MethodCall_ $mc): ?Node
     {
         $m = $mc->method;
@@ -578,12 +594,24 @@ final class InlineClosures implements Pass
         if ($k === Node::KIND_CALL) {
             $c = $this->call($n);
             $fname = \strtolower(\ltrim($c->function, '\\'));
-            if (\in_array($fname, NarrowScalarGuards::BYREF_BUILTINS, true)) { return false; }
-            $callee = $this->fnByName[\ltrim($c->function, '\\')] ?? null;
-            if ($callee !== null) {
-                foreach ($callee->params as $rawP) {
-                    if ($this->param($rawP)->byRef) { return false; }
+            // Reads the caller's locals by name: in the method body those are the method's.
+            if (\in_array($fname, self::SCOPE_READERS, true)) { return false; }
+            // A local handed straight to a callee is safe only when that callee
+            // is known to take it by value: a module function without a by-ref
+            // param, or a builtin on the by-value list. Unknown (a stdlib out-param) refuses.
+            $byValue = \in_array($fname, self::BYVAL_BUILTINS, true);
+            if (!$byValue) {
+                $callee = $this->fnByName[\ltrim($c->function, '\\')] ?? null;
+                if ($callee !== null) {
+                    $byValue = true;
+                    foreach ($callee->params as $rawP) {
+                        if ($this->param($rawP)->byRef) { $byValue = false; }
+                    }
                 }
+            }
+            foreach ($c->args as $a) {
+                if ($a->kind === Node::KIND_SPREAD) { return false; }
+                if (!$byValue && $a->kind === Node::KIND_LOAD_LOCAL) { return false; }
             }
         } elseif ($k === Node::KIND_NEW_OBJ && $this->ctorTakesNoRef($this->newObj($n)->class)) {
             // `new E($v)`: a known constructor without a by-ref param.
@@ -607,16 +635,14 @@ final class InlineClosures implements Pass
         if ($fn === null || \count($fn->params) > \count($iv->args)) { return $iv; }
         $subst = [];
         $i = 0;
-        foreach ($fn->params as $rawP) {
-            $a = $this->node($iv->args[$i]);
-            if ($a->kind !== Node::KIND_LOAD_LOCAL) { return $iv; }
-            $subst[$this->param($rawP)->name] = $a;
-            $i++;
-        }
-        // Extra arguments (`$f($v, $k)` to a one-param closure) are local
-        // loads php evaluates and drops.
+        // Every argument is a local load, so an extra one (`$f($v, $k)` to a
+        // one-param closure) is evaluated and dropped by php with no effect.
         foreach ($iv->args as $a) {
             if ($a->kind !== Node::KIND_LOAD_LOCAL) { return $iv; }
+        }
+        foreach ($fn->params as $rawP) {
+            $subst[$this->param($rawP)->name] = $this->node($iv->args[$i]);
+            $i++;
         }
         return NodeClone::nodeSubst($this->retExpr($fn), $subst);
     }
