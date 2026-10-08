@@ -6514,7 +6514,10 @@ loop:
   %sp = getelementptr inbounds i32, ptr %ixp, i64 %s
   %sl = load i32, ptr %sp
   %emp = icmp eq i32 %sl, -1
-  br i1 %emp, label %miss, label %chk
+  br i1 %emp, label %miss, label %chk0
+chk0:
+  %dead = icmp eq i32 %sl, {DEAD}
+  br i1 %dead, label %next, label %chk
 chk:
   %e = zext i32 %sl to i64
   %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)
@@ -6560,7 +6563,7 @@ loop:
   %s = phi i64 [ %s0, %entry ], [ %s2, %next ]
   %sp = getelementptr inbounds i32, ptr %ixp, i64 %s
   %sl = load i32, ptr %sp
-  %emp = icmp eq i32 %sl, -1
+  %emp = icmp slt i32 %sl, 0
   br i1 %emp, label %put, label %next
 next:
   %s1 = add i64 %s, 1
@@ -6978,41 +6981,19 @@ find:
   %fl = load i32, ptr %fp
   %fe = zext i32 %fl to i64
   %feq = icmp eq i64 %fe, %e
-  br i1 %feq, label %sh, label %fnext
+  br i1 %feq, label %done, label %fnext
 fnext:
   %s1 = add i64 %s, 1
   %s2 = and i64 %s1, %mask
   br label %find
-sh:
-  %i = phi i64 [ %s, %find ], [ %i, %keep ], [ %j2, %mv ]
-  %j = phi i64 [ %s, %find ], [ %j2, %keep ], [ %j2, %mv ]
-  %j1 = add i64 %j, 1
-  %j2 = and i64 %j1, %mask
-  %sp = getelementptr inbounds i32, ptr %ixp, i64 %j2
-  %sl = load i32, ptr %sp
-  %emp = icmp eq i32 %sl, -1
-  br i1 %emp, label %done, label %ex
-ex:
-  %se = zext i32 %sl to i64
-  %sep = call ptr @__mir_hmap_ent(i64 %h, i64 %se)
-  %eh = load i64, ptr %sep
-  %k = and i64 %eh, %mask
-  %le = icmp ule i64 %i, %j2
-  %a = icmp ult i64 %i, %k
-  %b = icmp ule i64 %k, %j2
-  %and = and i1 %a, %b
-  %or = or i1 %a, %b
-  %inr = select i1 %le, i1 %and, i1 %or
-  br i1 %inr, label %keep, label %mv
-keep:
-  br label %sh
-mv:
-  %dp = getelementptr inbounds i32, ptr %ixp, i64 %i
-  store i32 %sl, ptr %dp
-  br label %sh
 done:
-  %ip = getelementptr inbounds i32, ptr %ixp, i64 %i
-  store i32 -1, ptr %ip
+  %n1 = add i64 %s, 1
+  %n2 = and i64 %n1, %mask
+  %np = getelementptr inbounds i32, ptr %ixp, i64 %n2
+  %nl = load i32, ptr %np
+  %nemp = icmp eq i32 %nl, -1
+  %mark = select i1 %nemp, i32 -1, i32 {DEAD}
+  store i32 %mark, ptr %fp
   call void @__mir_cell_drop(i64 %dk)
   call void @__mir_cell_drop(i64 %dv)
   ret i64 1
@@ -7121,6 +7102,7 @@ done:
             '{ESM}' => (string)\Compile\MemoryAbi::HMAP_ENTRY_SIZE_MAP,
             '{ESD}' => (string)(\Compile\MemoryAbi::HMAP_ENTRY_SIZE_MAP - \Compile\MemoryAbi::HMAP_ENTRY_SIZE_SET),
             '{TOMB}' => (string)\Compile\MemoryAbi::HMAP_TOMB_HASH,
+            '{DEAD}' => (string)\Compile\MemoryAbi::HMAP_SLOT_DEAD,
             '{MINCAP}' => (string)\Compile\MemoryAbi::HMAP_MIN_CAP,
             '{MINMASK}' => (string)(\Compile\MemoryAbi::HMAP_MIN_CAP * 2 - 1),
             '{MINSLOTS4}' => (string)(\Compile\MemoryAbi::HMAP_MIN_CAP * 2 * 4),
@@ -7157,8 +7139,8 @@ done:
         }
         return "\ndefine i64 @__mir_hmap_find_" . $r . "(i64 %h, " . $kt . " %k) {\nentry:\n" . $pre
             . "go:\n  %mask = call i64 @__mir_hmap_hld(i64 %h, i64 {MASK})\n  %ixw = call i64 @__mir_hmap_hld(i64 %h, i64 {INDEX})\n  %ixp = inttoptr i64 %ixw to ptr\n  %s0 = and i64 %hash, %mask\n  br label %loop\n"
-            . "loop:\n  %s = phi i64 [ %s0, %go ], [ %s2, %next ]\n  %sp = getelementptr inbounds i32, ptr %ixp, i64 %s\n  %sl = load i32, ptr %sp\n  %emp = icmp eq i32 %sl, -1\n  br i1 %emp, label %miss, label %chk\n"
-            . "chk:\n  %e = zext i32 %sl to i64\n  %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)\n  %eh = load i64, ptr %ep\n  %heq = icmp eq i64 %eh, %hash\n  br i1 %heq, label %cmp, label %next\n"
+            . "loop:\n  %s = phi i64 [ %s0, %go ], [ %s2, %next ]\n  %sp = getelementptr inbounds i32, ptr %ixp, i64 %s\n  %sl = load i32, ptr %sp\n  %emp = icmp eq i32 %sl, -1\n  br i1 %emp, label %miss, label %chk0\n"
+            . "chk0:\n  %dead = icmp eq i32 %sl, {DEAD}\n  br i1 %dead, label %next, label %chk\nchk:\n  %e = zext i32 %sl to i64\n  %ep = call ptr @__mir_hmap_ent(i64 %h, i64 %e)\n  %eh = load i64, ptr %ep\n  %heq = icmp eq i64 %eh, %hash\n  br i1 %heq, label %cmp, label %next\n"
             . "cmp:\n  %kp = getelementptr inbounds i8, ptr %ep, i64 {EKEY}\n  %kk = load i64, ptr %kp\n" . $eq
             . "next:\n  %s1 = add i64 %s, 1\n  %s2 = and i64 %s1, %mask\n  br label %loop\nhit:\n  ret i64 %e\nmiss:\n  ret i64 -1\n}\n";
     }

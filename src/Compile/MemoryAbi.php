@@ -1077,6 +1077,7 @@ final class MemoryAbi
     public const HMAP_ENTRY_SIZE_SET = 16;
     public const HMAP_TOMB_HASH      = -1;  // live hashes are masked to 63 bits
     public const HMAP_SLOT_EMPTY     = -1;  // u32 0xFFFFFFFF
+    public const HMAP_SLOT_DEAD      = -2;  // u32 0xFFFFFFFE: deleted slot, probes continue past it; an insert may reuse it
     public const HMAP_MIN_CAP        = 8;
 
     // ─── exception object (zero-cost unwinding) ───────────────────
