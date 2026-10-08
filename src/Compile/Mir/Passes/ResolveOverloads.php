@@ -90,9 +90,9 @@ final class ResolveOverloads implements Pass
         $fn = $this->claimedMethod($t->class ?? '', $mc->method);
         if ($fn === null) { return; }
         foreach ($fn->claimParams as $i => $ct) {
-            $a = $mc->args[$i - 1] ?? null;
-            if ($a === null) { continue; }
-            if ($a->kind === Node::KIND_SPREAD || !$this->claimFits($a->type, $ct)) {
+            // An omitted arg takes the default, which must fit the claim too.
+            $a = $mc->args[$i - 1] ?? $fn->params[$i]->default;
+            if ($a === null || $a->kind === Node::KIND_SPREAD || !$this->claimFits($a->type, $ct)) {
                 $mc->direct = $fn->claimOrigin;
                 return;
             }

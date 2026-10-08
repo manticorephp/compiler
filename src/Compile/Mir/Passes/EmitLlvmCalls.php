@@ -3816,7 +3816,7 @@ trait EmitLlvmCalls
                 // filled default expr. Back it with a throwaway stack slot so
                 // the callee's write lands somewhere (PHP discards it) instead
                 // of dereferencing a null address.
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai, $ahmask[$ai] ?? false);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai - $c->recvArgs, $ahmask[$ai] ?? false);
                 $argList .= 'i64 ' . $this->lastValue;
                 $omitRefDrops .= $this->lastRefSlotDrop;
             } elseif (($camask[$ai] ?? false)

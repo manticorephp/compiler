@@ -541,6 +541,11 @@ final class Call extends Node
      * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
+    /** Leading args the SOURCE did not write: 1 for a method routed here with
+     *  its receiver prepended ({@see MethodCall_::$direct}), whose `$srcArgc`
+     *  counts the written args only. Declared LAST. */
+    public int $recvArgs = 0;
+
 
     public function accept(EmitVisitor $v): string
     {

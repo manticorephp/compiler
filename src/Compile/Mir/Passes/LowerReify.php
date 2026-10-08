@@ -601,7 +601,10 @@ trait LowerReify
         $i = 0;
         foreach ($base->params as $p) {
             $t = $i === 0 ? Type::obj($spec) : $p->type;
-            $params[] = new \Compile\Mir\Param($p->name, $t, $p->byRef, $p->variadic);
+            // The defaults too: an erased caller pads an omitted arg from the arm it
+            // calls, and a thunk without them left that register undefined.
+            $d = $p->default === null ? null : \Compile\Mir\NodeClone::node($p->default);
+            $params[] = new \Compile\Mir\Param($p->name, $t, $p->byRef, $p->variadic, $d);
             if ($i > 0) { $args[] = new \Compile\Mir\LoadLocal($p->name, $t); }
             $i = $i + 1;
         }

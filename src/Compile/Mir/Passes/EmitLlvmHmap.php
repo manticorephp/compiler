@@ -104,8 +104,8 @@ trait EmitLlvmHmap
         // The slow arm first: its result type is the merge slot's.
         $slow = $slowL . ":\n" . $this->emitMethodCallInner($mc);
         if ($borrow) {
-            // The facade may still return (a reified key param coerced the key the
-            // probe missed, #133): its +1 goes back, the table keeps the value.
+            // The method may still return (a `get` default argument): its +1 goes
+            // back, the table keeps the value.
             $ty = $this->lastValueType;
             $sv = $this->lastValue;
             $fl = $this->discardReleaseFlavor($mc->type);

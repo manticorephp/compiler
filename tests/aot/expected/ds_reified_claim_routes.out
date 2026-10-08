@@ -1,0 +1,24 @@
+1 int:3
+2 int:3,float:7
+3 int:3,float:7,string:3
+2 p,float:3
+3 p,float:3,bool:4
+null
+null
+int
+string
+2 x,int:3
+3 x,int:3,string:9
+float string null
+Cannot use a key of type float in Map
+Key not found
+dflt
+1
+60
+70 3
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+2
+B A string null

@@ -7988,6 +7988,7 @@ trait EmitLlvmObjects
             foreach ($mc->args as $a) { $dArgs[] = $a; }
             $dc = new \Compile\Mir\Call($mc->direct, $dArgs, $n->type);
             $dc->srcArgc = $mc->srcArgc;
+            $dc->recvArgs = 1;
             return $this->emitNode($dc);
         }
         // A method on a `#[TypeDef]` receiver: a direct call with the scalar as
