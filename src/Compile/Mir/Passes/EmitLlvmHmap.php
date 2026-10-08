@@ -66,8 +66,9 @@ trait EmitLlvmHmap
      * with a typed key, run in place: the probe and the entry read without the
      * facade's frame. A miss or a bad key runs the real method, which owns
      * every error and the default argument. `$borrow`: an `$m[$k]` read, a
-     * BORROW like every element read (the table keeps the value alive), so a
-     * slow arm that returns gives its +1 back. Otherwise the result is the +1 the
+     * BORROW like every element read (the table keeps the value alive). Its
+     * slow arm never returns: `offsetGet` passes `get` no default, so a miss or
+     * a bad key throws (Map is final). Otherwise the result is the +1 the
      * method's `return` hands out. null when the shape does not apply.
      */
     private function emitHmapCall(\Compile\Mir\MethodCall_ $mc, bool $borrow = false): ?string
@@ -104,17 +105,8 @@ trait EmitLlvmHmap
         // The slow arm first: its result type is the merge slot's.
         $slow = $slowL . ":\n" . $this->emitMethodCallInner($mc);
         if ($borrow) {
-            // The method may still return (a `get` default argument): its +1 goes
-            // back, the table keeps the value.
             $ty = $this->lastValueType;
-            $sv = $this->lastValue;
-            $fl = $this->discardReleaseFlavor($mc->type);
-            if ($fl !== '') {
-                $slow .= $this->coerceToI64();
-                $slow .= $this->rcReleaseReg($this->lastValue, $fl);
-            }
-            $this->lastValue = $sv;
-            $this->lastValueType = $ty;
+            $slow .= $this->nbufNoReturn();
         } elseif ($op === 'has') {
             $slow .= $this->coerceToI64();
             $nz = $this->ssa->allocReg();
@@ -129,8 +121,10 @@ trait EmitLlvmHmap
         }
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . ' = alloca ' . $ty . "\n";
-        $slow .= '  store ' . $ty . ' ' . $this->lastValue . ', ptr ' . $slot . "\n";
-        $slow .= '  br label %' . $endL . "\n";
+        if (!$borrow) {
+            $slow .= '  store ' . $ty . ' ' . $this->lastValue . ', ptr ' . $slot . "\n";
+            $slow .= '  br label %' . $endL . "\n";
+        }
         $out .= '  br i1 ' . $ok . ', label %' . $fastL . ', label %' . $slowL . "\n";
         $out .= $fastL . ":\n";
         if ($op === 'has') {
