@@ -181,7 +181,7 @@ four parameters. The server accepts the first well-formed offer it can satisfy; 
 client offers `permessage-deflate; client_max_window_bits` and fails the handshake if
 the server's answer names anything it did not allow. An offer that would bind *our*
 deflater to an 8-bit window is declined rather than silently upgraded to 9 — zlib
-(and this pure-PHP encoder, which matches it) cannot do a true 256-byte window, so
+cannot do a true 256-byte window, so
 the server skips such an offer and the client raises `HandshakeException`.
 
 Only messages at least `compressionMinBytes` (256 default) are compressed; smaller
@@ -189,12 +189,8 @@ ones go over the wire uncompressed, which RFC 7692 allows per message. Compressi
 and framing share one write lock, so a compressed frame's position on the wire
 matches the deflater's own stream order.
 
-**Cost.** The encoder is pure PHP (fixed-Huffman DEFLATE — no dynamic Huffman
-tables), roughly **1 ms of CPU per compressed round trip** on ordinary message
-sizes, and its output runs somewhat larger than zlib's on the same text. A single
-10 MB `deflate_add` call has been measured peaking around **622 MB RSS**; this is
-not a background cost, it only applies while compression is on and messages are
-large. **Decompression is bomb-bounded**: input is fed to `inflate_add` in 4 KiB
+**Cost.** Compression runs in the host libz, the same engine and the same bytes as
+php. **Decompression is bomb-bounded**: input is fed to `inflate_add` in 4 KiB
 slices, so a message is abandoned (closed with `1009`) once its **decompressed**
 size passes `maxMessageSize`, at a peak of `maxMessageSize` plus at most one slice's
 worth of output (up to ~4 MiB) rather than the whole crafted payload. Corrupt
@@ -282,12 +278,9 @@ separately, not something the WebSocket code itself holds onto.
 
 permessage-deflate is built on `deflate_init`/`deflate_add`/`inflate_init`/
 `inflate_add`/`inflate_get_status`/`inflate_get_read_len` (`DeflateContext`,
-`InflateContext`) — Zend's own API, pure PHP here, so `difftest` is its oracle for
-this part. Inflate decoding resumes at the last complete unit — a symbol, a slice of
-a stored block, a block header, a container field — so a stream fed in any chunking
-answers what zlib answers, not a block-at-a-time approximation of it; a data error
-returns `false` rather than throwing, matching the existing one-shot `gzinflate`
-contract.
+`InflateContext`) — Zend's own API over the host libz, so `difftest` is its oracle for
+this part; a data error returns `false` rather than throwing, matching the one-shot
+`gzinflate` contract.
 
 ## Not in this layer (out of scope)
 

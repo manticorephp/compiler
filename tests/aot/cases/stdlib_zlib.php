@@ -1,11 +1,8 @@
 <?php
 
-// ext/zlib, pure PHP. Two things are asserted and they are different in kind:
-// that streams THE INTERPRETER produced decode here byte for byte (the hex
-// literals below came out of php), and that everything this build produces
-// round-trips through its own decoder. What is NOT asserted anywhere is that
-// gzdeflate() emits php's bytes — DEFLATE is a format, not a function, and two
-// conforming encoders disagree on every input while both being right.
+// ext/zlib over the host libz — the library php links, so the compressed bytes
+// are php's too. The gzip header's OS byte is libz's build-time OS_CODE (3 on
+// Linux, 19 on macOS), so gzencode() bytes are compared past the header.
 
 $text = "The quick brown fox jumps over the lazy dog. The quick brown fox jumps again.";
 $run  = str_repeat('ab', 300);
@@ -51,12 +48,26 @@ $g = substr($g, 0, $cut) . chr(ord($g[$cut]) ^ 0xFF) . substr($g, $cut + 1);
 var_dump(gzdecode($g));
 
 // max_length bounds the output; php answers false rather than truncating when
-// the stream does not fit. (php's exact cut-off is an allocation artifact a few
-// percent BELOW the real length, so only clear-cut sizes are compared here.)
+// the stream does not fit. The cut-off is php's buffer-growth artifact, a few
+// bytes BELOW the real length — reproduced exactly.
 $z = gzdeflate($text, 6);
 var_dump(gzinflate($z, 5));
 var_dump(gzinflate($z, 1000) === $text);
 var_dump(gzinflate($z, 0) === $text);
+$long = str_repeat($text, 8);
+$zl = gzdeflate($long);
+foreach ([500, 575, 576, 600, 616, 617, 618] as $m) {
+    $r = gzinflate($zl, $m);
+    echo $m, ' ', $r === false ? 'false' : strlen($r), "\n";
+}
+
+// php's bytes, every level and container.
+foreach ([$text, $run, $long, implode('', array_map('chr', range(0, 255)))] as $in) {
+    foreach ([0, 1, 6, 9, -1] as $lvl) {
+        echo bin2hex(substr(gzdeflate($in, $lvl), 0, 12)), ' ', md5(gzcompress($in, $lvl)), ' ',
+            md5(substr(gzencode($in, $lvl), 10)), "\n";
+    }
+}
 
 // php's own ValueErrors, argument numbers included.
 try { gzdeflate('x', 10); } catch (\ValueError $e) { echo $e->getMessage(), "\n"; }

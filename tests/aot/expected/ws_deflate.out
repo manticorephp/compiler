@@ -21,7 +21,7 @@ client unknown: WebSocket handshake failed: server chose an unoffered extension 
 client dup: WebSocket handshake failed: server chose an unoffered extension "permessage-deflate; server_no_context_takeover; server_no_context_takeover"
 client two: WebSocket handshake failed: server chose an unoffered extension "permessage-deflate, permessage-deflate"
 client bare cmwb: WebSocket handshake failed: client_max_window_bits without a value
-client no-ctx: 3 echoed, lengths 24 24 24
+client no-ctx: 3 echoed, lengths 25 25 25
 ext: permessage-deflate; client_max_window_bits=12
 ext: []
 ext: permessage-deflate; server_max_window_bits=15

@@ -269,7 +269,7 @@ Corollaries:
 1. **Correctness first** — match Zend semantics for the supported subset;
    `tools/difftest.sh` is the gate. Where Zend emits a warning and carries on,
    Manticore throws.
-2. **No PHP runtime in the output** — a binary links libc, PCRE2 and OpenSSL,
+2. **No PHP runtime in the output** — a binary links libc, PCRE2, OpenSSL and zlib,
    plus whatever an FFI binding names (`#[Library]`) — nothing that has to be
    installed at run time beyond those system libraries. No interpreter, no `.ini`,
    no extension loader.

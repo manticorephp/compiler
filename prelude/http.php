@@ -3758,7 +3758,7 @@ final class Server
     private int $maxBodySize = 8388608;
     private bool $streamBodies = false;
     /** gzip, off by default — {@see compression}. The FLAG is what keeps the
-     *  pure-PHP deflater out of a program that never asks for it. */
+     *  deflater out of a program that never asks for it. */
     private bool $compress = false;
     private int $compressMin = 1024;
     private int $compressLevel = 6;
@@ -4583,8 +4583,8 @@ final class Server
      * at least `compressMin` bytes, no encoding already chosen, and a client
      * that asked. `Vary` goes on every compressible-type response either way.
      *
-     * Called only under `$this->compress`, which is what keeps `gzencode` — the
-     * pure-PHP deflater — out of a program that never turns compression on.
+     * Called only under `$this->compress`, which is what keeps `gzencode` out of
+     * a program that never turns compression on.
      */
     private function gzipBody(Request $req, Response $res, string $body): string
     {

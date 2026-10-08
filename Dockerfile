@@ -36,7 +36,7 @@ FROM debian:${DEBIAN_TAG} AS base
 ENV DEBIAN_FRONTEND=noninteractive
 
 # libpcre2-dev  -> preg_* (src/Runtime/Pcre.php binds pcre2-8 by name)
-# libssl-dev    -> TLS + hash/hmac (src/Runtime/Openssl.php, src/Runtime/Crypto.php)
+# libssl-dev    -> TLS + hash/hmac (src/Runtime/Openssl.php, src/Runtime/Crypto.php) # zlib1g-dev    -> ext/zlib (src/Runtime/Zlib.php binds `z` by name)
 # pkg-config    -> how Main.php discovers the openssl link flags
 # gcc/libc6-dev -> `cc` drives the final link
 # netbase       -> /etc/services + /etc/protocols, the databases getservby*() /
@@ -65,7 +65,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # clang any more — that comes from the distribution's own archive below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg \
-        gcc libc6-dev libpcre2-dev libssl-dev libcurl4-openssl-dev libsqlite3-dev libxml2-dev libicu-dev pkg-config \
+        gcc libc6-dev libpcre2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev libsqlite3-dev libxml2-dev libicu-dev pkg-config \
         binutils bash file make \
         netbase \
     && rm -rf /var/lib/apt/lists/*
