@@ -7982,14 +7982,25 @@ trait EmitLlvmObjects
         // Routed to one body with no dispatch (a reified receiver whose argument
         // does not fit the binding's claim runs the origin's erased method): a
         // plain call with the receiver as `$this`, so the callee's own erased
-        // params drive the arg coercions.
-        if ($mc->direct !== '') {
+        // params drive the arg coercions. A call built here at emit time
+        // (`$x[...]` → `offsetGet`, `$o(...)` → `__invoke`) never met
+        // ResolveOverloads, so the same rule decides it now; its node type is
+        // still the spec's, so an erased (cell) result is decoded to it.
+        $route = $mc->direct !== '' ? $mc->direct
+            : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes);
+        if ($route !== '') {
             $dArgs = [$mc->object];
             foreach ($mc->args as $a) { $dArgs[] = $a; }
-            $dc = new \Compile\Mir\Call($mc->direct, $dArgs, $n->type);
+            $rt = $mc->direct !== '' ? $n->type : ($this->sigs->returnType[$route] ?? $n->type);
+            $dc = new \Compile\Mir\Call($route, $dArgs, $rt);
             $dc->srcArgc = $mc->srcArgc;
             $dc->recvArgs = 1;
-            return $this->emitNode($dc);
+            $out = $this->emitNode($dc);
+            if ($rt->kind === Type::KIND_CELL && $n->type->kind !== Type::KIND_CELL
+                && $n->type->kind !== Type::KIND_VOID) {
+                $out .= $this->unboxCellToType($n->type);
+            }
+            return $out;
         }
         // A method on a `#[TypeDef]` receiver: a direct call with the scalar as
         // the first argument. Nothing to dispatch on — the class is final and has

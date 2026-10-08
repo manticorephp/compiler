@@ -77,46 +77,64 @@ final class ResolveOverloads implements Pass
         foreach (Walk::children($n) as $c) { $this->visit($c); }
     }
 
+    private function resolveClaim(MethodCall_ $mc): void
+    {
+        $route = self::claimRoute($mc, $this->claimed, $this->classes);
+        if ($route !== '') { $mc->direct = $route; }
+    }
+
     /**
      * A reified receiver (`Map<string,int>` → `Map__of__string__int`) runs its
      * spec method only when every argument provably fits what the binding
      * claimed for an erased param; otherwise the ORIGIN's erased body runs, as
-     * on an unbound receiver — the claim never converts or reinterprets.
+     * on an unbound receiver — the claim never converts or reinterprets. Returns
+     * that origin, or '' for ordinary dispatch. Shared with EmitLlvm, which
+     * builds `$x[...]` / `__invoke` method calls after this pass has run.
+     *
+     * @param array<string, FunctionDef> $claimed spec method name → its def, each with claimed params
+     * @param array<string, \Compile\Mir\ClassDef> $classes
      */
-    private function resolveClaim(MethodCall_ $mc): void
+    public static function claimRoute(MethodCall_ $mc, array $claimed, array $classes): string
     {
+        if ($claimed === []) { return ''; }
         $t = $mc->object->type;
-        if ($t->kind !== Type::KIND_OBJ) { return; }
-        $fn = $this->claimedMethod($t->class ?? '', $mc->method);
-        if ($fn === null) { return; }
+        if ($t->kind !== Type::KIND_OBJ) { return ''; }
+        $fn = self::claimedMethod($t->class ?? '', $mc->method, $claimed, $classes);
+        if ($fn === null) { return ''; }
         foreach ($fn->claimParams as $i => $ct) {
             // An omitted arg takes the default, which must fit the claim too.
             $a = $mc->args[$i - 1] ?? $fn->params[$i]->default;
-            if ($a === null || $a->kind === Node::KIND_SPREAD || !$this->claimFits($a->type, $ct)) {
-                $mc->direct = $fn->claimOrigin;
-                return;
+            if ($a === null || $a->kind === Node::KIND_SPREAD || !self::claimFits($a->type, $ct, $classes)) {
+                return $fn->claimOrigin;
             }
         }
+        return '';
     }
 
-    /** The claimed spec method `$cls` resolves for `$method`, walking its parents. */
-    private function claimedMethod(string $cls, string $method): ?FunctionDef
+    /**
+     * The claimed spec method `$cls` resolves for `$method`, walking its parents.
+     *
+     * @param array<string, FunctionDef> $claimed
+     * @param array<string, \Compile\Mir\ClassDef> $classes
+     */
+    private static function claimedMethod(string $cls, string $method, array $claimed, array $classes): ?FunctionDef
     {
         $guard = 0;
         while ($cls !== '' && $guard < 32) {
             $guard = $guard + 1;
-            $fn = $this->claimed[$cls . '__' . $method] ?? null;
+            $fn = $claimed[$cls . '__' . $method] ?? null;
             if ($fn !== null) { return $fn; }
-            $cd = $this->classes[$cls] ?? null;
+            $cd = $classes[$cls] ?? null;
             if ($cd === null || isset($cd->methodNames[$method])) { return null; }
             $cls = $cd->parent;
         }
         return null;
     }
 
-    private function claimFits(Type $given, Type $want): bool
+    /** @param array<string, \Compile\Mir\ClassDef> $classes */
+    private static function claimFits(Type $given, Type $want, array $classes): bool
     {
-        if ($want->kind !== Type::KIND_OBJ) { return $this->argFits($given, $want); }
+        if ($want->kind !== Type::KIND_OBJ) { return self::argFits($given, $want); }
         if ($given->kind !== Type::KIND_OBJ) { return false; }
         $c = $given->class ?? '';
         $w = $want->class ?? '';
@@ -124,7 +142,7 @@ final class ResolveOverloads implements Pass
         while ($c !== '' && $guard < 32) {
             $guard = $guard + 1;
             if ($c === $w) { return true; }
-            $cd = $this->classes[$c] ?? null;
+            $cd = $classes[$c] ?? null;
             if ($cd === null) { return false; }
             $c = $cd->parent;
         }
@@ -178,13 +196,13 @@ final class ResolveOverloads implements Pass
             }
             $a = $args[$i];
             if ($a->kind === Node::KIND_SPREAD) { return false; }
-            if (!$this->argFits($a->type, $p->type)) { return false; }
+            if (!self::argFits($a->type, $p->type)) { return false; }
         }
         return true;
     }
 
     /** `$given` is concrete and is exactly what a `$want` parameter holds. */
-    private function argFits(Type $given, Type $want): bool
+    private static function argFits(Type $given, Type $want): bool
     {
         $wk = $want->kind;
         if ($wk === Type::KIND_CELL || $wk === Type::KIND_UNKNOWN) { return true; }
