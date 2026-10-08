@@ -235,7 +235,7 @@ cross-unit calls without re-parsing sources, and a distributable compiler that s
 
 ## Performance
 
-Native AOT output vs the Zend interpreter on an Apple M1 Pro, `-O2`, PHP 8.5.10.
+Native AOT output vs the Zend interpreter on an Apple M1 Pro, `-O2`, PHP 8.5.11.
 Each ordinary-PHP case is verified byte-for-byte against `php` before timing; loops
 are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are seconds
 (lower is better); RSS is peak resident memory in MiB. Reproduce with
@@ -243,56 +243,56 @@ are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are s
 
 | Case | Native (s) | PHP (s) | Speedup | Native RSS (MiB) | PHP RSS (MiB) | Parity |
 |---|---:|---:|---:|---:|---:|---|
-| `alloc_churn` | 0.04 | 0.34 | 8.5× | 2.2 | 28.1 | ok |
-| `array` | 0.08 | 0.91 | 11.4× | 7.1 | 36.0 | ok |
-| `assoc` | 0.06 | 0.26 | 4.3× | 2.3 | 28.2 | ok |
-| `assoc_small` | 0.03 | 0.18 | 6.0× | 2.0 | 27.9 | ok |
-| `closures` | 0.03 | 0.63 | 21.0× | 2.1 | 28.0 | ok |
-| `crc32` | 0.03 | 0.25 | 8.3× | 2.1 | 28.0 | ok |
-| `dijkstra` | 0.02 | 0.34 | 17.0× | 2.5 | 29.2 | ok |
-| `explode` | 0.06 | 0.39 | 6.5× | 2.0 | 28.0 | ok |
-| `fib` | 0.11 | 12.09 | 109.9× | 2.0 | 28.1 | ok |
-| `fiber_pingpong` | 0.03 | 0.36 | 12.0× | 2.2 | 27.9 | ok |
-| `fiber_switch` | 0.06 | 0.56 | 9.3× | 2.2 | 27.9 | ok |
-| `foreach_assoc` | 0.02 | 0.19 | 9.5× | 26.3 | 41.7 | ok |
-| `funcarr` | 0.02 | 1.02 | 51.0× | 2.4 | 28.0 | ok |
-| `generator_yield` | 0.02 | 0.71 | 35.5× | 2.0 | 28.0 | ok |
-| `http_parse` | 1.08 | — | — | 3.0 | — | php-skip |
-| `http_scale` | 1.17 | — | — | 3.2 | — | php-skip |
-| `htmlspecialchars` | 0.09 | 0.41 | 4.6× | 2.2 | 28.0 | ok |
-| `implode_int` | 0.20 | 0.28 | 1.4× | 2.2 | 28.3 | ok |
-| `in_array` | 0.11 | 0.26 | 2.4× | 2.0 | 28.3 | ok |
-| `json` | 0.08 | 0.25 | 3.1× | 2.2 | 28.3 | ok |
-| `json_decode` | 0.11 | 0.30 | 2.7× | 16.0 | 45.9 | ok |
-| `json_decode_object` | 0.02 | 0.16 | 8.0× | 6.4 | 33.9 | ok |
-| `json_decode_records` | 0.07 | 0.24 | 3.4× | 11.1 | 39.0 | ok |
-| `json_deep` | 0.03 | 0.18 | 6.0× | 2.2 | 28.6 | ok |
-| `json_escape_heavy` | 0.02 | 0.15 | 7.5× | 3.4 | 28.6 | ok |
-| `json_objects` | 0.21 | 0.36 | 1.7× | 5.0 | 29.5 | ok |
-| `json_pretty` | 0.08 | 0.16 | 2.0× | 5.0 | 29.5 | ok |
-| `json_records` | 0.34 | 0.63 | 1.9× | 18.9 | 33.4 | ok |
-| `json_utf8` | 0.06 | 0.25 | 4.2× | 6.3 | 29.4 | ok |
-| `ksort_asort` | 0.02 | 0.13 | 6.5× | 6.2 | 29.1 | ok |
-| `loop` | 0.06 | 1.37 | 22.8× | 2.0 | 27.9 | ok |
-| `mandelbrot` | 0.04 | 0.97 | 24.2× | 2.0 | 28.0 | ok |
-| `mathf` | 0.02 | 0.72 | 36.0× | 2.0 | 27.9 | ok |
+| `alloc_churn` | 0.04 | 0.32 | 8.0× | 2.4 | 28.1 | ok |
+| `array` | 0.08 | 0.90 | 11.2× | 8.7 | 35.8 | ok |
+| `assoc` | 0.07 | 0.24 | 3.4× | 2.3 | 28.0 | ok |
+| `assoc_small` | 0.03 | 0.17 | 5.7× | 2.1 | 27.9 | ok |
+| `closures` | 0.02 | 0.61 | 30.5× | 2.1 | 28.1 | ok |
+| `crc32` | 0.03 | 0.24 | 8.0× | 2.2 | 28.2 | ok |
+| `dijkstra` | 0.02 | 0.32 | 16.0× | 2.6 | 29.2 | ok |
+| `explode` | 0.05 | 0.33 | 6.6× | 2.0 | 28.1 | ok |
+| `fib` | 0.10 | 11.59 | 115.9× | 2.0 | 28.0 | ok |
+| `fiber_pingpong` | 0.03 | 0.36 | 12.0× | 2.3 | 28.1 | ok |
+| `fiber_switch` | 0.05 | 0.55 | 11.0× | 2.4 | 28.7 | ok |
+| `foreach_assoc` | 0.02 | 0.19 | 9.5× | 26.4 | 41.5 | ok |
+| `funcarr` | 0.03 | 1.02 | 34.0× | 2.5 | 28.2 | ok |
+| `generator_yield` | 0.02 | 0.72 | 36.0× | 2.0 | 28.0 | ok |
+| `http_parse` | 0.92 | — | — | 3.2 | — | php-skip |
+| `http_scale` | 0.93 | — | — | 3.3 | — | php-skip |
+| `htmlspecialchars` | 0.09 | 0.40 | 4.4× | 2.2 | 28.6 | ok |
+| `implode_int` | 0.19 | 0.27 | 1.4× | 2.2 | 28.3 | ok |
+| `in_array` | 0.11 | 0.26 | 2.4× | 2.1 | 27.9 | ok |
+| `json` | 0.05 | 0.23 | 4.6× | 2.1 | 28.4 | ok |
+| `json_decode` | 0.10 | 0.30 | 3.0× | 15.3 | 46.0 | ok |
+| `json_decode_object` | 0.01 | 0.15 | 15.0× | 6.3 | 33.9 | ok |
+| `json_decode_records` | 0.06 | 0.23 | 3.8× | 10.8 | 39.3 | ok |
+| `json_deep` | 0.03 | 0.19 | 6.3× | 2.2 | 28.4 | ok |
+| `json_escape_heavy` | 0.02 | 0.15 | 7.5× | 2.8 | 28.5 | ok |
+| `json_objects` | 0.08 | 0.35 | 4.4× | 4.6 | 29.3 | ok |
+| `json_pretty` | 0.01 | 0.15 | 15.0× | 4.9 | 29.8 | ok |
+| `json_records` | 0.20 | 0.62 | 3.1× | 11.2 | 33.3 | ok |
+| `json_utf8` | 0.06 | 0.24 | 4.0× | 4.6 | 29.4 | ok |
+| `ksort_asort` | 0.02 | 0.13 | 6.5× | 5.8 | 29.1 | ok |
+| `loop` | 0.06 | 1.34 | 22.3× | 2.0 | 27.9 | ok |
+| `mandelbrot` | 0.03 | 0.96 | 32.0× | 2.0 | 28.3 | ok |
+| `mathf` | 0.02 | 0.72 | 36.0× | 2.0 | 28.0 | ok |
 | `matmul` | 0.01 | 0.17 | 17.0× | 2.6 | 28.9 | ok |
-| `nbody` | 0.04 | 0.37 | 9.2× | 2.0 | 28.2 | ok |
-| `nested_array_local` | 0.02 | 0.18 | 9.0× | 2.2 | 28.2 | ok |
-| `net_bulk` | 0.01 | 0.14 | 14.0× | 2.9 | 28.1 | ok |
-| `net_lines` | 0.02 | 0.15 | 7.5× | 5.9 | 28.2 | ok |
-| `oop` | 0.08 | 3.18 | 39.8× | 2.0 | 28.2 | ok |
-| `refslot` | 0.00 | 0.13 | ∞ | 2.5 | 28.5 | ok |
-| `sieve` | 0.03 | 0.44 | 14.7× | 28.1 | 58.7 | ok |
-| `sort` | 0.05 | 0.20 | 4.0× | 2.4 | 28.1 | ok |
-| `spectralnorm` | 0.02 | 1.55 | 77.5× | 2.2 | 27.9 | ok |
-| `sprintf` | 0.04 | 0.19 | 4.8× | 2.0 | 27.9 | ok |
-| `strcat` | 0.14 | 0.80 | 5.7× | 32.4 | 59.5 | ok |
-| `strops` | 0.02 | 0.22 | 11.0× | 2.0 | 28.0 | ok |
-| `tokenize` | 0.03 | — | — | 14.3 | — | php-skip |
-| `unset_churn` | 0.00 | 0.13 | ∞ | 3.6 | 29.1 | ok |
-| `variadic_pack` | 0.08 | 0.26 | 3.2× | 2.5 | 28.0 | ok |
-| `wordcount` | 0.02 | 0.16 | 8.0× | 2.0 | 28.1 | ok |
+| `nbody` | 0.04 | 0.35 | 8.8× | 2.1 | 28.3 | ok |
+| `nested_array_local` | 0.02 | 0.18 | 9.0× | 2.5 | 28.1 | ok |
+| `net_bulk` | 0.01 | 0.14 | 14.0× | 3.0 | 28.4 | ok |
+| `net_lines` | 0.02 | 0.15 | 7.5× | 2.8 | 28.1 | ok |
+| `oop` | 0.06 | 3.12 | 52.0× | 2.0 | 28.1 | ok |
+| `refslot` | 0.00 | 0.13 | ∞ | 2.6 | 28.2 | ok |
+| `sieve` | 0.03 | 0.43 | 14.3× | 28.2 | 58.7 | ok |
+| `sort` | 0.05 | 0.20 | 4.0× | 2.5 | 28.3 | ok |
+| `spectralnorm` | 0.01 | 1.55 | 155.0× | 2.2 | 28.0 | ok |
+| `sprintf` | 0.07 | 0.19 | 2.7× | 2.0 | 28.1 | ok |
+| `strcat` | 0.10 | 0.80 | 8.0× | 32.4 | 59.1 | ok |
+| `strops` | 0.03 | 0.22 | 7.3× | 2.1 | 28.1 | ok |
+| `tokenize` | 0.03 | — | — | 14.8 | — | php-skip |
+| `unset_churn` | 0.00 | 0.12 | ∞ | 3.6 | 29.4 | ok |
+| `variadic_pack` | 0.08 | 0.26 | 3.2× | 2.7 | 28.1 | ok |
+| `wordcount` | 0.02 | 0.16 | 8.0× | 2.0 | 28.0 | ok |
 
 All 47 comparable cases are faster natively; three HTTP/tokenization cases are
 native-only because they use Manticore prelude APIs. The sub-10 ms values are at the
