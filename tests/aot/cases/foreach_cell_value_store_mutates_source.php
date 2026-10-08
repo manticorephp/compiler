@@ -1,6 +1,5 @@
 <?php
 // A key write to a foreach value over a cell-element array mutates the array's own element in place, so a growing write frees a buffer the array still holds.
-// issue: #150
 function make(int $n): array
 {
     $out = [];

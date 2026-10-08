@@ -150,6 +150,13 @@ final class InsertMemoryOps implements Pass
         if ($fe->byRef) { return null; }
         $at = $fe->array->type;
         if ($at->isVec() || $at->isAssoc()) {
+            // A CELL element co-owns as the keyed read does ({@see cellElemReadCoOwns}):
+            // a borrowed loop variable at rc 1 let a key write mutate the source's
+            // own element in place, and a growing write freed it under the source (#150).
+            if ($at->element !== null && $at->element->kind === Type::KIND_CELL
+                && \Compile\Debug::$rcElemReadOwns) {
+                return Type::cell();
+            }
             return self::elemReadCoOwns($at->element, $enums, $classes) ? $at->element : null;
         }
         if ($at->kind !== Type::KIND_OBJ) { return null; }
