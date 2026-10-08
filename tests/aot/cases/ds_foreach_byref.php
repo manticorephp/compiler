@@ -8,3 +8,5 @@ unset($x);
 try { foreach ($s as &$x) {} } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 unset($x);
 try { foreach ($v as &$x) {} } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+function nb(?Map $m): void { foreach ($m as &$x) { echo $x; } echo "null by-ref walks nothing\n"; }
+nb(null);

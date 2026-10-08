@@ -172,7 +172,25 @@ trait EmitLlvmHmap
     private function emitForeachDs(\Compile\Mir\Foreach_ $fe, string $iterSlot): ?string
     {
         $kind = HmapInline::foreachKind($fe);
-        if ($kind === '' || $this->foreachBodyYields($fe->body)) { return null; }
+        if ($kind === '') { return null; }
+        // By reference: the Generator path iterates silently (#140), so the
+        // throw comes first, ahead of every bail-out. A null subject walks
+        // nothing, as a null array does.
+        if ($fe->byRef) {
+            $out = $this->emitNode($fe->array);
+            $out .= $this->coerceToI64();
+            $nz = $this->ssa->allocReg();
+            $out .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+            $thrL = $this->ssa->allocLabel('feds.byref');
+            $doneL = $this->ssa->allocLabel('feds.byref.end');
+            $out .= '  br i1 ' . $nz . ', label %' . $thrL . ', label %' . $doneL . "\n" . $thrL . ":\n";
+            $out .= $this->ehMarkRaise($this->emitNode(new \Compile\Mir\Call('Manticore\\Ds\\__iter_byref', [], Type::null_())), $fe->ownLive);
+            $out .= '  br label %' . $doneL . "\n" . $doneL . ":\n";
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        if ($this->foreachBodyYields($fe->body)) { return null; }
         $vt = $fe->iterValueType;
         if ($vt !== null && $vt->kind !== Type::KIND_CELL && $vt->kind !== Type::KIND_UNKNOWN) { return null; }
         $cls = \ltrim((string)($fe->array->type->class ?? ''), '\\');
@@ -180,9 +198,6 @@ trait EmitLlvmHmap
         $off = $this->classes[$cls]->propertyOffset('__mcbuf');
         if ($off < 0) { return null; }
         $out = $this->emitNode($fe->array);
-        if ($fe->byRef) {
-            return $out . $this->ehMarkRaise($this->emitNode(new \Compile\Mir\Call('Manticore\\Ds\\__iter_byref', [], Type::null_())), $fe->ownLive);
-        }
         $this->hmapNeeds();
         if ($kind === 'vec') { $this->rt->needsBuf = true; }
         $out .= $this->coerceToI64();
@@ -197,6 +212,11 @@ trait EmitLlvmHmap
         $endL = $this->ssa->allocLabel('feds.end');
         $pos = $this->ssa->allocReg();
         $out .= '  ' . $pos . " = alloca i64\n  store i64 0, ptr " . $pos . "\n";
+        // A null subject (`?Map`) walks nothing, as a null array does.
+        $nz = $this->ssa->allocReg();
+        $goL = $this->ssa->allocLabel('feds.go');
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $subj . ", 0\n";
+        $out .= '  br i1 ' . $nz . ', label %' . $goL . ', label %' . $endL . "\n" . $goL . ":\n";
         $wantKey = $fe->keyVar !== null;
         if ($kind === 'vec') {
             $out .= '  br label %' . $condL . "\n" . $condL . ":\n";
