@@ -1766,11 +1766,28 @@ trait InferNodes
      * every concrete-element arm into a real cell buffer
      * ({@see EmitLlvmControl::armCoerce}), so the claim is the runtime truth.
      * Null when the arms agree, either element is unknown (no evidence), or the
-     * keys differ (the key join is its own rule).
+     * keyed-ness differs (the key join is its own rule).
+     *
+     * Two KEYED arms on different key channels (`assoc[string, cell]` vs the
+     * cell-keyed array a loop over `foreach ($m as $k => …)` builds) join their
+     * keys to a CELL ({@see Type::joinKey}): taking the then-arm claimed string
+     * keys over a buffer that may hold int ones, and left the arms two different
+     * shapes, so the conditional stayed a borrow and its stored value dangled.
      */
     private function armArrayJoin(Type $a, Type $b): ?Type
     {
         if (!$a->isArray() || !$b->isArray()) { return null; }
+        $ak = $a->key;
+        $bk = $b->key;
+        if ($ak !== null && $bk !== null && $ak->kind !== $bk->kind
+            && !$a->isShape() && !$b->isShape()) {
+            $ae = $a->element;
+            $be = $b->element;
+            $el = $ae === null || $ae->kind === Type::KIND_UNKNOWN ? $be
+                : ($be === null || $be->kind === Type::KIND_UNKNOWN ? $ae
+                : ($ae->kind === $be->kind && ($ae->class ?? '') === ($be->class ?? '') ? $ae : Type::cell()));
+            return Type::assoc(Type::joinKey($ak, $bk), $el ?? Type::unknown());
+        }
         if ($a->isAssoc() !== $b->isAssoc()) { return null; }
         $ae = $a->element;
         $be = $b->element;

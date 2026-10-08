@@ -1197,7 +1197,7 @@ final class Ownership
     {
         if ($slot === null || $val === null) { return false; }
         if (!$slot->isArray() || !$val->isArray()) { return false; }
-        if ($slot->isAssoc() !== $val->isAssoc()) { return false; }
+        if ($slot->isAssoc() !== $val->isAssoc() && !CondOwn::cellKeyed($slot)) { return false; }
         $se = $slot->element;
         $ve = $val->element;
         if ($se === null || $ve === null) { return false; }
