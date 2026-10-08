@@ -144,6 +144,43 @@ namespace Manticore\Ds {
             for ($e = __mc_hmap_next($this->__mcbuf, 0); $e >= 0; $e = __mc_hmap_next($this->__mcbuf, $e + 1)) { $out->push(__mc_hmap_val($this->__mcbuf, $e)); }
             return $out;
         }
+
+        /** @param callable(V, K): void $f */
+        public function each(callable $f): void { foreach ($this as $k => $v) { $f($v, $k); } }
+
+        /**
+         * @template U
+         * @param callable(V, K): U $f
+         * @return Map<K, U>
+         */
+        public function map(callable $f): Map { $r = new Map(); foreach ($this as $k => $v) { $r->set($k, $f($v, $k)); } return $r; }
+
+        /**
+         * @param callable(V, K): bool $f
+         * @return Map<K, V>
+         */
+        public function filter(callable $f): Map { $r = new Map(); foreach ($this as $k => $v) { if ($f($v, $k)) { $r->set($k, $v); } } return $r; }
+
+        /**
+         * @template R
+         * @param callable(R, V, K): R $f
+         * @param R $initial
+         * @return R
+         */
+        public function reduce(callable $f, mixed $initial): mixed { $c = $initial; foreach ($this as $k => $v) { $c = $f($c, $v, $k); } return $c; }
+
+        /** @param callable(V, K): bool $f */
+        public function any(callable $f): bool { foreach ($this as $k => $v) { if ($f($v, $k)) { return true; } } return false; }
+
+        /** @param callable(V, K): bool $f */
+        public function all(callable $f): bool { foreach ($this as $k => $v) { if (!$f($v, $k)) { return false; } } return true; }
+
+        /**
+         * First matching value, null when none (ambiguous if the collection holds null; use any()).
+         * @param callable(V, K): bool $f
+         * @return ?V
+         */
+        public function find(callable $f): mixed { foreach ($this as $k => $v) { if ($f($v, $k)) { return $v; } } return null; }
     }
 
     /**
@@ -210,6 +247,43 @@ namespace Manticore\Ds {
         public function __unserialize(array $data): void { $this->__mcbuf = __mc_hmap_alloc(1); foreach ($data as $v) { $this->add($v); } }
         public function __debugInfo(): array { return $this->toArray(); }
         public function jsonSerialize(): mixed { return $this->toArray(); }
+
+        /** @param callable(T): void $f */
+        public function each(callable $f): void { foreach ($this as $v) { $f($v); } }
+
+        /**
+         * @template U
+         * @param callable(T): U $f
+         * @return Set<U>
+         */
+        public function map(callable $f): Set { $r = new Set(); foreach ($this as $v) { $r->add($f($v)); } return $r; }
+
+        /**
+         * @param callable(T): bool $f
+         * @return Set<T>
+         */
+        public function filter(callable $f): Set { $r = new Set(); foreach ($this as $v) { if ($f($v)) { $r->add($v); } } return $r; }
+
+        /**
+         * @template R
+         * @param callable(R, T): R $f
+         * @param R $initial
+         * @return R
+         */
+        public function reduce(callable $f, mixed $initial): mixed { $c = $initial; foreach ($this as $v) { $c = $f($c, $v); } return $c; }
+
+        /** @param callable(T): bool $f */
+        public function any(callable $f): bool { foreach ($this as $v) { if ($f($v)) { return true; } } return false; }
+
+        /** @param callable(T): bool $f */
+        public function all(callable $f): bool { foreach ($this as $v) { if (!$f($v)) { return false; } } return true; }
+
+        /**
+         * First matching value, null when none (ambiguous if the collection holds null; use any()).
+         * @param callable(T): bool $f
+         * @return ?T
+         */
+        public function find(callable $f): mixed { foreach ($this as $v) { if ($f($v)) { return $v; } } return null; }
     }
 
     /**
@@ -284,5 +358,42 @@ namespace Manticore\Ds {
         public function __unserialize(array $data): void { $this->__mcbuf = __mc_nbuf_alloc(11, 0); foreach ($data as $x) { $this->push($x); } }
         public function __debugInfo(): array { return $this->toArray(); }
         public function jsonSerialize(): mixed { return $this->toArray(); }
+
+        /** @param callable(T, int): void $f */
+        public function each(callable $f): void { foreach ($this as $k => $v) { $f($v, $k); } }
+
+        /**
+         * @template U
+         * @param callable(T, int): U $f
+         * @return Vec<U>
+         */
+        public function map(callable $f): Vec { $r = new Vec(); foreach ($this as $k => $v) { $r->push($f($v, $k)); } return $r; }
+
+        /**
+         * @param callable(T, int): bool $f
+         * @return Vec<T>
+         */
+        public function filter(callable $f): Vec { $r = new Vec(); foreach ($this as $k => $v) { if ($f($v, $k)) { $r->push($v); } } return $r; }
+
+        /**
+         * @template R
+         * @param callable(R, T, int): R $f
+         * @param R $initial
+         * @return R
+         */
+        public function reduce(callable $f, mixed $initial): mixed { $c = $initial; foreach ($this as $k => $v) { $c = $f($c, $v, $k); } return $c; }
+
+        /** @param callable(T, int): bool $f */
+        public function any(callable $f): bool { foreach ($this as $k => $v) { if ($f($v, $k)) { return true; } } return false; }
+
+        /** @param callable(T, int): bool $f */
+        public function all(callable $f): bool { foreach ($this as $k => $v) { if (!$f($v, $k)) { return false; } } return true; }
+
+        /**
+         * First matching value, null when none (ambiguous if the collection holds null; use any()).
+         * @param callable(T, int): bool $f
+         * @return ?T
+         */
+        public function find(callable $f): mixed { foreach ($this as $k => $v) { if ($f($v, $k)) { return $v; } } return null; }
     }
 }
