@@ -288,22 +288,65 @@ values are retained, not cloned).
 is collected natively by `gc_collect_cycles()`. Under the Zend polyfill it is
 not (the buffers live in a static registry).
 
+### Callbacks
+
+`Map`, `Set` and `Vec` take `each`, `map`, `filter`, `reduce`, `any`, `all` and
+`find`. Callbacks get `($value, $key)` (`Set`: `($value)`); `reduce` gets
+`($carry, $value, $key)` and an explicit initial value. `map` / `filter` return
+a new container of the same kind.
+
+```php
+$total = $m->reduce(fn(int $c, int $v, int $k): int => $c + $v, 0);
+```
+
+A literal closure passed directly to one of these is fused into a loop at
+compile time (no closure call per element); a closure held in a variable is
+called per element. Both are correct; the literal form is the fast one.
+
+- `find` returns `null` when nothing matches, indistinguishable from a stored
+  `null` match. Use `any` or `has` when that matters.
+- A callback must not mutate the container it walks (the `foreach` rule).
+
+### `foreach` and the fast path
+
+`foreach` over a `Map` / `Set` / `Vec` is native: it walks the table directly,
+no iterator object. The mutation rule is the one under **Order** above.
+
+- `foreach` over a `null` subject walks nothing.
+- `foreach ($m as &$v)` throws the generator by-reference `Exception` (Zend's
+  message); there is no by-ref walk.
+
+Typed keys take the fast path with no annotation: the static type of the key
+operand (`int`, `string`, object) selects a specialised hash / compare inline;
+an untyped key goes through the generic path. The strict-key rule holds on
+both, including a bound map (`/** @var Map<string,int> $m */`): a wrong-typed
+key is the same `TypeError`.
+
 ### Cost
 
-P1 is **erased**: every operation is a method call over a native table, values
-are boxed and keys are not specialised. 1,000,000 insert + lookup + remove,
-arm64 macOS (`tools/bench/ds_map_bench.php`; peak is the process peak, so it
-accumulates down the list):
+1,000,000 insert + lookup + remove, median of 5 interleaved runs, arm64 macOS
+(`tools/bench/ds_map_bench.php`; noise ~7%). P1 was erased (a method call per
+operation); P2 specialises keys, inlines lookups and walks natively.
 
-| | PHP array | Map / Set |
-|---|---|---|
-| string keys `"k$i"` | 291 ms | 383 ms |
-| int keys | 95 ms | 149 ms |
-| objects (`spl_object_id` array vs `Set`) | 96 ms | 165 ms |
+| ms | PHP array | P1 Map/Set | P2 Map/Set |
+|---|---|---|---|
+| string keys `"k$i"` | 284 | 393 | 270 |
+| int keys | 82 | 145 | 85 |
+| objects (`spl_object_id` array vs `Set`) | 99 | 168 | 93 |
+| `foreach` over 1e6 int entries | 2 | 6 | 3 |
+| `reduce`, literal closure / `$f` variable | | | 6 / 6 |
 
-Expect to trail a PHP array until P2 (key/value specialisation, inlined
-lookups, native `foreach`), which is planned. What `Map` / `Set` give today is
-strict keys, object keys without `spl_object_id`, and a defined order contract.
+`Map<string,int>` and `Set<object>` beat the array idiom. `Map<int,int>` ties it
+(85 vs 82 ms, inside the noise).
+
+### Known open issues
+
+- #137: a bound `V` (`Map<string,int>`) is a static claim; a stored value that
+  does not fit `V` is reinterpreted when read back.
+- #140: by-ref `foreach` over a by-value `Generator` iterates instead of
+  throwing (the `Map` case throws correctly).
+- #143, #144, #145: an exception thrown from a callback in `map` / `reduce`
+  leaks (memory only; semantics are right).
 
 ## Polyfill
 
@@ -331,5 +374,4 @@ registry, so a cycle through one is not collected under Zend.
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
-- `Map` / `Set` / `Vec` are erased (P1): no key or value specialisation, no inline
-  lookups, no native `foreach` yet — each access is a method call.
+- `Map` / `Set` / `Vec` values are boxed cells (no raw-word value columns yet).

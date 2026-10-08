@@ -1,5 +1,5 @@
 <?php
-// Baseline for Manticore\Ds Map/Set (P1, erased): insert + lookup + remove vs PHP arrays.
+// Map/Set vs PHP arrays: insert + lookup + remove, foreach, reduce. P2 (1e6, ms, arm64 macOS): see docs/ds.md "Cost".
 //   bin/manticore compile tools/bench/ds_map_bench.php -o /tmp/ds_map_bench   (run under an RSS watchdog)
 use Manticore\Ds\Map;
 use Manticore\Ds\Set;
@@ -65,3 +65,13 @@ $a = []; for ($i = 0; $i < $n; $i++) { $a[$i] = $i; }
 $t = hrtime(true); $s = 0;
 foreach ($a as $k => $v) { $s += $v; }
 report('foreach array<int,int>', $t, $s); $m = null; $a = [];
+
+/** @var Map<int,int> $m */
+$m = new Map(); for ($i = 0; $i < $n; $i++) { $m->set($i, $i); }
+$t = hrtime(true);
+$s = $m->reduce(fn(int $c, int $v, int $k): int => $c + $v, 0);
+report('reduce literal', $t, $s);
+$f = fn(int $c, int $v, int $k): int => $c + $v;
+$t = hrtime(true);
+$s = $m->reduce($f, 0);
+report('reduce $f', $t, $s);
