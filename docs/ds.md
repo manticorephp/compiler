@@ -305,7 +305,9 @@ compile time (no closure call per element) when **all** hold: it is a literal
 return type, its body is safe to splice, and the receiver is statically a
 `Map` / `Set` / `Vec`. Anything else (a `$f` variable, typed parameters or a
 return type, a `use` capture, an untyped receiver) is called per element:
-correct, slower.
+correct, slower. An exception thrown inside a fused callback has no
+`{closure}` frame in its `getTrace()`.
+
 - `find` returns `null` when nothing matches, indistinguishable from a stored
   `null` match. Use `any` or `has` when that matters.
 - A callback must not mutate the container it walks (the `foreach` rule).
@@ -327,8 +329,8 @@ key is the same `TypeError`.
 
 ### Cost
 
-1,000,000 insert + lookup + remove, median of 5 interleaved runs, arm64 macOS
-(`tools/bench/ds_map_bench.php`; noise ~7%). P1 was erased (a method call per
+1,000,000 insert + lookup + remove, median of 5 runs per row, arm64 macOS
+(`tools/bench/ds_map_bench.php`). P1 was erased (a method call per
 operation); P2 specialises keys, inlines lookups and walks natively.
 
 | ms | PHP array | P1 Map/Set | P2 Map/Set |
@@ -347,10 +349,11 @@ run under load (other jobs running) scattered them by up to 40% but kept the
 ordering.
 
 `Map<string,int>` (270 vs 284 ms, -5%) and `Set<object>`
-(93 vs 99, -6%) are at or below the array idiom, `Map<int,int>` (85 vs 82, +4%) just above: all three are parity within noise.
+(93 vs 99, -6%) are at or below the array idiom, `Map<int,int>` (85 vs 82, +4%) just above: all three are parity within the run-to-run scatter.
 The remaining `Map<int,int>` gap is insert-miss cost: index growth and rehash,
 first-touch page faults, and entry dereferences on a miss probe. A hash tag in
 the index slot would remove the dereferences; that is a layout change, deferred.
+
 ### Known open issues
 
 - #137: a bound `V` (`Map<string,int>`) is a static claim; a stored value that
