@@ -163,6 +163,7 @@ final class UnifiedArrayRuntime
         $this->emitImplode();
         $this->emitImplodeInt();
         $this->emitInArrayStr();
+        $this->emitImplodeFloat();
         $this->emitIssetInt();
         $this->emitIssetStr();
         $this->emitLookupInt();
@@ -4786,6 +4787,158 @@ final class UnifiedArrayRuntime
         $c3->brIf($c3->icmp('eq', $cmp, Value::int(Type::i32(), 0)), $hit, $next);
         $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
         $next->br($head);
+    }
+
+    /**
+     * `__mir_array_implode_float(sep, arr, fallback) -> ptr` — join RAW-float
+     * elements. A float whose `%.14G` form is plain digits — an integral or
+     * `.5` value below 1e13, which is exactly what fits the 14 significant
+     * digits — is written straight into the result: the integer part through
+     * the shared int formatter, then `.5`. Anything else (fraction with other
+     * digits, huge, non-finite, `-0`) goes through `__mir_float_to_str` and is
+     * copied in, so the text is the one `echo` prints. A buffer that is not a
+     * raw-float one (`fallback` is `__mir_array_implode_cell`) is joined there.
+     *
+     * The buffer holds `len * (seplen + 16) + 1` bytes — the widest fast-path
+     * element is 16 — and a slow element regrows it to keep that bound for the
+     * elements still to come, so the fast path never checks capacity.
+     */
+    private function emitImplodeFloat(): void
+    {
+        $fn = $this->module->func('__mir_array_implode_float', Type::ptr());
+        $sep = $fn->param(Type::ptr(), 'sep');
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $fb = $fn->param(Type::ptr(), 'fb');
+        $e = $fn->block('entry');
+        $empty = $fn->block('if_empty');
+        $chk = $fn->block('if_chk');
+        $fall = $fn->block('if_fall');
+        $init = $fn->block('if_init');
+        $head = $fn->block('if_head');
+        $body = $fn->block('if_body');
+        $fcheck = $fn->block('if_fcheck');
+        $fast = $fn->block('if_fast');
+        $fneg = $fn->block('if_fneg');
+        $fdig = $fn->block('if_fdig');
+        $fhalf = $fn->block('if_fhalf');
+        $fdone = $fn->block('if_fdone');
+        $slow = $fn->block('if_slow');
+        $grow = $fn->block('if_grow');
+        $scopy = $fn->block('if_scopy');
+        $next = $fn->block('if_next');
+        $done = $fn->block('if_done');
+
+        $len = $e->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $e->brIf($e->icmp('sle', $len, Value::int(Type::i64(), 0)), $empty, $chk);
+        $eb = $empty->call('__mir_str_alloc', Type::ptr(), [Value::int(Type::i64(), 1)]);
+        $empty->store(Value::int(Type::i8(), 0), $eb);
+        $empty->ret($eb);
+
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $hint = $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $chk->brIf($chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT)), $init, $fall);
+        $fall->ret($fall->callIndirect($fb, Type::ptr(), [Type::ptr(), Type::ptr()], [$sep, $arr]));
+
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        $seplen = $init->call('__mir_strlen', Type::i64(), [$sep]);
+        $per = $init->add($seplen, Value::int(Type::i64(), 16));
+        $cap0 = $init->add($init->mul($len, $per), Value::int(Type::i64(), 1));
+        $buf0 = $init->call('__mir_str_alloc', Type::ptr(), [$cap0]);
+        $bufSlot = $init->alloca(Type::ptr(), 'if_buf');
+        $capSlot = $init->alloca(Type::i64(), 'if_cap');
+        $wSlot = $init->alloca(Type::i64(), 'if_w');
+        $iSlot = $init->alloca(Type::i64(), 'if_i');
+        $init->store($buf0, $bufSlot);
+        $init->store($cap0, $capSlot);
+        $init->store(Value::int(Type::i64(), 0), $wSlot);
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        $init->br($head);
+
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $done, $body);
+
+        // The separator goes in first (not before element 0); capacity for it
+        // is part of the per-element bound, so no check.
+        $isFirst = $body->icmp('eq', $i, Value::int(Type::i64(), 0));
+        $sepn = $body->select($isFirst, Value::int(Type::i64(), 0), $seplen);
+        $w0 = $body->load(Type::i64(), $wSlot);
+        $b0 = $body->load(Type::ptr(), $bufSlot);
+        $body->call('memcpy', Type::ptr(), [$body->gep(Type::i8(), $b0, [$w0]), $sep, $sepn]);
+        $w1 = $body->add($w0, $sepn);
+        $body->store($w1, $wSlot);
+        $word = $body->load(Type::i64(), $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($i, $stride))]));
+        $d = $body->bitcast($word, Type::f64());
+        $isNeg = $body->icmp('slt', $word, Value::int(Type::i64(), 0));
+        $a = $body->select($isNeg, $body->fsub(Value::float(Type::f64(), 0.0), $d), $d);
+        // `olt` is false for NaN and for INF, which keeps both off the fast path
+        // before the conversions below see them.
+        $body->brIf($body->fcmp('olt', $a, Value::float(Type::f64(), 1.0e13)), $fcheck, $slow);
+
+        $w2 = $fcheck->fmul($a, Value::float(Type::f64(), 2.0));
+        $iw = $fcheck->fptosi($w2, Type::i64());
+        $exact = $fcheck->fcmp('oeq', $fcheck->sitofp($iw, Type::f64()), $w2);
+        // "-0" (and a negative that rounds to it) is not the digits "0".
+        $negZero = $fcheck->and_($isNeg, $fcheck->icmp('eq', $iw, Value::int(Type::i64(), 0)));
+        $okFast = $fcheck->and_($exact, $fcheck->icmp('eq', $negZero, Value::int(Type::i1(), 0)));
+        $fcheck->brIf($okFast, $fast, $slow);
+
+        $ip = $fast->ashr($iw, Value::int(Type::i64(), 1));
+        $half = $fast->and_($iw, Value::int(Type::i64(), 1));
+        $wf = $fast->load(Type::i64(), $wSlot);
+        $bf = $fast->load(Type::ptr(), $bufSlot);
+        $fast->brIf($isNeg, $fneg, $fdig);
+        $fneg->store(Value::int(Type::i8(), 45), $fneg->gep(Type::i8(), $bf, [$wf]));
+        $fneg->store($fneg->add($wf, Value::int(Type::i64(), 1)), $wSlot);
+        $fneg->br($fdig);
+        $wd = $fdig->load(Type::i64(), $wSlot);
+        $nd = $fdig->call('__mir_int_len', Type::i64(), [$ip]);
+        $fdig->call('__mir_int_fmt', Type::void(), [$bf, $wd, $ip]);
+        $wd2 = $fdig->add($wd, $nd);
+        $fdig->store($wd2, $wSlot);
+        $fdig->brIf($fdig->icmp('ne', $half, Value::int(Type::i64(), 0)), $fhalf, $fdone);
+        $dot = $fhalf->gep(Type::i8(), $bf, [$wd2]);
+        $fhalf->store(Value::int(Type::i8(), 46), $dot);
+        $fhalf->store(Value::int(Type::i8(), 53), $fhalf->gep(Type::i8(), $bf, [$fhalf->add($wd2, Value::int(Type::i64(), 1))]));
+        $fhalf->store($fhalf->add($wd2, Value::int(Type::i64(), 2)), $wSlot);
+        $fhalf->br($next);
+        $fdone->br($next);
+
+        $str = $slow->call('__mir_float_to_str', Type::ptr(), [$d]);
+        $sl = $slow->call('__mir_strlen', Type::i64(), [$str]);
+        $ws = $slow->load(Type::i64(), $wSlot);
+        $cap = $slow->load(Type::i64(), $capSlot);
+        $left = $slow->sub($slow->sub($len, $i), Value::int(Type::i64(), 1));
+        $need = $slow->add(
+            $slow->add($ws, $sl),
+            $slow->add($slow->mul($left, $per), Value::int(Type::i64(), 1)),
+        );
+        $slow->brIf($slow->icmp('ugt', $need, $cap), $grow, $scopy);
+        $nbuf = $grow->call('__mir_str_alloc', Type::ptr(), [$need]);
+        $obuf = $grow->load(Type::ptr(), $bufSlot);
+        $grow->call('memcpy', Type::ptr(), [$nbuf, $obuf, $ws]);
+        $grow->call('__mir_rc_release_str', Type::void(), [$obuf]);
+        $grow->store($nbuf, $bufSlot);
+        $grow->store($need, $capSlot);
+        $grow->br($scopy);
+        $bs = $scopy->load(Type::ptr(), $bufSlot);
+        $scopy->call('memcpy', Type::ptr(), [$scopy->gep(Type::i8(), $bs, [$ws]), $str, $sl]);
+        $scopy->store($scopy->add($ws, $sl), $wSlot);
+        $scopy->call('__mir_rc_release_str', Type::void(), [$str]);
+        $scopy->br($next);
+
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+
+        $wend = $done->load(Type::i64(), $wSlot);
+        $bend = $done->load(Type::ptr(), $bufSlot);
+        $done->store(Value::int(Type::i8(), 0), $done->gep(Type::i8(), $bend, [$wend]));
+        $done->call('__mir_str_set_len', Type::void(), [$bend, $wend]);
+        $done->ret($bend);
     }
 
     /**
