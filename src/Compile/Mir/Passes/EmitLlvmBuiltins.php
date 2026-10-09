@@ -5179,8 +5179,11 @@ trait EmitLlvmBuiltins
             $vec = $this->lastValue;
             $this->rt->needsTaggedToStr = true;
             $this->rt->needsImplodeCell = true;
+            $this->rt->needsIntStr = true;
+            $this->rt->needsStrRc = true;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_float(ptr ' . $sep . ', ptr ' . $vec
+                . ', ptr @__mir_array_implode_cell)' . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'ptr';
             return $out;
