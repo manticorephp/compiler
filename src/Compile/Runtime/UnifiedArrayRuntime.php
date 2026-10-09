@@ -162,6 +162,7 @@ final class UnifiedArrayRuntime
         $this->emitUnshiftAll();
         $this->emitImplode();
         $this->emitImplodeInt();
+        $this->emitInArrayStr();
         $this->emitIssetInt();
         $this->emitIssetStr();
         $this->emitLookupInt();
@@ -4708,6 +4709,83 @@ final class UnifiedArrayRuntime
         $done->store(Value::int(Type::i8(), 0), $done->gep(Type::i8(), $buf, [$offF]));
         $done->call('__mir_str_set_len', Type::void(), [$buf, $offF]);
         $done->ret($buf);
+    }
+
+    /**
+     * `__mir_array_in_str(arr, needle) -> i1` — strict `in_array` of a string
+     * over a string vec. One linear scan with the element loaded INLINE (packed
+     * slot / hashed value, mode and the cell-payload mask chosen once) and the
+     * compare done as pointer, header length, then bytes — no per-element
+     * retain/release of the element, no `__mir_str_eq_ns` call chain. A null
+     * element or needle matches only another null (the same word), as
+     * `__mir_str_eq_ns` does.
+     */
+    private function emitInArrayStr(): void
+    {
+        $fn = $this->module->func('__mir_array_in_str', Type::i1());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $needle = $fn->param(Type::i64(), 'needle');
+        $e = $fn->block('entry');
+        $miss = $fn->block('ia_miss');
+        $hit = $fn->block('ia_hit');
+        $init = $fn->block('ia_init');
+        $nl0 = $fn->block('ia_nl0');
+        $nl1 = $fn->block('ia_nl1');
+        $go = $fn->block('ia_go');
+        $head = $fn->block('ia_head');
+        $body = $fn->block('ia_body');
+        $c1 = $fn->block('ia_c1');
+        $c2 = $fn->block('ia_c2');
+        $c3 = $fn->block('ia_c3');
+        $next = $fn->block('ia_next');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $miss, $init);
+        $miss->ret(Value::int(Type::i1(), 0));
+        $hit->ret(Value::int(Type::i1(), 1));
+
+        $len = $init->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $flags = $init->load(Type::i64(), $this->hdr($init, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        // A cell-element buffer stores tagged words: the payload is the low 48
+        // bits (what `__mir_elem_untag` strips); a raw buffer is used as is.
+        $isCell = $init->icmp('eq', $this->elemHint($init, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $mask = $init->select($isCell, Value::int(Type::i64(), 281474976710655), Value::int(Type::i64(), -1));
+        $nlSlot = $init->alloca(Type::i64(), 'ia_nlen');
+        $iSlot = $init->alloca(Type::i64(), 'ia_i');
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        $init->brIf($init->icmp('eq', $needle, Value::int(Type::i64(), 0)), $nl0, $nl1);
+        $nl0->store(Value::int(Type::i64(), 0), $nlSlot);
+        $nl0->br($go);
+        $np = $nl1->inttoptr($needle, Type::ptr());
+        $nl1->store($nl1->call('__mir_strlen', Type::i64(), [$np]), $nlSlot);
+        $nl1->br($go);
+        $go->br($head);
+
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
+        $slot = $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($i, $stride))]);
+        $p = $body->and_($body->load(Type::i64(), $slot), $mask);
+        $body->brIf($body->icmp('eq', $p, $needle), $hit, $c1);
+        $anyNull = $c1->or_(
+            $c1->icmp('eq', $p, Value::int(Type::i64(), 0)),
+            $c1->icmp('eq', $needle, Value::int(Type::i64(), 0)),
+        );
+        $c1->brIf($anyNull, $next, $c2);
+        $pp = $c2->inttoptr($p, Type::ptr());
+        $pl = $c2->call('__mir_strlen', Type::i64(), [$pp]);
+        $nlen = $c2->load(Type::i64(), $nlSlot);
+        $c2->brIf($c2->icmp('eq', $pl, $nlen), $c3, $next);
+        $np2 = $c3->inttoptr($needle, Type::ptr());
+        $pp3 = $c3->inttoptr($p, Type::ptr());
+        $cmp = $c3->call('memcmp', Type::i32(), [$pp3, $np2, $c3->load(Type::i64(), $nlSlot)]);
+        $c3->brIf($c3->icmp('eq', $cmp, Value::int(Type::i32(), 0)), $hit, $next);
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
     }
 
     /**

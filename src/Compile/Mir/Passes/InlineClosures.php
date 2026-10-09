@@ -537,6 +537,13 @@ final class InlineClosures implements Pass
             $a2 = $this->node($args[2]);
             if ($a2->kind === Node::KIND_BOOL_CONST) { $strict = $a2->value; }
         }
+        // A strict string-in-string-vec search is emitted as one runtime scan
+        // ({@see EmitLlvmBuiltins::biInArrayStr}); only the synthesis below is
+        // for the shapes that scan does not cover.
+        if ($isInArray && $strict && $needle->type->kind === Type::KIND_STRING
+            && ($haystack->type->element->kind ?? null) === Type::KIND_STRING) {
+            return null;
+        }
         $op = $strict ? '===' : '==';
         $u = Type::unknown();
         // `if ($v <op> $needle) return <hit>;` inside `foreach ($h as $k => $v)`.
