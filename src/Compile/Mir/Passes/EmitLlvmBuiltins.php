@@ -367,7 +367,11 @@ trait EmitLlvmBuiltins
         }
         if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
-        if ($name === 'in_array' && $this->isStrictStrScan($args)) { return $this->biInArrayStr($args); }
+        if ($name === 'in_array') {
+            $shape = $this->inArrayShape($args);
+            if ($shape === 'str') { return $this->biInArrayStr($args); }
+            if ($shape !== '') { return $this->biInArrayWord($args, $shape); }
+        }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
         if ($name === 'printf')                       { return $this->biSprintf($args, true); }
         if ($name === '__mc_fmt_int')                 { return $this->biFmt1($args, 'i'); }
@@ -5133,20 +5137,23 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * `in_array($string, $string[], true)` — the one shape {@see biInArrayStr}
-     * scans natively. A loose search stays on the synthesized loop: `"1e1" ==
-     * "10"` compares numerically.
+     * The native scan {@see InlineClosures::nativeScanShape} picks for this
+     * call, or '' — also '' when the third argument is not a literal, since the
+     * strictness then is not known here.
      *
      * @param Node[] $args
      */
-    private function isStrictStrScan(array $args): bool
+    private function inArrayShape(array $args): string
     {
-        if (\count($args) !== 3 || $args[2]->kind !== Node::KIND_BOOL_CONST || $args[2]->value !== true) {
-            return false;
+        $strict = false;
+        if (\count($args) === 3) {
+            if ($args[2]->kind !== Node::KIND_BOOL_CONST) { return ''; }
+            $strict = $args[2]->value === true;
+        } elseif (\count($args) !== 2) {
+            return '';
         }
-        return $args[0]->type->kind === Type::KIND_STRING
-            && $args[1]->type->kind === Type::KIND_ARRAY
-            && ($args[1]->type->element->kind ?? null) === Type::KIND_STRING;
+        if ($args[1]->type->kind !== Type::KIND_ARRAY) { return ''; }
+        return InlineClosures::nativeScanShape($args[0]->type, $args[1]->type->element ?? null, $strict);
     }
 
     /**
@@ -5169,6 +5176,35 @@ trait EmitLlvmBuiltins
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
         $out .= $this->freeStrTemp($args[0], $needle);
+        return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `in_array` of an int / float / bool over a vec of the same kind →
+     * `__mir_array_in_word`. The needle travels as its 64-bit word (a float as
+     * its bits); the element kind is the hint code the buffer is read by.
+     *
+     * @param Node[] $args
+     */
+    private function biInArrayWord(array $args, string $shape): string
+    {
+        $out = $this->emitNode($args[0]);
+        if ($shape === 'float') {
+            $out .= $this->coerceTo('double');
+            $w = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = bitcast double ' . $this->lastValue . " to i64\n";
+        } else {
+            $out .= $this->coerceToI64();
+            $w = $this->lastValue;
+        }
+        $out .= $this->emitArrPtrArg($args[1]);
+        $arr = $this->lastValue;
+        $hint = $this->elementHintCodeForType($args[0]->type);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_in_word(ptr ' . $arr . ', i64 ' . $w
+              . ', i64 ' . (string)$hint . ', i64 ' . ($shape === 'float' ? '1' : '0') . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
         return $this->finishI64($out, $z);
     }
 

@@ -163,6 +163,7 @@ final class UnifiedArrayRuntime
         $this->emitImplode();
         $this->emitImplodeInt();
         $this->emitInArrayStr();
+        $this->emitInArrayWord();
         $this->emitImplodeFloat();
         $this->emitIssetInt();
         $this->emitIssetStr();
@@ -4939,6 +4940,102 @@ final class UnifiedArrayRuntime
         $done->store(Value::int(Type::i8(), 0), $done->gep(Type::i8(), $bend, [$wend]));
         $done->call('__mir_str_set_len', Type::void(), [$bend, $wend]);
         $done->ret($bend);
+    }
+
+    /**
+     * `__mir_array_in_word(arr, needle, kind, isFloat) -> i1` — `in_array` of an
+     * int / float / bool over a vec of the same kind. `kind` is the element
+     * hint code the static type promises. A buffer carrying exactly that hint
+     * is read raw (packed slot or hashed value, stride chosen once); any other
+     * buffer — a cellified one — has each element unboxed by `kind` first, as a
+     * foreach over the same type does. Integers and bools compare as words; a
+     * float compares as a double, so `NAN` matches nothing and `0.0 == -0.0`.
+     */
+    private function emitInArrayWord(): void
+    {
+        $fn = $this->module->func('__mir_array_in_word', Type::i1());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $needle = $fn->param(Type::i64(), 'needle');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $isF = $fn->param(Type::i64(), 'isf');
+        $e = $fn->block('entry');
+        $miss = $fn->block('iw_miss');
+        $hit = $fn->block('iw_hit');
+        $init = $fn->block('iw_init');
+        $head = $fn->block('iw_head');
+        $body = $fn->block('iw_body');
+        $slow = $fn->block('iw_slow');
+        $cmp = $fn->block('iw_cmp');
+        $fcmp = $fn->block('iw_fcmp');
+        $icmp = $fn->block('iw_icmp');
+        $next = $fn->block('iw_next');
+        $chunkSel = $fn->block('iw_chunk');
+        $iHead = $fn->block('iw_ihead');
+        $iBody = $fn->block('iw_ibody');
+        $iNext = $fn->block('iw_inext');
+        $fHead = $fn->block('iw_fhead');
+        $fBody = $fn->block('iw_fbody');
+        $fNext = $fn->block('iw_fnext');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $miss, $init);
+        $miss->ret(Value::int(Type::i1(), 0));
+        $hit->ret(Value::int(Type::i1(), 1));
+
+        $len = $init->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $flags = $init->load(Type::i64(), $this->hdr($init, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        $hint = $init->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $raw = $init->icmp('eq', $hint, $kind);
+        $nd = $init->bitcast($needle, Type::f64());
+        $iSlot = $init->alloca(Type::i64(), 'iw_i');
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        // A raw PACKED buffer is swept eight words at a time with no branch
+        // inside the group, which LLVM turns into vector compares; only the
+        // group result is tested. The tail (and every other buffer shape) takes
+        // the one-element loop below.
+        $packedRaw = $init->and_($raw, $init->icmp('eq', $ishash, Value::int(Type::i1(), 0)));
+        $init->brIf($packedRaw, $chunkSel, $head);
+        $chunkSel->brIf($chunkSel->icmp('ne', $isF, Value::int(Type::i64(), 0)), $fHead, $iHead);
+        foreach ([[$iHead, $iBody, $iNext, false], [$fHead, $fBody, $fNext, true]] as [$ch, $cb, $cn, $isFloat]) {
+            $ci = $ch->load(Type::i64(), $iSlot);
+            $ni = $ch->add($ci, Value::int(Type::i64(), 8));
+            $ch->brIf($ch->icmp('sgt', $ni, $len), $head, $cb);
+            $any = null;
+            for ($k = 0; $k < 8; $k++) {
+                $slotK = $cb->gep(Type::i8(), $arr, [$cb->add(
+                    Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+                    $cb->mul($cb->add($ci, Value::int(Type::i64(), $k)), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)),
+                )]);
+                $wk = $cb->load(Type::i64(), $slotK);
+                $eqk = $isFloat
+                    ? $cb->fcmp('oeq', $cb->bitcast($wk, Type::f64()), $nd)
+                    : $cb->icmp('eq', $wk, $needle);
+                $any = $any === null ? $eqk : $cb->or_($any, $eqk);
+            }
+            $cb->brIf($any, $hit, $cn);
+            $cn->store($ni, $iSlot);
+            $cn->br($ch);
+        }
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
+        $w = $body->load(Type::i64(), $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($i, $stride))]));
+        $body->brIf($raw, $cmp, $slow);
+        $u = $slow->call('__mir_elem_untag_kind', Type::i64(), [$arr, $w, $kind]);
+        $slow->br($cmp);
+        $phi = $cmp->phi(Type::i64());
+        $phi->addIncoming($w, $body);
+        $phi->addIncoming($u, $slow);
+        $v = $phi->value();
+        $cmp->brIf($cmp->icmp('ne', $isF, Value::int(Type::i64(), 0)), $fcmp, $icmp);
+        $fcmp->brIf($fcmp->fcmp('oeq', $fcmp->bitcast($v, Type::f64()), $nd), $hit, $next);
+        $icmp->brIf($icmp->icmp('eq', $v, $needle), $hit, $next);
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
     }
 
     /**
