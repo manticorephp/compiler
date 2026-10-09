@@ -3674,16 +3674,38 @@ trait EmitLlvmCalls
      * release list — or discard them when the literal itself is not released
      * there (`$released` false): its elements then stay owned by the buffer.
      * In ELEMENT order — php destroys an array's elements first to last.
+     *
+     * `$outer` is the literal's own register. The release hands the elements
+     * back only while the literal's buffer DIES in the call: a callee that kept
+     * it (`$this->rows = $r`) holds the elements through that buffer, and its
+     * own release walks them later, so giving them back here freed rows the
+     * property still listed. The drops go ahead of the literal's release (its
+     * rc is read first) behind a `sole:` flavor ({@see EmitLlvmMemory::rcReleaseReg}).
      * @param string[] $regs
      * @param string[] $flavs
      */
-    private function takeLitElemDrops(int $mark, bool $released, array &$regs, array &$flavs): void
+    private function takeLitElemDrops(int $mark, bool $released, array &$regs, array &$flavs, string $outer = ''): void
     {
         $n = \count($this->litElemDropRegs);
         if ($released) {
+            $at = -1;
+            if ($outer !== '') {
+                for ($j = \count($regs) - 1; $j >= 0; $j--) {
+                    if ($regs[$j] === $outer) { $at = $j; break; }
+                }
+                if ($at >= 0 && \str_ends_with($flavs[$at], 'own')) { $at = -1; }
+            }
+            $addR = [];
+            $addF = [];
             for ($i = $mark; $i < $n; $i++) {
-                $regs[] = $this->litElemDropRegs[$i];
-                $flavs[] = $this->litElemDropFlavors[$i];
+                $addR[] = $this->litElemDropRegs[$i];
+                $addF[] = $at >= 0 ? 'sole:' . $outer . ':' . $this->litElemDropFlavors[$i] : $this->litElemDropFlavors[$i];
+            }
+            if ($at >= 0) {
+                \array_splice($regs, $at, 0, $addR);
+                \array_splice($flavs, $at, 0, $addF);
+            } else {
+                foreach ($addR as $k => $r) { $regs[] = $r; $flavs[] = $addF[$k]; }
             }
         }
         while (\count($this->litElemDropRegs) > $mark) {
@@ -3911,7 +3933,7 @@ trait EmitLlvmCalls
                     $rf = $this->freshRcArgFlavor($a);
                     if ($rf !== '') { $rcArgRegs[] = $this->lastValue; $rcArgFlavs[] = $rf; }
                 }
-                $this->takeLitElemDrops($litMark, true, $rcArgRegs, $rcArgFlavs);
+                $this->takeLitElemDrops($litMark, true, $rcArgRegs, $rcArgFlavs, $this->lastValue);
             }
             $ai = $ai + 1;
         }

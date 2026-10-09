@@ -800,7 +800,7 @@ trait EmitLlvmObjects
                             $rcArgRegs[] = $this->lastValue;
                             $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
                         }
-                        $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
+                        $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs, $this->lastValue);
                     }
                     $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
                 }
@@ -6851,7 +6851,7 @@ trait EmitLlvmObjects
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai);
                     }
-                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
+                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs, $this->lastValue);
                 }
                 $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
             }
@@ -8422,7 +8422,7 @@ trait EmitLlvmObjects
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
                     }
-                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
+                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs, $this->lastValue);
                 }
                 $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
             }
