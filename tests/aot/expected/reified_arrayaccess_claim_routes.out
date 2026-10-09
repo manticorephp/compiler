@@ -1,0 +1,13 @@
+int(5)
+float(2.5)
+string(4) "fits"
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}
+int(7)
+string(3) "str"
+bool(true)
+bool(false)

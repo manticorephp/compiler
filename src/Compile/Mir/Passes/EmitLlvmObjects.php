@@ -800,7 +800,7 @@ trait EmitLlvmObjects
                             $rcArgRegs[] = $this->lastValue;
                             $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
                         }
-                        $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
+                        $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs, $this->lastValue);
                     }
                     $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
                 }
@@ -5443,12 +5443,15 @@ trait EmitLlvmObjects
     private function emitErasedIssetElem(\Compile\Mir\ArrayAccess_ $aa): string
     {
         $keyIsCell = $this->keyRidesCellChannel($aa->index);
+        $keyBoxed = $this->keyNeedsBoxing($aa->index);
+        $keyIsCell = $keyIsCell || $keyBoxed;
         $keyIsString = $aa->index->type->kind === Type::KIND_STRING
             || $aa->index->kind === Node::KIND_STRING_CONST;
         $out = '';
         $keyFirst = $this->keyBeforeBase($aa->array);
         if ($keyFirst) {
             $out .= $this->emitNode($aa->index);
+            if ($keyBoxed) { $out .= $this->boxToCell($aa->index->type); }
             $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
             $key = $this->lastValue;
         }
@@ -5457,6 +5460,7 @@ trait EmitLlvmObjects
         $cv = $this->lastValue;
         if (!$keyFirst) {
             $out .= $this->emitNode($aa->index);
+            if ($keyBoxed) { $out .= $this->boxToCell($aa->index->type); }
             $out .= $keyIsString ? $this->coerceToPtr() : $this->coerceToI64();
             $key = $this->lastValue;
         }
@@ -5482,7 +5486,13 @@ trait EmitLlvmObjects
         // an ArrayAccess object took the array path and answered false.
         if ($this->ifaceMethodHolders('ArrayAccess', 'offsetExists') !== []) {
             $keyCell = $key;
-            if (!$keyIsCell) {
+            if ($aa->index instanceof \Compile\Mir\IntConst && $aa->index->fromStr) {
+                // folded for the ARRAY arm; the object arm gets the literal as written
+                $out .= $this->emitNode(\Compile\Mir\IntConst::asWritten($aa->index));
+                $out .= $this->coerceToPtr();
+                $out .= $this->boxToCell(Type::string_());
+                $keyCell = $this->lastValue;
+            } elseif (!$keyIsCell) {
                 $this->lastValue = $key;
                 $this->lastValueType = $keyIsString ? 'ptr' : 'i64';
                 $out .= $this->boxToCell($keyIsString ? Type::string_() : Type::int_());
@@ -5632,7 +5642,7 @@ trait EmitLlvmObjects
             // `isset($obj[$k])` on an ArrayAccess object → `offsetExists()`.
             if ($aa->array->type->kind === Type::KIND_OBJ
                 && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
-                $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetExists', [$aa->index], Type::bool_());
+                $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetExists', [$this->keyAsWritten($aa->array, $aa->index)], Type::bool_());
                 $out = $this->emitMethodCall($mc);
                 $out .= $this->coerceToI64();
                 $cmp = $this->ssa->allocReg();
@@ -5958,10 +5968,26 @@ trait EmitLlvmObjects
             }
             if ($t->kind === Node::KIND_ARRAY_ACCESS) {
                 $aa = $t;
+                // An ERASED local base may hold an ArrayAccess object at run time:
+                // test the tag, an object arm calls offsetUnset (the array arm
+                // below took the object for a buffer header: SIGSEGV).
+                $uEndL = '';
+                if ($this->erasedBaseMayBeObject($aa->array)) {
+                    $out .= $this->erasedBaseObjTest($aa->array);
+                    $uIsObj = $this->objTestReg;
+                    $uObjL = $this->ssa->allocLabel('eunset.obj');
+                    $uArrL = $this->ssa->allocLabel('eunset.arr');
+                    $uEndL = $this->ssa->allocLabel('eunset.end');
+                    $out .= '  br i1 ' . $uIsObj . ', label %' . $uObjL . ', label %' . $uArrL . "\n";
+                    $out .= $uObjL . ":\n";
+                    $out .= $this->emitMethodCall(new \Compile\Mir\MethodCall_($aa->array, 'offsetUnset', [\Compile\Mir\IntConst::asWritten($aa->index)], Type::void()));
+                    $out .= '  br label %' . $uEndL . "\n";
+                    $out .= $uArrL . ":\n";
+                }
                 // `unset($obj[$k])` on an ArrayAccess object → `offsetUnset()`.
                 if ($aa->array->type->kind === Type::KIND_OBJ
                     && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
-                    $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetUnset', [$aa->index], Type::void());
+                    $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetUnset', [$this->keyAsWritten($aa->array, $aa->index)], Type::void());
                     $out .= $this->emitMethodCall($mc);
                 } elseif ($aa->array->type->kind !== Type::KIND_STRING) {
                     $baseCell = $aa->array->type->kind === Type::KIND_CELL;
@@ -6048,6 +6074,9 @@ trait EmitLlvmObjects
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
                     if ($dropFlavor !== '') { $out .= $this->elemSlotReleaseIr($curE, $dropFlavor, $dropArr); }
+                }
+                if ($uEndL !== '') {
+                    $out .= '  br label %' . $uEndL . "\n" . $uEndL . ":\n";
                 }
             }
             // Property overloading: `unset($obj->undeclaredProp)` on a class
@@ -6822,7 +6851,7 @@ trait EmitLlvmObjects
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai);
                     }
-                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
+                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs, $this->lastValue);
                 }
                 $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
             }
@@ -7940,6 +7969,8 @@ trait EmitLlvmObjects
 
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
     {
+        $hm = $this->emitHmapCall($n);
+        if ($hm !== null) { return $hm; }
         $depDiag = $this->deprecatedMethodDiag($this->staticClassOf($n->object), $n->method, $n->line);
         if ($depDiag !== '') { return $depDiag . $this->emitMethodCallInner($n); }
         return $this->emitMethodCallInner($n);
@@ -7948,6 +7979,29 @@ trait EmitLlvmObjects
     private function emitMethodCallInner(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
+        // Routed to one body with no dispatch (a reified receiver whose argument
+        // does not fit the binding's claim runs the origin's erased method): a
+        // plain call with the receiver as `$this`, so the callee's own erased
+        // params drive the arg coercions. A call built here at emit time
+        // (`$x[...]` → `offsetGet`, `$o(...)` → `__invoke`) never met
+        // ResolveOverloads, so the same rule decides it now; its node type is
+        // still the spec's, so an erased (cell) result is decoded to it.
+        $route = $mc->direct !== '' ? $mc->direct
+            : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes);
+        if ($route !== '') {
+            $dArgs = [$mc->object];
+            foreach ($mc->args as $a) { $dArgs[] = $a; }
+            $rt = $mc->direct !== '' ? $n->type : ($this->sigs->returnType[$route] ?? $n->type);
+            $dc = new \Compile\Mir\Call($route, $dArgs, $rt);
+            $dc->srcArgc = $mc->srcArgc;
+            $dc->recvArgs = 1;
+            $out = $this->emitNode($dc);
+            if ($rt->kind === Type::KIND_CELL && $n->type->kind !== Type::KIND_CELL
+                && $n->type->kind !== Type::KIND_VOID) {
+                $out .= $this->unboxCellToType($n->type);
+            }
+            return $out;
+        }
         // A method on a `#[TypeDef]` receiver: a direct call with the scalar as
         // the first argument. Nothing to dispatch on — the class is final and has
         // no runtime identity. Routed through the ordinary Call path so the
@@ -8368,7 +8422,7 @@ trait EmitLlvmObjects
                         $rcArgRegs[] = $this->lastValue;
                         $rcArgFlavs[] = $this->coOwnedArgFlavor($rf, $ptypes, $mask, $ai + 1);
                     }
-                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs);
+                    $this->takeLitElemDrops($litMark, $rf !== '', $rcArgRegs, $rcArgFlavs, $this->lastValue);
                 }
                 $this->takeLitElemDrops($litMark, false, $rcArgRegs, $rcArgFlavs);
             }

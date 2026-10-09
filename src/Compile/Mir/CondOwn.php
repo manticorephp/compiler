@@ -143,7 +143,7 @@ final class CondOwn
      */
     private static function sameArrayShape(Type $arm, Type $res): bool
     {
-        if ($arm->isAssoc() !== $res->isAssoc()) { return false; }
+        if ($arm->isAssoc() !== $res->isAssoc() && !self::cellKeyed($res)) { return false; }
         $ae = $arm->element;
         $re = $res->element;
         if ($ae === null || $re === null) { return $ae === null && $re === null; }
@@ -157,6 +157,16 @@ final class CondOwn
         if ($ae->kind !== $re->kind) { return false; }
         if ($ae->kind === Type::KIND_OBJ) { return ($ae->class ?? '') === ($re->class ?? ''); }
         return true;
+    }
+
+    /**
+     * A CELL-keyed array reads every key by its own tag (`__mir_array_key_cell_at`
+     * classifies packed vs hashed at runtime), and the retain / release / cellify
+     * helpers are key-agnostic, so it holds an arm of either keyed-ness.
+     */
+    public static function cellKeyed(Type $t): bool
+    {
+        return $t->kind === Type::KIND_ARRAY && $t->key !== null && $t->key->kind === Type::KIND_CELL;
     }
 
     private static function asArrayLit(Node $n): ArrayLit { return $n; }

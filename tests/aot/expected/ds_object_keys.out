@@ -1,0 +1,24 @@
+4
+string(1) "f"
+string(1) "g"
+string(7) "hearts2"
+string(3) "ace"
+bool(false)
+bool(false)
+bool(false)
+bool(true)
+string(7) "hearts2"
+bool(false)
+bool(true)
+int(3)
+Closure => g
+Suit => hearts2
+Rank => ace
+3
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+int(2)

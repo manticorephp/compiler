@@ -1,0 +1,23 @@
+a1 b2 c3 
+a=a10 b=b20 c=c30 
+2 6
+bool(true)
+bool(false)
+int(2)
+NULL
+1,0 2,3
+123 6 bool(true)
+bool(false)
+int(2)
+NULL
+0,6,14 567
+2
+0:5 1:6 2:7 
+bool(true)
+bool(false)
+int(6)
+NULL
+x4 y5 8,10 1 9 bool(true)
+bool(false)
+int(5)
+NULL

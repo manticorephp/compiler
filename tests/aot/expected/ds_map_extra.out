@@ -1,0 +1,12 @@
+3
+1="a" 's'=[1,2] K:obj="o" 
+2 a,2
+2 | a,2,z
+Map modified during iteration
+0
+2
+Map::toArray(): keys collide in a PHP array
+{"a":1}
+[]
+{}
+{"0":"a","5":"b"}

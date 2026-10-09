@@ -1,0 +1,5 @@
+before gc
+destruct a
+destruct b
+collected
+after gc

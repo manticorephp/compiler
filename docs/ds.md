@@ -213,10 +213,161 @@ The binding is written in a docblock (`@var` on a local or a property,
 nothing at run time: `get_class($kinds)` is still `Manticore\Ds\UInt16Array`.
 An array with no binding reads plain `int` / `float`, as before. `foreach`
 over a bound array still yields the plain scalar.
+
+## `Map`, `Set`, `Vec`
+
+Insertion-ordered containers over native tables (`Map`, `Set`) and a native
+buffer of boxed values (`Vec`). Unlike a PHP array the keys are **strict**.
+
+```php
+use Manticore\Ds\{Map, Set, Vec};
+
+$m = new Map();
+$m->set('a', 1);
+$m[2] = 'two';                 // int and string keys stay distinct: "2" !== 2
+$m->set($obj, 'by identity');  // an object is a key
+foreach ($m as $k => $v) { … } // insertion order
+```
+
+| `Map` | |
+|---|---|
+| `set(mixed $key, mixed $value): void`, `$m[$k] = $v` | insert or overwrite (an overwrite keeps the position) |
+| `get(mixed $key, mixed $default = null): mixed`, `$m[$k]` | the value; a missing key returns `$default` when one is passed, else `OutOfBoundsException("Key not found")` |
+| `has(mixed $key): bool`, `isset($m[$k])` | key present (a stored `null` still counts) |
+| `remove(mixed $key): mixed` | remove and return the value; `OutOfBoundsException("Key not found")` when missing |
+| `unset($m[$k])` | remove; a missing key is a no-op |
+| `count(): int`, `isEmpty(): bool`, `clear(): void` | |
+| `keys(): Vec`, `values(): Vec` | in order |
+| `toArray(): array` | see below |
+
+`$m[] = $v` is an `Error("Cannot append to a Map; use set()")`.
+
+| `Set` | |
+|---|---|
+| `add(mixed $value): void` | add; an existing value keeps its position |
+| `has(mixed $value): bool` | |
+| `remove(mixed $value): void` | `OutOfBoundsException("Value not found")` when missing |
+| `count()`, `isEmpty()`, `clear()` | |
+| `union(Set)`, `intersect(Set)`, `diff(Set)`: `Set` | new set; order follows the left operand, then the right for `union` |
+| `toArray(): array` | a list |
+
+| `Vec` | |
+|---|---|
+| `Vec::fromArray(array $values): Vec` | values in iteration order |
+| `push(mixed $value): void`, `$v[] = $x` | append |
+| `pop(): mixed` | `UnderflowException("Cannot pop from an empty Vec")` when empty |
+| `$v[$i]`, `$v[$i] = $x`, `isset($v[$i])` | an `int` index; other types `TypeError("Cannot access offset of type <t> on Vec")`; out of range `OutOfBoundsException("Index invalid or out of range")` |
+| `count()`, `isEmpty()`, `clear()`, `toArray()` | |
+
+`unset($v[$i])` is an `Error("Cannot unset a Vec element; use pop()")`.
+
+**Keys** (`Map`, `Set`) — `int`, `string` or object. `"1"` and `1` are
+different keys; an object is its own key by identity. Anything else (`float`,
+`bool`, `null`, `array`) is a `TypeError("Cannot use a key of type <t> in Map")`
+(`... in Set`).
+
+**Order** — iteration is insertion order. `remove` + re-insert moves the key to
+the end. Removing during `foreach` is fine. A **compaction** (triggered by an
+insert) or `clear()` during `foreach` throws
+`RuntimeException("Map modified during iteration")` /
+`("Set modified during iteration")`.
+`Vec` iteration has no guard: it re-reads the length every step.
+
+**`toArray()` / JSON** — `Map::toArray()` throws
+`ValueError("Map::toArray(): keys collide in a PHP array")` when `1` and `"1"`
+are both keys, and `TypeError("Map::toArray(): object keys cannot be array keys")`
+for an object key. `json_encode($map)` goes through `(object) toArray()`, so it
+is **always an object** (`{}` when empty). `Set` and `Vec` encode as JSON
+lists. `var_dump` / `print_r` show the entries (`Map`: a list of `[key, value]`
+pairs); `serialize` round-trips all three.
+
+**Copies** — assignment shares, `clone` copies the table (shallow: keys and
+values are retained, not cloned).
+
+**Cycles** — a cycle through a `Map` / `Set` / `Vec` (`$m->set('self', $m)`)
+is collected natively by `gc_collect_cycles()`. Under the Zend polyfill it is
+not (the buffers live in a static registry).
+
+### Callbacks
+
+`Map`, `Set` and `Vec` take `each`, `map`, `filter`, `reduce`, `any`, `all` and
+`find`. Callbacks get `($value, $key)` (`Set`: `($value)`); `reduce` gets
+`($carry, $value, $key)` and an explicit initial value. `map` / `filter` return
+a new container of the same kind.
+
+```php
+$total = $m->reduce(fn($c, $v) => $c + $v, 0);   // fused
+```
+
+A closure literal passed directly to one of these is fused into a loop at
+compile time (no closure call per element) when **all** hold: it is a literal
+(not a variable), captures nothing, its parameters are untyped, it has no
+return type, its body is safe to splice, and the receiver is statically a
+`Map` / `Set` / `Vec`. Anything else (a `$f` variable, typed parameters or a
+return type, a `use` capture, an untyped receiver) is called per element:
+correct, slower. An exception thrown inside a fused callback has no
+`{closure}` frame in its `getTrace()`.
+
+- `find` returns `null` when nothing matches, indistinguishable from a stored
+  `null` match. Use `any` or `has` when that matters.
+- A callback must not mutate the container it walks (the `foreach` rule).
+
+### `foreach` and the fast path
+
+`foreach` over a `Map` / `Set` / `Vec` is native: it walks the table directly,
+no iterator object. The mutation rule is the one under **Order** above.
+
+- `foreach` over a `null` subject walks nothing.
+- `foreach ($m as &$v)` throws the generator by-reference `Exception` (Zend's
+  message); there is no by-ref walk.
+
+Typed keys take the fast path with no annotation: the static type of the key
+operand (`int`, `string`, object) selects a specialised hash / compare inline;
+an untyped key goes through the generic path. The strict-key rule holds on
+both, including a bound map (`/** @var Map<string,int> $m */`): a wrong-typed
+key is the same `TypeError`.
+
+### Cost
+
+1,000,000 insert + lookup + remove, median of 5 runs per row, arm64 macOS
+(`tools/bench/ds_map_bench.php`). P1 was erased (a method call per
+operation); P2 specialises keys, inlines lookups and walks natively.
+
+| ms | PHP array | P1 Map/Set | P2 Map/Set |
+|---|---|---|---|
+| string keys `"k$i"` | 284 | 393 | 270 |
+| int keys | 82 | 145 | 85 |
+| objects (`spl_object_id` array vs `Set`) | 99 | 168 | 93 |
+| `foreach` over 1e6 int entries | 2 | 6 | 3 |
+| `reduce`, literal `fn($c, $v)` (fused) | | | 3 |
+| `reduce`, `$f` variable | | | 5 |
+| `reduce`, typed closure literal (not fused) | | | 6 |
+
+Run back to back (not interleaved) on a shared machine. The P1 column is from
+P1's own run. The three insert/lookup/remove rows are from a quiet run; a later
+run under load (other jobs running) scattered them by up to 40% but kept the
+ordering.
+
+`Map<string,int>` (270 vs 284 ms, -5%) and `Set<object>`
+(93 vs 99, -6%) are at or below the array idiom, `Map<int,int>` (85 vs 82, +4%) just above: all three are parity within the run-to-run scatter.
+The remaining `Map<int,int>` gap is insert-miss cost: index growth and rehash,
+first-touch page faults, and entry dereferences on a miss probe. A hash tag in
+the index slot would remove the dereferences; that is a layout change, deferred.
+
+### Known open issues
+
+- #137: a bound `V` (`Map<string,int>`) is a static claim; a stored value that
+  does not fit `V` is reinterpreted when read back.
+- #140: by-ref `foreach` over a by-value `Generator` iterates instead of
+  throwing (the `Map` case throws correctly).
+- #143, #144, #145: general throw-path leaks (method-argument receiver,
+  assignment RHS target, temporary call argument), visible through a `map` /
+  `reduce` callback that throws (memory only; semantics are right).
+
 ## Polyfill
 
-The classes are ordinary PHP (`prelude/ds.php`) over a small set of buffer
-primitives. Natively those primitives are compiler builtins; under Zend they
+The classes are ordinary PHP (`prelude/ds.php`, `prelude/ds_map.php`) over a small set of buffer
+and table primitives. Natively those primitives are compiler builtins; under Zend they
 are PHP functions that keep each buffer in a PHP array. Both are generated from
 the same files, so the polyfill behaves identically by construction — it is
 the oracle the native implementation is tested against.
@@ -230,7 +381,8 @@ through Composer) runs unchanged under `php` and under the compiler; natively
 the bootstrap is a no-op because the classes are built in.
 
 The polyfill is for portability, not speed: under Zend an element costs what a
-PHP array element costs.
+PHP array element costs. `Map` / `Set` / `Vec` keep their buffers in a static
+registry, so a cycle through one is not collected under Zend.
 
 ## Current limits
 
@@ -238,3 +390,4 @@ PHP array element costs.
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
+- No per-type value layout yet: values are stored as 8-byte cells.

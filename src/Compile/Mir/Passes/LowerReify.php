@@ -458,6 +458,7 @@ trait LowerReify
     {
         $origin = $this->reifyOrigin[$spec] ?? '';
         if ($origin === '') { return; }
+        $layoutOk = $this->reifyLayoutMatches($spec, $origin);
         foreach ($this->chainMethodNames($spec) as $m => $_) {
             if ($m === '__construct') { continue; }
             // Resolve through BOTH chains: the specialized method may be
@@ -469,7 +470,11 @@ trait LowerReify
             if ($base === null || $spun === null) { continue; }
             // Nothing was erased away — the raw entry already IS the erased one.
             if (!$this->sigDiffers($base, $spun)) { continue; }
-            $module->addFunction($this->erasedThunkFor($spec, $m, $base));
+            if ($layoutOk) {
+                $spun->claimOrigin = $base->name;
+                $spun->claimParams = $this->claimParams($base, $spun);
+            }
+            $module->addFunction($this->erasedThunkFor($spec, $m, $base, $spun));
         }
     }
 
@@ -525,25 +530,101 @@ trait LowerReify
     }
 
     /**
+     * The params a binding narrowed over an erased native hint: the origin
+     * takes a cell there, the spec a concrete scalar or object. That type is a
+     * docblock CLAIM — php never checks it — so it may not convert an argument.
+     *
+     * @return array<int, Type>
+     */
+    private function claimParams(FunctionDef $base, FunctionDef $spun): array
+    {
+        $out = [];
+        $sp = $spun->params;
+        $i = 0;
+        foreach ($base->params as $p) {
+            $s = $sp[$i];
+            if ($i > 0 && !$p->byRef && !$p->variadic) {
+                $bk = $p->type->kind;
+                $sk = $s->type->kind;
+                if (($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN)
+                    && ($sk === Type::KIND_INT || $sk === Type::KIND_FLOAT || $sk === Type::KIND_BOOL
+                        || $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ)) {
+                    $out[$i] = $s->type;
+                }
+            }
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /** The runtime test that `$v` is what a claimed `$t` param holds. */
+    private function claimCheck(Node $v, Type $t): Node
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_OBJ) { return new \Compile\Mir\Instanceof_($v, $t->class ?? ''); }
+        $fn = $k === Type::KIND_INT ? 'is_int' : ($k === Type::KIND_FLOAT ? 'is_float'
+            : ($k === Type::KIND_BOOL ? 'is_bool' : 'is_string'));
+        return new \Compile\Mir\Call($fn, [$v], Type::bool_());
+    }
+
+    /**
+     * Whether the origin's body can run on a spec instance: every property
+     * keeps its representation. A spec that moved one (a `T[]` slot of raw
+     * doubles) cannot hand its object to the erased body.
+     */
+    private function reifyLayoutMatches(string $spec, string $origin): bool
+    {
+        $scd = $this->classTable[$spec] ?? null;
+        $ocd = $this->classTable[$origin] ?? null;
+        if ($scd === null || $ocd === null) { return false; }
+        foreach ($scd->propertyTypes as $prop => $st) {
+            $pt = $ocd->propertyTypes[$prop] ?? null;
+            if ($pt === null || $st->kind !== $pt->kind) { return false; }
+            $se = $st->element;
+            $pe = $pt->element;
+            if (($se === null) !== ($pe === null)) { return false; }
+            if ($se !== null && $pe !== null && $se->kind !== $pe->kind) { return false; }
+        }
+        return true;
+    }
+
+    /**
      * `Spec__m$erased`: the origin's erased signature, a monomorphic call to the
      * spec's raw `m`, and the result returned through the erased return type.
      * `$this` keeps the SPEC's type so the inner call resolves directly (no
      * dispatch switch, no recursion back into this thunk).
      */
-    private function erasedThunkFor(string $spec, string $method, FunctionDef $base): FunctionDef
+    private function erasedThunkFor(string $spec, string $method, FunctionDef $base, FunctionDef $spun): FunctionDef
     {
         $params = [];
         $args = [];
         $i = 0;
         foreach ($base->params as $p) {
             $t = $i === 0 ? Type::obj($spec) : $p->type;
-            $params[] = new \Compile\Mir\Param($p->name, $t, $p->byRef, $p->variadic);
+            // The defaults too: an erased caller pads an omitted arg from the arm it
+            // calls, and a thunk without them left that register undefined.
+            $d = $p->default === null ? null : \Compile\Mir\NodeClone::node($p->default);
+            $params[] = new \Compile\Mir\Param($p->name, $t, $p->byRef, $p->variadic, $d);
             if ($i > 0) { $args[] = new \Compile\Mir\LoadLocal($p->name, $t); }
             $i = $i + 1;
         }
         $recv = new \Compile\Mir\LoadLocal('this', Type::obj($spec));
         $call = new \Compile\Mir\MethodCall_($recv, $method, $args, $base->returnType);
         $stmts = [];
+        // A value the binding only CLAIMED (`@param K` over `mixed $key`) is
+        // checked, not converted: one that does not fit runs the origin's
+        // erased body, as on an unbound receiver.
+        foreach ($spun->claimParams as $ci => $ct) {
+            $p = $base->params[$ci];
+            $ok = $this->claimCheck(new \Compile\Mir\LoadLocal($p->name, $p->type), $ct);
+            $oargs = [];
+            foreach ($params as $q) { $oargs[] = new \Compile\Mir\LoadLocal($q->name, $q->type); }
+            $ocall = new \Compile\Mir\Call($spun->claimOrigin, $oargs, $base->returnType);
+            $arm = $base->returnType->kind === Type::KIND_VOID
+                ? [$ocall, new \Compile\Mir\Return_(null, Type::void())]
+                : [new \Compile\Mir\Return_($ocall, Type::void())];
+            $stmts[] = new \Compile\Mir\If_(new \Compile\Mir\Not_($ok), new \Compile\Mir\Block($arm, Type::void()), null);
+        }
         if ($base->returnType->kind === Type::KIND_VOID) {
             $stmts[] = $call;
             $stmts[] = new \Compile\Mir\Return_(null, Type::void());

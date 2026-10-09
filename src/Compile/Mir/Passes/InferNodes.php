@@ -1766,11 +1766,28 @@ trait InferNodes
      * every concrete-element arm into a real cell buffer
      * ({@see EmitLlvmControl::armCoerce}), so the claim is the runtime truth.
      * Null when the arms agree, either element is unknown (no evidence), or the
-     * keys differ (the key join is its own rule).
+     * keyed-ness differs (the key join is its own rule).
+     *
+     * Two KEYED arms on different key channels (`assoc[string, cell]` vs the
+     * cell-keyed array a loop over `foreach ($m as $k => …)` builds) join their
+     * keys to a CELL ({@see Type::joinKey}): taking the then-arm claimed string
+     * keys over a buffer that may hold int ones, and left the arms two different
+     * shapes, so the conditional stayed a borrow and its stored value dangled.
      */
     private function armArrayJoin(Type $a, Type $b): ?Type
     {
         if (!$a->isArray() || !$b->isArray()) { return null; }
+        $ak = $a->key;
+        $bk = $b->key;
+        if ($ak !== null && $bk !== null && $ak->kind !== $bk->kind
+            && !$a->isShape() && !$b->isShape()) {
+            $ae = $a->element;
+            $be = $b->element;
+            $el = $ae === null || $ae->kind === Type::KIND_UNKNOWN ? $be
+                : ($be === null || $be->kind === Type::KIND_UNKNOWN ? $ae
+                : ($ae->kind === $be->kind && ($ae->class ?? '') === ($be->class ?? '') ? $ae : Type::cell()));
+            return Type::assoc(Type::joinKey($ak, $bk), $el ?? Type::unknown());
+        }
         if ($a->isAssoc() !== $b->isAssoc()) { return null; }
         $ae = $a->element;
         $be = $b->element;
@@ -2018,8 +2035,13 @@ trait InferNodes
         // key implied an erased element. The moment the element narrowed to a
         // concrete int, the key silently took the vec path and every string key
         // came back as its pointer read as an integer (`4364574184=10`).
+        // A STRING-keyed array holds int keys too: php canonicalises a numeric
+        // string key to an int at the store (`$m["11"]` is `$m[11]`), so a key
+        // READ back is int|string — a tagged cell, whatever the static key type
+        // says. Typed string, the loop rendered every int key into a minted,
+        // unowned string (`is_string($k)` folded true, and the strings leaked).
         if ($at->isArray() && $at->key !== null
-            && $at->key->kind === Type::KIND_CELL) {
+            && ($at->key->kind === Type::KIND_CELL || $at->key->kind === Type::KIND_STRING)) {
             $keyT = Type::cell();
         }
         // `foreach ($a as &$v)` over CELL elements: the loop writes `$v`'s slot

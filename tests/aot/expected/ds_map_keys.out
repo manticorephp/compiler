@@ -1,0 +1,15 @@
+4
+int(1)
+int
+string(1) "1"
+str
+string(0) ""
+empty
+string(2) "01"
+zero-one
+Cannot use a key of type float in Map
+Cannot use a key of type bool in Map
+Cannot append to a Map; use set()
+Cannot use a key of type array in Map
+Cannot use a key of type float in Map
+min max

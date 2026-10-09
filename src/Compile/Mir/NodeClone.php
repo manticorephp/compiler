@@ -66,7 +66,7 @@ final class NodeClone
         $k = $n->kind;
 
         // ── Leaves (copy payload, no children) ────────────────────
-        if ($k === Node::KIND_INT_CONST)    { $x = self::asInt($n);    return new IntConst($x->value, $n->type); }
+        if ($k === Node::KIND_INT_CONST)    { $x = self::asInt($n);    return new IntConst($x->value, $n->type, $x->fromStr); }
         if ($k === Node::KIND_FLOAT_CONST)  { $x = self::asFloat($n);  return new FloatConst($x->value, $n->type); }
         if ($k === Node::KIND_STRING_CONST) { $x = self::asStr($n);    return new StringConst($x->value, $n->type); }
         if ($k === Node::KIND_BOOL_CONST)   { $x = self::asBool($n);   return new BoolConst($x->value, $n->type); }
@@ -193,7 +193,7 @@ final class NodeClone
             return $d;
         }
         if ($k === Node::KIND_STORE_DYN_PROP) { $x = self::asStoreDynProp($n); return new StoreDynProp_(self::node($x->object), self::node($x->name), self::node($x->value), $n->type); }
-        if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); $c = new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); return $c; }
+        if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); $c = new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); $c->direct = $x->direct; return $c; }
         if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); $c = new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); return $c; }
         if ($k === Node::KIND_CLONE) {
             $x = self::asClone($n);

@@ -24,7 +24,7 @@ tells you what is missing), then puts everything under `$MANTICORE_HOME`
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 # then, as the script prints:
 export PATH="$HOME/.manticore/bin:$PATH"
-manticore version        # -> manticore 0.13.0
+manticore version        # -> manticore 0.14.0
 ```
 
 Re-running the installer **upgrades in place**. When it builds from source, a

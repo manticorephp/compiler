@@ -58,6 +58,9 @@ use Compile\Mir\While_;
  *     boxing. A non-concrete array (a chained fusion's outer call, a
  *     dynamically-typed source) is left as the prelude call, which is correct.
  *
+ *  3. Splice the same kind of closure into a `Manticore\Ds` Map/Set/Vec
+ *     each/map/filter/reduce/any/all/find ({@see tryFuseDsMethod}).
+ *
  * Runs AFTER {@see InferTypes} (callee / array-arg types are known) and BEFORE
  * {@see Monomorphize}; the caller re-runs InferTypes so the spliced / fused
  * expressions type from their (now concrete) operands.
@@ -77,6 +80,11 @@ final class InlineClosures implements Pass
     private array $captureCount = [];
     private ?Module $module = null;
     private int $fuseCounter = 0;
+    /** @var array<string,FunctionDef> every function by name (Ds method bodies to clone) */
+    private array $fnByName = [];
+    /** While a Ds method body is cloned: the local holding its callback. */
+    private string $dsCbVar = '';
+    private ?FunctionDef $dsCbFn = null;
 
     public function name(): string { return self::NAME; }
 
@@ -93,6 +101,7 @@ final class InlineClosures implements Pass
         foreach ($module->functions as $rawFn) {
             $fn = $this->fnDef($rawFn);
             $fns[] = $fn;
+            $this->fnByName[$fn->name] = $fn;
             if (isset($this->captureCount[$fn->name])) {
                 $this->closures[$fn->name] = $fn;
             }
@@ -124,6 +133,9 @@ final class InlineClosures implements Pass
             $args = [];
             foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
             $n->args = $args;
+            if ($this->dsCbVar !== '' && $n->callee->kind === Node::KIND_LOAD_LOCAL && $this->loadLocal($n->callee)->name === $this->dsCbVar) {
+                return $this->dsCallbackExpr($n);
+            }
             $spliced = $this->tryInline($n);
             return $spliced ?? $n;
         }
@@ -259,7 +271,7 @@ final class InlineClosures implements Pass
             $args = [];
             foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
             $n->args = $args;
-            return $n;
+            return $this->tryFuseDsMethod($n) ?? $n;
         }
         if ($n->kind === Node::KIND_STATIC_CALL) {
             $args = [];
@@ -469,6 +481,223 @@ final class InlineClosures implements Pass
         foreach (Walk::children($n) as $c) { $this->countLoads($c, $names, $counts); }
     }
 
+    // ── Ds Map/Set/Vec callback fusion ──────────────────────────────────
+    //
+    // `$ds->map(fn($v) => E)` (each/map/filter/reduce/any/all/find) becomes a
+    // call to a synthesized function whose body is the facade method's OWN
+    // body with its `$f(...)` replaced by E, the closure's params bound to that
+    // call's arguments. The loop stays the native Ds foreach (epoch check,
+    // unwind drops) and the callback costs no call. Only a closure whose splice
+    // means exactly what the call means qualifies: untyped params (no
+    // coercion), a return type that is the body's own (no coercion), and no
+    // write or by-ref pass that could reach the method's locals.
+
+    /** Builtins that read their arguments by value only (no out-param). */
+    private const BYVAL_BUILTINS = [
+        'strlen', 'mb_strlen', 'count', 'sizeof', 'ord', 'chr', 'trim', 'ltrim', 'rtrim',
+        'strtolower', 'strtoupper', 'ucfirst', 'lcfirst', 'ucwords', 'strrev', 'md5', 'sha1', 'crc32',
+        'intval', 'floatval', 'boolval', 'strval', 'is_string', 'is_int', 'is_float', 'is_bool',
+        'is_array', 'is_object', 'is_null', 'is_numeric', 'is_scalar', 'is_iterable',
+        'strpos', 'stripos', 'strrpos', 'str_contains', 'str_starts_with', 'str_ends_with',
+        'substr_count', 'substr', 'mb_substr', 'str_repeat', 'str_pad', 'explode', 'implode', 'join',
+        'number_format', 'dechex', 'hexdec', 'abs', 'floor', 'ceil', 'round', 'sqrt', 'intdiv',
+        'max', 'min', 'sprintf', 'printf', 'strcmp', 'in_array', 'array_key_exists', 'array_sum',
+        'array_keys', 'array_values', 'var_export', 'json_encode', 'gettype', 'get_debug_type',
+    ];
+
+    /** Builtins that see the calling scope's locals by name. */
+    private const SCOPE_READERS = ['compact', 'extract', 'get_defined_vars', 'func_get_args', 'func_get_arg', 'func_num_args'];
+
+    private function tryFuseDsMethod(MethodCall_ $mc): ?Node
+    {
+        $m = $mc->method;
+        if ($m !== 'each' && $m !== 'map' && $m !== 'filter' && $m !== 'reduce'
+            && $m !== 'any' && $m !== 'all' && $m !== 'find') { return null; }
+        $rt = $mc->object->type;
+        if ($rt->kind !== Type::KIND_OBJ || $mc->args === []) { return null; }
+        $cls = \ltrim((string)($rt->class ?? ''), '\\');
+        $p = \strpos($cls, '__of__');
+        $base = $p === false ? $cls : \substr($cls, 0, $p);
+        if ($base !== 'Manticore\\Ds\\Map' && $base !== 'Manticore\\Ds\\Set' && $base !== 'Manticore\\Ds\\Vec') { return null; }
+        $method = $this->fnByName[$cls . '__' . $m] ?? $this->fnByName[$base . '__' . $m] ?? null;
+        if ($method === null || \count($method->params) !== \count($mc->args) + 1) { return null; }
+        if ($this->param($method->params[0])->name !== 'this') { return null; }
+        $clos = $this->dsClosure($this->node($mc->args[0]));
+        if ($clos === null) { return null; }
+        $cbVar = $this->param($method->params[1])->name;
+        $body = $this->block(NodeClone::nodeSubst($method->body, ['this' => new LoadLocal('__mc_this', $rt)]));
+        $savedVar = $this->dsCbVar;
+        $savedClos = $this->dsCbFn;
+        $this->dsCbVar = $cbVar;
+        $this->dsCbFn = $clos;
+        $body = $this->rewriteBlock($body);
+        $this->dsCbVar = $savedVar;
+        $this->dsCbFn = $savedClos;
+        // A call the splice refused (arity, a non-trivial argument) leaves the
+        // callback local behind: keep the method call.
+        if ($this->mentionsLocal($body, $cbVar)) { return null; }
+        $params = [new Param('__mc_this', $rt, false, false)];
+        $args = [$mc->object];
+        for ($i = 2; $i < \count($method->params); $i++) {
+            $mp = $this->param($method->params[$i]);
+            if ($mp->byRef || $mp->variadic) { return null; }
+            $a = $this->node($mc->args[$i - 1]);
+            // `reduce(…, 0)`: a scalar seed keeps the accumulator an unboxed
+            // scalar (no drop/retain per element). The function is this call
+            // site's own, so its argument's type is exact; `mixed` coerces nothing.
+            $pt = $mp->type;
+            $ak = $a->type->kind;
+            if ($pt->kind === Type::KIND_CELL && ($ak === Type::KIND_INT || $ak === Type::KIND_FLOAT || $ak === Type::KIND_BOOL)) { $pt = $a->type; }
+            $params[] = new Param($mp->name, $pt, false, false);
+            $args[] = $a;
+        }
+        $call = $this->emitFusedFn('ds' . $m, $params, $method->returnType, $body, $args);
+        $this->call($call)->voidCast = $mc->voidCast;
+        return $call;
+    }
+
+    /** The captureless closure behind a literal callback whose body splices without changing meaning, or null. */
+    private function dsClosure(Node $arg): ?FunctionDef
+    {
+        $fn = $this->eligibleClosure($arg, -1);
+        if ($fn === null || $fn->usesFuncArgs) { return null; }
+        $names = [];
+        foreach ($fn->params as $rawP) {
+            $p = $this->param($rawP);
+            if ($p->type->kind !== Type::KIND_CELL || $p->default !== null) { return null; }
+            $names[$p->name] = true;
+        }
+        $expr = $this->retExpr($fn);
+        $r = $fn->returnType;
+        if ($r->kind !== Type::KIND_CELL
+            && ($r->kind !== $expr->type->kind || ($r->class ?? '') !== ($expr->type->class ?? ''))) { return null; }
+        if ($this->containsClosure($expr) || !$this->dsSafeExpr($expr, $names)) { return null; }
+        return $fn;
+    }
+
+    /**
+     * Reads only its params, and never writes one or hands one to something
+     * that may take it by reference — spliced into the method body, a param is
+     * the method's own local, not the closure's copy.
+     *
+     * @param array<string,bool> $params
+     */
+    private function dsSafeExpr(Node $n, array $params): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL) { return isset($params[$this->loadLocal($n)->name]); }
+        if ($k === Node::KIND_STORE_LOCAL || $k === Node::KIND_INCDEC || $k === Node::KIND_STORE_ELEMENT
+            || $k === Node::KIND_UNSET || $k === Node::KIND_YIELD || $k === Node::KIND_REF_ALIAS
+            || $k === Node::KIND_REF_BIND || $k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_CELL) {
+            return false;
+        }
+        if ($k === Node::KIND_CALL) {
+            $c = $this->call($n);
+            $fname = \strtolower(\ltrim($c->function, '\\'));
+            // Reads the caller's locals by name: in the method body those are the method's.
+            if (\in_array($fname, self::SCOPE_READERS, true)) { return false; }
+            // A local handed straight to a callee is safe only when that callee
+            // is known to take it by value: a module function without a by-ref
+            // param, or a builtin on the by-value list. Unknown (a stdlib out-param) refuses.
+            $byValue = \in_array($fname, self::BYVAL_BUILTINS, true);
+            if (!$byValue) {
+                $callee = $this->fnByName[\ltrim($c->function, '\\')] ?? null;
+                if ($callee !== null) {
+                    $byValue = true;
+                    foreach ($callee->params as $rawP) {
+                        if ($this->param($rawP)->byRef) { $byValue = false; }
+                    }
+                }
+            }
+            foreach ($c->args as $a) {
+                if ($a->kind === Node::KIND_SPREAD) { return false; }
+                if (!$byValue && $a->kind === Node::KIND_LOAD_LOCAL) { return false; }
+            }
+        } elseif ($k === Node::KIND_NEW_OBJ && $this->ctorTakesNoRef($this->newObj($n)->class)) {
+            // `new E($v)`: a known constructor without a by-ref param.
+        } elseif ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ) {
+            // The callee is not known here, and any of them may take an argument by reference.
+            foreach ($this->callArgs($n) as $a) {
+                if ($a->kind === Node::KIND_LOAD_LOCAL) { return false; }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            if (!$this->dsSafeExpr($c, $params)) { return false; }
+        }
+        return true;
+    }
+
+    /** `$f(...)` inside a cloned Ds method body → the callback's body over the call's arguments, or the call itself. */
+    private function dsCallbackExpr(Invoke_ $iv): Node
+    {
+        $fn = $this->dsCbFn;
+        if ($fn === null || \count($fn->params) > \count($iv->args)) { return $iv; }
+        $subst = [];
+        $i = 0;
+        // Every argument is a local load, so an extra one (`$f($v, $k)` to a
+        // one-param closure) is evaluated and dropped by php with no effect.
+        foreach ($iv->args as $a) {
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { return $iv; }
+        }
+        foreach ($fn->params as $rawP) {
+            $subst[$this->param($rawP)->name] = $this->node($iv->args[$i]);
+            $i++;
+        }
+        return NodeClone::nodeSubst($this->retExpr($fn), $subst);
+    }
+
+    /** Whether local `$name` is read anywhere in `$n`. */
+    private function mentionsLocal(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_LOAD_LOCAL && $this->loadLocal($n)->name === $name) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if ($this->mentionsLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
+    /** Whether `new $cls(...)` runs a constructor body this module has, none of whose params is by reference (or no constructor at all). */
+    private function ctorTakesNoRef(string $cls): bool
+    {
+        $c = \ltrim($cls, '\\');
+        while ($c !== '') {
+            $cd = $this->module->classes[$c] ?? null;
+            if ($cd === null) { return false; }
+            if (isset($cd->methodNames['__construct'])) {
+                $ctor = $this->fnByName[$c . '____construct'] ?? null;
+                if ($ctor === null) { return false; }
+                foreach ($ctor->params as $rawP) {
+                    if ($this->param($rawP)->byRef) { return false; }
+                }
+                return true;
+            }
+            $c = $cd->parent;
+        }
+        return true;
+    }
+
+    /** @return Node[] */
+    private function callArgs(Node $n): array
+    {
+        if ($n->kind === Node::KIND_METHOD_CALL) { return $n->args; }
+        if ($n->kind === Node::KIND_STATIC_CALL) { return $n->args; }
+        if ($n->kind === Node::KIND_INVOKE) { return $n->args; }
+        if ($n->kind === Node::KIND_NEW_OBJ) { return $n->args; }
+        if ($n->kind === Node::KIND_NEW_DYN_OBJ) { return $n->args; }
+        return [];
+    }
+
+    /** The single `return <expr>` of an {@see eligibleClosure} body. */
+    private function retExpr(FunctionDef $fn): Node
+    {
+        $ret = $this->node($fn->body->stmts[0]);
+        if ($ret->kind !== Node::KIND_RETURN || $ret->value === null) {
+            throw new \RuntimeException('retExpr: non-return body');
+        }
+        return $ret->value;
+    }
+
     // ── array_map / array_filter / array_reduce fusion ──────────────────
     //
     // Fuse one of these calls whose callback is a captureless single-expr
@@ -647,7 +876,7 @@ final class InlineClosures implements Pass
         if (($this->captureCount[$cls] ?? -1) !== 0) { return null; }
         $fn = $this->fnDef($this->closures[$cls]);
         if ($fn->isGenerator) { return null; }
-        if (\count($fn->params) !== $arity) { return null; }
+        if ($arity >= 0 && \count($fn->params) !== $arity) { return null; }
         foreach ($fn->params as $rawP) {
             $p = $this->param($rawP);
             if ($p->byRef || $p->variadic) { return null; }
@@ -711,4 +940,8 @@ final class InlineClosures implements Pass
     private function fnDef(FunctionDef $f): FunctionDef { return $f; }
     private function param(\Compile\Mir\Param $p): \Compile\Mir\Param { return $p; }
     private function node(Node $n): Node { return $n; }
+    private function block(Node $n): Block { return $n; }
+    private function call(Node $n): Call { return $n; }
+    private function loadLocal(Node $n): LoadLocal { return $n; }
+    private function newObj(Node $n): NewObj { return $n; }
 }

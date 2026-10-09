@@ -1,0 +1,38 @@
+typed count=6 keys=[1,"01","-0",-5," 1","9223372036854775808"] {"1":"b","01":"c","-0":"d","-5":"e"," 1":"f","9223372036854775808":"g"}
+bool(true)
+bool(true)
+string(1) "e"
+string(1) "e"
+typed-unset count=5 keys=["01","-0",-5," 1","9223372036854775808"] {"01":"c","-0":"d","-5":"e"," 1":"f","9223372036854775808":"g"}
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(1) "b"
+string(1) "e"
+string(1) "e"
+bool(false)
+int(5)
+erased count=5 keys=[1,"01","-0"," 1","9223372036854775808"] {"1":"b","01":"c","-0":"d"," 1":"f","9223372036854775808":"g"}
+subclass count=2 keys=[1,2] {"1":"b","2":"x"}
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(1) "b"
+string(1) "e"
+string(1) "e"
+bool(false)
+int(5)
+erased-subclass count=5 keys=[1,"01","-0"," 1","9223372036854775808"] {"1":"b","01":"c","-0":"d"," 1":"f","9223372036854775808":"g"}
+int(2)
+array(2) {
+  [2]=>
+  string(1) "y"
+  ["01"]=>
+  string(1) "z"
+}
+int(0)
+int(0)

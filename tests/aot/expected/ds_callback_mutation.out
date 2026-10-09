@@ -1,0 +1,9 @@
+each fused: Map modified during iteration
+5
+each var: Map modified during iteration
+5
+filter fused: Map modified during iteration
+filter var: Map modified during iteration
+reduce fused: Map modified during iteration
+set each fused: Set modified during iteration
+set each var: Set modified during iteration

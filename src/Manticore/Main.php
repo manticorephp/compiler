@@ -4173,7 +4173,7 @@ function cmd_dump_llvm(array $args): int
 
 function cmd_version(array $args): int
 {
-    puts("manticore 0.13.0");
+    puts("manticore 0.14.0");
     return 0;
 }
 
@@ -4975,7 +4975,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // serves plain HTTP never carries the frame codec. Parsed after Http\,
     // whose header helpers and takeover hook it calls.
     $wsSrc = prelude_src_or_empty("websocket.php");
+    // Ds\Map / Set live in ds_map.php, appended to the same unit (both are braced namespaces).
     $dsSrc = prelude_src_or_empty("ds.php");
+    $dsMapSrc = prelude_src_or_empty("ds_map.php");
+    if ($dsSrc !== "" && $dsMapSrc !== "") {
+        $dsSrc .= "\n" . $dsMapSrc;
+    }
     // serialize / unserialize — DEMAND-GATED, and gated SEPARATELY (two files):
     // each one generates a per-class arm set from the class table, so a program
     // that only serializes must not pay for unserialize's rebuild arms.
@@ -6302,6 +6307,7 @@ function analyze_prelude_files(): array
         "http.php",
         "websocket.php",
         "ds.php",
+        "ds_map.php",
         "weak.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the

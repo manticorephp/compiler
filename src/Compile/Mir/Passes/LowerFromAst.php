@@ -5892,7 +5892,7 @@ final class LowerFromAst implements Pass
         if (!($k instanceof StringConst)) { return $k; }
         $s = $k->value;
         if ($s === '' || (string)(int)$s !== $s) { return $k; }
-        return new IntConst((int)$s, Type::int_());
+        return new IntConst((int)$s, Type::int_(), true);
     }
 
     private function lowerArrayLit(\Parser\Ast\ArrayLit $expr): ArrayLit

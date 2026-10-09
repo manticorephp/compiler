@@ -908,6 +908,28 @@ trait EmitLlvmMemory
             $this->rt->needsStrRc = true;
             return '  call void @__mir_cell_drop(i64 ' . $i64reg . ")\n";
         }
+        // `sole:<outer reg>:<flavor>` — an element of a literal argument, given
+        // back only while the literal's buffer is the LAST reference to itself
+        // ({@see takeLitElemDrops}); a callee that kept the buffer owns it.
+        if (\str_starts_with($flavor, 'sole:')) {
+            $parts = \explode(':', $flavor, 3);
+            $op = $this->ssa->allocReg();
+            $ra = $this->ssa->allocReg();
+            $rc = $this->ssa->allocReg();
+            $le = $this->ssa->allocReg();
+            $doL = $this->ssa->allocLabel('litel.drop');
+            $endL = $this->ssa->allocLabel('litel.end');
+            $out  = '  ' . $op . ' = inttoptr i64 ' . $parts[1] . " to ptr\n";
+            $out .= '  ' . $ra . ' = getelementptr inbounds i8, ptr ' . $op . ', i64 ' . \Compile\MemoryAbi::ARRAY_RC_OFFSET . "\n";
+            $out .= '  ' . $rc . ' = load i64, ptr ' . $ra . "\n";
+            $out .= '  ' . $le . ' = icmp sle i64 ' . $rc . ", 1\n";
+            $out .= '  br i1 ' . $le . ', label %' . $doL . ', label %' . $endL . "\n";
+            $out .= $doL . ":\n";
+            $out .= $this->rcReleaseReg($i64reg, $parts[2]);
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $endL . ":\n";
+            return $out;
+        }
         if (\str_starts_with($flavor, 'mix')) {
             return $this->mixedReleaseIr($i64reg, \substr($flavor, 3), '');
         }

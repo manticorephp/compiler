@@ -450,7 +450,15 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
         if (\strncmp($name, '__mc_nbuf_', 10) === 0) {
             $nbufSig = \Compile\Mir\RuntimeLibrary::nbufSig(\substr($name, 10));
-            if (\strlen($nbufSig) === \count($args) + 1) { return $this->biNbuf(\substr($name, 10), $nbufSig, $args); }
+            if (\strlen($nbufSig) === \count($args) + 1) { return $this->biNbuf('nbuf', \substr($name, 10), $nbufSig, $args); }
+        }
+        if (\strncmp($name, '__mc_hmap_', 10) === 0) {
+            $hmapSig = \Compile\Mir\RuntimeLibrary::hmapSig(\substr($name, 10));
+            if (\strlen($hmapSig) === \count($args) + 1) {
+                $fast = $this->emitHmapBuiltin(\substr($name, 10), $args);
+                if ($fast !== null) { return $fast; }
+                return $this->biNbuf('hmap', \substr($name, 10), $hmapSig, $args);
+            }
         }
         if ($name === '__mc_obj_from_addr' && \count($args) === 1) { return $this->biObjFromAddr($args); }
         if ($name === 'array_key_first' && \count($args) === 1) { return $this->biArrayEndpoint($args, false, true); }
@@ -916,7 +924,16 @@ trait EmitLlvmBuiltins
      */
     private function cellBoxTempDrop(Type $t, string $cellReg, ?Node $src = null): string
     {
-        if ($t->kind === Type::KIND_CELL) { return ''; }
+        if ($t->kind === Type::KIND_CELL) {
+            // An already-a-cell argument is a borrow of the caller's value —
+            // unless it is a FRESH +1 (a call returning `mixed`, a normalized
+            // conditional…): nobody owns that but this site, and the callee only
+            // co-owns what it keeps. `__mir_cell_drop` is tag-dispatched.
+            if ($src === null || $this->freshRcArgFlavor($src) !== 'cell') { return ''; }
+            $this->rt->needsRc = true;
+            $this->rt->needsStrRc = true;
+            return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
+        }
         // An INT box is the call site's own: inline it owns nothing, past the
         // 48-bit form it is a counted heap block ({@see
         // \Compile\MemoryAbi::CELL_TAG_BIGINT}) the callee co-owns if it keeps it.
@@ -1806,19 +1823,32 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             $cellTemp = $this->lastValue;
         }
-        if ($arg->type->kind === Type::KIND_CELL) {
-            $out .= $this->cellToPtr();
-        } elseif ($arg->type->kind === Type::KIND_UNKNOWN) {
-            // An ERASED arg may carry a boxed cell, and `inttoptr` of the tagged
-            // word is what a string builtin then walked: `strlen($name)` /
-            // `sprintf('%s', $name)` over an element of an erased array faulted
-            // in libc strlen. Route it through the string unbox, which strips a
-            // pointer-shaped payload and RENDERS a scalar tag — the same
-            // treatment the call-arg boundary gives an erased arg bound to a
-            // string param ({@see EmitLlvmExpr::unboxCellArg}). It is the
-            // identity on a value that was already a raw string pointer.
-            $out .= $this->unboxCellToType(Type::string_());
-            $out .= $this->coerceToPtr();
+        if ($arg->type->kind === Type::KIND_CELL || $arg->type->kind === Type::KIND_UNKNOWN) {
+            // A cell (or an ERASED arg carrying one) is unboxed the way the
+            // call-arg boundary unboxes a cell bound to a string param
+            // ({@see EmitLlvmExpr::unboxCellArg}): a pointer-shaped payload is
+            // stripped, an INT / BOOL tag is RENDERED as php's coercion does.
+            // The plain strip handed the int itself to the builtin as a string
+            // pointer: `strlen($k)` over a generator's auto key SIGSEGVd (#102).
+            // A rendered string is fresh and is given back after the builtin.
+            $out .= $this->coerceToI64();
+            $cw = $this->lastValue;
+            $this->rt->needsCellToStrPtr = true;
+            $this->rt->needsTaggedToStr = true;
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $cw . ")\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $rn = $this->ssa->allocReg();
+            $out .= '  ' . $rn . ' = icmp ne ptr ' . $sp . ', ' . $pp . "\n";
+            $own = $this->ssa->allocReg();
+            $out .= '  ' . $own . ' = select i1 ' . $rn . ', ptr ' . $sp . ", ptr null\n";
+            $this->arrArgTempRegs[] = $own;
+            $this->arrArgTempFlavors[] = 'str';
+            $this->lastValue = $sp;
+            $this->lastValueType = 'ptr';
         } elseif ($arg->type->kind === Type::KIND_INT || $arg->type->kind === Type::KIND_FLOAT
             || $arg->type->kind === Type::KIND_BOOL) {
             // A scalar where a string is expected is RENDERED, as php does in
@@ -2927,9 +2957,9 @@ trait EmitLlvmBuiltins
      * the runtime when it is kept; a cell result is the caller's +1.
      * @param Node[] $args
      */
-    private function biNbuf(string $op, string $sig, array $args): string
+    private function biNbuf(string $prefix, string $op, string $sig, array $args): string
     {
-        $this->rt->needsBuf = true;
+        if ($prefix === 'hmap') { $this->rt->needsHmap = true; } else { $this->rt->needsBuf = true; }
         $this->rt->needsTagged = true;
         $this->rt->needsRc = true;
         $this->rt->needsStrRc = true;
@@ -2956,7 +2986,7 @@ trait EmitLlvmBuiltins
             }
         }
         $ret = $sig[$n];
-        $call = 'call ' . ($ret === 'v' ? 'void' : ($ret === 'f' ? 'double' : 'i64')) . ' @__mir_nbuf_' . $op . '(' . $list . ")\n";
+        $call = 'call ' . ($ret === 'v' ? 'void' : ($ret === 'f' ? 'double' : 'i64')) . ' @__mir_' . $prefix . '_' . $op . '(' . $list . ")\n";
         if ($ret === 'v') {
             $this->lastValue = '0';
             $this->lastValueType = 'i64';
@@ -8737,6 +8767,56 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToPtr();
             $s = $this->lastValue;
             return $out . $this->quoteOrNull($s);
+        }
+        if ($k === Type::KIND_CELL && $this->isArrayKeyLocal($args[0])) {
+            // A local only ever bound as an ARRAY foreach key holds int, string or
+            // (before its first binding) null: three tags cover it — an int renders
+            // bare, a string quotes. The walker below would also do, but it
+            // reaches the per-class object exporter, which a program that never
+            // exports an object then compiles for every class it declares.
+            $this->rt->needsTaggedToStr = true;
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            $v = $this->lastValue;
+            $nib = $this->ssa->allocReg();
+            $out .= '  ' . $nib . ' = lshr i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n";
+            $tg = $this->ssa->allocReg();
+            $out .= '  ' . $tg . ' = and i64 ' . $nib . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n";
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $tg . ", 4\n";
+            $lInt = $this->ssa->allocLabel('ke.int');
+            $lStr = $this->ssa->allocLabel('ke.str');
+            $lEnd = $this->ssa->allocLabel('ke.end');
+            $out .= '  br i1 ' . $isStr . ', label %' . $lStr . ', label %' . $lInt . "\n";
+            $out .= $lInt . ":\n";
+            $ir = $this->ssa->allocReg();
+            $out .= '  ' . $ir . ' = call ptr @__manticore_tagged_to_str(i64 ' . $v . ")\n";
+            $isNull = $this->ssa->allocReg();
+            $isNt = $this->ssa->allocReg();
+            $out .= '  ' . $isNt . ' = icmp eq i64 ' . $tg . ", 3\n";
+            $isZ = $this->ssa->allocReg();
+            $out .= '  ' . $isZ . ' = icmp eq i64 ' . $v . ", 0\n";
+            $out .= '  ' . $isNull . ' = or i1 ' . $isNt . ', ' . $isZ . "\n";
+            $ip = $this->ssa->allocReg();
+            $out .= '  ' . $ip . ' = select i1 ' . $isNull . ', ptr ' . $this->litStr('NULL') . ', ptr ' . $ir . "\n";
+            $out .= '  br label %' . $lEnd . "\n";
+            $out .= $lStr . ":\n";
+            $pm = $this->ssa->allocReg();
+            $out .= '  ' . $pm . ' = and i64 ' . $v . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+            $out .= $this->quoteOrNull($pp);
+            $q = $this->lastValue;
+            $lQ = $this->ssa->allocLabel('ke.q');
+            $out .= '  br label %' . $lQ . "\n" . $lQ . ":\n";
+            $out .= '  br label %' . $lEnd . "\n";
+            $out .= $lEnd . ":\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = phi ptr [ ' . $ip . ', %' . $lInt . ' ], [ ' . $q . ', %' . $lQ . " ]\n";
+            $out .= $this->cellBoxTempDrop($args[0]->type, $v, $args[0]);
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
         }
         // Arrays, objects, `mixed` and unions: the type is only known from the
         // NaN tag at runtime, so hand off to the recursive walker rather than

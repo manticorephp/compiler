@@ -1271,7 +1271,9 @@ final class OwnershipFlow implements Pass
         if ($key !== null && !isset($this->excluded[$key])) {
             $at = $fe->array->type;
             $kt = $at->isArray() ? ($at->key ?? Type::cell()) : Type::cell();
-            if ($kt->kind === Type::KIND_UNKNOWN) { $kt = Type::cell(); }
+            // A string-keyed array hands its keys out as cells too (an int key
+            // is a canonicalised numeric string, {@see InferNodes::inferForeach}).
+            if ($kt->kind === Type::KIND_UNKNOWN || $kt->kind === Type::KIND_STRING) { $kt = Type::cell(); }
             // A generator's frame owns its key and drops it at the next yield:
             // the loop's key var takes a +1 of its own, as its value var does.
             // So does one bound from an iterator step that answers a cell (a

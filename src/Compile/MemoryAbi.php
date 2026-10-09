@@ -43,8 +43,19 @@ final class MemoryAbi
      * v19: the class descriptor grows `visit_fn@64` ({@see
      * DESCRIPTOR_VISIT_FN_OFFSET}); a v18 descriptor is 8 bytes short and the
      * json encoder would read past it.
+     *
+     * v20: Manticore\Ds hash table block (`HMAP_*`, `__mir_hmap_*`); the
+     * cell object-tag constants (`CELL_TAG_OBJ` / `CELL_TAG_SHIFT` /
+     * `CELL_TAG_MASK`, `CELL_OBJ_MIN_PAYLOAD`) the cycle-collector walkers read;
+     * and the linkonce `__mir_array_set_str` / `isset_str` / `pos_str` /
+     * `ref_slot_str` canonicalise a numeric-string key to its int key at run
+     * time (#86) — a v19 body of the same name stores "11" as a string key,
+     * so a v19 object must not coalesce with them.
+     * The hash index also uses `HMAP_SLOT_DEAD` (u32 0xFFFFFFFE): a delete
+     * leaves a dead slot instead of back-shifting; lookups skip it, an insert
+     * reuses it after a miss.
      */
-    public const VERSION = 19;
+    public const VERSION = 20;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -227,6 +238,12 @@ final class MemoryAbi
      * EmitLlvmExpr::cellTagIr}. 9 is the first free one.
      */
     public const CELL_TAG_REF = 9;
+    public const CELL_TAG_OBJ = 8;
+    /** A cell's tag nibble is `(word >> CELL_TAG_SHIFT) & CELL_TAG_MASK`. */
+    public const CELL_TAG_SHIFT = 48;
+    public const CELL_TAG_MASK = 15;
+    /** An object payload at or below this is a boxed enum ordinal, not a heap object. */
+    public const CELL_OBJ_MIN_PAYLOAD = 65535;
 
     /**
      * BIGINT (tag 5): an int past the signed-48 inline form lives in a heap box
@@ -1043,6 +1060,28 @@ final class MemoryAbi
     public const BUF_KIND_CELL = 11;
     /** Raw 64 bits read as an unsigned value (`UInt64Array`); stored like I64. */
     public const BUF_KIND_U64 = 12;
+
+    // Manticore\Ds hash table (Map / Set). A header block owns two arrays:
+    // entries (insertion order) and index (u32 slots, open addressing).
+    public const HMAP_LEN_OFFSET     = 0;   // live entries
+    public const HMAP_USED_OFFSET    = 8;   // entries written, tombstones included
+    public const HMAP_CAP_OFFSET     = 16;  // entry capacity
+    public const HMAP_MASK_OFFSET    = 24;  // index slots - 1 (power of two minus one)
+    public const HMAP_FLAGS_OFFSET   = 32;  // bit 0: set (no value column)
+    public const HMAP_EPOCH_OFFSET   = 40;  // bumped by compaction and clear
+    public const HMAP_ENTRIES_OFFSET = 48;  // ptr
+    public const HMAP_INDEX_OFFSET   = 56;  // ptr
+    public const HMAP_HEADER_SIZE    = 64;
+    public const HMAP_FLAG_SET       = 1;
+    public const HMAP_ENTRY_HASH     = 0;   // i64; HMAP_TOMB_HASH marks a tombstone
+    public const HMAP_ENTRY_KEY      = 8;   // tagged cell
+    public const HMAP_ENTRY_VAL      = 16;  // tagged cell (absent for a set)
+    public const HMAP_ENTRY_SIZE_MAP = 24;
+    public const HMAP_ENTRY_SIZE_SET = 16;
+    public const HMAP_TOMB_HASH      = -1;  // live hashes are masked to 63 bits
+    public const HMAP_SLOT_EMPTY     = -1;  // u32 0xFFFFFFFF
+    public const HMAP_SLOT_DEAD      = -2;  // u32 0xFFFFFFFE: deleted slot, probes continue past it; an insert may reuse it
+    public const HMAP_MIN_CAP        = 8;
 
     // ─── exception object (zero-cost unwinding) ───────────────────
 

@@ -127,6 +127,7 @@ final class EmitLlvm implements EmitVisitor
     use EmitLlvmModule;
     use EmitLlvmRuntime;
     use EmitLlvmBuiltins;
+    use EmitLlvmHmap;
     use EmitLlvmExceptions;
     use EmitLlvmObjects;
     use EmitLlvmFiber;
@@ -470,6 +471,8 @@ final class EmitLlvm implements EmitVisitor
     private array $rtExterns = [];
     /** @var array<string, bool> mangled module-fn name → defined (for extern detection) */
     private array $definedFns = [];
+    /** @var array<string, \Compile\Mir\FunctionDef> reified spec method name → its def, each with claimed params ({@see ResolveOverloads::claimRoute}) */
+    private array $claimedFns = [];
     /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
     private array $ffiFnNames = [];
     /** The call being argued is a direct call to a PHP (non-FFI) function
@@ -780,6 +783,7 @@ final class EmitLlvm implements EmitVisitor
             // emitted once, here, before any body is.
             if ($fn->usesFuncArgs) { $this->rt->needsFuncArgs = true; }
             $this->definedFns[$this->mangle($fn->name)] = true;
+            if ($fn->claimParams !== []) { $this->claimedFns[$fn->name] = $fn; }
             if ($fn->ffiSymbol !== null) { $this->ffiFnNames[$fn->name] = true; }
             if ($fn->name === '__main') { $this->moduleHasMain = true; }
             // The demand-gated fiber prelude is present iff the program uses

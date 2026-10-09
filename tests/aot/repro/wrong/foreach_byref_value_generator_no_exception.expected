@@ -1,0 +1,2 @@
+Exception: You can only iterate a generator by-reference if it declared that it yields by-reference
+Exception: You can only iterate a generator by-reference if it declared that it yields by-reference

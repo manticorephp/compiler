@@ -1,0 +1,28 @@
+4 ad
+d a,B,c
+Index invalid or out of range
+Cannot access offset of type string on Vec
+Cannot pop from an empty Vec
+0:a 1:B 2:c 
+["a","B","c"]
+34
+array(2) {
+  [0]=>
+  string(1) "p"
+  [1]=>
+  string(1) "q"
+}
+array(2) {
+  [0]=>
+  float(1.5)
+  [1]=>
+  NULL
+}
+object(Manticore\Ds\Vec)#1 (3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "B"
+  [2]=>
+  string(1) "c"
+}
