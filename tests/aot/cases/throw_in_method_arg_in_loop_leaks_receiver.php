@@ -1,6 +1,5 @@
 <?php
 // A throw while evaluating a method call's argument inside a loop leaks the receiver object.
-// issue: #143
 final class Bag { public array $a = []; public function set(string $k, string $v): void { $this->a[$k] = $v; } }
 function fill(int $i): int
 {

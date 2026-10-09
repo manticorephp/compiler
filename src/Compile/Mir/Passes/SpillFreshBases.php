@@ -121,6 +121,8 @@ final class SpillFreshBases
 
     private ?\Compile\Mir\Ownership $own = null;
 
+    private ?\Compile\Mir\NothrowSummary $nothrow = null;
+
     /** `MANTICORE_OWN_TRACE` set: name every held read no local can co-own. */
     private bool $trace = false;
 
@@ -154,6 +156,7 @@ final class SpillFreshBases
         $this->closureCaptures = $module->closureCaptures;
         $statT = \Compile\Stats::now();
         $this->esc = \Compile\Mir\EscapeSummaries::fromModule($module);
+        $this->nothrow = \Compile\Mir\NothrowSummary::fromModule($module);
         \Compile\Stats::step('  escape summaries', $statT, -1, -1);
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $want = \getenv('MANTICORE_OWN_TRACE');
@@ -171,6 +174,7 @@ final class SpillFreshBases
         $this->pinned = [];
         $this->keyFirst = [];
         $this->esc = null;
+        $this->nothrow = null;
         $this->own = null;
         return $module;
     }
@@ -668,6 +672,41 @@ final class SpillFreshBases
         $this->rewriteRead($n);
         $this->rewriteConsumed($n);
         $this->spillHeldReads($n);
+        $this->spillFreshArgs($n);
+    }
+
+    /**
+     * A fresh string, array or closure argument of a call that may unwind
+     * gets an owner: a temporary has no name, so no cleanup pad drops it, and
+     * the call that throws (or a later argument that does) leaked it. The
+     * hidden local is `unset` after the statement like any other spill.
+     * Objects keep their temporary — a destructor must run where php runs it.
+     */
+    private function spillFreshArgs(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k !== Node::KIND_CALL && $k !== Node::KIND_STATIC_CALL && $k !== Node::KIND_NEW_OBJ
+            && $k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_INVOKE) { return; }
+        $args = $this->callArgs($n);
+        $nothrow = $this->nothrow;
+        if ($args === [] || $nothrow === null || !$nothrow->callMayThrow($n)) { return; }
+        $byRef = [];
+        foreach ($this->refArgIndexes($n) as $ri) { $byRef[$ri] = true; }
+        $shift = ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_INVOKE) ? 1 : 0;
+        $cnt = \count($args);
+        for ($i = 0; $i < $cnt; $i = $i + 1) {
+            $a = $args[$i];
+            if (isset($byRef[$i]) || isset($this->pinned[\spl_object_id($a)])) { continue; }
+            $t = $a->type->kind;
+            $closure = $t === Type::KIND_CLOSURE || ($t === Type::KIND_OBJ && ($a->type->class ?? '') === 'Closure');
+            if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure) { continue; }
+            // A nested array's release helper exists only to the depth the runtime emits.
+            if ($t === Type::KIND_ARRAY && ($a->type->element === null || $a->type->element->kind === Type::KIND_ARRAY)) { continue; }
+            $ak = $a->kind;
+            if ($ak !== Node::KIND_ARRAY_LIT && $ak !== Node::KIND_CONCAT && $ak !== Node::KIND_CLOSURE
+                && !$this->isFreshValue($a)) { continue; }
+            $this->setOperand($n, $i + $shift, $this->spill($a));
+        }
     }
 
     private function rewriteRead(Node $n): void

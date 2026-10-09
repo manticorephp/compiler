@@ -63,16 +63,23 @@ final class CondOwn
         return [];
     }
 
-    /** Can EVERY arm be handed a +1 of the conditional's own result type? */
+    /**
+     * Can EVERY arm be handed a +1 of the conditional's own result type? A
+     * `throw` arm never reaches the join, so its type (void, or the exception)
+     * must not disqualify the value arms.
+     */
     public static function armsCoverable(Node $n): bool
     {
         $arms = self::arms($n);
         if (\count($arms) === 0) { return false; }
+        $values = 0;
         foreach ($arms as $arm) {
+            if ($arm->kind === Node::KIND_THROW) { continue; }
+            $values++;
             if (self::isEmptyArrayLit($arm)) { continue; }
             if (!self::armCoverable($arm->type, $n->type)) { return false; }
         }
-        return true;
+        return $values > 0;
     }
 
     /**
