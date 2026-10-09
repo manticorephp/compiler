@@ -1,6 +1,5 @@
 <?php
 // SIGSEGV when a static ??= cache holds an array whose elements are a @phpstan-type alias
-// issue: #159
 declare(strict_types=1);
 
 /**

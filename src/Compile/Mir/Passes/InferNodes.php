@@ -2441,7 +2441,7 @@ trait InferNodes
             if ($k !== null && $at->isShape()) {
                 $ft = $at->shapeField($k);
                 if ($ft !== null) {
-                    $node->type = $ft;
+                    $node->type = $ft->kind === Type::KIND_UNKNOWN ? Type::cell() : $ft;
                     if ($ft->kind !== Type::KIND_CELL && $ft->kind !== Type::KIND_UNKNOWN) {
                         $node->shapeCheck = $at->shapeFieldNullable($k) ? 2 : 1;
                     }
