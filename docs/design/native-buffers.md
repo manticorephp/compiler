@@ -180,4 +180,4 @@ property view. `UInt64Array` shows raw bits in `toArray` (see open items).
 - #106: a class with a `#[TypeDef]` property makes any `var_dump` a compile error.
 - #110 (PR #111): `#[TypeDef]` repr is not enforced on a narrow property slot.
 - #109: `UInt64Array` JSON / dump encode unsigned values as signed bits.
-- `src/` may now use `Manticore\Ds`: the pin (`BOOTSTRAP_VERSION` = 0.13.0) has it (#105, [stage0-bootstrap.md](stage0-bootstrap.md)).
+- `src/` may now use `Manticore\Ds`: the pin (`BOOTSTRAP_VERSION` = 0.14.0) has it (#105, [stage0-bootstrap.md](stage0-bootstrap.md)).
