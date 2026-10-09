@@ -60,20 +60,32 @@ leakprof="${LEAKPROF:-0}"
 
 if [ ! -x "$mant" ]; then echo "no $mant — run bin/build first" >&2; exit 1; fi
 
-# min wall-clock (seconds) of $reps runs of "$@", via /usr/bin/time -p.
-best_time() {
-    local best="" t
-    for _ in $(seq 1 "$reps"); do
-        t=$( { /usr/bin/time -p "$@" >/dev/null; } 2>&1 | awk '/^real/{print $2}' )
-        if [ -z "$best" ] || awk "BEGIN{exit !($t < $best)}"; then best="$t"; fi
-    done
-    echo "$best"
+# Wall-clock "now" in seconds, for hosts with no /usr/bin/time (a bare Debian
+# image). bash 5 has EPOCHREALTIME; macOS bash 3.2 and a GNU date without %N do
+# not, so perl's Time::HiRes is the fallback.
+now() {
+    if [ -n "${EPOCHREALTIME:-}" ]; then printf '%s' "${EPOCHREALTIME/,/.}"; return; fi
+    perl -MTime::HiRes=time -e 'printf "%.6f", time' 2>/dev/null && return
+    date +%s.%N 2>/dev/null
 }
 
-# max RSS in MB of one run of "$@" (macOS `time -l` reports bytes).
-max_rss_mb() {
-    { /usr/bin/time -l "$@" >/dev/null; } 2>&1 \
-        | awk '/maximum resident set size/{printf "%.1f", $1/1048576}'
+if /usr/bin/time -p true >/dev/null 2>&1; then has_time=1; else has_time=0; fi
+
+# min wall-clock (seconds) of $reps runs of "$@": /usr/bin/time -p where it
+# exists, else two clock reads around the run.
+best_time() {
+    local best="" t t0 t1
+    for _ in $(seq 1 "$reps"); do
+        if [ "$has_time" = "1" ]; then
+            t=$( { /usr/bin/time -p "$@" >/dev/null; } 2>&1 | awk '/^real/{print $2}' )
+        else
+            t0="$(now)"; "$@" >/dev/null 2>&1; t1="$(now)"
+            t="$(awk "BEGIN{printf \"%.3f\", $t1 - $t0}")"
+        fi
+        [ -z "$t" ] && continue
+        if [ -z "$best" ] || awk "BEGIN{exit !($t < $best)}"; then best="$t"; fi
+    done
+    echo "${best:--}"
 }
 
 # max RSS in BYTES of one run of "$@" — macOS `time -l` (bytes) or GNU
@@ -89,6 +101,13 @@ max_rss_bytes() {
     out=$( { /usr/bin/time -v "$@" >/dev/null; } 2>&1 )
     printf '%s\n' "$out" \
         | awk -F: '/Maximum resident set size/{gsub(/[ \t]/,"",$2); print $2*1024; exit}'
+}
+
+# max RSS in MB of one run of "$@", or "-" when the host cannot report it.
+max_rss_mb() {
+    local b
+    b="$(max_rss_bytes "$@")"
+    if [ -n "$b" ]; then awk "BEGIN{printf \"%.1f\", $b/1048576}"; else printf -- '-'; fi
 }
 
 shopt -s nullglob
@@ -213,9 +232,13 @@ for f in "$cases_dir"/*.php; do
 
     nt="$(best_time "$bin")"
     pt="$(best_time "$php_bin" "$f")"
-    sp="$(awk "BEGIN{ if ($nt>0) printf \"%.1fx\", $pt/$nt; else print \"inf\" }")"
+    if [ "$nt" = "-" ] || [ "$pt" = "-" ]; then
+        sp="-"
+    else
+        sp="$(awk "BEGIN{ if ($nt>0) printf \"%.1fx\", $pt/$nt; else print \"inf\" }")"
+        awk "BEGIN{exit !($pt > $nt)}" && faster=$((faster + 1))
+    fi
     total=$((total + 1))
-    awk "BEGIN{exit !($pt > $nt)}" && faster=$((faster + 1))
     if [ "$mem" = "1" ]; then
         rn="$(max_rss_mb "$bin")"
         rp="$(max_rss_mb "$php_bin" "$f")"
