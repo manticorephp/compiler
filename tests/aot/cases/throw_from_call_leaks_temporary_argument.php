@@ -1,6 +1,5 @@
 <?php
 // A temporary argument (array literal, closure literal) of a call that throws is never released.
-// issue: #145
 function t(array $a): bool { throw new RuntimeException('x'); }
 function run(int $i): int
 {

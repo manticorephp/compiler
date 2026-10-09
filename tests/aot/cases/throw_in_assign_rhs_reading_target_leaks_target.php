@@ -1,6 +1,5 @@
 <?php
 // A throw inside an assignment's right-hand side that also reads the target (`$c = $t ? throw … : $c . $v`) leaks the target's old value.
-// issue: #144
 function acc(array $a): string
 {
     $c = '';
