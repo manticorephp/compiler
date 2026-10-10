@@ -92,6 +92,12 @@ final class ReflectSynth
         return '__mc_consts_' . \str_replace('\\', '_', \ltrim($class, '\\'));
     }
 
+    /** The docblock / start-line factory symbol: `__mc_cdoc_<C>()` → see LowerFromAst::synthDocFactories. */
+    public static function docFn(string $class): string
+    {
+        return '__mc_cdoc_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+    }
+
     /** The declaring-file factory symbol: `__mc_cfile_<C>()` → the path string. */
     public static function fileFn(string $class): string
     {

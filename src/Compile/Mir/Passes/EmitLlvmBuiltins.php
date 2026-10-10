@@ -433,6 +433,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_attr_repeated')      { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_REPEATED_OFFSET, false, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_err')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ERR_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_call0')              { return $this->biMcReflCall0($args); }
+        if ($name === '__mc_refl_doc_fn')             { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_DOC_FN_OFFSET, true); }
         if ($name === '__mc_refl_file_fn')            { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_FILE_FN_OFFSET, true); }
         if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
         if ($name === '__mc_refl_ifaces_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_IFACES_FN_OFFSET, true); }

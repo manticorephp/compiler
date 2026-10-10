@@ -5272,6 +5272,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // stableClassId with them, for no runtime benefit.
     // SensitiveParameterValue is exempt — it is a plain value class a program can
     // construct without reflecting on anything.
+    $useReflDocs = $demand->mentionsAny(['getDocComment', 'getStartLine']);
     $useAttributes = ($useReflection
             && $demand->mentionsAny([
                 'Attribute',
@@ -5738,6 +5739,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->unserializeSrc = $unserializeSrc;
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeReflection = $useReflection;
+        $lower->includeDocFactories = $useReflection && $useReflDocs;
         $lower->includeAttributes = $useAttributes;
         $lower->includeDateTime = $useDateTime;
         $lower->includeArrayFns = $useArrayFns;

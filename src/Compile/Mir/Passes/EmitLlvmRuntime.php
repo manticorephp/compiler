@@ -2650,10 +2650,15 @@ trait EmitLlvmRuntime
             if (isset($this->sigs->paramTypes[$fileFn])) {
                 $fileFnFld = 'ptr @manticore_' . $this->mangle($fileFn);
             }
+            $docFnFld = 'ptr null';
+            $docFn = \Compile\Mir\Passes\ReflectSynth::docFn($cls->name);
+            if (isset($this->sigs->paramTypes[$docFn])) {
+                $docFnFld = 'ptr @manticore_' . $this->mangle($docFn);
+            }
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
-                $constsFnFld, $ifacesFnFld, $fileFnFld);
+                $constsFnFld, $ifacesFnFld, $fileFnFld, $docFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
                 $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld, $visitFld);

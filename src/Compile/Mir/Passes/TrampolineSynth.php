@@ -92,6 +92,7 @@ final class TrampolineSynth
             || \str_contains($name, '__mc_attr_new_')
             || \str_contains($name, '__mc_consts_')
             || \str_contains($name, '__mc_cfile_')
+            || \str_contains($name, '__mc_cdoc_')
             || \str_contains($name, '__mc_enum_cases_');
     }
 

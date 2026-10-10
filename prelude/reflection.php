@@ -682,6 +682,32 @@ class ReflectionClass
         throw new ReflectionException("Class " . $this->name . " does not have a property named " . $name);
     }
 
+    /**
+     * The docblock / start-line table the compiler synthesized for this class
+     * (`['c' => [doc, line], 'm' => [method => [doc, line]], 'p' => [prop => [doc]]]`),
+     * or [] when the program never asked for one. Internal.
+     * @return array<string, mixed>
+     */
+    public function __docInfo(): array
+    {
+        $fn = __mc_refl_doc_fn($this->h);
+        if ($fn === 0) { return []; }
+        return __mc_refl_call0($fn);
+    }
+
+    /** The raw `/** … *\/` block above the class, or false. */
+    public function getDocComment(): string|false
+    {
+        $i = $this->__docInfo();
+        return $i['c'][0] ?? false;
+    }
+
+    public function getStartLine(): int|false
+    {
+        $i = $this->__docInfo();
+        return $i['c'][1] ?? false;
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
@@ -885,6 +911,37 @@ class ReflectionMethod
         $lc = \strtolower($t);
         if ($lc === "self" || $lc === "static") { $t = $this->class; }
         return __mc_refl_type_of($t, $nullable);
+    }
+
+    /**
+     * The `[doc, line]` entry of this method, found in the class it was reached
+     * through or the nearest ancestor that declares it.
+     * @return array<int, mixed>
+     */
+    private function docEntry(): array
+    {
+        $cls = $this->class;
+        $key = \strtolower($this->name);
+        while (true) {
+            $rc = new ReflectionClass($cls);
+            $i = $rc->__docInfo();
+            if (isset($i['m'][$key])) { return $i['m'][$key]; }
+            $p = $rc->getParentClass();
+            if ($p === false) { return []; }
+            $cls = $p->getName();
+        }
+    }
+
+    public function getDocComment(): string|false
+    {
+        $e = $this->docEntry();
+        return $e[0] ?? false;
+    }
+
+    public function getStartLine(): int|false
+    {
+        $e = $this->docEntry();
+        return $e[1] ?? false;
     }
 
     public function isConstructor(): bool
@@ -1175,6 +1232,12 @@ class ReflectionProperty
         return __mc_refl_attrs_of(
             __mc_refl_row_attrs($this->row),
             __mc_refl_row_nattrs($this->row), $name, $flags);
+    }
+
+    public function getDocComment(): string|false
+    {
+        $i = (new ReflectionClass($this->class))->__docInfo();
+        return $i['p'][$this->name][0] ?? false;
     }
 
     /** A declared property — a dynamic one has no row to reflect. */

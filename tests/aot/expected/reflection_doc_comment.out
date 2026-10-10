@@ -1,0 +1,24 @@
+string(48) "/**
+ * A documented class.
+ *
+ * @template T
+ */"
+int(9)
+bool(false)
+string(27) "/** @var int the counter */"
+bool(false)
+string(47) "/**
+     * Adds one.
+     * @return int
+     */"
+bool(false)
+string(18) "/** Static doc. */"
+int(20)
+int(22)
+string(47) "/**
+     * Adds one.
+     * @return int
+     */"
+int(20)
+bool(false)
+int(28)

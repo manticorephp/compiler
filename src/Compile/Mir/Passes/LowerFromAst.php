@@ -521,6 +521,9 @@ final class LowerFromAst implements Pass
      *  which classes carry metadata: that is ReflectAnalysis's job, because
      *  PreludeDemand cannot see a name hidden in a string literal. */
     public bool $includeReflection = false;
+
+    /** The program asks a reflector for a doc comment or a start line, so every class gets its `__mc_cdoc_` factory. */
+    public bool $includeDocFactories = false;
     /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
     public string $reflectionSrc = '';
     /** Inject PHP's reserved attribute classes (Attribute / Deprecated / Override
@@ -1205,6 +1208,12 @@ final class LowerFromAst implements Pass
             foreach ($this->synthFileFactories($module) as $decl) {
                 $this->fnDecls[$decl->name] = $decl;
                 $this->pendingSynthFns[] = $decl;
+            }
+            if ($this->includeDocFactories) {
+                foreach ($this->synthDocFactories($module) as $decl) {
+                    $this->fnDecls[$decl->name] = $decl;
+                    $this->pendingSynthFns[] = $decl;
+                }
             }
         }
 
@@ -2168,6 +2177,60 @@ final class LowerFromAst implements Pass
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
                 [], 'mixed', $newBody, $span);
         }
+    }
+
+    /**
+     * One `__mc_cdoc_<C>(): mixed` per class: `['c' => [doc, line], 'm' => [lower-cased
+     * method => [doc, line]], 'p' => [property => [doc]]]`, `doc` being the raw
+     * docblock or false. What `getDocComment()` / `getStartLine()` read.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthDocFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $decl = $this->classDecls[$cd->name];
+            $sp = new \Parser\Ast\Span(0, 0);
+            $methods = [];
+            foreach ($decl->methods as $md) {
+                $methods[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
+                    $this->docEntry($md->docComment, $md->span->line, $sp));
+            }
+            $props = [];
+            foreach ($decl->properties as $pd) {
+                $props[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string($pd->name, $sp),
+                    $this->docEntry($pd->docComment, $pd->span->line, $sp));
+            }
+            $elems = [
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('c', $sp),
+                    $this->docEntry($decl->docComment, $decl->span->line, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('m', $sp),
+                    \Parser\Ast\Expr::arrayLit($methods, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('p', $sp),
+                    \Parser\Ast\Expr::arrayLit($props, $sp)),
+            ];
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::docFn($cd->name), [], 'mixed', $body, $sp);
+        }
+        return $out;
+    }
+
+    /** `[doc-or-false, line]` as an array literal. */
+    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp): \Parser\Ast\Expr
+    {
+        $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
+        return \Parser\Ast\Expr::arrayLit([
+            new \Parser\Ast\ArrayElement(null, $docExpr),
+            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
+        ], $sp);
     }
 
     /**
