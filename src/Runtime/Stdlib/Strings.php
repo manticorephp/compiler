@@ -49,21 +49,9 @@ function str_contains(string $haystack, string $needle): bool
     if ($nLen === 0) {
         return true;
     }
-    // memcmp scan instead of libc `strstr` (whose `Ffi\Ptr` return + the
-    // `!== null` ptr-domain compare mis-infers under self-host — the
-    // parser's namespace qualification depends on this answer). Mirrors
-    // str_starts_with / str_ends_with, which use the same byte-compare.
-    $hLen = \strlen($haystack);
-    if ($nLen > $hLen) {
-        return false;
-    }
-    $last = $hLen - $nLen;
-    for ($i = 0; $i <= $last; $i = $i + 1) {
-        if (\Runtime\Libc\memcmp(\substr($haystack, $i, $nLen), $needle, $nLen) === 0) {
-            return true;
-        }
-    }
-    return false;
+    // The `strpos` builtin (memchr + memcmp over the header lengths): the old
+    // per-position substr-and-compare allocated a string at every offset.
+    return \strpos($haystack, $needle) !== false;
 }
 
 /**
@@ -88,6 +76,7 @@ function ltrim(string $s, string $mask = " \t\n\r\0\x0B"): string
         if (!__mask_has_byte($mask, \ord($s[$i]))) { break; }
         $i = $i + 1;
     }
+    if ($i === 0) { return $s; }
     return \substr($s, $i, $len - $i);
 }
 
@@ -99,6 +88,7 @@ function rtrim(string $s, string $mask = " \t\n\r\0\x0B"): string
         if (!__mask_has_byte($mask, \ord($s[$i - 1]))) { break; }
         $i = $i - 1;
     }
+    if ($i === $len) { return $s; }
     return \substr($s, 0, $i);
 }
 
@@ -127,12 +117,16 @@ function strrpos(string $haystack, string $needle, int $offset = 0): int|false
     }
     if ($nLen > $hLen) { return false; }
     $start = $hLen - $nLen;
-    if ($offset > 0 && $offset > $start) { return false; }
-    if ($offset < 0) {
-        $start = \max(0, $hLen + $offset - $nLen);
+    $low = 0;
+    if ($offset >= 0) {
+        $low = $offset;
+    } elseif (-$offset >= $nLen) {
+        $start = $hLen + $offset;
     }
-    for ($i = $start; $i >= 0; $i = $i - 1) {
-        if (\Runtime\Libc\memcmp(\substr($haystack, $i, $nLen), $needle, $nLen) === 0) {
+    $first = \ord($needle);
+    for ($i = $start; $i >= $low; $i = $i - 1) {
+        if (\ord($haystack[$i]) !== $first) { continue; }
+        if ($nLen === 1 || \Runtime\Libc\memcmp(\substr($haystack, $i, $nLen), $needle, $nLen) === 0) {
             return $i;
         }
     }

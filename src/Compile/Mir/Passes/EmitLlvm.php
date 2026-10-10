@@ -489,6 +489,9 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, bool> class → every class below it reads through
      *  SplFixedArray::offsetGet ({@see EmitLlvmArrays::emitFixedArrayGet}) */
     private array $fixedArrayPlain = [];
+
+    /** @var array<string, bool> {@see EmitLlvmHmap::foreachFixedArrayPlain} per static class */
+    private array $fixedArrayIterPlain = [];
     /** @var array<string, bool> …and whether the body emitted such a store */
     private array $feCellFlagSet = [];
     /**

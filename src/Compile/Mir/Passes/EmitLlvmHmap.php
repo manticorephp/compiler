@@ -163,9 +163,37 @@ trait EmitLlvmHmap
      * ({@see EmitLlvmControl::releaseAggIterSlot}, the slot's Own drop on an
      * exception). null when the shape does not apply.
      */
+    /**
+     * Whether `$fe` walks a SplFixedArray whose iterator is the prelude's own
+     * (`__McFixedArrayIterator`: position 0.., length re-read every step, the
+     * stored element past any `offsetGet` override), so the loop can run over
+     * the native buffer like a `Vec`'s. A class anywhere below the static one
+     * that overrides `getIterator` owns its own order and takes the protocol.
+     * By reference is php's "iterator cannot be used by reference" error, and
+     * stays on the protocol path.
+     */
+    private function foreachFixedArrayPlain(\Compile\Mir\Foreach_ $fe): bool
+    {
+        if ($fe->byRef || !$fe->iterAggregate) { return false; }
+        $t = $fe->array->type;
+        if ($t->kind !== Type::KIND_OBJ) { return false; }
+        $cls = \ltrim((string)($t->class ?? ''), '\\');
+        if ($cls === '' || !isset($this->classes[$cls]) || !$this->classIsA($cls, 'SplFixedArray')) { return false; }
+        if (!isset($this->fixedArrayIterPlain[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classIsA($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'getIterator') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayIterPlain[$cls] = $plain;
+        }
+        return $this->fixedArrayIterPlain[$cls];
+    }
+
     private function emitForeachDs(\Compile\Mir\Foreach_ $fe, string $iterSlot): ?string
     {
         $kind = HmapInline::foreachKind($fe);
+        if ($kind === '' && ($fe->fixedBuf || $this->foreachFixedArrayPlain($fe))) { $kind = 'vec'; }
         if ($kind === '') { return null; }
         // By reference: the Generator path iterates silently (#140), so the
         // throw comes first, ahead of every bail-out. A null subject walks
@@ -186,7 +214,7 @@ trait EmitLlvmHmap
         }
         if ($this->foreachBodyYields($fe->body)) { return null; }
         $vt = $fe->iterValueType;
-        if ($vt !== null && $vt->kind !== Type::KIND_CELL && $vt->kind !== Type::KIND_UNKNOWN) { return null; }
+        if (!$fe->fixedBuf && $vt !== null && $vt->kind !== Type::KIND_CELL && $vt->kind !== Type::KIND_UNKNOWN) { return null; }
         $cls = \ltrim((string)($fe->array->type->class ?? ''), '\\');
         if (!isset($this->classes[$cls])) { return null; }
         $off = $this->classes[$cls]->propertyOffset('__mcbuf');
@@ -225,6 +253,11 @@ trait EmitLlvmHmap
             $out .= '  br i1 ' . $c . ', label %' . $bodyL . ', label %' . $endL . "\n" . $bodyL . ":\n";
             $v = $this->ssa->allocReg();
             $out .= '  ' . $v . ' = call i64 @__mir_nbuf_get_c(i64 ' . $h . ', i64 ' . $i . ")\n";
+            if ($fe->fixedBuf) {
+                $this->lastValue = $v;
+                $out .= $this->unboxFixedElemObj();
+                $v = $this->lastValue;
+            }
             $out .= $this->foreachBindValue($fe, $v);
             if ($wantKey) { $out .= $this->dsIntKey($fe, $i); }
             $out .= $this->emitForeachBodyArm($fe, $endL, $stepL, true);

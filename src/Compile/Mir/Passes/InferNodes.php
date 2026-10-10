@@ -1976,6 +1976,21 @@ trait InferNodes
                     $keyT = $this->iterMethodReturn($ic, 'key', $keyT);
                 }
             }
+            // A SplFixedArray bound to a class, walked over the native buffer:
+            // each element is that class's pointer, so the loop variable is the
+            // class and `$token->…` is direct. Every condition here is one the
+            // emitter's buffer loop needs ({@see EmitLlvmHmap::emitForeachDs}).
+            $node->fixedBuf = false;
+            if ($node->iterAggregate && !$node->byRef && $elem->kind === Type::KIND_CELL
+                && isset($this->classes[$cls]) && $this->classImplementsT($cls, 'SplFixedArray')
+                && $this->fixedArrayIterPlain($cls) && !$this->containsYield($node->body)) {
+                $bound = $this->genericReturnType($cls, 'offsetGet', $at);
+                if ($bound !== null && $bound->kind === Type::KIND_OBJ && ($bound->class ?? '') !== ''
+                    && !isset($this->enums[$bound->class])) {
+                    $elem = $bound;
+                    $node->fixedBuf = true;
+                }
+            }
             $node->iterValueType = $node->iterClass !== '' ? $elem : null;
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an
@@ -2441,7 +2456,7 @@ trait InferNodes
             if ($k !== null && $at->isShape()) {
                 $ft = $at->shapeField($k);
                 if ($ft !== null) {
-                    $node->type = $ft;
+                    $node->type = $ft->kind === Type::KIND_UNKNOWN ? Type::cell() : $ft;
                     if ($ft->kind !== Type::KIND_CELL && $ft->kind !== Type::KIND_UNKNOWN) {
                         $node->shapeCheck = $at->shapeFieldNullable($k) ? 2 : 1;
                     }
@@ -2466,8 +2481,60 @@ trait InferNodes
             // named). A binding that would change it stays on the call path.
             $bound = $this->genericReturnType($at->class, 'offsetGet', $at);
             if ($bound !== null && $bound->kind === $node->type->kind) { $node->type = $bound; }
+            // A SplFixedArray bound to a class (`@extends SplFixedArray<Token>`):
+            // the buffer holds the object's tagged cell word, and the emitter
+            // strips it to the pointer, so the read is the class — a direct
+            // property load and call instead of a name lookup on a cell.
+            elseif ($bound !== null && $bound->kind === Type::KIND_OBJ && ($bound->class ?? '') !== ''
+                && !isset($this->enums[$bound->class])
+                && ($node->type->kind === Type::KIND_CELL || $node->type->kind === Type::KIND_UNKNOWN)
+                && $this->fixedArrayGetPlain($at->class)) {
+                $node->type = $bound;
+            }
         }
         return $node->type;
+    }
+
+    /** Whether no class at or below `$cls` replaces SplFixedArray's own `getIterator`. */
+    private function fixedArrayIterPlain(string $cls): bool
+    {
+        if (!isset($this->fixedArrayIterPlainMemo[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classImplementsT($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'getIterator') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayIterPlainMemo[$cls] = $plain;
+        }
+        return $this->fixedArrayIterPlainMemo[$cls];
+    }
+
+    private function containsYield(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_YIELD) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if ($this->containsYield($c)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * Whether `$cls` and every class below it read `$o[$i]` through the
+     * prelude's own SplFixedArray::offsetGet — the only reader the emitter
+     * unboxes to the bound class ({@see EmitLlvmArrays::fixedArrayIsPlain}).
+     */
+    private function fixedArrayGetPlain(string $cls): bool
+    {
+        if ($cls === '' || !isset($this->classes[$cls]) || !$this->classImplementsT($cls, 'SplFixedArray')) { return false; }
+        if (!isset($this->fixedArrayGetPlainMemo[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classImplementsT($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayGetPlainMemo[$cls] = $plain;
+        }
+        return $this->fixedArrayGetPlainMemo[$cls];
     }
 
     private function inferStoreElement(StoreElement $node): Type

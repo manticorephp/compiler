@@ -1464,6 +1464,13 @@ final class Foreach_ extends Node
      * @var array<string, MemoryOp_> */
     public array $ownLive = [];
 
+    /** Set by InferTypes: the subject is a SplFixedArray bound to a class
+     *  (`@extends SplFixedArray<Token>`) whose loop the emitter runs over the
+     *  native buffer, binding each element as that class's pointer
+     *  ({@see Passes\EmitLlvmHmap::emitForeachDs}); {@see $iterValueType} is the class.
+     *  Not copied by {@see NodeClone}: InferTypes sets it on every run. Declared LAST. */
+    public bool $fixedBuf = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitForeach($this);

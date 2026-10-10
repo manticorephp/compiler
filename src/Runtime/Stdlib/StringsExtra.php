@@ -228,7 +228,7 @@ function strpbrk(string $string, string $characters): string|false
 {
     $n = \strlen($string);
     for ($i = 0; $i < $n; $i = $i + 1) {
-        if (\strpos($characters, $string[$i]) !== false) {
+        if (__mask_has_byte($characters, \ord($string[$i]))) {
             return \substr($string, $i);
         }
     }
@@ -244,7 +244,7 @@ function strspn(string $subject, string $mask, int $offset = 0): int
     if ($offset < 0) { $offset = 0; }
     $i = $offset;
     while ($i < $n) {
-        if (\strpos($mask, $subject[$i]) === false) { break; }
+        if (!__mask_has_byte($mask, \ord($subject[$i]))) { break; }
         $i = $i + 1;
     }
     return $i - $offset;
