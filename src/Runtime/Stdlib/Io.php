@@ -892,13 +892,24 @@ function stream_wrapper_restore(string $protocol): bool
 {
     return \in_array($protocol, \stream_get_wrappers(), true);
 }
-/** Whether $stream is a LOCAL stream (a file/memory resource), not a network one. */
-function stream_is_local(\Resource $stream): bool
+/**
+ * Whether $stream is a LOCAL stream (a file/memory resource), not a network one.
+ * php also takes a path or a URL: no scheme is a plain file, and only the network
+ * wrappers (http, https, ftp, ftps) are remote.
+ */
+function stream_is_local(mixed $stream): bool
 {
-    $k = $stream->kind;
-    return $k === \Resource::KIND_FILE || $k === \Resource::KIND_DIR
-        || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY
-        || $k === \Resource::KIND_OUTPUT;
+    if ($stream instanceof \Resource) {
+        $k = $stream->kind;
+        return $k === \Resource::KIND_FILE || $k === \Resource::KIND_DIR
+            || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY
+            || $k === \Resource::KIND_OUTPUT;
+    }
+    $s = (string)$stream;
+    $p = \strpos($s, '://');
+    if ($p === false) { return true; }
+    $scheme = \strtolower(\substr($s, 0, $p));
+    return $scheme !== 'http' && $scheme !== 'https' && $scheme !== 'ftp' && $scheme !== 'ftps';
 }
 
 /** Whether $stream supports flock() — only a FILE-backed stream does. */
