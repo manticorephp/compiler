@@ -4365,7 +4365,7 @@ trait EmitLlvmObjects
     }
 
     /** A value that can be computed once and held in a slot: an int literal, a
-     *  plain property / subscript chain rooted at a local, a call, or a concat (a dynamic name). A call's
+     *  plain property / subscript chain rooted at a local, a call, a `new`, an assignment, or a concat (a dynamic name). A call's
      *  +1 result is no more owned here than in the per-arm inline path, which
      *  evaluates it in the one arm that runs and releases nothing either; what
      *  hoisting changes is that a site with a fresh receiver or argument takes
@@ -4378,7 +4378,8 @@ trait EmitLlvmObjects
         }
         if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
             || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
-            || $n->kind === Node::KIND_CONCAT) {
+            || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_STORE_LOCAL) {
             return true;
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
@@ -4509,7 +4510,10 @@ trait EmitLlvmObjects
                 || $recv->type->kind === Type::KIND_UNION)
             && \count($clean) >= 16;
         if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+            $argKinds = '';
+            foreach ($iv->args as $a) { $argKinds .= ($argKinds === '' ? '' : ',') . $a->kind; }
             \error_log('DYNM ' . ($canExtract ? 'yes' : 'no')
+                . ' ' . $this->frame->name . ' name=' . $nameNode->kind . ' argKinds=' . $argKinds
                 . ': args=' . (string)$argc
                 . ' argsOk=' . ($argsOk ? '1' : '0')
                 . ' reEmitSafe=' . ($reEmitSafe ? '1' : '0')
