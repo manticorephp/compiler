@@ -46,6 +46,12 @@ final class ReflectSynth
         return ($setter ? '__mc_pset_' : '__mc_pget_') . $c . '__' . $prop;
     }
 
+    /** The set-hook-bypassing setter of a HOOKED property — what `setRawValue` calls. */
+    public static function propRawSetter(string $declClass, string $prop): string
+    {
+        return '__mc_prraw_' . \str_replace('\\', '_', \ltrim($declClass, '\\')) . '__' . $prop;
+    }
+
     /**
      * The symbol base for one attribute occurrence's factory (Ф4). Keyed by the
      * declaring class + member kind (`c` class / `m` method / `p` property) +
@@ -103,13 +109,13 @@ final class ReflectSynth
         $out = '';
         foreach ($cls->propertyMeta as $pn => $pm) {
             if ($pm->declaringClass !== '' && $pm->declaringClass !== $cls->name) { continue; }
-            $out .= self::accessorPair($cls->name, $pm);
+            $out .= self::accessorPair($cls->name, $pm, ($cls->propHooks[$pm->name]['set'] ?? '') !== '');
         }
         return $out;
     }
 
     /** getter + setter for one property. */
-    private static function accessorPair(string $class, PropertyMeta $pm): string
+    private static function accessorPair(string $class, PropertyMeta $pm, bool $setHooked): string
     {
         $fqn = '\\' . \ltrim($class, '\\');
         $get = self::propAccessor($class, $pm->name, false);
@@ -127,6 +133,10 @@ final class ReflectSynth
         // setValue() then throws, matching php's own readonly refusal.
         if (!$pm->isReadonly) {
             $out .= 'function ' . $set . '(' . $recv . ", mixed \$v): void {\n  " . $read . " = \$v;\n}\n";
+            if ($setHooked && !$pm->isStatic) {
+                $out .= 'function ' . self::propRawSetter($class, $pm->name) . '(' . $recv
+                      . ", mixed \$v): void {\n  \\__mc_raw_prop_store(\$t, '" . $pm->name . "', \$v);\n}\n";
+            }
         }
         return $out;
     }

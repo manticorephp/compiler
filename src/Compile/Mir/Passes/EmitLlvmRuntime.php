@@ -2054,8 +2054,11 @@ trait EmitLlvmRuntime
             if ($typeFld !== 'null' || $getFld !== 'ptr null' || $setFld !== 'ptr null') {
                 $exSym = '@.rmeta.px.' . $id . '.' . (string)$i;
                 $tf = $typeFld === 'null' ? 'ptr null' : $typeFld;
-                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr } { '
-                       . $tf . ', ' . $getFld . ', ' . $setFld . " }\n";
+                // The 4th word: the set-hook-bypassing setter of a hooked property, else the plain one.
+                $rawSym = \Compile\Mir\Passes\ReflectSynth::propRawSetter($decl, $pm->name);
+                $rawFld = isset($this->sigs->paramTypes[$rawSym]) ? 'ptr @manticore_' . $this->mangle($rawSym) : $setFld;
+                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr, ptr } { '
+                       . $tf . ', ' . $getFld . ', ' . $setFld . ', ' . $rawFld . " }\n";
                 $extra = $exSym;
             }
             $ap = $this->attrTableFor($pm->attributes, $decl, 'p', $pm->name, '@.rmeta.pattr.' . $id . '.' . (string)$i);

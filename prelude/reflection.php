@@ -943,6 +943,19 @@ class ReflectionProperty
     }
 
     /**
+     * Set the property on `$object` WITHOUT running its set hook (php 8.4). The
+     * row's 4th accessor word, read through the setter builtin from `extra + 8`.
+     */
+    public function setRawValue(object $object, mixed $value): void
+    {
+        $raw = $this->extra === 0 ? 0 : __mc_refl_prop_setter($this->extra + 8);
+        if ($raw === 0) {
+            throw new ReflectionException("Cannot write property " . $this->name);
+        }
+        __mc_refl_prop_set($raw, $object, $value);
+    }
+
+    /**
      * The property's attributes, optionally filtered to `$name`.
      * @return ReflectionAttribute[]
      */
