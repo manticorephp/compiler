@@ -4364,13 +4364,21 @@ trait EmitLlvmObjects
         return $need;
     }
 
-    /** A value that can be computed once and held in a slot without owning
-     *  anything: an int literal, or a plain property / subscript chain rooted
-     *  at a local. */
+    /** A value that can be computed once and held in a slot: an int literal, a
+     *  plain property / subscript chain rooted at a local, a call, or a concat (a dynamic name). A call's
+     *  +1 result is no more owned here than in the per-arm inline path, which
+     *  evaluates it in the one arm that runs and releases nothing either; what
+     *  hoisting changes is that a site with a fresh receiver or argument takes
+     *  the shared name chain instead of splicing one arm per candidate class. */
     private function dynHoistableRead(Node $n): bool
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_INT_CONST
             || $n->kind === Node::KIND_STRING_CONST) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
+            || $n->kind === Node::KIND_CONCAT) {
             return true;
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
@@ -4408,10 +4416,9 @@ trait EmitLlvmObjects
     {
         // Every shared path below wants its operands as LOCALS, because the
         // inline fallback re-emits them per arm. A plain READ — a property or
-        // subscript chain off a local — is evaluated ONCE into a slot here, so
-        // `$this->dispatcher->{$m}(...$args)` takes the table instead of a
-        // 3 069-arm chain spliced into the site. Fresh values (a call's result)
-        // are left alone: a slot would own a +1 nobody releases.
+        // subscript chain off a local, or a call — is evaluated ONCE into a slot
+        // here, so `$this->dispatcher->{$m}(...$args)` takes the table instead
+        // of a 3 069-arm chain spliced into the site.
         if ($this->dynOperandsNeedHoist($dp, $iv)) {
             $out = '';
             $recvL = $this->dynHoistOperand($dp->object, $out);
