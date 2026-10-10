@@ -53,6 +53,7 @@ CASES=(
     "async_smoke|examples/async/smoke.php"
     "dyn_fresh|tests/aot/cases/dyn_method_fresh_operands.php"
     "dyn_new|tests/aot/cases/dyn_method_new_operand.php"
+    "dyn_spread|tests/aot/cases/dyn_method_spread_scope.php"
 )
 
 # Headroom over the measured figure when blessing. Small enough that a real

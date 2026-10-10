@@ -3821,10 +3821,14 @@ trait EmitLlvmObjects
      * candidate name has even one possible by-ref/variadic implementation, the
      * erased receiver cannot route that name through `...$a` safely; keep the
      * entire site on the original inline dispatcher instead.
+     * A private / protected method counts only when the site's own scope can
+     * reach it ({@see DynProp_::$scope}); from anywhere else the shared helper
+     * refuses it as php does, so a program full of non-public methods of
+     * unrelated classes no longer sends every one of those names inline.
      * @param array<string, Type> $methods
      * @return array<string, true>
      */
-    private function dynamicMethodUnsupportedNames(array $methods): array
+    private function dynamicMethodUnsupportedNames(array $methods, string $scope): array
     {
         $out = [];
         foreach ($methods as $mn => $_) {
@@ -3836,8 +3840,13 @@ trait EmitLlvmObjects
                 }
                 $mm = $this->asMethodMeta($cd->methodMeta[$mn]);
                 if ($mm->visibility !== 'public') {
-                    $out[$mn] = true;
-                    break;
+                    if ($scope === \Compile\Mir\DynProp_::ANY_SCOPE
+                        || ($scope !== '' && ($cd->name === $scope
+                            || $this->classIsA($cd->name, $scope) || $this->classIsA($scope, $cd->name)))) {
+                        $out[$mn] = true;
+                        break;
+                    }
+                    continue;
                 }
                 foreach ($mm->params as $pm) {
                     $p = $this->asParamMeta($pm);
@@ -4399,15 +4408,19 @@ trait EmitLlvmObjects
     }
 
     /** Evaluate `$n` once into a fresh slot and answer a LoadLocal of it —
-     *  a local or a string literal is already that. */
-    private function dynHoistOperand(Node $n, string &$out): Node
+     *  a local or a string literal is already that. An ARGUMENT that is a fresh
+     *  +1 temp ({@see freshRcArgFlavor}) is recorded in `$owned` (slot => flavor)
+     *  for the caller to give back after the call, as an inline argument would be. */
+    private function dynHoistOperand(Node $n, string &$out, array &$owned, bool $isArg): Node
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
         $out .= $this->emitNode($n);
         $out .= $this->coerceToI64();
+        $flavor = $isArg ? $this->freshRcArgFlavor($n) : '';
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        if ($flavor !== '') { $owned[$slot] = $flavor; }
         $name = '__mc_dynh_' . \substr($slot, 1);
         $this->locals->slots[$name] = $slot;
         return new \Compile\Mir\LoadLocal($name, $n->type);
@@ -4422,15 +4435,17 @@ trait EmitLlvmObjects
         // of a 3 069-arm chain spliced into the site.
         if ($this->dynOperandsNeedHoist($dp, $iv)) {
             $out = '';
-            $recvL = $this->dynHoistOperand($dp->object, $out);
-            $nameL = $this->dynHoistOperand($dp->name, $out);
+            /** @var array<string, string> $owned */
+            $owned = [];
+            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, false);
+            $nameL = $this->dynHoistOperand($dp->name, $out, $owned, false);
             $args = [];
             foreach ($iv->args as $a) {
                 if ($a->kind === Node::KIND_SPREAD) {
                     $sp = $this->asSpreadNode($a);
-                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out), $a->type);
+                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out, $owned, false), $a->type);
                 } else {
-                    $args[] = $this->dynHoistOperand($a, $out);
+                    $args[] = $this->dynHoistOperand($a, $out, $owned, true);
                 }
             }
             $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
@@ -4438,7 +4453,17 @@ trait EmitLlvmObjects
             $dp2->scope = $dp->scope;
             $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
             $iv2->line = $iv->line;
-            return $out . $this->emitDynMethodCall($dp2, $iv2);
+            $out .= $this->emitDynMethodCall($dp2, $iv2);
+            $resReg = $this->lastValue;
+            $resTy = $this->lastValueType;
+            foreach ($owned as $slot => $flavor) {
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = load i64, ptr ' . $slot . "\n";
+                $out .= $this->rcReleaseReg($v, $flavor);
+            }
+            $this->lastValue = $resReg;
+            $this->lastValueType = $resTy;
+            return $out;
         }
         $recv = $dp->object;
         $nameNode = $dp->name;
@@ -4679,7 +4704,7 @@ trait EmitLlvmObjects
                 // implementation in this site accepts an unpacked by-value array.
                 // This site-local gate removes the old module-wide veto while
                 // preserving the exact inline path for any by-ref/variadic name.
-                $unsafeNames = $this->dynamicMethodUnsupportedNames($methods);
+                $unsafeNames = $this->dynamicMethodUnsupportedNames($methods, $dp->scope);
                 if (\Compile\Stats::$on) {
                     \Compile\Stats::bump('dynamic.fallback.site_count', 1);
                     \Compile\Stats::bump('dynamic.fallback.site_candidates', \count($methods));
