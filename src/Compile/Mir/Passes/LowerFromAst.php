@@ -2206,7 +2206,19 @@ final class LowerFromAst implements Pass
                     \Parser\Ast\Expr::string($pd->name, $sp),
                     $this->docEntry($pd->docComment, $pd->span->line, $sp));
             }
+            $traitElems = [];
+            $traitNames = [];
+            foreach ($decl->uses as $tn) {
+                $tn = \ltrim($tn, '\\');
+                $traitElems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($tn, $sp));
+                $traitNames[] = $tn;
+            }
+            $module->classTraitNames[$cd->name] = $traitNames;
             $elems = [
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('u', $sp),
+                    \Parser\Ast\Expr::arrayLit($traitElems, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('r', $sp),
+                    \Parser\Ast\Expr::bool($decl->isReadonly, $sp)),
                 new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('c', $sp),
                     $this->docEntry($decl->docComment, $decl->span->line, $sp)),
                 new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('m', $sp),

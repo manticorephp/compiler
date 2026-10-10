@@ -217,6 +217,13 @@ final class ReflectAnalysis
                 }
             }
         }
+        // `getTraits()` likewise builds a ReflectionClass per trait by name.
+        foreach ($module->classes as $name => $cd) {
+            if (!isset($this->names[$name])) { continue; }
+            foreach ($module->classTraitNames[$name] ?? [] as $tn) {
+                $this->names[$tn] = true;
+            }
+        }
         if (!$this->descendants) { return; }
         // A root reached through an object: any subclass could be the runtime
         // class, so each needs its own block. Repeat until nothing new appears —

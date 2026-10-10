@@ -2066,7 +2066,8 @@ trait EmitLlvmRuntime
             $defs .= $ap[0];
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
-                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly),
+                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly)
+                    | ($pm->hasDefault ? \Compile\MemoryAbi::RMETA_MEM_HAS_DEFAULT : 0),
                 'null', 0, 0, $extra,
                 $ap[1], $ap[2]);
             $i = $i + 1;

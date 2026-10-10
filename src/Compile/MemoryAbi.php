@@ -665,6 +665,7 @@ final class MemoryAbi
     public const RMETA_MEM_READONLY  = 32;
     /** #[\Deprecated] on the member — ReflectionFunctionAbstract::isDeprecated(). */
     public const RMETA_MEM_DEPRECATED = 64;
+    public const RMETA_MEM_HAS_DEFAULT = 128;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;

@@ -695,6 +695,34 @@ class ReflectionClass
         return __mc_refl_call0($fn);
     }
 
+    /**
+     * The traits the class uses directly, in declaration order.
+     * @return string[]
+     */
+    public function getTraitNames(): array
+    {
+        $i = $this->__docInfo();
+        return $i['u'] ?? [];
+    }
+
+    /**
+     * @return array<string, ReflectionClass>
+     */
+    public function getTraits(): array
+    {
+        $out = [];
+        foreach ($this->getTraitNames() as $n) {
+            $out[$n] = new ReflectionClass($n);
+        }
+        return $out;
+    }
+
+    public function isReadOnly(): bool
+    {
+        $i = $this->__docInfo();
+        return $i['r'] ?? false;
+    }
+
     /** The raw `/** … *\/` block above the class, or false. */
     public function getDocComment(): string|false
     {
@@ -1232,6 +1260,37 @@ class ReflectionProperty
         return __mc_refl_attrs_of(
             __mc_refl_row_attrs($this->row),
             __mc_refl_row_nattrs($this->row), $name, $flags);
+    }
+
+    /** A constructor-promoted property: the declaring class's `__construct` has a promoted parameter of this name. */
+    public function isPromoted(): bool
+    {
+        if (!(new ReflectionClass($this->class))->hasMethod('__construct')) { return false; }
+        foreach ((new ReflectionMethod($this->class, '__construct'))->getParameters() as $p) {
+            if ($p->getName() === $this->name) { return $p->isPromoted(); }
+        }
+        return false;
+    }
+
+    /** A default is written (`= expr`), or the property is untyped (implicitly null). A promoted one has none. */
+    public function hasDefaultValue(): bool
+    {
+        if ($this->isPromoted()) { return false; }
+        if (($this->flags & 128) !== 0) { return true; }
+        return !$this->hasType();
+    }
+
+    /**
+     * The declared default: read off an instance made without its constructor (a
+     * static property reads its current value). Null when there is none.
+     */
+    public function getDefaultValue(): mixed
+    {
+        if (!$this->hasDefaultValue()) { return null; }
+        if ($this->isStatic()) { return $this->getValue(null); }
+        $rc = new ReflectionClass($this->class);
+        if (!$rc->isInstantiable()) { return null; }
+        return $this->getValue($rc->newInstanceWithoutConstructor());
     }
 
     public function getDocComment(): string|false
