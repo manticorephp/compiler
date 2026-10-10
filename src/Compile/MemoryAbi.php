@@ -566,9 +566,13 @@ final class MemoryAbi
      *  the string-array building on the normal path. */
     public const RMETA_IFACES_FN_OFFSET = 96;
 
+    /** `ptr` — the declaring-file factory `__mc_cfile_<C>()`, or null: returns the
+     *  path the class was declared in, as `getFileName()` reports it. */
+    public const RMETA_FILE_FN_OFFSET = 104;
+
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 104;
+    public const RMETA_SIZE = 112;
 
     /** One row of the method / property tables:
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,

@@ -324,7 +324,7 @@ trait InferCalls
             || $n === '__mc_refl_row_flags'
             || $n === '__mc_refl_attr_args' || $n === '__mc_refl_attr_new'
             || $n === '__mc_refl_attr_target' || $n === '__mc_refl_attr_repeated'
-            || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn'
+            || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn' || $n === '__mc_refl_file_fn'
             || $n === '__mc_refl_fn_find' || $n === '__mc_refl_clo_find' || $n === '__mc_refl_row_tramp'
             || $n === '__mc_refl_param_flags'
             || $n === '__mc_refl_param_nattrs' || $n === '__mc_refl_param_attrs'

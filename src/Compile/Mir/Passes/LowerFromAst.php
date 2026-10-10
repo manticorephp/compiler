@@ -1202,6 +1202,10 @@ final class LowerFromAst implements Pass
                 $this->fnDecls[$decl->name] = $decl;
                 $this->pendingSynthFns[] = $decl;
             }
+            foreach ($this->synthFileFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $this->pendingSynthFns[] = $decl;
+            }
         }
 
         // Pre-pass: capture every function's params so call sites can
@@ -2164,6 +2168,31 @@ final class LowerFromAst implements Pass
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
                 [], 'mixed', $newBody, $span);
         }
+    }
+
+    /**
+     * One `__mc_cfile_<C>(): string` per class declared in a file, returning that
+     * file's path — what `ReflectionClass::getFileName()` reports. A class whose
+     * span carries no file (the prelude blob, stdin) gets none.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthFileFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $file = $this->classDecls[$cd->name]->span->file;
+            if ($file === '') { continue; }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::string($file, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::fileFn($cd->name), [], 'string', $body, $sp);
+        }
+        return $out;
     }
 
     /**

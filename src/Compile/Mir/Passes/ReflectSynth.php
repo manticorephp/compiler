@@ -92,6 +92,12 @@ final class ReflectSynth
         return '__mc_consts_' . \str_replace('\\', '_', \ltrim($class, '\\'));
     }
 
+    /** The declaring-file factory symbol: `__mc_cfile_<C>()` → the path string. */
+    public static function fileFn(string $class): string
+    {
+        return '__mc_cfile_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+    }
+
     /** The interface-names factory symbol (Ф5): `__mc_ifaces_<C>()` → string[]. */
     public static function ifacesFn(string $class): string
     {

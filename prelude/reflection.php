@@ -506,6 +506,18 @@ class ReflectionClass
         return __mc_refl_call0($fn);
     }
 
+    /**
+     * The path of the file the class was declared in, as the compiler saw it, or
+     * false for a class with none (an internal one). Read from a synthesized
+     * factory so the rmeta row holds a pointer, not a string.
+     */
+    public function getFileName(): string|false
+    {
+        $fn = __mc_refl_file_fn($this->h);
+        if ($fn === 0) { return false; }
+        return (string)__mc_refl_call0($fn);
+    }
+
     /** One constant's value, or false when there is no such constant. */
     public function getConstant(string $name): mixed
     {

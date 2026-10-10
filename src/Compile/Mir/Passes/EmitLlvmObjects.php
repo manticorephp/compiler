@@ -2226,12 +2226,26 @@ trait EmitLlvmObjects
 
     /** Emit a property set-hook call: `<hookSym>($this, $value)`. The
      *  assignment expression yields the assigned value. */
-    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode): string
+    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode, string $property): string
     {
         $out = $this->emitNode($objNode);
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
         $out .= $this->emitNode($valueNode);
+        // The hook takes `$value` in the property's declared type, so a CELL
+        // value (a `mixed` parameter, what ReflectionProperty::setValue passes)
+        // is unboxed exactly as a plain store into the slot would.
+        if ($valueNode->type->kind === Type::KIND_CELL) {
+            $pcls = $objNode->type->class ?? '';
+            $propType = ($pcls !== '' && isset($this->classes[$pcls]))
+                ? ($this->classes[$pcls]->propertyTypes[$property] ?? null)
+                : null;
+            if ($this->slotIsArrayHinted($objNode, $property, $propType)) {
+                $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            } elseif ($propType !== null) {
+                $out .= $this->unboxCellToType($propType);
+            }
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $reg = $this->ssa->allocReg();
@@ -2701,7 +2715,7 @@ trait EmitLlvmObjects
             && isset($this->classes[$hcls]->propHooks[$n->property])) {
             $hk = $this->classes[$hcls]->propHooks[$n->property];
             if ($hk['set'] !== '' && !$this->insideOwnHook($hk)) {
-                return $this->emitHookSet($n->object, $hk['set'], $n->value);
+                return $this->emitHookSet($n->object, $hk['set'], $n->value, $n->property);
             }
         }
         // Dynamic property on a bag class → set the boxed value in the
