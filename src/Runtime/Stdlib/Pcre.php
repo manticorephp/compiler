@@ -125,6 +125,33 @@ function __preg_md(int $code, int $give): int
 }
 
 /**
+ * Whether `$pattern` matches `$subject` from `$offset`: 1 for a match, 0 for none,
+ * -1 when the pattern does not compile or PCRE reports anything but "no match"
+ * (a bad UTF-8 subject under /u, a match limit). preg_match does the same
+ * search, then builds `$matches` — an array, a substr and a boxed cell per
+ * group — which a caller that only asks "does it match" throws away: 3 000
+ * instructions for a one-line check, two thirds of them that bookkeeping.
+ */
+function __preg_test(string $pattern, string $subject, int $offset = 0): int
+{
+    $code = \__preg_compile($pattern);
+    if ($code === 0) {
+        return -1;
+    }
+    $md = \__preg_md($code, 0);
+    $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, 0);
+    \__preg_md($code, $md);
+    $rc = $rc & 0xFFFFFFFF;
+    if ($rc >= 0x80000000) {
+        $rc = $rc - 0x100000000;
+    }
+    if ($rc > 0) {
+        return 1;
+    }
+    return $rc === -1 ? 0 : -1;
+}
+
+/**
  * preg_match — search $subject for $pattern. Returns 1 on match, 0 on no
  * match, false on error. On a match, $matches is filled with the full match
  * at [0] and each captured group after it (unmatched groups → "").
