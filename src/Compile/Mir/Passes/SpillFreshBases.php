@@ -698,6 +698,7 @@ final class SpillFreshBases
         for ($i = 0; $i < $cnt; $i = $i + 1) {
             $a = $args[$i];
             if (isset($byRef[$i]) || isset($this->pinned[\spl_object_id($a)])) { continue; }
+            if ($a->allocKind === AllocationKind::ARENA) { continue; }
             $t = $a->type->kind;
             $closure = $t === Type::KIND_CLOSURE || ($t === Type::KIND_OBJ && ($a->type->class ?? '') === 'Closure');
             if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure) { continue; }
