@@ -138,6 +138,13 @@ trait LowerExprs
             // gates that were already bare (func_get_args, sscanf, …) have
             // always made the same trade.
             $fnBare = $this->bareName($fn);
+            // `__mc_raw_prop_store($obj, 'prop', $v)` — ReflectSynth's set-hook-bypassing
+            // write (`ReflectionProperty::setRawValue`): the store itself, hook skipped.
+            if ($fnBare === '__mc_raw_prop_store' && \count($expr->args) === 3
+                && $expr->args[1]->kind === 'StringLiteral') {
+                $rv = $this->lowerExpr($expr->args[2]);
+                return new StoreProperty($this->lowerExpr($expr->args[0]), $this->stringLitValue($expr->args[1]), $rv, $rv->type, true);
+            }
             // `call_user_func($cb, ...$rest)` → invoke $cb with the rest args,
             // reusing the Invoke path (literal / FCC / const-callable dispatch).
             if ($fnBare === 'call_user_func' && \count($expr->args) >= 1) {

@@ -87,9 +87,12 @@ final class TrampolineSynth
             || \str_contains($name, '__mc_fntramp_')
             || \str_contains($name, '__mc_pget_')
             || \str_contains($name, '__mc_pset_')
+            || \str_contains($name, '__mc_prraw_')
             || \str_contains($name, '__mc_attr_args_')
             || \str_contains($name, '__mc_attr_new_')
             || \str_contains($name, '__mc_consts_')
+            || \str_contains($name, '__mc_cfile_')
+            || \str_contains($name, '__mc_cdoc_')
             || \str_contains($name, '__mc_enum_cases_');
     }
 

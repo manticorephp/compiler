@@ -566,9 +566,16 @@ final class MemoryAbi
      *  the string-array building on the normal path. */
     public const RMETA_IFACES_FN_OFFSET = 96;
 
+    /** `ptr` — the declaring-file factory `__mc_cfile_<C>()`, or null: returns the
+     *  path the class was declared in, as `getFileName()` reports it. */
+    public const RMETA_FILE_FN_OFFSET = 104;
+
+    /** `ptr` — the docblock / start-line factory `__mc_cdoc_<C>()`, or null. */
+    public const RMETA_DOC_FN_OFFSET = 112;
+
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 104;
+    public const RMETA_SIZE = 120;
 
     /** One row of the method / property tables:
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
@@ -635,6 +642,7 @@ final class MemoryAbi
     public const RMETA_PARAM_VARIADIC    = 4;
     public const RMETA_PARAM_PROMOTED    = 8;
     public const RMETA_PARAM_HAS_TYPE    = 16;
+    public const RMETA_PARAM_BYREF       = 32;
 
     public const RMETA_FLAG_FINAL     = 1;
     public const RMETA_FLAG_ABSTRACT  = 2;
@@ -657,6 +665,7 @@ final class MemoryAbi
     public const RMETA_MEM_READONLY  = 32;
     /** #[\Deprecated] on the member — ReflectionFunctionAbstract::isDeprecated(). */
     public const RMETA_MEM_DEPRECATED = 64;
+    public const RMETA_MEM_HAS_DEFAULT = 128;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;

@@ -1,0 +1,25 @@
+pub: true false false false pub
+prot: true false false false ~*~prot
+priv: true false false false ~Ctr~priv
+stat: true false false false stat
+ro: true false false false ro
+bool(false)
+int(77)
+A: false false
+B: false false
+C: false false
+bool(true)
+bool(false)
+bool(true)
+string(4) "Suit"
+bool(true)
+bool(false)
+bool(false)
+bool(false)
+int(1)
+bool(true)
+bool(false)
+string(4) "Suit"
+bool(true)
+bool(true)
+string(1) "s"

@@ -521,6 +521,9 @@ final class LowerFromAst implements Pass
      *  which classes carry metadata: that is ReflectAnalysis's job, because
      *  PreludeDemand cannot see a name hidden in a string literal. */
     public bool $includeReflection = false;
+
+    /** The program asks a reflector for a doc comment or a start line, so every class gets its `__mc_cdoc_` factory. */
+    public bool $includeDocFactories = false;
     /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
     public string $reflectionSrc = '';
     /** Inject PHP's reserved attribute classes (Attribute / Deprecated / Override
@@ -1201,6 +1204,16 @@ final class LowerFromAst implements Pass
             foreach ($this->synthIfaceFactories($module) as $decl) {
                 $this->fnDecls[$decl->name] = $decl;
                 $this->pendingSynthFns[] = $decl;
+            }
+            foreach ($this->synthFileFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $this->pendingSynthFns[] = $decl;
+            }
+            if ($this->includeDocFactories) {
+                foreach ($this->synthDocFactories($module) as $decl) {
+                    $this->fnDecls[$decl->name] = $decl;
+                    $this->pendingSynthFns[] = $decl;
+                }
             }
         }
 
@@ -2167,6 +2180,97 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * One `__mc_cdoc_<C>(): mixed` per class: `['c' => [doc, line], 'm' => [lower-cased
+     * method => [doc, line]], 'p' => [property => [doc]]]`, `doc` being the raw
+     * docblock or false. What `getDocComment()` / `getStartLine()` read.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthDocFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $decl = $this->classDecls[$cd->name];
+            $sp = new \Parser\Ast\Span(0, 0);
+            $methods = [];
+            foreach ($decl->methods as $md) {
+                $methods[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
+                    $this->docEntry($md->docComment, $md->span->line, $sp));
+            }
+            $props = [];
+            foreach ($decl->properties as $pd) {
+                $props[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string($pd->name, $sp),
+                    $this->docEntry($pd->docComment, $pd->span->line, $sp));
+            }
+            $traitElems = [];
+            $traitNames = [];
+            foreach ($decl->uses as $tn) {
+                $tn = \ltrim($tn, '\\');
+                $traitElems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($tn, $sp));
+                $traitNames[] = $tn;
+            }
+            $module->classTraitNames[$cd->name] = $traitNames;
+            $elems = [
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('u', $sp),
+                    \Parser\Ast\Expr::arrayLit($traitElems, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('r', $sp),
+                    \Parser\Ast\Expr::bool($decl->isReadonly, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('c', $sp),
+                    $this->docEntry($decl->docComment, $decl->span->line, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('m', $sp),
+                    \Parser\Ast\Expr::arrayLit($methods, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('p', $sp),
+                    \Parser\Ast\Expr::arrayLit($props, $sp)),
+            ];
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::docFn($cd->name), [], 'mixed', $body, $sp);
+        }
+        return $out;
+    }
+
+    /** `[doc-or-false, line]` as an array literal. */
+    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp): \Parser\Ast\Expr
+    {
+        $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
+        return \Parser\Ast\Expr::arrayLit([
+            new \Parser\Ast\ArrayElement(null, $docExpr),
+            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
+        ], $sp);
+    }
+
+    /**
+     * One `__mc_cfile_<C>(): string` per class declared in a file, returning that
+     * file's path — what `ReflectionClass::getFileName()` reports. A class whose
+     * span carries no file (the prelude blob, stdin) gets none.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthFileFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $file = $this->classDecls[$cd->name]->span->file;
+            if ($file === '') { continue; }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::string($file, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::fileFn($cd->name), [], 'string', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
      * Ф5 — one `__mc_consts_<C>(): array` per class that has any constant,
      * returning `['NAME' => \C::NAME, …]`. Referencing each constant by its
      * qualified name reuses the existing const resolution (a `self::` or
@@ -2349,6 +2453,37 @@ final class LowerFromAst implements Pass
         return \substr($fqn, 0, $pos);
     }
 
+    /** @var array<int, \Parser\Ast\ClassDecl> adaptation (spl_object_id) → the declaration whose `use` block wrote it */
+    private array $adaptScope = [];
+
+    /**
+     * Every `as` / `insteadof` adaptation that applies to a declaration: its own,
+     * then those written inside the traits it uses, transitively. php flattens
+     * `class C { use B; }` with `trait B { use A { foo as doFoo; } }` so that C
+     * has `doFoo`; reading only the class's own block dropped it (symfony's
+     * MicroKernelTrait). {@see $adaptScope} remembers which declaration's `use`
+     * block holds each, because `foo` there names a method of A, not of B.
+     *
+     * @return \Parser\Ast\TraitAdaptation[]
+     */
+    private function effectiveAdaptations(\Parser\Ast\ClassDecl $decl): array
+    {
+        $out = [];
+        foreach ($decl->traitAdaptations as $a) {
+            $this->adaptScope[\spl_object_id($a)] = $decl;
+            $out[] = $a;
+        }
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->traitAdaptations as $a) {
+                $this->adaptScope[\spl_object_id($a)] = $td;
+                $out[] = $a;
+            }
+        }
+        return $out;
+    }
+
     /**
      * `insteadof` losers as a flat set keyed `<trait>::<method>` (a flat map,
      * NOT a nested array). `as` aliases are read off the TraitAdaptation objects
@@ -2360,7 +2495,7 @@ final class LowerFromAst implements Pass
     private function traitExclusions(\Parser\Ast\ClassDecl $decl): array
     {
         $excluded = [];
-        foreach ($decl->traitAdaptations as $a) {
+        foreach ($this->effectiveAdaptations($decl) as $a) {
             if ($a->kind !== 'insteadof') { continue; }
             foreach ($a->exclude as $ex) {
                 $excluded[\ltrim($ex, '\\') . '::' . $a->method] = true;

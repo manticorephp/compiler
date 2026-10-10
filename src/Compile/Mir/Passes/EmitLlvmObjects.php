@@ -2226,12 +2226,26 @@ trait EmitLlvmObjects
 
     /** Emit a property set-hook call: `<hookSym>($this, $value)`. The
      *  assignment expression yields the assigned value. */
-    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode): string
+    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode, string $property): string
     {
         $out = $this->emitNode($objNode);
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
         $out .= $this->emitNode($valueNode);
+        // The hook takes `$value` in the property's declared type, so a CELL
+        // value (a `mixed` parameter, what ReflectionProperty::setValue passes)
+        // is unboxed exactly as a plain store into the slot would.
+        if ($valueNode->type->kind === Type::KIND_CELL) {
+            $pcls = $objNode->type->class ?? '';
+            $propType = ($pcls !== '' && isset($this->classes[$pcls]))
+                ? ($this->classes[$pcls]->propertyTypes[$property] ?? null)
+                : null;
+            if ($this->slotIsArrayHinted($objNode, $property, $propType)) {
+                $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            } elseif ($propType !== null) {
+                $out .= $this->unboxCellToType($propType);
+            }
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $reg = $this->ssa->allocReg();
@@ -2701,7 +2715,7 @@ trait EmitLlvmObjects
             && isset($this->classes[$hcls]->propHooks[$n->property])) {
             $hk = $this->classes[$hcls]->propHooks[$n->property];
             if ($hk['set'] !== '' && !$this->insideOwnHook($hk)) {
-                return $this->emitHookSet($n->object, $hk['set'], $n->value);
+                return $this->emitHookSet($n->object, $hk['set'], $n->value, $n->property);
             }
         }
         // Dynamic property on a bag class → set the boxed value in the
@@ -3821,10 +3835,14 @@ trait EmitLlvmObjects
      * candidate name has even one possible by-ref/variadic implementation, the
      * erased receiver cannot route that name through `...$a` safely; keep the
      * entire site on the original inline dispatcher instead.
+     * A private / protected method counts only when the site's own scope can
+     * reach it ({@see DynProp_::$scope}); from anywhere else the shared helper
+     * refuses it as php does, so a program full of non-public methods of
+     * unrelated classes no longer sends every one of those names inline.
      * @param array<string, Type> $methods
      * @return array<string, true>
      */
-    private function dynamicMethodUnsupportedNames(array $methods): array
+    private function dynamicMethodUnsupportedNames(array $methods, string $scope): array
     {
         $out = [];
         foreach ($methods as $mn => $_) {
@@ -3836,8 +3854,13 @@ trait EmitLlvmObjects
                 }
                 $mm = $this->asMethodMeta($cd->methodMeta[$mn]);
                 if ($mm->visibility !== 'public') {
-                    $out[$mn] = true;
-                    break;
+                    if ($scope === \Compile\Mir\DynProp_::ANY_SCOPE
+                        || ($scope !== '' && ($cd->name === $scope
+                            || $this->classIsA($cd->name, $scope) || $this->classIsA($scope, $cd->name)))) {
+                        $out[$mn] = true;
+                        break;
+                    }
+                    continue;
                 }
                 foreach ($mm->params as $pm) {
                     $p = $this->asParamMeta($pm);
@@ -4364,13 +4387,22 @@ trait EmitLlvmObjects
         return $need;
     }
 
-    /** A value that can be computed once and held in a slot without owning
-     *  anything: an int literal, or a plain property / subscript chain rooted
-     *  at a local. */
+    /** A value that can be computed once and held in a slot: an int literal, a
+     *  plain property / subscript chain rooted at a local, a call, a `new`, an assignment, or a concat (a dynamic name). A call's
+     *  +1 result is no more owned here than in the per-arm inline path, which
+     *  evaluates it in the one arm that runs and releases nothing either; what
+     *  hoisting changes is that a site with a fresh receiver or argument takes
+     *  the shared name chain instead of splicing one arm per candidate class. */
     private function dynHoistableRead(Node $n): bool
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_INT_CONST
             || $n->kind === Node::KIND_STRING_CONST) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
+            || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_STORE_LOCAL) {
             return true;
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
@@ -4390,15 +4422,19 @@ trait EmitLlvmObjects
     }
 
     /** Evaluate `$n` once into a fresh slot and answer a LoadLocal of it —
-     *  a local or a string literal is already that. */
-    private function dynHoistOperand(Node $n, string &$out): Node
+     *  a local or a string literal is already that. An ARGUMENT that is a fresh
+     *  +1 temp ({@see freshRcArgFlavor}) is recorded in `$owned` (slot => flavor)
+     *  for the caller to give back after the call, as an inline argument would be. */
+    private function dynHoistOperand(Node $n, string &$out, array &$owned, bool $isArg): Node
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
         $out .= $this->emitNode($n);
         $out .= $this->coerceToI64();
+        $flavor = $isArg ? $this->freshRcArgFlavor($n) : '';
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        if ($flavor !== '') { $owned[$slot] = $flavor; }
         $name = '__mc_dynh_' . \substr($slot, 1);
         $this->locals->slots[$name] = $slot;
         return new \Compile\Mir\LoadLocal($name, $n->type);
@@ -4408,21 +4444,22 @@ trait EmitLlvmObjects
     {
         // Every shared path below wants its operands as LOCALS, because the
         // inline fallback re-emits them per arm. A plain READ — a property or
-        // subscript chain off a local — is evaluated ONCE into a slot here, so
-        // `$this->dispatcher->{$m}(...$args)` takes the table instead of a
-        // 3 069-arm chain spliced into the site. Fresh values (a call's result)
-        // are left alone: a slot would own a +1 nobody releases.
+        // subscript chain off a local, or a call — is evaluated ONCE into a slot
+        // here, so `$this->dispatcher->{$m}(...$args)` takes the table instead
+        // of a 3 069-arm chain spliced into the site.
         if ($this->dynOperandsNeedHoist($dp, $iv)) {
             $out = '';
-            $recvL = $this->dynHoistOperand($dp->object, $out);
-            $nameL = $this->dynHoistOperand($dp->name, $out);
+            /** @var array<string, string> $owned */
+            $owned = [];
+            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, false);
+            $nameL = $this->dynHoistOperand($dp->name, $out, $owned, false);
             $args = [];
             foreach ($iv->args as $a) {
                 if ($a->kind === Node::KIND_SPREAD) {
                     $sp = $this->asSpreadNode($a);
-                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out), $a->type);
+                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out, $owned, false), $a->type);
                 } else {
-                    $args[] = $this->dynHoistOperand($a, $out);
+                    $args[] = $this->dynHoistOperand($a, $out, $owned, true);
                 }
             }
             $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
@@ -4430,7 +4467,17 @@ trait EmitLlvmObjects
             $dp2->scope = $dp->scope;
             $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
             $iv2->line = $iv->line;
-            return $out . $this->emitDynMethodCall($dp2, $iv2);
+            $out .= $this->emitDynMethodCall($dp2, $iv2);
+            $resReg = $this->lastValue;
+            $resTy = $this->lastValueType;
+            foreach ($owned as $slot => $flavor) {
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = load i64, ptr ' . $slot . "\n";
+                $out .= $this->rcReleaseReg($v, $flavor);
+            }
+            $this->lastValue = $resReg;
+            $this->lastValueType = $resTy;
+            return $out;
         }
         $recv = $dp->object;
         $nameNode = $dp->name;
@@ -4502,7 +4549,10 @@ trait EmitLlvmObjects
                 || $recv->type->kind === Type::KIND_UNION)
             && \count($clean) >= 16;
         if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+            $argKinds = '';
+            foreach ($iv->args as $a) { $argKinds .= ($argKinds === '' ? '' : ',') . $a->kind; }
             \error_log('DYNM ' . ($canExtract ? 'yes' : 'no')
+                . ' ' . $this->frame->name . ' name=' . $nameNode->kind . ' argKinds=' . $argKinds
                 . ': args=' . (string)$argc
                 . ' argsOk=' . ($argsOk ? '1' : '0')
                 . ' reEmitSafe=' . ($reEmitSafe ? '1' : '0')
@@ -4668,7 +4718,7 @@ trait EmitLlvmObjects
                 // implementation in this site accepts an unpacked by-value array.
                 // This site-local gate removes the old module-wide veto while
                 // preserving the exact inline path for any by-ref/variadic name.
-                $unsafeNames = $this->dynamicMethodUnsupportedNames($methods);
+                $unsafeNames = $this->dynamicMethodUnsupportedNames($methods, $dp->scope);
                 if (\Compile\Stats::$on) {
                     \Compile\Stats::bump('dynamic.fallback.site_count', 1);
                     \Compile\Stats::bump('dynamic.fallback.site_candidates', \count($methods));
@@ -5333,13 +5383,15 @@ trait EmitLlvmObjects
         return $cd->display();
     }
 
+    /**
+     * `$obj::class` is `get_class($obj)`: an erased or polymorphic operand has no
+     * single static class, so the name comes off the object's class_id exactly as
+     * {@see biGetClass} reads it. Reading only the static type gave the empty
+     * string for every `object` / `mixed` / `object|string` operand.
+     */
     private function emitClassName(ClassName_ $n): string
     {
-        $cls = $this->displayClassName($n->operand->type->class ?? '');
-        $id = $this->pool->intern($cls);
-        $this->lastValue = $this->strLitId($id);
-        $this->lastValueType = 'ptr';
-        return '';
+        return $this->biGetClass([$n->operand]);
     }
 
     private function emitIsset(Isset_ $n): string

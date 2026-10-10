@@ -33,6 +33,9 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, string[]> class → the traits it uses directly (reflection: getTraits) */
+    public array $classTraitNames = [];
+
     /** @var array<string, true> the interfaces php itself declares (prelude /
      *  runtime library) — ReflectionClass::isInternal(). */
     public array $internalInterfaceNames = [];

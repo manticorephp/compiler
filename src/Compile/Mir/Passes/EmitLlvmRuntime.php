@@ -1977,6 +1977,7 @@ trait EmitLlvmRuntime
             if ($pm->allowsNull())      { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_ALLOWS_NULL; }
             if ($pm->variadic)          { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_VARIADIC; }
             if ($pm->promoted !== '')   { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_PROMOTED; }
+            if ($pm->byRef)             { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_BYREF; }
             if ($pm->typeHint !== '') {
                 $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_TYPE;
                 $tsym = '@.rmeta.pmt.' . $id . '.' . (string)$mi . '.' . (string)$pi;
@@ -2054,15 +2055,19 @@ trait EmitLlvmRuntime
             if ($typeFld !== 'null' || $getFld !== 'ptr null' || $setFld !== 'ptr null') {
                 $exSym = '@.rmeta.px.' . $id . '.' . (string)$i;
                 $tf = $typeFld === 'null' ? 'ptr null' : $typeFld;
-                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr } { '
-                       . $tf . ', ' . $getFld . ', ' . $setFld . " }\n";
+                // The 4th word: the set-hook-bypassing setter of a hooked property, else the plain one.
+                $rawSym = \Compile\Mir\Passes\ReflectSynth::propRawSetter($decl, $pm->name);
+                $rawFld = isset($this->sigs->paramTypes[$rawSym]) ? 'ptr @manticore_' . $this->mangle($rawSym) : $setFld;
+                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr, ptr } { '
+                       . $tf . ', ' . $getFld . ', ' . $setFld . ', ' . $rawFld . " }\n";
                 $extra = $exSym;
             }
             $ap = $this->attrTableFor($pm->attributes, $decl, 'p', $pm->name, '@.rmeta.pattr.' . $id . '.' . (string)$i);
             $defs .= $ap[0];
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
-                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly),
+                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly)
+                    | ($pm->hasDefault ? \Compile\MemoryAbi::RMETA_MEM_HAS_DEFAULT : 0),
                 'null', 0, 0, $extra,
                 $ap[1], $ap[2]);
             $i = $i + 1;
@@ -2641,10 +2646,20 @@ trait EmitLlvmRuntime
             if (isset($this->sigs->paramTypes[$ifacesFn])) {
                 $ifacesFnFld = 'ptr @manticore_' . $this->mangle($ifacesFn);
             }
+            $fileFnFld = 'ptr null';
+            $fileFn = \Compile\Mir\Passes\ReflectSynth::fileFn($cls->name);
+            if (isset($this->sigs->paramTypes[$fileFn])) {
+                $fileFnFld = 'ptr @manticore_' . $this->mangle($fileFn);
+            }
+            $docFnFld = 'ptr null';
+            $docFn = \Compile\Mir\Passes\ReflectSynth::docFn($cls->name);
+            if (isset($this->sigs->paramTypes[$docFn])) {
+                $docFnFld = 'ptr @manticore_' . $this->mangle($docFn);
+            }
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
-                $constsFnFld, $ifacesFnFld);
+                $constsFnFld, $ifacesFnFld, $fileFnFld, $docFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
                 $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld, $visitFld);

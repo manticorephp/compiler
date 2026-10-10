@@ -489,11 +489,11 @@ trait LowerClasses
                 }
             }
         }
-        foreach ($decl->traitAdaptations as $a) {
+        foreach ($this->effectiveAdaptations($decl) as $a) {
             if ($a->kind === 'as' && $a->alias !== '') {
                 $methodNames[$a->alias] = true;
                 // The alias is the same declaration under a second name.
-                $src = $this->traitAliasSource($decl, $a);
+                $src = $this->traitAliasSource($this->adaptScope[\spl_object_id($a)] ?? $decl, $a);
                 if ($src !== null) {
                     $am = $this->buildMethodMeta($decl->name, $src);
                     $am->name = $a->alias;
@@ -1130,9 +1130,9 @@ trait LowerClasses
         }
         // `m as alias` / `A::m as alias`: emit a renamed copy of the source
         // trait method (a visibility change without an alias is not enforced).
-        foreach ($decl->traitAdaptations as $a) {
+        foreach ($this->effectiveAdaptations($decl) as $a) {
             if ($a->kind !== 'as' || $a->alias === '') { continue; }
-            $src = $this->findTraitMethod($decl, \ltrim($a->trait, '\\'), $a->method);
+            $src = $this->findTraitMethod($this->adaptScope[\spl_object_id($a)] ?? $decl, \ltrim($a->trait, '\\'), $a->method);
             if ($src === null || isset($ownNames[$a->alias])) { continue; }
             $methods[] = new \Parser\Ast\MethodDecl(
                 $a->alias, $src->visibility, $src->isStatic, $src->isFinal, $src->isAbstract,

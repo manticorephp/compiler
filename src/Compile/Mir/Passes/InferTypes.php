@@ -1375,7 +1375,7 @@ final class InferTypes implements Pass
                 if (!$ok) {
                     $unusable[$key] = true;
                 } elseif (!isset($observed[$key])) {
-                    $observed[$key] = $vt;
+                    $observed[$key] = $vt->withoutShape();
                 } elseif (!$this->sameElemShape($observed[$key], $vt)) {
                     $unusable[$key] = true;
                 }
@@ -2296,6 +2296,29 @@ final class InferTypes implements Pass
     }
 
     /**
+     * The types the SLOTS hold at the end of a then-arm: a guard narrows a local
+     * in the arm (`$x instanceof C` → `obj<C>`) without touching its slot, so a
+     * local the arm never stored keeps the representation it entered with — the
+     * one an else-arm store must agree with at the merge.
+     * @param array<string,Type> $thenLocals @param array<string,Type> $narrowed @param array<string,Type> $saved
+     * @return array<string,Type>
+     */
+    private function unnarrowedSlots(array $thenLocals, array $narrowed, array $saved): array
+    {
+        $out = [];
+        foreach ($thenLocals as $name => $t) {
+            $slot = $t;
+            if (isset($narrowed[$name]) && isset($saved[$name])
+                && $t->exactString() === $narrowed[$name]->exactString()
+                && $t->exactString() !== $saved[$name]->exactString()) {
+                $slot = $saved[$name];
+            }
+            $out[$name] = $slot;
+        }
+        return $out;
+    }
+
+    /**
      * The inverse of {@see planMergeShadow}, for a promotion a LATER run no
      * longer needs. The plant is sticky (`declaredType`), but the arm types it
      * was planted on are not: `$t = tables(); $lh = $t[0];` beside `$lh =
@@ -2313,9 +2336,10 @@ final class InferTypes implements Pass
      * leaves a diverging if/else alone, and types each name answered here with
      * the union of its two arms: the slot leaves both raw.
      *
+     * @param array<string,Type> $thenSlots {@see unnarrowedSlots}
      * @return array<string,Type> name => its merged type past the if/else
      */
-    private function unplantAgreedBoxBacks(Block $then, Block $else): array
+    private function unplantAgreedBoxBacks(Block $then, Block $else, array $thenSlots): array
     {
         $out = [];
         $names = self::trailingBoxBackNames($then);
@@ -2331,6 +2355,9 @@ final class InferTypes implements Pass
             $tT = self::boxBackValueType($then->stmts[$ti]);
             $oT = self::boxBackValueType($else->stmts[$ei]);
             if ($tT->kind !== $oT->kind || $this->joinDisagrees($tT, $oT)) { continue; }
+            // The box-back reads the arm's NARROWED type; the slot it boxes holds
+            // the representation the arm entered with.
+            if (isset($thenSlots[$name]) && $this->joinDisagrees($thenSlots[$name], $oT)) { continue; }
             $then->stmts = self::withoutStmt($then->stmts, $ti);
             $else->stmts = self::withoutStmt($else->stmts, $ei);
             $out[$name] = $this->unionTypes($tT, $oT);
@@ -3139,6 +3166,9 @@ final class InferTypes implements Pass
                 && $this->unionTypes($a, $b)->kind === Type::KIND_CELL;
         }
         if ($a->kind === $b->kind) { return false; }
+        // A closure value and a closure literal's `obj<__closure_N>` handle are
+        // one env pointer.
+        if (\Compile\Mir\Ownership::isClosureValueType($a) && \Compile\Mir\Ownership::isClosureValueType($b)) { return false; }
         // An ERASED value (a bare-`array` result, an unknown receiver's return)
         // beside a scalar, a string, an object or a cell shares no raw word with
         // it either — the join typed `unknown` read a string as an array. The
@@ -3248,11 +3278,13 @@ final class InferTypes implements Pass
     }
 
     /** A kind a cell carries by its tag: a scalar, a string, an array, an
-     *  object. Two different ones in one slot share no raw word, and their
+     *  object or a closure ({@see EmitLlvmBuiltins::boxToCell} boxes it as an
+     *  object). Two different ones in one slot share no raw word, and their
      *  union is `unknown` — a type with no representation. */
     private function cellCarries(Type $t): bool
     {
-        return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ;
+        return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ
+            || $t->kind === Type::KIND_CLOSURE;
     }
 
     /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */

@@ -1552,15 +1552,17 @@ trait InferNodes
         $saved = $this->localTypes;
         // Flow-typing: narrow a local inside the then-branch from the guard.
         $this->narrowFromCond($node->cond);
+        $narrowed = $this->localTypes;
         $this->inferNode($node->then);
         $thenLocals = $this->localTypes;
+        $thenSlots = $this->unnarrowedSlots($thenLocals, $narrowed, $saved);
         // A branch that DIVERGES (ends in return/throw) never reaches the merge,
         // so its narrowed locals must not flow past the `if` — else a guard like
         // `if ($v instanceof C) { ...; return; }` leaves `$v` mistyped (non-cell)
         // for the fall-through, and a later cell op reads it raw → crash.
         $thenDiv = $this->blockDiverges($node->then);
         if ($node->else === null) {
-            $this->planMergeShadow($node, $thenLocals, $saved);
+            $this->planMergeShadow($node, $thenSlots, $saved);
             if ($thenDiv) {
                 // `if (NEG) return/throw;` — the fall-through is the NEGATION of
                 // the guard, so narrow as if the un-negated form held below
@@ -1579,9 +1581,9 @@ trait InferNodes
         /** @var array<string,Type> $agreed */
         $agreed = [];
         if (!$thenDiv && !$elseDiv) {
-            $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else);
+            $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else, $thenSlots);
         }
-        $this->planMergeShadow($node, $thenLocals, $elseLocals);
+        $this->planMergeShadow($node, $thenSlots, $elseLocals);
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
         elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }
         else {
