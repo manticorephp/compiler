@@ -5383,13 +5383,15 @@ trait EmitLlvmObjects
         return $cd->display();
     }
 
+    /**
+     * `$obj::class` is `get_class($obj)`: an erased or polymorphic operand has no
+     * single static class, so the name comes off the object's class_id exactly as
+     * {@see biGetClass} reads it. Reading only the static type gave the empty
+     * string for every `object` / `mixed` / `object|string` operand.
+     */
     private function emitClassName(ClassName_ $n): string
     {
-        $cls = $this->displayClassName($n->operand->type->class ?? '');
-        $id = $this->pool->intern($cls);
-        $this->lastValue = $this->strLitId($id);
-        $this->lastValueType = 'ptr';
-        return '';
+        return $this->biGetClass([$n->operand]);
     }
 
     private function emitIsset(Isset_ $n): string
