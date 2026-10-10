@@ -97,6 +97,7 @@ final class OwnershipFlow implements Pass
 
     // ── per function ───────────────────────────────────────────────
     private string $fnName = '';
+    private ?Node $fnBody = null;
     /** `MANTICORE_OWN_TRACE`, read once per run. */
     private string $traceWant = '';
     /** False for a function {@see \Compile\Debug::$ownFlowOnly} leaves out: it
@@ -228,6 +229,7 @@ final class OwnershipFlow implements Pass
     private function lowerFunction(FunctionDef $fn): void
     {
         $this->fnName = $fn->name;
+        $this->fnBody = $fn->body;
         $this->releases = self::bisectAdmits($fn->name);
         $this->trace = $this->traceWant !== '' && \str_contains($fn->name, $this->traceWant);
         $this->excluded = [];
@@ -267,6 +269,7 @@ final class OwnershipFlow implements Pass
         $this->erasedParams = [];
         $this->erasedCand = [];
         $this->erasedVeto = [];
+        $this->erasedConcrete = [];
         $this->erasedAliasOf = [];
         foreach ($fn->params as $p) {
             $this->erasedVeto[$p->name] = true;
@@ -765,6 +768,12 @@ final class OwnershipFlow implements Pass
         $cand = $this->erasedCand;
         $veto = $this->erasedVeto;
         $aliasOf = $this->erasedAliasOf;
+        // An alias of an erased array beside a concrete array store joins the
+        // one release class: left out, the alias is a scalar word and the
+        // concrete side an owned array, which no join can reconcile.
+        foreach ($aliasOf as $name => $unused) {
+            if (isset($this->erasedConcrete[$name])) { $cand[$name] = true; }
+        }
         $changed = true;
         while ($changed) {
             $changed = false;
@@ -794,6 +803,8 @@ final class OwnershipFlow implements Pass
     private array $erasedVeto = [];
     /** @var array<string, string[]> {@see scanErased}: name → the locals it aliases */
     private array $erasedAliasOf = [];
+    /** @var array<string, bool> {@see scanErased}: names a concrete array is stored to */
+    private array $erasedConcrete = [];
 
     /** The erased array local `$v` aliases for an erased-array local, or '' when
      *  `$v` is no such alias. */
@@ -811,6 +822,7 @@ final class OwnershipFlow implements Pass
         if ($k === Node::KIND_STORE_LOCAL) {
             $sl = self::asStoreLocal($n);
             $v = $sl->value;
+            if (InsertMemoryOps::slotStoredType($sl)->isArray()) { $this->erasedConcrete[$sl->name] = true; }
             if ($this->own->erasedArrayCall($v)) {
                 $this->erasedCand[$sl->name] = true;
             } elseif ($v->kind === Node::KIND_LOAD_LOCAL && $v->type->kind === Type::KIND_UNKNOWN
@@ -1241,11 +1253,11 @@ final class OwnershipFlow implements Pass
                 $this->noteOwnKey($val, $k);
             } else {
                 $et = $fe->array->type->element ?? Type::unknown();
-                // An erased element bound to a name the body keeps a CELL (a
-                // merge box-back re-tags it there): the slot holds that borrowed
+                // An erased element bound to a name the function keeps a CELL
+                // anywhere (a merge box-back re-tags it there): the slot holds that borrowed
                 // word as a cell, and the owned cell another path leaves meets
                 // it as a Borrow of the same class, not as a scalar.
-                if ($et->kind === Type::KIND_UNKNOWN && self::storesCell($fe->body, $val)) { $et = Type::cell(); }
+                if ($et->kind === Type::KIND_UNKNOWN && self::storesCell($this->fnBody ?? $fe->body, $val)) { $et = Type::cell(); }
                 $this->bindBorrow($lat, $id, $val, $et, true);
             }
         }
@@ -1274,6 +1286,10 @@ final class OwnershipFlow implements Pass
             // A string-keyed array hands its keys out as cells too (an int key
             // is a canonicalised numeric string, {@see InferNodes::inferForeach}).
             if ($kt->kind === Type::KIND_UNKNOWN || $kt->kind === Type::KIND_STRING) { $kt = Type::cell(); }
+            // An erased-element vec may be hashed at run time, so InferNodes::
+            // inferForeach hands its key out as a cell whatever key it records.
+            if ($at->isVec() && ($at->element === null || $at->element->kind === Type::KIND_CELL
+                || $at->element->kind === Type::KIND_UNKNOWN)) { $kt = Type::cell(); }
             // A generator's frame owns its key and drops it at the next yield:
             // the loop's key var takes a +1 of its own, as its value var does.
             // So does one bound from an iterator step that answers a cell (a
