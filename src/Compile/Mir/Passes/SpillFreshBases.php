@@ -2,6 +2,7 @@
 
 namespace Compile\Mir\Passes;
 
+use Compile\Mir\AllocationKind;
 use Compile\Mir\Block;
 use Compile\Mir\CondOwn;
 use Compile\Mir\LoadLocal;
@@ -1114,7 +1115,8 @@ final class SpillFreshBases
 
     /**
      * {@see consume} for one side of a comparison against `$other`. A string a
-     * cast MINTS (`(string)$int`, always on the heap) is the emitter's to free
+     * cast MINTS (`(string)$int`, on the heap unless ApplyMemoryMode stamped it
+     * Arena, which the loop's reset reclaims and a local must not hold) is the emitter's to free
      * when both sides are strings; against a cell or an erased value the compare
      * runs through the tagged table, which frees nothing — `(string)$i == $key`
      * over an `int|string` key kept the buffer. A local owns it there. A concat
@@ -1125,7 +1127,8 @@ final class SpillFreshBases
     {
         $ok = $other->type->kind;
         if ($v->type->kind === Type::KIND_STRING && ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN)) {
-            if ($v->kind === Node::KIND_CAST && $this->asCast($v)->operand->type->kind !== Type::KIND_STRING) {
+            if ($v->kind === Node::KIND_CAST && $v->allocKind !== AllocationKind::ARENA
+                && $this->asCast($v)->operand->type->kind !== Type::KIND_STRING) {
                 return $this->spill($v);
             }
         }
