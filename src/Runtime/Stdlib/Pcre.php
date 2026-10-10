@@ -59,6 +59,11 @@ final class __McPcreCache
     public static array $code = [];
     /** @var array<int, int> code => its idle match block ({@see __preg_md}) */
     public static array $idle = [];
+    /** @var array<int, int> code => 1 when the pattern has named groups, else 0 ({@see __preg_name_map}) */
+    public static array $named = [];
+    /** The idle match block of the pattern last used, kept out of the map: one slot, one compare. */
+    public static int $slotCode = 0;
+    public static int $slotMd = 0;
 }
 
 function __preg_compile(string $pattern): int
@@ -109,12 +114,22 @@ function __preg_compile(string $pattern): int
 function __preg_md(int $code, int $give): int
 {
     if ($give === 0) {
+        if (__McPcreCache::$slotCode === $code && __McPcreCache::$slotMd !== 0) {
+            $slot = __McPcreCache::$slotMd;
+            __McPcreCache::$slotMd = 0;
+            return $slot;
+        }
         $md = isset(__McPcreCache::$idle[$code]) ? __McPcreCache::$idle[$code] : 0;
         if ($md !== 0) {
             __McPcreCache::$idle[$code] = 0;
             return $md;
         }
         return \Runtime\Pcre\matchDataCreate($code, 0);
+    }
+    if (__McPcreCache::$slotMd === 0) {
+        __McPcreCache::$slotCode = $code;
+        __McPcreCache::$slotMd = $give;
+        return 0;
     }
     if (!isset(__McPcreCache::$idle[$code]) || __McPcreCache::$idle[$code] === 0) {
         __McPcreCache::$idle[$code] = $give;
@@ -256,14 +271,19 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
  */
 function __preg_name_map(int $code): array
 {
+    if ((__McPcreCache::$named[$code] ?? -1) === 0) {
+        return [];
+    }
     $buf = \Runtime\Libc\calloc(8, 1);
     // PCRE2_INFO_NAMECOUNT = 17, NAMEENTRYSIZE = 18, NAMETABLE = 19.
     \Runtime\Pcre\patternInfo($code, 17, $buf);
     $count = \peek_u32($buf, 0);
     if ($count <= 0) {
         \Runtime\Libc\free($buf);
+        __McPcreCache::$named[$code] = 0;
         return [];
     }
+    __McPcreCache::$named[$code] = 1;
     \Runtime\Pcre\patternInfo($code, 18, $buf);
     $size = \peek_u32($buf, 0);
     \Runtime\Pcre\patternInfo($code, 19, $buf);
@@ -641,6 +661,8 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
     $md = \__preg_md($code, 0);
     $out = "";
     $pos = 0;
+    // No `$N` / `\N` in the replacement: it is inserted as written.
+    $literal = \strcspn($replacement, '$\\') === \strlen($replacement);
     while ($pos <= $len) {
         if ($limit >= 0 && $count >= $limit) { break; }
         $m = \__preg_match_at($code, $md, $subject, $len, $pos);
@@ -648,13 +670,14 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
         $ms = $m[1];
         $me = $m[2];
         $out .= \substr($subject, $pos, $ms - $pos);         // text before the match
-        $out .= \__preg_expand($replacement, $subject, $m);  // the replacement
+        $out .= $literal ? $replacement : \__preg_expand($replacement, $subject, $m);  // the replacement
         $count = $count + 1;
         $next = \__preg_advance($ms, $me);
         if ($me === $ms) { $out .= \substr($subject, $ms, 1); }  // empty match: keep the char
         $pos = $next;
     }
     \__preg_md($code, $md);
+    if ($count === 0) { return $subject; }
     if ($pos < $len) { $out .= \substr($subject, $pos, $len - $pos); }
     return $out;
 }
