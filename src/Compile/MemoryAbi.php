@@ -639,6 +639,7 @@ final class MemoryAbi
     public const RMETA_PARAM_VARIADIC    = 4;
     public const RMETA_PARAM_PROMOTED    = 8;
     public const RMETA_PARAM_HAS_TYPE    = 16;
+    public const RMETA_PARAM_BYREF       = 32;
 
     public const RMETA_FLAG_FINAL     = 1;
     public const RMETA_FLAG_ABSTRACT  = 2;

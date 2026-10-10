@@ -1977,6 +1977,7 @@ trait EmitLlvmRuntime
             if ($pm->allowsNull())      { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_ALLOWS_NULL; }
             if ($pm->variadic)          { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_VARIADIC; }
             if ($pm->promoted !== '')   { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_PROMOTED; }
+            if ($pm->byRef)             { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_BYREF; }
             if ($pm->typeHint !== '') {
                 $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_TYPE;
                 $tsym = '@.rmeta.pmt.' . $id . '.' . (string)$mi . '.' . (string)$pi;

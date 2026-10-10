@@ -203,6 +203,20 @@ final class ReflectAnalysis
                 $p = $module->classes[$p]->parent;
             }
         }
+        // `getInterfaces()` builds a ReflectionClass for each interface BY NAME,
+        // so a reflected class drags its interfaces in, and the ones they extend.
+        // An interface has no ClassDef, only a name (and its ancestors in
+        // Module::$interfaceAncestors), which is all its registry entry needs.
+        foreach ($module->classes as $name => $cd) {
+            if (!isset($this->names[$name])) { continue; }
+            foreach ($cd->interfaces as $iface) {
+                $iface = \ltrim($iface, '\\');
+                $this->names[$iface] = true;
+                foreach ($module->interfaceAncestors[$iface] ?? [] as $anc) {
+                    $this->names[\ltrim($anc, '\\')] = true;
+                }
+            }
+        }
         if (!$this->descendants) { return; }
         // A root reached through an object: any subclass could be the runtime
         // class, so each needs its own block. Repeat until nothing new appears —
