@@ -2453,6 +2453,37 @@ final class LowerFromAst implements Pass
         return \substr($fqn, 0, $pos);
     }
 
+    /** @var array<int, \Parser\Ast\ClassDecl> adaptation (spl_object_id) → the declaration whose `use` block wrote it */
+    private array $adaptScope = [];
+
+    /**
+     * Every `as` / `insteadof` adaptation that applies to a declaration: its own,
+     * then those written inside the traits it uses, transitively. php flattens
+     * `class C { use B; }` with `trait B { use A { foo as doFoo; } }` so that C
+     * has `doFoo`; reading only the class's own block dropped it (symfony's
+     * MicroKernelTrait). {@see $adaptScope} remembers which declaration's `use`
+     * block holds each, because `foo` there names a method of A, not of B.
+     *
+     * @return \Parser\Ast\TraitAdaptation[]
+     */
+    private function effectiveAdaptations(\Parser\Ast\ClassDecl $decl): array
+    {
+        $out = [];
+        foreach ($decl->traitAdaptations as $a) {
+            $this->adaptScope[\spl_object_id($a)] = $decl;
+            $out[] = $a;
+        }
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->traitAdaptations as $a) {
+                $this->adaptScope[\spl_object_id($a)] = $td;
+                $out[] = $a;
+            }
+        }
+        return $out;
+    }
+
     /**
      * `insteadof` losers as a flat set keyed `<trait>::<method>` (a flat map,
      * NOT a nested array). `as` aliases are read off the TraitAdaptation objects
@@ -2464,7 +2495,7 @@ final class LowerFromAst implements Pass
     private function traitExclusions(\Parser\Ast\ClassDecl $decl): array
     {
         $excluded = [];
-        foreach ($decl->traitAdaptations as $a) {
+        foreach ($this->effectiveAdaptations($decl) as $a) {
             if ($a->kind !== 'insteadof') { continue; }
             foreach ($a->exclude as $ex) {
                 $excluded[\ltrim($ex, '\\') . '::' . $a->method] = true;
