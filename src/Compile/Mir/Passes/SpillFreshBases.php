@@ -73,6 +73,10 @@ final class SpillFreshBases
 
     private int $counter = 0;
 
+    /** Loops enclosing the node being visited; an Arena stamp inside one is
+     *  reclaimed by that loop's reset (ApplyMemoryMode demoted every other). */
+    private int $loopDepth = 0;
+
     /** @var array<string, bool> functions whose result is not a +1 (FFI, by-ref) */
     private array $notOwned = [];
 
@@ -567,6 +571,19 @@ final class SpillFreshBases
     private function visit(Node $n): void
     {
         $k = $n->kind;
+        if ($k === Node::KIND_WHILE || $k === Node::KIND_DOWHILE
+            || $k === Node::KIND_FOR || $k === Node::KIND_FOREACH) {
+            $this->loopDepth = $this->loopDepth + 1;
+            $this->visitNode($n);
+            $this->loopDepth = $this->loopDepth - 1;
+            return;
+        }
+        $this->visitNode($n);
+    }
+
+    private function visitNode(Node $n): void
+    {
+        $k = $n->kind;
         if ($k === Node::KIND_IF) {
             $i = $this->asIf($n);
             $mark = \count($this->pending);
@@ -603,7 +620,11 @@ final class SpillFreshBases
         }
         if ($k === Node::KIND_FOR) {
             $fo = $this->asFor($n);
-            if ($fo->init !== null) { $this->visit($fo->init); }
+            if ($fo->init !== null) {
+                $this->loopDepth = $this->loopDepth - 1;
+                $this->visit($fo->init);
+                $this->loopDepth = $this->loopDepth + 1;
+            }
             $made = [];
             $cond = $fo->cond;
             if ($cond !== null) {
@@ -618,7 +639,9 @@ final class SpillFreshBases
         }
         if ($k === Node::KIND_FOREACH) {
             $fe = $this->asForeach($n);
+            $this->loopDepth = $this->loopDepth - 1;
             $this->visit($fe->array);
+            $this->loopDepth = $this->loopDepth + 1;
             if (!$fe->byRef) {
                 $held = $this->heldKeys($fe->array);
                 if ($held !== [] && $this->esc->bodyMeets($fe->body, $held)) {
@@ -698,7 +721,7 @@ final class SpillFreshBases
         for ($i = 0; $i < $cnt; $i = $i + 1) {
             $a = $args[$i];
             if (isset($byRef[$i]) || isset($this->pinned[\spl_object_id($a)])) { continue; }
-            if ($a->allocKind === AllocationKind::ARENA) { continue; }
+            if ($this->loopDepth > 0 && $a->allocKind === AllocationKind::ARENA) { continue; }
             $t = $a->type->kind;
             $closure = $t === Type::KIND_CLOSURE || ($t === Type::KIND_OBJ && ($a->type->class ?? '') === 'Closure');
             if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure) { continue; }
@@ -1128,7 +1151,7 @@ final class SpillFreshBases
     {
         $ok = $other->type->kind;
         if ($v->type->kind === Type::KIND_STRING && ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN)) {
-            if ($v->kind === Node::KIND_CAST && $v->allocKind !== AllocationKind::ARENA
+            if ($v->kind === Node::KIND_CAST && !($this->loopDepth > 0 && $v->allocKind === AllocationKind::ARENA)
                 && $this->asCast($v)->operand->type->kind !== Type::KIND_STRING) {
                 return $this->spill($v);
             }
