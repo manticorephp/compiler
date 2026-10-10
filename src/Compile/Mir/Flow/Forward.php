@@ -116,6 +116,9 @@ final class Forward
     private array $finDepth = [];
     /** @var array<int, array<string, bool>> */
     private array $finLabels = [];
+    /** @var array<int, int> a finally's unique owner id, by depth: the depth is reused once a finally leaves the stack, and its deferred jumps outlive that */
+    private array $finId = [];
+    private int $finSeq = 0;
     /** @var array<string, bool> */
     private array $labelScan = [];
 
@@ -172,6 +175,8 @@ final class Forward
         $this->thrHas = [];
         $this->finDepth = [];
         $this->finLabels = [];
+        $this->finId = [];
+        $this->finSeq = 0;
         $this->labelScan = [];
         $this->defKind = [];
         $this->defAt = [];
@@ -749,8 +754,12 @@ final class Forward
     {
         $fin = $n->hasFinally;
         $ff = -1;
+        $owner = -1;
         if ($fin) {
             $ff = \count($this->finDepth);
+            $owner = $this->finSeq;
+            $this->finSeq = $owner + 1;
+            $this->finId[$ff] = $owner;
             $this->finDepth[$ff] = \count($this->frSwitch);
             $this->labelScan = [];
             $this->labelsIn($n);
@@ -791,6 +800,7 @@ final class Forward
         $thrownHas = \array_pop($this->thrHas);
         \array_pop($this->finDepth);
         \array_pop($this->finLabels);
+        \array_pop($this->finId);
         $finIn = $norm;
         if ($thrownHas) {
             $fKeys[] = $this->edge('finally', $n, null, -1, $thrown, self::deadState());
@@ -798,8 +808,8 @@ final class Forward
         }
         /** @var array<int, int> $mine */
         $mine = [];
-        foreach ($this->defOwner as $d => $owner) {
-            if ($owner !== $ff) { continue; }
+        foreach ($this->defOwner as $d => $defOwner) {
+            if ($defOwner !== $owner) { continue; }
             $mine[] = $d;
             $at = $this->defAt[$d];
             $finIn = $this->joinOpt($finIn, $this->defState[$d]);
@@ -855,7 +865,7 @@ final class Forward
                 $this->defTarget[$d] = $target;
                 $this->defLabel[$d] = $label;
                 $this->defState[$d] = $s;
-                $this->defOwner[$d] = $f;
+                $this->defOwner[$d] = $this->finId[$f];
                 return;
             }
         }
