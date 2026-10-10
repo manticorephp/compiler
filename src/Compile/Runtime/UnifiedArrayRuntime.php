@@ -162,6 +162,9 @@ final class UnifiedArrayRuntime
         $this->emitUnshiftAll();
         $this->emitImplode();
         $this->emitImplodeInt();
+        $this->emitInArrayStr();
+        $this->emitInArrayWord();
+        $this->emitImplodeFloat();
         $this->emitIssetInt();
         $this->emitIssetStr();
         $this->emitLookupInt();
@@ -4722,6 +4725,331 @@ final class UnifiedArrayRuntime
         $done->store(Value::int(Type::i8(), 0), $done->gep(Type::i8(), $buf, [$offF]));
         $done->call('__mir_str_set_len', Type::void(), [$buf, $offF]);
         $done->ret($buf);
+    }
+
+    /**
+     * `__mir_array_in_str(arr, needle) -> i1` — strict `in_array` of a string
+     * over a string vec. One linear scan with the element loaded INLINE (packed
+     * slot / hashed value, mode and the cell-payload mask chosen once) and the
+     * compare done as pointer, header length, then bytes — no per-element
+     * retain/release of the element, no `__mir_str_eq_ns` call chain. A null
+     * element or needle matches only another null (the same word), as
+     * `__mir_str_eq_ns` does.
+     */
+    private function emitInArrayStr(): void
+    {
+        $fn = $this->module->func('__mir_array_in_str', Type::i1());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $needle = $fn->param(Type::i64(), 'needle');
+        $e = $fn->block('entry');
+        $miss = $fn->block('ia_miss');
+        $hit = $fn->block('ia_hit');
+        $init = $fn->block('ia_init');
+        $nl0 = $fn->block('ia_nl0');
+        $nl1 = $fn->block('ia_nl1');
+        $go = $fn->block('ia_go');
+        $head = $fn->block('ia_head');
+        $body = $fn->block('ia_body');
+        $c1 = $fn->block('ia_c1');
+        $c2 = $fn->block('ia_c2');
+        $c3 = $fn->block('ia_c3');
+        $next = $fn->block('ia_next');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $miss, $init);
+        $miss->ret(Value::int(Type::i1(), 0));
+        $hit->ret(Value::int(Type::i1(), 1));
+
+        $len = $init->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $flags = $init->load(Type::i64(), $this->hdr($init, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        // A cell-element buffer stores tagged words: the payload is the low 48
+        // bits (what `__mir_elem_untag` strips); a raw buffer is used as is.
+        $isCell = $init->icmp('eq', $this->elemHint($init, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $mask = $init->select($isCell, Value::int(Type::i64(), 281474976710655), Value::int(Type::i64(), -1));
+        $nlSlot = $init->alloca(Type::i64(), 'ia_nlen');
+        $iSlot = $init->alloca(Type::i64(), 'ia_i');
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        $init->brIf($init->icmp('eq', $needle, Value::int(Type::i64(), 0)), $nl0, $nl1);
+        $nl0->store(Value::int(Type::i64(), 0), $nlSlot);
+        $nl0->br($go);
+        $np = $nl1->inttoptr($needle, Type::ptr());
+        $nl1->store($nl1->call('__mir_strlen', Type::i64(), [$np]), $nlSlot);
+        $nl1->br($go);
+        $go->br($head);
+
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
+        $slot = $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($i, $stride))]);
+        $p = $body->and_($body->load(Type::i64(), $slot), $mask);
+        $body->brIf($body->icmp('eq', $p, $needle), $hit, $c1);
+        $anyNull = $c1->or_(
+            $c1->icmp('eq', $p, Value::int(Type::i64(), 0)),
+            $c1->icmp('eq', $needle, Value::int(Type::i64(), 0)),
+        );
+        $c1->brIf($anyNull, $next, $c2);
+        $pp = $c2->inttoptr($p, Type::ptr());
+        $pl = $c2->call('__mir_strlen', Type::i64(), [$pp]);
+        $nlen = $c2->load(Type::i64(), $nlSlot);
+        $c2->brIf($c2->icmp('eq', $pl, $nlen), $c3, $next);
+        $np2 = $c3->inttoptr($needle, Type::ptr());
+        $pp3 = $c3->inttoptr($p, Type::ptr());
+        $cmp = $c3->call('memcmp', Type::i32(), [$pp3, $np2, $c3->load(Type::i64(), $nlSlot)]);
+        $c3->brIf($c3->icmp('eq', $cmp, Value::int(Type::i32(), 0)), $hit, $next);
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+    }
+
+    /**
+     * `__mir_array_implode_float(sep, arr, fallback) -> ptr` — join RAW-float
+     * elements. A float whose `%.14G` form is plain digits — an integral or
+     * `.5` value below 1e13, which is exactly what fits the 14 significant
+     * digits — is written straight into the result: the integer part through
+     * the shared int formatter, then `.5`. Anything else (fraction with other
+     * digits, huge, non-finite, `-0`) goes through `__mir_float_to_str` and is
+     * copied in, so the text is the one `echo` prints. A buffer that is not a
+     * raw-float one (`fallback` is `__mir_array_implode_cell`) is joined there.
+     *
+     * The buffer holds `len * (seplen + 16) + 1` bytes — the widest fast-path
+     * element is 16 — and a slow element regrows it to keep that bound for the
+     * elements still to come, so the fast path never checks capacity.
+     */
+    private function emitImplodeFloat(): void
+    {
+        $fn = $this->module->func('__mir_array_implode_float', Type::ptr());
+        $sep = $fn->param(Type::ptr(), 'sep');
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $fb = $fn->param(Type::ptr(), 'fb');
+        $e = $fn->block('entry');
+        $empty = $fn->block('if_empty');
+        $chk = $fn->block('if_chk');
+        $fall = $fn->block('if_fall');
+        $init = $fn->block('if_init');
+        $head = $fn->block('if_head');
+        $body = $fn->block('if_body');
+        $fcheck = $fn->block('if_fcheck');
+        $fast = $fn->block('if_fast');
+        $fneg = $fn->block('if_fneg');
+        $fdig = $fn->block('if_fdig');
+        $fhalf = $fn->block('if_fhalf');
+        $fdone = $fn->block('if_fdone');
+        $slow = $fn->block('if_slow');
+        $grow = $fn->block('if_grow');
+        $scopy = $fn->block('if_scopy');
+        $next = $fn->block('if_next');
+        $done = $fn->block('if_done');
+
+        $len = $e->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $e->brIf($e->icmp('sle', $len, Value::int(Type::i64(), 0)), $empty, $chk);
+        $eb = $empty->call('__mir_str_alloc', Type::ptr(), [Value::int(Type::i64(), 1)]);
+        $empty->store(Value::int(Type::i8(), 0), $eb);
+        $empty->ret($eb);
+
+        $flags = $chk->load(Type::i64(), $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $hint = $chk->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $chk->brIf($chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_FLOAT)), $init, $fall);
+        $fall->ret($fall->callIndirect($fb, Type::ptr(), [Type::ptr(), Type::ptr()], [$sep, $arr]));
+
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        $seplen = $init->call('__mir_strlen', Type::i64(), [$sep]);
+        $per = $init->add($seplen, Value::int(Type::i64(), 16));
+        $cap0 = $init->add($init->mul($len, $per), Value::int(Type::i64(), 1));
+        $buf0 = $init->call('__mir_str_alloc', Type::ptr(), [$cap0]);
+        $bufSlot = $init->alloca(Type::ptr(), 'if_buf');
+        $capSlot = $init->alloca(Type::i64(), 'if_cap');
+        $wSlot = $init->alloca(Type::i64(), 'if_w');
+        $iSlot = $init->alloca(Type::i64(), 'if_i');
+        $init->store($buf0, $bufSlot);
+        $init->store($cap0, $capSlot);
+        $init->store(Value::int(Type::i64(), 0), $wSlot);
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        $init->br($head);
+
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $done, $body);
+
+        // The separator goes in first (not before element 0); capacity for it
+        // is part of the per-element bound, so no check.
+        $isFirst = $body->icmp('eq', $i, Value::int(Type::i64(), 0));
+        $sepn = $body->select($isFirst, Value::int(Type::i64(), 0), $seplen);
+        $w0 = $body->load(Type::i64(), $wSlot);
+        $b0 = $body->load(Type::ptr(), $bufSlot);
+        $body->call('memcpy', Type::ptr(), [$body->gep(Type::i8(), $b0, [$w0]), $sep, $sepn]);
+        $w1 = $body->add($w0, $sepn);
+        $body->store($w1, $wSlot);
+        $word = $body->load(Type::i64(), $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($i, $stride))]));
+        $d = $body->bitcast($word, Type::f64());
+        $isNeg = $body->icmp('slt', $word, Value::int(Type::i64(), 0));
+        $a = $body->select($isNeg, $body->fsub(Value::float(Type::f64(), 0.0), $d), $d);
+        // `olt` is false for NaN and for INF, which keeps both off the fast path
+        // before the conversions below see them.
+        $body->brIf($body->fcmp('olt', $a, Value::float(Type::f64(), 1.0e13)), $fcheck, $slow);
+
+        $w2 = $fcheck->fmul($a, Value::float(Type::f64(), 2.0));
+        $iw = $fcheck->fptosi($w2, Type::i64());
+        $exact = $fcheck->fcmp('oeq', $fcheck->sitofp($iw, Type::f64()), $w2);
+        // "-0" (and a negative that rounds to it) is not the digits "0".
+        $negZero = $fcheck->and_($isNeg, $fcheck->icmp('eq', $iw, Value::int(Type::i64(), 0)));
+        $okFast = $fcheck->and_($exact, $fcheck->icmp('eq', $negZero, Value::int(Type::i1(), 0)));
+        $fcheck->brIf($okFast, $fast, $slow);
+
+        $ip = $fast->ashr($iw, Value::int(Type::i64(), 1));
+        $half = $fast->and_($iw, Value::int(Type::i64(), 1));
+        $wf = $fast->load(Type::i64(), $wSlot);
+        $bf = $fast->load(Type::ptr(), $bufSlot);
+        $fast->brIf($isNeg, $fneg, $fdig);
+        $fneg->store(Value::int(Type::i8(), 45), $fneg->gep(Type::i8(), $bf, [$wf]));
+        $fneg->store($fneg->add($wf, Value::int(Type::i64(), 1)), $wSlot);
+        $fneg->br($fdig);
+        $wd = $fdig->load(Type::i64(), $wSlot);
+        $nd = $fdig->call('__mir_int_len', Type::i64(), [$ip]);
+        $fdig->call('__mir_int_fmt', Type::void(), [$bf, $wd, $ip]);
+        $wd2 = $fdig->add($wd, $nd);
+        $fdig->store($wd2, $wSlot);
+        $fdig->brIf($fdig->icmp('ne', $half, Value::int(Type::i64(), 0)), $fhalf, $fdone);
+        $dot = $fhalf->gep(Type::i8(), $bf, [$wd2]);
+        $fhalf->store(Value::int(Type::i8(), 46), $dot);
+        $fhalf->store(Value::int(Type::i8(), 53), $fhalf->gep(Type::i8(), $bf, [$fhalf->add($wd2, Value::int(Type::i64(), 1))]));
+        $fhalf->store($fhalf->add($wd2, Value::int(Type::i64(), 2)), $wSlot);
+        $fhalf->br($next);
+        $fdone->br($next);
+
+        $str = $slow->call('__mir_float_to_str', Type::ptr(), [$d]);
+        $sl = $slow->call('__mir_strlen', Type::i64(), [$str]);
+        $ws = $slow->load(Type::i64(), $wSlot);
+        $cap = $slow->load(Type::i64(), $capSlot);
+        $left = $slow->sub($slow->sub($len, $i), Value::int(Type::i64(), 1));
+        $need = $slow->add(
+            $slow->add($ws, $sl),
+            $slow->add($slow->mul($left, $per), Value::int(Type::i64(), 1)),
+        );
+        $slow->brIf($slow->icmp('ugt', $need, $cap), $grow, $scopy);
+        $nbuf = $grow->call('__mir_str_alloc', Type::ptr(), [$need]);
+        $obuf = $grow->load(Type::ptr(), $bufSlot);
+        $grow->call('memcpy', Type::ptr(), [$nbuf, $obuf, $ws]);
+        $grow->call('__mir_rc_release_str', Type::void(), [$obuf]);
+        $grow->store($nbuf, $bufSlot);
+        $grow->store($need, $capSlot);
+        $grow->br($scopy);
+        $bs = $scopy->load(Type::ptr(), $bufSlot);
+        $scopy->call('memcpy', Type::ptr(), [$scopy->gep(Type::i8(), $bs, [$ws]), $str, $sl]);
+        $scopy->store($scopy->add($ws, $sl), $wSlot);
+        $scopy->call('__mir_rc_release_str', Type::void(), [$str]);
+        $scopy->br($next);
+
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+
+        $wend = $done->load(Type::i64(), $wSlot);
+        $bend = $done->load(Type::ptr(), $bufSlot);
+        $done->store(Value::int(Type::i8(), 0), $done->gep(Type::i8(), $bend, [$wend]));
+        $done->call('__mir_str_set_len', Type::void(), [$bend, $wend]);
+        $done->ret($bend);
+    }
+
+    /**
+     * `__mir_array_in_word(arr, needle, kind, isFloat) -> i1` — `in_array` of an
+     * int / float / bool over a vec of the same kind. `kind` is the element
+     * hint code the static type promises. A buffer carrying exactly that hint
+     * is read raw (packed slot or hashed value, stride chosen once); any other
+     * buffer — a cellified one — has each element unboxed by `kind` first, as a
+     * foreach over the same type does. Integers and bools compare as words; a
+     * float compares as a double, so `NAN` matches nothing and `0.0 == -0.0`.
+     */
+    private function emitInArrayWord(): void
+    {
+        $fn = $this->module->func('__mir_array_in_word', Type::i1());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $needle = $fn->param(Type::i64(), 'needle');
+        $kind = $fn->param(Type::i64(), 'kind');
+        $isF = $fn->param(Type::i64(), 'isf');
+        $e = $fn->block('entry');
+        $miss = $fn->block('iw_miss');
+        $hit = $fn->block('iw_hit');
+        $init = $fn->block('iw_init');
+        $head = $fn->block('iw_head');
+        $body = $fn->block('iw_body');
+        $slow = $fn->block('iw_slow');
+        $cmp = $fn->block('iw_cmp');
+        $fcmp = $fn->block('iw_fcmp');
+        $icmp = $fn->block('iw_icmp');
+        $next = $fn->block('iw_next');
+        $chunkSel = $fn->block('iw_chunk');
+        $iHead = $fn->block('iw_ihead');
+        $iBody = $fn->block('iw_ibody');
+        $iNext = $fn->block('iw_inext');
+        $fHead = $fn->block('iw_fhead');
+        $fBody = $fn->block('iw_fbody');
+        $fNext = $fn->block('iw_fnext');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $miss, $init);
+        $miss->ret(Value::int(Type::i1(), 0));
+        $hit->ret(Value::int(Type::i1(), 1));
+
+        $len = $init->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $flags = $init->load(Type::i64(), $this->hdr($init, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $ishash = $init->icmp('ne', $this->hashedBit($init, $flags), Value::int(Type::i64(), 0));
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        $hint = $init->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $raw = $init->icmp('eq', $hint, $kind);
+        $nd = $init->bitcast($needle, Type::f64());
+        $iSlot = $init->alloca(Type::i64(), 'iw_i');
+        $init->store(Value::int(Type::i64(), 0), $iSlot);
+        // A raw PACKED buffer is swept eight words at a time with no branch
+        // inside the group, which LLVM turns into vector compares; only the
+        // group result is tested. The tail (and every other buffer shape) takes
+        // the one-element loop below.
+        $packedRaw = $init->and_($raw, $init->icmp('eq', $ishash, Value::int(Type::i1(), 0)));
+        $init->brIf($packedRaw, $chunkSel, $head);
+        $chunkSel->brIf($chunkSel->icmp('ne', $isF, Value::int(Type::i64(), 0)), $fHead, $iHead);
+        foreach ([[$iHead, $iBody, $iNext, false], [$fHead, $fBody, $fNext, true]] as [$ch, $cb, $cn, $isFloat]) {
+            $ci = $ch->load(Type::i64(), $iSlot);
+            $ni = $ch->add($ci, Value::int(Type::i64(), 8));
+            $ch->brIf($ch->icmp('sgt', $ni, $len), $head, $cb);
+            $any = null;
+            for ($k = 0; $k < 8; $k++) {
+                $slotK = $cb->gep(Type::i8(), $arr, [$cb->add(
+                    Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+                    $cb->mul($cb->add($ci, Value::int(Type::i64(), $k)), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)),
+                )]);
+                $wk = $cb->load(Type::i64(), $slotK);
+                $eqk = $isFloat
+                    ? $cb->fcmp('oeq', $cb->bitcast($wk, Type::f64()), $nd)
+                    : $cb->icmp('eq', $wk, $needle);
+                $any = $any === null ? $eqk : $cb->or_($any, $eqk);
+            }
+            $cb->brIf($any, $hit, $cn);
+            $cn->store($ni, $iSlot);
+            $cn->br($ch);
+        }
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $miss, $body);
+        $w = $body->load(Type::i64(), $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($i, $stride))]));
+        $body->brIf($raw, $cmp, $slow);
+        $u = $slow->call('__mir_elem_untag_kind', Type::i64(), [$arr, $w, $kind]);
+        $slow->br($cmp);
+        $phi = $cmp->phi(Type::i64());
+        $phi->addIncoming($w, $body);
+        $phi->addIncoming($u, $slow);
+        $v = $phi->value();
+        $cmp->brIf($cmp->icmp('ne', $isF, Value::int(Type::i64(), 0)), $fcmp, $icmp);
+        $fcmp->brIf($fcmp->fcmp('oeq', $fcmp->bitcast($v, Type::f64()), $nd), $hit, $next);
+        $icmp->brIf($icmp->icmp('eq', $v, $needle), $hit, $next);
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
     }
 
     /**

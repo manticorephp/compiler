@@ -746,6 +746,23 @@ final class InlineClosures implements Pass
     }
 
     /**
+     * Which native element scan answers `in_array($needle, $elem[], <literal strict>)`,
+     * or '' when none does. Both sides must be the SAME scalar kind: `str`
+     * (strict only — a loose string compare is numeric when both look numeric),
+     * and `int` / `float` / `bool`, where `==` and `===` agree because the types
+     * do. Anything mixed stays on the synthesized loop, which owns the coercions.
+     */
+    public static function nativeScanShape(Type $needle, ?Type $elem, bool $strict): string
+    {
+        if ($elem === null || $needle->kind !== $elem->kind) { return ''; }
+        if ($needle->kind === Type::KIND_STRING) { return $strict ? 'str' : ''; }
+        if ($needle->kind === Type::KIND_INT) { return 'int'; }
+        if ($needle->kind === Type::KIND_FLOAT) { return 'float'; }
+        if ($needle->kind === Type::KIND_BOOL) { return 'bool'; }
+        return '';
+    }
+
+    /**
      * `in_array(n,h[,strict])` / `array_search(n,h[,strict])` over a CONCRETELY-
      * typed haystack → a synthesized per-call loop fn (monomorphized to the
      * call's needle/element types, so the element compare is native — no .o
@@ -765,6 +782,14 @@ final class InlineClosures implements Pass
         if (\count($args) >= 3 && $args[2]->kind === Node::KIND_BOOL_CONST) {
             $a2 = $this->node($args[2]);
             if ($a2->kind === Node::KIND_BOOL_CONST) { $strict = $a2->value; }
+        }
+        // A search the runtime can answer with one scan over the element words
+        // ({@see nativeScanShape}) is emitted as that scan by the builtin; the
+        // synthesis below is for the shapes it does not cover.
+        $literal = \count($args) < 3 || $args[2]->kind === Node::KIND_BOOL_CONST;
+        if ($isInArray && $literal
+            && self::nativeScanShape($needle->type, $haystack->type->element ?? null, $strict) !== '') {
+            return null;
         }
         $op = $strict ? '===' : '==';
         $u = Type::unknown();

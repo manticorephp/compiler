@@ -367,6 +367,11 @@ trait EmitLlvmBuiltins
         }
         if ($name === 'print_r' && \count($args) >= 1) { return $this->biPrintR($args); }
         if ($name === 'implode' || $name === 'join')  { return $this->biImplode($args); }
+        if ($name === 'in_array') {
+            $shape = $this->inArrayShape($args);
+            if ($shape === 'str') { return $this->biInArrayStr($args); }
+            if ($shape !== '') { return $this->biInArrayWord($args, $shape); }
+        }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
         if ($name === 'printf')                       { return $this->biSprintf($args, true); }
         if ($name === '__mc_fmt_int')                 { return $this->biFmt1($args, 'i'); }
@@ -5161,6 +5166,78 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * The native scan {@see InlineClosures::nativeScanShape} picks for this
+     * call, or '' — also '' when the third argument is not a literal, since the
+     * strictness then is not known here.
+     *
+     * @param Node[] $args
+     */
+    private function inArrayShape(array $args): string
+    {
+        $strict = false;
+        if (\count($args) === 3) {
+            if ($args[2]->kind !== Node::KIND_BOOL_CONST) { return ''; }
+            $strict = $args[2]->value === true;
+        } elseif (\count($args) !== 2) {
+            return '';
+        }
+        if ($args[1]->type->kind !== Type::KIND_ARRAY) { return ''; }
+        return InlineClosures::nativeScanShape($args[0]->type, $args[1]->type->element ?? null, $strict);
+    }
+
+    /**
+     * Strict `in_array` of a string over a string vec → `__mir_array_in_str`.
+     *
+     * @param Node[] $args
+     */
+    private function biInArrayStr(array $args): string
+    {
+        $this->rt->needsConcat = true;   // pulls __mir_strlen
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $needle = $this->lastValue;
+        $out .= $this->emitArrPtrArg($args[1]);
+        $arr = $this->lastValue;
+        $nw = $this->ssa->allocReg();
+        $out .= '  ' . $nw . ' = ptrtoint ptr ' . $needle . " to i64\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_in_str(ptr ' . $arr . ', i64 ' . $nw . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        $out .= $this->freeStrTemp($args[0], $needle);
+        return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `in_array` of an int / float / bool over a vec of the same kind →
+     * `__mir_array_in_word`. The needle travels as its 64-bit word (a float as
+     * its bits); the element kind is the hint code the buffer is read by.
+     *
+     * @param Node[] $args
+     */
+    private function biInArrayWord(array $args, string $shape): string
+    {
+        $out = $this->emitNode($args[0]);
+        if ($shape === 'float') {
+            $out .= $this->coerceTo('double');
+            $w = $this->ssa->allocReg();
+            $out .= '  ' . $w . ' = bitcast double ' . $this->lastValue . " to i64\n";
+        } else {
+            $out .= $this->coerceToI64();
+            $w = $this->lastValue;
+        }
+        $out .= $this->emitArrPtrArg($args[1]);
+        $arr = $this->lastValue;
+        $hint = $this->elementHintCodeForType($args[0]->type);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_in_word(ptr ' . $arr . ', i64 ' . $w
+              . ', i64 ' . (string)$hint . ', i64 ' . ($shape === 'float' ? '1' : '0') . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        return $this->finishI64($out, $z);
+    }
+
     /** @param Node[] $args  implode($sep, $vec) / join. */
     private function biImplode(array $args): string
     {
@@ -5209,8 +5286,11 @@ trait EmitLlvmBuiltins
             $vec = $this->lastValue;
             $this->rt->needsTaggedToStr = true;
             $this->rt->needsImplodeCell = true;
+            $this->rt->needsIntStr = true;
+            $this->rt->needsStrRc = true;
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_cell(ptr ' . $sep . ', ptr ' . $vec . ")\n";
+            $out .= '  ' . $reg . ' = call ptr @__mir_array_implode_float(ptr ' . $sep . ', ptr ' . $vec
+                . ', ptr @__mir_array_implode_cell)' . "\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'ptr';
             return $out;
