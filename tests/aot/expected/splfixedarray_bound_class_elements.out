@@ -1,0 +1,16 @@
+1 b3 6
+20
+50
+7 14
+4 50
+0:1 1:50 2:7 3:4 
+OutOfBoundsException: Index invalid or out of range
+OutOfBoundsException: Index invalid or out of range
+-- override
+101 102
+0:1 1:2 
+-- shared object
+10 10
+10
+-- clone is deep for the buffer, shallow for the objects
+1 99 50

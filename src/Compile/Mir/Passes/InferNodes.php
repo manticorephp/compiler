@@ -2466,8 +2466,37 @@ trait InferNodes
             // named). A binding that would change it stays on the call path.
             $bound = $this->genericReturnType($at->class, 'offsetGet', $at);
             if ($bound !== null && $bound->kind === $node->type->kind) { $node->type = $bound; }
+            // A SplFixedArray bound to a class (`@extends SplFixedArray<Token>`):
+            // the buffer holds the object's tagged cell word, and the emitter
+            // strips it to the pointer, so the read is the class — a direct
+            // property load and call instead of a name lookup on a cell.
+            elseif ($bound !== null && $bound->kind === Type::KIND_OBJ && ($bound->class ?? '') !== ''
+                && !isset($this->enums[$bound->class])
+                && ($node->type->kind === Type::KIND_CELL || $node->type->kind === Type::KIND_UNKNOWN)
+                && $this->fixedArrayGetPlain($at->class)) {
+                $node->type = $bound;
+            }
         }
         return $node->type;
+    }
+
+    /**
+     * Whether `$cls` and every class below it read `$o[$i]` through the
+     * prelude's own SplFixedArray::offsetGet — the only reader the emitter
+     * unboxes to the bound class ({@see EmitLlvmArrays::fixedArrayIsPlain}).
+     */
+    private function fixedArrayGetPlain(string $cls): bool
+    {
+        if ($cls === '' || !isset($this->classes[$cls]) || !$this->classImplementsT($cls, 'SplFixedArray')) { return false; }
+        if (!isset($this->fixedArrayGetPlainMemo[$cls])) {
+            $plain = true;
+            foreach ($this->classes as $sub) {
+                if ($this->classImplementsT($sub->name, $cls)
+                    && $this->resolveMethodClass($sub->name, 'offsetGet') !== 'SplFixedArray') { $plain = false; break; }
+            }
+            $this->fixedArrayGetPlainMemo[$cls] = $plain;
+        }
+        return $this->fixedArrayGetPlainMemo[$cls];
     }
 
     private function inferStoreElement(StoreElement $node): Type

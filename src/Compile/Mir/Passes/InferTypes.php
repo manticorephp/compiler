@@ -832,6 +832,9 @@ final class InferTypes implements Pass
 
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
+
+    /** @var array<string, bool> class → no class at or below it reads `offsetGet` through anything but SplFixedArray's own */
+    private array $fixedArrayGetPlainMemo = [];
     /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
     private array $interfaceAncestors = [];
 

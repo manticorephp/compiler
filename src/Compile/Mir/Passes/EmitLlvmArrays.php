@@ -268,14 +268,21 @@ trait EmitLlvmArrays
         // `$obj[$k]` on an ArrayAccess object → `$obj->offsetGet($k)`.
         if ($aa->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
-            $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$this->keyAsWritten($aa->array, $aa->index)], $n->type);
+            // A bound SplFixedArray<Class> read is typed the class
+            // ({@see InferNodes::inferArrayAccess}); the call and the inline
+            // load both answer the CELL word, which is unboxed to the pointer.
+            $wantObj = $n->type->kind === Type::KIND_OBJ && $this->fixedArrayIsPlain($aa);
+            $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$this->keyAsWritten($aa->array, $aa->index)], $wantObj ? Type::cell() : $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
-            if ($fast !== null) { return $fast; }
+            if ($fast !== null) { return $wantObj ? $fast . $this->unboxFixedElemObj() : $fast; }
             $fast = $this->emitNbufGet($aa, $mc);
             if ($fast !== null) { return $fast; }
             $fast = $this->emitHmapCall($mc, true);
             if ($fast !== null) { return $fast; }
-            if ($this->fixedArrayIsPlain($aa)) { return $this->emitFixedArrayCallBorrow($mc); }
+            if ($this->fixedArrayIsPlain($aa)) {
+                $borrow = $this->emitFixedArrayCallBorrow($mc);
+                return $wantObj ? $borrow . $this->unboxFixedElemObj() : $borrow;
+            }
             return $this->emitMethodCall($mc);
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
@@ -375,6 +382,29 @@ trait EmitLlvmArrays
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /**
+     * The cell word in lastValue as the object POINTER it carries: the payload
+     * when the tag is OBJECT, else null. The element of a SplFixedArray bound to
+     * a class is that class's cell, boxed by `offsetSet`.
+     */
+    private function unboxFixedElemObj(): string
+    {
+        $w = $this->lastValue;
+        $m = $this->ssa->allocReg();
+        $out = '  ' . $m . ' = and i64 ' . $w . ", 281474976710655\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $w . ", " . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n";
+        $tag = $this->ssa->allocReg();
+        $out .= '  ' . $tag . ' = and i64 ' . $sh . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_OBJ . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = select i1 ' . $isObj . ', i64 ' . $m . ", i64 0\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
