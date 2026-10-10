@@ -835,6 +835,9 @@ final class InferTypes implements Pass
 
     /** @var array<string, bool> class → no class at or below it reads `offsetGet` through anything but SplFixedArray's own */
     private array $fixedArrayGetPlainMemo = [];
+
+    /** @var array<string, bool> class → no class at or below it overrides getIterator */
+    private array $fixedArrayIterPlainMemo = [];
     /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
     private array $interfaceAncestors = [];
 
