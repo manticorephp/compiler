@@ -1632,8 +1632,7 @@ trait EmitLlvmCalls
                 if (!$known) {
                     throw new \RuntimeException('spread into a dynamic callable of unknown arity is unsupported');
                 }
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadOperand($a->operand);
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 // Declared ARGUMENT arity — the captures are not call slots.
@@ -3345,6 +3344,17 @@ trait EmitLlvmCalls
     }
 
     /**
+     * Emit a `...$arr` operand as the array POINTER the fill helpers read. A
+     * CELL operand (a foreach value of an erased array, a `mixed` local) is a
+     * NaN-boxed word: dereferencing it as a pointer faulted on the tag bits.
+     */
+    private function emitSpreadOperand(Node $operand): string
+    {
+        $out = $this->emitNode($operand);
+        return $out . ($operand->type->kind === Type::KIND_CELL ? $this->cellToPtr() : $this->coerceToPtr());
+    }
+
+    /**
      * Fixed-arity spread expansion for a KNOWN callee: read the elements of the
      * runtime array `$arrReg` filling the callee's params `[$firstParam ..
      * count($ptypes))`. Each element is boxed to a tagged cell when the target
@@ -3895,8 +3905,7 @@ trait EmitLlvmCalls
             // element values pass raw (matches int/string/cell params).
             if ($a->kind === Node::KIND_SPREAD) {
                 $operand = $a->operand;
-                $out .= $this->emitNode($operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadOperand($operand);
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,

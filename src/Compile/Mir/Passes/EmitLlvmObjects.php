@@ -260,8 +260,7 @@ trait EmitLlvmObjects
         $spreadElem = null;
         foreach ($n->args as $a) {
             if ($a->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadOperand($a->operand);
                 $spreadArr = $this->lastValue;
                 $spreadElem = $a->operand->type->element ?? null;
                 continue;
@@ -714,8 +713,7 @@ trait EmitLlvmObjects
                 // node emitted no value and the ctor read whatever lastValue
                 // still held, so `new R(...['C'])` constructed from garbage.
                 if ($a->kind === Node::KIND_SPREAD) {
-                    $out .= $this->emitNode($a->operand);
-                    $out .= $this->coerceToPtr();
+                    $out .= $this->emitSpreadOperand($a->operand);
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
                         $a->operand->type->element ?? null, $ctorClass . '____construct');
@@ -6855,8 +6853,7 @@ trait EmitLlvmObjects
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadOperand($a->operand);
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
@@ -8386,8 +8383,7 @@ trait EmitLlvmObjects
                 // fallback's signature — `$o->__construct(...['C'])` took some
                 // unrelated class's `= 0` for its second param. Each arm (and
                 // the single-target path) expands it against its own params.
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadOperand($a->operand);
                 $this->spreadTail = [$this->lastValue, $ai + 1, $a->operand->type->element ?? null];
                 $ai = \count($ptypes) - 1;
                 continue;
