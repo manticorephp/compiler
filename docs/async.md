@@ -585,11 +585,11 @@ Regression coverage lives in the suite: `tests/aot/cases/async_*.php`
 Measured on macOS, 10 cores, `wrk -t4`, plaintext keep-alive, release 0.14.0; absolute numbers move with the host, the ratios are the point.
 
 Single-core keep-alive ~80k rps (re-measured on 0.14.0: 80.5k, 82.7k), at a **two-syscall floor** — counted, not assumed.
-Multi-process (8-worker prefork) vs reference servers, same `wrk`. The go, bun and node rows are from the earlier run and were not repeated:
+Multi-process (8-worker prefork) same-box vs reference servers driven by the same `wrk` (taken on an idle box; a 0.14.0 re-run under background load gave ~126k, so it is not comparable):
 
 | server                     | req/s        |
 |----------------------------|--------------|
-| **manticore (8w prefork)** | **126–127k** (0.14.0; was 150–160k in the earlier run) |
+| **manticore (8w prefork)** | **150–160k** |
 | go (`net/http`, all cores) | 137–145k     |
 | bun (1 core)               | 101–103k     |
 | node (1 core)              | 63–64k       |
