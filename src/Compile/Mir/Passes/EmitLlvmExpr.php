@@ -1924,6 +1924,18 @@ trait EmitLlvmExpr
         $out .= "  %tbs = lshr i64 %b, 48\n";
         $out .= "  %tbn = and i64 %tbs, 15\n";
         $out .= "  %tbb = select i1 %bistag, i64 %tbn, i64 6\n";
+        // `+` of two ARRAY cells is php's union, not arithmetic (erased operands:
+        // `$this->m[$k] += $p` over a bare-array property).
+        if ($name === 'add') {
+            $out .= "  %aar = icmp eq i64 %taa, 7\n  %bar = icmp eq i64 %tbb, 7\n  %bothar = and i1 %aar, %bar\n";
+            $out .= "  br i1 %bothar, label %arrs, label %nums\n";
+            $out .= "arrs:\n";
+            $out .= "  %apa = and i64 %a, 281474976710655\n  %apap = inttoptr i64 %apa to ptr\n";
+            $out .= "  %apb = and i64 %b, 281474976710655\n  %apbp = inttoptr i64 %apb to ptr\n";
+            $out .= "  %aun = call ptr @__mir_array_union(ptr %apap, ptr %apbp)\n";
+            $out .= "  %aunb = call i64 @__manticore_box_array(ptr %aun)\n  ret i64 %aunb\n";
+            $out .= "nums:\n";
+        }
         $out .= "  %afl = call i1 @__mir_cell_num_is_float(i64 %a)\n";
         $out .= "  %bfl = call i1 @__mir_cell_num_is_float(i64 %b)\n";
         $out .= "  %isf = or i1 %afl, %bfl\n";

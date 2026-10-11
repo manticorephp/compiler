@@ -1,6 +1,5 @@
 <?php
 // `$this->arr += $other` followed by `$this->arr[$k] += $v` on a property array segfaults (symfony's EnvPlaceholderParameterBag::mergeEnvPlaceholders)
-// issue: #191
 class Bag
 {
     private array $m = [];
@@ -34,3 +33,6 @@ $b->add('FOO', 'p2');
 $b->add('BAZ', 'p3');
 $a->merge($b);
 echo json_encode($a->all()), "\n";
+
+function f(mixed $a, mixed $b) { return $a + $b; }
+echo json_encode(f(['a' => 1], ['a' => 9, 'b' => 2])), json_encode(f([1, 2], [5, 6, 7])), json_encode(f(1, 2)), json_encode(f(1.5, 2)), "\n";
