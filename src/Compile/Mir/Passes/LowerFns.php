@@ -1129,7 +1129,7 @@ trait LowerFns
             // `$fetchMode !== null` held, setFetchMode() ran with an array
             // POINTER, and every default fetch() came back as an object.
             while ($i < $vidx) {
-                $out[] = $this->lowerOmittedParam($params[$i], $selfClass);
+                $out[] = $this->lowerOmittedParam($params[$i], $selfClass, $params, $astArgs);
                 $i = $i + 1;
             }
             $out[] = new ArrayLit($packed, Type::unknown());
@@ -1199,7 +1199,7 @@ trait LowerFns
         $out = [];
         $i = 0;
         foreach ($params as $p) {
-            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass);
+            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass, $params, $astArgs);
             $i = $i + 1;
         }
         return $out;
@@ -1212,10 +1212,27 @@ trait LowerFns
      * `self` is bound to it while lowering (an empty `$selfClass` — a plain
      * function — keeps the caller's context).
      */
-    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass): Node
+    /**
+     * @param \Parser\Ast\Param[] $params
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
+    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass, array $params, array $astArgs): Node
     {
         $pd = $this->paramDefault($p);
-        if ($pd === null) { return new NullConst(Type::null_()); }
+        if ($pd === null) {
+            // A REQUIRED parameter the call left out: php's ArgumentCountError, raised
+            // when the call is reached (the argument expression throws).
+            $req = 0;
+            $exact = true;
+            foreach ($params as $q) {
+                if ($this->paramVariadic($q)) { $exact = false; continue; }
+                if ($this->paramDefault($q) === null) { $req = $req + 1; } else { $exact = false; }
+            }
+            return new Call('__mir_throw_argcount_error', [
+                new StringConst('Too few arguments: ' . (string)\count($astArgs) . ' passed and '
+                    . ($exact ? 'exactly ' : 'at least ') . (string)$req . ' expected', Type::string_()),
+            ], Type::cell());
+        }
         if ($selfClass === '') { return $this->lowerExpr($pd); }
         $prevSelf = $this->currentLowerClass;
         $this->currentLowerClass = $selfClass;

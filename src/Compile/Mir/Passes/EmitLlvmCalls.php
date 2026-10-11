@@ -3466,6 +3466,13 @@ trait EmitLlvmCalls
                 $out .= $this->emitParamDefault($def, $ptypes[$pi], $tmask[$pi] ?? false);
                 $this->lastPadArgs .= $sep . 'i64 ' . $this->lastValue;
             } else {
+                // A required, non-variadic parameter the call left out: php's ArgumentCountError.
+                if (!($this->sigs->variadicParams[$fnKey][$pi] ?? false)) {
+                    $out .= $this->emitNode(new Call('__mir_throw_argcount_error', [
+                        new \Compile\Mir\StringConst('Too few arguments to function '
+                            . \str_replace('__', '::', $fnKey) . '()', Type::string_()),
+                    ], Type::cell()));
+                }
                 $this->lastPadArgs .= $sep . 'i64 0';
             }
             $pi = $pi + 1;
