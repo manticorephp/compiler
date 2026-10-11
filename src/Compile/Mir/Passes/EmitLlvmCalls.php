@@ -2239,6 +2239,8 @@ trait EmitLlvmCalls
     /** Tags the data word placed in front of a closure body that has a by-ref
      *  param or returns by reference. The low bit is "returns by reference". */
     private const CLOSURE_META_MAGIC = 0x4D434C4F52450000;
+    /** Tags the two extra prefix words (row magic, row offset) of a reflected closure. */
+    private const CLOSURE_ROW_MAGIC = 0x4D434C5257000000;
 
     /**
      * The `prefix` clause of closure `$cname`'s `define`: three words in front
@@ -2256,6 +2258,17 @@ trait EmitLlvmCalls
         $mask = $this->closureOwnRefMask($cname, $capCnt);
         $raw = $this->closureOwnRefMask($cname, $capCnt, true);
         $rr = ($this->sigs->returnsByRef[$cname] ?? false) ? 1 : 0;
+        if (isset($this->reflClosureMeta[$cname])) {
+            // A reflected closure carries its metadata row in front of its entry:
+            // the code pointer is no identity across split parts (each part has
+            // its own copy of an internal closure), a prefix travels with every
+            // copy. Two words ahead of the tag/mask/raw triple: row magic, then the
+            // row address relative to the entry (an absolute one is a text relocation).
+            return ' prefix [5 x i64] [i64 ' . (string)self::CLOSURE_ROW_MAGIC
+                . ', i64 sub (i64 ptrtoint (ptr @__mc_fnmeta_' . $this->mangle($cname) . ' to i64), i64 ptrtoint (ptr @manticore_' . $this->mangle($cname) . ' to i64))'
+                . ', i64 ' . (string)(self::CLOSURE_META_MAGIC | $rr)
+                . ', i64 ' . (string)$mask . ', i64 ' . (string)$raw . ']';
+        }
         if ($mask === 0 && $rr === 0) { return ''; }
         return ' prefix [3 x i64] [i64 ' . (string)(self::CLOSURE_META_MAGIC | $rr)
             . ', i64 ' . (string)$mask . ', i64 ' . (string)$raw . ']';
