@@ -1090,7 +1090,8 @@ trait EmitLlvmModule
             // per-module counters (`__closure_N`); without internal linkage a
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
-            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
+            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')'
+                . $this->closureMetaPrefix($fn->name, $capCnt) . $this->personalityClause() . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;

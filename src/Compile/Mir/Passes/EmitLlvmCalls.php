@@ -2236,27 +2236,81 @@ trait EmitLlvmCalls
         return false;
     }
 
+    /** Tags the data word placed in front of a closure body that has a by-ref
+     *  param or returns by reference. The low bit is "returns by reference". */
+    private const CLOSURE_META_MAGIC = 0x4D434C4F52450000;
+
+    /**
+     * The `prefix` clause of closure `$cname`'s `define`: three words in front
+     * of the entry point — tag, by-ref mask, raw-only by-ref mask. '' when the
+     * closure has nothing to report (the reader treats that as all-by-value).
+     *
+     * The dynamic invoke recovers this from the fn pointer alone. A chain of
+     * `icmp eq fp, @closure_N` could not: closures are `internal`, and a split
+     * build gives every part its own copy of each, so a linkonce_odr prelude
+     * body (`array_walk_recursive`) coalesced from one part compared against
+     * an address no closure built in another part ever carried.
+     */
+    private function closureMetaPrefix(string $cname, int $capCnt): string
+    {
+        $mask = $this->closureOwnRefMask($cname, $capCnt);
+        $raw = $this->closureOwnRefMask($cname, $capCnt, true);
+        $rr = ($this->sigs->returnsByRef[$cname] ?? false) ? 1 : 0;
+        if ($mask === 0 && $rr === 0) { return ''; }
+        return ' prefix [3 x i64] [i64 ' . (string)(self::CLOSURE_META_MAGIC | $rr)
+            . ', i64 ' . (string)$mask . ', i64 ' . (string)$raw . ']';
+    }
+
+    /** Registers set by {@see closureMetaLoad}: the word, and the tag-matches i1. */
+    private string $metaWord = '';
+    private string $metaOk = '';
+
+    /**
+     * Load meta word `$idx` (0 tag, 1 mask, 2 raw mask) of the closure at
+     * `$fpReg`. Reading before the body is safe for any code pointer; the tag
+     * check decides whether the word means anything.
+     */
+
+    private function closureMetaLoad(string $fpReg, int $idx): string
+    {
+        $out = '';
+        $tagA = $this->ssa->allocReg();
+        $out .= '  ' . $tagA . ' = sub i64 ' . $fpReg . ", 24\n";
+        $tagP = $this->ssa->allocReg();
+        $out .= '  ' . $tagP . ' = inttoptr i64 ' . $tagA . " to ptr\n";
+        $tag = $this->ssa->allocReg();
+        $out .= '  ' . $tag . ' = load i64, ptr ' . $tagP . "\n";
+        $tagHi = $this->ssa->allocReg();
+        $out .= '  ' . $tagHi . ' = and i64 ' . $tag . ", -2\n";
+        $ok = $this->ssa->allocReg();
+        $out .= '  ' . $ok . ' = icmp eq i64 ' . $tagHi . ', ' . (string)self::CLOSURE_META_MAGIC . "\n";
+        $this->metaOk = $ok;
+        $this->metaWord = $tag;
+        if ($idx === 0) { return $out; }
+        $wa = $this->ssa->allocReg();
+        $out .= '  ' . $wa . ' = sub i64 ' . $fpReg . ', ' . (string)(24 - 8 * $idx) . "\n";
+        $wp = $this->ssa->allocReg();
+        $out .= '  ' . $wp . ' = inttoptr i64 ' . $wa . " to ptr\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $wp . "\n";
+        $this->metaWord = $w;
+        return $out;
+    }
+
     /**
      * i1 in `lastValue`: does the closure at `$fpReg` return by reference?
-     * The exact analogue of {@see closureRefMaskChain}, and it shares that
-     * method's documented limit — the chain sees only THIS module's closures,
-     * so a by-ref closure built inside `manticore_stdlib.o` answers false and
-     * keeps today's by-value behaviour rather than being papered over.
+     * Reads the word {@see closureMetaPrefix} put in front of the body.
      */
     private function closureReturnsByRefChain(string $fpReg): string
     {
-        $out = '';
-        $cur = 'false';
-        foreach ($this->closureCaptures as $cname => $unused) {
-            if (!($this->sigs->returnsByRef[$cname] ?? false)) { continue; }
-            $eq = $this->ssa->allocReg();
-            $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpReg
-                  . ', ptrtoint (ptr @manticore_' . $this->mangle($cname) . " to i64)\n";
-            $or = $this->ssa->allocReg();
-            $out .= '  ' . $or . ' = or i1 ' . $eq . ', ' . $cur . "\n";
-            $cur = $or;
-        }
-        $this->lastValue = $cur;
+        $out = $this->closureMetaLoad($fpReg, 0);
+        $bit = $this->ssa->allocReg();
+        $out .= '  ' . $bit . ' = and i64 ' . $this->metaWord . ", 1\n";
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp ne i64 ' . $bit . ", 0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = and i1 ' . $nz . ', ' . $this->metaOk . "\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i1';
         return $out;
     }
@@ -2275,37 +2329,20 @@ trait EmitLlvmCalls
     }
 
     /**
-     * Recover a dynamic closure's by-ref mask from its fn ptr: a chain of
-     * `select`s over the module's closures that declare one. Leaves the mask in
-     * `lastValue`; an unrecognised pointer yields 0, i.e. today's all-by-value
-     * behaviour.
-     *
-     * ⚠ The chain sees only THIS module's closures. A closure built inside
-     * `manticore_stdlib.o` and invoked from user code answers 0 — prelude
-     * bodies are emitted into the consumer's module (so `array_walk`-shaped
-     * callbacks are covered), but a stdlib function that RETURNS a closure with
-     * a by-ref parameter is not. Recorded as an audit limit, not papered over.
+     * Recover a dynamic closure's by-ref mask from its fn ptr: the word
+     * {@see closureMetaPrefix} placed in front of its body, behind a tag check
+     * so a pointer that is not such a closure answers 0, i.e. today's
+     * all-by-value behaviour. Leaves the mask in `lastValue`.
      */
     private function closureRefMaskChain(string $fpReg, bool $rawOnly = false): string
     {
-        $out = '';
-        $cur = '0';
-        foreach ($this->closureCaptures as $cname => $capCnt) {
-            $mask = $this->closureOwnRefMask($cname, $capCnt, $rawOnly);
-            if ($mask === 0) { continue; }
-            $eq = $this->ssa->allocReg();
-            $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpReg
-                  . ', ptrtoint (ptr @manticore_' . $this->mangle($cname) . " to i64)\n";
-            $sel = $this->ssa->allocReg();
-            $out .= '  ' . $sel . ' = select i1 ' . $eq . ', i64 ' . (string)$mask
-                  . ', i64 ' . $cur . "\n";
-            $cur = $sel;
-        }
-        $this->lastValue = $cur;
+        $out = $this->closureMetaLoad($fpReg, $rawOnly ? 2 : 1);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $this->metaOk . ', i64 ' . $this->metaWord . ", i64 0\n";
+        $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
     }
-
     /** Scratch out-params of {@see emitByRefCellUnboxArg} / {@see
      *  emitByRefCellBoxArg} (self-host has no list-destructure return;
      *  mirrors {@see EmitLlvm::$classIdReg}). */

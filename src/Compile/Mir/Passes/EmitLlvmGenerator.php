@@ -164,7 +164,8 @@ trait EmitLlvmGenerator
             }
         }
         $defLinkage = $isClosure ? 'internal ' : '';
-        $out = 'define ' . $defLinkage . 'i64 ' . $mangled . '(' . $paramSig . ") {\nentry:\n";
+        $out = 'define ' . $defLinkage . 'i64 ' . $mangled . '(' . $paramSig . ')'
+            . ($isClosure ? $this->closureMetaPrefix($fn->name, $capCnt) : '') . " {\nentry:\n";
         // The frame carries the string-style rc header `[cap@-24, len@-16,
         // rc@-8, ...]` (value ptr = base+24) so a Generator is freed on its
         // last reference via the existing string rc helpers (rc@-8, free base =
