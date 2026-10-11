@@ -1602,8 +1602,13 @@ trait EmitLlvmLocals
         return $out === null ? null : $pre . $out;
     }
 
+    /** The caller's slot of the ERASED array base the last element address was taken from
+     *  ({@see byRefAddrOfRaw}); its elements ride the buffer's hint, not a cell. */
+    private string $refElemBase = '';
+
     private function byRefAddrOfRaw(Node $a): ?string
     {
+        $this->refElemBase = '';
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
             // A GLOBAL-BACKED local — `global $x`, and every SUPERGLOBAL, which
@@ -1708,6 +1713,7 @@ trait EmitLlvmLocals
             $this->containerCloseIr = '';
             if ($out === null) { return null; }
             $slotPtr = $this->lastValue;
+            $baseSlot = $slotPtr;
             // A `$GLOBALS`-viewed global cell holds the buffer BOXED
             // ({@see boxForViewSlot}); `__mir_array_ref_slot` reads and writes
             // a raw pointer, so it works on a scratch word that is unboxed
@@ -1717,6 +1723,23 @@ trait EmitLlvmLocals
                 && isset($this->locals->globalBacked[$aa->array->name])
                 && $this->isGlobalsViewName($aa->array->name)
                 ? $slotPtr : '';
+            // An ERASED / cell base holds its array BOXED (a json_decode result):
+            // the ref-slot helper wants the raw pointer, so it works on a scratch
+            // word the payload is masked into. An erased local gets it back RAW
+            // (what every other write to one leaves there), a cell local re-boxed.
+            $baseK = $aa->array->type->kind;
+            $erasedCell = $viewCell === '' && $aa->array->kind === Node::KIND_LOAD_LOCAL
+                && ($baseK === Type::KIND_UNKNOWN || $baseK === Type::KIND_CELL) ? $slotPtr : '';
+            if ($erasedCell !== '') {
+                $w = $this->ssa->allocReg();
+                $out .= '  ' . $w . ' = load i64, ptr ' . $erasedCell . "\n";
+                $rawW = $this->ssa->allocReg();
+                $out .= '  ' . $rawW . ' = and i64 ' . $w . ", 281474976710655\n";
+                $scr = $this->ssa->allocReg();
+                $out .= '  ' . $scr . " = alloca i64\n";
+                $out .= '  store i64 ' . $rawW . ', ptr ' . $scr . "\n";
+                $slotPtr = $scr;
+            }
             if ($viewCell !== '') {
                 $this->rt->needsTagged = true;
                 $w = $this->ssa->allocReg();
@@ -1764,6 +1787,22 @@ trait EmitLlvmLocals
                 $nb = $this->ssa->allocReg();
                 $out .= '  ' . $nb . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
                 $out .= '  store i64 ' . $nb . ', ptr ' . $viewCell . "\n";
+            }
+            if ($erasedCell !== '') {
+                $nw = $this->ssa->allocReg();
+                $out .= '  ' . $nw . ' = load i64, ptr ' . $slotPtr . "\n";
+                if ($baseK === Type::KIND_CELL) {
+                    $np = $this->ssa->allocReg();
+                    $out .= '  ' . $np . ' = inttoptr i64 ' . $nw . " to ptr\n";
+                    $nw = $this->ssa->allocReg();
+                    $out .= '  ' . $nw . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
+                }
+                $out .= '  store i64 ' . $nw . ', ptr ' . $erasedCell . "\n";
+            }
+            // A CELL-typed element of a local base is encoded by the buffer's hint
+            // (an erased `array` may hold a typed one): the by-ref call decodes it.
+            if ($aa->array->kind === Node::KIND_LOAD_LOCAL && $a->type->kind === Type::KIND_CELL) {
+                $this->refElemBase = $baseSlot;
             }
             $out .= $close;
             $addr = $this->ssa->allocReg();

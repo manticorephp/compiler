@@ -143,6 +143,12 @@ trait EmitLlvmArrays
         // Base must be a genuine (raw-pointer) array container. A bare-array
         // property read can infer UNKNOWN, so consult the declared prop type.
         if ($aa->array->type->isArray()) { return true; }
+        // An ERASED array (a bare `array` hint, a json_decode result) is a RAW
+        // pointer whose elements are cells; the cell lvalue then rides the
+        // unbox / re-box path of the by-ref call. Without this the element was
+        // copied into a throwaway slot holding a boxed cell the callee read raw.
+        if ($aa->array->kind === Node::KIND_LOAD_LOCAL
+            && ($aa->array->type->kind === Type::KIND_UNKNOWN || $aa->array->type->kind === Type::KIND_CELL)) { return true; }
         if ($aa->array->kind === Node::KIND_PROPERTY_ACCESS) {
             $pa = $aa->array;
             $cls = $pa->object->type->class ?? '';

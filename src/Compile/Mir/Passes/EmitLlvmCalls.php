@@ -2444,6 +2444,16 @@ trait EmitLlvmCalls
         $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
         $cv = $this->ssa->allocReg();
         $out .= '  ' . $cv . ' = load i64, ptr ' . $sp . "\n";
+        $elemBase = $this->refElemBase;
+        $this->refElemBase = '';
+        if ($elemBase !== '') {
+            // An element of an ERASED array is encoded by the buffer's hint, not
+            // necessarily a cell: decode it for the callee, encode it back after.
+            $out .= $this->erasedBaseArray($elemBase);
+            $dv = $this->ssa->allocReg();
+            $out .= '  ' . $dv . ' = call i64 @__mir_elem_decode(ptr ' . $this->lastValue . ', i64 ' . $cv . ")\n";
+            $cv = $dv;
+        }
         $scalar = $pt !== null && $this->isByRefScalarParam($pt);
         // A STRING param decodes too: php coerces the argument on entry, and the
         // bare payload of an int cell handed to `string &$s` was dereferenced
@@ -2478,6 +2488,7 @@ trait EmitLlvmCalls
         // array tag over the instance.
         $this->byRefScalarTmps[$tmp] = ($scalar || ($pt !== null && $this->isByRefPtrParam($pt))) ? $pt : null;
         $out .= '  store i64 ' . $raw . ', ptr ' . $tmp . "\n";
+        $this->byRefElemBase[$tmp] = $elemBase;
         $taddr = $this->ssa->allocReg();
         $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
         $this->refBoxSlot = $slotAddr;
@@ -2518,6 +2529,14 @@ trait EmitLlvmCalls
                 $out .= $this->boxToCell($st);
             } else {
                 $out .= $this->boxToCell(Type::vec(Type::cell()));
+            }
+            $eb = $this->byRefElemBase[$tmp] ?? '';
+            if ($eb !== '') {
+                $bx = $this->lastValue;
+                $out .= $this->erasedBaseArray($eb);
+                $en = $this->ssa->allocReg();
+                $out .= '  ' . $en . ' = call i64 @__mir_elem_encode(ptr ' . $this->lastValue . ', i64 ' . $bx . ")\n";
+                $this->lastValue = $en;
             }
             $sp = $this->ssa->allocReg();
             $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
@@ -3060,6 +3079,23 @@ trait EmitLlvmCalls
     {
         return $pt->kind === Type::KIND_STRING
             || ($pt->kind === Type::KIND_OBJ && !$this->isEnumType($pt));
+    }
+
+    /** @var array<string, string> scratch alloca → caller slot of its erased array base ('' = plain cell element) */
+    private array $byRefElemBase = [];
+
+    /** IR leaving the raw array pointer held by an erased base's slot in lastValue (as `ptr`). */
+    private function erasedBaseArray(string $slot): string
+    {
+        $bl = $this->ssa->allocReg();
+        $out = '  ' . $bl . ' = load i64, ptr ' . $slot . "\n";
+        $ar = $this->ssa->allocReg();
+        $out .= '  ' . $ar . ' = and i64 ' . $bl . ", 281474976710655\n";
+        $ap = $this->ssa->allocReg();
+        $out .= '  ' . $ap . ' = inttoptr i64 ' . $ar . " to ptr\n";
+        $this->lastValue = $ap;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /** @var array<string, ?Type> scratch alloca → the scalar / string / object param type it re-boxes by */
