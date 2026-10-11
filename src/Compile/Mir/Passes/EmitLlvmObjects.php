@@ -4023,6 +4023,11 @@ trait EmitLlvmObjects
         return $node;
     }
 
+    private function asTernary(Node $node): \Compile\Mir\Ternary
+    {
+        return $node;
+    }
+
     private function dynamicMethodTrampolinesEligible(Type $receiver, array $methods): bool
     {
         $reachable = [];
@@ -4404,6 +4409,13 @@ trait EmitLlvmObjects
             || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
             || $n->kind === Node::KIND_STORE_LOCAL || $n->kind === Node::KIND_ARRAY_LIT) {
             return true;
+        }
+        if ($n->kind === Node::KIND_TERNARY) {
+            // `->{$c ? 'a' : 'b'}()`: a name picked between plain operands.
+            $t = $this->asTernary($n);
+            return $t->then !== null
+                && ($t->then->kind === Node::KIND_STRING_CONST || $t->then->kind === Node::KIND_LOAD_LOCAL)
+                && ($t->else_->kind === Node::KIND_STRING_CONST || $t->else_->kind === Node::KIND_LOAD_LOCAL);
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
         if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
