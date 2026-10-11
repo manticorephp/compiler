@@ -1,6 +1,5 @@
 <?php
 // A null passed to a non-nullable int parameter is coerced to 0 instead of throwing TypeError.
-// issue: #172
 declare(strict_types=1);
 
 function f(int $x): int { return $x + 1; }

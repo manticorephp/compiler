@@ -1369,9 +1369,40 @@ trait EmitLlvmControl
         return $out . "  ]\n";
     }
 
+    /**
+     * `foreach ($iterator as &$v)`: php throws once the iterator exists — a
+     * generator (no by-reference generators here) with an Exception, anything
+     * else with an Error. An IteratorAggregate whose getIterator() is declared
+     * to return a Generator gets the generator's answer.
+     */
+    private function emitForeachByRefIteratorThrow(Foreach_ $fe): string
+    {
+        $c = $fe->array->type->class ?? '';
+        $gen = $this->isGeneratorType($fe->array->type);
+        if (!$gen && $this->classImplements($c, 'IteratorAggregate')) {
+            $h = $this->resolveMethodClass($c, 'getIterator');
+            $rt = $h === '' ? null : ($this->sigs->returnType[$h . '__getIterator'] ?? null);
+            $gen = $rt !== null && $rt->kind === Type::KIND_OBJ && ($rt->class ?? '') === 'Generator';
+        }
+        $out = $this->emitNode($fe->array);
+        $out .= $this->coerceToPtr();
+        $live = $this->ssa->allocReg();
+        $out .= '  ' . $live . ' = icmp ne ptr ' . $this->lastValue . ", null\n";
+        return $out . $this->emitThrowIf($live, $gen ? 'Exception' : 'Error', $gen
+            ? 'You can only iterate a generator by-reference if it declared that it yields by-reference'
+            : 'An iterator cannot be used with foreach by reference');
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
+        if ($fe->byRef && ($this->isGeneratorType($fe->array->type)
+            || ($this->isTraversableType($fe->array->type)
+                && !\str_starts_with($fe->array->type->class ?? '', 'Manticore\\Ds\\')
+                && !$this->classExtends($fe->array->type->class ?? "", "ArrayObject")
+                && !$this->classExtends($fe->array->type->class ?? "", "ArrayIterator")))) {
+            return $this->emitForeachByRefIteratorThrow($fe);
+        }
         if ($this->isGeneratorType($fe->array->type)) {
             return $this->emitForeachGenerator($fe);
         }

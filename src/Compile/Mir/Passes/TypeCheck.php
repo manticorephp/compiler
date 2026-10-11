@@ -83,14 +83,18 @@ final class TypeCheck
             if (!$this->reprOnly) { $this->checkArith($n, $inFn); }
         }
         if ($n->kind === Node::KIND_CALL) {
+            $this->nullArgsToScalar($n->function, $n, 0);
             $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0);
         } elseif ($n->kind === Node::KIND_NEW_OBJ) {
+            $this->nullArgsToScalar($n->class . '____construct', $n, 1);
             $this->checkArgs($n->class . '____construct', 'new ' . $n->class, $n->args, $inFn, 1);
         } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $this->nullArgsToScalar($n->class . '__' . $n->method, $n, 0);
             $this->checkArgs($n->class . '__' . $n->method, $n->class . '::' . $n->method, $n->args, $inFn, 0);
         } elseif ($n->kind === Node::KIND_METHOD_CALL) {
             $cls = $n->object->type->class ?? '';
             if ($cls !== '') {
+                $this->nullArgsToScalar($cls . '__' . $n->method, $n, 1);
                 $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1);
             }
         }
@@ -107,6 +111,31 @@ final class TypeCheck
             return;
         }
         foreach (Walk::children($n) as $c) { $this->checkNode($c, $inFn); }
+    }
+
+    /**
+     * A literal `null` handed to a non-nullable int/float/bool parameter is
+     * php's TypeError. The argument becomes a throwing expression, so the call
+     * only fails when it is reached, as in php. (A nullable parameter is a
+     * cell, and a default of null makes the hint implicitly nullable.)
+     */
+    private function nullArgsToScalar(string $fnName, Node $call, int $recv): void
+    {
+        $params = $this->paramsByFn[$fnName] ?? null;
+        if ($params === null) { return; }
+        $offset = ($recv === 1 && \count($params) > 0 && $params[0]->name === 'this') ? 1 : 0;
+        foreach ($call->args as $ai => $arg) {
+            if ($arg->kind === Node::KIND_SPREAD) { return; }
+            $p = $params[$ai + $offset] ?? null;
+            if ($p === null || $p->variadic || $p->byRef || $p->default !== null) { continue; }
+            if ($arg->type->kind !== Type::KIND_NULL) { continue; }
+            $k = $p->type->kind;
+            if ($k !== Type::KIND_INT && $k !== Type::KIND_FLOAT && $k !== Type::KIND_BOOL) { continue; }
+            $call->args[$ai] = new Call('__mir_throw_type_error', [
+                new \Compile\Mir\StringConst($fnName . '(): Argument #' . (string)($ai + 1) . ' ($' . $p->name
+                    . ') must be of type ' . $p->type->toString() . ', null given', Type::string_()),
+            ], $p->type);
+        }
     }
 
     private function checkGuarded(Node $cond, ?Node $then, ?Node $else, string $inFn): void

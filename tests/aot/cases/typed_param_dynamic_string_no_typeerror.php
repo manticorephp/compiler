@@ -1,6 +1,5 @@
 <?php
 // A string from json_decode passed to an int parameter under strict_types does not throw TypeError.
-// issue: #84
 declare(strict_types=1);
 function f(int $x) { return $x; }
 $a = json_decode('["x"]');

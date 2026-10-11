@@ -390,7 +390,14 @@ final class InlineClosures implements Pass
         // Clone the body expr, substituting each param load with its arg as the
         // clone is built ({@see NodeClone::nodeSubst} — one complete dispatch,
         // so no node shape can slip through un-substituted).
-        return NodeClone::nodeSubst($retX->value, $subst);
+        $body = NodeClone::nodeSubst($retX->value, $subst);
+        // The call coerced the result to the declared scalar return type (`fn(): string => $a + $b`).
+        $rk = $fn->returnType->kind;
+        if (($rk === Type::KIND_INT || $rk === Type::KIND_FLOAT || $rk === Type::KIND_STRING || $rk === Type::KIND_BOOL)
+            && $body->type->kind !== $rk) {
+            return new Cast($rk, $body, $fn->returnType);
+        }
+        return $body;
     }
 
     /**

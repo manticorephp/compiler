@@ -2361,7 +2361,9 @@ trait EmitLlvmCalls
             if ($t->isArray()) {
                 $out .= $this->emitCellArrayToTyped($t);
             } else {
+                $this->intGuardOff = true;
                 $out .= $this->unboxCellToType($t);
+                $this->intGuardOff = false;
             }
             $out .= $this->coerceToI64();
             $sp = $this->ssa->allocReg();
@@ -2405,7 +2407,9 @@ trait EmitLlvmCalls
             // the scratch holds the decoded value, re-boxed by type after.
             $this->lastValue = $cv;
             $this->lastValueType = 'i64';
+            $this->intGuardOff = true;
             $out .= $this->unboxCellToType($pt);
+            $this->intGuardOff = false;
             if ($this->lastValueType === 'double') {
                 $bits = $this->ssa->allocReg();
                 $out .= '  ' . $bits . ' = bitcast double ' . $this->lastValue . " to i64\n";

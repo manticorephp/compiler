@@ -808,6 +808,31 @@ trait EmitLlvmExpr
     }
 
     /**
+     * Why a cell cannot become an `int` parameter / return value: 0 it can, 1 it
+     * is null, 2 an array, 3 a string with no numeric prefix (php's TypeError;
+     * a leading-numeric string still coerces). Called before
+     * {@see cellToIntArgRuntime}, which would answer 0 for all of them.
+     */
+    private function cellIntBadRuntime(): string
+    {
+        $m = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $o  = "\ndefine i32 @__manticore_cell_int_bad(i64 %v) alwaysinline {\n";
+        $o .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %ok, label %slow\n";
+        $o .= "slow:\n  %istag = icmp ugt i64 %v, -4503599627370496\n  br i1 %istag, label %tagged, label %ok\n";
+        $o .= "tagged:\n  %nib = and i64 %hi, 15\n  switch i64 %nib, label %ok [\n    i64 3, label %null\n    i64 7, label %arr\n    i64 4, label %str\n  ]\n";
+        $o .= "ok:\n  ret i32 0\nnull:\n  ret i32 1\narr:\n  ret i32 2\n";
+        $o .= "str:\n  %sp = and i64 %v, " . $m . "\n  %sptr = inttoptr i64 %sp to ptr\n  br label %ws\n";
+        $o .= "ws:\n  %p = phi ptr [ %sptr, %str ], [ %p1, %wsn ]\n  %c = load i8, ptr %p\n";
+        $o .= "  %t = sub i8 %c, 9\n  %le = icmp ule i8 %t, 4\n  %sps = icmp eq i8 %c, 32\n  %w = or i1 %le, %sps\n  br i1 %w, label %wsn, label %sign\n";
+        $o .= "wsn:\n  %p1 = getelementptr i8, ptr %p, i64 1\n  br label %ws\n";
+        $o .= "sign:\n  %pl = icmp eq i8 %c, 43\n  %mi = icmp eq i8 %c, 45\n  %sg = or i1 %pl, %mi\n  br i1 %sg, label %sgn, label %chk\n";
+        $o .= "sgn:\n  %p2 = getelementptr i8, ptr %p, i64 1\n  %c2 = load i8, ptr %p2\n  br label %chk\n";
+        $o .= "chk:\n  %cc = phi i8 [ %c, %sign ], [ %c2, %sgn ]\n  %d = sub i8 %cc, 48\n  %isd = icmp ule i8 %d, 9\n  %isdot = icmp eq i8 %cc, 46\n  %good = or i1 %isd, %isdot\n  br i1 %good, label %ok, label %bad\n";
+        $o .= "bad:\n  ret i32 3\n}\n";
+        return $o;
+    }
+
+    /**
      * A cell reaching an `int` parameter or return: php's coercive typing, not
      * a bare unbox. A STRING cell parses (`int $min` handed Finder's `'1'` depth
      * target read the string's ADDRESS), a BOOL is 0/1, and every other word
@@ -2215,9 +2240,11 @@ trait EmitLlvmExpr
         $target = $isFloat ? 'double' : 'i64';
         $op = $isFloat ? $floatOp : $intOp;
         $out = $this->emitNode($left);
+        $out .= $this->cellArithGuard($left, $left, $right, $intOp);
         $out .= $this->coerceArithOperand($left, $isFloat);
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
+        $out .= $this->cellArithGuard($right, $left, $right, $intOp);
         $out .= $this->coerceArithOperand($right, $isFloat);
         $r = $this->lastValue;
         if ($op === 'srem') {
@@ -2227,6 +2254,63 @@ trait EmitLlvmExpr
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = $target;
+        return $out;
+    }
+
+    /**
+     * A `mixed` operand that is an array or a non-numeric string is php's
+     * TypeError ("Unsupported operand types: string + int"); the cell would
+     * otherwise be read as an int. The operand names come from the operands
+     * themselves when they are plain loads or literals (re-read only inside the
+     * cold throw block), else from their static types.
+     */
+    private function cellArithGuard(Node $operand, Node $left, Node $right, string $intOp): string
+    {
+        if ($operand->type->kind !== Type::KIND_CELL) { return ''; }
+        $this->rt->needsCellToIntArg = true;
+        $this->rt->needsStrtol = true;
+        $sym = ['add' => '+', 'sub' => '-', 'mul' => '*', 'srem' => '%'][$intOp] ?? '';
+        if ($sym === '') { return ''; }
+        $bad = $this->ssa->allocReg();
+        $cnd = $this->ssa->allocReg();
+        $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $this->lastValue . ")\n";
+        $out .= '  ' . $cnd . ' = icmp ugt i32 ' . $bad . ", 1\n";
+        $head = 'Unsupported operand types: ';
+        $mid = ' ' . $sym . ' ';
+        $st = static fn (Node $n): string => $n->type->kind === Type::KIND_CELL ? 'mixed' : $n->type->toString();
+        $rt = static fn (Node $n): bool => $n->type->kind === Type::KIND_CELL && $n->kind === Node::KIND_LOAD_LOCAL;
+        $lit = static fn (string $t): \Compile\Mir\StringConst => new \Compile\Mir\StringConst($t, Type::string_());
+        $dbg = static fn (Node $n): Call => new Call('get_debug_type', [$n], Type::string_());
+        // Constant pieces fold into one literal: a Concat in the cold block is not free of emitter state.
+        if (!$rt($left) && !$rt($right)) {
+            $msg = $lit($head . $st($left) . $mid . $st($right));
+        } else {
+            $msg = new \Compile\Mir\Concat(
+                new \Compile\Mir\Concat($lit($head), $rt($left) ? $dbg($left) : $lit($st($left))),
+                new \Compile\Mir\Concat($lit($mid), $rt($right) ? $dbg($right) : $lit($st($right))),
+            );
+        }
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $thr = new Call('__mir_throw_type_error', [$msg], Type::cell());
+        $thr = $this->emitThrowNodeIf($cnd, $thr);
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
+        return $out . $thr;
+    }
+
+    /** Branch on the i1 `$cond` into a cold block that evaluates `$thrower` (a throwing call). */
+    private function emitThrowNodeIf(string $cond, Node $thrower): string
+    {
+        $thr = $this->ssa->allocLabel('arith.throw');
+        $ok = $this->ssa->allocLabel('arith.ok');
+        $out = '  br i1 ' . $cond . ', label %' . $thr . ', label %' . $ok . "\n";
+        $out .= $thr . ":\n";
+        $savedB = $this->lastCallWasBuiltin;
+        $out .= $this->emitNode($thrower);
+        $this->lastCallWasBuiltin = $savedB;
+        $out .= '  br label %' . $ok . "\n";
+        $out .= $ok . ":\n";
         return $out;
     }
 
@@ -2276,6 +2360,7 @@ trait EmitLlvmExpr
         $out .= $thr . ":\n";
         $saved = $this->lastValue;
         $savedT = $this->lastValueType;
+        $savedB = $this->lastCallWasBuiltin;
         $out .= $this->emitNode(new \Compile\Mir\Throw_(
             new \Compile\Mir\NewObj($class, [
                 new \Compile\Mir\StringConst($message, Type::string_()),
@@ -2288,6 +2373,7 @@ trait EmitLlvmExpr
         $out .= $ok . ":\n";
         $this->lastValue = $saved;
         $this->lastValueType = $savedT;
+        $this->lastCallWasBuiltin = $savedB;
         return $out;
     }
 
@@ -6352,6 +6438,8 @@ trait EmitLlvmExpr
      * would mis-read (a boxed `false` is non-zero → truthy; a boxed array
      * inttoptr's the tagged bits → fault).
      */
+    private bool $intGuardOff = false;
+
     private function unboxCellToType(Type $pt): string
     {
         // See through a reference before decoding it. This is the single most
@@ -6388,8 +6476,21 @@ trait EmitLlvmExpr
         if ($pk === Type::KIND_INT) {
             $this->rt->needsCellToIntArg = true;
             $this->rt->needsStrtol = true;
+            $keep = $this->lastValue;
+            $out = '';
+            // A by-ref scratch holds a callee's OUTPUT: a null there is no argument.
+            foreach ($this->intGuardOff ? [] : [[1, 'null'], [2, 'array'], [3, 'string']] as $bw) {
+                if ($out === '') {
+                    $bad = $this->ssa->allocReg();
+                    $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $keep . ")\n";
+                }
+                $cnd = $this->ssa->allocReg();
+                $out .= '  ' . $cnd . ' = icmp eq i32 ' . $bad . ', ' . (string)$bw[0] . "\n";
+                $out .= $this->emitThrowIf($cnd, 'TypeError', 'Argument must be of type int, ' . $bw[1] . ' given');
+            }
+            $this->lastValue = $keep;
             $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call i64 @__manticore_cell_to_int_arg(i64 ' . $this->lastValue . ")\n";
+            $out .= '  ' . $r . ' = call i64 @__manticore_cell_to_int_arg(i64 ' . $keep . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;

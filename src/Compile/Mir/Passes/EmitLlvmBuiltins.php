@@ -272,6 +272,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_pool_start')              { return $this->biPoolStart($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
+        if ($name === '__mir_throw_type_error') { return $this->biThrowError($args, 'TypeError'); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
         if ($name === '__mir_obj_bag')                { return $this->biObjBag($args); }
         if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
@@ -4830,6 +4831,9 @@ trait EmitLlvmBuiltins
         $out .= $this->emitNode($args[1]);
         $out .= $this->coerceIntArg($args[1]);
         $n = $this->lastValue;
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $n . ", 0\n";
+        $out .= $this->emitThrowIf($neg, 'ValueError', 'str_repeat(): Argument #2 ($times) must be greater than or equal to 0');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_repeat(ptr ' . $s . ', i64 ' . $n . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
@@ -7278,7 +7282,7 @@ trait EmitLlvmBuiltins
      * Static detection is not lost — the analyzer reports `undefined.constant`
      * for exactly this, and it runs closed-world over the whole source set.
      */
-    private function biThrowError(array $args): string
+    private function biThrowError(array $args, string $cls = 'Error'): string
     {
         // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to
         // go through reflLitStr, which answers '' for anything that is not a
@@ -7290,11 +7294,11 @@ trait EmitLlvmBuiltins
             ? $args[0]
             : new \Compile\Mir\StringConst('', Type::string_());
         $throw = new \Compile\Mir\Throw_(
-            new \Compile\Mir\NewObj('Error', [
+            new \Compile\Mir\NewObj($cls, [
                 $message,
                 new \Compile\Mir\IntConst(0, Type::int_()),
                 new \Compile\Mir\NullConst(Type::obj('Throwable')),
-            ], Type::obj('Error')),
+            ], Type::obj($cls)),
             Type::void(),
         );
         $out = $this->emitNode($throw);
