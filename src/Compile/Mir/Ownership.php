@@ -431,6 +431,7 @@ final class Ownership
         if ($k === Node::KIND_STATIC_PROP && ($value->type->isVec() || $value->type->isAssoc())) {
             return true;
         }
+        if ($value instanceof Cast && self::castArrayMints($value)) { return true; }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so
@@ -903,7 +904,8 @@ final class Ownership
         // owned by nobody and lived until shutdown.
         $owned = $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
-              || ($k === Node::KIND_ADD && $tk === Type::KIND_ARRAY);
+              || ($k === Node::KIND_ADD && $tk === Type::KIND_ARRAY)
+              || ($a instanceof Cast && self::castArrayMints($a));
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
             $owned = isset($this->ctx->moduleFns[$fn]) && !($this->ctx->returnsByRef[$fn] ?? false);
@@ -1247,6 +1249,7 @@ final class Ownership
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
         if ($tk === Type::KIND_OBJ && $v instanceof Cast && $v->target === 'object') { return false; }
+        if ($isArr && $v instanceof Cast && self::castArrayMints($v)) { return false; }
         if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
         if ($tk === Type::KIND_STRING && ($k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST)) { return false; }
         // `(string)$int` / `(string)$float` mint a fresh rc=1 buffer.
@@ -1722,4 +1725,15 @@ final class Ownership
     private static function asStaticCall(Node $n): StaticCall_ { return $n; }
     private static function asInvoke(Node $n): Invoke_ { return $n; }
     private static function asCast(Node $n): Cast { return $n; }
+
+    /** `(array)$v` over a runtime-dispatched operand hands back an OWNED array on every arm
+     *  ({@see Passes\EmitLlvmExpr::emitCast}): a retained array, a fresh `[]`, `[$v]` or property bag. */
+    private static function castArrayMints(Cast $c): bool
+    {
+        if ($c->target !== 'array') { return false; }
+        $ok = $c->operand->type->kind;
+        return $ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN || $ok === Type::KIND_UNION
+            || $ok === Type::KIND_STRING || $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
+            || $ok === Type::KIND_BOOL || $ok === Type::KIND_NULL;
+    }
 }
