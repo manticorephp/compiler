@@ -1,6 +1,5 @@
 <?php
 // (array) of a string|array parameter stores the argument without retaining it: a fresh string argument is freed and reused
-// issue: #181
 class L
 {
     protected array $paths;

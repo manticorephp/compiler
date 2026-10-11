@@ -3917,6 +3917,9 @@ trait EmitLlvmExpr
                 $out .= '  ' . $sg . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
                       . (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE . "\n";
                 $out .= '  store i64 ' . $v . ', ptr ' . $sg . "\n";
+                // The element is OWNED: the operand is a borrow (a parameter,
+                // a temporary the caller releases), so co-own its payload.
+                $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
                 $out .= '  store i64 1, ptr ' . $one . "\n";
                 $ni = $this->ssa->allocReg();
                 $out .= '  ' . $ni . ' = getelementptr inbounds i8, ptr ' . $one . ', i64 '
