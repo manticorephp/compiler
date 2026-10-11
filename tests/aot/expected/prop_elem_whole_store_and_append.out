@@ -1,0 +1,11 @@
+none
+a b 3 default
+c - 4 7
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  int(3)
+}

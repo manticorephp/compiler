@@ -1411,6 +1411,29 @@ final class InferTypes implements Pass
      */
     private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
+        // A WHOLE-property store of an array is evidence about the elements
+        // too: `$this->d = [$id, 'x']; $this->d[] = $int;` holds strings AND an
+        // int, and only the appends were counted — the slot became vec[int] and
+        // every string read back as a raw pointer. A store whose element type is
+        // unknown says nothing usable (the empty literal excepted: it holds none).
+        if ($n->kind === Node::KIND_STORE_PROPERTY && $n->value->type->isArray()) {
+            $owner = $this->propElemStoreOwner($n->object, $cls);
+            if ($owner !== '') {
+                $key = $owner . '::' . $n->property;
+                $et = $n->value->type->element;
+                $emptyLit = $n->value instanceof \Compile\Mir\ArrayLit && \count($n->value->elements) === 0;
+                if ($emptyLit) {
+                    // holds nothing
+                } elseif ($et === null || !$this->isBoxablePropElem($et)) {
+                    $unusable[$key] = true;
+                } elseif (!isset($observed[$key])) {
+                    $observed[$key] = $et;
+                } elseif ($observed[$key]->kind !== Type::KIND_CELL
+                    && !$this->sameElemShape($observed[$key], $et)) {
+                    $observed[$key] = Type::cell();
+                }
+            }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS) {
