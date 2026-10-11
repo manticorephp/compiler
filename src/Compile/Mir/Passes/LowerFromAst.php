@@ -5112,7 +5112,7 @@ final class LowerFromAst implements Pass
     /**
      * The extensions a compiled binary genuinely carries. `pcre` is linked
      * (pcre2), `json` / `ctype` / `mbstring` are built in, `openssl` rides the TLS
-     * stack, `intl` links ICU on use. Everything else — pcntl, dom — is absent,
+     * stack, `intl` links ICU on use, `session` is the prelude's session_* family. Everything else — pcntl, dom — is absent,
      * and a program that asks gets the honest answer rather than a link-time
      * surprise.
      */
@@ -5120,7 +5120,8 @@ final class LowerFromAst implements Pass
     {
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
-            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl';
+            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
+            || $ext === 'session';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),
