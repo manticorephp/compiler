@@ -1013,6 +1013,21 @@ class ReflectionMethod
         return \strtolower($this->name) === '__destruct';
     }
 
+    /**
+     * Prototypes (the overridden ancestor or implemented interface method) are not resolved: a method row
+     * does not record where it was DECLARED (an inherited method reports the subclass) and an interface's
+     * methods are not reflectable, so no method reports a prototype.
+     */
+    public function hasPrototype(): bool
+    {
+        return false;
+    }
+
+    public function getPrototype(): ReflectionMethod
+    {
+        throw new ReflectionException("Method " . $this->class . "::" . $this->name . " does not have a prototype");
+    }
+
     public function getShortName(): string
     {
         return $this->name;
