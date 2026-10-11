@@ -5145,7 +5145,7 @@ trait EmitLlvmBuiltins
     private function biExplode(array $args): string
     {
         $this->rt->needsStrExplode = true;
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $delim = $this->lastValue;

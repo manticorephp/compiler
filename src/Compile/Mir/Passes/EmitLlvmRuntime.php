@@ -4700,7 +4700,12 @@ end:
             $out .= "cloop:\n";
             $out .= "  %cpos = load i64, ptr %posp\n";
             $out .= "  %chs = getelementptr inbounds i8, ptr %subj, i64 %cpos\n";
-            $out .= "  %chit = call ptr @strstr(ptr %chs, ptr %delim)\n";
+            // Binary-safe: a NUL-bearing subject or delimiter (explode("\\0", …)) must be found by
+            // length, not by C-string scan — strstr read an "\\0" delimiter as empty and the loop never ended.
+            $out .= "  %crem0 = sub i64 %slen, %cpos\n";
+            $out .= "  %cremn = icmp slt i64 %crem0, 0\n";
+            $out .= "  %crem = select i1 %cremn, i64 0, i64 %crem0\n";
+            $out .= "  %chit = call ptr @memmem(ptr %chs, i64 %crem, ptr %delim, i64 %dlen)\n";
             $out .= "  %cmiss = icmp eq ptr %chit, null\n";
             $out .= "  br i1 %cmiss, label %cdone, label %cnext\n";
             $out .= "cnext:\n";
@@ -4737,7 +4742,10 @@ end:
             $out .= "search:\n";
             $out .= "  %pos = load i64, ptr %posp\n";
             $out .= "  %hstart = getelementptr inbounds i8, ptr %subj, i64 %pos\n";
-            $out .= "  %hit = call ptr @strstr(ptr %hstart, ptr %delim)\n";
+            $out .= "  %rem0 = sub i64 %slen, %pos\n";
+            $out .= "  %remn = icmp slt i64 %rem0, 0\n";
+            $out .= "  %rem = select i1 %remn, i64 0, i64 %rem0\n";
+            $out .= "  %hit = call ptr @memmem(ptr %hstart, i64 %rem, ptr %delim, i64 %dlen)\n";
             $out .= "  %miss = icmp eq ptr %hit, null\n";
             $out .= "  br i1 %miss, label %tail, label %emit\n";
             $out .= "emit:\n";
