@@ -4475,24 +4475,48 @@ function __mc_source_is_data_file(string $src): bool
     } catch (Throwable $e) {
         return false;
     }
-    $stmts = $program->statements;
-    if (\count($stmts) !== 1) {
-        return false;
+    $ret = null;
+    foreach ($program->statements as $s) {
+        if ($s instanceof \Parser\Ast\ReturnStmt && $ret === null) {
+            $ret = $s;
+        } elseif ($s->kind !== 'Namespace' && $s->kind !== 'UseDecl') {
+            return false;
+        }
     }
-    $s = $stmts[0];
-    if ($s->kind !== 'Return' || !($s instanceof \Parser\Ast\ReturnStmt)) {
+    return $ret !== null && __mc_stmt_is_pure_return($ret);
+}
+
+/** A top-level `return <pure expr>`: evaluating it at startup is unobservable. */
+function __mc_stmt_is_pure_return(\Parser\Ast\Stmt $s): bool
+{
+    if (!($s instanceof \Parser\Ast\ReturnStmt)) {
         return false;
     }
     $v = __mc_as_return($s)->value;
-    return $v instanceof \Parser\Ast\Expr && __mc_expr_is_literal($v);
+    return $v instanceof \Parser\Ast\Expr && __mc_expr_is_pure($v);
 }
 
-function __mc_expr_is_literal(\Parser\Ast\Expr $e): bool
+/**
+ * Evaluating `$e` has no side effect: literals, arrays of pure, `.`/arith of
+ * pure, constants, `X::class` / `X::CONST`, magic constants, and closure /
+ * arrow-fn literals WITHOUT a `use` clause (creating one is unobservable; a
+ * `use ($x)` captures a variable, so it is not pure).
+ */
+function __mc_expr_is_pure(\Parser\Ast\Expr $e): bool
 {
     $k = $e->kind;
     if ($k === 'StringLiteral' || $k === 'IntLiteral' || $k === 'FloatLiteral'
-        || $k === 'BoolLiteral' || $k === 'NullLiteral') {
+        || $k === 'BoolLiteral' || $k === 'NullLiteral' || $k === 'Identifier'
+        || $k === 'MagicConstant' || $k === 'StaticAccess' || $k === 'ArrowFn') {
         return true;
+    }
+    if ($e instanceof \Parser\Ast\Closure) {
+        return \count($e->uses) === 0;
+    }
+    if ($e instanceof \Parser\Ast\BinaryOp) {
+        $op = $e->op;
+        return ($op === '.' || $op === '+' || $op === '-' || $op === '*')
+            && __mc_expr_is_pure($e->left) && __mc_expr_is_pure($e->right);
     }
     if ($k !== 'ArrayLit' || !($e instanceof \Parser\Ast\ArrayLit)) {
         return false;
@@ -4502,10 +4526,10 @@ function __mc_expr_is_literal(\Parser\Ast\Expr $e): bool
             return false;
         }
         $key = $el->key;
-        if ($key instanceof \Parser\Ast\Expr && !__mc_expr_is_literal($key)) {
+        if ($key instanceof \Parser\Ast\Expr && !__mc_expr_is_pure($key)) {
             return false;
         }
-        if (!__mc_expr_is_literal($el->value)) {
+        if (!__mc_expr_is_pure($el->value)) {
             return false;
         }
     }
@@ -4802,7 +4826,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if (!$isEntry && $srcPath !== '' && isset(CompileArgs::$demandLoadedPaths[$srcPath])) {
             $kept = [];
             foreach ($topStmts as $s) {
-                if (__mc_stmt_declares($s)) {
+                if (__mc_stmt_declares($s) || __mc_stmt_is_pure_return($s)) {
                     $kept[] = $s;
                 }
             }
