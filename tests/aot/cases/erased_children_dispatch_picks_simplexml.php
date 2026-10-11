@@ -1,6 +1,5 @@
 <?php
 // ->children() on a receiver that came out of a dynamic ->{$name}() call dispatches to SimpleXMLElement::children() once the program mentions SimpleXMLElement
-// issue: #182
 interface ParentDef {}
 
 abstract class NodeDef implements ParentDef

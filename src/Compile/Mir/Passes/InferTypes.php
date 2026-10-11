@@ -3631,7 +3631,8 @@ final class InferTypes implements Pass
             }
             if ($sig === null) { return null; }
             if ($found === null) { $found = $sig; }
-            elseif ($found->kind !== $sig->kind) { return Type::cell(); }
+            elseif ($found->kind !== $sig->kind
+                || ($found->kind === Type::KIND_OBJ && $found->class !== $sig->class)) { return Type::cell(); }
         }
         return $found;
     }
@@ -3649,7 +3650,8 @@ final class InferTypes implements Pass
             $sig = $this->sigs[$cn . '__' . $method] ?? null;
             if ($sig === null) { continue; }
             if ($found === null) { $found = $sig; }
-            elseif ($found->kind !== $sig->kind) { return Type::cell(); }
+            elseif ($found->kind !== $sig->kind
+                || ($found->kind === Type::KIND_OBJ && $found->class !== $sig->class)) { return Type::cell(); }
         }
         return $found;
     }
