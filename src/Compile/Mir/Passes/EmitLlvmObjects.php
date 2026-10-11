@@ -260,8 +260,7 @@ trait EmitLlvmObjects
         $spreadElem = null;
         foreach ($n->args as $a) {
             if ($a->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadPackPtr($a->operand);
                 $spreadArr = $this->lastValue;
                 $spreadElem = $a->operand->type->element ?? null;
                 continue;
@@ -714,8 +713,7 @@ trait EmitLlvmObjects
                 // node emitted no value and the ctor read whatever lastValue
                 // still held, so `new R(...['C'])` constructed from garbage.
                 if ($a->kind === Node::KIND_SPREAD) {
-                    $out .= $this->emitNode($a->operand);
-                    $out .= $this->coerceToPtr();
+                    $out .= $this->emitSpreadPackPtr($a->operand);
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
                         $a->operand->type->element ?? null, $ctorClass . '____construct');
@@ -1332,6 +1330,13 @@ trait EmitLlvmObjects
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
+        // php: reading a property of null is a warning; here it throws (a wild load otherwise).
+        if (!($pa->object->kind === Node::KIND_LOAD_LOCAL && $pa->object->name === 'this')
+            && $pa->object->kind !== Node::KIND_NEW_OBJ) {
+            $isNull = $this->ssa->allocReg();
+            $out .= '  ' . $isNull . ' = icmp eq ptr ' . $objPtr . ", null\n";
+            $out .= $this->emitThrowIf($isNull, 'Error', 'Attempt to read property "' . $pa->property . '" on null');
+        }
         $out .= $this->propSlotGep($pa->object, $objPtr, $pa->property);
         $gep = $this->lastValue;
         $out .= $this->emitSlotLoad(
@@ -2232,6 +2237,15 @@ trait EmitLlvmObjects
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
         $out .= $this->emitNode($valueNode);
+        // The hook takes `$value` as its declared type; a cell value (a reflective write) is unboxed to it.
+        $hpt = $this->sigs->paramTypes[$hookSym][1] ?? null;
+        $vk = $valueNode->type->kind;
+        if ($hpt !== null && $vk === Type::KIND_CELL
+            && ($hpt->kind === Type::KIND_STRING || $hpt->kind === Type::KIND_INT
+                || $hpt->kind === Type::KIND_FLOAT || $hpt->kind === Type::KIND_BOOL)) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType($hpt);
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $reg = $this->ssa->allocReg();
@@ -4402,6 +4416,21 @@ trait EmitLlvmObjects
         $name = '__mc_dynh_' . \substr($slot, 1);
         $this->locals->slots[$name] = $slot;
         return new \Compile\Mir\LoadLocal($name, $n->type);
+    }
+
+    /** Emit a `...$pack` operand to a raw array pointer: an erased (cell) pack carries tag bits. */
+    private function emitSpreadPackPtr(Node $operand): string
+    {
+        $out = $this->emitNode($operand);
+        $k = $operand->type->kind;
+        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $m = $this->ssa->allocReg();
+            $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $this->lastValue = $m;
+            $this->lastValueType = 'i64';
+        }
+        return $out . $this->coerceToPtr();
     }
 
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
@@ -6759,8 +6788,7 @@ trait EmitLlvmObjects
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadPackPtr($a->operand);
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
@@ -6995,6 +7023,97 @@ trait EmitLlvmObjects
      * @param array<int, Type> $cTypes   this arm's own signature
      */
     private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
+    {
+        // An address the site passed for a param another candidate takes by reference: an arm
+        // that takes it by value reads the value through it.
+        $pre = '';
+        $post = '';
+        if ($this->vdWiden !== [] && $sym !== '') {
+            $wp = \explode(', ', $argList);
+            $wm = $this->sigs->refParams[$sym] ?? [];
+            $wpt = $this->sigs->paramTypes[$sym] ?? [];
+            foreach ($this->vdWiden as $wi => $wt) {
+                if (!isset($wp[$wi])) { continue; }
+                if ($wm[$wi] ?? false) {
+                    // By-ref arm, raw caller slot, `mixed &$p`: lend a boxed scratch cell, read it back.
+                    $pt = $wpt[$wi] ?? null;
+                    $ck = $wt->kind;
+                    if ($pt !== null && $pt->kind === Type::KIND_CELL
+                        && ($ck === Type::KIND_INT || $ck === Type::KIND_BOOL || $ck === Type::KIND_FLOAT
+                            || $ck === Type::KIND_STRING || $ck === Type::KIND_NULL || $ck === Type::KIND_OBJ
+                            || $wt->isArray())) {
+                        $slotAddr = \substr($wp[$wi], 4);
+                        $sp = $this->ssa->allocReg();
+                        $rv = $this->ssa->allocReg();
+                        $pre .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+                        $pre .= '  ' . $rv . ' = load i64, ptr ' . $sp . "\n";
+                        $this->lastValue = $rv;
+                        $this->lastValueType = 'i64';
+                        if ($ck === Type::KIND_FLOAT) {
+                            $fb = $this->ssa->allocReg();
+                            $pre .= '  ' . $fb . ' = bitcast i64 ' . $rv . " to double\n";
+                            $this->lastValue = $fb;
+                            $this->lastValueType = 'double';
+                        }
+                        $pre .= $wt->isArray() ? $this->boxToCell($wt) : $this->boxToCellShallow($wt);
+                        $tmp = $this->ssa->allocReg();
+                        $ta = $this->ssa->allocReg();
+                        $pre .= '  ' . $tmp . " = alloca i64\n";
+                        $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+                        $pre .= '  ' . $ta . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                        $post .= $this->emitByRefCellWriteBack($tmp, $slotAddr, $wt);
+                        $wp[$wi] = 'i64 ' . $ta;
+                    }
+                    continue;
+                }
+                $wptr = $this->ssa->allocReg();
+                $wval = $this->ssa->allocReg();
+                $pre .= '  ' . $wptr . ' = inttoptr i64 ' . \substr($wp[$wi], 4) . " to ptr\n";
+                $pre .= '  ' . $wval . ' = load i64, ptr ' . $wptr . "\n";
+                $wp[$wi] = 'i64 ' . $wval;
+                $srcTypes[$wi] = $wt;
+            }
+            $argList = \implode(', ', $wp);
+        }
+        $r = $pre . $this->vdArmArgsBase($argList, $srcTypes, $cTypes, $sym);
+        $this->vdArmDrops .= $post;
+        return $r;
+    }
+
+    /** @var array<int, Type> params the site passed by address for another candidate's by-ref */
+    private array $vdWiden = [];
+
+    /** Param indices any candidate of an erased / union receiver takes by reference.
+     *  @return array<int, bool> */
+    private function siteRefUnion(Type $rt, string $method): array
+    {
+        $cls = [];
+        if ($rt->kind === Type::KIND_UNION) {
+            foreach ($rt->atoms as $atom) {
+                foreach ($this->selfAndDescendants($atom->class ?? '') as $d) { $cls[] = $d; }
+            }
+        } else {
+            foreach ($this->methodHolders($method) as $cn => $_decl) { $cls[] = $cn; }
+        }
+        $u = [];
+        $typed = [];
+        foreach ($cls as $c) {
+            $t = $this->resolveMethodClass($c, $method);
+            if ($t === '') { continue; }
+            foreach ($this->sigs->refParams[$t . '__' . $method] ?? [] as $i => $b) {
+                if ($b) { $u[$i] = true; }
+            }
+            // Only an UNTYPED / mixed slot is a repr every arm can read back from the address: an
+            // arm with a concrete param type keeps the coercion the site makes for the fallback.
+            foreach ($this->sigs->paramTypes[$t . '__' . $method] ?? [] as $i => $pt) {
+                if ($pt->kind !== Type::KIND_CELL && $pt->kind !== Type::KIND_UNKNOWN) { $typed[$i] = true; }
+            }
+        }
+        foreach ($typed as $i => $_t) { unset($u[$i]); }
+        return $u;
+    }
+
+    private function vdArmArgsBase(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
         // ARITY first, and OUTSIDE the repr early-return: a site that emitted no
@@ -8304,6 +8423,11 @@ trait EmitLlvmObjects
         // fallback declares is how an int -1 became a pointer. An index left
         // unset (by-ref, spread, pre-boxed array) is skipped by the fixup.
         $argOutTypes = [];
+        // Param indices some OTHER candidate takes by reference while the fallback does not:
+        // the site passes the address and a by-value arm loads it (see vdArmArgs).
+        $widenRef = ($mc->object->type->kind === Type::KIND_UNION || !isset($this->classes[$static]))
+            ? $this->siteRefUnion($mc->object->type, $mc->method) : [];
+        $widen = [];
         // Raw caller lvalue → cell by-ref param: scratch slots to write back
         // after the call, parallel with the caller's own types.
         $cellBoxSlots = [];
@@ -8319,13 +8443,16 @@ trait EmitLlvmObjects
                 // fallback's signature — `$o->__construct(...['C'])` took some
                 // unrelated class's `= 0` for its second param. Each arm (and
                 // the single-target path) expands it against its own params.
-                $out .= $this->emitNode($a->operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadPackPtr($a->operand);
                 $this->spreadTail = [$this->lastValue, $ai + 1, $a->operand->type->element ?? null];
                 $ai = \count($ptypes) - 1;
                 continue;
             }
-            if ($this->argIsByRef($mask, $ai + 1, $a)
+            if (!($mask[$ai + 1] ?? false) && ($widenRef[$ai + 1] ?? false) && $this->isByRefAddressable($a)) {
+                $out .= $this->emitByRefArg($a);
+                $argList .= ', i64 ' . $this->lastValue;
+                $widen[$ai + 1] = $a->type;
+            } elseif ($this->argIsByRef($mask, $ai + 1, $a)
                 && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellUnbox($a, $ptypes, $ai + 1)
             ) {
@@ -8580,6 +8707,7 @@ trait EmitLlvmObjects
         // dispatch arm boxes its raw return by its own type (a mixed-repr raw
         // merge would mis-read). The result is then a uniform self-describing cell.
         $boxCell = $n->type->kind === Type::KIND_CELL;
+        $this->vdWiden = $widen;
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
             // The fallback is derived from the static type before the candidate
@@ -8630,6 +8758,7 @@ trait EmitLlvmObjects
             $reg = $this->vdResult;
         }
         $this->spreadTail = null;
+        $this->vdWiden = [];
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);

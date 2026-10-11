@@ -5371,6 +5371,10 @@ trait EmitLlvmBuiltins
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $vals[] = [true, $this->lastValue];
+            } elseif ($a->type->kind === Type::KIND_CLOSURE || ($a->type->kind === Type::KIND_OBJ && $this->isClosureClass($a->type->class ?? ""))) {
+                // A closure is not in the class table; the object walk would read it as a bag.
+                $out .= $this->emitNode($a);
+                $vals[] = [true, ''];
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -5383,7 +5387,9 @@ trait EmitLlvmBuiltins
             }
         }
         foreach ($vals as $v) {
-            if ($v[0]) {
+            if ($v[0] && $v[1] === '') {
+                $out .= $this->emitOutLit("object(Closure)#1 (0) {\n}\n");
+            } elseif ($v[0]) {
                 // Shortest round-trip via the Ryu core (uppercase E, no forced
                 // `.0` — var_dump form), byte-exact with php and faster than the
                 // old snprintf-probe. The core takes the raw i64 bits.
