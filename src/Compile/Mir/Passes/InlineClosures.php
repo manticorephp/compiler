@@ -783,6 +783,13 @@ final class InlineClosures implements Pass
             $a2 = $this->node($args[2]);
             if ($a2->kind === Node::KIND_BOOL_CONST) { $strict = $a2->value; }
         }
+        // A literal int / string list is a chain of compares, cheaper than any
+        // scan of a buffer ({@see constListQuery}); it also takes the cell
+        // needle the native scan below does not.
+        if ($isInArray && $strict) {
+            $chain = $this->constListQuery($needle, $haystack);
+            if ($chain !== null) { return $chain; }
+        }
         // A search the runtime can answer with one scan over the element words
         // ({@see nativeScanShape}) is emitted as that scan by the builtin; the
         // synthesis below is for the shapes it does not cover.
@@ -814,6 +821,67 @@ final class InlineClosures implements Pass
             $ret,
             $body,
             [$needle, $haystack],
+        );
+    }
+
+    /**
+     * Strict `in_array($n, [c1, c2, …])` over a literal list of int (or string)
+     * CONSTANTS → `if ($n === c1) return true; if ($n === c2) …; return false;`,
+     * which LLVM folds into a switch. The generic loop compared a tagged cell
+     * against each element of a heap vec per call: php-cs-fixer's
+     * `TokensAnalyzer::isBinaryOperator` scans 30 token ids that way for every
+     * token. An int list takes an int or a cell needle (`?int`, guarded by
+     * `is_int`, so a null / float / string needle is a miss as `===` says); a
+     * string list takes a string needle. null for anything else.
+     */
+    private function constListQuery(Node $needle, Node $haystack): ?Node
+    {
+        if (!($haystack instanceof ArrayLit)) { return null; }
+        $n = \count($haystack->elements);
+        if ($n < 1 || $n > 64) { return null; }
+        $ints = true;
+        $strs = true;
+        foreach ($haystack->elements as $el) {
+            if ($el->key !== null) { return null; }
+            if (!($el->value instanceof \Compile\Mir\IntConst)) { $ints = false; }
+            if (!($el->value instanceof \Compile\Mir\StringConst)) { $strs = false; }
+        }
+        $nk = $needle->type->kind;
+        $bool = Type::bool_();
+        $void = Type::void();
+        $stmts = [];
+        $needleParam = $needle->type;
+        if ($ints && ($nk === Type::KIND_INT || $nk === Type::KIND_CELL)) {
+            $it = Type::int_();
+            $src = '__mc_n';
+            if ($nk === Type::KIND_CELL) {
+                $src = '__mc_i';
+                $stmts[] = new StoreLocal('__mc_i', new Cast('int', new LoadLocal('__mc_n', Type::unknown()), $it), $it);
+            }
+            foreach ($haystack->elements as $el) {
+                $cmp = new \Compile\Mir\Cmp(new LoadLocal($src, $it), new \Compile\Mir\IntConst($el->value->value, $it), '===');
+                $stmts[] = new If_($cmp, new Block([new Return_(new \Compile\Mir\BoolConst(true, $bool), $void)], $void), null);
+            }
+            if ($nk === Type::KIND_CELL) {
+                $guard = new Call('is_int', [new LoadLocal('__mc_n', $needleParam)], $bool);
+                $stmts = [new If_($guard, new Block($stmts, $void), null)];
+            }
+        } elseif ($strs && $nk === Type::KIND_STRING) {
+            $st = Type::string_();
+            foreach ($haystack->elements as $el) {
+                $cmp = new \Compile\Mir\Cmp(new LoadLocal('__mc_n', $st), new \Compile\Mir\StringConst($el->value->value, $st), '===');
+                $stmts[] = new If_($cmp, new Block([new Return_(new \Compile\Mir\BoolConst(true, $bool), $void)], $void), null);
+            }
+        } else {
+            return null;
+        }
+        $stmts[] = new Return_(new \Compile\Mir\BoolConst(false, $bool), $void);
+        return $this->emitFusedFn(
+            'inarraylit',
+            [new Param('__mc_n', $needleParam, false, false)],
+            $bool,
+            new Block($stmts, $void),
+            [$needle],
         );
     }
 

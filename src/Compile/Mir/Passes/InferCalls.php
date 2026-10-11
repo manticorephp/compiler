@@ -748,7 +748,10 @@ trait InferCalls
         if ($args === [] && isset($this->classes[$decl])) {
             $args = $this->defaultTypeArgs($this->classes[$decl]);
         }
-        if ($args === []) { return null; }
+        // A class with no parameters of its own can still bind its parent's
+        // (`/** @extends SplFixedArray<Token> */ class Tokens extends SplFixedArray`):
+        // the walk below translates them, so only a class with neither is a dead end.
+        if ($args === [] && !(isset($this->classes[$decl]) && $this->classes[$decl]->parentTypeArgs !== [])) { return null; }
         $seen = [];
         while ($decl !== '' && isset($this->classes[$decl]) && !isset($seen[$decl])) {
             $seen[$decl] = true;

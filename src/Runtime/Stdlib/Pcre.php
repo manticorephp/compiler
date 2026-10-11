@@ -59,6 +59,13 @@ final class __McPcreCache
     public static array $code = [];
     /** @var array<int, int> code => its idle match block ({@see __preg_md}) */
     public static array $idle = [];
+    /** @var array<int, int> code => 1 when the pattern has named groups, else 0 ({@see __preg_name_map}) */
+    public static array $named = [];
+    /** @var array<int, array<int, string>> code => its group number => name map ({@see __preg_name_map}) */
+    public static array $nameMaps = [];
+    /** The idle match block of the pattern last used, kept out of the map: one slot, one compare. */
+    public static int $slotCode = 0;
+    public static int $slotMd = 0;
 }
 
 function __preg_compile(string $pattern): int
@@ -109,6 +116,11 @@ function __preg_compile(string $pattern): int
 function __preg_md(int $code, int $give): int
 {
     if ($give === 0) {
+        if (__McPcreCache::$slotCode === $code && __McPcreCache::$slotMd !== 0) {
+            $slot = __McPcreCache::$slotMd;
+            __McPcreCache::$slotMd = 0;
+            return $slot;
+        }
         $md = isset(__McPcreCache::$idle[$code]) ? __McPcreCache::$idle[$code] : 0;
         if ($md !== 0) {
             __McPcreCache::$idle[$code] = 0;
@@ -116,12 +128,44 @@ function __preg_md(int $code, int $give): int
         }
         return \Runtime\Pcre\matchDataCreate($code, 0);
     }
+    if (__McPcreCache::$slotMd === 0) {
+        __McPcreCache::$slotCode = $code;
+        __McPcreCache::$slotMd = $give;
+        return 0;
+    }
     if (!isset(__McPcreCache::$idle[$code]) || __McPcreCache::$idle[$code] === 0) {
         __McPcreCache::$idle[$code] = $give;
     } else {
         \Runtime\Pcre\matchDataFree($give);
     }
     return 0;
+}
+
+/**
+ * Whether `$pattern` matches `$subject` from `$offset`: 1 for a match, 0 for none,
+ * -1 when the pattern does not compile or PCRE reports anything but "no match"
+ * (a bad UTF-8 subject under /u, a match limit). preg_match does the same
+ * search, then builds `$matches` — an array, a substr and a boxed cell per
+ * group — which a caller that only asks "does it match" throws away: 3 000
+ * instructions for a one-line check, two thirds of them that bookkeeping.
+ */
+function __preg_test(string $pattern, string $subject, int $offset = 0): int
+{
+    $code = \__preg_compile($pattern);
+    if ($code === 0) {
+        return -1;
+    }
+    $md = \__preg_md($code, 0);
+    $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, 0);
+    \__preg_md($code, $md);
+    $rc = $rc & 0xFFFFFFFF;
+    if ($rc >= 0x80000000) {
+        $rc = $rc - 0x100000000;
+    }
+    if ($rc > 0) {
+        return 1;
+    }
+    return $rc === -1 ? 0 : -1;
 }
 
 /**
@@ -229,14 +273,22 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
  */
 function __preg_name_map(int $code): array
 {
+    if ((__McPcreCache::$named[$code] ?? -1) === 0) {
+        return [];
+    }
+    if (isset(__McPcreCache::$nameMaps[$code])) {
+        return __McPcreCache::$nameMaps[$code];
+    }
     $buf = \Runtime\Libc\calloc(8, 1);
     // PCRE2_INFO_NAMECOUNT = 17, NAMEENTRYSIZE = 18, NAMETABLE = 19.
     \Runtime\Pcre\patternInfo($code, 17, $buf);
     $count = \peek_u32($buf, 0);
     if ($count <= 0) {
         \Runtime\Libc\free($buf);
+        __McPcreCache::$named[$code] = 0;
         return [];
     }
+    __McPcreCache::$named[$code] = 1;
     \Runtime\Pcre\patternInfo($code, 18, $buf);
     $size = \peek_u32($buf, 0);
     \Runtime\Pcre\patternInfo($code, 19, $buf);
@@ -255,6 +307,7 @@ function __preg_name_map(int $code): array
         // pcre2_code and must not be freed here.
         $out[$group] = \cstr_to_str(\int_to_ptr($table + $i * $size + 2));
     }
+    __McPcreCache::$nameMaps[$code] = $out;
     return $out;
 }
 
@@ -473,11 +526,7 @@ function __preg_row_named(array $cells, array $names): array
 function __preg_group_pair(string $subject, int $s, int $e, bool $asNull): array
 {
     if ($s < 0) {
-        /** @var mixed[] $pair */
-        $pair = [];
-        $pair[] = \__mir_to_cell($asNull ? null : "");
-        $pair[] = \__mir_to_cell(-1);
-        return $pair;
+        return [\__mir_to_cell($asNull ? null : ""), \__mir_to_cell(-1)];
     }
     return \__preg_pair(\substr($subject, $s, $e - $s), $s);
 }
@@ -494,11 +543,7 @@ function __preg_capture_count(int $code): int
 
 function __preg_pair(string $s, int $off): array
 {
-    /** @var mixed[] $pair */
-    $pair = [];
-    $pair[] = \__mir_to_cell($s);
-    $pair[] = \__mir_to_cell($off < 0 ? -1 : $off);
-    return $pair;
+    return [\__mir_to_cell($s), \__mir_to_cell($off < 0 ? -1 : $off)];
 }
 
 /** Box a string[] into a vec[cell] (NaN-boxed elements) for an erased sink.
@@ -614,6 +659,8 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
     $md = \__preg_md($code, 0);
     $out = "";
     $pos = 0;
+    // No `$N` / `\N` in the replacement: it is inserted as written.
+    $literal = \strcspn($replacement, '$\\') === \strlen($replacement);
     while ($pos <= $len) {
         if ($limit >= 0 && $count >= $limit) { break; }
         $m = \__preg_match_at($code, $md, $subject, $len, $pos);
@@ -621,13 +668,14 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
         $ms = $m[1];
         $me = $m[2];
         $out .= \substr($subject, $pos, $ms - $pos);         // text before the match
-        $out .= \__preg_expand($replacement, $subject, $m);  // the replacement
+        $out .= $literal ? $replacement : \__preg_expand($replacement, $subject, $m);  // the replacement
         $count = $count + 1;
         $next = \__preg_advance($ms, $me);
         if ($me === $ms) { $out .= \substr($subject, $ms, 1); }  // empty match: keep the char
         $pos = $next;
     }
     \__preg_md($code, $md);
+    if ($count === 0) { return $subject; }
     if ($pos < $len) { $out .= \substr($subject, $pos, $len - $pos); }
     return $out;
 }

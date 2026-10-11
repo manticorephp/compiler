@@ -1,0 +1,24 @@
+0=10
+1='two'
+2=NULL
+3=Box4
+-- empty
+-- break/continue
+0
+2
+-- values only
+0 1 4 
+-- grow while iterating
+0a 1b 2c 3d 
+-- shrink while iterating
+0 1 2 
+-- element rewritten while iterating
+0 changed 2 
+-- nested over one array
+pp pq qp qq 
+-- offsetGet override is bypassed
+0=1 1=2 | g1
+-- getIterator override
+0=x 1=y 
+-- value var survives the loop
+2 4
