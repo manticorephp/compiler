@@ -6426,7 +6426,34 @@ final class LowerFromAst implements Pass
             && \count($expr->args) === 1) {
             $conv = $this->coerceCallableArg(Type::closure(), $expr->args[0]);
             if ($conv !== null) { return $conv; }
-            return $this->lowerExpr($expr->args[0]);
+            $v = $this->lowerExpr($expr->args[0]);
+            $vc = $v->type->class ?? '';
+            if ($v->type->kind === Type::KIND_OBJ && isset($this->module->closureCaptures[$vc])) {
+                return $v;
+            }
+            // A callable known only at run time (a string name, an array, an invokable): the
+            // caller treats the result as a closure, so wrap it in one that invokes it.
+            $tmp = '__fc_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $sp = $expr->span;
+            // Fixed optional params + func_num_args(): a variadic closure is not packed when it is
+            // invoked through an erased `Closure` slot.
+            $params = [];
+            for ($pi = 0; $pi < 8; $pi = $pi + 1) {
+                $params[] = new \Parser\Ast\Param('a' . (string)$pi, null, \Parser\Ast\Expr::null($sp), false, false, '', false, [], $sp);
+            }
+            $body = null;
+            for ($k = 8; $k >= 0; $k = $k - 1) {
+                $cargs = [];
+                for ($pi = 0; $pi < $k; $pi = $pi + 1) { $cargs[] = \Parser\Ast\Expr::variable('a' . (string)$pi, $sp); }
+                $callK = \Parser\Ast\Expr::invoke(\Parser\Ast\Expr::variable($tmp, $sp), $cargs, $sp);
+                $body = $body === null ? $callK : \Parser\Ast\Expr::ternary(
+                    \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::call('func_num_args', [], $sp), \Parser\Ast\Expr::int($k, $sp), $sp),
+                    $callK, $body, $sp);
+            }
+            $wrap = \Parser\Ast\Expr::arrowFn(true, $params, null, $body, $sp);
+            $this->pendingCallInits[] = new StoreLocal($tmp, $v, $v->type);
+            return $this->lowerExpr($wrap);
         }
         // First-class callable `C::m(...)` → a 0-capture closure forwarding to
         // the static method (scope preserved for late static binding).
