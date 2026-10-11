@@ -363,7 +363,7 @@ class ReflectionClass
         return new ReflectionClass(__mc_refl_name($p));
     }
 
-    /** Does this class extend `$name`, at any depth? */
+    /** Does this class extend, or implement, `$name` at any depth? (Not the class itself.) */
     public function isSubclassOf(string $name): bool
     {
         $want = __mc_refl_unqualify($name);
@@ -372,7 +372,8 @@ class ReflectionClass
             if (__mc_refl_name($p) === $want) { return true; }
             $p = __mc_refl_parent($p);
         }
-        return false;
+        if (__mc_refl_unqualify($this->name) === $want) { return false; }
+        return $this->implementsInterface($name);
     }
 
     /**
