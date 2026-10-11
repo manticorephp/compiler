@@ -24,7 +24,7 @@ no import and no registration.
 | Process | `Pcntl.php`, `Proc.php`, `Offload.php` (blocking-offload pool) |
 | Native buffers | `Buf.php` (bootstrap twins of the `__mc_nbuf_*` codegen builtins behind `SplFixedArray` / `Manticore\Ds\*`) |
 | Compression / images | `Zlib.php`, `Image.php` |
-| Web / session / SAPI | `Session.php`, `Sapi.php`, `Win.php`, `Output.php`, `Locale.php`, `Apcu.php` |
+| Web / session / SAPI | `Session.php`, `Sapi.php`, `Win.php`, `Output.php`, `Locale.php` |
 | Misc | `Gc.php`, `VarExtra.php` |
 
 `Io.php` (~76 KB), `Net.php` (~100 KB) and `Sockets.php` (~50 KB) are the three that
