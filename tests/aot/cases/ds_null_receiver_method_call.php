@@ -1,6 +1,5 @@
 <?php
 // A method call on a null ?Map receiver does not throw "Call to a member function on null" (fused callback returns the seed, plain call dereferences null).
-// issue: #148
 use Manticore\Ds\Map;
 
 function fused(?Map $m): void

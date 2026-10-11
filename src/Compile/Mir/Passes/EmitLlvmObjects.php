@@ -7967,7 +7967,36 @@ trait EmitLlvmObjects
         return false;
     }
 
+    /**
+     * php's `Error: Call to a member function m() on null` for a typed object
+     * receiver that holds null. Only a receiver that is a plain local (never
+     * `$this`) is guarded: it is read again by the call itself, so nothing is
+     * evaluated twice. One compare and a cold branch.
+     */
+    private function nullReceiverGuard(\Compile\Mir\MethodCall_ $n): string
+    {
+        $o = $n->object;
+        if ($o->kind !== Node::KIND_LOAD_LOCAL || $o->name === 'this' || $o->type->kind !== Type::KIND_OBJ
+            || isset($this->enums[$o->type->class ?? ''])) { return ''; }
+        // An enum case rides as its ordinal, and 0 is a valid one: skip any type an enum can inhabit.
+        foreach ($this->enums as $en => $_e) {
+            if ($this->classImplements((string)$en, $o->type->class ?? '')) { return ''; }
+        }
+        $out = $this->emitNode($o);
+        $out .= $this->coerceToI64();
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+        return $out . $this->emitThrowIf($z, 'Error', 'Call to a member function ' . $n->method . '() on null');
+    }
+
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
+    {
+        $guard = $this->nullReceiverGuard($n);
+        if ($guard !== '') { return $guard . $this->emitMethodCallUnguarded($n); }
+        return $this->emitMethodCallUnguarded($n);
+    }
+
+    private function emitMethodCallUnguarded(\Compile\Mir\MethodCall_ $n): string
     {
         $hm = $this->emitHmapCall($n);
         if ($hm !== null) { return $hm; }

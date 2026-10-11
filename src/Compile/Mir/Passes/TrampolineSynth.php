@@ -244,10 +244,13 @@ final class TrampolineSynth
             for ($i = 0; $i < $k; $i = $i + 1) { $parts[] = '$a[' . (string)$i . ']'; }
             return \implode(', ', $parts);
         };
+        $guard = $req > 0
+            ? '  if (count($a) < ' . (string)$req . ") { throw new \\ArgumentCountError('Too few arguments: ' . count(\$a) . ' passed and at least " . (string)$req . " expected'); }\n"
+            : '';
         if ($req >= $tot) {
-            return $stmt($mk($argsUpTo($tot)));
+            return $guard . $stmt($mk($argsUpTo($tot)));
         }
-        $out = "  \$n = count(\$a);\n";
+        $out = $guard . "  \$n = count(\$a);\n";
         for ($k = $req; $k < $tot; $k = $k + 1) {
             $out .= '  if ($n <= ' . (string)$k . ") {\n  " . $stmt($mk($argsUpTo($k))) . "  }\n";
         }

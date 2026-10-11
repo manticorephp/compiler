@@ -3357,6 +3357,17 @@ trait EmitLlvmCalls
                 $ev = $this->lastValue;
             }
             $def = $pdefs[$k] ?? null;
+            if ($def === null && $fnKey !== '' && !($vmask[$k] ?? false)) {
+                // A required parameter the pack is too short for: php's ArgumentCountError.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $short = $this->ssa->allocReg();
+                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                $out .= $this->emitThrowIf($short, 'ArgumentCountError',
+                    'Too few arguments to function ' . \str_replace('__', '::', $fnKey) . '()');
+            }
             if ($def !== null) {
                 if ($cnt === '') {
                     $out .= $this->arrayCountFromPtrIr($arrReg);
@@ -3726,6 +3737,22 @@ trait EmitLlvmCalls
     }
 
     private function emitCall(Call $n): string
+    {
+        $c = $n;
+        if (\str_starts_with($c->function, '__mc_fuse_ds') && \count($c->args) > 0
+            && $c->args[0]->kind === Node::KIND_LOAD_LOCAL && $c->args[0]->type->kind === Type::KIND_OBJ) {
+            // A fused Ds callback method (`$m->reduce(fn …)`) stands in for a method call on its receiver.
+            $m = \preg_replace('/^__mc_fuse_ds(.*)_[0-9]+$/', '$1', $c->function);
+            $z0 = $this->emitNode($c->args[0]) . $this->coerceToI64();
+            $z = $this->ssa->allocReg();
+            $z0 .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            return $z0 . $this->emitThrowIf($z, 'Error', 'Call to a member function ' . $m . '() on null')
+                . $this->emitCallUnguarded($n);
+        }
+        return $this->emitCallUnguarded($n);
+    }
+
+    private function emitCallUnguarded(Call $n): string
     {
         $c = $n;
         $b = $this->emitBuiltin($c);

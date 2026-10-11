@@ -1,6 +1,5 @@
 <?php
 // A dynamically named method called with too few arguments is padded instead of throwing ArgumentCountError.
-// issue: #175
 class Svc { public function get(string $host, string $key): string { return "$host/$key"; } }
 $s = new Svc();
 $m = 'get';
