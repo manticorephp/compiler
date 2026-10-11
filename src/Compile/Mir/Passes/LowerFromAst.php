@@ -1225,12 +1225,7 @@ final class LowerFromAst implements Pass
             if ($stmt->kind === 'Function') {
                 $fqn = $stmt->decl->name;
                 $this->fnDecls[$fqn] = $stmt->decl;
-                $pos = \strrpos($fqn, '\\');
-                if ($pos !== false) {
-                    $bare = \substr($fqn, $pos + 1);
-                    $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare])
-                        ? '' : $fqn;
-                }
+                $this->noteSourceFnAlias($fqn);
             }
         }
 
@@ -3169,6 +3164,21 @@ final class LowerFromAst implements Pass
     private function yieldFrom(\Parser\Ast\YieldExpr $y): bool { return $y->from; }
 
     /**
+     * Register the bare-name alias of a namespaced function declared in source.
+     * A name the compiler emits inline (`getenv`, `strlen`, …) is never aliased:
+     * a lone `Ns\getenv` declaration would otherwise capture every global and
+     * cross-namespace `getenv()` call, which php resolves to the builtin.
+     */
+    private function noteSourceFnAlias(string $fqn): void
+    {
+        $pos = \strrpos($fqn, '\\');
+        if ($pos === false) { return; }
+        $bare = \substr($fqn, $pos + 1);
+        if ($this->isCodegenBuiltin($bare) || $this->isEmitterInlineName(\strtolower($bare))) { return; }
+        $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
+    }
+
+    /**
      * Resolve a called function name. PHP resolves an unqualified call in
      * a namespace to the namespaced function if one exists, else falls back
      * to the global function / builtin. We keep the name when it's a known
@@ -4802,11 +4812,7 @@ final class LowerFromAst implements Pass
         if ($s->kind === 'Function') {
             $fqn = $s->decl->name;
             $this->fnDecls[$fqn] = $s->decl;
-            $pos = \strrpos($fqn, '\\');
-            if ($pos !== false) {
-                $bare = \substr($fqn, $pos + 1);
-                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
-            }
+            $this->noteSourceFnAlias($fqn);
             return;
         }
         if ($s->kind !== 'Class') { return; }
