@@ -261,6 +261,17 @@ trait EmitLlvmGenerator
         // ── resume ──
         $this->locals->slots = [];
         $this->locals->refLocals = [];
+        // A by-ref param's frame slot holds the caller's ADDRESS (the creator stored it): the
+        // body reads and writes through it, so a lazy assignment reaches the caller.
+        $this->locals->refParamTypes = [];
+        $this->locals->refParamRetyped = [];
+        foreach ($fn->params as $gp) {
+            if ($gp->byRef) {
+                $this->locals->refLocals[$gp->name] = true;
+                $this->locals->refParamTypes[$gp->name] = $gp->type;
+                if ($gp->retypedByRef) { $this->locals->refParamRetyped[$gp->name] = true; }
+            }
+        }
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
