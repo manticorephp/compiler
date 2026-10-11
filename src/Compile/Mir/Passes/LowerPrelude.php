@@ -704,6 +704,7 @@ trait LowerPrelude
         foreach ($groups as $g => $members) {
             $helper = '__mc_ser_object_group_' . (string)$g;
             $body .= "function " . $helper . "(mixed \$v, __McSerSt \$st): string {\n";
+            $labels = '';
             foreach ($members as $cname) {
                 $cd = $this->classTable[$cname];
                 $props = $cd->propertyNames;
@@ -739,8 +740,9 @@ trait LowerPrelude
                     $body .= "        return \"" . $this->dqBody($head . (string)count($props) . ':{') . "\"\n"
                         . $entries . "          . '}';\n      }\n";
                 }
-                $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$st);\n";
+                $labels .= "    case " . (string)$cd->classId . ":\n";
             }
+            $dispatch .= $labels . "      return " . $helper . "(\$v, \$st);\n";
             $body .= "  return '';\n}\n";
         }
         $dispatch .= "  }\n"
