@@ -580,7 +580,9 @@ Regression coverage lives in the suite: `tests/aot/cases/async_*.php`
 (`bash tests/aot/run.sh -k async`). They are manticore-only — `php` has no `Io\Poll`, so
 `difftest` skips them and their `expected/` is hand-written.
 
-## Where it stands (macOS, 10-core, `wrk -t4`, plaintext keep-alive)
+## Where it stands
+
+Measured on macOS, 10 cores, `wrk -t4`, plaintext keep-alive, release 0.14.0; absolute numbers move with the host, the ratios are the point.
 
 Single-core keep-alive ~64.5k rps, at a **two-syscall floor** — counted, not assumed.
 Multi-process (8-worker prefork) same-box vs reference servers driven by the same `wrk`:
