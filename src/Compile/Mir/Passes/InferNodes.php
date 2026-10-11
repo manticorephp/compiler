@@ -1991,6 +1991,12 @@ trait InferNodes
                     $node->fixedBuf = true;
                 }
             }
+            if ($node->iterClass === '' && !$node->byRef) {
+                // A plain object walks its properties, as get_object_vars()
+                // hands them ({@see EmitLlvmControl::emitForeach}).
+                $elem = Type::cell();
+                $keyT = Type::cell();
+            }
             $node->iterValueType = $node->iterClass !== '' ? $elem : null;
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an

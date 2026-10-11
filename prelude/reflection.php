@@ -679,6 +679,12 @@ class ReflectionMethod
         return __mc_refl_invoke($this->tramp, $object, $args);
     }
 
+    /** A closure over the method; `$object` is the receiver (null for a static method). */
+    public function getClosure(?object $object = null): \Closure
+    {
+        return function (mixed ...$args) use ($object) { return $this->invoke($object, ...$args); };
+    }
+
     private function flags(): int
     {
         return __mc_refl_member($this->h, $this->name, 1) - 1;

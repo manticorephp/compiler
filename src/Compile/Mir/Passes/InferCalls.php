@@ -273,7 +273,7 @@ trait InferCalls
         // Never actually returns — it throws php's `Undefined constant` Error.
         // Typed CELL so whatever position the constant stood in accepts it: the
         // value is unreachable, but the type has to be one every consumer takes.
-        if ($n === '__mir_throw_error') { return Type::cell(); }
+        if ($n === '__mir_throw_error' || $n === '__mir_throw_type_error' || $n === '__mir_throw_argcount_error') { return Type::cell(); }
         // `print` always yields int 1 in PHP — that is what makes it usable in
         // `$c and print "x"` and `$ok = print "y"`.
         if ($n === 'print') { return Type::int_(); }

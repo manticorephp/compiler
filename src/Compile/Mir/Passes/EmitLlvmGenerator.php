@@ -261,6 +261,17 @@ trait EmitLlvmGenerator
         // ── resume ──
         $this->locals->slots = [];
         $this->locals->refLocals = [];
+        // A by-ref param's frame slot holds the caller's ADDRESS (the creator stored it): the
+        // body reads and writes through it, so a lazy assignment reaches the caller.
+        $this->locals->refParamTypes = [];
+        $this->locals->refParamRetyped = [];
+        foreach ($fn->params as $gp) {
+            if ($gp->byRef) {
+                $this->locals->refLocals[$gp->name] = true;
+                $this->locals->refParamTypes[$gp->name] = $gp->type;
+                if ($gp->retypedByRef) { $this->locals->refParamRetyped[$gp->name] = true; }
+            }
+        }
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];
         $this->frame->returnType = $fn->returnType;
@@ -328,6 +339,17 @@ trait EmitLlvmGenerator
         // ends the generator, as in php, and nothing re-enters a frame whose
         // locals the unwind already gave back.
         $out .= '  store i64 -1, ptr ' . $this->gen->statePtr . "\n";
+        // A try's saved backtrace depth is only valid for the resume that entered it: a
+        // later resume may run at another depth, so a catch must restore THIS resume's.
+        if ($this->rt->needsBacktrace) {
+            foreach ($locals as $name => $_idx) {
+                if (\str_starts_with((string)$name, '@try.bt.')) {
+                    $bd = $this->ssa->allocReg();
+                    $out .= '  ' . $bd . " = load i64, ptr @__mir_bt_depth\n";
+                    $out .= '  store i64 ' . $bd . ', ptr ' . $this->locals->slots[$name] . "\n";
+                }
+            }
+        }
         $out .= '  switch i64 ' . $st . ', label %' . $startLabel . " [\n" . $cases . "  ]\n";
         $out .= "gen.destroy.0:\n" . $this->genOwnDropsIr($fn->ownGenParams) . "  br label %gen.done\n";
         $out .= "gen.done:\n  ret i64 0\n";

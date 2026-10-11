@@ -72,6 +72,13 @@ final class Parser
     private array $useAliases = [];
 
     /**
+     * Lowercased alias → FQN of `use function X as alias;`.
+     *
+     * @var array<string, string>
+     */
+    private array $useFnAliases = [];
+
+    /**
      * Map: index of the token at which a doc-comment is "attached"
      * (i.e. the next non-DocComment token) → the doc-comment lexeme.
      * Built once at construction so parseFunctionDecl / parseMethod
@@ -133,6 +140,7 @@ final class Parser
             $p->sourceFile = $lazy->file;
             $p->currentNamespace = $lazy->namespace;
             $p->useAliases = $lazy->useAliases;
+            $p->useFnAliases = $lazy->useFnAliases;
             $program = $p->parseProgram();
             $lazy->source = '';
             foreach ($program->statements as $stmt) {
@@ -410,13 +418,16 @@ final class Parser
         if ($this->check(TokenKind::OpenBrace)) {
             $prevNs = $this->currentNamespace;
             $prevUses = $this->useAliases;
+            $prevFnUses = $this->useFnAliases;
             $this->currentNamespace = $name;
             $this->useAliases = [];
+            $this->useFnAliases = [];
             try {
                 $body = $this->parseBlock();
             } finally {
                 $this->currentNamespace = $prevNs;
                 $this->useAliases = $prevUses;
+                $this->useFnAliases = $prevFnUses;
             }
             return Stmt::namespace_($name, $body, $span);
         }
@@ -426,6 +437,7 @@ final class Parser
         // and let later `parseUseDecl` calls layer aliases onto it.
         $this->currentNamespace = $name;
         $this->useAliases = [];
+        $this->useFnAliases = [];
         return Stmt::namespace_($name, null, $span);
     }
 
@@ -525,6 +537,7 @@ final class Parser
                 : \substr($fqn, \strrpos($fqn, '\\') + 1));
             $this->useAliases[$short] = $fqn;
         }
+        if ($kind === 'function' && $alias !== null) { $this->useFnAliases[\strtolower($alias)] = $fqn; }
         return new UseItem($fqn, $alias, $kind);
     }
 
@@ -558,6 +571,7 @@ final class Parser
             $short = $alias ?? (strpos($fqn, '\\') === false ? $fqn : substr($fqn, strrpos($fqn, '\\') + 1));
             $this->useAliases[$short] = $fqn;
         }
+        if ($kind === 'function' && $alias !== null) { $this->useFnAliases[\strtolower($alias)] = $fqn; }
         return new UseItem($fqn, $alias, $kind);
     }
 
@@ -1266,6 +1280,7 @@ final class Parser
             $this->currentNamespace,
             $this->useAliases,
             $this->sourceFile,
+            $this->useFnAliases,
         );
     }
 
@@ -2997,7 +3012,8 @@ final class Parser
      */
     private function parseNameOrCall(Span $span): Expr
     {
-        $name = $this->parseClassName();
+        $literal = $this->parseClassNameLiteral();
+        $name = $this->resolveClassName($literal);
         $tok = $this->peek();
 
         if ($tok->kind === TokenKind::DoubleColon) {
@@ -3051,6 +3067,8 @@ final class Parser
         // are rare but accepted too.
         if ($this->check(TokenKind::OpenParen)) {
             $args = $this->parseArgList();
+            $fl = \strtolower($literal);
+            if (isset($this->useFnAliases[$fl]) && !\str_contains($literal, '\\')) { $name = $this->useFnAliases[$fl]; }
             return Expr::call($name, $args, $span);
         }
 
