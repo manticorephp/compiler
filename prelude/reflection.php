@@ -406,6 +406,36 @@ class ReflectionClass
     }
 
     /**
+     * PHP 8.4 lazy objects. A compiled program has none: every object is fully initialized, so the
+     * object itself is the "real instance" and nothing is uninitialized. Creating lazy objects
+     * (newLazyGhost / newLazyProxy / resetAsLazy*) is not supported.
+     */
+    public function isUninitializedLazyObject(object $object): bool
+    {
+        return false;
+    }
+
+    public function initializeLazyObject(object $object): object
+    {
+        return $object;
+    }
+
+    public function markLazyObjectAsInitialized(object $object): object
+    {
+        return $object;
+    }
+
+    public function newLazyGhost(callable $initializer, int $options = 0): object
+    {
+        throw new ReflectionException("Lazy objects are not supported");
+    }
+
+    public function newLazyProxy(callable $factory, int $options = 0): object
+    {
+        throw new ReflectionException("Lazy objects are not supported");
+    }
+
+    /**
      * A new instance, constructor arguments from an array. The `mixed[]` hint
      * boxes a concrete-element array to the `vec[cell]` the ctor trampoline
      * expects.
