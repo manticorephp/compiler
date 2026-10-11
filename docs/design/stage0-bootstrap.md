@@ -1,6 +1,6 @@
 # Stage0 bootstrap — building the compiler from a pinned release
 
-**Status:** shipped (#105: PR #112 pin, PR #114 seed removal), 2026-10. The procedure contributors
+**Status:** shipped (2026-10). The procedure contributors
 follow is the "Bootstrap: the pinned release" section of `AGENTS.md`. This note explains why the
 design looks the way it does.
 

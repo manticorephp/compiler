@@ -7,7 +7,7 @@ reasoning and the wiring.
 
 ## Status
 
-Shipped in PR #108 (`54365770`), ABI v18 (`MemoryAbi::VERSION`, `BUF_*` block, descriptor
+Shipped, ABI v18 (`MemoryAbi::VERSION`, `BUF_*` block, descriptor
 `json_fn@56`, kind 12 `U64`). In the v0.13.0 release. Tracking: #92 (epic), #101 (follow-ups).
 Open items are at the end.
 
@@ -178,6 +178,6 @@ property view. `UInt64Array` shows raw bits in `toArray` (see open items).
   `SplFixedArray`, views over a `ByteBuffer`, string-array container.
 - #107: `foreach` over a typed array bound to a `#[TypeDef]` yields the plain scalar.
 - #106: a class with a `#[TypeDef]` property makes any `var_dump` a compile error.
-- #110 (PR #111): `#[TypeDef]` repr is not enforced on a narrow property slot.
+- #110: `#[TypeDef]` repr is not enforced on a narrow property slot.
 - #109: `UInt64Array` JSON / dump encode unsigned values as signed bits.
 - `src/` may now use `Manticore\Ds`: the pin (`BOOTSTRAP_VERSION` = 0.14.0) has it (#105, [stage0-bootstrap.md](stage0-bootstrap.md)).

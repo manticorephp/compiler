@@ -1,11 +1,10 @@
-# Handoff — the ownership contract for builtins, and what is left of it
+# Builtin ownership — the ownership contract for builtins, and what is left of it
 
-**State**: `f1baf57` merged into local `main`, then `79cd5db` / `2e1b880`
-(branch `packown`, merged) and `5ed7347` (branch `arrflavor`). The ownership table is at **LEAK on 0 · parity DIFF 0**.
+Status: **shipped; one open item (section 3).** The ownership table is at **LEAK on 0 · parity DIFF 0**.
 What is left of the area is one unnamed disagreement, section 3.
 
-Read this before touching rc/ownership code again. It starts from the model, so
-a session with none of the context can start at the top.
+Read this before touching rc/ownership code. It starts from the model, so
+a reader with none of the context can start at the top.
 
 ---
 
@@ -63,7 +62,7 @@ Never land one half.
 
 ## 2. What is already done
 
-`tools/ownership_probe.php` is the classifier the first version of this handoff
+`tools/ownership_probe.php` is the classifier an earlier version of this note
 asked for, and it is now the instrument for the whole area:
 
     php tools/ownership_probe.php            # the table
@@ -196,7 +195,7 @@ one of them.
   named. Until then the release stays buffer-only: one leaked ref per element
   per call, the safe direction (`tools/prof/packleak.php alias`, 38/75).
 
-  ★ Two notes that are no longer true and cost a session each: "a compiler built
+  ★ Two notes that are no longer true and cost days each: "a compiler built
   with `MANTICORE_DEBUG_VERIFY=1` crashes with NO guard firing" — it fires,
   `[VERIFY] str_release: rc <= 0` inside `LowerFromAst::collectVars` — and the
   string path had NO retain-side guard at all, so the first illegal touch was

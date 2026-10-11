@@ -1,5 +1,7 @@
 # MIR — Manticore's mid-level IR
 
+Status: **shipped.** Overview of the mid-level IR and the pass pipeline.
+
 MIR is the typed, tree-shaped IR between the AST and LLVM. Every analysis,
 transform, and lowering step operates on it. This doc is the map: data
 structures, the type lattice, the node taxonomy, the pass pipeline, and the

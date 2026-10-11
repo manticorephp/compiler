@@ -14,8 +14,8 @@ Two namespaces:
 (`#[Struct]`), `Attr\Struct`, and `Manticore\Attr\Struct`. Two consequences.
 First, a `use` statement is optional — the bare form is what the test suite and
 the compiler's own source use. Second, `Manticore\Attr\TypeDef` is accepted by
-name even though **no such class file exists** (`src/Manticore/Attr/` holds only
-`Struct`, `RefOut` and `CellArg`), so write `#[TypeDef]` bare.
+name even though **no such class file exists** (`src/Manticore/Attr/` holds
+`Struct`, `RefOut`, `CellArg`, `Overload`, `CompareKey`, `CompareNone` and `Uncomparable`), so write `#[TypeDef]` bare.
 
 ---
 

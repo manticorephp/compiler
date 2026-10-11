@@ -464,7 +464,7 @@ the one consumer today.
 
 Routing, middleware, PSR-7/PSR-15, HTTP/2, multi-range (`multipart/byteranges`),
 brotli, and compression of a STREAMED body. PSR-7 wrappers are an ordinary pure-PHP
-package on top of this; the rest are their own epics.
+package on top of this; the rest are not provided.
 
 ## See also
 

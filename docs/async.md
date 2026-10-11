@@ -629,9 +629,9 @@ registered wakes up never. Nothing reads the signalfd: its readability is the hi
 path on both hosts. Where neither is available (the portable `poll` backend) the 50 ms tick
 is still there.
 
-## Not yet
+## Limitations and not yet built
 
-Also: shared-memory multithreading (a future compiler superset).
+Shared-memory multithreading is not available (a possible future compiler superset).
 
 **Below two syscalls per request.** Those two are `recvfrom` + `sendto` and nothing else
 (measured above). `writev(2)` is already here — `fwrite($s, [$hdr, $body])` sends headers and

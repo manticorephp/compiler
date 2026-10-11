@@ -1,5 +1,7 @@
 # cellguard — the cell-contract verifier
 
+Status: **shipped** (instrument in tree; producer fixes tracked in value-channels.md).
+
 `Type::KIND_CELL` claims "boxed, self-describing". It is a static claim; nothing
 at runtime guarantees it. cellguard is the instrument that makes the claim
 checkable: a static census at the emitter seam, a runtime cross-check at the
@@ -8,8 +10,6 @@ shrink. It does NOT fix producers — that is the element-channel epic.
 
 Code: `src/Compile/Mir/Passes/EmitLlvmCellGuard.php` (a trait on the `EmitLlvm`
 host). Tool: `tools/cellguard_scan.sh`. Baseline: `tools/cellguard_baseline.txt`.
-Untracked working notes (calibration history, task reports):
-`docs/status/CELLGUARD-CENSUS-2026-09-08.md` and `.superpowers/sdd/2026-09-08-cellguard/`.
 
 **Binding constraint: with both flags off, the emitted IR is byte-identical to
 an emitter without the trait.** Every marking call writes only to compile-time

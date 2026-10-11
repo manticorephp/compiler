@@ -288,7 +288,7 @@ DONE + gated (suite 247 · difftest 238 · fixpoint · stability):
   boxed bits raw → segfault. Only `instanceof` narrowing kept (obj→obj, ptr rep).
   Sound scalar narrowing of a cell needs an UNBOX at the narrow point.
 
-### OPEN gap found this session — cell local across a control-flow MERGE
+### Gap (since resolved, see below) — cell local across a control-flow MERGE
 `if ($b) { $x = 1.5; } else { $x = "hi"; } var_dump($x)` prints garbage EVEN for
 an explicit `mixed $x`. Root cause now precise: a cell/mixed local uses a
 **store-RAW + box-at-USE + flow-narrow** model — the slot holds the raw i64, and
@@ -304,7 +304,7 @@ multi-`return` of distinct concrete types with no declared return type.
   promotes a local to a boxed-cell slot when it's assigned ≥2 distinct concrete
   value kinds whose ranges merge (cf. scanParamCellSinks / assocLocals). Heavy
   self-host risk — the compiler uses mixed/cell locals; gate hard. EPIC-SIZED,
-  give it a focused session. This is the next type-system priority.
+  give it a focused effort. This was the next type-system priority.
 
 ### DEAD END (s8 attempt) — naive blanket boxed-cell-slot promotion
 Attempted: a `mergeLocals` detector marks a local assigned ≥2 distinct scalar
@@ -356,7 +356,7 @@ A use-whitelist (promote only if EVERY use is provably cell-safe: echo/var_dump/
 return/arith/concat/compare) is a weaker variant of full-cell — likely too
 conservative to fire, and still must catch every consuming context.
 
-## Next session — concrete worklist (priority order)
+## Open work (priority order)
 
 1. ✅ **Cell local across an if/else merge — DONE flow-sensitively** (`abcbe08`,
    see RESOLVED section above). Remaining siblings: **multi-`return` of distinct

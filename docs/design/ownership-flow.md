@@ -1,7 +1,7 @@
 # OwnershipFlow — who holds a count of a local, decided per program point
 
-Status: **shipped.** PR #15 (`b40d04be`, "Ownership of locals decided per program
-point") and PR #104 (`21337382`, "generator frames own what they hold", ABI v17).
+Status: **shipped.** Ownership of locals decided per program
+point, and generator frames own what they hold (ABI v17).
 `MemoryAbi::VERSION` is 18 today (`src/Compile/MemoryAbi.php`). The rc encoding,
 tags and generator-frame layout are in `memory-abi.md` (§5 is the short form of
 this note); this note says how the decision is made and what a contributor may
@@ -9,7 +9,7 @@ not break.
 
 ## Why
 
-Before PR #15 the question "does this local hold a +1?" had several deciders that
+Before this change the question "does this local hold a +1?" had several deciders that
 could disagree:
 
 - `InsertMemoryOps` kept a **name-level** rc track: one verdict per local for the
@@ -42,7 +42,7 @@ PR.
 - `InsertMemoryOps` is now the frame's **arena scope only** (`arena_enter` /
   `arena_leave`); it plants no per-local release.
 - `OwnershipFlow` always runs (no flag; `MANTICORE_OWNFLOW=1` was only the
-  transition switch in PR #15).
+  transition switch).
 - `Verify` throws `MIR.verify: …` when `Module::ownFlowErrors` is non-empty
   (`Passes/Verify.php::run`): an ownership the flow cannot settle fails the build
   with function, name and line, never a silent choice of one release over another.
