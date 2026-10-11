@@ -239,15 +239,41 @@ trait LowerStmts
     private function hoistAssign(\Parser\Ast\Assign $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->target);
-        if ($t === $e->target) { return null; }
-        return new \Parser\Ast\Assign($t, $e->value, $e->span);
+        $v = $this->hoistLvValue($e->target, $e->value);
+        if ($t === $e->target && $v === $e->value) { return null; }
+        return new \Parser\Ast\Assign($t, $v, $e->span);
     }
 
     private function hoistCompound(\Parser\Ast\CompoundAssign $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->target);
-        if ($t === $e->target) { return null; }
-        return new \Parser\Ast\CompoundAssign($e->op, $t, $e->value, $e->span);
+        $v = $this->hoistLvValue($e->target, $e->value);
+        if ($t === $e->target && $v === $e->value) { return null; }
+        return new \Parser\Ast\CompoundAssign($e->op, $t, $v, $e->span);
+    }
+
+    /**
+     * `$k[X] = $k[Y] = v`: the outer store would load the container BEFORE the
+     * inner store ran, and the inner store may promote / grow / separate that
+     * buffer. php evaluates the dims, then the right-hand side, then the
+     * dim-write — so a right-hand side that itself writes is evaluated into a
+     * temp first and the store reads the container after it.
+     */
+    private function hoistLvValue(\Parser\Ast\Expr $target, \Parser\Ast\Expr $v): \Parser\Ast\Expr
+    {
+        $k = $v->kind;
+        // A chain `$m[a] = $m[b] = $m[c] = v` nests: the same rule, one level in.
+        if ($k === 'Assign') {
+            $it = $this->hoistLvChain($v->target);
+            $iv = $this->hoistLvValue($v->target, $v->value);
+            if ($it !== $v->target || $iv !== $v->value) {
+                $v = new \Parser\Ast\Assign($it, $iv, $v->span);
+            }
+        }
+        $tk = $target->kind;
+        if ($tk !== 'ArrayAccess' && $tk !== 'PropertyAccess' && $tk !== 'DynProp') { return $v; }
+        if ($k !== 'Assign' && $k !== 'CompoundAssign' && $k !== 'IncDec') { return $v; }
+        return $this->lvTemp($v);
     }
 
     private function hoistIncDec(\Parser\Ast\IncDec $e): ?\Parser\Ast\Expr
