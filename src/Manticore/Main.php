@@ -5965,6 +5965,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $statT = \Compile\Stats::now();
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
+            // A provable argument mismatch in a user program is a run-time
+            // TypeError at the site, as in php; bin/build (the tree compiling
+            // itself) sets MANTICORE_TYPECHECK_STRICT and keeps it a build error.
+            $tc->demoteArgMismatch = $collect === null && \getenv("MANTICORE_TYPECHECK_STRICT") !== "1";
             $module = $tc->run($module);
             \Compile\Stats::step('TypeCheck', $statT, \count($module->functions), -1);
             foreach ($tc->warnings as $tw) {

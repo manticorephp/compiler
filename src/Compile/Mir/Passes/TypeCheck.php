@@ -37,6 +37,14 @@ final class TypeCheck
     /** @var string[] findings that do not stop the build */
     public array $warnings = [];
 
+    /**
+     * Turn a statically-provable array-ness argument mismatch into a RUN-TIME
+     * `TypeError` at the call site instead of a build error. Set by the driver
+     * for a user program; `analyze` (collect mode) leaves it off, so the
+     * compiler's own tree still reports every such site as an error.
+     */
+    public bool $demoteArgMismatch = false;
+
     /** A warning {@see shapeConflict} found while answering, taken by its caller. */
     private string $shapeWarn = '';
 
@@ -83,15 +91,15 @@ final class TypeCheck
             if (!$this->reprOnly) { $this->checkArith($n, $inFn); }
         }
         if ($n->kind === Node::KIND_CALL) {
-            $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0);
+            $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0, $n);
         } elseif ($n->kind === Node::KIND_NEW_OBJ) {
-            $this->checkArgs($n->class . '____construct', 'new ' . $n->class, $n->args, $inFn, 1);
+            $this->checkArgs($n->class . '____construct', 'new ' . $n->class, $n->args, $inFn, 1, $n);
         } elseif ($n->kind === Node::KIND_STATIC_CALL) {
-            $this->checkArgs($n->class . '__' . $n->method, $n->class . '::' . $n->method, $n->args, $inFn, 0);
+            $this->checkArgs($n->class . '__' . $n->method, $n->class . '::' . $n->method, $n->args, $inFn, 0, $n);
         } elseif ($n->kind === Node::KIND_METHOD_CALL) {
             $cls = $n->object->type->class ?? '';
             if ($cls !== '') {
-                $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1);
+                $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1, $n);
             }
         }
         $this->checkShapeNode($n, $inFn);
@@ -150,7 +158,7 @@ final class TypeCheck
      * arg/param indices line up. An unresolved callee (builtin, dynamic,
      * inherited method on a parent class) is skipped — no callee, no check.
      */
-    private function checkArgs(string $fnName, string $label, array $args, string $inFn, int $recv): void
+    private function checkArgs(string $fnName, string $label, array $args, string $inFn, int $recv, Node $site): void
     {
         $params = $this->paramsByFn[$fnName] ?? null;
         if ($params === null) { return; }
@@ -175,6 +183,10 @@ final class TypeCheck
             $p = $params[$pi];
             if ($p->variadic) { break; }
             if (!$this->reprOnly && $this->incompatible($this->provenType($arg), $p->type)) {
+                if ($this->demoteArgMismatch) {
+                    $this->demoteToTypeError($site, $arg, $p, $label, $ai, $inFn);
+                    return;
+                }
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected';
@@ -194,6 +206,48 @@ final class TypeCheck
             }
             $this->takeShapeWarn($arg, $inFn . '(): argument ' . (string)($ai + 1) . ' to ' . $label . '() — ');
         }
+    }
+
+    /**
+     * php checks an argument against the callee's parameter type when the call
+     * is MADE, so a mismatch in code that never runs (an inherited `new static`
+     * cloned per subclass, a branch behind a feature guard) is not an error
+     * until it runs, and then it is a `TypeError`. The call's LAST argument
+     * becomes `true ? throw new TypeError(…) : <arg>`: the earlier arguments are
+     * evaluated first, as php does, then the throw. Keeps a warning at build time.
+     */
+    private function demoteToTypeError(Node $site, Node $arg, \Compile\Mir\Param $p, string $label, int $ai, string $inFn): void
+    {
+        $callee = \str_replace('->', '::', $label);
+        if (\str_starts_with($callee, 'new ')) { $callee = \substr($callee, 4) . '::__construct'; }
+        $msg = $callee . '(): Argument #' . (string)($ai + 1) . ' ($' . $p->name . ') must be of type '
+            . $this->phpTypeName($p->type) . ', ' . $this->phpTypeName($this->provenType($arg)) . ' given';
+        $line = $arg->line;
+        $str = new \Compile\Mir\StringConst($msg, Type::string_());
+        $zero = new \Compile\Mir\IntConst(0, Type::int_());
+        $none = new \Compile\Mir\NullConst(Type::null_());
+        $err = new NewObj('TypeError', [$str, $zero, $none], Type::obj('TypeError'));
+        $throw = new \Compile\Mir\Throw_($err, Type::void());
+        $args = $site->args;
+        $last = \count($args) - 1;
+        $orig = $args[$last];
+        $guard = new \Compile\Mir\Ternary(new \Compile\Mir\BoolConst(true, Type::bool_()), $throw, $orig, $orig->type);
+        $args[$last] = $guard;
+        $site->args = $args;
+        foreach ([$str, $zero, $none, $err, $throw, $guard] as $made) { $made->line = $line; }
+        $this->warnings[] = ($arg->line > 0 ? 'line ' . (string)$arg->line . ': warning: ' : 'warning: ') . $inFn . '(): ' . $msg . ' — throws TypeError if reached';
+    }
+
+    private function phpTypeName(Type $t): string
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_ARRAY) { return 'array'; }
+        if ($k === Type::KIND_INT) { return 'int'; }
+        if ($k === Type::KIND_FLOAT) { return 'float'; }
+        if ($k === Type::KIND_STRING) { return 'string'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_OBJ && $t->class !== null) { return $t->class; }
+        return 'mixed';
     }
 
     /**
