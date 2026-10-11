@@ -7734,6 +7734,49 @@ trait EmitLlvmBuiltins
     /** property_exists($obj|'C', 'p') — walk the parent chain for the prop. */
     private function biPropertyExists(array $args): string
     {
+        $out = $this->biPropertyExistsDeclared($args);
+        // An OBJECT also answers for its dynamic properties (the bag). Only a
+        // statically-typed object read twice for free (a local, a literal name).
+        $o = $args[0] ?? null;
+        $k = $args[1] ?? null;
+        if ($o === null || $k === null || $o->kind !== Node::KIND_LOAD_LOCAL
+            || $o->type->kind !== Type::KIND_OBJ
+            || ($k->kind !== Node::KIND_STRING_CONST && $k->kind !== Node::KIND_LOAD_LOCAL)) {
+            return $out;
+        }
+        $cd = $this->classes[$o->type->class ?? ''] ?? null;
+        if ($cd !== null && !$cd->usesBag()) { return $out; }
+        $declared = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $declared . ', ptr ' . $slot . "\n";
+        $out .= $this->emitNode($o);
+        $out .= $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+        $out .= $cd !== null ? $this->emitBagPtrAt($objPtr, $cd->bagOffset()) : $this->emitBagOfUnknownClass($objPtr);
+        $bagP = $cd !== null ? $this->bagPtrReg : $this->lastValue;
+        $out .= $this->emitPtrArg($k);
+        $keyP = $this->lastValue;
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp eq ptr ' . $bagP . ", null\n";
+        $safe = $this->ssa->allocReg();
+        $out .= '  ' . $safe . ' = select i1 ' . $nz . ', ptr @__mir_zero_word, ptr ' . $bagP . "\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = call i64 @__mir_array_isset_str(ptr ' . $safe . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+        $d = $this->ssa->allocReg();
+        $out .= '  ' . $d . ' = icmp ne i64 ' . $declared . ", 0\n";
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = icmp ne i64 ' . $has . ", 0\n";
+        $o2 = $this->ssa->allocReg();
+        $out .= '  ' . $o2 . ' = or i1 ' . $d . ', ' . $h . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $o2 . " to i64\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /** @param Node[] $args */
+    private function biPropertyExistsDeclared(array $args): string
+    {
         if (\count($args) < 2) {
             return $this->biConstBool($this->reflEvalArgs($args), false);
         }

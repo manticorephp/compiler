@@ -2167,9 +2167,7 @@ trait EmitLlvmObjects
      *  one — which is what lets the whole store lift into a shared writer. */
     private function emitCellBagStoreByName(string $prop, string $objPtr, string $cellVal): string
     {
-        $std = $this->classes['stdClass'] ?? null;
-        $bagOff = $std === null ? 16 : $std->bagOffset();
-        $out = $this->emitBagPtrAt($objPtr, $bagOff);
+        $out = $this->emitBagPtrByClassId($objPtr);
         $bagP = $this->bagPtrReg;
         $bg = $this->bagSlotReg;
         $kid = $this->pool->intern($prop);
@@ -3418,6 +3416,37 @@ trait EmitLlvmObjects
         $bg = $this->ssa->allocReg();
         $out = '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$bagOff . "\n";
+        $bagI = $this->ssa->allocReg();
+        $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+        $bagP = $this->ssa->allocReg();
+        $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+        $this->bagSlotReg = $bg;
+        $this->bagPtrReg = $bagP;
+        return $out;
+    }
+
+    /** {@see emitBagPtrAt} for an object of UNKNOWN class: every bag class puts
+     *  its bag after its OWN slots, so the byte offset is picked by class_id
+     *  ({@see bagOfClassArms}); classes at stdClass's offset take the default. */
+    private function emitBagPtrByClassId(string $objPtr): string
+    {
+        $std = $this->classes['stdClass'] ?? null;
+        $off = (string)($std === null ? 16 : $std->bagOffset());
+        $out = '';
+        $arms = $this->bagOfClassArms();
+        if ($arms !== []) {
+            $out .= $this->emitLoadClassId($objPtr);
+            $cid = $this->classIdReg;
+            foreach ($arms as $cd) {
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i64 ' . $cid . ', ' . (string)$cd->classId . "\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $eq . ', i64 ' . (string)$cd->bagOffset() . ', i64 ' . $off . "\n";
+                $off = $sel;
+            }
+        }
+        $bg = $this->ssa->allocReg();
+        $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr . ', i64 ' . $off . "\n";
         $bagI = $this->ssa->allocReg();
         $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
         $bagP = $this->ssa->allocReg();
@@ -5274,7 +5303,7 @@ trait EmitLlvmObjects
             // expression here, so {@see emitCellBagStoreByName} (which interns a
             // STATIC name) is the wrong tool. Same store as the general path's
             // default arm.
-            $out .= $this->emitBagPtrAt($objPtr, $bagCd->bagOffset());
+            $out .= $this->emitBagPtrByClassId($objPtr);
             $bagP = $this->bagPtrReg;
             $bg = $this->bagSlotReg;
             $nb = $this->ssa->allocReg();
