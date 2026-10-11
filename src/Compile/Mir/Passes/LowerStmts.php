@@ -364,6 +364,15 @@ trait LowerStmts
 
     /** A dim / receiver whose evaluation has no effect and whose value cannot
      *  change inside the statement's own chain. */
+    private function storesLocal(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->storesLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
     private function lvPure(\Parser\Ast\Expr $e): bool
     {
         $k = $e->kind;
@@ -376,7 +385,11 @@ trait LowerStmts
         if ($stmt->kind === 'Expression') {
             $hoisted = $this->hoistLvalueStmt($stmt->expr);
             if ($hoisted !== null) { return $hoisted; }
+            $outerValueTemps = $this->valueTemps;
+            $this->valueTemps = [];
             $lowered = $this->lowerExpr($stmt->expr);
+            $valueTemps = $this->valueTemps;
+            $this->valueTemps = $outerValueTemps;
             // `(void) f();` — the cast lowered away, so mark the call itself so
             // the #[\NoDiscard] check stays quiet for it.
             if ($this->isVoidCastExpr($stmt->expr)) { $this->markVoidCast($lowered); }
@@ -395,6 +408,17 @@ trait LowerStmts
                     // slot as it. {@see LowerReify}
                     $this->reifiedNew($lowered);
                 }
+            }
+            if ($valueTemps !== []) {
+                // php destroys the stored value's temporary at the end of the statement.
+                $loads = [];
+                // A speculative lowering of a closure body can leave a name behind
+                // whose store never reached the tree: unset only what is defined here.
+                foreach ($valueTemps as $t) {
+                    if ($this->storesLocal($lowered, $t)) { $loads[] = new LoadLocal($t, Type::unknown()); }
+                }
+                if ($loads === []) { return $lowered; }
+                return new Block([$lowered, new Unset_($loads, Type::void())], Type::void());
             }
             return $lowered;
         }

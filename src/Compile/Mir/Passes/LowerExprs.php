@@ -917,6 +917,19 @@ trait LowerExprs
             $idx = $target->index === null
                 ? new NullConst(Type::null_())
                 : $this->foldNumericKey($this->lowerExpr($target->index));
+            // A right-hand side that runs code may write the very container this
+            // store loads (`self::$m[$k] = self::build($k)`, `$this->c[$k] ??= $this->mk($k)`):
+            // the load happens before the value is emitted, so the store would
+            // go through a buffer the callee already grew or replaced. php
+            // evaluates the value first and reads the container after it.
+            if ($this->runsCode($value) && !$this->dimRootIsLocal($target)) {
+                $name = '__lv_' . (string)$this->lvCounter;
+                $this->lvCounter = $this->lvCounter + 1;
+                $this->valueTemps[] = $name;
+                $tmp = new StoreLocal($name, $value, $value->type);
+                $store = new StoreElement($arr, $idx, new LoadLocal($name, Type::unknown()), $value->type);
+                return new Block([$tmp, $store], $value->type);
+            }
             return new StoreElement($arr, $idx, $value, $value->type);
         }
         if ($target->kind === 'PropertyAccess') {
@@ -949,6 +962,26 @@ trait LowerExprs
             . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : '<source>')
             . ':' . (string)$target->span->line
         );
+    }
+
+    /** The dim chain bottoms out in a plain local: no call can reach its buffer. */
+    private function dimRootIsLocal(\Parser\Ast\Expr $e): bool
+    {
+        while ($e->kind === 'ArrayAccess') { $e = $e->array; }
+        return $e->kind === 'Variable';
+    }
+
+    private function runsCode(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ) {
+            return true;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->runsCode($c)) { return true; }
+        }
+        return false;
     }
 
     private function buildBinop(string $op, Node $left, Node $right): Node

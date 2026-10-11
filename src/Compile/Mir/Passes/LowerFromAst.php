@@ -674,6 +674,8 @@ final class LowerFromAst implements Pass
 
     /** @var string[] the temp names of the lvalue being hoisted */
     private array $lvTemps = [];
+    /** @var string[] value temps of the expression statement being lowered ({@see storeToTarget}) */
+    private array $valueTemps = [];
 
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
