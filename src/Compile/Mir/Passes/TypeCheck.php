@@ -63,6 +63,9 @@ final class TypeCheck
     /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
     private array $paramsByFn = [];
 
+    /** @var array<string, bool> FFI-bound callees: their `string` param takes a raw address, never a rendered object */
+    private array $ffiFns = [];
+
     /** @var array<string, Type> fn name → declared return type */
     private array $returnTypes = [];
 
@@ -70,6 +73,7 @@ final class TypeCheck
     {
         foreach ($module->functions as $fn) {
             $this->paramsByFn[$fn->name] = $fn->params;
+            if ($fn->ffiSymbol !== null) { $this->ffiFns[$fn->name] = true; }
             $this->returnTypes[$fn->name] = $module->declaredReturnTypes[$fn->name] ?? $fn->returnType;
         }
         foreach ($module->functions as $fn) {
@@ -182,6 +186,15 @@ final class TypeCheck
             if (!isset($params[$pi])) { break; }
             $p = $params[$pi];
             if ($p->variadic) { break; }
+            // Coercive mode: an object bound to a `string` param is rendered by its
+            // `__toString`. Left alone, the callee read the object POINTER as string bytes.
+            if ($p->type->kind === Type::KIND_STRING && $arg->type->kind === Type::KIND_OBJ
+                && !isset($this->ffiFns[$fnName]) && $site->args[$ai] === $arg) {
+                $cast = new \Compile\Mir\Cast('string', $arg, Type::string_());
+                $cast->line = $arg->line;
+                $site->args[$ai] = $cast;
+                continue;
+            }
             if (!$this->reprOnly && $this->incompatible($this->provenType($arg), $p->type)) {
                 if ($this->demoteArgMismatch) {
                     $this->demoteToTypeError($site, $arg, $p, $label, $ai, $inFn);
