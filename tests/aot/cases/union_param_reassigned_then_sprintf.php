@@ -1,6 +1,5 @@
 <?php
 // A string|bool|null parameter reassigned to a string inside `if (true === $format)` segfaults when later passed to sprintf
-// issue: #185
 final class B
 {
     public function getEnv(string $n): string { return strtoupper($n); }

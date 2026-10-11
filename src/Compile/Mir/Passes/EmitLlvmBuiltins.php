@@ -5832,7 +5832,7 @@ trait EmitLlvmBuiltins
         $esz = \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
         $count = \count($args) - 1;
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToStr($args[0]);
         $fmtI = $this->ssa->allocReg();
         $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         // Pack args[1..] into a packed CELL array (mirrors emitArrayLitDirect).
