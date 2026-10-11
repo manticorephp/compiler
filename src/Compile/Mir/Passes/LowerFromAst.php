@@ -6254,7 +6254,12 @@ final class LowerFromAst implements Pass
             return $this->variadicMethodParamsCache[$method];
         }
         $found = null;
-        foreach ($this->classDecls as $cd) {
+        // Trait bodies count too: a trait's `call()` reaches every user class by
+        // `use`, so a non-variadic one disagrees with an unrelated variadic
+        // `call()` (symfony ErrorHandler::call(callable, ...)) and must defer.
+        $decls = \array_values($this->classDecls);
+        foreach ($this->traitTable as $td) { $decls[] = $td; }
+        foreach ($decls as $cd) {
             foreach ($this->classDeclMethods($cd) as $m) {
                 if ($this->methodDeclName($m) !== $method) { continue; }
                 $mp = $this->methodDeclParams($m);
