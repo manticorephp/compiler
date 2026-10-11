@@ -1332,6 +1332,13 @@ trait EmitLlvmObjects
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
+        // php: reading a property of null is a warning; here it throws (a wild load otherwise).
+        if (!($pa->object->kind === Node::KIND_LOAD_LOCAL && $pa->object->name === 'this')
+            && $pa->object->kind !== Node::KIND_NEW_OBJ) {
+            $isNull = $this->ssa->allocReg();
+            $out .= '  ' . $isNull . ' = icmp eq ptr ' . $objPtr . ", null\n";
+            $out .= $this->emitThrowIf($isNull, 'Error', 'Attempt to read property "' . $pa->property . '" on null');
+        }
         $out .= $this->propSlotGep($pa->object, $objPtr, $pa->property);
         $gep = $this->lastValue;
         $out .= $this->emitSlotLoad(
