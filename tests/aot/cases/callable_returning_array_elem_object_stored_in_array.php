@@ -1,6 +1,5 @@
 <?php
 // A callable that returns an object read from an array element, stored into an array, traps (refcount underflow).
-// issue: #173
 final class E {
     public function __construct(private string $value) {}
     public function toString(): string { return $this->value; }

@@ -1306,7 +1306,11 @@ final class Ownership
     {
         $vk = $v->type->kind;
         $retCell = $retType !== null && $retType->kind === Type::KIND_CELL;
-        if ($closureAbi && self::cellBoxableKind($v->type)) {
+        // A CELL value under a declared OBJECT / ARRAY return rides raw, not boxed
+        // ({@see EmitLlvmModule::emitReturn}): it takes the plain-function arms below.
+        $rawRet = $closureAbi && $retType !== null && $vk === Type::KIND_CELL
+            && ($retType->kind === Type::KIND_OBJ || $retType->isArray());
+        if ($closureAbi && !$rawRet && self::cellBoxableKind($v->type)) {
             if ($this->returnBorrowsObj($v, $retType, $moved, $erasedArray)) { return self::RET_CELL_PAYLOAD; }
             if ($vk === Type::KIND_CELL && $this->returnBorrowsCell($v, $moved, $erasedArray)) { return self::RET_CELL_TAG; }
             return self::RET_NONE;
