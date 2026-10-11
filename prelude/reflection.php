@@ -2054,6 +2054,16 @@ class ReflectionFunction
         return __mc_refl_invoke($this->tramp, 0, $args);
     }
 
+    /**
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return __mc_refl_attrs_of(
+            __mc_refl_row_attrs($this->row),
+            __mc_refl_row_nattrs($this->row), $name, $flags);
+    }
+
     public function getClosureThis(): ?object
     {
         if ($this->closure === null) { return null; }
