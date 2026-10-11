@@ -4402,7 +4402,7 @@ trait EmitLlvmObjects
         if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
             || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
             || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
-            || $n->kind === Node::KIND_STORE_LOCAL) {
+            || $n->kind === Node::KIND_STORE_LOCAL || $n->kind === Node::KIND_ARRAY_LIT) {
             return true;
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
@@ -4430,7 +4430,8 @@ trait EmitLlvmObjects
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
         $out .= $this->emitNode($n);
         $out .= $this->coerceToI64();
-        $flavor = $isArg ? $this->freshRcArgFlavor($n) : '';
+        $flavor = $n->kind === Node::KIND_ARRAY_LIT ? $this->mergedTempFlavor($n)
+            : ($isArg ? $this->freshRcArgFlavor($n) : '');
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
@@ -4440,8 +4441,39 @@ trait EmitLlvmObjects
         return new \Compile\Mir\LoadLocal($name, $n->type);
     }
 
+    /**
+     * Rewrite `(f1, .., fn, ...$s)` to `(...[f1, .., fn, ...$s])` for a dynamic
+     * method site that the packed-array ABI can serve. The literal is evaluated
+     * after the receiver and the name, before any dispatch — php's order. Any
+     * shape the packed path would not take is left alone.
+     */
+    private function packLeadingSpreadArgs(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): \Compile\Mir\Invoke_
+    {
+        $n = \count($iv->args);
+        if ($n < 2 || $this->dynamicMethodAbiDisabled || !$this->dynamicMethodMeta) { return $iv; }
+        if ($iv->args[$n - 1]->kind !== Node::KIND_SPREAD) { return $iv; }
+        for ($i = 0; $i < $n - 1; $i++) {
+            if ($iv->args[$i]->kind === Node::KIND_SPREAD) { return $iv; }
+        }
+        $candidates = $this->dynMethodCandidates($dp->object->type, -1);
+        if ($candidates === null || \count($candidates) < 16) { return $iv; }
+        $elems = [];
+        foreach ($iv->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        $lit = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
+        $lit->line = $iv->line;
+        $sp = new \Compile\Mir\Spread_($lit, $lit->type);
+        $iv2 = new \Compile\Mir\Invoke_($dp, [$sp], $iv->type);
+        $iv2->line = $iv->line;
+        return $iv2;
+    }
+
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
+        // `$o->$m($a, ...$rest)`: the packed-array ABI below takes ONE spread, so
+        // a leading fixed argument sent the site down the per-candidate inline
+        // chain (236 K IR lines for symfony's RedisClusterNodeProxy::__call).
+        // `[$a, ...$rest]` IS that one array — build it once, here.
+        $iv = $this->packLeadingSpreadArgs($dp, $iv);
         // Every shared path below wants its operands as LOCALS, because the
         // inline fallback re-emits them per arm. A plain READ — a property or
         // subscript chain off a local, or a call — is evaluated ONCE into a slot
