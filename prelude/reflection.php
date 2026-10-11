@@ -1350,6 +1350,32 @@ class ReflectionProperty
         return false;
     }
 
+    /**
+     * PHP 8.4 asymmetric visibility and property hooks. `private(set)` / `protected(set)` is parsed but
+     * not recorded, and a hook is not exposed as a ReflectionMethod, so a property reports no set-only
+     * visibility, is never virtual and has no hooks.
+     */
+    public function isProtectedSet(): bool
+    {
+        return false;
+    }
+
+    public function isPrivateSet(): bool
+    {
+        return false;
+    }
+
+    public function isVirtual(): bool
+    {
+        return false;
+    }
+
+    /** @return array<string, ReflectionMethod> */
+    public function getHooks(): array
+    {
+        return [];
+    }
+
     /** Lazy objects are not supported, so nothing is ever lazy. */
     public function isLazy(object $object): bool
     {
