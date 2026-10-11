@@ -165,23 +165,26 @@ final class TrampolineSynth
     }
 
     /**
-     * One reusable slow path for erased `$o->$name(...$args)` calls. Each arm
-     * uses a literal method name, so normal lowering preserves by-ref/default/
-     * variadic argument rules; the caller only pays one call into this helper
-     * when the lightweight table has no supported row.
+     * One reusable slow path for erased `$o->$name(...$args)` calls that the
+     * method table could not answer. Every user class owns a table row (and a
+     * trampoline) for each safe name, so only objects WITHOUT a table — prelude
+     * and struct classes — can reach here: one `instanceof`-guarded, monomorphic
+     * arm per (such class, safe method) instead of an erased dispatch over every
+     * class of the program, whose per-candidate argument unpacking made this one
+     * function 160k IR lines.
      *
-     * @param array<string, true> $methods keyed by method name
+     * @param array<string, true>     $methods   safe names, keyed by method name
+     * @param array<string, string[]> $tableless class name => its method names
      */
-    public static function spreadFallbackSource(array $methods): string
+    public static function spreadFallbackSource(array $methods, array $tableless = []): string
     {
         $out = self::ARGS_HINT . "function __mc_dyn_spread_fallback(object \$o, string \$name, array \$a): mixed {\n";
-        foreach ($methods as $method => $_) {
-            if ($method === '' || $method === '__construct' || $method === '__call') { continue; }
-            // Method names come from parsed PHP declarations. Keep this path
-            // free of a runtime regex dependency: the self-hosted seed may not
-            // expose identical preg_match modifier behavior, while declaration
-            // names are already valid member identifiers here.
-            $out .= '  if ($name === ' . \var_export($method, true) . ") { return \$o->" . $method . "(...\$a); }\n";
+        foreach ($tableless as $class => $names) {
+            foreach ($names as $method) {
+                if (!isset($methods[$method]) || $method === '' || $method === '__construct' || $method === '__call') { continue; }
+                $out .= '  if ($name === ' . \var_export($method, true) . ' && $o instanceof \\' . \ltrim($class, '\\')
+                      . ') { return $o->' . $method . "(...\$a); }\n";
+            }
         }
         return $out . "  return null;\n}\n";
     }

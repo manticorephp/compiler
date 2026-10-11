@@ -1577,7 +1577,13 @@ final class LowerFromAst implements Pass
                     \Compile\Stats::bump('dynamic.fallback.global_safe', \count($safeDynamicMethodNames));
                     \Compile\Stats::bump('dynamic.fallback.synthesized', 1);
                 }
-                $fallbackSrc = \Compile\Mir\Passes\TrampolineSynth::spreadFallbackSource($safeDynamicMethodNames);
+                /** @var array<string, string[]> $tableless */
+                $tableless = [];
+                foreach ($module->classes as $cd) {
+                    if (!$cd->isStruct && !$cd->isPreludeClass) { continue; }
+                    $tableless[$cd->name] = \array_map('strval', \array_keys($cd->methodNames));
+                }
+                $fallbackSrc = \Compile\Mir\Passes\TrampolineSynth::spreadFallbackSource($safeDynamicMethodNames, $tableless);
                 $fallbackProg = \Parser\Parser::parseSource("<?php\n" . $fallbackSrc);
                 foreach ($fallbackProg->statements as $fstmt) {
                     if ($fstmt->kind !== 'Function') { continue; }
