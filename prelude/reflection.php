@@ -787,12 +787,42 @@ class ReflectionObject extends ReflectionClass
 }
 
 /**
+ * Common base of ReflectionFunction and ReflectionMethod (php's
+ * ReflectionFunctionAbstract). Abstract members are exactly the intersection
+ * both subclasses implement.
+ */
+abstract class ReflectionFunctionAbstract
+{
+    public string $name = "";
+
+    abstract public function getName(): string;
+    abstract public function getShortName(): string;
+    abstract public function getNamespaceName(): string;
+    abstract public function inNamespace(): bool;
+    abstract public function getParameters(): array;
+    abstract public function getNumberOfParameters(): int;
+    abstract public function getNumberOfRequiredParameters(): int;
+    abstract public function hasReturnType(): bool;
+    abstract public function getReturnType(): ReflectionType|null;
+    abstract public function getAttributes(?string $name = null, int $flags = 0): array;
+    abstract public function isInternal(): bool;
+    abstract public function isUserDefined(): bool;
+    abstract public function isVariadic(): bool;
+    abstract public function isDeprecated(): bool;
+    abstract public function returnsReference(): bool;
+    abstract public function hasTentativeReturnType(): bool;
+    abstract public function getTentativeReturnType(): ReflectionType|null;
+    abstract public function getExtension(): ?object;
+    abstract public function getExtensionName(): string|false;
+}
+
+/**
  * A method handle. Ф2: `invoke()` calls the method's uniform trampoline
  * indirectly. The `mixed ...$args` form packs a `vec[cell]` the trampoline
  * unboxes per parameter; `invokeArgs(array)` (an already-built array) waits on
  * call-site element boxing (Ф2b).
  */
-class ReflectionMethod
+class ReflectionMethod extends ReflectionFunctionAbstract
 {
     public string $name = "";
     public string $class = "";
@@ -1984,7 +2014,7 @@ class ReflectionAttribute
  * function's uniform trampoline — the static-method invoke shape with the
  * receiver ignored.
  */
-class ReflectionFunction
+class ReflectionFunction extends ReflectionFunctionAbstract
 {
     public string $name = "";
 
