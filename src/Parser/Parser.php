@@ -2583,6 +2583,13 @@ final class Parser
         $tok = $this->peek();
         $span = $this->span();
 
+        // `#[Attr] fn () => …` / `#[Attr] static function () {}`: a closure's attributes
+        // are metadata no running code reads, so they are parsed and dropped.
+        if ($tok->kind === TokenKind::AttributeStart) {
+            $this->collectAttributes();
+            return $this->parsePrimary();
+        }
+
         if ($tok->kind === TokenKind::IntLiteral) {
             $this->advance();
             return Expr::int($this->parseIntLiteral($tok->lexeme), $span);

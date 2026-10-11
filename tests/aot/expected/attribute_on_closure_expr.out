@@ -1,0 +1,3 @@
+console.error onError arrow
+kernel.request onRequest 42
+2 3
