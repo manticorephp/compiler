@@ -1455,6 +1455,26 @@ class ReflectionProperty
  * method's parameter table by index — the raw base address + position carried
  * as ints. Ф2d: the shape a DI container walks to autowire a constructor.
  */
+/** A parameter default as php's ReflectionParameter::__toString() prints it. */
+function __mc_refl_param_default_text(mixed $v): string
+{
+    if ($v === null) { return "NULL"; }
+    if ($v === true) { return "true"; }
+    if ($v === false) { return "false"; }
+    if (\is_int($v)) { return (string) $v; }
+    if (\is_float($v)) { return \var_export($v, true); }
+    if (\is_string($v)) { return "'" . $v . "'"; }
+    if (\is_array($v)) {
+        $parts = [];
+        $list = \array_is_list($v);
+        foreach ($v as $k => $x) {
+            $parts[] = ($list ? "" : (\is_int($k) ? (string) $k : "'" . $k . "'") . " => ") . __mc_refl_param_default_text($x);
+        }
+        return "[" . \implode(", ", $parts) . "]";
+    }
+    return "Object";
+}
+
 class ReflectionParameter
 {
     public string $name = "";
@@ -1483,6 +1503,30 @@ class ReflectionParameter
         return $this->name;
     }
 
+    /**
+     * php's textual form: `Parameter #1 [ <optional> ?Foo $name = NULL ]`. Symfony parses the tail after
+     * `$name = ` to learn whether a default is NULL. A default written as a constant expression
+     * (`PHP_INT_MAX`, `self::X`) is printed as its VALUE: the expression is not kept after evaluation.
+     */
+    public function __toString(): string
+    {
+        $out = "Parameter #" . (string) $this->getPosition() . " [ <" . ($this->isOptional() ? "optional" : "required") . "> ";
+        if ($this->hasType()) {
+            $out .= (string) $this->getType() . " ";
+        }
+        if ($this->isPassedByReference()) {
+            $out .= "&";
+        }
+        if ($this->isVariadic()) {
+            $out .= "...";
+        }
+        $out .= "$" . $this->name;
+        if ($this->isDefaultValueAvailable()) {
+            $out .= " = " . __mc_refl_param_default_text($this->getDefaultValue());
+        }
+        return $out . " ]";
+    }
+
     public function getPosition(): int
     {
         return $this->pos;
@@ -1503,7 +1547,7 @@ class ReflectionParameter
 
     public function isOptional(): bool
     {
-        return ($this->flags & 1) !== 0;
+        return ($this->flags & 1) !== 0 || $this->isVariadic();
     }
 
     public function isDefaultValueAvailable(): bool
@@ -1930,7 +1974,13 @@ function __mc_refl_type_of(string $decl, bool $nullable): object
     }
     if ($cur !== "") { $parts[] = new ReflectionNamedType($cur, false); }
     if ($sep === "&") { return new ReflectionIntersectionType($parts); }
-    return new ReflectionUnionType($parts, $nullable);
+    // `T|null` is php's nullable named type `?T`; `A|B|null` keeps null out of the member list (it prints last).
+    $members = [];
+    foreach ($parts as $p) {
+        if (\strtolower($p->getName()) === "null") { $nullable = true; } else { $members[] = $p; }
+    }
+    if (\count($members) === 1) { return new ReflectionNamedType($members[0]->getName(), true); }
+    return new ReflectionUnionType($members, $nullable);
 }
 
 /**
