@@ -5665,14 +5665,28 @@ final class LowerFromAst implements Pass
             $recv,
             $span,
         );
+        $tmp = '__dynrc' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticAccess($cname, $nm, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
         return $this->lowerExpr($chain);
+    }
+
+    /**
+     * The class-name operand of arm `$i` of a `$cls::member` chain: the first
+     * arm evaluates `$nameExpr` into the hidden local `$tmp`, every other arm
+     * reads it. Re-lowering the expression per arm gave each of the N arms its
+     * own temporaries, and every call's unwind pad dropped all of them — O(N^2).
+     */
+    private function dynArmName(\Parser\Ast\Expr $nameExpr, string $tmp, int $i, \Parser\Ast\Span $span): \Parser\Ast\Expr
+    {
+        $v = \Parser\Ast\Expr::variable($tmp, $span);
+        return $i === 0 ? \Parser\Ast\Expr::assign($v, $nameExpr, $span) : $v;
     }
 
     /**
@@ -5702,10 +5716,12 @@ final class LowerFromAst implements Pass
             $recv,
             $span,
         );
+        $tmp = '__dynrc' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticCall($cname, $method, $args, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
