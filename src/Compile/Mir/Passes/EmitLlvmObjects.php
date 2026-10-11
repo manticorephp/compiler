@@ -2237,6 +2237,15 @@ trait EmitLlvmObjects
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
         $out .= $this->emitNode($valueNode);
+        // The hook takes `$value` as its declared type; a cell value (a reflective write) is unboxed to it.
+        $hpt = $this->sigs->paramTypes[$hookSym][1] ?? null;
+        $vk = $valueNode->type->kind;
+        if ($hpt !== null && $vk === Type::KIND_CELL
+            && ($hpt->kind === Type::KIND_STRING || $hpt->kind === Type::KIND_INT
+                || $hpt->kind === Type::KIND_FLOAT || $hpt->kind === Type::KIND_BOOL)) {
+            $out .= $this->coerceToI64();
+            $out .= $this->unboxCellToType($hpt);
+        }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
         $reg = $this->ssa->allocReg();
@@ -7087,13 +7096,20 @@ trait EmitLlvmObjects
             foreach ($this->methodHolders($method) as $cn => $_decl) { $cls[] = $cn; }
         }
         $u = [];
+        $typed = [];
         foreach ($cls as $c) {
             $t = $this->resolveMethodClass($c, $method);
             if ($t === '') { continue; }
             foreach ($this->sigs->refParams[$t . '__' . $method] ?? [] as $i => $b) {
                 if ($b) { $u[$i] = true; }
             }
+            // Only an UNTYPED / mixed slot is a repr every arm can read back from the address: an
+            // arm with a concrete param type keeps the coercion the site makes for the fallback.
+            foreach ($this->sigs->paramTypes[$t . '__' . $method] ?? [] as $i => $pt) {
+                if ($pt->kind !== Type::KIND_CELL && $pt->kind !== Type::KIND_UNKNOWN) { $typed[$i] = true; }
+            }
         }
+        foreach ($typed as $i => $_t) { unset($u[$i]); }
         return $u;
     }
 
