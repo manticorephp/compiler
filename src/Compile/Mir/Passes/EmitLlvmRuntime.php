@@ -2158,7 +2158,7 @@ trait EmitLlvmRuntime
     {
         if ($mm->isAbstract) { return 'null'; }
         foreach ($mm->params as $p) {
-            if ($p->byRef || $p->variadic) { return 'null'; }
+            if ($p->byRef) { return 'null'; }
         }
         $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
         $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name);

@@ -1482,10 +1482,10 @@ final class LowerFromAst implements Pass
                     if ($p->variadic) { $variadic = true; }
                     if ($p->byRef) { $byRef = true; }
                 }
-                if ($variadic || $byRef) { continue; }
+                if ($byRef) { continue; }
                 $void = \strtolower($mm->returnType) === 'void';
                 $fnTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::functionTramp(
-                    $fn, $mm->requiredParams(), \count($mm->params), $void);
+                    $fn, $mm->requiredParams(), \count($mm->params), $void, $variadic);
             }
             if ($fnTrampSrc !== '') {
                 $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);

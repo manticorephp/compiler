@@ -1110,7 +1110,15 @@ trait LowerFns
         }
         // Variadic last param: pack trailing positional args into a vec.
         $np = \count($params);
-        if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
+        // A `...$arr` ahead of the variadic covers fixed params AND the pack, a
+        // run-time split the emitter makes against the signature
+        // ({@see EmitLlvmCalls::emitSpreadFill}); an eager empty pack here became a
+        // stray extra argument.
+        $spreadAt = -1;
+        foreach ($astArgs as $si => $sa) {
+            if ($sa->kind === 'Spread') { $spreadAt = $si; break; }
+        }
+        if ($np > 0 && $this->paramVariadic($params[$np - 1]) && ($spreadAt < 0 || $spreadAt >= $np - 1)) {
             $vidx = $np - 1;
             $refPack = $this->paramByRefDecl($params[$vidx]);
             $out = [];

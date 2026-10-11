@@ -21,15 +21,15 @@ use Compile\Mir\MethodMeta;
  * declared `\C $t`) and is IGNORED for a static method / constructor (declared
  * `int $t`). The second is the boxed `mixed[]` argument array. The body reads a
  * legal-arity arm per `count($args)`, so normal lowering fills each arm's
- * defaults / packs nothing (variadics are excluded — Ф2c).
+ * defaults. A variadic callee gets one `...$a` spread instead of arms.
  *
  * Keyed by the DECLARING class: `Dog` inheriting `Animal::feed` reuses
  * `__mc_rtramp_Animal__feed` (its `$t->feed()` still dispatches virtually to
  * Dog's body). One trampoline per declared method, not per inheritor.
  *
  * NOT invokable (no trampoline; the rmeta row's tramp stays null): abstract and
- * interface methods, a method with a by-ref or variadic parameter. Ф2 does not
- * forward by-ref through the boxed array, and a variadic needs unbounded arms.
+ * interface methods, a method with a by-ref parameter. Ф2 does not
+ * forward by-ref through the boxed array.
  */
 final class TrampolineSynth
 {
@@ -105,11 +105,11 @@ final class TrampolineSynth
      * receiver ignored: `__mc_fntramp_<f>(int $t, array $a): mixed { return
      * \f($a[0], …); }`. Arms from required..total so lowering fills defaults.
      */
-    public static function functionTramp(string $fn, int $req, int $tot, bool $void): string
+    public static function functionTramp(string $fn, int $req, int $tot, bool $void, bool $variadic = false): string
     {
         $fqn = '\\' . \ltrim($fn, '\\');
         $mk = fn (string $args): string => $fqn . '(' . $args . ')';
-        $body = self::arms($req, $tot, $mk, $void);
+        $body = $variadic ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void);
         return self::ARGS_HINT . 'function ' . self::fnTrampBase($fn)
              . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
@@ -119,7 +119,7 @@ final class TrampolineSynth
     {
         if ($mm->isAbstract) { return false; }
         foreach ($mm->params as $p) {
-            if ($p->byRef || $p->variadic) { return false; }
+            if ($p->byRef) { return false; }
         }
         return true;
     }
@@ -224,8 +224,17 @@ final class TrampolineSynth
             $mk = fn (string $args): string => '$t->' . $method . '(' . $args . ')';
         }
         $name = self::symBase($class, $method);
-        $body = self::arms($req, $tot, $mk, $void);
+        $variadic = $tot > 0 && $mm->params[$tot - 1]->variadic;
+        $body = $variadic ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void);
         return self::ARGS_HINT . 'function ' . $name . '(' . $recv . ", array \$a): mixed {\n" . $body . "}\n";
+    }
+
+    /** A variadic callee takes the whole pack as one spread: the emitter splits it into the
+     *  fixed params and the variadic vec against the signature (and checks the arity). */
+    private static function spreadBody(callable $mk, bool $void): string
+    {
+        $call = $mk('...$a');
+        return $void ? ('  ' . $call . "; return null;\n") : ('  return ' . $call . ";\n");
     }
 
     /**

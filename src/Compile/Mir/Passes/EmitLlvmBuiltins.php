@@ -1573,7 +1573,7 @@ trait EmitLlvmBuiltins
      * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
      * and the self-built compiler crashed on `method_exists(...$pack)`.
      */
-    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false): string
+    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false, string $from = ''): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -1609,7 +1609,7 @@ trait EmitLlvmBuiltins
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
-        $out .= '  store i64 0, ptr ' . $iSlot . "\n";
+        $out .= '  store i64 ' . ($from !== '' ? $from : '0') . ', ptr ' . $iSlot . "\n";
         $cond = $this->ssa->allocLabel('uct.cond');
         $body = $this->ssa->allocLabel('uct.body');
         $end  = $this->ssa->allocLabel('uct.end');
@@ -1664,7 +1664,9 @@ trait EmitLlvmBuiltins
         // TypeExpression glued `null|Expr[]` as `null0Expr[]`.
         $kb = $this->ssa->allocReg();
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
+        $out .= $from !== ''
+            ? '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $raw . ")\n"
+            : '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
         $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
