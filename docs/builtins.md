@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **967 / 2135** · classes **169 / 327** · codegen builtins 239 · lowered 34 · stdlib globals 1065 · prelude globals 1170
+Functions **967 / 2135** · classes **170 / 327** · codegen builtins 239 · lowered 34 · stdlib globals 1065 · prelude globals 1170
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -65,7 +65,7 @@ Functions **967 / 2135** · classes **169 / 327** · codegen builtins 239 · low
 | [posix](#posix) | 6 / 40 | 0 / 0 | 15% |
 | [random](#random) | 8 / 9 | 0 / 11 | 40% |
 | [readline](#readline) | 0 / 12 | 0 / 0 | 0% |
-| [Reflection](#reflection) | 0 / 0 | 16 / 26 | 62% |
+| [Reflection](#reflection) | 0 / 0 | 17 / 26 | 65% |
 | [session](#session) | 23 / 23 | 4 / 4 | 100% |
 | [shmop](#shmop) | 0 / 6 | 0 / 1 | 0% |
 | [SimpleXML](#simplexml) | 3 / 3 | 2 / 2 | 100% |
@@ -713,17 +713,17 @@ Functions 0 / 12 · classes 0 / 0
 
 ### Reflection
 
-Functions 0 / 0 · classes 16 / 26
+Functions 0 / 0 · classes 17 / 26
 
-<details><summary>implemented (16)</summary>
+<details><summary>implemented (17)</summary>
 
-Classes: `ReflectionAttribute` `ReflectionClass` `ReflectionClassConstant` `ReflectionEnum` `ReflectionEnumBackedCase` `ReflectionEnumUnitCase` `ReflectionException` `ReflectionFunction` `ReflectionIntersectionType` `ReflectionMethod` `ReflectionNamedType` `ReflectionObject` `ReflectionParameter` `ReflectionProperty` `ReflectionType` `ReflectionUnionType`
+Classes: `ReflectionAttribute` `ReflectionClass` `ReflectionClassConstant` `ReflectionEnum` `ReflectionEnumBackedCase` `ReflectionEnumUnitCase` `ReflectionException` `ReflectionFunction` `ReflectionIntersectionType` `ReflectionMethod` `ReflectionNamedType` `ReflectionObject` `ReflectionParameter` `ReflectionProperty` `ReflectionReference` `ReflectionType` `ReflectionUnionType`
 
 </details>
 
-<details><summary>missing (10)</summary>
+<details><summary>missing (9)</summary>
 
-Classes: `PropertyHookType` `Reflection` `ReflectionConstant` `ReflectionExtension` `ReflectionFiber` `ReflectionFunctionAbstract` `ReflectionGenerator` `ReflectionReference` `ReflectionZendExtension` `Reflector`
+Classes: `PropertyHookType` `Reflection` `ReflectionConstant` `ReflectionExtension` `ReflectionFiber` `ReflectionFunctionAbstract` `ReflectionGenerator` `ReflectionZendExtension` `Reflector`
 
 </details>
 

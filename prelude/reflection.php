@@ -2205,3 +2205,29 @@ class ReflectionClassConstant
         return 1;
     }
 }
+
+/**
+ * Identity of a PHP reference held by an array element. A compiled program does not expose element
+ * references as a separate identity, so no element is ever reported as a reference: the factory answers
+ * null (php's answer for a plain value) after php's own key check, and an instance cannot be built.
+ */
+final class ReflectionReference
+{
+    private function __construct() {}
+
+    /** @param mixed[] $array */
+    public static function fromArrayElement(array $array, int|string $key): ?ReflectionReference
+    {
+        if (!\array_key_exists($key, $array)) {
+            throw new ReflectionException("Array key not found");
+        }
+        return null;
+    }
+
+    public function getId(): string
+    {
+        throw new ReflectionException("Reference identity is not available");
+    }
+
+    private function __clone() {}
+}
