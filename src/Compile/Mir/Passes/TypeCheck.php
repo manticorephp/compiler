@@ -174,7 +174,7 @@ final class TypeCheck
             if (!isset($params[$pi])) { break; }
             $p = $params[$pi];
             if ($p->variadic) { break; }
-            if (!$this->reprOnly && $this->incompatible($arg->type, $p->type)) {
+            if (!$this->reprOnly && $this->incompatible($this->provenType($arg), $p->type)) {
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected';
@@ -278,12 +278,32 @@ final class TypeCheck
     private function checkReturnNodes(Node $n, Type $rt, string $fnName): void
     {
         if ($n->kind === Node::KIND_RETURN) {
-            if ($n->value !== null && $this->incompatible($n->value->type, $rt)) {
+            if ($n->value !== null && $this->incompatible($this->provenType($n->value), $rt)) {
                 $this->errors[] = $this->at($n) . $fnName . '(): return ' . $n->value->type->toString()
                     . ' incompatible with declared ' . $rt->toString();
             }
         }
         foreach (Walk::children($n) as $c) { $this->checkReturnNodes($c, $rt, $fnName); }
+    }
+
+    /**
+     * The type of `$n` as far as it is a PROOF. A method call on an erased
+     * (`cell` / `unknown`) receiver is typed by {@see InferCalls}: when the
+     * classes declaring the method agree, the call is given that return type so
+     * the caller reads the result at the right width. With ONE declarer that is
+     * a dispatch hint, not evidence about the receiver — `$cell->getMessages()`
+     * is a `Generator` because some unrelated class declares a generator
+     * `getMessages()`, while the receiver is a class of an uninstalled package.
+     * Checking the hint against a declared `array` return made an unreachable
+     * path a build error.
+     */
+    private function provenType(Node $n): Type
+    {
+        if ($n->kind === Node::KIND_METHOD_CALL && $n instanceof MethodCall_) {
+            $rk = $n->object->type->kind;
+            if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN) { return Type::unknown(); }
+        }
+        return $n->type;
     }
 
     /**
