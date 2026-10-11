@@ -5942,11 +5942,16 @@ final class LowerFromAst implements Pass
         $op = $expr->op === '++' ? '+' : '-';
         if ($operand->kind !== 'Variable') {
             // `$this->p++` / `$a[$k]++` — no plain-local slot. Desugar to
-            // `target = target ± 1` (a compound assign). In statement context
-            // (the common case, e.g. an Iterator's `next()`) this is exact; a
-            // postfix used as an expression value yields the NEW value (minor).
+            // `target = target ± 1` (a compound assign). A postfix used as a
+            // value (statement context is rewritten to prefix by the caller)
+            // saves the OLD value in a temp and answers it.
             $read = $this->lowerExpr($operand);
-            return $this->storeToTarget($operand, $this->buildBinop($op, $read, new IntConst(1, Type::int_())));
+            $store = $this->storeToTarget($operand, $this->buildBinop($op, $read, new IntConst(1, Type::int_())));
+            if ($expr->prefix) { return $store; }
+            $old = $this->lowerExpr($operand);
+            $tmp = '__pi_' . (string)$this->lvCounter;
+            $this->lvCounter = $this->lvCounter + 1;
+            return new Block([new StoreLocal($tmp, $old, $old->type), $store, new LoadLocal($tmp, $old->type)], $old->type);
         }
         return new IncDec($operand->name, $op, $expr->prefix, Type::int_());
     }

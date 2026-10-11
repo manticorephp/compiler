@@ -276,6 +276,13 @@ trait LowerStmts
         return $this->lvTemp($v);
     }
 
+    /** A discarded `$t->p++` is `++$t->p`: no old value to keep. */
+    private function discardedIncDec(\Parser\Ast\Expr $e): \Parser\Ast\Expr
+    {
+        if (!($e instanceof \Parser\Ast\IncDec) || $e->prefix || $e->operand->kind === 'Variable') { return $e; }
+        return new \Parser\Ast\IncDec($e->op, true, $e->operand, $e->span);
+    }
+
     private function hoistIncDec(\Parser\Ast\IncDec $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->operand);
@@ -383,11 +390,12 @@ trait LowerStmts
     private function lowerStmtInner(\Parser\Ast\Stmt $stmt): Node
     {
         if ($stmt->kind === 'Expression') {
-            $hoisted = $this->hoistLvalueStmt($stmt->expr);
+            $se = $this->discardedIncDec($stmt->expr);
+            $hoisted = $this->hoistLvalueStmt($se);
             if ($hoisted !== null) { return $hoisted; }
             $outerValueTemps = $this->valueTemps;
             $this->valueTemps = [];
-            $lowered = $this->lowerExpr($stmt->expr);
+            $lowered = $this->lowerExpr($se);
             $valueTemps = $this->valueTemps;
             $this->valueTemps = $outerValueTemps;
             // `(void) f();` — the cast lowered away, so mark the call itself so
@@ -549,6 +557,7 @@ trait LowerStmts
 
     private function lowerClauseExpr(\Parser\Ast\Expr $e): Node
     {
+        $e = $this->discardedIncDec($e);
         $h = $this->hoistLvalueStmt($e);
         return $h ?? $this->lowerExpr($e);
     }
