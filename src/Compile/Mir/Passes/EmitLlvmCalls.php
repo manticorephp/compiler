@@ -3328,6 +3328,19 @@ trait EmitLlvmCalls
         }
         $cnt = '';
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
+            if ($k > $firstParam && ($vmask[$k] ?? false)) {
+                // Fixed params first, then the variadic: the rest of the pack, renumbered,
+                // is its ONE vec argument ($k == $firstParam is the whole array, above).
+                $tel = $ptypes[$k]->element ?? null;
+                if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) { $tel = Type::cell(); }
+                $srcI = $this->ssa->allocReg();
+                $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
+                $this->lastValue = $srcI;
+                $this->lastValueType = 'i64';
+                $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)($k - $firstParam));
+                $regs[] = $this->lastValue;
+                break;
+            }
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
                   . ', i64 ' . (string)($k - $firstParam) . ")\n";
@@ -3688,6 +3701,18 @@ trait EmitLlvmCalls
         $out = $this->emitNode($a);
         $this->litElemCollect = $wasCollect;
         $this->litElemCalleeElem = $wasCalleeElem;
+        // A variadic pack is a literal of the written args; cell (mixed) args make it
+        // a vec[cell] bound to a typed `int ...$m`. Rebuild it at the de-cellify
+        // boundary (MOVING the values, dropping the bare cell buffer), then retype the
+        // node so the post-call release is the typed vec's.
+        if ($collect && $a instanceof ArrayLit && $paramType !== null
+            && $this->needsDeCellify($paramType, $a->type)) {
+            $out .= $this->coerceToPtr();
+            $src = $this->lastValue;
+            $out .= $this->emitCellArrayToTyped($paramType);
+            $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
+            $a->type = $paramType;
+        }
         return $out;
     }
 
@@ -3847,8 +3872,7 @@ trait EmitLlvmCalls
             // element values pass raw (matches int/string/cell params).
             if ($a->kind === Node::KIND_SPREAD) {
                 $operand = $a->operand;
-                $out .= $this->emitNode($operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadPackPtr($operand);
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,
