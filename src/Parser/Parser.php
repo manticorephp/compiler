@@ -2887,6 +2887,44 @@ final class Parser
         // first paren ambiguous with the argument list.
         if ($this->check(TokenKind::Variable)) {
             $classExpr = $this->parsePrimary();
+            // PHP's `new_variable`: property fetches and subscripts name the class
+            // (`new $a->b[0]()`), but a call ends it — `(` starts the constructor's
+            // argument list, so `new $a->b()` is `new ($a->b)()`, not `(new $a)->b()`.
+            while (true) {
+                $tok = $this->peek();
+                if ($tok->kind === TokenKind::Arrow || $tok->kind === TokenKind::NullsafeArrow) {
+                    $nullsafe = $tok->kind === TokenKind::NullsafeArrow;
+                    $mspan = $this->span();
+                    $this->advance();
+                    if ($this->check(TokenKind::Variable) || $this->check(TokenKind::OpenBrace)) {
+                        if ($this->check(TokenKind::OpenBrace)) {
+                            $this->advance();
+                            $nameExpr = $this->parseExpression();
+                            $this->expect(TokenKind::CloseBrace, "expected '}' after dynamic member");
+                        } else {
+                            $vt = $this->advance();
+                            $nameExpr = Expr::variable(\ltrim($vt->lexeme, '$'), $mspan);
+                        }
+                        $classExpr = Expr::dynProp($classExpr, $nameExpr, $nullsafe, $mspan);
+                        continue;
+                    }
+                    $nameTok = $this->advance();
+                    if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword && $nameTok->kind !== TokenKind::MagicConstant) {
+                        throw $this->error('expected member name after ->');
+                    }
+                    $classExpr = Expr::propertyAccess($classExpr, $nameTok->lexeme, $nullsafe, $mspan);
+                    continue;
+                }
+                if ($tok->kind === TokenKind::OpenBracket) {
+                    $mspan = $this->span();
+                    $this->advance();
+                    $index = $this->parseExpression();
+                    $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
+                    $classExpr = Expr::arrayAccess($classExpr, $index, $mspan);
+                    continue;
+                }
+                break;
+            }
             $dargs = [];
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
