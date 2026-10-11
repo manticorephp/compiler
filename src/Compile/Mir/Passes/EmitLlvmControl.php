@@ -2200,12 +2200,34 @@ trait EmitLlvmControl
         $defaultTarget = $defaultAi >= 0 ? ($base . '_b' . (string)$defaultAi) : $endLabel;
         $firstTarget = $nv > 0 ? ($base . '_t0') : $defaultTarget;
 
-        // Dispatch — chained equality tests over the value arms.
-        $out .= '  br label %' . $firstTarget . "\n";
+        // An int subject over int-literal arms is one LLVM `switch` — a line per
+        // arm and a binary search, not a 3-line compare chain walked in order
+        // (the class-id dispatchers carry thousands of arms). The first of two
+        // equal literals wins, as in the chain.
+        $litOnly = $subjK === Type::KIND_INT && $nv >= 4;
+        foreach ($arms as $arm) {
+            if ($arm->value !== null && !($arm->value instanceof \Compile\Mir\IntConst)) { $litOnly = false; }
+        }
+        if ($litOnly) {
+            $out .= '  switch i64 ' . $subj . ', label %' . $defaultTarget . " [\n";
+            $seen = [];
+            $ai = 0;
+            foreach ($arms as $arm) {
+                if ($arm->value instanceof \Compile\Mir\IntConst && !isset($seen[$arm->value->value])) {
+                    $seen[$arm->value->value] = true;
+                    $out .= '    i64 ' . (string)$arm->value->value . ', label %' . $base . '_b' . (string)$ai . "\n";
+                }
+                $ai = $ai + 1;
+            }
+            $out .= "  ]\n";
+            $nv = 0;
+        } else {
+            $out .= '  br label %' . $firstTarget . "\n";
+        }
         $ai = 0;
         $vi = 0;
         foreach ($arms as $arm) {
-            if ($arm->value !== null) {
+            if ($arm->value !== null && !$litOnly) {
                 $out .= $base . '_t' . (string)$vi . ":\n";
                 $out .= $this->emitNode($arm->value);
                 $vk = $arm->value->type->kind;
