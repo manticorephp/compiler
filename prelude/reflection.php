@@ -244,6 +244,9 @@ function __mc_refl_attrs_of(int $base, int $n, ?string $filter, int $flags = 0):
 
 class ReflectionException extends Exception {}
 
+/** Reflection stand-in for the compiler-internal Closure type (no user-visible class record). */
+final class __MC_ClosureShape {}
+
 class ReflectionClass
 {
     /** PHP exposes the class name as a public property, not just getName(). */
@@ -264,17 +267,20 @@ class ReflectionClass
             // A leading `\` is not part of the name the compiler recorded.
             $n = __mc_refl_unqualify($objectOrClass);
             $h = __mc_refl_find($n);
+            if ($h === 0 && \strtolower($n) === 'closure') {
+                $h = __mc_refl_find('__MC_ClosureShape');
+            }
             if ($h === 0) {
                 throw new ReflectionException("Class \"" . $n . "\" does not exist");
             }
         } else {
-            $h = __mc_refl_of($objectOrClass);
+            $h = $objectOrClass instanceof \Closure ? __mc_refl_find('__MC_ClosureShape') : __mc_refl_of($objectOrClass);
             if ($h === 0) {
                 throw new ReflectionException("Class does not exist");
             }
         }
         $this->h = $h;
-        $this->name = __mc_refl_name($h);
+        $this->name = $h === __mc_refl_find('__MC_ClosureShape') ? 'Closure' : __mc_refl_name($h);
     }
 
     public function getName(): string

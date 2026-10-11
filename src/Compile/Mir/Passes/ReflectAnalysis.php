@@ -55,6 +55,8 @@ final class ReflectAnalysis
 
     public function run(Module $module): void
     {
+        // The stand-in ReflectionClass uses for the compiler-internal Closure type.
+        $this->names['__MC_ClosureShape'] = true;
         foreach ($module->functions as $fn) {
             // A prelude body is the reflection implementation itself; its
             // `__mc_refl_find($name)` is a parameter by construction and would
