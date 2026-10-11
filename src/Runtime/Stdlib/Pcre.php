@@ -61,6 +61,8 @@ final class __McPcreCache
     public static array $idle = [];
     /** @var array<int, int> code => 1 when the pattern has named groups, else 0 ({@see __preg_name_map}) */
     public static array $named = [];
+    /** @var array<int, array<int, string>> code => its group number => name map ({@see __preg_name_map}) */
+    public static array $nameMaps = [];
     /** The idle match block of the pattern last used, kept out of the map: one slot, one compare. */
     public static int $slotCode = 0;
     public static int $slotMd = 0;
@@ -274,6 +276,9 @@ function __preg_name_map(int $code): array
     if ((__McPcreCache::$named[$code] ?? -1) === 0) {
         return [];
     }
+    if (isset(__McPcreCache::$nameMaps[$code])) {
+        return __McPcreCache::$nameMaps[$code];
+    }
     $buf = \Runtime\Libc\calloc(8, 1);
     // PCRE2_INFO_NAMECOUNT = 17, NAMEENTRYSIZE = 18, NAMETABLE = 19.
     \Runtime\Pcre\patternInfo($code, 17, $buf);
@@ -302,6 +307,7 @@ function __preg_name_map(int $code): array
         // pcre2_code and must not be freed here.
         $out[$group] = \cstr_to_str(\int_to_ptr($table + $i * $size + 2));
     }
+    __McPcreCache::$nameMaps[$code] = $out;
     return $out;
 }
 
@@ -520,11 +526,7 @@ function __preg_row_named(array $cells, array $names): array
 function __preg_group_pair(string $subject, int $s, int $e, bool $asNull): array
 {
     if ($s < 0) {
-        /** @var mixed[] $pair */
-        $pair = [];
-        $pair[] = \__mir_to_cell($asNull ? null : "");
-        $pair[] = \__mir_to_cell(-1);
-        return $pair;
+        return [\__mir_to_cell($asNull ? null : ""), \__mir_to_cell(-1)];
     }
     return \__preg_pair(\substr($subject, $s, $e - $s), $s);
 }
@@ -541,11 +543,7 @@ function __preg_capture_count(int $code): int
 
 function __preg_pair(string $s, int $off): array
 {
-    /** @var mixed[] $pair */
-    $pair = [];
-    $pair[] = \__mir_to_cell($s);
-    $pair[] = \__mir_to_cell($off < 0 ? -1 : $off);
-    return $pair;
+    return [\__mir_to_cell($s), \__mir_to_cell($off < 0 ? -1 : $off)];
 }
 
 /** Box a string[] into a vec[cell] (NaN-boxed elements) for an erased sink.
