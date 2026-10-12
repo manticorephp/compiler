@@ -864,6 +864,9 @@ final class LowerFromAst implements Pass
                     $this->classDecls[$iname] = $cdecl;
                     $this->knownClassNames[$iname] = true;
                     $module->interfaceNames[\ltrim($iname, '\\')] = true;
+                    foreach ($cdecl->methods as $im) {
+                        $module->interfaceMethods[\ltrim($iname, '\\')][$im->name] = $this->buildMethodMeta($cdecl->name, $im);
+                    }
                     if ($sIdx < $preludeCount || $this->exportRuntimeTypes) {
                         $module->internalInterfaceNames[\ltrim($iname, '\\')] = true;
                     }
@@ -1475,6 +1478,27 @@ final class LowerFromAst implements Pass
             }
             $this->closureReflFactories = [];
             $this->closureReflFactoryScope = [];
+            // A reflected free function's parameter defaults, one nullary factory
+            // each — the same shape and naming a method's carry.
+            foreach ($module->reflFnMeta as $rfn => $_rmm) {
+                $rdecl = $this->fnDecls[$rfn] ?? null;
+                if ($rdecl === null) { continue; }
+                $rpi = -1;
+                foreach ($rdecl->params as $rp) {
+                    $rpi = $rpi + 1;
+                    if ($rp->default === null) { continue; }
+                    $rbody = new \Parser\Ast\Block([
+                        \Parser\Ast\Stmt::return_(
+                            \Parser\Ast\Expr::call('__mir_to_cell', [$rp->default], $rp->default->span),
+                            $rp->default->span),
+                    ]);
+                    $rfd = new \Parser\Ast\FunctionDecl(
+                        \Compile\Mir\Passes\ReflectSynth::paramDefaultFn('', $rfn, $rpi),
+                        [], 'mixed', $rbody, $rp->default->span);
+                    $this->fnDecls[$rfd->name] = $rfd;
+                    $module->addFunction($this->lowerFunction($rfd));
+                }
+            }
             $fnTrampSrc = '';
             foreach ($module->reflFnMeta as $fn => $mm) {
                 $variadic = false; $byRef = false;
