@@ -421,6 +421,7 @@ trait LowerPrelude
             // An enum-case singleton renders `enum(Enum::Case)` — detected via its
             // class descriptor before the class-id dispatch (enums aren't classes here).
             . "  \$en = __mir_enum_name(\$v); if (\$en !== '') { echo 'enum(', \$en, \")\\n\"; return; }\n"
+            . "  if (\$v instanceof \\Closure) { echo \"object(Closure)#1 (0) {\\n\", \$pad, \"}\\n\"; return; }\n"
             . "  switch (__mir_object_class_id(\$v)) {\n";
         $arm = 0;
         foreach ($names as $cname) {

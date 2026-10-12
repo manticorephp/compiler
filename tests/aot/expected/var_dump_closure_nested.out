@@ -1,0 +1,16 @@
+object(Holder)#1 (2) {
+  ["c"]=>
+  object(Closure)#1 (0) {
+  }
+  ["arr"]=>
+  array(1) {
+    [0]=>
+    object(Closure)#1 (0) {
+    }
+  }
+}
+array(1) {
+  [0]=>
+  object(Closure)#1 (0) {
+  }
+}
