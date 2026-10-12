@@ -3237,7 +3237,7 @@ trait EmitLlvmObjects
         // reference to a cell slot (`public static mixed $x`) wrote a raw word
         // into a self-describing slot and the next tag-decoding read saw a
         // denormal. The address was never the hard part.
-        $this->locals->refParamTypes[$n->target] = $n->lvalue->type;
+        $this->locals->refParamTypes[$n->target] = $n->erased ? Type::unknown() : $n->lvalue->type;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;

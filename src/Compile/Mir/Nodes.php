@@ -1011,6 +1011,10 @@ final class RefBind_ extends Node
  *  it (the refLocals mechanism), aliasing the property / element. */
 final class RefAddr_ extends Node
 {
+    /** The local is typed ERASED, whatever the slot's own type: a computed
+     *  property name (`&$this->$p`) binds one local to slots of several types. */
+    public bool $erased = false;
+
     public function __construct(public string $target, public Node $lvalue, Type $type)
     {
         parent::__construct(Node::KIND_REF_ADDR, $type);

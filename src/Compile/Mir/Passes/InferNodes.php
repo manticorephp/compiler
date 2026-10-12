@@ -1163,7 +1163,7 @@ trait InferNodes
     private function inferRefAddr(\Compile\Mir\RefAddr_ $node): Type
     {
         $t = $this->inferNode($node->lvalue);
-        $this->localTypes[$node->target] = $t;
+        $this->localTypes[$node->target] = $node->erased ? Type::unknown() : $t;
         return Type::void();
     }
 

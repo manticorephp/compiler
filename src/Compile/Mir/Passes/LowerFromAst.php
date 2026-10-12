@@ -4073,6 +4073,10 @@ final class LowerFromAst implements Pass
      */
     private function lowerRefAssign(\Parser\Ast\RefAssign $expr): Node
     {
+        if ($expr->target->kind === 'Variable' && $expr->source->kind === 'DynProp') {
+            $dp = $this->dynPropBase($expr->source);
+            if ($dp !== null) { return $this->lowerDynPropRef($dp, $expr); }
+        }
         if ($expr->target->kind === 'Variable' && $expr->source->kind === 'Variable') {
             return new RefAlias_($expr->target->name, $expr->source->name, Type::void());
         }
@@ -4142,6 +4146,10 @@ final class LowerFromAst implements Pass
         // deep index chain comes along for free — there is no new store node.
         $dyn = $this->dynStaticPropBase($expr->target);
         if ($dyn !== null) { return $this->lowerDynStaticStore($dyn, $expr); }
+        if ($expr->target->kind === 'ArrayAccess') {
+            $dp = $this->dynPropBase($expr->target);
+            if ($dp !== null) { return $this->lowerDynPropStore($dp, $expr); }
+        }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
     }
 
@@ -4158,6 +4166,135 @@ final class LowerFromAst implements Pass
     }
 
     private function arrayAccessBase(\Parser\Ast\ArrayAccess $a): \Parser\Ast\Expr { return $a->array; }
+
+    private function asDynProp(\Parser\Ast\Expr $e): \Parser\Ast\DynProp
+    {
+        /** @var \Parser\Ast\DynProp $e */
+        return $e;
+    }
+
+    private function asVariable(\Parser\Ast\Expr $e): \Parser\Ast\Variable
+    {
+        /** @var \Parser\Ast\Variable $e */
+        return $e;
+    }
+
+    /**
+     * The `$this->$name` a target / source bottoms out at (walking index
+     * expressions), or null. Only `$this` of a known class with a plain variable
+     * name qualifies: its declared properties are the closed candidate set the
+     * runtime name can select, and the name may be re-read by the fallback arm.
+     */
+    private function dynPropBase(\Parser\Ast\Expr $t): ?\Parser\Ast\DynProp
+    {
+        $cur = $t;
+        while ($cur->kind === 'ArrayAccess') { $cur = $this->arrayAccessBase($this->asArrayAccess($cur)); }
+        if ($cur->kind !== 'DynProp') { return null; }
+        $d = $this->asDynProp($cur);
+        if ($d->nullsafe || $d->object->kind !== 'Variable' || $d->name->kind !== 'Variable') { return null; }
+        if ($this->varName($this->asVariable($d->object)) !== 'this') { return null; }
+        if (!isset($this->classTable[$this->currentLowerClass])) { return null; }
+        return $d;
+    }
+
+    /**
+     * Declared instance properties of the current class.
+     *
+     * @return string[]
+     */
+    private function dynPropCandidates(bool $arraysOnly): array
+    {
+        $cd = $this->classTable[$this->currentLowerClass];
+        $out = [];
+        foreach ($cd->propertyNames as $nm) {
+            if ($arraysOnly && !($cd->propertyArrayHinted[$nm] ?? false)) { continue; }
+            $out[] = $nm;
+        }
+        return $out;
+    }
+
+    /** `$target` with its `$this->$name` base replaced by the concrete `$this->prop`. */
+    private function substDynPropBase(\Parser\Ast\Expr $target, string $prop): \Parser\Ast\Expr
+    {
+        if ($target->kind === 'DynProp') {
+            return new \Parser\Ast\PropertyAccess($this->asDynProp($target)->object, $prop, false, $target->span);
+        }
+        $aa = $this->asArrayAccess($target);
+        $base = $this->substDynPropBase($this->arrayAccessBase($aa), $prop);
+        return \Parser\Ast\Expr::arrayAccess($base, $this->arrayAccessIndex($aa), $target->span);
+    }
+
+    /**
+     * `$this->$name[...] = v`: an element write needs the property SLOT, which the
+     * dynamic read / write helpers do not hand out — the write landed in a copy.
+     * Evaluate name and value once, then store through the concrete slot; a name
+     * matching no declared property takes the lowering the site had before.
+     */
+    private function lowerDynPropStore(\Parser\Ast\DynProp $dyn, \Parser\Ast\Assign $expr): Node
+    {
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameTmp = '__dynp_n' . $id;
+        $valTmp = '__dynp_v' . $id;
+        $valNode = $this->lowerExpr($expr->value);
+        $stmts = [
+            new StoreLocal($nameTmp, $this->lowerExpr($this->dynPropName($dyn)), Type::string_()),
+            new StoreLocal($valTmp, $valNode, $valNode->type),
+        ];
+        $names = $this->dynPropCandidates(false);
+        $chain = new Block([$this->storeToTarget($expr->target, new LoadLocal($valTmp, $valNode->type))], Type::void());
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $nm = $names[$i];
+            $tgt = $this->substDynPropBase($expr->target, $nm);
+            $arm = new Block([$this->storeToTarget($tgt, new LoadLocal($valTmp, $valNode->type))], Type::void());
+            $chain = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($nm, Type::string_()), '==='),
+                $arm,
+                $chain,
+            )], Type::void());
+        }
+        $stmts[] = $chain;
+        return new Block($stmts, Type::void());
+    }
+
+    private function erasedRefAddr(string $target, Node $lv): RefAddr_
+    {
+        $r = new RefAddr_($target, $lv, Type::unknown());
+        $r->erased = true;
+        return $r;
+    }
+
+    /**
+     * `$r = &$this->$name`: `$r` must alias the property slot, which only a
+     * concrete property has. Dispatch over the array-typed properties (one
+     * representation, so one type for `$r`); any other name throws — a value copy would lose every write through `$r`.
+     */
+    private function lowerDynPropRef(\Parser\Ast\DynProp $dyn, \Parser\Ast\RefAssign $expr): Node
+    {
+        $nameTmp = '__dynp_n' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $stmts = [new StoreLocal($nameTmp, $this->lowerExpr($this->dynPropName($dyn)), Type::string_())];
+        $names = $this->dynPropCandidates(true);
+        $chain = new Block([new Call(
+            '__mir_throw_error',
+            [new Concat(
+                new StringConst('Cannot take a reference to dynamic property ', Type::string_()),
+                new LoadLocal($nameTmp, Type::string_()),
+            )],
+            Type::cell(),
+        )], Type::void());
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $nm = $names[$i];
+            $lv = $this->lowerExpr($this->substDynPropBase($expr->source, $nm));
+            $chain = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($nm, Type::string_()), '==='),
+                new Block([$this->erasedRefAddr($this->varName($this->asVariable($expr->target)), $lv)], Type::void()),
+                $chain,
+            )], Type::void());
+        }
+        $stmts[] = $chain;
+        return new Block($stmts, Type::void());
+    }
 
     private function asDynStaticProp(\Parser\Ast\Expr $e): \Parser\Ast\DynamicStaticProp
     {

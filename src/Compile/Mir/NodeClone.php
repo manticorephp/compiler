@@ -140,7 +140,7 @@ final class NodeClone
         if ($k === Node::KIND_SPREAD) { $x = self::asSpread($n); return new Spread_(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_THROW)  { $x = self::asThrow($n);  return new Throw_(self::node($x->value), $n->type); }
         if ($k === Node::KIND_REF_BIND) { $x = self::asRefBind($n); return new RefBind_($x->target, self::node($x->call), $n->type); }
-        if ($k === Node::KIND_REF_ADDR) { $x = self::asRefAddr($n); return new RefAddr_($x->target, self::node($x->lvalue), $n->type); }
+        if ($k === Node::KIND_REF_ADDR) { $x = self::asRefAddr($n); $c = new RefAddr_($x->target, self::node($x->lvalue), $n->type); $c->erased = $x->erased; return $c; }
         if ($k === Node::KIND_REF_CELL) { $x = self::asRefCell($n); return new RefCell_(self::node($x->refSource), $n->type); }
         if ($k === Node::KIND_STORE_STATIC_PROP) { $x = self::asStoreStaticProp($n); return new StoreStaticProp_($x->global, self::node($x->value), $n->type, $x->declared); }
         if ($k === Node::KIND_ISSET)  { $x = self::asIsset($n);  return new Isset_(self::nodes($x->targets), $n->type); }

@@ -1,6 +1,5 @@
 <?php
 // `$passes = &$this->$property; $passes[$k][] = $v;` (symfony PassConfig::addPass) loses the writes and clobbers the array
-// issue: #199
 final class PassConfig
 {
     public const TYPE_BEFORE_OPTIMIZATION = 'beforeOptimization';
