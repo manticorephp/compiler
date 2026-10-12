@@ -1,0 +1,25 @@
+int(1)
+array(4) {
+  [0]=>
+  string(16) "/_error/404.json"
+  [1]=>
+  string(3) "404"
+  [2]=>
+  string(4) "json"
+  ["MARK"]=>
+  string(2) "35"
+}
+int(1)
+array(2) {
+  [0]=>
+  string(1) "y"
+  ["MARK"]=>
+  string(6) "second"
+}
+int(1)
+array(2) {
+  [0]=>
+  string(2) "ab"
+  [1]=>
+  string(1) "b"
+}

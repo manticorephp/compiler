@@ -212,6 +212,12 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
         }
         $matches[$i] = \__mir_to_cell($val);
     }
+    // `(*MARK:name)` / `(*:name)`: php reports the last one passed under 'MARK'
+    // — symfony's CompiledUrlMatcher picks the matched route by it.
+    $mark = \Runtime\Pcre\getMark($md);
+    if ($mark !== 0) {
+        $matches['MARK'] = \__mir_to_cell(\cstr_to_str(\int_to_ptr($mark)));
+    }
     \__preg_md($code, $md);
     return 1;
 }
