@@ -2990,6 +2990,7 @@ trait InferScans
             $props = [];
             $statics = [];
             $this->scanRefCellArgNode($fn->body, $names, $elems, $props, $statics);
+            $this->scanMixedRefPointerLocals($fn->body, $fn->body, $names);
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
@@ -3209,6 +3210,56 @@ trait InferScans
         foreach (Walk::children($n) as $c) {
             $this->scanRefCellArgNode($c, $names, $elems, $props, $statics);
         }
+    }
+
+    /**
+     * A local handed BY REF to an object/string param (`?Tg &$o`) that the same
+     * function also gives ANOTHER pointer kind — `foreach (['a'] as $k)` then
+     * `$k = null; parse($p, $k)`. One slot cannot hold both representations, and
+     * the flow-narrowed `null` at the call site hides the string slot from
+     * {@see refArgSlotSink}: the callee wrote an object into a string slot.
+     *
+     * @param array<string,bool> $names
+     */
+    private function scanMixedRefPointerLocals(Node $body, Node $n, array &$names): void
+    {
+        $offset = 0;
+        $fname = $this->refCalleeOf($n, $offset);
+        $callee = $fname !== '' ? ($this->fnByName[$fname] ?? null) : null;
+        if ($callee !== null) {
+            foreach ($this->refCallArgs($n) as $i => $a) {
+                $p = $callee->params[$offset + $i] ?? null;
+                if ($p === null || !$p->byRef) { continue; }
+                $pk = $p->type->kind;
+                if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING) { continue; }
+                $an = '';
+                if ($a->kind === Node::KIND_LOAD_LOCAL) { $an = $a->name; }
+                elseif ($a->kind === Node::KIND_REF_ADDR) { $an = $a->target; }
+                if ($an === '' || isset($names[$an])) { continue; }
+                if ($this->localHoldsOtherPointer($body, $an, $pk)) { $names[$an] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->scanMixedRefPointerLocals($body, $c, $names);
+        }
+    }
+
+    /** Is `$name` stored (or foreach-bound) as a pointer kind other than `$pk`? */
+    private function localHoldsOtherPointer(Node $n, string $name, string $pk): bool
+    {
+        $k = '';
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
+            $k = $n->value->type->kind;
+        } elseif ($n->kind === Node::KIND_FOREACH && $n->valueVar === $name && !$n->byRef) {
+            $k = $n->array->type->element->kind ?? '';
+        }
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_STRING || $k === Type::KIND_ARRAY) {
+            if ($k !== $pk) { return true; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->localHoldsOtherPointer($c, $name, $pk)) { return true; }
+        }
+        return false;
     }
 
     /**

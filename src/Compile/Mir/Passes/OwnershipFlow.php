@@ -1085,6 +1085,11 @@ final class OwnershipFlow implements Pass
         foreach ($this->refArgLoad as $lid => $ll) {
             $name = $ll->name;
             $k = $this->firstOwnKey[$name] ?? $this->firstKey[$name] ?? 0;
+            // The callee writes a CELL scratch back into a cell slot, whatever
+            // raw kind a foreach binding gave the name first.
+            if ($ll->type->kind === Type::KIND_CELL && !isset($this->mixedHere[$name])) {
+                $k = $this->intern($name, 'cell', $ll->type);
+            }
             if ($k === 0 && !isset($this->mixedHere[$name])) {
                 $ks = $this->keyString($ll->type);
                 if ($ks !== '') { $k = $this->intern($name, $ks, $ll->type); }
