@@ -280,10 +280,8 @@ final class HashContext
  */
 function hash_init(string $algo, int $flags = 0, string $key = '', array $options = []): HashContext
 {
-    // `< 0`, not `=== 0`: md5 IS id 0 and -1 is the unknown one. Reading that
-    // check the other way rejected md5 and nothing else, which looked exactly
-    // like a cross-module arity bug for an afternoon.
-    if (__mc_algo_id($algo) < 0) {
+    // The same list hash() answers to: crc32 and xxh128 are not EVP algos (id -1) but hash_final() reaches them through hash().
+    if (!\in_array(\strtolower($algo), hash_algos(), true)) {
         throw new \ValueError('hash_init(): Argument #1 ($algo) must be a valid hashing algorithm');
     }
     $ctx = new HashContext();
