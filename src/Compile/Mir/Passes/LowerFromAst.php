@@ -6182,9 +6182,21 @@ final class LowerFromAst implements Pass
         if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite(); }
         $read = $this->lowerExpr($expr->target);
         $value = $this->lowerExpr($expr->value);
-        // `$t ??= v` → `$t = $t ?? v`.
+        // `$t ??= v` → `$t ?? ($t = v)`: php writes only when `$t` is null or
+        // unset. Writing back what was read separated the containers on every
+        // hit, and a nested `$this->p[$a][$b] ??= v` separated the inner array
+        // for the store BEFORE its read co-owned the outer one — the write-back
+        // then copied the outer with the stale inner pointer (UAF in symfony's
+        // DefinitionErrorExceptionPass).
         if ($expr->op === '??=') {
-            return $this->storeToTarget($expr->target, new NullCoalesce_($this->markProbe($read), $value, Type::unknown()));
+            $tmp = '__nca_' . (string)$this->lvCounter;
+            $this->lvCounter = $this->lvCounter + 1;
+            $assign = new Block([
+                new StoreLocal($tmp, $value, $value->type),
+                $this->storeToTarget($expr->target, new LoadLocal($tmp, $value->type)),
+                new LoadLocal($tmp, $value->type),
+            ], $value->type);
+            return new NullCoalesce_($this->markProbe($read), $assign, Type::unknown());
         }
         $base = \substr($expr->op, 0, \strlen($expr->op) - 1); // strip '='
         return $this->storeToTarget($expr->target, $this->buildBinop($base, $read, $value));
