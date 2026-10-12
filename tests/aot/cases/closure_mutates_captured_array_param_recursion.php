@@ -1,6 +1,5 @@
 <?php
 // A closure that mutates its by-value captured array (use ($resolving)) and recurses into the method that created it traps (symfony ParameterBag::resolveString)
-// issue: #208
 final class Bag
 {
     /** @var array<string, mixed> */

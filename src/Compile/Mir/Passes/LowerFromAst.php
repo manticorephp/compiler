@@ -299,6 +299,14 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /**
+     * Names the closure being lowered captures BY VALUE out of an enclosing
+     * bare-`array` param (or such a capture itself): their erased type says
+     * nothing, so a nested closure reads its array-ness from here.
+     * @var array<string, bool>
+     */
+    private array $currentArrayCaps = [];
+
     /** BY-REF parameter names of the body being lowered: such a name is already
      *  defined — it IS the caller's variable — so a `#[RefOut]` argument init
      *  must not overwrite it ({@see collectRefOutInits}).
@@ -3294,7 +3302,13 @@ final class LowerFromAst implements Pass
     {
         $capNames = [];
         $capByRef = [];
-        foreach ($expr->uses as $u) { $capNames[] = $u->name; $capByRef[$u->name] = $u->byRef; }
+        $myArrayCaps = [];
+        foreach ($expr->uses as $u) {
+            $capNames[] = $u->name; $capByRef[$u->name] = $u->byRef;
+            if (!$u->byRef && $this->enclosingArrayName($u->name)) { $myArrayCaps[$u->name] = true; }
+        }
+        $savedArrayCaps = $this->currentArrayCaps;
+        $this->currentArrayCaps = $myArrayCaps;
         // Isolate the generator flag: a yield inside this closure marks the
         // closure, not the enclosing function.
         $savedSawYield = $this->sawYield;
@@ -3304,6 +3318,7 @@ final class LowerFromAst implements Pass
         // enclosing function. Restored after, because the enclosing body keeps
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
+        $savedParamHints = $this->currentLowerParamHints;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
@@ -3320,9 +3335,19 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentLowerParamHints = $savedParamHints;
+        $this->currentArrayCaps = $savedArrayCaps;
         $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
             (bool)($expr->returnsByRef ?? false), $clUsesFa, null, false, $expr->isStatic);
+    }
+
+    /** Whether `$name`, read in the scope being lowered, is a bare-`array` param or a capture of one. */
+    private function enclosingArrayName(string $name): bool
+    {
+        $i = \array_search($name, $this->currentLowerParams, true);
+        if ($i !== false) { return $this->isBareArrayHint($this->currentLowerParamHints[$i] ?? ''); }
+        return isset($this->currentArrayCaps[$name]);
     }
 
     private function lowerArrowFn(\Parser\Ast\ArrowFn $expr): Node
@@ -3340,6 +3365,7 @@ final class LowerFromAst implements Pass
         }
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
+        $savedParamHints = $this->currentLowerParamHints;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
@@ -3363,6 +3389,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentLowerParamHints = $savedParamHints;
         $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,

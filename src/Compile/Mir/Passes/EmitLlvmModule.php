@@ -1117,6 +1117,10 @@ trait EmitLlvmModule
                 $cv = $this->ssa->allocReg();
                 $bodySink->write('  ' . $cv . ' = load i64, ptr ' . $gep . "\n");
                 $bodySink->write('  store i64 ' . $cv . ', ptr ' . $slot . "\n");
+                if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $fn->params[$pi], true)) {
+                    $bodySink->write($this->arrayHintedEntryMask($fn->params[$pi], $slot));
+                    $bodySink->write($this->paramEntryCopyIr($fn->params[$pi], $slot));
+                }
             }
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
                 $pp = $fn->params[$pi];

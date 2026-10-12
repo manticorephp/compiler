@@ -520,7 +520,12 @@ trait LowerFns
             $ptype = $cn === 'this' ? $thisType : Type::unknown();
             // A by-ref capture is passed (and unpacked) as a slot address —
             // mark the param byRef so the closure body derefs it (refLocals).
-            $params[] = new Param(name: $cn, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
+            $capP = new Param(name: $cn, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
+            // A by-value capture of an array param is the env's word: the prologue copies it (php re-copies per call) when the body stores into it. The erased type says nothing, the enclosing hint does.
+            if (!$capP->byRef && $this->enclosingArrayName($cn)) {
+                $capP->arrayHinted = true;
+            }
+            $params[] = $capP;
         }
         foreach ($declParams as $p) {
             $cp = new Param(
