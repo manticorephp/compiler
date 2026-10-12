@@ -1506,10 +1506,10 @@ final class LowerFromAst implements Pass
                     if ($p->variadic) { $variadic = true; }
                     if ($p->byRef) { $byRef = true; }
                 }
-                if ($variadic || $byRef) { continue; }
+                if ($byRef) { continue; }
                 $void = \strtolower($mm->returnType) === 'void';
                 $fnTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::functionTramp(
-                    $fn, $mm->requiredParams(), \count($mm->params), $void);
+                    $fn, $mm->requiredParams(), \count($mm->params), $void, $variadic);
             }
             if ($fnTrampSrc !== '') {
                 $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);
@@ -5365,7 +5365,7 @@ final class LowerFromAst implements Pass
             // whether it reads them back are both known.
             return $out;
         }
-        return $this->defaultFillArgs($params, $astArgs, '', $fnName);
+        return $this->defaultFillArgs($params, $astArgs, '');
     }
 
     /**
@@ -6072,7 +6072,7 @@ final class LowerFromAst implements Pass
         $cls = $this->resolveStaticClass($expr->class);
         $params = $this->resolveMethodParams($cls, '__construct');
         if ($params !== null) {
-            $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'), $cls . '::__construct');
+            $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'));
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
@@ -6398,7 +6398,7 @@ final class LowerFromAst implements Pass
         }
         if ($params !== null) {
             $selfCls = $mcClass !== '' ? $this->resolveMethodDeclClass($mcClass, $expr->method) : '';
-            $args = $this->defaultFillArgs($params, $expr->args, $selfCls, $mcClass !== '' ? $mcClass . '::' . $expr->method : '');
+            $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
@@ -6457,7 +6457,34 @@ final class LowerFromAst implements Pass
             && \count($expr->args) === 1) {
             $conv = $this->coerceCallableArg(Type::closure(), $expr->args[0]);
             if ($conv !== null) { return $conv; }
-            return $this->lowerExpr($expr->args[0]);
+            $v = $this->lowerExpr($expr->args[0]);
+            $vc = $v->type->class ?? '';
+            if ($v->type->kind === Type::KIND_OBJ && isset($this->module->closureCaptures[$vc])) {
+                return $v;
+            }
+            // A callable known only at run time (a string name, an array, an invokable): the
+            // caller treats the result as a closure, so wrap it in one that invokes it.
+            $tmp = '__fc_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $sp = $expr->span;
+            // Fixed optional params + func_num_args(): a variadic closure is not packed when it is
+            // invoked through an erased `Closure` slot.
+            $params = [];
+            for ($pi = 0; $pi < 8; $pi = $pi + 1) {
+                $params[] = new \Parser\Ast\Param('a' . (string)$pi, null, \Parser\Ast\Expr::null($sp), false, false, '', false, [], $sp);
+            }
+            $body = null;
+            for ($k = 8; $k >= 0; $k = $k - 1) {
+                $cargs = [];
+                for ($pi = 0; $pi < $k; $pi = $pi + 1) { $cargs[] = \Parser\Ast\Expr::variable('a' . (string)$pi, $sp); }
+                $callK = \Parser\Ast\Expr::invoke(\Parser\Ast\Expr::variable($tmp, $sp), $cargs, $sp);
+                $body = $body === null ? $callK : \Parser\Ast\Expr::ternary(
+                    \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::call('func_num_args', [], $sp), \Parser\Ast\Expr::int($k, $sp), $sp),
+                    $callK, $body, $sp);
+            }
+            $wrap = \Parser\Ast\Expr::arrowFn(true, $params, null, $body, $sp);
+            $this->pendingCallInits[] = new StoreLocal($tmp, $v, $v->type);
+            return $this->lowerExpr($wrap);
         }
         // First-class callable `C::m(...)` → a 0-capture closure forwarding to
         // the static method (scope preserved for late static binding).
@@ -6536,7 +6563,7 @@ final class LowerFromAst implements Pass
         $params = $this->resolveMethodParams($class, $expr->method);
         if ($params !== null) {
             $selfCls = $this->resolveMethodDeclClass($class, $expr->method);
-            foreach ($this->defaultFillArgs($params, $expr->args, $selfCls, $class . '::' . $expr->method) as $f) { $args[] = $f; }
+            foreach ($this->defaultFillArgs($params, $expr->args, $selfCls) as $f) { $args[] = $f; }
         } elseif ($bindScope !== '') {
             $ai = 0;
             foreach ($expr->args as $a) {

@@ -272,6 +272,8 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_pool_start')              { return $this->biPoolStart($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
+        if ($name === '__mir_throw_type_error') { return $this->biThrowError($args, 'TypeError'); }
+        if ($name === '__mir_throw_argcount_error') { return $this->biThrowError($args, 'ArgumentCountError'); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
         if ($name === '__mir_obj_bag')                { return $this->biObjBag($args); }
         if ($name === '__mir_fiber_make')             { return $this->biFiberMake($args); }
@@ -1572,7 +1574,7 @@ trait EmitLlvmBuiltins
      * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
      * and the self-built compiler crashed on `method_exists(...$pack)`.
      */
-    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false): string
+    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false, string $from = ''): string
     {
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
@@ -1608,7 +1610,7 @@ trait EmitLlvmBuiltins
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
-        $out .= '  store i64 0, ptr ' . $iSlot . "\n";
+        $out .= '  store i64 ' . ($from !== '' ? $from : '0') . ', ptr ' . $iSlot . "\n";
         $cond = $this->ssa->allocLabel('uct.cond');
         $body = $this->ssa->allocLabel('uct.body');
         $end  = $this->ssa->allocLabel('uct.end');
@@ -1663,7 +1665,9 @@ trait EmitLlvmBuiltins
         // TypeExpression glued `null|Expr[]` as `null0Expr[]`.
         $kb = $this->ssa->allocReg();
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        $out .= '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
+        $out .= $from !== ''
+            ? '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $raw . ")\n"
+            : '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
         $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
@@ -4831,6 +4835,9 @@ trait EmitLlvmBuiltins
         $out .= $this->emitNode($args[1]);
         $out .= $this->coerceIntArg($args[1]);
         $n = $this->lastValue;
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $n . ", 0\n";
+        $out .= $this->emitThrowIf($neg, 'ValueError', 'str_repeat(): Argument #2 ($times) must be greater than or equal to 0');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_repeat(ptr ' . $s . ', i64 ' . $n . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
@@ -5360,18 +5367,17 @@ trait EmitLlvmBuiltins
         $out = '';
         // php evaluates EVERY argument before var_dump prints the first:
         // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
-        /** @var array<int, array{0: ?bool, 1: string}> float? (null = closure) + the value register */
+        /** @var array<int, array{0: bool, 1: string}> float? + the value register */
         $vals = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $vals[] = [true, $this->lastValue];
-            } elseif (Type::isClosureLike($a->type)) {
-                // A closure handle is no tagged object: boxing it and walking
-                // the class table dereferenced garbage (SIGSEGV).
+            } elseif ($a->type->kind === Type::KIND_CLOSURE || ($a->type->kind === Type::KIND_OBJ && $this->isClosureClass($a->type->class ?? ""))) {
+                // A closure is not in the class table; the object walk would read it as a bag.
                 $out .= $this->emitNode($a);
-                $vals[] = [null, ""];
+                $vals[] = [true, ''];
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -5384,7 +5390,7 @@ trait EmitLlvmBuiltins
             }
         }
         foreach ($vals as $v) {
-            if ($v[0] === null) {
+            if ($v[0] && $v[1] === '') {
                 $out .= $this->emitOutLit("object(Closure)#1 (0) {\n}\n");
             } elseif ($v[0]) {
                 // Shortest round-trip via the Ryu core (uppercase E, no forced
@@ -7287,7 +7293,7 @@ trait EmitLlvmBuiltins
      * Static detection is not lost — the analyzer reports `undefined.constant`
      * for exactly this, and it runs closed-world over the whole source set.
      */
-    private function biThrowError(array $args): string
+    private function biThrowError(array $args, string $cls = 'Error'): string
     {
         // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to
         // go through reflLitStr, which answers '' for anything that is not a
@@ -7298,8 +7304,6 @@ trait EmitLlvmBuiltins
         $message = \count($args) > 0
             ? $args[0]
             : new \Compile\Mir\StringConst('', Type::string_());
-        // An optional 2nd literal names the class (default \Error).
-        $cls = \count($args) > 1 && $args[1]->kind === Node::KIND_STRING_CONST ? $args[1]->value : 'Error';
         $throw = new \Compile\Mir\Throw_(
             new \Compile\Mir\NewObj($cls, [
                 $message,
@@ -7731,6 +7735,49 @@ trait EmitLlvmBuiltins
 
     /** property_exists($obj|'C', 'p') — walk the parent chain for the prop. */
     private function biPropertyExists(array $args): string
+    {
+        $out = $this->biPropertyExistsDeclared($args);
+        // An OBJECT also answers for its dynamic properties (the bag). Only a
+        // statically-typed object read twice for free (a local, a literal name).
+        $o = $args[0] ?? null;
+        $k = $args[1] ?? null;
+        if ($o === null || $k === null || $o->kind !== Node::KIND_LOAD_LOCAL
+            || $o->type->kind !== Type::KIND_OBJ
+            || ($k->kind !== Node::KIND_STRING_CONST && $k->kind !== Node::KIND_LOAD_LOCAL)) {
+            return $out;
+        }
+        $cd = $this->classes[$o->type->class ?? ''] ?? null;
+        if ($cd !== null && !$cd->usesBag()) { return $out; }
+        $declared = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $declared . ', ptr ' . $slot . "\n";
+        $out .= $this->emitNode($o);
+        $out .= $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+        $out .= $cd !== null ? $this->emitBagPtrAt($objPtr, $cd->bagOffset()) : $this->emitBagOfUnknownClass($objPtr);
+        $bagP = $cd !== null ? $this->bagPtrReg : $this->lastValue;
+        $out .= $this->emitPtrArg($k);
+        $keyP = $this->lastValue;
+        $nz = $this->ssa->allocReg();
+        $out .= '  ' . $nz . ' = icmp eq ptr ' . $bagP . ", null\n";
+        $safe = $this->ssa->allocReg();
+        $out .= '  ' . $safe . ' = select i1 ' . $nz . ', ptr @__mir_zero_word, ptr ' . $bagP . "\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = call i64 @__mir_array_isset_str(ptr ' . $safe . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+        $d = $this->ssa->allocReg();
+        $out .= '  ' . $d . ' = icmp ne i64 ' . $declared . ", 0\n";
+        $h = $this->ssa->allocReg();
+        $out .= '  ' . $h . ' = icmp ne i64 ' . $has . ", 0\n";
+        $o2 = $this->ssa->allocReg();
+        $out .= '  ' . $o2 . ' = or i1 ' . $d . ', ' . $h . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $o2 . " to i64\n";
+        return $this->finishI64($out, $r);
+    }
+
+    /** @param Node[] $args */
+    private function biPropertyExistsDeclared(array $args): string
     {
         if (\count($args) < 2) {
             return $this->biConstBool($this->reflEvalArgs($args), false);

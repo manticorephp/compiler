@@ -72,8 +72,7 @@ final class Parser
     private array $useAliases = [];
 
     /**
-     * `use function Ns\f [as g]` — lowercase short name → FQN, consulted for
-     * an unqualified call. Resets with {@see $useAliases}.
+     * Lowercased alias → FQN of `use function X as alias;`.
      *
      * @var array<string, string>
      */
@@ -3015,16 +3014,8 @@ final class Parser
      */
     private function parseNameOrCall(Span $span): Expr
     {
-        // `use function Ns\f as g;` then `g(…)`: an unqualified call resolves
-        // through the function alias table, not the namespace prefix.
-        $t0 = $this->peek();
-        $t1 = $this->tokens[$this->pos + 1] ?? null;
-        if ($t0->kind === TokenKind::Identifier && $t1 !== null && $t1->kind === TokenKind::OpenParen
-            && isset($this->useFnAliases[\strtolower($t0->lexeme)])) {
-            $this->advance();
-            return Expr::call($this->useFnAliases[\strtolower($t0->lexeme)], $this->parseArgList(), $span);
-        }
-        $name = $this->parseClassName();
+        $literal = $this->parseClassNameLiteral();
+        $name = $this->resolveClassName($literal);
         $tok = $this->peek();
 
         if ($tok->kind === TokenKind::DoubleColon) {
@@ -3078,6 +3069,8 @@ final class Parser
         // are rare but accepted too.
         if ($this->check(TokenKind::OpenParen)) {
             $args = $this->parseArgList();
+            $fl = \strtolower($literal);
+            if (isset($this->useFnAliases[$fl]) && !\str_contains($literal, '\\')) { $name = $this->useFnAliases[$fl]; }
             return Expr::call($name, $args, $span);
         }
 

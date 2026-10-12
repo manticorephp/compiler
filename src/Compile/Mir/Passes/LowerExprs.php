@@ -720,6 +720,16 @@ trait LowerExprs
                     false,
                     Type::cell(),
                 );
+                if ($src instanceof \Compile\Mir\Call && $src->function === '__mc_yf_gen') {
+                    // The expression's value is the inner generator's return value.
+                    $gv = '__yf_g' . (string)$n;
+                    $gt = Type::obj('Generator');
+                    return new Block([
+                        new StoreLocal($gv, $src, $gt),
+                        new Foreach_(new LoadLocal($gv, $gt), $kv, $vv, false, new Block([$inner], Type::void())),
+                        new \Compile\Mir\MethodCall_(new LoadLocal($gv, $gt), 'getReturn', [], Type::cell()),
+                    ], Type::cell());
+                }
                 return new Foreach_($src, $kv, $vv, false, new Block([$inner], Type::void()));
             }
             $key = $yk !== null ? $this->lowerExpr($yk) : null;

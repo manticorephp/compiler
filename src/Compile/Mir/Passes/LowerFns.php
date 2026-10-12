@@ -1102,7 +1102,7 @@ trait LowerFns
      * @param \Parser\Ast\Expr[]  $astArgs
      * @return Node[]
      */
-    private function defaultFillArgs(array $params, array $astArgs, string $selfClass = '', string $fnName = ''): array
+    private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
         $hasNamed = false;
         foreach ($astArgs as $a) {
@@ -1110,7 +1110,15 @@ trait LowerFns
         }
         // Variadic last param: pack trailing positional args into a vec.
         $np = \count($params);
-        if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
+        // A `...$arr` ahead of the variadic covers fixed params AND the pack, a
+        // run-time split the emitter makes against the signature
+        // ({@see EmitLlvmCalls::emitSpreadFill}); an eager empty pack here became a
+        // stray extra argument.
+        $spreadAt = -1;
+        foreach ($astArgs as $si => $sa) {
+            if ($sa->kind === 'Spread') { $spreadAt = $si; break; }
+        }
+        if ($np > 0 && $this->paramVariadic($params[$np - 1]) && ($spreadAt < 0 || $spreadAt >= $np - 1)) {
             $vidx = $np - 1;
             $refPack = $this->paramByRefDecl($params[$vidx]);
             $out = [];
@@ -1129,7 +1137,7 @@ trait LowerFns
             // `$fetchMode !== null` held, setFetchMode() ran with an array
             // POINTER, and every default fetch() came back as an object.
             while ($i < $vidx) {
-                $out[] = $this->lowerOmittedParam($params[$i], $selfClass, $fnName === '' || $hasNamed ? null : [$fnName, $params, \count($astArgs)]);
+                $out[] = $this->lowerOmittedParam($params[$i], $selfClass, $params, $astArgs);
                 $i = $i + 1;
             }
             $out[] = new ArrayLit($packed, Type::unknown());
@@ -1199,7 +1207,7 @@ trait LowerFns
         $out = [];
         $i = 0;
         foreach ($params as $p) {
-            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass, $fnName === '' || $hasNamed ? null : [$fnName, $params, \count($astArgs)]);
+            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass, $params, $astArgs);
             $i = $i + 1;
         }
         return $out;
@@ -1213,26 +1221,26 @@ trait LowerFns
      * function — keeps the caller's context).
      */
     /**
-     * @param array{0: string, 1: \Parser\Ast\Param[], 2: int}|null $site callee name,
-     *        its params and the positional count written, when a REQUIRED param
-     *        left out must raise php's ArgumentCountError at the call.
+     * @param \Parser\Ast\Param[] $params
+     * @param \Parser\Ast\Expr[] $astArgs
      */
-    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass, ?array $site = null): Node
+    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass, array $params, array $astArgs): Node
     {
         $pd = $this->paramDefault($p);
-        if ($pd === null && $site !== null && !$this->paramVariadic($p) && !$this->paramByRefDecl($p)) {
-            $required = 0;
-            $i = 0;
-            foreach ($site[1] as $q) {
-                $i = $i + 1;
-                if ($this->paramDefault($q) === null && !$this->paramVariadic($q)) { $required = $i; }
+        if ($pd === null) {
+            // A REQUIRED parameter the call left out: php's ArgumentCountError, raised
+            // when the call is reached (the argument expression throws).
+            $req = 0;
+            $exact = true;
+            foreach ($params as $q) {
+                if ($this->paramVariadic($q)) { $exact = false; continue; }
+                if ($this->paramDefault($q) === null) { $req = $req + 1; } else { $exact = false; }
             }
-            $msg = 'Too few arguments to function ' . $site[0] . '(), ' . (string)$site[2] . ' passed and '
-                . ($required === \count($site[1]) ? 'exactly' : 'at least') . ' ' . (string)$required . ' expected';
-            return new Call('__mir_throw_error', [new StringConst($msg, Type::string_()),
-                new StringConst('ArgumentCountError', Type::string_())], Type::cell());
+            return new Call('__mir_throw_argcount_error', [
+                new StringConst('Too few arguments: ' . (string)\count($astArgs) . ' passed and '
+                    . ($exact ? 'exactly ' : 'at least ') . (string)$req . ' expected', Type::string_()),
+            ], Type::cell());
         }
-        if ($pd === null) { return new NullConst(Type::null_()); }
         if ($selfClass === '') { return $this->lowerExpr($pd); }
         $prevSelf = $this->currentLowerClass;
         $this->currentLowerClass = $selfClass;

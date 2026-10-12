@@ -1384,14 +1384,52 @@ trait EmitLlvmControl
         return $out . "  ]\n";
     }
 
+    /**
+     * `foreach ($iterator as &$v)`: php throws once the iterator exists — a
+     * generator (no by-reference generators here) with an Exception, anything
+     * else with an Error. An IteratorAggregate whose getIterator() is declared
+     * to return a Generator gets the generator's answer.
+     */
+    private function emitForeachByRefIteratorThrow(Foreach_ $fe): string
+    {
+        $c = $fe->array->type->class ?? '';
+        $gen = $this->isGeneratorType($fe->array->type);
+        if (!$gen && $this->classImplements($c, 'IteratorAggregate')) {
+            $h = $this->resolveMethodClass($c, 'getIterator');
+            $rt = $h === '' ? null : ($this->sigs->returnType[$h . '__getIterator'] ?? null);
+            $gen = $rt !== null && $rt->kind === Type::KIND_OBJ && ($rt->class ?? '') === 'Generator';
+        }
+        $out = $this->emitNode($fe->array);
+        $out .= $this->coerceToPtr();
+        $live = $this->ssa->allocReg();
+        $out .= '  ' . $live . ' = icmp ne ptr ' . $this->lastValue . ", null\n";
+        return $out . $this->emitThrowIf($live, $gen ? 'Exception' : 'Error', $gen
+            ? 'You can only iterate a generator by-reference if it declared that it yields by-reference'
+            : 'An iterator cannot be used with foreach by reference');
+    }
+
     private function emitForeach(Foreach_ $n): string
     {
         $fe = $n;
+        if ($fe->byRef && ($this->isGeneratorType($fe->array->type)
+            || ($this->isTraversableType($fe->array->type)
+                && !\str_starts_with($fe->array->type->class ?? '', 'Manticore\\Ds\\')
+                && !$this->classExtends($fe->array->type->class ?? "", "ArrayObject")
+                && !$this->classExtends($fe->array->type->class ?? "", "ArrayIterator")))) {
+            return $this->emitForeachByRefIteratorThrow($fe);
+        }
         if ($this->isGeneratorType($fe->array->type)) {
             return $this->emitForeachGenerator($fe);
         }
         if ($this->isTraversableType($fe->array->type)) {
             return $this->emitForeachObject($fe);
+        }
+        $at0 = $fe->array->type;
+        if (!$fe->byRef && $at0->kind === Type::KIND_OBJ && ($at0->class ?? '') !== '') {
+            // A plain object: walk its properties (declared, then dynamic), the
+            // array get_object_vars() builds.
+            $fe->array = new \Compile\Mir\Call('get_object_vars', [$fe->array],
+                Type::assoc(Type::cell(), Type::cell()));
         }
         $out = '';
         if (!isset($this->locals->slots[$fe->valueVar])) {
@@ -1527,18 +1565,58 @@ trait EmitLlvmControl
             // column measured 0 — the Table drew ` -- -- -- ` around correctly
             // rendered rows.
             $out .= $oChk . ":\n";
+            // An object is a Traversable (drive its protocol) or a plain object
+            // (walk its properties, as get_object_vars() hands them); anything
+            // else falls to the array arm. The array arm reads its word from a
+            // slot the plain-object arm overwrites with the property array.
+            $awSlot = $this->ssa->allocReg();
+            $out .= '  ' . $awSlot . " = alloca i64\n";
+            $out .= '  store i64 ' . $word . ', ptr ' . $awSlot . "\n";
+            $out .= $this->objectProbeIr($word);
+            $pArm = $this->ssa->allocLabel('fe.dyn.plain');
+            $out .= '  br i1 ' . $this->objectProbeReg . ', label %' . $pArm
+                  . ', label %' . $aArm . "\n";
+            $out .= $pArm . ":\n";
+            $plainL = $this->ssa->allocLabel('fe.dyn.pobj');
             if ($this->hasTraversableClasses()) {
-                $out .= $this->objectProbeIr($word);
-                $out .= '  br i1 ' . $this->objectProbeReg . ', label %' . $oArm
-                      . ', label %' . $aArm . "\n";
-                $out .= $oArm . ":\n";
+                $subjName = '@fe.pj.' . (string)$this->iterCounter;
+                $this->iterCounter = $this->iterCounter + 1;
+                $subjSlot = $this->ssa->allocReg();
+                $out .= '  ' . $subjSlot . " = alloca i64\n";
+                $out .= '  store i64 ' . $word . ', ptr ' . $subjSlot . "\n";
+                $this->locals->slots[$subjName] = $subjSlot;
+                $trav = '';
+                foreach (['Iterator', 'IteratorAggregate'] as $ic) {
+                    $out .= $this->emitNode(new \Compile\Mir\Instanceof_(
+                        new \Compile\Mir\LoadLocal($subjName, \Compile\Mir\Type::unknown()), $ic));
+                    $out .= $this->coerceToI64();
+                    $t = $this->ssa->allocReg();
+                    $out .= '  ' . $t . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+                    if ($trav === '') { $trav = $t; continue; }
+                    $o = $this->ssa->allocReg();
+                    $out .= '  ' . $o . ' = or i1 ' . $trav . ', ' . $t . "\n";
+                    $trav = $o;
+                }
+                $oArm2 = $this->ssa->allocLabel('fe.dyn.trav');
+                $out .= '  br i1 ' . $trav . ', label %' . $oArm2 . ', label %' . $plainL . "\n";
+                $out .= $oArm2 . ":\n";
                 $out .= $this->emitForeachErasedIterator($fe, $word);
                 $out .= '  br label %' . $dynEnd . "\n";
             } else {
-                $out .= '  br label %' . $aArm . "\n";
+                $out .= '  br label %' . $plainL . "\n";
             }
+            $out .= $plainL . ":\n";
+            $pp = $this->ssa->allocReg();
+            $out .= '  ' . $pp . ' = inttoptr i64 ' . $word . " to ptr\n";
+            $out .= $this->emitObjectVarsOfPtr($pp);
+            $pw = $this->ssa->allocReg();
+            $out .= '  ' . $pw . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            $out .= '  store i64 ' . $pw . ', ptr ' . $awSlot . "\n";
+            $out .= '  br label %' . $aArm . "\n";
             $out .= $aArm . ":\n";
-            $out .= $this->arrayPtrOrEmptyIr($word);
+            $aw = $this->ssa->allocReg();
+            $out .= '  ' . $aw . ' = load i64, ptr ' . $awSlot . "\n";
+            $out .= $this->arrayPtrOrEmptyIr($aw);
             $this->lastValue = $this->arrayPtrReg;
             $this->lastValueType = 'ptr';
         } elseif ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) {
