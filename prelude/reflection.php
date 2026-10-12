@@ -249,6 +249,11 @@ final class __MC_ClosureShape {}
 
 class ReflectionClass
 {
+    public const IS_IMPLICIT_ABSTRACT = 16;
+    public const IS_EXPLICIT_ABSTRACT = 64;
+    public const IS_FINAL = 32;
+    public const IS_READONLY = 65536;
+
     /** PHP exposes the class name as a public property, not just getName(). */
     public string $name = "";
 
@@ -479,14 +484,17 @@ class ReflectionClass
      * trait → inherited — what php's getMethods() reports).
      * @return ReflectionMethod[]
      */
-    public function getMethods(): array
+    public function getMethods(?int $filter = null): array
     {
         $n = __mc_refl_nmethods($this->h);
         $base = __mc_refl_methods_base($this->h);
         $out = [];
         $i = 0;
         while ($i < $n) {
-            $out[] = new ReflectionMethod($this->name, __mc_refl_row_name($base, $i));
+            $m = new ReflectionMethod($this->name, __mc_refl_row_name($base, $i));
+            if ($filter === null || ($m->getModifiers() & $filter) !== 0) {
+                $out[] = $m;
+            }
             $i = $i + 1;
         }
         return $out;
@@ -497,14 +505,17 @@ class ReflectionClass
      * order (inherited first, then own — what the metadata carries).
      * @return ReflectionProperty[]
      */
-    public function getProperties(): array
+    public function getProperties(?int $filter = null): array
     {
         $n = __mc_refl_nprops($this->h);
         $base = __mc_refl_props_base($this->h);
         $out = [];
         $i = 0;
         while ($i < $n) {
-            $out[] = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
+            $p = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
+            if ($filter === null || ($p->getModifiers() & $filter) !== 0) {
+                $out[] = $p;
+            }
             $i = $i + 1;
         }
         return $out;
@@ -830,6 +841,13 @@ abstract class ReflectionFunctionAbstract
  */
 class ReflectionMethod extends ReflectionFunctionAbstract
 {
+    public const IS_STATIC = 16;
+    public const IS_PUBLIC = 1;
+    public const IS_PROTECTED = 2;
+    public const IS_PRIVATE = 4;
+    public const IS_ABSTRACT = 64;
+    public const IS_FINAL = 32;
+
     public string $name = "";
     public string $class = "";
 
@@ -1167,6 +1185,11 @@ class ReflectionProperty
     public const IS_PUBLIC = 1;
     public const IS_PROTECTED = 2;
     public const IS_PRIVATE = 4;
+    public const IS_ABSTRACT = 64;
+    public const IS_FINAL = 32;
+    public const IS_VIRTUAL = 512;
+    public const IS_PROTECTED_SET = 2048;
+    public const IS_PRIVATE_SET = 4096;
 
     public string $name = "";
     public string $class = "";
@@ -2293,6 +2316,11 @@ class ReflectionFunction extends ReflectionFunctionAbstract
  */
 class ReflectionClassConstant
 {
+    public const IS_PUBLIC = 1;
+    public const IS_PROTECTED = 2;
+    public const IS_PRIVATE = 4;
+    public const IS_FINAL = 32;
+
     public string $name = "";
     public string $class = "";
 
