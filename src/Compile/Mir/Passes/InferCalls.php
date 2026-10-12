@@ -333,7 +333,7 @@ trait InferCalls
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
             || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name'
             || $n === '__mc_refl_attr_err'
-            || $n === '__mc_refl_row_rettype'
+            || $n === '__mc_refl_row_rettype' || $n === '__mc_refl_row_declclass'
             || $n === '__mc_refl_prow_type') { return Type::string_(); }
         // The boxed result of an indirect trampoline call — a mixed cell the
         // prelude's ReflectionMethod::invoke / newInstance hand back to the user.

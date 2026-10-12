@@ -427,6 +427,7 @@ trait EmitLlvmObjects
                     } else {
                         $out .= $this->coerceToI64();
                         $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                        $this->takeCellStrArgOwn();
                         // No temp list on this path: never let the flag reach another site.
                         $this->takeScalarStrArgTemp();
                     }
@@ -778,6 +779,8 @@ trait EmitLlvmObjects
                     $cellTmp = $this->isFreshCellTemp($a);
                     if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                    $cso = $this->takeCellStrArgOwn();
+                    if ($cso !== '') { $argTemps[] = $cso; }
                     if ($cellTmp) {
                         // ★ Already released by its TAGGED word above; asking
                         // `freshRcArgFlavor` too drops the same temp twice.
@@ -3595,10 +3598,11 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop, string $within = ''): string
+    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false): string
     {
         $key = '__mc_prop_write_' . $this->mangle($prop)
-             . ($within === '' ? '' : '__in_' . $this->mangle($within));
+             . ($within === '' ? '' : '__in_' . $this->mangle($within))
+             . ($dropOld ? '__drop' : '');
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
@@ -3633,7 +3637,27 @@ trait EmitLlvmObjects
             $seen[$cd->name] = true;
             $lbl = $this->ssa->allocLabel('pw.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+            $bodies .= $lbl . ":\n";
+            // A by-ref write-back over a slot the erased READ rebuilt (a concrete-
+            // element array is cellified into a fresh copy, so the seed never
+            // aliased the slot) must give the slot's OLD buffer back: the raw
+            // overwrite below would strand it, and every element it holds.
+            $oldSlot = '';
+            $oldFlavor = '';
+            $spt = $cd->propertyTypes[$prop] ?? null;
+            if ($dropOld && $spt !== null && !$this->cellPropBoxed($spt, $cd->name, $prop)
+                && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))
+                && $cd->propertyWidth($prop) === 8) {
+                $oldFlavor = $this->discardReleaseFlavor($spt);
+                if ($oldFlavor !== '') {
+                    $og = $this->ssa->allocReg();
+                    $oldSlot = $this->ssa->allocReg();
+                    $bodies .= '  ' . $og . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+                    $bodies .= '  ' . $oldSlot . ' = load i64, ptr ' . $og . "\n";
+                }
+            }
+            $bodies .= $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+            if ($oldSlot !== '') { $bodies .= $this->rcReleaseReg($oldSlot, $oldFlavor); }
             $bodies .= '  br label %' . $end . "\n";
         }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
@@ -5159,6 +5183,46 @@ trait EmitLlvmObjects
         return [$sym, \count($names)];
     }
 
+    /**
+     * A synthesized MethodCall_ skips the lowering that packs trailing
+     * arguments into a variadic parameter's vec, so the callee read the first
+     * scalar as the vec pointer and answered an empty value. Pack them here.
+     *
+     * @param Node[] $args
+     * @return Node[]
+     */
+    private function packDynVariadicArgs(Node $recv, string $m, array $args): array
+    {
+        foreach ($args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return $args; }
+        }
+        $holder = '';
+        $cls = $recv->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls])) {
+            $holder = $this->resolveMethodClass($cls, $m);
+        } else {
+            foreach ($this->methodHolders($m) as $decl) {
+                if (\in_array(true, $this->sigs->variadicParams[$decl . '__' . $m] ?? [], true)) { $holder = $decl; break; }
+            }
+        }
+        if ($holder === '') { return $args; }
+        $key = $holder . '__' . $m;
+        $vi = -1;
+        foreach ($this->sigs->variadicParams[$key] ?? [] as $i => $v) {
+            if ($v) { $vi = $i; }
+        }
+        // Param 0 is $this, so the variadic sits at argument index $vi - 1.
+        $vt = $this->sigs->paramTypes[$key][$vi] ?? null;
+        if ($vi < 1 || $vt === null) { return $args; }
+        $out = [];
+        $rest = [];
+        foreach ($args as $i => $a) {
+            if ($i < $vi - 1) { $out[] = $a; } else { $rest[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        }
+        $out[] = new \Compile\Mir\ArrayLit($rest, $vt);
+        return $out;
+    }
+
     private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): string
     {
         $recv = $dp->object;
@@ -5181,7 +5245,7 @@ trait EmitLlvmObjects
             $out .= $hitL . ":\n";
             // $recv keeps its type (single class OR union), so emitMethodCall
             // dispatches monomorphically or via the runtime class_id switch.
-            $call = new \Compile\Mir\MethodCall_($recv, $m, $iv->args, $retT);
+            $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, (string)$m, $iv->args), $retT);
             $out .= $this->emitMethodCall($call);
             $out .= $this->boxToCell($retT);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
@@ -6878,6 +6942,8 @@ trait EmitLlvmObjects
                 $cellTmp = $this->isFreshCellTemp($a);
                 if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
+                $cso = $this->takeCellStrArgOwn();
+                if ($cso !== '') { $argTemps[] = $cso; }
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($cellTmp) {
                     // ★ ALREADY released — by the TAGGED word recorded above.
@@ -7246,6 +7312,8 @@ trait EmitLlvmObjects
             $this->vdArmList = \implode(', ', $kept);
             return '';
         }
+        // A site whose argument count is known (receiver + written args)
+        // raises php's ArgumentCountError for a required param it left out.
         $out = $this->emitDefaultArgPad($sym, $have, true);
         $this->vdArmList = \implode(', ', $parts) . $this->lastPadArgs;
         $this->vdArmDrops = $this->lastPadDrops;
@@ -8573,6 +8641,8 @@ trait EmitLlvmObjects
                     $argOutTypes[$ai + 1] = Type::cell();
                 } else {
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                    $cso = $this->takeCellStrArgOwn();
+                    if ($cso !== '') { $argTemps[] = $cso; }
                     $argOutTypes[$ai + 1] = $a->type;
                 }
                 $argList .= ', i64 ' . $this->lastValue;

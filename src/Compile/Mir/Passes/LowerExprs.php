@@ -335,7 +335,7 @@ trait LowerExprs
             // table at run time: folding it false answered no for every name.
             if ($fnBare === 'defined' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
-                if ($a0->kind !== 'StringLiteral') {
+                if ($a0->kind !== 'StringLiteral' || \strpos($this->stringLitValue($a0), '::') !== false) {
                     $this->sawDynConstant = true;
                     return new Call('__mc_defined', [$this->lowerExpr($a0)], Type::bool_());
                 }
@@ -350,7 +350,7 @@ trait LowerExprs
             // came out empty.
             if ($fnBare === 'constant' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
-                if ($a0->kind !== 'StringLiteral') {
+                if ($a0->kind !== 'StringLiteral' || \strpos($this->stringLitValue($a0), '::') !== false) {
                     $this->sawDynConstant = true;
                     return new Call('__mc_constant', [$this->lowerExpr($a0)], Type::cell());
                 }

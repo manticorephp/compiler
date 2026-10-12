@@ -9,7 +9,8 @@ namespace Parser\Ast;
  */
 final class LazyBody
 {
-    /** @param array<string,string> $useAliases */
+    /** @param array<string,string> $useAliases
+     *  @param array<string,string> $useFnAliases */
     public function __construct(
         public string $source,
         public readonly int $start,

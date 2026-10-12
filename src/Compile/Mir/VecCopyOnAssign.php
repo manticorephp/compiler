@@ -76,7 +76,23 @@ final class VecCopyOnAssign
     {
         if ($fn->isGenerator) { return false; }
         if ($p->byRef || !$p->arrayHinted) { return false; }
-        return self::storesInto($fn->body, $p->name);
+        return self::storesInto($fn->body, $p->name) || self::mutatedByBuiltin($fn->body, $p->name);
+    }
+
+    /** Whether `$name` (or an element path rooted at it) is argument 0 of a
+     *  by-ref array builtin (`array_pop($p)`, `array_walk($p, …)`, `sort($p)`)
+     *  anywhere in `$n` — an in-place write the caller's buffer must not see. */
+    private static function mutatedByBuiltin(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_CALL && \count($n->args) > 0 && self::mutatesArg0($n->function)) {
+            $base = $n->args[0];
+            while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
+            if ($base->kind === Node::KIND_LOAD_LOCAL && $base->name === $name) { return true; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if (self::mutatedByBuiltin($c, $name)) { return true; }
+        }
+        return false;
     }
 
     /**

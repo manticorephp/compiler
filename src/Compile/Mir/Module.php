@@ -33,6 +33,10 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, array<string, MethodMeta>> interface → its own declared
+     *  methods, for reflection (an interface has no ClassDef). */
+    public array $interfaceMethods = [];
+
     /** @var array<string, true> the interfaces php itself declares (prelude /
      *  runtime library) — ReflectionClass::isInternal(). */
     public array $internalInterfaceNames = [];

@@ -1,6 +1,5 @@
 <?php
 // An array property passed by reference through an erased (mixed) receiver leaks the property's array on every call.
-// issue: #138
 final class D
 {
     public static int $live = 0;

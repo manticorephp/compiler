@@ -1508,6 +1508,7 @@ trait EmitLlvmRuntime
         $out .= "@__mir_dtor_only = linkonce_odr global i64 0\n";
         $out .= "@__mir_dtor_done = linkonce_odr global i64 0\n";
         $out .= "@__mir_obj_to_str_hook = linkonce_odr global ptr null\n";
+        $out .= "@__mir_obj_to_str_soft_hook = linkonce_odr global ptr null\n";
         $out .= "@__mir_dtor_inh = linkonce_odr global i64 0\n";
         $out .= "define i64 @__mir_dtor_hash(ptr %p, i64 %mask) {\n";
         $out .= "entry:\n";
@@ -1817,8 +1818,14 @@ trait EmitLlvmRuntime
         $key = 'n_' . $this->mangle($name);
         $nameSym = '@.rmeta.name.' . $key;
         $out = $this->strGlobalDef($nameSym, $name);
+        $mFlds = 'i64 0, ptr null';
+        if (isset($this->interfaceMethods[$name])) {
+            $mPair = $this->rmetaMethodRows($this->interfaceMethods[$name], $name, null, $key);
+            $out .= $mPair[0];
+            $mFlds = $mPair[1];
+        }
         $out .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
-            $key, 'ptr ' . $this->strSymBytes($nameSym), $flags, 0);
+            $key, 'ptr ' . $this->strSymBytes($nameSym), $flags, 0, 'ptr null', $mFlds);
         $out .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($key);
         $reflIds[] = $key;
         return $out;
@@ -1911,15 +1918,25 @@ trait EmitLlvmRuntime
      */
     private function rmetaMethodTable(\Compile\Mir\ClassDef $cls, string $id): array
     {
+        return $this->rmetaMethodRows($cls->methodMeta, $cls->name, $cls, $id);
+    }
+
+    /**
+     * @param array<string, \Compile\Mir\MethodMeta> $methodMeta
+     * @param \Compile\Mir\ClassDef|null $cls null for an interface: no trampolines
+     * @return string[]
+     */
+    private function rmetaMethodRows(array $methodMeta, string $clsName, ?\Compile\Mir\ClassDef $cls, string $id): array
+    {
         $rows = [];
         $defs = '';
         $i = 0;
-        foreach ($cls->methodMeta as $mn => $mm) {
+        foreach ($methodMeta as $mn => $mm) {
             $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $mn);
-            $pp = $this->rmetaParamTable($mm, $id, $i, $cls->name);
+            $pp = $this->rmetaParamTable($mm, $id, $i, $clsName);
             $defs .= $pp[0];
-            $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
+            $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $clsName;
             $ap = $this->attrTableFor($mm->attributes, $mdecl, 'm', $mn, '@.rmeta.mattr.' . $id . '.' . (string)$i);
             $defs .= $ap[0];
             // Always a real string (empty when untyped), never a null pointer:
@@ -1928,15 +1945,17 @@ trait EmitLlvmRuntime
             $rsym = '@.rmeta.mret.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($rsym, $mm->returnType);
             $retFld = $this->strSymBytes($rsym);
+            $dsym = '@.rmeta.mdecl.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($dsym, $mdecl);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false)
                     | $this->metaIsDeprecated($mm),
-                $this->methodTrampField($cls, $mm, $mn),
+                $cls === null ? 'null' : $this->methodTrampField($cls, $mm, $mn),
                 $this->methodArity($mm),
                 \count($mm->params),
                 $pp[1],
-                $ap[1], $ap[2], $retFld);
+                $ap[1], $ap[2], $retFld, $this->strSymBytes($dsym));
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
