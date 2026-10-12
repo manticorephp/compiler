@@ -406,7 +406,10 @@ trait LowerStmts
             // bare `array` local can't carry, e.g. `@var array<string, Type>`).
             if ($stmt->docComment !== null && $lowered instanceof StoreLocal) {
                 $vt = $this->docTagType($stmt->docComment, '@var', $lowered->name);
-                if ($vt === null) { $vt = $this->docTagType($stmt->docComment, '@var', ''); }
+                // An unnamed `@var T` only: `/** @var Foo $p */` above `$type = ...`
+                // annotates `$p` (a foreach value), and typing `$type` as Foo made a
+                // string concat call Foo::__toString on the string.
+                if ($vt === null) { $vt = $this->docTagType($stmt->docComment, '@var', '', true); }
                 if ($vt !== null) {
                     $lowered->declaredType = $this->lowerTypeHint($vt);
                     // `/** @var Box<float> $b */ $b = new Box();` — the binding is
