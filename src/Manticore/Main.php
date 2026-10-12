@@ -5059,7 +5059,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
-    $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
+    // A spread ahead of a variadic lowers to `array_slice` ({@see \Compile\Mir\Passes\LowerFns::spreadAheadOfPack}).
+    $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc))
+        || $demand->usesEllipsis();
     // The EXTENDED array functions are a SEPARATE gate on purpose: array_fns is
     // injected into the compiler's own build (src/ calls array_map/sort), and a
     // prelude is injected WHOLE — so a miscompile in any function sharing that
