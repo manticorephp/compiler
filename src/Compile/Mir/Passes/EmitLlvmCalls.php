@@ -2300,36 +2300,105 @@ trait EmitLlvmCalls
      * calls a match directly with the pack built. A closure with a by-ref
      * parameter keeps the indirect call.
      *
-     * @return array<string, array{0: int, 1: int}>
+     * @return array<string, array{0: int, 1: int, 2: int}> [capture count, pack position, element code]
      */
     private function closurePackCandidates(int $argc): array
     {
         $out = [];
         foreach ($this->closureCaptures as $cname => $capCnt) {
-            $vars = $this->sigs->variadicParams[$cname] ?? [];
-            $vi = -1;
-            foreach ($vars as $i => $isVar) { if ($isVar) { $vi = (int)$i; } }
-            $k = $vi - $capCnt;
-            if ($vi < 0 || $k < 0 || $k >= $argc) { continue; }
-            $byRef = false;
-            foreach ($this->sigs->refParams[$cname] ?? [] as $ri => $isRef) {
-                if ($isRef && $ri >= $capCnt) { $byRef = true; }
-            }
-            if ($byRef) { continue; }
-            $out[$cname] = [$capCnt, $k];
+            $k = $this->closurePackPos($cname, $capCnt);
+            if ($k < 0 || $k >= $argc) { continue; }
+            $out[$cname] = [$capCnt, $k, $this->closurePackElemCode($cname, $capCnt)];
         }
         return $out;
     }
 
+    /** Pack element kinds a dynamic invoke can rebuild a cell pack into, by prefix code. */
+    private const PACK_ELEM_KINDS = [1 => Type::KIND_STRING, 2 => Type::KIND_INT, 3 => Type::KIND_FLOAT, 4 => Type::KIND_BOOL];
+
     /**
-     * A direct call of variadic closure `$cname` from a dynamic invoke: the
-     * first `$k` argument words go positionally, the rest into the pack — cells,
-     * as the uniform ABI made them, rebuilt into a typed pack the way a known
-     * call's is ({@see closureVariadicPack}). Result in lastValue.
+     * The argument position of closure `$cname`'s variadic pack when a dynamic
+     * invoke can build it — no by-ref parameter, an untyped or scalar-typed
+     * element — or -1.
+     */
+    private function closurePackPos(string $cname, int $capCnt): int
+    {
+        $vars = $this->sigs->variadicParams[$cname] ?? [];
+        $vi = -1;
+        foreach ($vars as $i => $isVar) { if ($isVar) { $vi = (int)$i; } }
+        $k = $vi - $capCnt;
+        if ($vi < 0 || $k < 0) { return -1; }
+        foreach ($this->sigs->refParams[$cname] ?? [] as $ri => $isRef) {
+            if ($isRef && $ri >= $capCnt) { return -1; }
+        }
+        return $this->closurePackElemCode($cname, $capCnt) < 0 ? -1 : $k;
+    }
+
+    /** 0 untyped (cells), a {@see PACK_ELEM_KINDS} code, or -1 for an element a cell pack cannot become. */
+    private function closurePackElemCode(string $cname, int $capCnt): int
+    {
+        $vi = -1;
+        foreach ($this->sigs->variadicParams[$cname] ?? [] as $i => $isVar) { if ($isVar) { $vi = (int)$i; } }
+        $pt = $this->sigs->paramTypes[$cname][$vi] ?? null;
+        $el = $pt === null ? null : $pt->element;
+        if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) { return 0; }
+        foreach (self::PACK_ELEM_KINDS as $code => $kind) {
+            if ($el->kind === $kind) { return (int)$code; }
+        }
+        return -1;
+    }
+
+    /**
+     * A dynamic invoke of a closure whose prefix names an untyped variadic pack
+     * at position k ({@see closureMetaPrefix}): the first k argument words go
+     * positionally, the rest into the pack — cells, as the uniform ABI made
+     * them. Branches to `$endL` with the result in `$res` on a match.
      *
      * @param string[] $argRegs
      */
-    private function emitDynClosurePackCall(string $cname, int $capCnt, int $k, string $struct, array $argRegs): string
+    private function emitDynVariadicPackCalls(string $fpi, string $struct, array $argRegs, string $res, string $endL): string
+    {
+        /** @var array<int, bool> $ks pack position * 16 + element code */
+        $ks = [];
+        foreach ($this->closurePackCandidates(\count($argRegs)) as $ck) { $ks[$ck[1] * 16 + $ck[2]] = true; }
+        if ($ks === []) { return ''; }
+        // The pack position rides in the closure's prefix: a code pointer is no
+        // identity across split parts, the prefix travels with every copy.
+        $out = $this->closureMetaLoad($fpi, 0);
+        $ok = $this->metaOk;
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $this->metaWord . ", 4\n";
+        $vf = $this->ssa->allocReg();
+        $out .= '  ' . $vf . ' = and i64 ' . $sh . ", 4095\n";
+        foreach ($ks as $key => $_) {
+            $k = \intdiv((int)$key, 16);
+            $code = (int)$key % 16;
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $vf . ', ' . (string)(($k + 1) * 16 + $code) . "\n";
+            $hit = $this->ssa->allocReg();
+            $out .= '  ' . $hit . ' = and i1 ' . $ok . ', ' . $eq . "\n";
+            $hitL = $this->ssa->allocLabel('cpack.hit');
+            $nextL = $this->ssa->allocLabel('cpack.next');
+            $out .= '  br i1 ' . $hit . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= $this->emitDynClosurePackCall($fpi, $k, $code, $struct, $argRegs);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
+        }
+        return $out;
+    }
+
+    private function packElemType(int $code): Type
+    {
+        if ($code === 1) { return Type::vec(Type::string_()); }
+        if ($code === 2) { return Type::vec(Type::int_()); }
+        if ($code === 3) { return Type::vec(Type::float_()); }
+        return Type::vec(Type::bool_());
+    }
+
+    /** @param string[] $argRegs */
+    private function emitDynClosurePackCall(string $fpi, int $k, int $code, string $struct, array $argRegs): string
     {
         $out = '';
         $elems = [];
@@ -2345,8 +2414,8 @@ trait EmitLlvmCalls
         $out .= $this->coerceToI64();
         $pack = $this->lastValue;
         $flavor = 'veccell';
-        $pt = $this->sigs->paramTypes[$cname][$capCnt + $k] ?? null;
-        if ($pt !== null && $this->needsDeCellify($pt, Type::vec(Type::cell()))) {
+        if ($code > 0) {
+            $pt = $this->packElemType($code);
             $src = $this->ssa->allocReg();
             $out .= '  ' . $src . ' = inttoptr i64 ' . $pack . " to ptr\n";
             $this->lastValue = $src;
@@ -2358,9 +2427,12 @@ trait EmitLlvmCalls
             $flavor = $this->discardReleaseFlavor($pt);
         }
         $argList = 'ptr ' . $struct;
-        for ($i = 0; $i < $k; $i = $i + 1) { $argList .= ', i64 ' . $argRegs[$i]; }
+        $argTypes = 'ptr';
+        for ($i = 0; $i < $k; $i = $i + 1) { $argList .= ', i64 ' . $argRegs[$i]; $argTypes .= ', i64'; }
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($cname) . '(' . $argList . ', i64 ' . $pack . ")\n";
+        $out .= '  ' . $r . ' = call i64 (' . $argTypes . ', i64) ' . $fp . '(' . $argList . ', i64 ' . $pack . ")\n";
         if ($flavor !== '') { $out .= $this->rcReleaseReg($pack, $flavor); }
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -2376,19 +2448,7 @@ trait EmitLlvmCalls
         $out .= '  ' . $res . " = alloca i64\n";
         $endL = $this->ssa->allocLabel('cpad.end');
         if ($struct !== '' && \count($argRegs) === $argc) {
-            foreach ($this->closurePackCandidates($argc) as $cname => $ck) {
-                $sym = '@manticore_' . $this->mangle($cname);
-                $eq = $this->ssa->allocReg();
-                $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpi . ', ptrtoint (ptr ' . $sym . " to i64)\n";
-                $hitL = $this->ssa->allocLabel('cpack.hit');
-                $nextL = $this->ssa->allocLabel('cpack.next');
-                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
-                $out .= $hitL . ":\n";
-                $out .= $this->emitDynClosurePackCall($cname, $ck[0], $ck[1], $struct, $argRegs);
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-                $out .= '  br label %' . $endL . "\n";
-                $out .= $nextL . ":\n";
-            }
+            $out .= $this->emitDynVariadicPackCalls($fpi, $struct, $argRegs, $res, $endL);
         }
         foreach ($this->closurePadCandidates($argc) as $cname => $capCnt) {
             $sym = '@manticore_' . $this->mangle($cname);
@@ -2456,6 +2516,12 @@ trait EmitLlvmCalls
         $mask = $this->closureOwnRefMask($cname, $capCnt);
         $raw = $this->closureOwnRefMask($cname, $capCnt, true);
         $rr = ($this->sigs->returnsByRef[$cname] ?? false) ? 1 : 0;
+        // Bits 8-15: 1 + the position of a variadic pack a dynamic invoke builds
+        // from the trailing arguments, bits 4-7 its element code ({@see emitDynVariadicPackCalls}).
+        $vk = $this->closurePackPos($cname, $capCnt);
+        if ($vk >= 0 && $vk < 255) {
+            $rr = $rr | (($vk + 1) << 8) | ($this->closurePackElemCode($cname, $capCnt) << 4);
+        }
         if (isset($this->reflClosureMeta[$cname])) {
             // A reflected closure carries its metadata row in front of its entry:
             // the code pointer is no identity across split parts (each part has
@@ -2492,7 +2558,7 @@ trait EmitLlvmCalls
         $tag = $this->ssa->allocReg();
         $out .= '  ' . $tag . ' = load i64, ptr ' . $tagP . "\n";
         $tagHi = $this->ssa->allocReg();
-        $out .= '  ' . $tagHi . ' = and i64 ' . $tag . ", -2\n";
+        $out .= '  ' . $tagHi . ' = and i64 ' . $tag . ", -65536\n";
         $ok = $this->ssa->allocReg();
         $out .= '  ' . $ok . ' = icmp eq i64 ' . $tagHi . ', ' . (string)self::CLOSURE_META_MAGIC . "\n";
         $this->metaOk = $ok;

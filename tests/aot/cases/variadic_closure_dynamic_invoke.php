@@ -1,5 +1,5 @@
 <?php
-// A variadic closure reached through an erased slot gets its pack built from the trailing arguments.
+// A variadic closure reached through an erased slot gets its pack built from the trailing arguments. (@split: a closure's code pointer differs per part, its prefix does not.)
 class L { public function on(object $e, string $n, object $d): void { echo get_class($e), " $n ", get_class($d), "\n"; } }
 class E {}
 class D {
