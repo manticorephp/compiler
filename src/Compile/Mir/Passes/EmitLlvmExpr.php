@@ -1405,7 +1405,39 @@ trait EmitLlvmExpr
         $out .= "  ret i64 %oez\n";
         $out .= "objmix:\n";
         $out .= "  %anyobj = or i1 %aobj, %bobj\n";
-        $out .= "  br i1 %anyobj, label %objgreater, label %rowarr\n";
+        $out .= "  br i1 %anyobj, label %objstr, label %rowarr\n";
+        // An object against a string compares its __toString() (the program's
+        // hook, null when no class declares one) with the string.
+        $out .= "objstr:\n";
+        $out .= "  %osta = icmp eq i64 %ta, 4\n";
+        $out .= "  %ostb = icmp eq i64 %tb, 4\n";
+        $out .= "  %os1 = and i1 %aobj, %ostb\n";
+        $out .= "  %os2 = and i1 %bobj, %osta\n";
+        $out .= "  %os = or i1 %os1, %os2\n";
+        $out .= "  %osh = load ptr, ptr @__mir_obj_to_str_hook\n";
+        $out .= "  %osnn = icmp ne ptr %osh, null\n";
+        $out .= "  %osok = and i1 %os, %osnn\n";
+        $out .= "  br i1 %osok, label %osdo, label %objgreater\n";
+        $out .= "osdo:\n";
+        $out .= "  %osov = select i1 %os1, i64 %a, i64 %b\n";
+        $out .= "  %ossv = select i1 %os1, i64 %b, i64 %a\n";
+        $out .= "  %osostr = call ptr %osh(i64 %osov)\n";
+        $out .= "  %osspi = and i64 %ossv, $mask\n";
+        $out .= "  %ossp = inttoptr i64 %osspi to ptr\n";
+        if ($eq) {
+            $out .= "  %osle = call i1 @__mir_str_loose_eq(ptr %osostr, ptr %ossp)\n";
+            $out .= "  %osres = zext i1 %osle to i64\n";
+        } else {
+            $out .= "  %osc = call i64 @__mir_str_cmp(ptr %osostr, ptr %ossp)\n";
+            $out .= "  %osneg = sub i64 0, %osc\n";
+            $out .= "  %osoc = select i1 %os1, i64 %osc, i64 %osneg\n";
+            $out .= "  %oslt = icmp slt i64 %osoc, 0\n";
+            $out .= "  %osgt = icmp sgt i64 %osoc, 0\n";
+            $out .= "  %ossel = select i1 %osgt, i64 1, i64 0\n";
+            $out .= "  %osres = select i1 %oslt, i64 -1, i64 %ossel\n";
+        }
+        $out .= "  call void @__mir_rc_release_str(ptr %osostr)\n";
+        $out .= "  ret i64 %osres\n";
         $out .= "objgreater:\n";
         $out .= $eq
             ? "  ret i64 0\n"
@@ -5055,6 +5087,20 @@ trait EmitLlvmExpr
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
+        // A loose compare of an object against a string compares its
+        // __toString() with the string; the object's address was compared.
+        if ($c->op !== '===' && $c->op !== '!==') {
+            $lo = $c->left->type;
+            $ro = $c->right->type;
+            if ($lo->kind === Type::KIND_OBJ && $ro->kind === Type::KIND_STRING
+                && $this->resolveMethodClass($lo->class ?? '', '__toString') !== '') {
+                return $this->emitCmp(new Cmp(new \Compile\Mir\Cast('string', $c->left, Type::string_()), $c->right, $c->op));
+            }
+            if ($ro->kind === Type::KIND_OBJ && $lo->kind === Type::KIND_STRING
+                && $this->resolveMethodClass($ro->class ?? '', '__toString') !== '') {
+                return $this->emitCmp(new Cmp($c->left, new \Compile\Mir\Cast('string', $c->right, Type::string_()), $c->op));
+            }
+        }
         // `X === null` / `!== null` (and == / !=) — null-ness is a
         // compile-time property of the operand's type (the i64 carrier
         // can't tell null from int 0 at runtime). Evaluate the non-null
