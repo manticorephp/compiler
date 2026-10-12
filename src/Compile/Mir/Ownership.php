@@ -522,6 +522,26 @@ final class Ownership
     }
 
     /**
+     * `$o[$k]` on an object whose whole class chain is user code is a real
+     * `offsetGet` call: its result is a +1 the reader already owns. A prelude
+     * class (SplFixedArray, Ds maps, native buffers) may read inline and hand
+     * out a BORROW instead. An unknown class answers false (the borrow reading).
+     *
+     * @param array<string, ClassDef> $classes
+     */
+    public static function userOffsetGetBase(Type $at, array $classes): bool
+    {
+        if ($at->kind !== Type::KIND_OBJ) { return false; }
+        $cur = \ltrim($at->class ?? '', '\\');
+        while ($cur !== '') {
+            $cd = $classes[$cur] ?? null;
+            if ($cd === null || $cd->isPreludeClass) { return false; }
+            $cur = $cd->parent;
+        }
+        return true;
+    }
+
+    /**
      * Does an ELEMENT read of this type co-own what it hands out? One predicate
      * for the store side ({@see storedOwned}) and the emitter's element-read
      * retain ({@see Passes\EmitLlvmLocals::elemReadCoOwn}).

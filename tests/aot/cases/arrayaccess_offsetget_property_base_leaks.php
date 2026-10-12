@@ -1,6 +1,5 @@
 <?php
 // A property read on an ArrayAccess offsetGet result (`$o[$k]->p`) never releases the returned object.
-// issue: #132
 final class Box { public function __construct(public string $s) {} }
 final class C implements ArrayAccess {
     private array $d = [];
