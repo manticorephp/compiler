@@ -655,6 +655,32 @@ trait EmitLlvmExpr
         $out .= "  %s = call ptr @__manticore_tagged_to_str(i64 %v)\n";
         $out .= "  ret ptr %s\n";
         $out .= "}\n";
+        // The string-PARAMETER boundary: a Stringable object renders through the
+        // program's soft __toString hook (null hook or a null answer = not
+        // Stringable: the plain strip stays). Not folded into the function above:
+        // emitPtrArg also reaches it for an object bound to a builtin's POINTER
+        // argument (__mc_refl_of), where rendering would replace the object.
+        $out .= "\ndefine ptr @__manticore_cell_to_strptr_s(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %ts, 15\n";
+        $out .= "  %e8 = icmp eq i64 %nib, 8\n";
+        $out .= "  %isobj = and i1 %istag, %e8\n";
+        $out .= "  %hk = load ptr, ptr @__mir_obj_to_str_soft_hook\n";
+        $out .= "  %hkn = icmp ne ptr %hk, null\n";
+        $out .= "  %tryo = and i1 %isobj, %hkn\n";
+        $out .= "  br i1 %tryo, label %objtry, label %plain\n";
+        $out .= "objtry:\n";
+        $out .= "  %os = call ptr %hk(i64 %v)\n";
+        $out .= "  %osn = icmp eq ptr %os, null\n";
+        $out .= "  br i1 %osn, label %plain, label %objret\n";
+        $out .= "objret:\n";
+        $out .= "  ret ptr %os\n";
+        $out .= "plain:\n";
+        $out .= "  %pl = call ptr @__manticore_cell_to_strptr(i64 %v)\n";
+        $out .= "  ret ptr %pl\n";
+        $out .= "}\n";
         return $out;
     }
 
@@ -1414,7 +1440,7 @@ trait EmitLlvmExpr
         $out .= "  %os1 = and i1 %aobj, %ostb\n";
         $out .= "  %os2 = and i1 %bobj, %osta\n";
         $out .= "  %os = or i1 %os1, %os2\n";
-        $out .= "  %osh = load ptr, ptr @__mir_obj_to_str_hook\n";
+        $out .= "  %osh = load ptr, ptr @__mir_obj_to_str_soft_hook\n";
         $out .= "  %osnn = icmp ne ptr %osh, null\n";
         $out .= "  %osok = and i1 %os, %osnn\n";
         $out .= "  br i1 %osok, label %osdo, label %objgreater\n";
@@ -1422,6 +1448,9 @@ trait EmitLlvmExpr
         $out .= "  %osov = select i1 %os1, i64 %a, i64 %b\n";
         $out .= "  %ossv = select i1 %os1, i64 %b, i64 %a\n";
         $out .= "  %osostr = call ptr %osh(i64 %osov)\n";
+        $out .= "  %osnul = icmp eq ptr %osostr, null\n";
+        $out .= "  br i1 %osnul, label %objgreater, label %osdo2\n";
+        $out .= "osdo2:\n";
         $out .= "  %osspi = and i64 %ossv, $mask\n";
         $out .= "  %ossp = inttoptr i64 %osspi to ptr\n";
         if ($eq) {
@@ -6478,7 +6507,7 @@ trait EmitLlvmExpr
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
             $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr(i64 '
+            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr_s(i64 '
                  . $this->lastValue . ")\n";
             // Hand back an i64 like the plain strip did: this helper serves
             // every cell→string boundary, and a `return` site stores the result

@@ -1817,7 +1817,7 @@ trait EmitLlvmBuiltins
      * unboxed (tag stripped) first — else a builtin like strlen derefs the
      * boxed bits → SIGSEGV. A non-cell coerces as usual.
      */
-    private function emitPtrArg(Node $arg): string
+    private function emitPtrArg(Node $arg, bool $objOk = false): string
     {
         $out = $this->emitNode($arg);
         // Keep the TAGGED word of a fresh cell temp: the payload pointer below
@@ -1842,7 +1842,7 @@ trait EmitLlvmBuiltins
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
             $sp = $this->ssa->allocReg();
-            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $cw . ")\n";
+            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr' . ($objOk ? '' : '_s') . '(i64 ' . $cw . ")\n";
             $pm = $this->ssa->allocReg();
             $out .= '  ' . $pm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
             $pp = $this->ssa->allocReg();
@@ -5988,7 +5988,7 @@ trait EmitLlvmBuiltins
      */
     private function biMcReflOf(array $args): string
     {
-        $out = $this->emitPtrArg($args[0]);
+        $out = $this->emitPtrArg($args[0], true);
         $objp = $this->lastValue;
         $descI = $this->ssa->allocReg();
         $out .= '  ' . $descI . ' = load i64, ptr ' . $objp . "\n";
@@ -6639,7 +6639,7 @@ trait EmitLlvmBuiltins
      * stable per-object int (unique among live objects). */
     private function biSplObjectId(array $args): string
     {
-        $out = $this->emitPtrArg($args[0]);
+        $out = $this->emitPtrArg($args[0], true);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         return $this->finishI64($out, $reg);
@@ -7713,7 +7713,7 @@ trait EmitLlvmBuiltins
         }
         $this->rt->needsMethodExists = true;
         if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
         } else {
             $out = $this->biGetClass([$args[0]]);
@@ -7748,7 +7748,7 @@ trait EmitLlvmBuiltins
         }
         $this->rt->needsPropExists = true;
         if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
         } else {
             $out = $this->biGetClass([$args[0]]);
@@ -7998,9 +7998,9 @@ trait EmitLlvmBuiltins
             // string. Neither can serve, so the closed world's is-a EDGES go
             // into a table and the two names are matched against it at runtime.
             $this->rt->needsClassIsa = true;
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $subP = $this->lastValue;
-            $out .= $this->emitPtrArg($args[1]);
+            $out .= $this->emitPtrArg($args[1], true);
             $tgtP = $this->lastValue;
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__mir_class_isa(ptr ' . $subP
