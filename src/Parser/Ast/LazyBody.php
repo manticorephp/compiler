@@ -18,6 +18,8 @@ final class LazyBody
         public readonly string $namespace,
         public readonly array $useAliases,
         public readonly string $file,
+        /** @var array<string,string> */
+        public readonly array $useFnAliases = [],
     ) {}
 }
 

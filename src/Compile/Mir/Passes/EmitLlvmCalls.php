@@ -2361,7 +2361,9 @@ trait EmitLlvmCalls
             if ($t->isArray()) {
                 $out .= $this->emitCellArrayToTyped($t);
             } else {
+                $this->intGuardOff = true;
                 $out .= $this->unboxCellToType($t);
+                $this->intGuardOff = false;
             }
             $out .= $this->coerceToI64();
             $sp = $this->ssa->allocReg();
@@ -2405,7 +2407,9 @@ trait EmitLlvmCalls
             // the scratch holds the decoded value, re-boxed by type after.
             $this->lastValue = $cv;
             $this->lastValueType = 'i64';
+            $this->intGuardOff = true;
             $out .= $this->unboxCellToType($pt);
+            $this->intGuardOff = false;
             if ($this->lastValueType === 'double') {
                 $bits = $this->ssa->allocReg();
                 $out .= '  ' . $bits . ' = bitcast double ' . $this->lastValue . " to i64\n";
@@ -3324,6 +3328,19 @@ trait EmitLlvmCalls
         }
         $cnt = '';
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
+            if ($k > $firstParam && ($vmask[$k] ?? false)) {
+                // Fixed params first, then the variadic: the rest of the pack, renumbered,
+                // is its ONE vec argument ($k == $firstParam is the whole array, above).
+                $tel = $ptypes[$k]->element ?? null;
+                if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) { $tel = Type::cell(); }
+                $srcI = $this->ssa->allocReg();
+                $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
+                $this->lastValue = $srcI;
+                $this->lastValueType = 'i64';
+                $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)($k - $firstParam));
+                $regs[] = $this->lastValue;
+                break;
+            }
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
                   . ', i64 ' . (string)($k - $firstParam) . ")\n";
@@ -3353,6 +3370,17 @@ trait EmitLlvmCalls
                 $ev = $this->lastValue;
             }
             $def = $pdefs[$k] ?? null;
+            if ($def === null && $fnKey !== '' && !($vmask[$k] ?? false)) {
+                // A required parameter the pack is too short for: php's ArgumentCountError.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $short = $this->ssa->allocReg();
+                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                $out .= $this->emitThrowIf($short, 'ArgumentCountError',
+                    'Too few arguments to function ' . \str_replace('__', '::', $fnKey) . '()');
+            }
             if ($def !== null) {
                 if ($cnt === '') {
                     $out .= $this->arrayCountFromPtrIr($arrReg);
@@ -3462,6 +3490,13 @@ trait EmitLlvmCalls
                 $out .= $this->emitParamDefault($def, $ptypes[$pi], $tmask[$pi] ?? false);
                 $this->lastPadArgs .= $sep . 'i64 ' . $this->lastValue;
             } else {
+                // A required, non-variadic parameter the call left out: php's ArgumentCountError.
+                if (!($this->sigs->variadicParams[$fnKey][$pi] ?? false)) {
+                    $out .= $this->emitNode(new Call('__mir_throw_argcount_error', [
+                        new \Compile\Mir\StringConst('Too few arguments to function '
+                            . \str_replace('__', '::', $fnKey) . '()', Type::string_()),
+                    ], Type::cell()));
+                }
                 $this->lastPadArgs .= $sep . 'i64 0';
             }
             $pi = $pi + 1;
@@ -3666,6 +3701,18 @@ trait EmitLlvmCalls
         $out = $this->emitNode($a);
         $this->litElemCollect = $wasCollect;
         $this->litElemCalleeElem = $wasCalleeElem;
+        // A variadic pack is a literal of the written args; cell (mixed) args make it
+        // a vec[cell] bound to a typed `int ...$m`. Rebuild it at the de-cellify
+        // boundary (MOVING the values, dropping the bare cell buffer), then retype the
+        // node so the post-call release is the typed vec's.
+        if ($collect && $a instanceof ArrayLit && $paramType !== null
+            && $this->needsDeCellify($paramType, $a->type)) {
+            $out .= $this->coerceToPtr();
+            $src = $this->lastValue;
+            $out .= $this->emitCellArrayToTyped($paramType);
+            $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
+            $a->type = $paramType;
+        }
         return $out;
     }
 
@@ -3715,6 +3762,22 @@ trait EmitLlvmCalls
     }
 
     private function emitCall(Call $n): string
+    {
+        $c = $n;
+        if (\str_starts_with($c->function, '__mc_fuse_ds') && \count($c->args) > 0
+            && $c->args[0]->kind === Node::KIND_LOAD_LOCAL && $c->args[0]->type->kind === Type::KIND_OBJ) {
+            // A fused Ds callback method (`$m->reduce(fn …)`) stands in for a method call on its receiver.
+            $m = \preg_replace('/^__mc_fuse_ds(.*)_[0-9]+$/', '$1', $c->function);
+            $z0 = $this->emitNode($c->args[0]) . $this->coerceToI64();
+            $z = $this->ssa->allocReg();
+            $z0 .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            return $z0 . $this->emitThrowIf($z, 'Error', 'Call to a member function ' . $m . '() on null')
+                . $this->emitCallUnguarded($n);
+        }
+        return $this->emitCallUnguarded($n);
+    }
+
+    private function emitCallUnguarded(Call $n): string
     {
         $c = $n;
         $b = $this->emitBuiltin($c);
@@ -3809,8 +3872,7 @@ trait EmitLlvmCalls
             // element values pass raw (matches int/string/cell params).
             if ($a->kind === Node::KIND_SPREAD) {
                 $operand = $a->operand;
-                $out .= $this->emitNode($operand);
-                $out .= $this->coerceToPtr();
+                $out .= $this->emitSpreadPackPtr($operand);
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,

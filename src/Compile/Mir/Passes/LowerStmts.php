@@ -239,8 +239,12 @@ trait LowerStmts
     private function hoistAssign(\Parser\Ast\Assign $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->target);
-        if ($t === $e->target) { return null; }
-        return new \Parser\Ast\Assign($t, $e->value, $e->span);
+        // A yield value is only available after the resume: evaluate it before the
+        // store's base, whose SSA values do not survive the resume switch.
+        $v = $e->value;
+        if ($v->kind === 'Yield' && $e->target->kind !== 'Variable') { $v = $this->lvTemp($v); }
+        if ($t === $e->target && $v === $e->value) { return null; }
+        return new \Parser\Ast\Assign($t, $v, $e->span);
     }
 
     private function hoistCompound(\Parser\Ast\CompoundAssign $e): ?\Parser\Ast\Expr

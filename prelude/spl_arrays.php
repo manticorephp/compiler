@@ -33,6 +33,9 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
 
     public function __construct(mixed $array = [])
     {
+        if (!\is_array($array) && !\is_object($array)) {
+            throw new \TypeError('ArrayIterator::__construct(): Argument #1 ($array) must be of type array, ' . \get_debug_type($array) . ' given');
+        }
         $this->__s = $array;
         $this->__rebuildKeys();
     }
@@ -150,6 +153,9 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
 
     public function __construct(mixed $array = [])
     {
+        if (!\is_array($array) && !\is_object($array)) {
+            throw new \TypeError('ArrayObject::__construct(): Argument #1 ($array) must be of type array, ' . \get_debug_type($array) . ' given');
+        }
         $this->__s = $array;
     }
 
