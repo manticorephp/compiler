@@ -705,6 +705,21 @@ trait EmitLlvmControl
         return $this->freshRcArgFlavor($fe->array);
     }
 
+    /**
+     * The pairwise release of a {@see foreachBodyMutatesBase} snapshot, or ''
+     * when no flavor is known (the copy then stays a bounded leak rather than
+     * dropping refs it may not hold). An erased / cell base and a cell element
+     * walk by the buffer's hint, as the copy's adopt does.
+     */
+    private function snapshotReleaseFlavor(Type $at, string $baseKind): string
+    {
+        if ($baseKind === Type::KIND_CELL || $baseKind === Type::KIND_UNKNOWN) { return 'veccellown'; }
+        if (!$at->isArray()) { return ''; }
+        $el = $at->element;
+        if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) { return 'veccellown'; }
+        return '';
+    }
+
     private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
     {
         $out = '';
@@ -1553,10 +1568,22 @@ trait EmitLlvmControl
         // walking the freed base. Copy up front for this shape only; the copy
         // is a bounded leak (conservative direction — never free a buffer the
         // body may still hand out).
+        $snapSlot = '';
+        $snapFlavor = '';
         if ($this->foreachBodyMutatesBase($fe)) {
             $snap = $this->ssa->allocReg();
             $out .= '  ' . $snap . ' = call ptr @__mir_array_copy(ptr ' . $arr . ")\n";
             $arr = $snap;
+            // The copy is a VALUE copy that owns its element refs: the loop gives
+            // it back at its end and on every jump out, pairwise like its adopt.
+            $snapFlavor = $this->snapshotReleaseFlavor($fe->array->type, $bk);
+            if ($snapFlavor !== '') {
+                $snapSlot = $this->ssa->allocReg();
+                $out .= '  ' . $snapSlot . " = alloca i64\n";
+                $sw = $this->ssa->allocReg();
+                $out .= '  ' . $sw . ' = ptrtoint ptr ' . $snap . " to i64\n";
+                $out .= '  store i64 ' . $sw . ', ptr ' . $snapSlot . "\n";
+            }
         }
         // Empty vec/assoc literals lower to a null ptr; reading the length
         // word from null faults. Redirect a null base to a shared zero word
@@ -1630,6 +1657,7 @@ trait EmitLlvmControl
         $stepLabel = $this->ssa->allocLabel('fe.step');
         $endLabel  = $this->ssa->allocLabel('fe.end');
         if ($iterSlot !== '') { $this->cf->pushAggIter($iterSlot, false, '', $iterFlavor); }
+        if ($snapSlot !== '') { $this->cf->pushAggIter($snapSlot, false, '', $snapFlavor); }
         $this->cf->enterLoop($endLabel, $stepLabel);
 
         // Per-iteration arena reset. Safe because the save point is taken
@@ -1879,9 +1907,11 @@ trait EmitLlvmControl
             $out .= '  ' . $lk . ' = load i64, ptr ' . $liveKey . "\n";
             $out .= '  call void @__mir_cell_drop(i64 ' . $lk . ")\n";
         }
+        if ($snapSlot !== '') { $out .= $this->releaseAggIterSlot($snapSlot, false, '', $snapFlavor); }
         if ($iterSlot !== '') { $out .= $this->releaseAggIterSlot($iterSlot, false, '', $iterFlavor); }
 
         $this->cf->leave();
+        if ($snapSlot !== '') { $this->cf->popAggIter(); }
         if ($iterSlot !== '') { $this->cf->popAggIter(); }
         if ($feFlag !== '') {
             if ($fePrev === null) { unset($this->feCellFlags[$fe->valueVar]); }

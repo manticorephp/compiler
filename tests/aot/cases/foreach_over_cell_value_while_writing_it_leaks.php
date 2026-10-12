@@ -1,6 +1,5 @@
 <?php
 // A foreach over a cell array value whose body writes new keys into that same value leaks the value's buffers.
-// issue: #151
 function make(): array
 {
     return [0 => ['a' => 1, 'b' => 'x']];
