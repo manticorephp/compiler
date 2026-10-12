@@ -7546,6 +7546,9 @@ trait EmitLlvmBuiltins
                 $recv = $a->elements[0]->value;
                 $cls = $this->reflClassName($recv);
                 $m   = $this->reflLitStr($a->elements[1]->value);
+                // A method NAME known only at run time (`[$loader, $method]`,
+                // symfony's ObjectLoader) asks the runtime tables.
+                if ($m === '') { return $this->emitIsCallableDyn($a); }
                 $ok  = $cls !== '' && $m !== '' && $this->resolveMethodClass($cls, $m) !== '';
                 // ['C', 'm'] names a CLASS — no instance, so PHP 8 needs a static
                 // method. [$obj, 'm'] supplies one and stays existence-only.
@@ -7577,20 +7580,54 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
             return $this->finishI64($out, $z);
         }
-        // A tagged cell that carries an object/closure (tag 8) is callable.
-        if ($k === Type::KIND_CELL) {
-            $this->rt->needsTagged = true;
-            $out = $this->emitNode($a);
-            $out .= $this->coerceToI64();
-            $out .= $this->cellTagIr($this->lastValue);
-            $eq = $this->ssa->allocReg();
-            $out .= '  ' . $eq . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
-            $z = $this->ssa->allocReg();
-            $out .= '  ' . $z . ' = zext i1 ' . $eq . " to i64\n";
-            return $this->finishI64($out, $z);
+        // An erased value or an array is decided at run time.
+        if ($k === Type::KIND_CELL || $a->type->isArray()) {
+            return $this->emitIsCallableDyn($a);
         }
         // int/float/bool/null/plain object/non-literal string/array → not callable.
         return $this->biConstBool($this->emitNode($a), false);
+    }
+
+    /**
+     * is_callable($v) of a value whose shape is known only at run time: a
+     * Closure, an object with __invoke, or a two-element `[$objOrClass,
+     * 'method']` whose method (or `__call` / `__callStatic`) exists. Evaluated
+     * as a condition over a scratch cell holding `$v`, through the same
+     * builtins user code reaches.
+     * ponytail: visibility-blind like the literal fold above, and a function
+     * NAME string still answers false (no runtime function registry here).
+     */
+    private function emitIsCallableDyn(Node $a): string
+    {
+        $out = $this->emitNode($a);
+        if ($a->type->kind !== Type::KIND_CELL) { $out .= $this->boxToCell($a->type); }
+        $out .= $this->coerceToI64();
+        $name = '__iscb' . \substr($this->ssa->allocReg(), 2);
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $this->locals->slots[$name] = $slot;
+        $cell = Type::cell();
+        $bool = Type::bool_();
+        $t = fn (): Node => new \Compile\Mir\LoadLocal($name, $cell);
+        $el = fn (int $i): Node => new \Compile\Mir\ArrayAccess_($t(), new \Compile\Mir\IntConst($i, Type::int_()), $cell);
+        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
+        $and = fn (Node $x, Node $y): Node => new \Compile\Mir\Ternary($x, $y, new \Compile\Mir\BoolConst(false, $bool), $bool);
+        $or = fn (Node $x, Node $y): Node => new \Compile\Mir\Ternary($x, new \Compile\Mir\BoolConst(true, $bool), $y, $bool);
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $invokable = $or(new \Compile\Mir\Instanceof_($t(), 'Closure'),
+            $and($call('is_object', [$t()]), $call('method_exists', [$t(), $str('__invoke')])));
+        $pair = $and($call('is_array', [$t()]),
+            $and(new \Compile\Mir\Cmp(new \Compile\Mir\Call('count', [$t()], Type::int_()), new \Compile\Mir\IntConst(2, Type::int_()), '==='),
+            $and($call('array_key_exists', [new \Compile\Mir\IntConst(0, Type::int_()), $t()]),
+            $and($call('array_key_exists', [new \Compile\Mir\IntConst(1, Type::int_()), $t()]),
+            $and($call('is_string', [$el(1)]),
+            $or($and($call('is_object', [$el(0)]),
+                    $or($call('method_exists', [$el(0), $el(1)]), $call('method_exists', [$el(0), $str('__call')]))),
+                $and($call('is_string', [$el(0)]),
+                    $or($call('method_exists', [$el(0), $el(1)]), $call('method_exists', [$el(0), $str('__callStatic')])))))))));
+        $out .= $this->emitNode($or($invokable, $pair));
+        return $out . $this->coerceToI64();
     }
 
     /** method_exists($obj|'C', 'm') — walk the parent chain for the method. */
@@ -7706,6 +7743,41 @@ trait EmitLlvmBuiltins
         if ($this->subjectIsString($args[0])) {
             $out = $this->emitPtrArg($args[0]);
             $clsP = $this->lastValue;
+        } elseif ($args[0]->type->kind === Type::KIND_CELL) {
+            // An erased subject is a class NAME or an object only at run time:
+            // get_class() of the name answered '' (`method_exists($cls, $m)`
+            // over a `mixed $cls` was always false).
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            $w = $this->lastValue;
+            $out .= $this->cellTagIr($w);
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+            $strL = $this->ssa->allocLabel('mex.str');
+            $objL = $this->ssa->allocLabel('mex.obj');
+            $joinL = $this->ssa->allocLabel('mex.join');
+            $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $objL . "\n";
+            $out .= $strL . ":\n";
+            $sm = $this->ssa->allocReg();
+            $out .= '  ' . $sm . ' = and i64 ' . $w . ", 281474976710655\n";
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $sm . " to ptr\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $objL . ":\n";
+            $sn = '__mex' . \substr($this->ssa->allocReg(), 2);
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  store i64 ' . $w . ', ptr ' . $slot . "\n";
+            $this->locals->slots[$sn] = $slot;
+            $out .= $this->biGetClass([new \Compile\Mir\LoadLocal($sn, Type::cell())]);
+            $out .= $this->coerceToPtr();
+            $op = $this->lastValue;
+            $objEnd = $this->ssa->allocLabel('mex.objend');
+            $out .= '  br label %' . $objEnd . "\n" . $objEnd . ":\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $joinL . ":\n";
+            $clsP = $this->ssa->allocReg();
+            $out .= '  ' . $clsP . ' = phi ptr [ ' . $sp . ', %' . $strL . ' ], [ ' . $op . ', %' . $objEnd . " ]\n";
         } else {
             $out = $this->biGetClass([$args[0]]);
             $clsP = $this->lastValue;
