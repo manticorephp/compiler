@@ -6189,14 +6189,7 @@ final class LowerFromAst implements Pass
         // then copied the outer with the stale inner pointer (UAF in symfony's
         // DefinitionErrorExceptionPass).
         if ($expr->op === '??=') {
-            $tmp = '__nca_' . (string)$this->lvCounter;
-            $this->lvCounter = $this->lvCounter + 1;
-            $assign = new Block([
-                new StoreLocal($tmp, $value, $value->type),
-                $this->storeToTarget($expr->target, new LoadLocal($tmp, $value->type)),
-                new LoadLocal($tmp, $value->type),
-            ], $value->type);
-            return new NullCoalesce_($this->markProbe($read), $assign, Type::unknown());
+            return new NullCoalesce_($this->markProbe($read), $this->storeToTarget($expr->target, $value), Type::unknown());
         }
         $base = \substr($expr->op, 0, \strlen($expr->op) - 1); // strip '='
         return $this->storeToTarget($expr->target, $this->buildBinop($base, $read, $value));
