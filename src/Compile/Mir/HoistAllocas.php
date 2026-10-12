@@ -54,7 +54,11 @@ final class HoistAllocas
         $nl = \substr($line, -1) === "\n" ? "\n" : '';
         $core = $nl === '' ? $line : \substr($line, 0, -1);
         if (\substr($core, -2) !== ' {' || \str_contains($core, '#0')) { return $line; }
-        $p = \strpos($core, \Compile\Runtime\UnwindRuntime::PERSONALITY);
+        // LLVM wants the attribute group before `prefix` (a closure's metadata words) and `personality`.
+        $p = \strpos($core, ' prefix ');
+        if ($p === false) {
+            $p = \strpos($core, \Compile\Runtime\UnwindRuntime::PERSONALITY);
+        }
         if ($p !== false) {
             return \substr($core, 0, $p) . ' #0' . \substr($core, $p) . $nl;
         }
