@@ -1089,7 +1089,8 @@ trait EmitLlvmMemory
         if (($tk === Type::KIND_OBJ || $tk === Type::KIND_CELL) && $valueNode instanceof \Compile\Mir\Cast && $valueNode->target === 'object') { return ''; }
         // An array literal / spread is a fresh +1 that transfers; only
         // borrowed arrays (alias / read) need a co-owner retain.
-        if ($tk === Type::KIND_ARRAY && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return ''; }
+        // An array `+` is `__mir_array_union`'s fresh +1, a literal's twin.
+        if ($tk === Type::KIND_ARRAY && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD || $k === Node::KIND_ADD)) { return ''; }
         // String owned producer: a concat is a fresh +1; a literal is
         // immortal (retain is a sentinel no-op — skip it).
         if ($tk === Type::KIND_STRING
