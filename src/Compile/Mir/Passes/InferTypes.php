@@ -3646,12 +3646,21 @@ final class InferTypes implements Pass
     {
         /** @var Type $found */
         $found = null;
+        $first = null;
         foreach ($this->declarersOf($method) as $cn) {
             $sig = $this->sigs[$cn . '__' . $method] ?? null;
             if ($sig === null) { continue; }
-            if ($found === null) { $found = $sig; }
+            if ($found === null) { $found = $sig; $first = $sig; }
             elseif ($found->kind !== $sig->kind
                 || ($found->kind === Type::KIND_OBJ && $found->class !== $sig->class)) { return Type::cell(); }
+            // Arrays of different ELEMENT shapes share a word, not a view: the
+            // first declarer's `string[]` read `ReflectionClass::getMethods()`'s
+            // objects as strings, and symfony Route::getMethods()'s strings as
+            // objects ({@see virtualReturnJoin} joins the same way).
+            elseif ($sig->kind === Type::KIND_ARRAY && $first !== null
+                && $this->elemReprShape($sig) !== $this->elemReprShape($first)) {
+                $found = $found->unionWith($sig);
+            }
         }
         return $found;
     }
