@@ -636,8 +636,7 @@ trait EmitLlvmCalls
                 $out .= $this->coerceToI64();
                 $fixedRegs[] = $this->lastValue;
             }
-            $out .= $this->emitNode($iv->args[$spreadIdx]->operand);
-            $out .= $this->coerceToPtr();
+            $out .= $this->emitSpreadOperand($iv->args[$spreadIdx]->operand);
             $spreadArr = $this->lastValue;
         }
         // Split the candidates BEFORE emitting anything. A candidate can be
@@ -3045,8 +3044,7 @@ trait EmitLlvmCalls
             }
             $fixedRegs[] = $this->lastValue;
         }
-        $out .= $this->emitNode($args[$spreadPos]->operand);
-        $out .= $this->coerceToPtr();
+        $out .= $this->emitSpreadOperand($args[$spreadPos]->operand);
         $arr = $this->lastValue;
         $elemType = $args[$spreadPos]->operand->type->element ?? null;
         $boxElem = $elemType !== null && $elemType->kind !== Type::KIND_CELL

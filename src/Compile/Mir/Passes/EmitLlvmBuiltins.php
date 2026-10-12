@@ -5822,8 +5822,7 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToPtr();
             $fmtI = $this->ssa->allocReg();
             $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
-            $out .= $this->emitNode($args[1]->operand);
-            $out .= $this->coerceToPtr();
+            $out .= $this->emitSpreadOperand($args[1]->operand);
             $arrI = $this->ssa->allocReg();
             $out .= '  ' . $arrI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             return $this->formatCallAndFinish($out, $fmtI, $arrI, $toStdout, false);
