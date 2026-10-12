@@ -3246,8 +3246,10 @@ trait EmitLlvmCalls
             }
             if ($this->lastCallWasBuiltin) { return ''; }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
-            // A by-ref-returning fn yields an address, not an owned value.
-            if ($this->sigs->returnsByRef[$fname] ?? false) { return ''; }
+            // Value context derefs the address and takes a +1 copy
+            // ({@see byRefValueCopyRetainIr}). Only an array copy is counted; a raw
+            // string/object word is not retained there, so releasing it would double-free.
+            if (($this->sigs->returnsByRef[$fname] ?? false) && $s->type->kind !== Type::KIND_ARRAY) { return ''; }
         } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
             return '';
         }
