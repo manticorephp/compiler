@@ -3555,10 +3555,11 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop, string $within = ''): string
+    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false): string
     {
         $key = '__mc_prop_write_' . $this->mangle($prop)
-             . ($within === '' ? '' : '__in_' . $this->mangle($within));
+             . ($within === '' ? '' : '__in_' . $this->mangle($within))
+             . ($dropOld ? '__drop' : '');
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
@@ -3593,7 +3594,26 @@ trait EmitLlvmObjects
             $seen[$cd->name] = true;
             $lbl = $this->ssa->allocLabel('pw.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+            $bodies .= $lbl . ":\n";
+            // A by-ref write-back over a slot the erased READ rebuilt (a concrete-
+            // element array is cellified into a fresh copy, so the seed never
+            // aliased the slot) must give the slot's OLD buffer back: the raw
+            // overwrite below would strand it, and every element it holds.
+            $oldSlot = '';
+            $oldFlavor = '';
+            $spt = $cd->propertyTypes[$prop] ?? null;
+            if ($dropOld && $spt !== null && $spt->kind === Type::KIND_ARRAY && !$this->boxRawValueBorrows($spt)
+                && $cd->propertyWidth($prop) === 8) {
+                $oldFlavor = $this->discardReleaseFlavor($spt);
+                if ($oldFlavor !== '') {
+                    $og = $this->ssa->allocReg();
+                    $oldSlot = $this->ssa->allocReg();
+                    $bodies .= '  ' . $og . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+                    $bodies .= '  ' . $oldSlot . ' = load i64, ptr ' . $og . "\n";
+                }
+            }
+            $bodies .= $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+            if ($oldSlot !== '') { $bodies .= $this->rcReleaseReg($oldSlot, $oldFlavor); }
             $bodies .= '  br label %' . $end . "\n";
         }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {

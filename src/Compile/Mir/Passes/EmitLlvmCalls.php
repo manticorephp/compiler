@@ -3563,7 +3563,7 @@ trait EmitLlvmCalls
             $wb .= '  ' . $np . ' = inttoptr i64 ' . $nv . " to ptr\n";
             $cv = $this->ssa->allocReg();
             $wb .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
-            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property)
+            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property, '', $seedIsCell)
                  . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
             if ($seedIsCell) { $wb .= $this->rcReleaseReg($seedCell, 'cell'); }
             $this->lastRefSlotDrop .= $wb;
