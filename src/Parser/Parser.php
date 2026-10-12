@@ -72,6 +72,14 @@ final class Parser
     private array $useAliases = [];
 
     /**
+     * `use function Ns\f [as g]` — lowercase short name → FQN, consulted for
+     * an unqualified call. Resets with {@see $useAliases}.
+     *
+     * @var array<string, string>
+     */
+    private array $useFnAliases = [];
+
+    /**
      * Map: index of the token at which a doc-comment is "attached"
      * (i.e. the next non-DocComment token) → the doc-comment lexeme.
      * Built once at construction so parseFunctionDecl / parseMethod
@@ -133,6 +141,7 @@ final class Parser
             $p->sourceFile = $lazy->file;
             $p->currentNamespace = $lazy->namespace;
             $p->useAliases = $lazy->useAliases;
+            $p->useFnAliases = $lazy->useFnAliases;
             $program = $p->parseProgram();
             $lazy->source = '';
             foreach ($program->statements as $stmt) {
@@ -410,13 +419,16 @@ final class Parser
         if ($this->check(TokenKind::OpenBrace)) {
             $prevNs = $this->currentNamespace;
             $prevUses = $this->useAliases;
+            $prevFnUses = $this->useFnAliases;
             $this->currentNamespace = $name;
             $this->useAliases = [];
+            $this->useFnAliases = [];
             try {
                 $body = $this->parseBlock();
             } finally {
                 $this->currentNamespace = $prevNs;
                 $this->useAliases = $prevUses;
+                $this->useFnAliases = $prevFnUses;
             }
             return Stmt::namespace_($name, $body, $span);
         }
@@ -426,6 +438,7 @@ final class Parser
         // and let later `parseUseDecl` calls layer aliases onto it.
         $this->currentNamespace = $name;
         $this->useAliases = [];
+        $this->useFnAliases = [];
         return Stmt::namespace_($name, null, $span);
     }
 
@@ -524,6 +537,8 @@ final class Parser
                 ? $fqn
                 : \substr($fqn, \strrpos($fqn, '\\') + 1));
             $this->useAliases[$short] = $fqn;
+        } elseif ($kind === "function") {
+            $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
         }
         return new UseItem($fqn, $alias, $kind);
     }
@@ -557,6 +572,8 @@ final class Parser
         if ($kind === 'class') {
             $short = $alias ?? (strpos($fqn, '\\') === false ? $fqn : substr($fqn, strrpos($fqn, '\\') + 1));
             $this->useAliases[$short] = $fqn;
+        } elseif ($kind === "function") {
+            $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
         }
         return new UseItem($fqn, $alias, $kind);
     }
@@ -1266,6 +1283,7 @@ final class Parser
             $this->currentNamespace,
             $this->useAliases,
             $this->sourceFile,
+            $this->useFnAliases,
         );
     }
 
@@ -2997,6 +3015,15 @@ final class Parser
      */
     private function parseNameOrCall(Span $span): Expr
     {
+        // `use function Ns\f as g;` then `g(…)`: an unqualified call resolves
+        // through the function alias table, not the namespace prefix.
+        $t0 = $this->peek();
+        $t1 = $this->tokens[$this->pos + 1] ?? null;
+        if ($t0->kind === TokenKind::Identifier && $t1 !== null && $t1->kind === TokenKind::OpenParen
+            && isset($this->useFnAliases[\strtolower($t0->lexeme)])) {
+            $this->advance();
+            return Expr::call($this->useFnAliases[\strtolower($t0->lexeme)], $this->parseArgList(), $span);
+        }
         $name = $this->parseClassName();
         $tok = $this->peek();
 
