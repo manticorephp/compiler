@@ -1,0 +1,6 @@
+x %a% y => x A-B-C y
+%a% => A-B-C
+p %a% q %c% r %n% s %% => p A-B-C q C r 5 s %%
+plain => plain
+x %loop% y => x %loop% y => LogicException: circular loop
+done
