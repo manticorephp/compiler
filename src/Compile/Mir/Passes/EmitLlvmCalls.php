@@ -3811,8 +3811,30 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    private function emitRefValueSlot(Node $a, ?Type $pt, int $srcArgc, int $ai, bool $arrayHinted = false): string
+    private function emitRefValueSlot(Node $a, ?Type $pt, int $srcArgc, int $ai, bool $arrayHinted = false,
+                                      string $fnKey = '', int $pidx = -1): string
     {
+        // An omitted default bound to a by-ref param the callee's closure
+        // captures by reference: the closure outlives this call, so the slot is
+        // a heap REF box the capture can hold a count on, not a stack word
+        // (symfony `resolveServices($v)` → `doResolveServices($v, &$inline = [])`
+        // → a generator `use (&$inline)` read the dead frame).
+        $boxed = $fnKey !== '' && $pt !== null && ($this->escapingRefParams[$fnKey][$pidx] ?? false)
+            && $a->kind !== Node::KIND_PROPERTY_ACCESS && $this->isOmittedDefaultArg($srcArgc, $ai, $a);
+        if ($boxed) {
+            $out = $this->emitNode($a);
+            $out .= $this->coerceToI64();
+            $out .= $this->ownRefSeed($a, $this->lastValue);
+            $box = $this->ssa->allocReg();
+            $out .= '  ' . $box . ' = call ptr @__mir_ref_new(i64 ' . $this->lastValue . ")\n";
+            $addr = $this->ssa->allocReg();
+            $out .= '  ' . $addr . ' = ptrtoint ptr ' . $box . " to i64\n";
+            $this->lastRefSlotDrop = $this->refBoxUnrefIr($box,
+                $this->isClosureValueType($pt) ? 'closure' : $this->discardReleaseFlavor($pt));
+            $this->lastValue = $addr;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $tmp = $this->ssa->allocReg();
         $out = '  ' . $tmp . " = alloca i64\n";
         $out .= $this->emitNode($a);
@@ -3865,6 +3887,25 @@ trait EmitLlvmCalls
         $this->lastValue = $addr;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** Give back one count on REF box `$box`; the last holder drops its value by `$flavor` and frees it. */
+    private function refBoxUnrefIr(string $box, string $flavor): string
+    {
+        $last = $this->ssa->allocReg();
+        $out = '  ' . $last . ' = call i1 @__mir_ref_unref(ptr ' . $box . ")\n";
+        $dropL = $this->ssa->allocLabel('refpad.drop');
+        $doneL = $this->ssa->allocLabel('refpad.done');
+        $out .= '  br i1 ' . $last . ', label %' . $dropL . ', label %' . $doneL . "\n";
+        $out .= $dropL . ":\n";
+        if ($flavor !== '') {
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = load i64, ptr ' . $box . "\n";
+            $out .= $this->rcReleaseReg($v, $flavor);
+        }
+        $out .= '  call void @__mir_ref_free(ptr ' . $box . ")\n";
+        $out .= '  br label %' . $doneL . "\n";
+        return $out . $doneL . ":\n";
     }
 
     /**
@@ -4155,7 +4196,8 @@ trait EmitLlvmCalls
                 // filled default expr. Back it with a throwaway stack slot so
                 // the callee's write lands somewhere (PHP discards it) instead
                 // of dereferencing a null address.
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai - $c->recvArgs, $ahmask[$ai] ?? false);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $c->srcArgc, $ai - $c->recvArgs, $ahmask[$ai] ?? false,
+                    $c->function, $ai);
                 $argList .= 'i64 ' . $this->lastValue;
                 $omitRefDrops .= $this->lastRefSlotDrop;
             } elseif (($camask[$ai] ?? false)

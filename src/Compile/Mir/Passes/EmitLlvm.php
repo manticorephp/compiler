@@ -310,6 +310,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** Compiler-owned lightweight method tables for erased dynamic calls. */
     private bool $dynamicMethodMeta = false;
+    /** @var array<string, array<int, bool>> fn name => by-ref param index a closure captures by reference */
+    private array $escapingRefParams = [];
+
     /** @var array<string, bool> {@see Module::$callableArrayMethods} */
     private array $callableArrayMethods = [];
 
@@ -778,6 +781,7 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->sigs->returnType[$fn->name] = $fn->returnType;
             $this->sigs->usesFuncArgs[$fn->name] = $fn->usesFuncArgs;
+            $this->recordEscapingRefParams($fn);
             // One callee that asks arms the channel for the whole module: the
             // push is per-call-site, but the global and its take helper are
             // emitted once, here, before any body is.
@@ -4067,6 +4071,47 @@ final class EmitLlvm implements EmitVisitor
      * empty channel has a defined meaning (fall back to the declared arity)
      * and a stale one does not.
      */
+    /**
+     * The by-ref params of `$fn` a closure in its body captures BY REFERENCE —
+     * {@see emitRefValueSlot} backs an omitted default for one with a heap box.
+     */
+    private function recordEscapingRefParams(\Compile\Mir\FunctionDef $fn): void
+    {
+        $any = false;
+        foreach ($fn->params as $p) { if ($p->byRef) { $any = true; } }
+        if (!$any || !$this->bodyHasClosure($fn->body)) { return; }
+        /** @var array<string, bool> $names */
+        $names = [];
+        $this->byRefCaptureNames($fn->body, $names);
+        $i = 0;
+        foreach ($fn->params as $p) {
+            if ($p->byRef && isset($names[$p->name])) { $this->escapingRefParams[$fn->name][$i] = true; }
+            $i = $i + 1;
+        }
+    }
+
+    private function bodyHasClosure(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_CLOSURE) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { if ($this->bodyHasClosure($c)) { return true; } }
+        return false;
+    }
+
+    /** @param array<string, bool> $out */
+    private function byRefCaptureNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $cl = $n;
+            $i = 0;
+            foreach ($cl->captures as $c) {
+                if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) { $out[$c->name] = true; }
+                $i = $i + 1;
+            }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->byRefCaptureNames($c, $out); }
+    }
+
     private function faPop(): string
     {
         if (!$this->rt->needsFuncArgs) { return ''; }

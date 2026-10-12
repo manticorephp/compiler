@@ -743,7 +743,8 @@ trait EmitLlvmObjects
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
                 } elseif ($mask[$ai + 1] ?? false) {
-                    $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai, $ahmask[$ai + 1] ?? false);
+                    $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai, $ahmask[$ai + 1] ?? false,
+                        $ctorClass . '____construct', $ai + 1);
                     $refSlotDrops .= $this->lastRefSlotDrop;
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
@@ -6895,7 +6896,8 @@ trait EmitLlvmObjects
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
             } elseif ($mask[$ai] ?? false) {
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai, $ahmask[$ai] ?? false);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai, $ahmask[$ai] ?? false,
+                    $cls . '__' . $n->method, $ai);
                 $argList .= 'i64 ' . $this->lastValue;
                 $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -8422,7 +8424,8 @@ trait EmitLlvmObjects
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
             } elseif ($mask[$ai + 1] ?? false) {
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai, $ahmask[$ai + 1] ?? false);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai, $ahmask[$ai + 1] ?? false,
+                    $fallback . '__' . $mc->method, $ai + 1);
                 $argList .= ', i64 ' . $this->lastValue;
                 $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
