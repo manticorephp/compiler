@@ -1091,6 +1091,20 @@ final class InferTypes implements Pass
             );
             $guard = $guard + 1;
         }
+        // …and through a NESTED store: `$t[] = ['a', 'b']; $t[0][2] = true;`
+        // writes a bool into an inner `string[]` ({@see scanNestedElemStoreWiden}).
+        $guard = 0;
+        while ($guard < 4 && $this->scanNestedElemStoreWiden($module)) {
+            $this->inferFunctionsForScope(
+                $module, 'nested_elem', $this->lastInferenceChangedFunctions,
+            );
+            // A callee the call-site scans pinned to the pre-widening element
+            // (`array_reverse($t)`) is re-observed against the widened local.
+            if ($this->scanCallSiteArrayElems($module)) {
+                $this->inferFunctionsForScope($module, 'nested_elem_callsite_array');
+            }
+            $guard = $guard + 1;
+        }
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
         // MIXED array: left alone, the callee is narrowed to the caller's

@@ -1981,6 +1981,56 @@ trait InferScans
         return $changed;
     }
 
+    /**
+     * A local whose INNER arrays receive a nested store of a kind they have no
+     * representation for — `$tokens[$i][4] = true` into a `string[]` token
+     * (symfony's RouteCompiler under the `utf8` option): the bool landed raw in
+     * a string buffer and the next reader dereferenced it. The outer element
+     * becomes a cell, so each inner array is reached through its own tag and
+     * the store converts it. Records into `forcedCellElemLocals` like
+     * {@see scanUnshiftElemWiden}; true when it found something new.
+     */
+    private function scanNestedElemStoreWiden(Module $module): bool
+    {
+        $changed = false;
+        $this->lastInferenceChangedFunctions = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
+            if ($fn->isExtern) { continue; }
+            $found = [];
+            $this->scanNestedForeignStores($fn->body, $found);
+            if ($found === []) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            foreach ($found as $name => $unused) {
+                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
+                if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $this->lastInferenceChangedFunctions[$fn->name] = true;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Locals `$x` with a `$x[…][…] = v` whose `v` kind differs from the inner array's concrete element. @param array<string,bool> $out */
+    private function scanNestedForeignStores(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT && $n->array->kind === Node::KIND_ARRAY_ACCESS
+            && $n->array->array->kind === Node::KIND_LOAD_LOCAL) {
+            $inner = $n->array->type;
+            $ek = $inner->isArray() && $inner->element !== null ? $inner->element->kind : Type::KIND_UNKNOWN;
+            $vk = $n->value->type->kind;
+            if ($ek !== Type::KIND_UNKNOWN && $ek !== Type::KIND_CELL
+                && $vk !== Type::KIND_UNKNOWN && $vk !== Type::KIND_CELL && $vk !== $ek) {
+                $out[$n->array->array->name] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanNestedForeignStores($c, $out); }
+    }
+
     /** Value classes prepended into each local by `array_unshift`, plus the
      *  container's own current element class. @param array<string, array<string,bool>> $out */
     private function scanUnshiftClasses(Node $n, array &$out): void
