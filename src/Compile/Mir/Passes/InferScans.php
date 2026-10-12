@@ -2216,12 +2216,13 @@ trait InferScans
         return $added;
     }
 
-    /** A by-value, non-variadic param of `$fn` whose declared type is concrete. */
+    /** A by-value param of `$fn` whose declared type is concrete — a variadic pack
+     *  included: it arrives as the raw vec the caller packed. */
     private function paramArrivesRaw(FunctionDef $fn, string $name): bool
     {
         foreach ($fn->params as $p) {
             if ($p->name !== $name) { continue; }
-            if ($p->byRef || $p->variadic) { return false; }
+            if ($p->byRef) { return false; }
             $k = $p->type->kind;
             return $k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN;
         }

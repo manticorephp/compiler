@@ -1232,9 +1232,12 @@ trait EmitLlvmModule
         $this->locals->byRefCaptured = [];
         $this->locals->collectByRefCaptured($fn->body);
         foreach ($this->locals->byRefCaptured as $bname => $_) {
-            if (isset($paramNames[$bname])) { continue; }
             if (!isset($this->locals->slots[$bname])) { continue; }
             if (isset($this->locals->refLocals[$bname])) { continue; }
+            if (isset($paramNames[$bname])) {
+                $bodySink->write($this->boxByRefCapturedParamIr($fn, $bname));
+                continue;
+            }
             $bodySink->write($this->newOwnedBoxIr($bname, '0'));
         }
         // One i1 per global-backed name this function unsets: `unset($static)`
@@ -1610,6 +1613,32 @@ trait EmitLlvmModule
         $out .= $this->newOwnedBoxIr($name, $cv);
         $this->locals->refParamTypes[$name] = Type::cell();
         return $out;
+    }
+
+    /**
+     * A BY-VALUE parameter a closure captures by reference (`function f(array
+     * $a) { return function () use (&$a) {…}; }`) gets the heap box a local
+     * gets: the closure outlives the frame, and capturing the stack slot's
+     * address handed it dead memory (symfony LazyString::fromCallable's
+     * `use (&$callback, &$arguments)` read a garbage pack). The box holds the
+     * incoming word in the param's own representation, with a count of its own
+     * (the argument stays the caller's). A by-ref parameter — a closure's own
+     * by-ref capture included — already holds an address and is left alone.
+     */
+    private function boxByRefCapturedParamIr(\Compile\Mir\FunctionDef $fn, string $name): string
+    {
+        foreach ($fn->params as $p) {
+            if ($p->name !== $name) { continue; }
+            if ($p->byRef) { return ''; }
+            $v = $this->ssa->allocReg();
+            $out = '  ' . $v . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
+            // The ARRIVING word's flavor: a slot InferScans retypes to a cell re-boxes it
+            // by an entry store, which takes this count over.
+            $flavor = $this->boxValueFlavor($p->type);
+            if ($flavor !== '') { $out .= $this->rcRetainReg($v, $flavor); }
+            return $out . $this->newOwnedBoxIr($name, $v);
+        }
+        return '';
     }
 
     /** @param array<string, bool> $paramNames @param array<string, Type> $paramTypes */
