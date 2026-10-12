@@ -1916,6 +1916,13 @@ final class LowerFromAst implements Pass
             if ($fn->body !== null) { $this->collectConstLits($fn->body, $names); }
         }
         foreach ($mainStmts as $ms) { $this->collectConstLits($ms, $names); }
+        // A name built at run time (`$cls . '::' . $c`) cannot be spelled
+        // ahead: admit every public class constant the program declares.
+        foreach ($this->classDecls as $cd) {
+            foreach ($cd->consts as $cc) {
+                if ($cc->visibility === 'public' || $cc->visibility === '') { $names[\ltrim($cd->name, '\\') . '::' . $cc->name] = true; }
+            }
+        }
         $arms = '';
         $defs = '';
         foreach ($names as $n => $_) {
