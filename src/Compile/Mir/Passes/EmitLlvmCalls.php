@@ -1718,6 +1718,8 @@ trait EmitLlvmCalls
         $erasedArgDrops = '';
         /** @var string[] $intArgBoxes */
         $intArgBoxes = [];
+        /** @var string[] $argRegs the argument words, in call order */
+        $argRegs = [];
         $this->closurePackNode = null;
         $callArgs = ($known && $dynSpread === -1)
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
@@ -1815,6 +1817,7 @@ trait EmitLlvmCalls
             if ($dynMask !== '' && ($refGate & (1 << $pi)) !== 0) {
                 $out .= $this->emitDynByRefArg($a, $dynMask, $pi, $dynRawMask);
                 $argList .= ', i64 ' . $this->lastValue;
+                $argRegs[] = $this->lastValue;
                 $argTypes .= ', i64';
                 if ($this->dynRefTmp !== '') {
                     $dynReboxSlots[] = $this->dynRefSlot;
@@ -1860,6 +1863,7 @@ trait EmitLlvmCalls
                 $intArgBoxes[] = $this->lastValue;
             }
             $argList .= ', i64 ' . $this->lastValue;
+            $argRegs[] = $this->lastValue;
             $argTypes .= ', i64';
             $pi = $pi + 1;
         }
@@ -1885,14 +1889,14 @@ trait EmitLlvmCalls
                   . $this->lastPadArgs . ")\n";
             $out .= $padDrops . $this->lastPadDrops;
         } elseif ($dynSpread === -1 && !$this->frame->isPrelude
-            && $this->closurePadCandidates($pi) !== []) {
+            && ($this->closurePadCandidates($pi) !== [] || $this->closurePackCandidates($pi) !== [])) {
             $fpi = $dynFp;
             if ($fpi === '') {
                 $fpi = $this->ssa->allocReg();
                 $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
             }
             $fpReg = $fpi;
-            $out .= $this->emitDynClosurePaddedCall($fpi, $argList, $argTypes, $pi);
+            $out .= $this->emitDynClosurePaddedCall($fpi, $argList, $argTypes, $pi, $struct, $argRegs);
             $out .= $padDrops;
             $reg = $this->lastValue;
         } else {
@@ -2288,12 +2292,104 @@ trait EmitLlvmCalls
             . '  store i64 ' . $fpi . ", ptr @__mir_clo_fp\n";
     }
 
-    private function emitDynClosurePaddedCall(string $fpi, string $argList, string $argTypes, int $argc): string
+    /**
+     * The module's VARIADIC closures a dynamic invoke of `$argc` arguments may
+     * reach with arguments FOR the pack — name => [capture count, fixed arity].
+     * The indirect call hands such a closure its arguments positionally, the
+     * first pack argument landing AS the pack; {@see emitDynClosurePaddedCall}
+     * calls a match directly with the pack built. A closure with a by-ref
+     * parameter keeps the indirect call.
+     *
+     * @return array<string, array{0: int, 1: int}>
+     */
+    private function closurePackCandidates(int $argc): array
+    {
+        $out = [];
+        foreach ($this->closureCaptures as $cname => $capCnt) {
+            $vars = $this->sigs->variadicParams[$cname] ?? [];
+            $vi = -1;
+            foreach ($vars as $i => $isVar) { if ($isVar) { $vi = (int)$i; } }
+            $k = $vi - $capCnt;
+            if ($vi < 0 || $k < 0 || $k >= $argc) { continue; }
+            $byRef = false;
+            foreach ($this->sigs->refParams[$cname] ?? [] as $ri => $isRef) {
+                if ($isRef && $ri >= $capCnt) { $byRef = true; }
+            }
+            if ($byRef) { continue; }
+            $out[$cname] = [$capCnt, $k];
+        }
+        return $out;
+    }
+
+    /**
+     * A direct call of variadic closure `$cname` from a dynamic invoke: the
+     * first `$k` argument words go positionally, the rest into the pack — cells,
+     * as the uniform ABI made them, rebuilt into a typed pack the way a known
+     * call's is ({@see closureVariadicPack}). Result in lastValue.
+     *
+     * @param string[] $argRegs
+     */
+    private function emitDynClosurePackCall(string $cname, int $capCnt, int $k, string $struct, array $argRegs): string
+    {
+        $out = '';
+        $elems = [];
+        for ($i = $k; $i < \count($argRegs); $i = $i + 1) {
+            $sn = '__cpack' . \substr($this->ssa->allocReg(), 2);
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  store i64 ' . $argRegs[$i] . ', ptr ' . $slot . "\n";
+            $this->locals->slots[$sn] = $slot;
+            $elems[] = new ArrayElement_(null, new \Compile\Mir\LoadLocal($sn, Type::cell()));
+        }
+        $out .= $this->emitNode(new ArrayLit($elems, Type::vec(Type::cell())));
+        $out .= $this->coerceToI64();
+        $pack = $this->lastValue;
+        $flavor = 'veccell';
+        $pt = $this->sigs->paramTypes[$cname][$capCnt + $k] ?? null;
+        if ($pt !== null && $this->needsDeCellify($pt, Type::vec(Type::cell()))) {
+            $src = $this->ssa->allocReg();
+            $out .= '  ' . $src . ' = inttoptr i64 ' . $pack . " to ptr\n";
+            $this->lastValue = $src;
+            $this->lastValueType = 'ptr';
+            $out .= $this->emitCellArrayToTyped($pt);
+            $out .= $this->coerceToI64();
+            $pack = $this->lastValue;
+            $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
+            $flavor = $this->discardReleaseFlavor($pt);
+        }
+        $argList = 'ptr ' . $struct;
+        for ($i = 0; $i < $k; $i = $i + 1) { $argList .= ', i64 ' . $argRegs[$i]; }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($cname) . '(' . $argList . ', i64 ' . $pack . ")\n";
+        if ($flavor !== '') { $out .= $this->rcReleaseReg($pack, $flavor); }
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** @param string[] $argRegs */
+    private function emitDynClosurePaddedCall(string $fpi, string $argList, string $argTypes, int $argc,
+                                              string $struct = '', array $argRegs = []): string
     {
         $out = '';
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $endL = $this->ssa->allocLabel('cpad.end');
+        if ($struct !== '' && \count($argRegs) === $argc) {
+            foreach ($this->closurePackCandidates($argc) as $cname => $ck) {
+                $sym = '@manticore_' . $this->mangle($cname);
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i64 ' . $fpi . ', ptrtoint (ptr ' . $sym . " to i64)\n";
+                $hitL = $this->ssa->allocLabel('cpack.hit');
+                $nextL = $this->ssa->allocLabel('cpack.next');
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitDynClosurePackCall($cname, $ck[0], $ck[1], $struct, $argRegs);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+        }
         foreach ($this->closurePadCandidates($argc) as $cname => $capCnt) {
             $sym = '@manticore_' . $this->mangle($cname);
             $eq = $this->ssa->allocReg();
