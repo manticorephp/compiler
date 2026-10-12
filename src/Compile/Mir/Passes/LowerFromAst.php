@@ -3714,9 +3714,21 @@ final class LowerFromAst implements Pass
         $methE = $this->elemValue($arr->elements[1]);
         if ($methE->kind !== 'StringLiteral') { return null; }
         $m = $this->strLitValue($methE);
+        $cls = $this->callableClassOf($recvE);
+        // A receiver known only at run time is an object OR a class-name string
+        // (`[self::$subscriber, 'm']()`): a string takes the `$cls::m()` dispatch.
+        if ($cls === null && !($recvE->kind === 'Variable' && $this->variableName($recvE) === 'this')) {
+            $span = $arr->span;
+            $tmp = '__dyncb' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $probe = \Parser\Ast\Expr::call('is_string',
+                [\Parser\Ast\Expr::assign(\Parser\Ast\Expr::variable($tmp, $span), $recvE, $span)], $span);
+            $viaClass = new \Parser\Ast\DynamicStaticCall(\Parser\Ast\Expr::variable($tmp, $span), $m, $astArgs, $span);
+            $viaObject = \Parser\Ast\Expr::methodCall(\Parser\Ast\Expr::variable($tmp, $span), $m, $astArgs, false, $span);
+            return $this->lowerExpr(\Parser\Ast\Expr::ternary($probe, $viaClass, $viaObject, $span));
+        }
         $args = [];
         foreach ($astArgs as $a) { $args[] = $this->lowerExpr($a); }
-        $cls = $this->callableClassOf($recvE);
         if ($cls !== null) {
             return new StaticCall_($cls, $m, $args, Type::unknown(), $cls);
         }
