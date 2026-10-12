@@ -5360,13 +5360,18 @@ trait EmitLlvmBuiltins
         $out = '';
         // php evaluates EVERY argument before var_dump prints the first:
         // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
-        /** @var array<int, array{0: bool, 1: string}> float? + the value register */
+        /** @var array<int, array{0: ?bool, 1: string}> float? (null = closure) + the value register */
         $vals = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $vals[] = [true, $this->lastValue];
+            } elseif (Type::isClosureLike($a->type)) {
+                // A closure handle is no tagged object: boxing it and walking
+                // the class table dereferenced garbage (SIGSEGV).
+                $out .= $this->emitNode($a);
+                $vals[] = [null, ""];
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -5379,7 +5384,9 @@ trait EmitLlvmBuiltins
             }
         }
         foreach ($vals as $v) {
-            if ($v[0]) {
+            if ($v[0] === null) {
+                $out .= $this->emitOutLit("object(Closure)#1 (0) {\n}\n");
+            } elseif ($v[0]) {
                 // Shortest round-trip via the Ryu core (uppercase E, no forced
                 // `.0` — var_dump form), byte-exact with php and faster than the
                 // old snprintf-probe. The core takes the raw i64 bits.
