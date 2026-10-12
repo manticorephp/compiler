@@ -332,6 +332,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, true> interface names (interface_exists fold) */
     private array $interfaceNames = [];
+    /** @var array<string, array<string, \Compile\Mir\MethodMeta>> {@see Module::$interfaceMethods} */
+    private array $interfaceMethods = [];
     /** @var array<string, true> {@see Module::$internalInterfaceNames} */
     private array $internalInterfaceNames = [];
 
@@ -692,6 +694,7 @@ final class EmitLlvm implements EmitVisitor
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
+        $this->interfaceMethods = $module->interfaceMethods;
         $this->internalInterfaceNames = $module->internalInterfaceNames;
         $this->interfaceAncestors = $module->interfaceAncestors;
         $this->traitNames = $module->traitNames;

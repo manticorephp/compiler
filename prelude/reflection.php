@@ -616,6 +616,8 @@ class ReflectionMethod
         $this->name = $method;
         $this->tramp = __mc_refl_tramp($h, $method);
         $this->row = __mc_refl_mrow($h, $method);
+        $d = __mc_refl_row_declclass($this->row);
+        if ($d !== "") { $this->class = $d; }
     }
 
     public function getName(): string

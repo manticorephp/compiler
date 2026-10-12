@@ -591,7 +591,10 @@ final class MemoryAbi
     /** `ptr` — a METHOD row's declared return type (the hint as written, or null);
      *  ReflectionMethod::getReturnType() reads it. Zero on a property row. */
     public const RMETA_ROW_RETTYPE_OFFSET = 64;
-    public const RMETA_ROW_SIZE = 72;
+    /** `ptr` — a METHOD row's declaring class name (the class that wrote the
+     *  body, not the one reached through); ReflectionMethod::$class reads it. */
+    public const RMETA_ROW_DECLCLASS_OFFSET = 72;
+    public const RMETA_ROW_SIZE = 80;
 
     /** One parameter entry of a method's param table:
      *  `{ ptr name, ptr type, i64 flags, ptr attrs, i64 nattrs, ptr default_fn }`.

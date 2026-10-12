@@ -438,6 +438,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
         if ($name === '__mc_refl_ifaces_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_IFACES_FN_OFFSET, true); }
         if ($name === '__mc_refl_row_rettype')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_RETTYPE_OFFSET, true); }
+        if ($name === '__mc_refl_row_declclass')     { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_DECLCLASS_OFFSET, true); }
         if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
         if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
         if ($name === '__mc_refl_clo_find')           { return $this->biMcReflCloFind($args); }
@@ -1820,7 +1821,7 @@ trait EmitLlvmBuiltins
      * unboxed (tag stripped) first — else a builtin like strlen derefs the
      * boxed bits → SIGSEGV. A non-cell coerces as usual.
      */
-    private function emitPtrArg(Node $arg): string
+    private function emitPtrArg(Node $arg, bool $objOk = false): string
     {
         $out = $this->emitNode($arg);
         // Keep the TAGGED word of a fresh cell temp: the payload pointer below
@@ -1845,7 +1846,7 @@ trait EmitLlvmBuiltins
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
             $sp = $this->ssa->allocReg();
-            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $cw . ")\n";
+            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr' . ($objOk ? '' : '_s') . '(i64 ' . $cw . ")\n";
             $pm = $this->ssa->allocReg();
             $out .= '  ' . $pm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
             $pp = $this->ssa->allocReg();
@@ -5993,7 +5994,7 @@ trait EmitLlvmBuiltins
      */
     private function biMcReflOf(array $args): string
     {
-        $out = $this->emitPtrArg($args[0]);
+        $out = $this->emitPtrArg($args[0], true);
         $objp = $this->lastValue;
         $descI = $this->ssa->allocReg();
         $out .= '  ' . $descI . ' = load i64, ptr ' . $objp . "\n";
@@ -6644,7 +6645,7 @@ trait EmitLlvmBuiltins
      * stable per-object int (unique among live objects). */
     private function biSplObjectId(array $args): string
     {
-        $out = $this->emitPtrArg($args[0]);
+        $out = $this->emitPtrArg($args[0], true);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         return $this->finishI64($out, $reg);
@@ -7218,6 +7219,7 @@ trait EmitLlvmBuiltins
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call ptr @getenv(ptr ' . $nm . ")\n";
         $out .= $this->freeStrTemp($args[0], $nm);
+        $this->rt->needsStrRc = true;
         $isnull = $this->ssa->allocReg();
         $out .= '  ' . $isnull . ' = icmp eq ptr ' . $ev . ", null\n";
         $lSet = $this->ssa->allocLabel('genv.set');
@@ -7716,7 +7718,7 @@ trait EmitLlvmBuiltins
         }
         $this->rt->needsMethodExists = true;
         if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
         } else {
             $out = $this->biGetClass([$args[0]]);
@@ -7794,7 +7796,7 @@ trait EmitLlvmBuiltins
         }
         $this->rt->needsPropExists = true;
         if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
         } else {
             $out = $this->biGetClass([$args[0]]);
@@ -8044,9 +8046,9 @@ trait EmitLlvmBuiltins
             // string. Neither can serve, so the closed world's is-a EDGES go
             // into a table and the two names are matched against it at runtime.
             $this->rt->needsClassIsa = true;
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $subP = $this->lastValue;
-            $out .= $this->emitPtrArg($args[1]);
+            $out .= $this->emitPtrArg($args[1], true);
             $tgtP = $this->lastValue;
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__mir_class_isa(ptr ' . $subP
@@ -8841,7 +8843,9 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceToPtr();
         $buf = $this->lastValue;
+        $this->rt->needsStrRc = true;
         $out .= $this->emitOutStr($buf);
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $buf . ")\n";
         $this->lastValue = $this->litStr('');
         $this->lastValueType = 'ptr';
         return $out;
@@ -8989,6 +8993,7 @@ trait EmitLlvmBuiltins
      */
     private function wrapOrNull(string $s, string $pre, string $post, string $nullLit): string
     {
+        $this->rt->needsStrRc = true;
         $isnull = $this->ssa->allocReg();
         $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
         $lNull = $this->ssa->allocLabel('we.null');
@@ -9000,6 +9005,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr($pre) . ', ptr ' . $s . ")\n";
         $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr($post) . ")\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $c1 . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
@@ -9023,6 +9029,7 @@ trait EmitLlvmBuiltins
             $this->libcExtra['manticore___mc_var_export_qstr']
                 = 'declare i64 @manticore___mc_var_export_qstr(i64)';
         }
+        $this->rt->needsStrRc = true;
         $isnull = $this->ssa->allocReg();
         $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
         $lNull = $this->ssa->allocLabel('qe.null');
@@ -9040,6 +9047,8 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr("'") . ', ptr ' . $qp . ")\n";
         $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr("'") . ")\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $qp . ")\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $c1 . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr('NULL');

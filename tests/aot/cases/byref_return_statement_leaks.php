@@ -1,18 +1,20 @@
 <?php
-// Reading a function-static array through a by-reference return (`tab()["len"]`) leaks a copy of the whole array on every call.
-// issue: #125
+// A by-ref-returning call used as a bare statement leaks the +1 array copy it takes.
 /** @return array<string, mixed> */
 function &tab(): array
 {
     static $t = ['k' => [], 'len' => 0];
     return $t;
 }
+function &sname(): string
+{
+    static $s = "hello world";
+    return $s;
+}
 function put(int $v): void { $t = &tab(); $t['k'][] = $v; $t['len']++; }
-function len(): int { return tab()['len']; }
+function touch1(): void { tab(); sname(); }
 $m0 = memory_get_peak_usage();
-$s = 0;
-for ($i = 0; $i < 3000; $i++) { put($i); $s += len(); }
+for ($i = 0; $i < 3000; $i++) { put($i); touch1(); }
 $mb = (memory_get_peak_usage() - $m0) >> 20;
-fwrite(STDERR, "grew {$mb} MB\n");
-echo $s, "\n";
+echo sname(), "\n";
 echo $mb < 8 ? "flat\n" : "LEAK\n";

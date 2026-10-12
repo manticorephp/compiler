@@ -536,8 +536,9 @@ final class Parser
                 ? $fqn
                 : \substr($fqn, \strrpos($fqn, '\\') + 1));
             $this->useAliases[$short] = $fqn;
+        } elseif ($kind === "function") {
+            $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
         }
-        if ($kind === 'function' && $alias !== null) { $this->useFnAliases[\strtolower($alias)] = $fqn; }
         return new UseItem($fqn, $alias, $kind);
     }
 
@@ -570,8 +571,9 @@ final class Parser
         if ($kind === 'class') {
             $short = $alias ?? (strpos($fqn, '\\') === false ? $fqn : substr($fqn, strrpos($fqn, '\\') + 1));
             $this->useAliases[$short] = $fqn;
+        } elseif ($kind === "function") {
+            $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
         }
-        if ($kind === 'function' && $alias !== null) { $this->useFnAliases[\strtolower($alias)] = $fqn; }
         return new UseItem($fqn, $alias, $kind);
     }
 
