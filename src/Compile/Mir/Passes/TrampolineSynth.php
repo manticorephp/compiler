@@ -84,6 +84,7 @@ final class TrampolineSynth
     {
         return \str_contains($name, '__mc_rtramp_')
             || \str_contains($name, '__mc_rmagic_')
+            || \str_contains($name, '__mc_static_callable')
             || \str_contains($name, '__mc_fntramp_')
             || \str_contains($name, '__mc_pget_')
             || \str_contains($name, '__mc_pset_')
@@ -187,6 +188,29 @@ final class TrampolineSynth
             }
         }
         return $out . "  return null;\n}\n";
+    }
+
+    /**
+     * `['C', 'm'](...$a)` — a STATIC callable array reached through an erased
+     * invoke ({@see EmitLlvmCalls::emitErasedInvoke}): one arm per public static
+     * method some callable-array literal names, matched case-insensitively.
+     *
+     * @param array<int, array{0: string, 1: string, 2: bool}> $arms [class, method, void]
+     */
+    public static function staticCallableSource(array $arms): string
+    {
+        $out = self::ARGS_HINT . "function __mc_static_callable(string \$c, string \$m, array \$a): mixed {\n"
+             . "  \$lc = \\strtolower(\\ltrim(\$c, '\\\\'));\n  \$lm = \\strtolower(\$m);\n";
+        foreach ($arms as $arm) {
+            $fqn = '\\' . \ltrim($arm[0], '\\');
+            // `Closure::fromCallable` is a compiler intrinsic, not a declared method.
+            $call = \strtolower($fqn . '::' . $arm[1]) === '\\closure::fromcallable'
+                ? '\\Closure::fromCallable($a[0])' : $fqn . '::' . $arm[1] . '(...$a)';
+            $out .= '  if ($lc === ' . \var_export(\strtolower(\ltrim($arm[0], '\\')), true)
+                  . ' && $lm === ' . \var_export(\strtolower($arm[1]), true) . ') { '
+                  . ($arm[2] ? $call . '; return null;' : 'return ' . $call . ';') . " }\n";
+        }
+        return $out . "  throw new \\Error('Call to undefined method ' . \\ltrim(\$c, '\\\\') . '::' . \$m . '()');\n}\n";
     }
 
     /**

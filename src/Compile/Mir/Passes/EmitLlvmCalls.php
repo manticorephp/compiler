@@ -1382,7 +1382,8 @@ trait EmitLlvmCalls
         // a `[$x, 'name']` literal spells ({@see Module::$callableArrayMethods}):
         // one strcmp arm each, an erased-receiver method call by runtime class.
         // The callee is re-read per arm, so only a pure one qualifies.
-        if ($this->callableArrayMethods !== []) {
+        $staticCallable = isset($this->sigs->paramTypes['__mc_static_callable']);
+        if ($this->callableArrayMethods !== [] || $staticCallable) {
             $isArrT = $this->ssa->allocReg();
             $out .= '  ' . $isArrT . ' = icmp eq i64 ' . $tag . ", 7\n";
             $arrL = $this->ssa->allocLabel('erinv.arr');
@@ -1399,62 +1400,11 @@ trait EmitLlvmCalls
             $out .= '  store i64 ' . $avW . ', ptr ' . $avSlot . "\n";
             $this->locals->slots[$avName] = $avSlot;
             $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $res . "\n";
-            $mname = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
-                new \Compile\Mir\IntConst(1, Type::int_()), Type::cell());
-            $out .= $this->emitNode($mname);
-            $out .= $this->coerceToI64();
-            $mw = $this->lastValue;
-            $out .= $this->cellTagIr($mw);
-            $isS = $this->ssa->allocReg();
-            $out .= '  ' . $isS . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
-            $sL = $this->ssa->allocLabel('erinv.arrname');
-            $out .= '  br i1 ' . $isS . ', label %' . $sL . ', label %' . $endL . "\n";
-            $out .= $sL . ":\n";
-            // `$c[0]->{$c[1]}(...)` through the method table when the module has
-            // one: a name chain here spliced one arm per `[$x, 'name']` literal of
-            // the program into every erased invoke (62 645 strcmp arms, +128 MB
-            // of IR, in php-cs-fixer).
-            $viaTable = null;
-            if ($this->dynamicMethodMeta) {
-                $dpc = new \Compile\Mir\DynProp_(
-                    new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
-                        new \Compile\Mir\IntConst(0, Type::int_()), Type::cell()),
-                    new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
-                        new \Compile\Mir\IntConst(1, Type::int_()), Type::cell()),
-                    Type::cell());
-                $dpc->scope = \Compile\Mir\DynProp_::ANY_SCOPE;
-                $ivc = new \Compile\Mir\Invoke_($dpc, $n->args, Type::cell());
-                /** @var array<string, Type> $cams */
-                $cams = [];
-                foreach ($this->callableArrayMethods as $cm => $_) { $cams[(string)$cm] = Type::cell(); }
-                $viaTable = $this->emitDynMethodDispatch($dpc, $ivc, $cams);
+            if ($staticCallable) {
+                $out .= $this->emitStaticCallableArm($n, $avName, $res, $endL);
             }
-            if ($viaTable !== null) {
-                $out .= $viaTable;
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            } else {
-                $mm = $this->ssa->allocReg();
-                $out .= '  ' . $mm . ' = and i64 ' . $mw . ", 281474976710655\n";
-                $mp = $this->ssa->allocReg();
-                $out .= '  ' . $mp . ' = inttoptr i64 ' . $mm . " to ptr\n";
-                $this->rt->needsStrcmp = true;
-                foreach ($this->callableArrayMethods as $cm => $_) {
-                    $hitL = $this->ssa->allocLabel('erinv.arrhit');
-                    $nextL = $this->ssa->allocLabel('erinv.arrnext');
-                    $cr = $this->ssa->allocReg();
-                    $out .= '  ' . $cr . ' = call i32 @strcmp(ptr ' . $mp . ', ptr ' . $this->litStr((string)$cm) . ")\n";
-                    $ce = $this->ssa->allocReg();
-                    $out .= '  ' . $ce . ' = icmp eq i32 ' . $cr . ", 0\n";
-                    $out .= '  br i1 ' . $ce . ', label %' . $hitL . ', label %' . $nextL . "\n";
-                    $out .= $hitL . ":\n";
-                    $recv = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
-                        new \Compile\Mir\IntConst(0, Type::int_()), Type::cell());
-                    $out .= $this->emitNode(new \Compile\Mir\MethodCall_($recv, (string)$cm, $n->args, Type::cell()));
-                    $out .= $this->coerceToI64();
-                    $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-                    $out .= '  br label %' . $endL . "\n";
-                    $out .= $nextL . ":\n";
-                }
+            if ($this->callableArrayMethods !== []) {
+                $out .= $this->emitInstanceCallableArm($n, $avName, $res, $endL);
             }
             $out .= '  br label %' . $endL . "\n";
             $out .= $noArrL . ":\n";
@@ -1502,6 +1452,160 @@ trait EmitLlvmCalls
         if ($n->type->kind === Type::KIND_CELL) {
             $this->markCellOpaque($this->lastValue);
         }
+        return $out;
+    }
+
+    /**
+     * `[$obj, 'm'](...)` — `$c[0]->{$c[1]}(...)` by runtime class, the names
+     * limited to the ones a `[$x, 'name']` literal spells. Branches to `$endL`
+     * with the result in `$res`, or falls through when `$c[1]` names none.
+     */
+    private function emitInstanceCallableArm(Invoke_ $n, string $avName, string $res, string $endL): string
+    {
+        $out = '';
+        $mname = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+            new \Compile\Mir\IntConst(1, Type::int_()), Type::cell());
+        $out .= $this->emitNode($mname);
+        $out .= $this->coerceToI64();
+        $mw = $this->lastValue;
+        $out .= $this->cellTagIr($mw);
+        $isS = $this->ssa->allocReg();
+        $out .= '  ' . $isS . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $sL = $this->ssa->allocLabel('erinv.arrname');
+        $out .= '  br i1 ' . $isS . ', label %' . $sL . ', label %' . $endL . "\n";
+        $out .= $sL . ":\n";
+        // `$c[0]->{$c[1]}(...)` through the method table when the module has
+        // one: a name chain here spliced one arm per `[$x, 'name']` literal of
+        // the program into every erased invoke (62 645 strcmp arms, +128 MB
+        // of IR, in php-cs-fixer).
+        $viaTable = null;
+        if ($this->dynamicMethodMeta) {
+            $dpc = new \Compile\Mir\DynProp_(
+                new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                    new \Compile\Mir\IntConst(0, Type::int_()), Type::cell()),
+                new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                    new \Compile\Mir\IntConst(1, Type::int_()), Type::cell()),
+                Type::cell());
+            $dpc->scope = \Compile\Mir\DynProp_::ANY_SCOPE;
+            $ivc = new \Compile\Mir\Invoke_($dpc, $n->args, Type::cell());
+            /** @var array<string, Type> $cams */
+            $cams = [];
+            foreach ($this->callableArrayMethods as $cm => $_) { $cams[(string)$cm] = Type::cell(); }
+            $viaTable = $this->emitDynMethodDispatch($dpc, $ivc, $cams);
+        }
+        if ($viaTable !== null) {
+            $out .= $viaTable;
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        } else {
+            $mm = $this->ssa->allocReg();
+            $out .= '  ' . $mm . ' = and i64 ' . $mw . ", 281474976710655\n";
+            $mp = $this->ssa->allocReg();
+            $out .= '  ' . $mp . ' = inttoptr i64 ' . $mm . " to ptr\n";
+            $this->rt->needsStrcmp = true;
+            foreach ($this->callableArrayMethods as $cm => $_) {
+                $hitL = $this->ssa->allocLabel('erinv.arrhit');
+                $nextL = $this->ssa->allocLabel('erinv.arrnext');
+                $cr = $this->ssa->allocReg();
+                $out .= '  ' . $cr . ' = call i32 @strcmp(ptr ' . $mp . ', ptr ' . $this->litStr((string)$cm) . ")\n";
+                $ce = $this->ssa->allocReg();
+                $out .= '  ' . $ce . ' = icmp eq i32 ' . $cr . ", 0\n";
+                $out .= '  br i1 ' . $ce . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $recv = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                    new \Compile\Mir\IntConst(0, Type::int_()), Type::cell());
+                $out .= $this->emitNode(new \Compile\Mir\MethodCall_($recv, (string)$cm, $n->args, Type::cell()));
+                $out .= $this->coerceToI64();
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * `['C', 'm'](...)` — `$c[0]` a class-NAME string: the static method runs
+     * through the synthesized `__mc_static_callable`
+     * ({@see TrampolineSynth::staticCallableSource}), the arguments packed as a
+     * cell array. Branches to `$endL` with the result in `$res`, or falls through
+     * when `$c[0]` / `$c[1]` is not a string. '' for an argument list that is
+     * neither plain values nor one spread array.
+     */
+    private function emitStaticCallableArm(Invoke_ $n, string $avName, string $res, string $endL): string
+    {
+        $spread = null;
+        foreach ($n->args as $a) {
+            if ($a->kind !== Node::KIND_SPREAD) { continue; }
+            if (\count($n->args) !== 1) { return ''; }
+            $spread = $this->asSpreadNode($a)->operand;
+            $sk = $spread->type->kind;
+            if (!$spread->type->isArray() && $sk !== Type::KIND_CELL && $sk !== Type::KIND_UNKNOWN) { return ''; }
+        }
+        $out = '';
+        $words = [];
+        foreach ([0, 1] as $i) {
+            $out .= $this->emitNode(new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal($avName, Type::cell()),
+                new \Compile\Mir\IntConst($i, Type::int_()), Type::cell()));
+            $out .= $this->coerceToI64();
+            $words[] = $this->lastValue;
+        }
+        $stL = $this->ssa->allocLabel('erinv.static');
+        $notL = $this->ssa->allocLabel('erinv.notstatic');
+        $out .= $this->cellTagIr($words[0]);
+        $s0 = $this->ssa->allocReg();
+        $out .= '  ' . $s0 . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $out .= $this->cellTagIr($words[1]);
+        $s1 = $this->ssa->allocReg();
+        $out .= '  ' . $s1 . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $both = $this->ssa->allocReg();
+        $out .= '  ' . $both . ' = and i1 ' . $s0 . ', ' . $s1 . "\n";
+        $out .= '  br i1 ' . $both . ', label %' . $stL . ', label %' . $notL . "\n";
+        $out .= $stL . ":\n";
+        $fresh = true;
+        if ($spread === null) {
+            $elems = [];
+            foreach ($n->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell())));
+            $out .= $this->coerceToPtr();
+        } elseif (!$spread->type->isArray()) {
+            // An erased pack (`$args = $this->resolve(...)`): only an ARRAY cell
+            // unpacks here; anything else keeps the paths below.
+            $out .= $this->emitNode($spread);
+            $out .= $this->coerceToI64();
+            $pw = $this->lastValue;
+            $out .= $this->cellTagIr($pw);
+            $isA = $this->ssa->allocReg();
+            $out .= '  ' . $isA . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
+            $packL = $this->ssa->allocLabel('erinv.staticpack');
+            $out .= '  br i1 ' . $isA . ', label %' . $packL . ', label %' . $notL . "\n";
+            $out .= $packL . ":\n";
+            $this->lastValue = $pw;
+            $this->lastValueType = 'i64';
+            $fresh = false;
+            $out .= $this->cellToPtr();
+        } else {
+            $el = $spread->type->element;
+            $out .= $this->emitNode($spread);
+            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+                $out .= $this->coerceToPtr();
+                $out .= $this->emitVecToCellArray($el);
+            } else {
+                $fresh = false;
+            }
+            $out .= $this->cellToPtr();
+        }
+        $argsI = $this->ssa->allocReg();
+        $out .= '  ' . $argsI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        $cI = $this->ssa->allocReg();
+        $out .= '  ' . $cI . ' = and i64 ' . $words[0] . ", 281474976710655\n";
+        $mI = $this->ssa->allocReg();
+        $out .= '  ' . $mI . ' = and i64 ' . $words[1] . ", 281474976710655\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore___mc_static_callable(i64 ' . $cI . ', i64 ' . $mI . ', i64 ' . $argsI . ")\n";
+        $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+        if ($fresh) { $out .= $this->rcReleaseReg($argsI, 'veccell'); }
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $notL . ":\n";
         return $out;
     }
 

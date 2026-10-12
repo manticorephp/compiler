@@ -319,6 +319,8 @@ final class LowerFromAst implements Pass
     private bool $sawDynFnExists = false;
     /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
     private bool $sawGetDefinedFns = false;
+    /** @var array<string, bool> lowercased method names any `[$x, 'name']` literal spells, static receiver included */
+    private array $callableNamesAnyRecv = [];
     /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
      *  get_defined_functions()['user']. */
     private array $userFnNames = [];
@@ -1526,6 +1528,7 @@ final class LowerFromAst implements Pass
             }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
+        $this->synthStaticCallable($module);
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -1651,12 +1654,43 @@ final class LowerFromAst implements Pass
             $e0 = $node->elements[0];
             $e1 = $node->elements[1];
             if ($e0->key === null && $e1->key === null
-                && $e1->value instanceof \Compile\Mir\StringConst
-                && $e0->value->kind !== Node::KIND_STRING_CONST) {
-                $module->callableArrayMethods[$e1->value->value] = true;
+                && $e1->value instanceof \Compile\Mir\StringConst) {
+                $this->callableNamesAnyRecv[\strtolower($e1->value->value)] = true;
+                if ($e0->value->kind !== Node::KIND_STRING_CONST) {
+                    $module->callableArrayMethods[$e1->value->value] = true;
+                }
             }
         }
         foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
+    }
+
+    /**
+     * `__mc_static_callable` ({@see TrampolineSynth::staticCallableSource}): one arm
+     * per public, by-value static method whose name a callable-array literal spells.
+     */
+    private function synthStaticCallable(Module $module): void
+    {
+        if ($this->callableNamesAnyRecv === []) { return; }
+        /** @var array<int, array{0: string, 1: string, 2: bool}> $arms */
+        $arms = [];
+        foreach ($module->classes as $cd) {
+            foreach ($cd->methodMeta as $mn => $mm) {
+                if (!$mm->isStatic || $mm->isAbstract || $mm->visibility !== 'public') { continue; }
+                if (!isset($this->callableNamesAnyRecv[\strtolower((string)$mn)])) { continue; }
+                $byRef = false;
+                foreach ($mm->params as $p) { if ($p->byRef) { $byRef = true; } }
+                if ($byRef) { continue; }
+                $arms[] =[$cd->name, (string)$mn, \strtolower($mm->returnType) === 'void'];
+            }
+        }
+        if (isset($this->callableNamesAnyRecv['fromcallable'])) { $arms[] = ['Closure', 'fromCallable', false]; }
+        if ($arms === []) { return; }
+        $prog = \Parser\Parser::parseSource("<?php\n" . TrampolineSynth::staticCallableSource($arms));
+        foreach ($prog->statements as $s) {
+            if ($s->kind !== 'Function') { continue; }
+            $this->fnDecls[$s->decl->name] = $s->decl;
+            $module->addFunction($this->lowerFunction($s->decl));
+        }
     }
 
     private function moduleHasDynamicMethodInvoke(Module $module): bool
