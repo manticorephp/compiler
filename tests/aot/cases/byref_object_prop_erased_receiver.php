@@ -1,6 +1,5 @@
 <?php
 // An object property passed by reference through an erased (mixed) receiver SIGSEGVs.
-// issue: #205
 final class D {}
 final class Bucket { public ?D $o = null; }
 final class Sink { public function fo(?D &$x): void { $x = new D(); } }

@@ -3580,7 +3580,24 @@ trait EmitLlvmCalls
             && $this->propertyOffsetOrNull($a->object, $a->property) === null
             && $this->fixedPropertyHolders($a->property) !== [];
         $seedIsCell = $erasedProp && $a->type->kind === Type::KIND_CELL;
-        if (!$erasedProp || $seedIsCell) {
+        // Any OTHER property kind read off an erased receiver arrives as a cell
+        // too, and the callee reads the slot as the raw string / object / scalar
+        // its parameter declares: hand it the unboxed value (owning a reference
+        // the callee releases on overwrite) and write what it leaves back through
+        // the class_id writer, which drops the slot's old reference.
+        $erasedScalar = !$erasedProp && $pt !== null
+            && $a->kind === Node::KIND_PROPERTY_ACCESS
+            && $a->type->kind === Type::KIND_CELL
+            && $a->object->kind === Node::KIND_LOAD_LOCAL
+            && \in_array($pt->kind, [Type::KIND_STRING, Type::KIND_INT, Type::KIND_FLOAT, Type::KIND_BOOL, Type::KIND_OBJ, Type::KIND_UNION], true)
+            && $this->propertyOffsetOrNull($a->object, $a->property) === null
+            && $this->fixedPropertyHolders($a->property) !== [];
+        if ($erasedScalar) {
+            $out .= $this->unboxCellToType($pt);
+            $out .= $this->coerceToI64();
+            $fl = $this->discardReleaseFlavor($pt);
+            if ($fl !== '') { $out .= $this->rcRetainReg($this->lastValue, $fl); }
+        } elseif (!$erasedProp || $seedIsCell) {
             $out .= $this->ownRefSeed($a, $this->lastValue);
         }
         $seedCell = $this->lastValue;
@@ -3593,9 +3610,28 @@ trait EmitLlvmCalls
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
         $this->lastRefSlotDrop = ($pt !== null && $this->isOmittedDefaultArg($srcArgc, $ai, $a))
             ? $this->omittedRefSlotDrop($tmp, $pt, $arrayHinted) : '';
-        if ($erasedProp) {
+        if ($erasedScalar) {
             $this->rt->needsTagged = true;
             $wb = $this->emitObjPtrOf($a->object);
+            $objp = $this->lastValue;
+            $nv = $this->ssa->allocReg();
+            $wb .= '  ' . $nv . ' = load i64, ptr ' . $tmp . "\n";
+            $this->lastValue = $nv;
+            $this->lastValueType = 'i64';
+            if ($pt->kind === Type::KIND_FLOAT) {
+                $dv = $this->ssa->allocReg();
+                $wb .= '  ' . $dv . ' = bitcast i64 ' . $nv . " to double\n";
+                $this->lastValue = $dv;
+                $this->lastValueType = 'double';
+            }
+            $wb .= $this->boxToCell($pt);
+            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property, '', true)
+                 . '(ptr ' . $objp . ', i64 ' . $this->lastValue . ")\n";
+            $this->lastRefSlotDrop .= $wb;
+        }
+        if ($erasedProp) {
+            $this->rt->needsTagged = true;
+            $wb =$this->emitObjPtrOf($a->object);
             $objp = $this->lastValue;
             $nv = $this->ssa->allocReg();
             $wb .= '  ' . $nv . ' = load i64, ptr ' . $tmp . "\n";

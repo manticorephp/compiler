@@ -3602,7 +3602,8 @@ trait EmitLlvmObjects
             $oldSlot = '';
             $oldFlavor = '';
             $spt = $cd->propertyTypes[$prop] ?? null;
-            if ($dropOld && $spt !== null && $spt->kind === Type::KIND_ARRAY && !$this->boxRawValueBorrows($spt)
+            if ($dropOld && $spt !== null && !$this->cellPropBoxed($spt, $cd->name, $prop)
+                && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))
                 && $cd->propertyWidth($prop) === 8) {
                 $oldFlavor = $this->discardReleaseFlavor($spt);
                 if ($oldFlavor !== '') {
