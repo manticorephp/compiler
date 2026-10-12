@@ -7206,6 +7206,7 @@ trait EmitLlvmBuiltins
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = call ptr @getenv(ptr ' . $nm . ")\n";
         $out .= $this->freeStrTemp($args[0], $nm);
+        $this->rt->needsStrRc = true;
         $isnull = $this->ssa->allocReg();
         $out .= '  ' . $isnull . ' = icmp eq ptr ' . $ev . ", null\n";
         $lSet = $this->ssa->allocLabel('genv.set');
@@ -8786,7 +8787,9 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceToPtr();
         $buf = $this->lastValue;
+        $this->rt->needsStrRc = true;
         $out .= $this->emitOutStr($buf);
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $buf . ")\n";
         $this->lastValue = $this->litStr('');
         $this->lastValueType = 'ptr';
         return $out;
@@ -8934,6 +8937,7 @@ trait EmitLlvmBuiltins
      */
     private function wrapOrNull(string $s, string $pre, string $post, string $nullLit): string
     {
+        $this->rt->needsStrRc = true;
         $isnull = $this->ssa->allocReg();
         $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
         $lNull = $this->ssa->allocLabel('we.null');
@@ -8945,6 +8949,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr($pre) . ', ptr ' . $s . ")\n";
         $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr($post) . ")\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $c1 . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
@@ -8968,6 +8973,7 @@ trait EmitLlvmBuiltins
             $this->libcExtra['manticore___mc_var_export_qstr']
                 = 'declare i64 @manticore___mc_var_export_qstr(i64)';
         }
+        $this->rt->needsStrRc = true;
         $isnull = $this->ssa->allocReg();
         $out = '  ' . $isnull . ' = icmp eq ptr ' . $s . ", null\n";
         $lNull = $this->ssa->allocLabel('qe.null');
@@ -8985,6 +8991,8 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr("'") . ', ptr ' . $qp . ")\n";
         $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr("'") . ")\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $qp . ")\n";
+        $out .= '  call void @__mir_rc_release_str(ptr ' . $c1 . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr('NULL');
