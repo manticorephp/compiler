@@ -6229,8 +6229,20 @@ trait EmitLlvmExpr
         return $t;
     }
 
+    private bool $collectCellStrOwn = false;
+    private string $cellStrOwn = '';
+
+    /** i64 reg of the fresh string a cell→string arg unbox rendered, or ''. */
+    private function takeCellStrArgOwn(): string
+    {
+        $o = $this->cellStrOwn;
+        $this->cellStrOwn = '';
+        return $o;
+    }
+
     private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
+        $this->cellStrOwn = '';
         $ak = $a->type->kind;
         $pt = $ptypes[$pi] ?? null;
         // The call-argument cell sink: `$pt` is the PARAMETER's declared type
@@ -6295,7 +6307,9 @@ trait EmitLlvmExpr
         }
         if ($ak !== Type::KIND_CELL) { return $this->nestedArgConform($a->type, $pt); }
         if ($pt === null) { return ''; }
+        $this->collectCellStrOwn = true;
         $out = $this->unboxCellToType($pt);
+        $this->collectCellStrOwn = false;
         $out .= $this->nestedArgConform($a->type, $pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
         // leaves a `double` behind (the tag has to be read to get a real value
@@ -6439,6 +6453,17 @@ trait EmitLlvmExpr
             // straight into an i64 slot without coercing.
             $ri = $this->ssa->allocReg();
             $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
+            if ($this->collectCellStrOwn) {
+                // A rendered scalar is a fresh string the CALLER must free after
+                // the call; a stripped pointer is the cell's own (null = borrowed).
+                $pm = $this->ssa->allocReg();
+                $out .= '  ' . $pm . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $ne = $this->ssa->allocReg();
+                $out .= '  ' . $ne . ' = icmp ne i64 ' . $ri . ', ' . $pm . "\n";
+                $ow = $this->ssa->allocReg();
+                $out .= '  ' . $ow . ' = select i1 ' . $ne . ', i64 ' . $ri . ", i64 0\n";
+                $this->cellStrOwn = $ow;
+            }
             $this->lastValue = $ri;
             $this->lastValueType = 'i64';
             return $out;

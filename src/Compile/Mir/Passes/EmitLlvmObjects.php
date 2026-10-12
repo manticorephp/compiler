@@ -428,6 +428,7 @@ trait EmitLlvmObjects
                     } else {
                         $out .= $this->coerceToI64();
                         $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                        $this->takeCellStrArgOwn();
                         // No temp list on this path: never let the flag reach another site.
                         $this->takeScalarStrArgTemp();
                     }
@@ -780,6 +781,8 @@ trait EmitLlvmObjects
                     $cellTmp = $this->isFreshCellTemp($a);
                     if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                    $cso = $this->takeCellStrArgOwn();
+                    if ($cso !== '') { $argTemps[] = $cso; }
                     if ($cellTmp) {
                         // ★ Already released by its TAGGED word above; asking
                         // `freshRcArgFlavor` too drops the same temp twice.
@@ -6821,6 +6824,8 @@ trait EmitLlvmObjects
                 $cellTmp = $this->isFreshCellTemp($a);
                 if ($cellTmp) { $cellArgTemps[] = $this->lastValue; }
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
+                $cso = $this->takeCellStrArgOwn();
+                if ($cso !== '') { $argTemps[] = $cso; }
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($cellTmp) {
                     // ★ ALREADY released — by the TAGGED word recorded above.
@@ -8388,6 +8393,8 @@ trait EmitLlvmObjects
                     $argOutTypes[$ai + 1] = Type::cell();
                 } else {
                     $out .= $this->unboxCellArg($a, $ptypes, $ai + 1, $ahmask);
+                    $cso = $this->takeCellStrArgOwn();
+                    if ($cso !== '') { $argTemps[] = $cso; }
                     $argOutTypes[$ai + 1] = $a->type;
                 }
                 $argList .= ', i64 ' . $this->lastValue;

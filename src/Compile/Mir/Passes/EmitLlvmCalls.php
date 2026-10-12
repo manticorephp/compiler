@@ -3924,6 +3924,8 @@ trait EmitLlvmCalls
                 // `trim(json_encode($x))` leaked the whole document.
                 $cellArgTemp = $this->isFreshCellTemp($a) ? $this->lastValue : '';
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
+                $cso = $this->takeCellStrArgOwn();
+                if ($cso !== '') { $argTemps[] = $cso; }
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($cellArgTemp !== '') {
                     $rcArgRegs[] = $cellArgTemp; $rcArgFlavs[] = 'cell';
