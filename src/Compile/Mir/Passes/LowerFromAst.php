@@ -321,6 +321,8 @@ final class LowerFromAst implements Pass
     private bool $sawGetDefinedFns = false;
     /** @var array<string, bool> lowercased method names any `[$x, 'name']` literal spells, static receiver included */
     private array $callableNamesAnyRecv = [];
+    /** A `Closure::fromCallable` of a runtime value was lowered ({@see closureFromSource}). */
+    private bool $needsClosureFrom = false;
     /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
      *  get_defined_functions()['user']. */
     private array $userFnNames = [];
@@ -1529,6 +1531,14 @@ final class LowerFromAst implements Pass
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $this->synthStaticCallable($module);
+        if ($this->needsClosureFrom) {
+            $prog = \Parser\Parser::parseSource("<?php\n" . $this->closureFromSource());
+            foreach ($prog->statements as $cfs) {
+                if ($cfs->kind !== 'Function') { continue; }
+                $this->fnDecls[$cfs->decl->name] = $cfs->decl;
+                $module->addFunction($this->lowerFunction($cfs->decl));
+            }
+        }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -5953,6 +5963,35 @@ final class LowerFromAst implements Pass
         return $this->lowerExpr($chain);
     }
 
+    /**
+     * `__mc_closure_from($c)`: `$c` itself when it is a Closure, else a Closure
+     * forwarding to it. FIXED-arity optional params, because a variadic closure
+     * reached through an erased invoke gets its arguments positionally (the first
+     * one as the pack); a param the call omits keeps a sentinel default, and the
+     * trailing sentinels are cut before forwarding.
+     * ponytail: 8 forwarded arguments at most; a by-ref parameter of the target
+     * binds a copy.
+     */
+    private function closureFromSource(): string
+    {
+        $s = "'\\0__mc_fromcallable_omitted'";
+        $params = [];
+        $elems = [];
+        for ($i = 0; $i < 8; $i = $i + 1) {
+            $params[] = '$__fa' . (string)$i . ' = ' . $s;
+            $elems[] = '$__fa' . (string)$i;
+        }
+        return "function __mc_closure_from(mixed \$c): \\Closure {\n"
+            . "  if (\$c instanceof \\Closure) { return \$c; }\n"
+            . '  return static function (' . \implode(', ', $params) . ") use (\$c) {\n"
+            . '    $__a = [' . \implode(', ', $elems) . "];\n"
+            . "    \$__n = 8;\n"
+            . "    while (\$__n > 0 && \$__a[\$__n - 1] === " . $s . ") { \$__n = \$__n - 1; }\n"
+            . "    \$__b = [];\n"
+            . "    for (\$__i = 0; \$__i < \$__n; \$__i = \$__i + 1) { \$__b[] = \$__a[\$__i]; }\n"
+            . "    return \$c(...\$__b);\n  };\n}\n";
+    }
+
     /** {@see \Compile\Mir\ClassDef::stableId} */
     private function stableClassId(string $fqn): int
     {
@@ -6812,7 +6851,13 @@ final class LowerFromAst implements Pass
             && \count($expr->args) === 1) {
             $conv = $this->coerceCallableArg(Type::closure(), $expr->args[0]);
             if ($conv !== null) { return $conv; }
-            return $this->lowerExpr($expr->args[0]);
+            // A RUNTIME callable (an array or a name in an erased slot) passed
+            // through stayed an array: `instanceof \Closure` and is_callable of a
+            // protected `[$this, 'm']` answered false outside its class (symfony
+            // LazyString over `container.getenv`). `__mc_closure_from` wraps it
+            // unless it already is one ({@see closureFromSource}).
+            $this->needsClosureFrom = true;
+            return new \Compile\Mir\Call('__mc_closure_from', [$this->lowerExpr($expr->args[0])], Type::closure());
         }
         // First-class callable `C::m(...)` → a 0-capture closure forwarding to
         // the static method (scope preserved for late static binding).
