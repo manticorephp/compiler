@@ -1037,21 +1037,42 @@ trait InferCalls
         }
         if (\count($bodies) < 2) { return null; }
         $first = null;
+        $acc = null;
+        $shapeDiffers = false;
         $numeric = true;
         $differ = false;
         foreach ($bodies as $b) {
             $t = $this->sigs[$b . '__' . $method] ?? null;
             if ($t === null) { continue; }
             if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) { $numeric = false; }
-            if ($first === null) { $first = $t; continue; }
+            if ($first === null) { $first = $t; $acc = $t; continue; }
+            if ($t->kind === Type::KIND_ARRAY && $acc !== null && $acc->kind === Type::KIND_ARRAY) {
+                if ($this->elemReprShape($t) !== $this->elemReprShape($first)) { $shapeDiffers = true; }
+                $acc = $acc->unionWith($t);
+            }
             // Only a different KIND changes how the word is read. Bodies that agree
             // on it (arrays of different elements, objects of different classes)
             // share the representation; boxing them into a cell cost every call a
             // box and leaked it — the compiler compiling itself grew 1.3 GB → 8 GB.
             if ($t->kind !== $first->kind) { $differ = true; }
         }
-        if (!$differ) { return null; }
+        if (!$differ) {
+            // Arrays of different ELEMENT shapes share a representation but not a
+            // view: the call must read the join, not whichever body came first.
+            return $shapeDiffers && $acc !== null ? $acc : null;
+        }
         return $numeric ? Type::numericCell() : Type::cell();
+    }
+
+    /** How an array's elements are laid out, ignoring which class an object is: two arrays that differ here are read differently. */
+    private function elemReprShape(Type $t): string
+    {
+        $e = $t->element;
+        if ($e === null) { return '?'; }
+        $k = $e->kind;
+        if ($k === Type::KIND_ARRAY) { return 'arr(' . $this->elemReprShape($e) . ')'; }
+        if ($k === Type::KIND_UNKNOWN) { return Type::KIND_CELL; }
+        return $k;
     }
 
     /**
