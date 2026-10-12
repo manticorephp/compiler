@@ -1284,6 +1284,9 @@ final class Cast extends Node
         parent::__construct(Node::KIND_CAST, $type);
     }
 
+    /** A `string` cast of a cell keeps NULL as NULL (a `?string` param's null), not "". */
+    public bool $keepNull = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCast($this);

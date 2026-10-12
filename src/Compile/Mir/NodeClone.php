@@ -109,7 +109,7 @@ final class NodeClone
         if ($k === Node::KIND_NEG)    { $x = self::asNeg($n);    return new Neg(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_NOT)    { $x = self::asNot($n);    return new Not_(self::node($x->operand)); }
         if ($k === Node::KIND_BITNOT) { $x = self::asBitNot($n); return new BitNot_(self::node($x->operand), $n->type); }
-        if ($k === Node::KIND_CAST)   { $x = self::asCast($n);   return new Cast($x->target, self::node($x->operand), $n->type); }
+        if ($k === Node::KIND_CAST)   { $x = self::asCast($n);   $cc = new Cast($x->target, self::node($x->operand), $n->type); $cc->keepNull = $x->keepNull; return $cc; }
         if ($k === Node::KIND_CLASS_NAME) { $x = self::asClassName($n); return new ClassName_(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_INSTANCEOF) { $x = self::asInstanceof($n); return new Instanceof_(self::node($x->operand), $x->class); }
 

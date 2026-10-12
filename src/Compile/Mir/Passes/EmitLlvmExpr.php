@@ -3633,6 +3633,13 @@ trait EmitLlvmExpr
                 $out .= $this->coerceToI64();
                 $cv = $this->lastValue;
                 $out .= $this->coerceCellToStr($cv);
+                if ($c->keepNull) {
+                    $isNull = $this->ssa->allocReg();
+                    $out .= '  ' . $isNull . ' = icmp eq i64 ' . $cv . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
+                    $kept = $this->ssa->allocReg();
+                    $out .= '  ' . $kept . ' = select i1 ' . $isNull . ', ptr null, ptr ' . $this->lastValue . "\n";
+                    $this->lastValue = $kept;
+                }
                 // A CAST was the one consumer of a fresh cell temp with no
                 // owner: the ~30 string builtins get the drop through
                 // {@see EmitLlvm::$ptrArgCellByReg} and `echo` has its own, but
