@@ -6022,6 +6022,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         $narrow = null;
+        // NarrowReturns sharpened erased call results to objects: a string param they
+        // reach needs its `__toString` cast, which the first check could not see.
+        $tcCast = new \Compile\Mir\Passes\TypeCheck();
+        $tcCast->reprOnly = true;
+        $tcCast->castOnly = true;
+        $module = $tcCast->run($module);
+        $tcCast = null;
         \Manticore\Allocator::release('after-narrow');
         // The `#[TypeDef]` soundness gate: an erased value must never reach a
         // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a

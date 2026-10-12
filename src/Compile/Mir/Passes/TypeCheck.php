@@ -60,6 +60,14 @@ final class TypeCheck
      */
     public bool $reprOnly = false;
 
+    /**
+     * Run ONLY the weak-mode `__toString` cast of an object bound to a `string`
+     * param (set together with {@see $reprOnly}). The driver runs it again after
+     * NarrowReturns: that pass sharpens a foreach variable over a call result from
+     * erased to `obj`, after the full check already looked at the argument.
+     */
+    public bool $castOnly = false;
+
     /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
     private array $paramsByFn = [];
 
@@ -195,7 +203,8 @@ final class TypeCheck
                 $site->args[$ai] = $cast;
                 continue;
             }
-            if (!$this->reprOnly && $this->incompatible($this->provenType($arg), $p->type)) {
+            if ($this->castOnly) { continue; }
+            if (!$this->reprOnly &&$this->incompatible($this->provenType($arg), $p->type)) {
                 if ($this->demoteArgMismatch) {
                     $this->demoteToTypeError($site, $arg, $p, $label, $ai, $inFn);
                     return;
@@ -403,7 +412,7 @@ final class TypeCheck
         // A Monomorphize clone shares its generic's docblock shapes and body;
         // the generic stays in the module and its nodes keep their source
         // lines, so the clone would only repeat every finding without one.
-        if (\str_contains($inFn, '$mono$')) { return; }
+        if ($this->castOnly || \str_contains($inFn, '$mono$')) { return; }
         if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
             $rt = $this->returnTypes[$inFn] ?? null;
             if ($rt !== null && $rt->hasShape()) {
