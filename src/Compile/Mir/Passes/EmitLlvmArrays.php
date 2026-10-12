@@ -2849,6 +2849,46 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    private string $reloadedBase = '';
+
+    /** @var array<string,bool> the current function's by-ref param names */
+    private array $byRefParamNames = [];
+
+    /**
+     * A key or value that RUNS CODE may write the very BY-REF PARAM this store loaded
+     * its buffer from — `$seen[$id] = walk($seen)` hands the caller's array down again
+     * and the callee may grow or replace it. php reads the container after the value
+     * is computed, so the base is loaded (and separated) again here; the buffer lands
+     * in {@see $reloadedBase}, the old one when nothing could have moved it.
+     */
+    private function reloadStoreBase(StoreElement $se, bool $baseCell, string $arrPtr, string $cowFn): string
+    {
+        $this->reloadedBase = $arrPtr;
+        if ($se->array->kind !== Node::KIND_LOAD_LOCAL || !isset($this->byRefParamNames[$this->loadLocalNameOf($se->array)])) { return ''; }
+        if (!$this->nodeRunsCode($se->value) && !$this->nodeRunsCode($se->index)) { return ''; }
+        $out = $this->emitNode($se->array);
+        $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+        $cow = $this->ssa->allocReg();
+        $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $this->lastValue . ")\n";
+        $out .= $this->vecWriteBack($se->array, $cow, $baseCell);
+        $this->reloadedBase = $cow;
+        return $out;
+    }
+
+    private function loadLocalNameOf(\Compile\Mir\LoadLocal $n): string { return $n->name; }
+
+    private function nodeRunsCode(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ) {
+            return true;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->nodeRunsCode($c)) { return true; }
+        }
+        return false;
+    }
     private function emitStoreElementUnified(StoreElement $se): string
     {
         // A `mixed`/cell base (mixed property / param holding an array) carries
@@ -2929,6 +2969,8 @@ trait EmitLlvmArrays
         $next = $this->ssa->allocReg();
         if ($isAppend) {
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $this->reloadStoreBase($se, $baseCell, $arrPtr, $cowFn);
+            $arrPtr = $this->reloadedBase;
             $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $arrPtr . ', i64 ' . $val . ")\n";
@@ -2941,6 +2983,8 @@ trait EmitLlvmArrays
             $out .= $this->coerceToI64();
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $this->reloadStoreBase($se, $baseCell, $arrPtr, $cowFn);
+            $arrPtr = $this->reloadedBase;
             $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $curE = '';
@@ -2973,6 +3017,8 @@ trait EmitLlvmArrays
             $out .= $this->coerceToPtr();
             $key = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $this->reloadStoreBase($se, $baseCell, $arrPtr, $cowFn);
+            $arrPtr = $this->reloadedBase;
             $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $curE = '';
@@ -2996,6 +3042,8 @@ trait EmitLlvmArrays
             $out .= $this->coerceToI64();
             $idx = $this->lastValue;
             $out .= $this->emitStoreElemValue($se, $boxVal);
+            $out .= $this->reloadStoreBase($se, $baseCell, $arrPtr, $cowFn);
+            $arrPtr = $this->reloadedBase;
             $out .= $boxVal ? $this->emitElemEncode($arrPtr) : $this->emitElemEncodeRaw($arrPtr, $se);
             $val = $this->elemValReg;
             $curE = '';

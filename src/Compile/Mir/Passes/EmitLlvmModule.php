@@ -980,7 +980,11 @@ trait EmitLlvmModule
         $this->writtenNamesFn = $fn->name;
         $this->wnFnBody = $fn->body;
         $this->wnFnParams = [];
-        foreach ($fn->params as $wp) { $this->wnFnParams[$wp->name] = true; }
+        $this->byRefParamNames = [];
+        foreach ($fn->params as $wp) {
+            $this->wnFnParams[$wp->name] = true;
+            if ($wp->byRef) { $this->byRefParamNames[$wp->name] = true; }
+        }
         $this->arrayKeyLocalsFn = '';
         if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
