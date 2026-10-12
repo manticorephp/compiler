@@ -135,7 +135,7 @@ final class SpillFreshBases
         $this->refMasks = [];
         $this->refVariadic = [];
         foreach ($module->functions as $fn) {
-            if ($fn->ffiSymbol !== null || $fn->returnsByRef) { $this->notOwned[$fn->name] = true; }
+            if ($fn->ffiSymbol !== null) { $this->notOwned[$fn->name] = true; }
             $mask = [];
             $lastVariadicRef = false;
             foreach ($fn->params as $p) {

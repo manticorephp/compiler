@@ -781,8 +781,7 @@ final class Ownership
             if ($fn === $cn) { return true; }
         }
         if ($lastCallWasBuiltin) { return false; }
-        return isset($this->ctx->moduleFns[$fn])
-            && !($this->ctx->returnsByRef[$fn] ?? false);
+        return isset($this->ctx->moduleFns[$fn]);
     }
 
     /**
@@ -869,7 +868,7 @@ final class Ownership
             if ($ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL || $ck === Node::KIND_INVOKE) { return 'closure'; }
             if ($ck === Node::KIND_CALL) {
                 $cfn = $a->function;
-                if (isset($this->ctx->moduleFns[$cfn]) && !($this->ctx->returnsByRef[$cfn] ?? false)) { return 'closure'; }
+                if (isset($this->ctx->moduleFns[$cfn])) { return 'closure'; }
             }
             return '';
         }
@@ -906,7 +905,7 @@ final class Ownership
               || ($k === Node::KIND_ADD && $tk === Type::KIND_ARRAY);
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
-            $owned = isset($this->ctx->moduleFns[$fn]) && !($this->ctx->returnsByRef[$fn] ?? false);
+            $owned = isset($this->ctx->moduleFns[$fn]);
             // …or a BUILTIN that mints a fresh array. A module body is evidence
             // a user BODY was called, and a codegen builtin has no body — so
             // `array_slice(explode($d, $s), 0, 2)` stranded the exploded vec:
