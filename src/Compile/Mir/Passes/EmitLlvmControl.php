@@ -717,7 +717,7 @@ trait EmitLlvmControl
         if (!$at->isArray()) { return ''; }
         $el = $at->element;
         if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) { return 'veccellown'; }
-        return '';
+        return $this->discardReleaseFlavor($at);
     }
 
     private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
