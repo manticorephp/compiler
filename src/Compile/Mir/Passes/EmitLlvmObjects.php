@@ -1441,6 +1441,10 @@ trait EmitLlvmObjects
      * With 3 130 classes that is how one Doctrine function reached 101 MB of IR.
      * Every arm is a function of the SLOT and the NAME, never of the call site,
      * so there is exactly one correct body per property in the module.
+     *
+     * @param \Compile\Mir\ClassDef[] $fixed
+     * @param array<string,\Compile\Mir\EnumDef> $enumArms
+     * @param array<string,string> $magic class name → declaring class (a bare `array` would erase its key channel)
      */
     private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag): string
     {
