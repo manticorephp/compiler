@@ -7297,12 +7297,14 @@ trait EmitLlvmBuiltins
         $message = \count($args) > 0
             ? $args[0]
             : new \Compile\Mir\StringConst('', Type::string_());
+        // An optional 2nd literal names the class (default \Error).
+        $cls = \count($args) > 1 && $args[1]->kind === Node::KIND_STRING_CONST ? $args[1]->value : 'Error';
         $throw = new \Compile\Mir\Throw_(
-            new \Compile\Mir\NewObj('Error', [
+            new \Compile\Mir\NewObj($cls, [
                 $message,
                 new \Compile\Mir\IntConst(0, Type::int_()),
                 new \Compile\Mir\NullConst(Type::obj('Throwable')),
-            ], Type::obj('Error')),
+            ], Type::obj($cls)),
             Type::void(),
         );
         $out = $this->emitNode($throw);

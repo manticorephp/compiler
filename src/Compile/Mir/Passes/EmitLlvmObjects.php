@@ -446,7 +446,7 @@ trait EmitLlvmObjects
                 } else {
                     // Default-fill the trailing optional ctor params (param 0 is
                     // `$this`, provided args cover [1 .. argc]).
-                    $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true);
+                    $out .= $this->emitDefaultArgPad($ctorClass . '____construct', $argc + 1, true, 1);
                     $argList .= $this->lastPadArgs;
                     $padDrops = $this->lastPadDrops;
                 }
@@ -6861,7 +6861,7 @@ trait EmitLlvmObjects
         // Catch-all default pad (mirrors emitMethodCall); a static call is
         // usually lower-filled, but an unresolved-at-lowering callee may
         // arrive short — never leave a trailing optional unset.
-        $out .= $this->emitDefaultArgPad($cls . '__' . $n->method, $ai, !$first);
+        $out .= $this->emitDefaultArgPad($cls . '__' . $n->method, $ai, !$first, 0);
         $argList .= $this->lastPadArgs;
         $padDrops = $refSlotDrops . $this->lastPadDrops;
         $btName = '';
@@ -7098,7 +7098,9 @@ trait EmitLlvmObjects
             $this->vdArmList = \implode(', ', $kept);
             return '';
         }
-        $out = $this->emitDefaultArgPad($sym, $have, true);
+        // A site whose argument count is known (receiver + written args)
+        // raises php's ArgumentCountError for a required param it left out.
+        $out = $this->emitDefaultArgPad($sym, $have, true, $site > 0 ? 1 : -1);
         $this->vdArmList = \implode(', ', $parts) . $this->lastPadArgs;
         $this->vdArmDrops = $this->lastPadDrops;
         return $out;
@@ -8433,7 +8435,7 @@ trait EmitLlvmObjects
         // isn't default-filled at lowering (class unknown pre-InferTypes),
         // so the callee would read an uninitialized arg register. Param 0 is
         // `$this`, so provided params cover indices [0 .. $ai].
-        $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true);
+        $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true, 1);
         $argList .= $this->lastPadArgs;
         // The fallback's by-ref pad slots are the site's: an arm that re-pads
         // leaves them holding the default, one that keeps them sees the

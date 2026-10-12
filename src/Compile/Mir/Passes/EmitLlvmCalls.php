@@ -3367,6 +3367,16 @@ trait EmitLlvmCalls
                 $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
                       . ', i64 ' . $dv . "\n";
                 $ev = $sel;
+            } elseif ($fnKey !== '' && !($vmask[$k] ?? false) && !($this->sigs->refParams[$fnKey][$k] ?? false)) {
+                // A REQUIRED param the pack is too short to reach.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $short = $this->ssa->allocReg();
+                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                $out .= $this->emitThrowIf($short, 'ArgumentCountError',
+                    'Too few arguments to function ' . $fnKey . '()');
             }
             // A BY-REF parameter dereferences what it is handed: a VALUE from
             // the pack crashed it. php binds the pack's element, a temporary
@@ -3419,7 +3429,13 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    private function emitDefaultArgPad(string $fnKey, int $firstMissingIdx, bool $haveArgs): string
+    /**
+     * @param int $implicit leading ABI slots that are no php argument (`$this` = 1);
+     *                      -1 = the site cannot tell, so a missing REQUIRED param
+     *                      is padded with zero instead of raising php's
+     *                      ArgumentCountError.
+     */
+    private function emitDefaultArgPad(string $fnKey, int $firstMissingIdx, bool $haveArgs, int $implicit = -1): string
     {
         $this->lastPadArgs = '';
         $this->lastPadDrops = '';
@@ -3462,11 +3478,33 @@ trait EmitLlvmCalls
                 $out .= $this->emitParamDefault($def, $ptypes[$pi], $tmask[$pi] ?? false);
                 $this->lastPadArgs .= $sep . 'i64 ' . $this->lastValue;
             } else {
+                if ($implicit >= 0 && !($this->sigs->variadicParams[$fnKey][$pi] ?? false)) {
+                    $out .= $this->emitTooFewArgs($fnKey, $pdefs, $ptypes, $firstMissingIdx - $implicit, $implicit);
+                }
                 $this->lastPadArgs .= $sep . 'i64 0';
             }
             $pi = $pi + 1;
         }
         return $out;
+    }
+
+    /**
+     * php's ArgumentCountError for a call that omits a REQUIRED parameter.
+     * @param array<int, Node|null> $pdefs
+     * @param array<int, Type> $ptypes
+     */
+    private function emitTooFewArgs(string $fnKey, array $pdefs, array $ptypes, int $passed, int $implicit): string
+    {
+        $required = 0;
+        $i = $implicit;
+        $n = \count($ptypes);
+        while ($i < $n) {
+            if (($pdefs[$i] ?? null) === null && !($this->sigs->variadicParams[$fnKey][$i] ?? false)) { $required = $i - $implicit + 1; }
+            $i = $i + 1;
+        }
+        $exact = $required === $n - $implicit;
+        return $this->emitThrowIf('true', 'ArgumentCountError', 'Too few arguments to function ' . $fnKey . '(), '
+            . (string)$passed . ' passed and ' . ($exact ? 'exactly' : 'at least') . ' ' . (string)$required . ' expected');
     }
 
     /**
@@ -3950,7 +3988,7 @@ trait EmitLlvmCalls
         // unserialize SIGSEGV. The emitter always knows the signature, so it is
         // the right place to close the gap; the object paths already padded here
         // and inherited the same by-ref hazard.
-        $out .= $this->emitDefaultArgPad($c->function, $ai, !$first);
+        $out .= $this->emitDefaultArgPad($c->function, $ai, !$first, 0);
         $argList .= $this->lastPadArgs;
         $omitRefDrops .= $this->lastPadDrops;
         // …and the mirror question: arguments the callee has NO parameter for
