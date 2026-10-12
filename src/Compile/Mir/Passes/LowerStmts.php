@@ -629,6 +629,21 @@ trait LowerStmts
             foreach ($body->stmts as $s) { $stmts[] = $s; }
             $body = new Block($stmts, Type::void());
         }
+        // `foreach ($config as $name => $config)`: php iterates the array the
+        // variable held when the loop began, and the binding overwrites only the
+        // variable. Iterating the slot itself read each bound VALUE back as the
+        // subject (symfony routing's ContentLoaderTrait counted keys 0, 1, …).
+        if (!$stmt->valueByRef && $stmt->expr->kind === 'Variable') {
+            $sn = $this->varName($stmt->expr);
+            if ($sn === $valueVar || $sn === $keyVar) {
+                $tmp = '__fe_snap_' . (string)$this->destrCounter;
+                $this->destrCounter = $this->destrCounter + 1;
+                return new Block([
+                    new StoreLocal($tmp, $array, Type::void()),
+                    new Foreach_(new LoadLocal($tmp, Type::unknown()), $keyVar, $valueVar, false, $body),
+                ], Type::void());
+            }
+        }
         return $this->hoistForeachSubject(
             new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body));
     }
