@@ -1019,7 +1019,13 @@ trait InferNodes
         // An inline `/** @var T $x */` on the binding is authoritative: seed the
         // slot with the declared type (retyping an array-literal init to match
         // its shape) so later element reads resolve. Wins over the heuristics.
-        if ($node->declaredType !== null) {
+        // …except an ARRAY claim over a value that is `mixed` by its own type:
+        // nothing makes it one, and a docblock is not checked by php.
+        // `/** @var RouteCollection[] $imported */ $imported = $this->import(…)
+        // ?: []` holds a single collection, which the next line wraps after
+        // `!\is_array($imported)` — folded to false, and no route loaded.
+        if ($node->declaredType !== null
+            && !($node->declaredType->isArray() && $valueType->kind === Type::KIND_CELL)) {
             $dt = $node->declaredType;
             if ($node->value->kind === Node::KIND_ARRAY_LIT && $dt->isArray()) {
                 $node->value->type = $dt;
