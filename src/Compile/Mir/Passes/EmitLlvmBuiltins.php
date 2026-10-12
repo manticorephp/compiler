@@ -1817,7 +1817,7 @@ trait EmitLlvmBuiltins
      * unboxed (tag stripped) first — else a builtin like strlen derefs the
      * boxed bits → SIGSEGV. A non-cell coerces as usual.
      */
-    private function emitPtrArg(Node $arg): string
+    private function emitPtrArg(Node $arg, bool $objOk = false): string
     {
         $out = $this->emitNode($arg);
         // Keep the TAGGED word of a fresh cell temp: the payload pointer below
@@ -1842,7 +1842,7 @@ trait EmitLlvmBuiltins
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
             $sp = $this->ssa->allocReg();
-            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr(i64 ' . $cw . ")\n";
+            $out .= '  ' . $sp . ' = call ptr @__manticore_cell_to_strptr' . ($objOk ? '' : '_s') . '(i64 ' . $cw . ")\n";
             $pm = $this->ssa->allocReg();
             $out .= '  ' . $pm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
             $pp = $this->ssa->allocReg();
@@ -5360,13 +5360,18 @@ trait EmitLlvmBuiltins
         $out = '';
         // php evaluates EVERY argument before var_dump prints the first:
         // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
-        /** @var array<int, array{0: bool, 1: string}> float? + the value register */
+        /** @var array<int, array{0: ?bool, 1: string}> float? (null = closure) + the value register */
         $vals = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceTo('double');
                 $vals[] = [true, $this->lastValue];
+            } elseif (Type::isClosureLike($a->type)) {
+                // A closure handle is no tagged object: boxing it and walking
+                // the class table dereferenced garbage (SIGSEGV).
+                $out .= $this->emitNode($a);
+                $vals[] = [null, ""];
             } else {
                 $out .= $this->emitNode($a);
                 // An erased value may already BE a cell (array_shift over a
@@ -5379,7 +5384,9 @@ trait EmitLlvmBuiltins
             }
         }
         foreach ($vals as $v) {
-            if ($v[0]) {
+            if ($v[0] === null) {
+                $out .= $this->emitOutLit("object(Closure)#1 (0) {\n}\n");
+            } elseif ($v[0]) {
                 // Shortest round-trip via the Ryu core (uppercase E, no forced
                 // `.0` — var_dump form), byte-exact with php and faster than the
                 // old snprintf-probe. The core takes the raw i64 bits.
@@ -5981,7 +5988,7 @@ trait EmitLlvmBuiltins
      */
     private function biMcReflOf(array $args): string
     {
-        $out = $this->emitPtrArg($args[0]);
+        $out = $this->emitPtrArg($args[0], true);
         $objp = $this->lastValue;
         $descI = $this->ssa->allocReg();
         $out .= '  ' . $descI . ' = load i64, ptr ' . $objp . "\n";
@@ -6632,7 +6639,7 @@ trait EmitLlvmBuiltins
      * stable per-object int (unique among live objects). */
     private function biSplObjectId(array $args): string
     {
-        $out = $this->emitPtrArg($args[0]);
+        $out = $this->emitPtrArg($args[0], true);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         return $this->finishI64($out, $reg);
@@ -7291,12 +7298,14 @@ trait EmitLlvmBuiltins
         $message = \count($args) > 0
             ? $args[0]
             : new \Compile\Mir\StringConst('', Type::string_());
+        // An optional 2nd literal names the class (default \Error).
+        $cls = \count($args) > 1 && $args[1]->kind === Node::KIND_STRING_CONST ? $args[1]->value : 'Error';
         $throw = new \Compile\Mir\Throw_(
-            new \Compile\Mir\NewObj('Error', [
+            new \Compile\Mir\NewObj($cls, [
                 $message,
                 new \Compile\Mir\IntConst(0, Type::int_()),
                 new \Compile\Mir\NullConst(Type::obj('Throwable')),
-            ], Type::obj('Error')),
+            ], Type::obj($cls)),
             Type::void(),
         );
         $out = $this->emitNode($throw);
@@ -7705,7 +7714,7 @@ trait EmitLlvmBuiltins
         }
         $this->rt->needsMethodExists = true;
         if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
         } else {
             $out = $this->biGetClass([$args[0]]);
@@ -7740,7 +7749,7 @@ trait EmitLlvmBuiltins
         }
         $this->rt->needsPropExists = true;
         if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
         } else {
             $out = $this->biGetClass([$args[0]]);
@@ -7990,9 +7999,9 @@ trait EmitLlvmBuiltins
             // string. Neither can serve, so the closed world's is-a EDGES go
             // into a table and the two names are matched against it at runtime.
             $this->rt->needsClassIsa = true;
-            $out = $this->emitPtrArg($args[0]);
+            $out = $this->emitPtrArg($args[0], true);
             $subP = $this->lastValue;
-            $out .= $this->emitPtrArg($args[1]);
+            $out .= $this->emitPtrArg($args[1], true);
             $tgtP = $this->lastValue;
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @__mir_class_isa(ptr ' . $subP

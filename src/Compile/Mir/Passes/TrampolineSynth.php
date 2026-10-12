@@ -109,7 +109,7 @@ final class TrampolineSynth
     {
         $fqn = '\\' . \ltrim($fn, '\\');
         $mk = fn (string $args): string => $fqn . '(' . $args . ')';
-        $body = self::arms($req, $tot, $mk, $void);
+        $body = self::arms($req, $tot, $mk, $void, $fn);
         return self::ARGS_HINT . 'function ' . self::fnTrampBase($fn)
              . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
@@ -205,7 +205,7 @@ final class TrampolineSynth
         $req = $ctor === null ? 0 : $ctor->requiredParams();
         $tot = $ctor === null ? 0 : \count($ctor->params);
         $name = self::symBase($class, '__construct');
-        $body = self::arms($req, $tot, fn (string $args): string => 'new ' . $fqn . '(' . $args . ')', false);
+        $body = self::arms($req, $tot, fn (string $args): string => 'new ' . $fqn . '(' . $args . ')', false, $class . '::__construct');
         return self::ARGS_HINT . 'function ' . $name . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
 
@@ -224,7 +224,7 @@ final class TrampolineSynth
             $mk = fn (string $args): string => '$t->' . $method . '(' . $args . ')';
         }
         $name = self::symBase($class, $method);
-        $body = self::arms($req, $tot, $mk, $void);
+        $body = self::arms($req, $tot, $mk, $void, $class . '::' . $method);
         return self::ARGS_HINT . 'function ' . $name . '(' . $recv . ", array \$a): mixed {\n" . $body . "}\n";
     }
 
@@ -234,7 +234,7 @@ final class TrampolineSynth
      * comma list `$a[0], $a[1], …`. A void call returns null (an undefined i64
      * result otherwise). When R==T there is a single tail call, no count().
      */
-    private static function arms(int $req, int $tot, callable $mk, bool $void): string
+    private static function arms(int $req, int $tot, callable $mk, bool $void, string $label): string
     {
         $stmt = function (string $call) use ($void): string {
             return $void ? ('  ' . $call . "; return null;\n") : ('  return ' . $call . ";\n");
@@ -244,10 +244,19 @@ final class TrampolineSynth
             for ($i = 0; $i < $k; $i = $i + 1) { $parts[] = '$a[' . (string)$i . ']'; }
             return \implode(', ', $parts);
         };
-        if ($req >= $tot) {
-            return $stmt($mk($argsUpTo($tot)));
+        // A boxed argument array shorter than the REQUIRED arity is php's
+        // ArgumentCountError, not a read past the end of the array.
+        $guard = '';
+        if ($req > 0) {
+            $lbl = \str_replace('\\', '\\\\', \ltrim($label, '\\'));
+            $guard = '  if (count($a) < ' . (string)$req . ") { throw new \\ArgumentCountError('Too few arguments to function "
+                . $lbl . "(), ' . (string)count(\$a) . ' passed and "
+                . ($req === $tot ? 'exactly' : 'at least') . ' ' . (string)$req . " expected'); }\n";
         }
-        $out = "  \$n = count(\$a);\n";
+        if ($req >= $tot) {
+            return $guard . $stmt($mk($argsUpTo($tot)));
+        }
+        $out = $guard . "  \$n = count(\$a);\n";
         for ($k = $req; $k < $tot; $k = $k + 1) {
             $out .= '  if ($n <= ' . (string)$k . ") {\n  " . $stmt($mk($argsUpTo($k))) . "  }\n";
         }

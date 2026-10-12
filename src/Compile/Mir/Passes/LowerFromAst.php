@@ -5365,7 +5365,7 @@ final class LowerFromAst implements Pass
             // whether it reads them back are both known.
             return $out;
         }
-        return $this->defaultFillArgs($params, $astArgs);
+        return $this->defaultFillArgs($params, $astArgs, '', $fnName);
     }
 
     /**
@@ -6072,7 +6072,7 @@ final class LowerFromAst implements Pass
         $cls = $this->resolveStaticClass($expr->class);
         $params = $this->resolveMethodParams($cls, '__construct');
         if ($params !== null) {
-            $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'));
+            $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'), $cls . '::__construct');
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
@@ -6398,7 +6398,7 @@ final class LowerFromAst implements Pass
         }
         if ($params !== null) {
             $selfCls = $mcClass !== '' ? $this->resolveMethodDeclClass($mcClass, $expr->method) : '';
-            $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
+            $args = $this->defaultFillArgs($params, $expr->args, $selfCls, $mcClass !== '' ? $mcClass . '::' . $expr->method : '');
         } else {
             $args = [];
             foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
@@ -6536,7 +6536,7 @@ final class LowerFromAst implements Pass
         $params = $this->resolveMethodParams($class, $expr->method);
         if ($params !== null) {
             $selfCls = $this->resolveMethodDeclClass($class, $expr->method);
-            foreach ($this->defaultFillArgs($params, $expr->args, $selfCls) as $f) { $args[] = $f; }
+            foreach ($this->defaultFillArgs($params, $expr->args, $selfCls, $class . '::' . $expr->method) as $f) { $args[] = $f; }
         } elseif ($bindScope !== '') {
             $ai = 0;
             foreach ($expr->args as $a) {

@@ -238,7 +238,7 @@ function __mc_url_parse(string $url): array|false
             // is NOT read as scheme "host") — php treats "host:80/x" as authority.
             $after = \substr($rest, $cpos + 1);
             if (\substr($after, 0, 2) === '//' || !\__mc_all_digits_until_slash($after)) {
-                $scheme = \strtolower($cand);
+                $scheme = $cand;
                 $hasScheme = true;
                 $rest = $after;
             }

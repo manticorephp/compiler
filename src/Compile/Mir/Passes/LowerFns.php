@@ -1102,7 +1102,7 @@ trait LowerFns
      * @param \Parser\Ast\Expr[]  $astArgs
      * @return Node[]
      */
-    private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
+    private function defaultFillArgs(array $params, array $astArgs, string $selfClass = '', string $fnName = ''): array
     {
         $hasNamed = false;
         foreach ($astArgs as $a) {
@@ -1129,7 +1129,7 @@ trait LowerFns
             // `$fetchMode !== null` held, setFetchMode() ran with an array
             // POINTER, and every default fetch() came back as an object.
             while ($i < $vidx) {
-                $out[] = $this->lowerOmittedParam($params[$i], $selfClass);
+                $out[] = $this->lowerOmittedParam($params[$i], $selfClass, $fnName === '' || $hasNamed ? null : [$fnName, $params, \count($astArgs)]);
                 $i = $i + 1;
             }
             $out[] = new ArrayLit($packed, Type::unknown());
@@ -1199,7 +1199,7 @@ trait LowerFns
         $out = [];
         $i = 0;
         foreach ($params as $p) {
-            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass);
+            $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass, $fnName === '' || $hasNamed ? null : [$fnName, $params, \count($astArgs)]);
             $i = $i + 1;
         }
         return $out;
@@ -1212,9 +1212,26 @@ trait LowerFns
      * `self` is bound to it while lowering (an empty `$selfClass` — a plain
      * function — keeps the caller's context).
      */
-    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass): Node
+    /**
+     * @param array{0: string, 1: \Parser\Ast\Param[], 2: int}|null $site callee name,
+     *        its params and the positional count written, when a REQUIRED param
+     *        left out must raise php's ArgumentCountError at the call.
+     */
+    private function lowerOmittedParam(\Parser\Ast\Param $p, string $selfClass, ?array $site = null): Node
     {
         $pd = $this->paramDefault($p);
+        if ($pd === null && $site !== null && !$this->paramVariadic($p) && !$this->paramByRefDecl($p)) {
+            $required = 0;
+            $i = 0;
+            foreach ($site[1] as $q) {
+                $i = $i + 1;
+                if ($this->paramDefault($q) === null && !$this->paramVariadic($q)) { $required = $i; }
+            }
+            $msg = 'Too few arguments to function ' . $site[0] . '(), ' . (string)$site[2] . ' passed and '
+                . ($required === \count($site[1]) ? 'exactly' : 'at least') . ' ' . (string)$required . ' expected';
+            return new Call('__mir_throw_error', [new StringConst($msg, Type::string_()),
+                new StringConst('ArgumentCountError', Type::string_())], Type::cell());
+        }
         if ($pd === null) { return new NullConst(Type::null_()); }
         if ($selfClass === '') { return $this->lowerExpr($pd); }
         $prevSelf = $this->currentLowerClass;
