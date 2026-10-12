@@ -5101,6 +5101,46 @@ trait EmitLlvmObjects
         return [$sym, \count($names)];
     }
 
+    /**
+     * A synthesized MethodCall_ skips the lowering that packs trailing
+     * arguments into a variadic parameter's vec, so the callee read the first
+     * scalar as the vec pointer and answered an empty value. Pack them here.
+     *
+     * @param Node[] $args
+     * @return Node[]
+     */
+    private function packDynVariadicArgs(Node $recv, string $m, array $args): array
+    {
+        foreach ($args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return $args; }
+        }
+        $holder = '';
+        $cls = $recv->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls])) {
+            $holder = $this->resolveMethodClass($cls, $m);
+        } else {
+            foreach ($this->methodHolders($m) as $decl) {
+                if (\in_array(true, $this->sigs->variadicParams[$decl . '__' . $m] ?? [], true)) { $holder = $decl; break; }
+            }
+        }
+        if ($holder === '') { return $args; }
+        $key = $holder . '__' . $m;
+        $vi = -1;
+        foreach ($this->sigs->variadicParams[$key] ?? [] as $i => $v) {
+            if ($v) { $vi = $i; }
+        }
+        // Param 0 is $this, so the variadic sits at argument index $vi - 1.
+        $vt = $this->sigs->paramTypes[$key][$vi] ?? null;
+        if ($vi < 1 || $vt === null) { return $args; }
+        $out = [];
+        $rest = [];
+        foreach ($args as $i => $a) {
+            if ($i < $vi - 1) { $out[] = $a; } else { $rest[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        }
+        $out[] = new \Compile\Mir\ArrayLit($rest, $vt);
+        return $out;
+    }
+
     private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): string
     {
         $recv = $dp->object;
@@ -5123,7 +5163,7 @@ trait EmitLlvmObjects
             $out .= $hitL . ":\n";
             // $recv keeps its type (single class OR union), so emitMethodCall
             // dispatches monomorphically or via the runtime class_id switch.
-            $call = new \Compile\Mir\MethodCall_($recv, $m, $iv->args, $retT);
+            $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, (string)$m, $iv->args), $retT);
             $out .= $this->emitMethodCall($call);
             $out .= $this->boxToCell($retT);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
