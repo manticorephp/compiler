@@ -138,7 +138,7 @@ final class Builtins
             '__mc_refl_prop_setter', '__mc_refl_props_base', '__mc_refl_prow',
             '__mc_refl_prow_type', '__mc_refl_row_arity', '__mc_refl_row_attrs',
             '__mc_refl_row_flags', '__mc_refl_row_name', '__mc_refl_row_nattrs',
-            '__mc_refl_row_nparams', '__mc_refl_row_params', '__mc_refl_row_rettype',
+            '__mc_refl_row_nparams', '__mc_refl_row_params', '__mc_refl_row_rettype', '__mc_refl_row_declclass',
             '__mc_refl_row_tramp', '__mc_refl_tramp',
             // Boxing / tagging intrinsics.
             '__mir_obj_bag', '__mir_untag_str', 'manticore_box_int', 'manticore_tag',

@@ -183,7 +183,7 @@ final class RuntimeLibrary
      *     i64 nattrs, ptr attrs, ptr rettype }`. */
     public static function rmetaRowType(): string
     {
-        return '{ ptr, i64, ptr, i64, i64, ptr, i64, ptr, ptr }';
+        return '{ ptr, i64, ptr, i64, i64, ptr, i64, ptr, ptr, ptr }';
     }
 
     /** One parameter entry: `{ ptr name, ptr type, i64 flags }`. */
@@ -290,13 +290,13 @@ final class RuntimeLibrary
     /** One method/property row body, fields interpolated by the caller.
      *  `$nattrs`/`$attrsIr` are the member's attribute table (0 / 'null' when it
      *  carries none). */
-    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr, int $nattrs = 0, string $attrsIr = 'null', string $retTypeIr = 'null'): string
+    public static function rmetaRow(string $nameIr, int $flags, string $tramp, int $arity, int $nparams, string $paramsIr, int $nattrs = 0, string $attrsIr = 'null', string $retTypeIr = 'null', string $declIr = 'null'): string
     {
         return self::rmetaRowType() . ' { ptr ' . $nameIr . ', i64 ' . (string)$flags
              . ', ptr ' . $tramp . ', i64 ' . (string)$arity
              . ', i64 ' . (string)$nparams . ', ptr ' . $paramsIr
              . ', i64 ' . (string)$nattrs . ', ptr ' . $attrsIr
-             . ', ptr ' . $retTypeIr . ' }';
+             . ', ptr ' . $retTypeIr . ', ptr ' . $declIr . ' }';
     }
 
     /**

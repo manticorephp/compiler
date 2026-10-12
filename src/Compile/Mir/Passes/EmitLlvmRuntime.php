@@ -1928,6 +1928,8 @@ trait EmitLlvmRuntime
             $rsym = '@.rmeta.mret.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($rsym, $mm->returnType);
             $retFld = $this->strSymBytes($rsym);
+            $dsym = '@.rmeta.mdecl.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($dsym, $mdecl);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false)
@@ -1936,7 +1938,7 @@ trait EmitLlvmRuntime
                 $this->methodArity($mm),
                 \count($mm->params),
                 $pp[1],
-                $ap[1], $ap[2], $retFld);
+                $ap[1], $ap[2], $retFld, $this->strSymBytes($dsym));
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
