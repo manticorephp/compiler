@@ -6968,6 +6968,19 @@ final class LowerFromAst implements Pass
         return $mc;
     }
 
+    /** `$child` is `$anc` or extends it (the parent chain of declared classes). */
+    private function lowerClassIsA(string $child, string $anc): bool
+    {
+        $c = $child;
+        for ($depth = 0; $c !== '' && $depth < 64; $depth = $depth + 1) {
+            if (\strcasecmp($c, $anc) === 0) { return true; }
+            $cd = $this->classTable[$c] ?? null;
+            if ($cd === null) { return false; }
+            $c = (string)($cd->parent ?? '');
+        }
+        return false;
+    }
+
     private function lowerStaticCall(\Parser\Ast\StaticCall $expr): Node
     {
         $class = $expr->class;
@@ -7054,7 +7067,12 @@ final class LowerFromAst implements Pass
         // DatePoint (php declares it; our DateTimeImmutable does not) stopped
         // tier 2 with `dangling local $this`. Three lines reproduce it —
         // `class B { static function f() { return static::nope(); } }`.
-        if ($isSelfish && $this->currentLowerFnHasThis
+        // An instance method of the current class or an ANCESTOR named outright
+        // (`AbstractDumper::__construct(…)` inside HtmlDumper, skipping
+        // CliDumper's) is an instance call too: php hands it `$this`.
+        $namesOwnLine = !$isSelfish && $this->currentLowerClass !== ''
+            && $this->lowerClassIsA($this->currentLowerClass, \ltrim($class, '\\'));
+        if (($isSelfish || $namesOwnLine) && $this->currentLowerFnHasThis
             && !$this->methodIsStatic($class, $expr->method)) {
             $args[] = new LoadLocal('this', Type::obj($this->currentLowerClass));
         }
