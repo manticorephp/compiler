@@ -1,6 +1,5 @@
 <?php
 // A static callable array copied out of a static property default and invoked through an erased slot crashes (SIGBUS); symfony VarDumper casters.
-// issue: #232
 class EC { public static function ce(string $s, int $f = 0): string { return "ce:" . $s; } }
 class Cl {
     public static array $d = ["x" => ["EC", "ce"]];

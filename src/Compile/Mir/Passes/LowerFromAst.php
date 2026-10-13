@@ -1554,6 +1554,9 @@ final class LowerFromAst implements Pass
             }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
+        // A static-prop default (VarDumper's `$defaultCasters` map of
+        // `['C', 'm']`) is a callable-array literal no function body spells.
+        foreach ($module->globalDefaults as $gd) { $this->collectCallableArrayMethods($gd, $module); }
         $this->synthStaticCallable($module);
         if ($this->needsClosureFrom) {
             $prog = \Parser\Parser::parseSource("<?php\n" . $this->closureFromSource($module));
