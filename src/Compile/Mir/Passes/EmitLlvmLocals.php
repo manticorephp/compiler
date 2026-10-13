@@ -1297,7 +1297,9 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
-            $out .= $this->refParamOverwriteIr($sl->name, $p, $val);
+            $sv = $sl->value;
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $val,
+                $sv instanceof \Compile\Mir\LoadLocal && $sv->name === $sl->name);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite, where OwnershipFlow owns the old value.
@@ -1335,9 +1337,10 @@ trait EmitLlvmLocals
      * its argument to; an erased `array` names no flavor and keeps the leak. A
      * closure's by-ref parameter is cell-typed by the ABI, not by what it points
      * at (an array element of any representation), so it is left alone; so is a
-     * name rebound by `=&`, and a store of the word the slot already holds.
+     * name rebound by `=&`, and `$a = $a` (`$selfLoad`: the value read the slot
+     * itself and took no count, so the same word must not be given back).
      */
-    private function refParamOverwriteIr(string $name, string $slotPtr, string $val): string
+    private function refParamOverwriteIr(string $name, string $slotPtr, string $val, bool $selfLoad = false): string
     {
         if ($this->frame->isClosure || $this->frame->isTrampoline) { return ''; }
         $pt = $this->locals->refParamTypes[$name] ?? null;
@@ -1356,6 +1359,12 @@ trait EmitLlvmLocals
         }
         $old = $this->ssa->allocReg();
         $out = '  ' . $old . ' = load i64, ptr ' . $slotPtr . "\n";
+        if (!$selfLoad) {
+            // The stored value took its own count before this point, so the old
+            // one goes back even when it is the same word (`$n = $a; $a = $n`):
+            // skipped, that store leaked the whole array once per call.
+            return $out . $this->rcReleaseReg($old, $flavor);
+        }
         $diff = $this->ssa->allocReg();
         $out .= '  ' . $diff . ' = icmp ne i64 ' . $old . ', ' . $val . "\n";
         $relL = $this->ssa->allocLabel('refp.ow');
