@@ -120,6 +120,17 @@ trait EmitLlvmLocals
         return $this->localSlotAlloca($slot) . '  store i64 0, ptr ' . $slot . "\n";
     }
 
+    private function preallocateRefAddr(\Compile\Mir\RefAddr_ $n): string
+    {
+        $out = '';
+        if (!isset($this->locals->globalBacked[$n->target]) && !isset($this->locals->slots[$n->target])) {
+            $slot = $this->ssa->allocReg();
+            $this->locals->slots[$n->target] = $slot;
+            $out .= $this->localVarSlot($slot);
+        }
+        return $out . $this->preallocateLocals($n->lvalue);
+    }
+
     private function preallocateLocals(Node $n): string
     {
         $k = $n->kind;
@@ -349,6 +360,15 @@ trait EmitLlvmLocals
             $out = '';
             foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
+        }
+        // `$r = &$a[$k]` binds `$r` like an assignment does: its slot belongs to
+        // the frame from entry. Without one the prologue skipped `$r` — no element
+        // box co-owned by the frame ({@see emitElemRefBoxSlots}), no heap box for
+        // a by-ref capture — so the binding fell back to the element's ADDRESS
+        // inside the buffer, and a closure capturing `&$r` kept that address past
+        // the array's death and read freed memory.
+        if ($k === Node::KIND_REF_ADDR) {
+            return $this->preallocateRefAddr($n);
         }
         // Every kind NOT special-cased above recurses over its children
         // generically, so the walk is exhaustive by construction. It was a
