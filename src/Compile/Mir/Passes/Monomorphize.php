@@ -524,6 +524,15 @@ final class Monomorphize implements Pass
                 // unboxed, or not, by call-site order. The arg's ELEMENT
                 // still specializes the buffer; the fields stay the contract.
                 $t = $p->type->hasShape() ? $this->shapedParamType($p->type, $at) : $at;
+                // An INFERRED record (a literal's fields) is the first call site's
+                // guess, not a contract: a body that writes an element of the param
+                // (`$m['k'] = 'str'` over a `k:vec[string]` field) would store past it.
+                if (!$p->type->hasShape() && $t->isShape() && !$t->declared
+                    && $t->key !== null && $this->bodyStoresElementOf($fn->body, $p->name)) {
+                    $t = $t->key->kind === Type::KIND_INT
+                        ? Type::vec($t->element ?? Type::cell())
+                        : Type::assoc($t->key, $t->element ?? Type::cell());
+                }
             }
             $np = new Param($p->name, $t, $p->byRef, $p->variadic, $p->default);
             $np->refOut = $p->refOut;
@@ -566,6 +575,19 @@ final class Monomorphize implements Pass
         );
         $clone->returnArrayHinted = $fn->returnArrayHinted;
         return $clone;
+    }
+
+    /** Does `$n` write an element of local `$name` (`$name[k] = v`, `$name[] = v`)? */
+    private function bodyStoresElementOf(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT
+            && $n->array->kind === Node::KIND_LOAD_LOCAL && $n->array->name === $name) {
+            return true;
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->bodyStoresElementOf($c, $name)) { return true; }
+        }
+        return false;
     }
 
     /**
