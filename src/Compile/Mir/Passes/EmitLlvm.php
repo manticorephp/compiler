@@ -832,6 +832,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropArrayBase = [];
         $this->refCellPropNames = [];
         $this->needsObjectVarsFn = false;
+        $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
@@ -1160,6 +1161,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->emitNewDynFns();
         $extraBodies .= $this->emitErasedIndexFns();
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
+        if ($this->needsObjectVarsMgFn) { $extraBodies .= $this->emitObjectVarsFn(true); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
@@ -2002,6 +2004,8 @@ final class EmitLlvm implements EmitVisitor
     /** A site asked for `get_object_vars`' class-table walk, so the module needs
      *  the one shared body ({@see EmitLlvmBuiltins::emitObjectVarsFn}). */
     private bool $needsObjectVarsFn = false;
+    /** Same walk, keys mangled for the `(array)` cast. */
+    private bool $needsObjectVarsMgFn = false;
 
     /** A site asked for the erased `get_class()` body. */
     private bool $needsGetClassFn = false;

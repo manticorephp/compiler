@@ -4104,7 +4104,7 @@ trait EmitLlvmExpr
                 // SIGSEGV'd on `public int $id`; and where it did not fault it
                 // answered `[]`, which is the `{}` that `json_encode` of an
                 // object has been rendering.
-                $out .= $this->emitObjectVarsOfPtr($opp);
+                $out .= $this->emitObjectVarsOfPtr($opp, true);
                 // OWNED on every arm — no retain here (see the helper).
                 $out .= '  store ptr ' . $this->lastValue . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
@@ -4171,7 +4171,7 @@ trait EmitLlvmExpr
                 $declared = $cd !== null && $cd->propertyNames !== [];
                 $decl = '';
                 if ($declared) {
-                    $out .= $this->emitDeclaredPropsArray($objp, $cls);
+                    $out .= $this->emitDeclaredPropsArray($objp, $cls, false, false, true);
                     $decl = $this->lastValue;
                     if (!$cd->usesBag()) {
                         $this->lastValue = $decl; $this->lastValueType = 'ptr';

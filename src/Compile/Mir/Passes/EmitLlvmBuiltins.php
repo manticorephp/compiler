@@ -8438,7 +8438,17 @@ trait EmitLlvmBuiltins
      * declared arm mints one, the bag arm co-owns), so the caller must not
      * retain it again.
      */
-    private function emitObjectVarsOfPtr(string $objPtr): string
+    /** php's `(array)` key for a property: "\0*\0name" protected, "\0Declarer\0name" private. */
+    private function mangledPropKey(\Compile\Mir\ClassDef $cd, string $pn): string
+    {
+        $pm = $cd->propertyMeta[$pn] ?? null;
+        if ($pm === null || $pm->visibility === 'public') { return $pn; }
+        if ($pm->visibility === 'protected') { return "\0*\0" . $pn; }
+        $decl = \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cd->name, '\\');
+        return "\0" . $decl . "\0" . $pn;
+    }
+
+    private function emitObjectVarsOfPtr(string $objPtr, bool $mangle = false): string
     {
         // ONE copy per module, CALLED — not spliced into every site. The walk is
         // a switch with one arm per class that declares properties, and each arm
@@ -8453,11 +8463,11 @@ trait EmitLlvmBuiltins
         // table ({@see EmitLlvm::linkonceRuntime} is for the preamble, whose
         // helpers carry no module-local information). `noinline` because -O2
         // would otherwise splice it straight back into the few callers.
-        $this->needsObjectVarsFn = true;
+        if ($mangle) { $this->needsObjectVarsMgFn = true; } else { $this->needsObjectVarsFn = true; }
         $r = $this->ssa->allocReg();
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
-        return '  ' . $r . ' = call ptr @' . $this->mirHelperSym('__mir_object_vars') . '(ptr ' . $objPtr . ")\n";
+        return '  ' . $r . ' = call ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . '(ptr ' . $objPtr . ")\n";
     }
 
     /**
@@ -8511,19 +8521,19 @@ trait EmitLlvmBuiltins
 
     /** The one shared body {@see emitObjectVarsOfPtr} calls. Emitted beside the
      *  function bodies (not the preamble) when a site asked for it. */
-    private function emitObjectVarsFn(): string
+    private function emitObjectVarsFn(bool $mangle = false): string
     {
-        $body = $this->emitObjectVarsInline('%gov.obj');
+        $body = $this->emitObjectVarsInline('%gov.obj', $mangle);
         // `optnone` on top: this walk is a REFLECTIVE fallback (an erased receiver),
         // cold by construction, and at 1.2 MB it was the single most expensive
         // function in the whole backend — 7.22 s of clang's 136.7 s of
         // per-function optimization (5.3%), measured with `-ftime-trace`.
         // Optimizing a cold dispatcher buys nothing at runtime.
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 
-    private function emitObjectVarsInline(string $objPtr): string
+    private function emitObjectVarsInline(string $objPtr, bool $mangle = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -8550,7 +8560,7 @@ trait EmitLlvmBuiltins
             $lbl = $this->ssa->allocLabel('gov.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname);
+            $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname, false, false, $mangle);
             $props = $this->lastValue;
             // A class can have BOTH — `#[AllowDynamicProperties] class Q { public
             // int $a; }` with `$q->extra = 9`. Declared first, bag second, php's
@@ -8812,7 +8822,7 @@ trait EmitLlvmBuiltins
      * its case SINGLETON, since two ordinals of different enums are the same
      * word.
      */
-    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false, bool $forCompare = false): string
+    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false, bool $forCompare = false, bool $mangle = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -8880,7 +8890,7 @@ trait EmitLlvmBuiltins
                 }
                 $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
-                      . $cur . ', ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
+                      . $cur . ', ptr ' . $this->litStr($mangle ? $this->mangledPropKey($cd, $pn) : $pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
                 $cur = $next;
             }
         }
