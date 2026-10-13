@@ -1602,6 +1602,13 @@ trait LowerPrelude
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
             'PHP_VERSION' => '8.5.11', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
+            'DATE_ATOM' => 'Y-m-d\\TH:i:sP', 'DATE_COOKIE' => 'l, d-M-Y H:i:s T',
+            'DATE_ISO8601' => 'Y-m-d\\TH:i:sO', 'DATE_ISO8601_EXPANDED' => 'X-m-d\\TH:i:sP',
+            'DATE_RFC822' => 'D, d M y H:i:s O', 'DATE_RFC850' => 'l, d-M-y H:i:s T',
+            'DATE_RFC1036' => 'D, d M y H:i:s O', 'DATE_RFC1123' => 'D, d M Y H:i:s O',
+            'DATE_RFC7231' => 'D, d M Y H:i:s \\G\\M\\T', 'DATE_RFC2822' => 'D, d M Y H:i:s O',
+            'DATE_RFC3339' => 'Y-m-d\\TH:i:sP', 'DATE_RFC3339_EXTENDED' => 'Y-m-d\\TH:i:s.vP',
+            'DATE_RSS' => 'D, d M Y H:i:s O', 'DATE_W3C' => 'Y-m-d\\TH:i:sP',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references
             // compiling; a program that actually spawns `php` would need a real value.
