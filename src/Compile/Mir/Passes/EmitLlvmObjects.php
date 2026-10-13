@@ -7900,8 +7900,19 @@ trait EmitLlvmObjects
     private function holderTakesArgs(string $holder, string $method, int $argc): bool
     {
         $key = $holder . '__' . $method;
-        if (\count($this->sigs->paramTypes[$key] ?? []) >= $argc) { return true; }
-        foreach ($this->sigs->variadicParams[$key] ?? [] as $v) {
+        $n = \count($this->sigs->paramTypes[$key] ?? []);
+        $vmask = $this->sigs->variadicParams[$key] ?? [];
+        // …and that the call does not leave a REQUIRED one out: the site pads an
+        // omitted param from this holder's signature, and a required one pads as
+        // an unconditional ArgumentCountError. CachePoolPass::getNamespace($seed,
+        // $id), the first holder of the name, threw for every erased
+        // `$bundle->getNamespace()`.
+        $pdefs = $this->sigs->paramDefaults[$key] ?? [];
+        for ($i = $argc; $i < $n; $i++) {
+            if (($pdefs[$i] ?? null) === null && !($vmask[$i] ?? false)) { return false; }
+        }
+        if ($n >= $argc) { return true; }
+        foreach ($vmask as $v) {
             if ($v) { return true; }
         }
         return false;
