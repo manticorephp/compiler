@@ -1,0 +1,12 @@
+dtor a
+dtor b
+dtor c
+LogicException: boom
+dtor a
+dtor b
+dtor c
+RuntimeException: from a <- LogicException: boom
+dtor a
+dtor b
+dtor c
+RuntimeException: from c <- RuntimeException: from a <- LogicException: boom
