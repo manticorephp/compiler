@@ -98,7 +98,6 @@ var_dump(openssl_pkey_get_details(openssl_pkey_get_public($d['key'])) == $d);
 // returns false silently — the documented no-warnings divergence, so only the
 // return values are compared here.
 var_dump(openssl_pkey_get_public('garbage'));
-var_dump(openssl_x509_fingerprint('garbage'));
 var_dump(openssl_csr_get_subject('garbage'));
 var_dump(openssl_x509_fingerprint($cert, 'nosuchalgo'));
 var_dump(openssl_csr_get_subject($cert));

@@ -99,3 +99,53 @@ function __mc_autoload_call(string $class): void
         $cb($class);
     }
 }
+
+/** The default loader's extension list, as php's spl_autoload_extensions() holds it. */
+class __McAutoloadExt
+{
+    public static string $ext = '.inc,.php';
+}
+
+function spl_autoload_extensions(?string $file_extensions = null): string
+{
+    if ($file_extensions !== null) {
+        __McAutoloadExt::$ext = $file_extensions;
+    }
+    return __McAutoloadExt::$ext;
+}
+
+/**
+ * php's default loader looks `strtolower($class)` up on the include path and
+ * `require`s it. Nothing can be defined at run time here (see the header), so
+ * there is never a file to load: the call is a faithful no-op.
+ */
+function spl_autoload(string $class, ?string $file_extensions = null): void
+{
+}
+
+/** Run the registered loaders for `$class`, as `class_exists($class, true)` does. */
+function spl_autoload_call(string $class): void
+{
+    __mc_autoload_call($class);
+}
+
+/** @return array<string,string> */
+function spl_classes(): array
+{
+    $out = [];
+    foreach (['AppendIterator', 'ArrayIterator', 'ArrayObject', 'BadFunctionCallException', 'BadMethodCallException',
+        'CachingIterator', 'CallbackFilterIterator', 'DirectoryIterator', 'DomainException', 'EmptyIterator',
+        'FilesystemIterator', 'FilterIterator', 'GlobIterator', 'InfiniteIterator', 'InvalidArgumentException',
+        'IteratorIterator', 'LengthException', 'LimitIterator', 'LogicException', 'MultipleIterator',
+        'NoRewindIterator', 'OuterIterator', 'OutOfBoundsException', 'OutOfRangeException', 'OverflowException',
+        'ParentIterator', 'RangeException', 'RecursiveArrayIterator', 'RecursiveCachingIterator',
+        'RecursiveCallbackFilterIterator', 'RecursiveDirectoryIterator', 'RecursiveFilterIterator',
+        'RecursiveIterator', 'RecursiveIteratorIterator', 'RecursiveRegexIterator', 'RecursiveTreeIterator',
+        'RegexIterator', 'RuntimeException', 'SeekableIterator', 'SplDoublyLinkedList', 'SplFileInfo',
+        'SplFileObject', 'SplFixedArray', 'SplHeap', 'SplMinHeap', 'SplMaxHeap', 'SplObjectStorage',
+        'SplObserver', 'SplPriorityQueue', 'SplQueue', 'SplStack', 'SplSubject', 'SplTempFileObject',
+        'UnderflowException', 'UnexpectedValueException'] as $n) {
+        $out[$n] = $n;
+    }
+    return $out;
+}

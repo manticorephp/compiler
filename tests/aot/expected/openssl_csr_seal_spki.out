@@ -1,0 +1,105 @@
+string(32) "OpenSSLCertificateSigningRequest"
+bool(true)
+-----BEGIN CERTIFICATE REQUEST-----
+MIIC1jCCAb4CAQAwgZAxCzAJBgNVBAYTAlVBMQ0wCwYDVQQIDARLeWl2MQ0wCwYD
+VQQHDARLeWl2MRIwEAYDVQQKDAlNYW50aWNvcmUxETAPBgNVBAsMCENvbXBpbGVy
+MRowGAYDVQQDDBFsZWFmLmV4YW1wbGUudGVzdDEgMB4GCSqGSIb3DQEJARYRbGVh
+ZkBleGFtcGxlLnRlc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCm
+9/mgzzDWAN2Kj4/M2YLqElSWeEXW+6b440r3T//HvqOhWSVJNG+OTAkL7ERPO7Ka
+Fugo2Uk+QJ/9T+pd2zBIpxvKlw+qaiqFb+vUtToSTkkyzdZCHEoNb6gNq3sUTva5
+1073z+927A1Um6ARKOue/gUV1tXLsvOQXpM5Xbeuv9RUuFzOJ7PlnUkoDh5jWvtj
+ZaskJNYyxE49Uaqmr6yx8be0D0qU+34hltZcrjZvZp3i6jwWWmMzCx7gyiueReaA
+tTNa+ws3SC7N/9xTRFDgrH9OBMvPumWHr4GL+Ed3Qorh2MFjEJxMkp7psVwhaZ4E
+4gpHv/PjUP52w+XfwE3zAgMBAAGgADANBgkqhkiG9w0BAQsFAAOCAQEAo5U6iLaq
+d3XvnKSygnRxkiWsiI3bC+V5mROGgAu0B/msIrgknZBJPUJ5926ovV6OGw6eUOFI
+zvyYumx7df3VrFjsPMpHuYgHE2bA6pJGOTv2bDDmPsRW+sjl3P1KR4D3LTey49B6
+NOkB7HHafeTvG4fLFB3k11kRIGYQ5chLcfVj7c4nqap9wAdVMHPkOt4teQiaD1KM
+i0Pb25j9DqdxBCPRN5StosnJPx3q2xX03GxNO3WY2pe6eK5lzNJInCZ9vj8/9Y5d
+eBhItwQTGY+KU/r6phnqkS1N46BI65dbWeMYRIiRdj7FjjLsAmZJ4HeV8TLNlQX8
+FpO0Y/OlQcH5gg==
+-----END CERTIFICATE REQUEST-----
+bool(true)
+bool(true)
+bool(true)
+Array
+(
+    [C] => UA
+    [ST] => Kyiv
+    [L] => Kyiv
+    [O] => Manticore
+    [OU] => Compiler
+    [CN] => leaf.example.test
+    [emailAddress] => leaf@example.test
+)
+Array
+(
+    [C] => UA
+    [ST] => Kyiv
+    [L] => Kyiv
+    [O] => Manticore
+    [OU] => Compiler
+    [CN] => leaf.example.test
+    [emailAddress] => leaf@example.test
+)
+bool(true)
+bool(true)
+bool(true)
+string(32) "OpenSSLCertificateSigningRequest"
+string(20) "OpenSSLAsymmetricKey"
+int(1024)
+string(18) "OpenSSLCertificate"
+int(2)
+string(1) "7"
+bool(true)
+string(17) "leaf.example.test"
+string(10) "RSA-SHA256"
+int(2592000)
+int(1)
+bool(true)
+bool(true)
+string(17) "leaf.example.test"
+string(2) "99"
+int(31536000)
+int(1)
+bool(true)
+int(2)
+int(256)
+int(128)
+int(16)
+bool(true)
+string(26) "sealed message aes-128-cbc"
+bool(true)
+string(26) "sealed message aes-128-cbc"
+bool(true)
+int(2)
+int(256)
+int(128)
+int(0)
+bool(true)
+string(26) "sealed message aes-256-ecb"
+bool(true)
+string(26) "sealed message aes-256-ecb"
+bool(true)
+int(2)
+int(256)
+int(128)
+int(16)
+bool(true)
+string(26) "sealed message aes-128-ctr"
+bool(true)
+string(26) "sealed message aes-128-ctr"
+SPKAC=MIICSTCCATEwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCm9/mgzzDWAN2Kj4/M2YLqElSWeEXW+6b440r3T//HvqOhWSVJNG+OTAkL7ERPO7KaFugo2Uk+QJ/9T+pd2zBIpxvKlw+qaiqFb+vUtToSTkkyzdZCHEoNb6gNq3sUTva51073z+927A1Um6ARKOue/gUV1tXLsvOQXpM5Xbeuv9RUuFzOJ7PlnUkoDh5jWvtjZaskJNYyxE49Uaqmr6yx8be0D0qU+34hltZcrjZvZp3i6jwWWmMzCx7gyiueReaAtTNa+ws3SC7N/9xTRFDgrH9OBMvPumWHr4GL+Ed3Qorh2MFjEJxMkp7psVwhaZ4E4gpHv/PjUP52w+XfwE3zAgMBAAEWCWNoYWxsZW5nZTANBgkqhkiG9w0BAQQFAAOCAQEApOWvLgMeya8oogNO/OYPvV7iqvQcI4LQuQHu4wM6mkvuxTkPt5qJK06aRPfn0oV5amiKRy3cfBYiZDT3f2KZGQXxyB9Y0YjQ7GizNaauBhqqe6MuuW7b8LAzh3UmKt6ZQxfmKSdwaMpglXKGVn0SaKF+qWdpeYuQsOKpKI8PDtPFyvnkd85XhNWsfPxKIy6crHnJDR7GOGWdIanVc62z7NxDt+ATfCyyYCUwQWyxsHPrCJaXUBgcygFhqoqDqdtrjql8KsYDLjcuml89JgjYiDQvLIwe/bhipujrQiHj0L/Y2Nv8mZFmtnhsyo9IxOfoWtkH+vysC7oObObVRxlc/A==
+bool(true)
+bool(true)
+string(9) "challenge"
+SPKAC=MIICSTCCATEwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCm9/mgzzDWAN2Kj4/M2YLqElSWeEXW+6b440r3T//HvqOhWSVJNG+OTAkL7ERPO7KaFugo2Uk+QJ/9T+pd2zBIpxvKlw+qaiqFb+vUtToSTkkyzdZCHEoNb6gNq3sUTva51073z+927A1Um6ARKOue/gUV1tXLsvOQXpM5Xbeuv9RUuFzOJ7PlnUkoDh5jWvtjZaskJNYyxE49Uaqmr6yx8be0D0qU+34hltZcrjZvZp3i6jwWWmMzCx7gyiueReaAtTNa+ws3SC7N/9xTRFDgrH9OBMvPumWHr4GL+Ed3Qorh2MFjEJxMkp7psVwhaZ4E4gpHv/PjUP52w+XfwE3zAgMBAAEWCWNoYWxsZW5nZTANBgkqhkiG9w0BAQsFAAOCAQEAMXfADLTDRSdjaHPAfx0Yzd9d1jZYG+Z+7JHD19MOMUaJGHKI/77AxVoaIawvG2bqV0O63Lzr31HwuhQ2HOsHWJf81U/xzsBCwV1xVMIlKgCi5G4I/HsexZIsdoHu9KFhZw4ndYbL417iOYi5lhpwJKIOhFgxf5XM4JTT1m1o/QCiuOaC7B5Hrel1IBnuBO02stugiDnEmwUcu49xEzIeJZGzD/dBCurc6DgH31H2vP2UojOh9YkTsiH/H2qoE9GtfFhqAKLw79j7SwpOC22KCf1LNhzU/2quNgTCro74Mol6xeezC0ey0P4bPSgrCRO3JPH1u3CpiolHV1FXki3muw==
+bool(true)
+bool(true)
+string(9) "challenge"
+bool(true)
+bool(true)
+bool(true)
+default_cert_file,default_cert_file_env,default_cert_dir,default_cert_dir_env,default_private_dir,default_default_cert_area,ini_cafile,ini_capath
+string(13) "SSL_CERT_FILE"
+string(12) "SSL_CERT_DIR"
+bool(true)

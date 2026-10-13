@@ -136,6 +136,12 @@ foreach ([['s', $stdlibFiles], ['p', $preludeFiles]] as [$tier, $files]) {
     }
 }
 
+// A public function the compiler writes out as PHP source from the class table
+// (class_uses): a string literal, invisible to the tokenizer above. `__`-names
+// are internal helpers.
+\preg_match_all('/"function ([a-z][a-z_0-9]*)\(/', (string)\file_get_contents($root . '/src/Compile/Mir/Passes/LowerFromAst.php'), $gm);
+foreach ($gm[1] as $n) { note($ours, $spell, $n, 'p'); }
+
 // ── reference: this php ─────────────────────────────────────────────────
 /** @var array<string, array<string, true>> ext => lowercase fn => true */
 $phpFns = [];

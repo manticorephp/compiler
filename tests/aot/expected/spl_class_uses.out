@@ -1,0 +1,33 @@
+Array
+(
+    [App\Hello] => App\Hello
+)
+Array
+(
+    [App\World] => App\World
+)
+Array
+(
+    [App\Both] => App\Both
+)
+Array
+(
+    [App\Hello] => App\Hello
+    [App\World] => App\World
+)
+Array
+(
+    [App\World] => App\World
+)
+Array
+(
+)
+Array
+(
+)
+array(0) {
+}
+Array
+(
+    [App\Hello] => App\Hello
+)

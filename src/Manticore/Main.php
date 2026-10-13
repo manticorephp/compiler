@@ -4977,7 +4977,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $wsSrc = prelude_src_or_empty("websocket.php");
     // Ds\Map / Set live in ds_map.php, appended to the same unit (both are braced namespaces).
     $dsSrc = prelude_src_or_empty("ds.php");
+    $filterSrc = prelude_src_or_empty("filter.php");
+    $filterFnsSrc = prelude_src_or_empty("filter_fns.php");
     $dsMapSrc = prelude_src_or_empty("ds_map.php");
+    // ext/random — Random\Randomizer + engines, braced namespaces, DEMAND-GATED on the `Random` qualifier.
+    $randomSrc = prelude_src_or_empty("random.php");
     if ($dsSrc !== "" && $dsMapSrc !== "") {
         $dsSrc .= "\n" . $dsMapSrc;
     }
@@ -5047,6 +5051,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Same definedFunctions gate: adding a function to prelude/autoload.php
     // enrols it automatically, no second list to keep in step.
     $useAutoload = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($autoloadSrc));
+    // class_uses() is GENERATED from the class declarations, not read from a file.
+    $useClassUses = $demand->callsAny(['class_uses']);
+    // filter_var / filter_input & co. (entry points; validators live in the stdlib).
+    $useFilterFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($filterFnsSrc));
     // `array_multisort` is DESUGARED at the call site (LowerExprs) into
     // __mc_multisort_order + __mc_multisort_apply, so the user's source never
     // names either helper and the definedFunctions gate above cannot see the
@@ -5067,6 +5075,19 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'RecursiveFilterIterator',
             'RecursiveCallbackFilterIterator',
             'AppendIterator',
+            'LimitIterator',
+            'CachingIterator',
+            'RecursiveCachingIterator',
+            'InfiniteIterator',
+            'NoRewindIterator',
+            'RegexIterator',
+            'RecursiveRegexIterator',
+            'RecursiveArrayIterator',
+            'MultipleIterator',
+            'ParentIterator',
+            'GlobIterator',
+            'SplObserver',
+            'SplSubject',
             'EmptyIterator',
             'RecursiveIteratorIterator',
             'RecursiveTreeIterator',
@@ -5109,6 +5130,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         'restore_exception_handler',
         'register_shutdown_function',
         'trigger_error',
+        'user_error',
         'error_reporting',
         'error_get_last',
     ]);
@@ -5190,6 +5212,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Manticore\Ds — typed fixed-width arrays. Gates on the QUALIFIER like the
     // trees above: nobody reaches `Int32Array` without writing `Ds\`.
     $useDs = $demand->mentions('Ds');
+    $useRandom = $demand->mentions('Random');
+    // Filter\ exceptions are UNCONDITIONAL: the stdlib's filter_var() throws one by name
+    // (`new $cls`) and the stdlib build cannot see a demand-gated prelude class.
+    $useFilter = true;
     if ($useWs) {
         $useHttp = true;
         $useBuffer = true;
@@ -5261,6 +5287,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'get_declared_traits',
             'class_implements',
             'class_parents',
+            'get_mangled_object_vars',
             'get_defined_constants',
         ]);
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
@@ -5485,7 +5512,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // enrols it automatically. The class arm matters because a program can take
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
-        || $demand->mentions('OpenSSLAsymmetricKey');
+        || $demand->mentionsAny(['OpenSSLAsymmetricKey', 'OpenSSLCertificate', 'OpenSSLCertificateSigningRequest']);
     // ext/intl over the host ICU: gated on its functions and its classes, so a
     // program that uses neither never links libicu.
     // One gate per class family; each needs intl.php (UTF-16 helpers, the
@@ -5602,12 +5629,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // sapi.php MENTIONS $_SERVER, and superglobal demand is module-wide: the
         // seed for it is __mc_server(), which lives in cli.php. Without this the
         // request seam would link against an undefined symbol.
-        || $useSapi;
+        || $useSapi
+        // filter_input() & co. read $_SERVER; its seed (__mc_server) lives in cli.php.
+        || $useFilterFns;
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
     $useBacktrace = $demand->callsAnyMethod(['getTrace', 'getTraceAsString'])
-        || $demand->calls('debug_backtrace');
+        || $demand->calls('debug_backtrace') || $demand->calls('debug_print_backtrace');
     // PreludeDemand has scanned every input source and is no longer needed after
     // the gates above. Its release drops the token-derived maps and, critically,
     // the full source-array ownership it retained during the scan.
@@ -5659,6 +5688,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     }
     if ($useDs && $dsSrc === "") {
         dprint("compile failed: prelude: cannot read ds.php");
+        return null;
+    }
+    if ($useFilterFns && $filterFnsSrc === "") {
+        dprint("compile failed: prelude: cannot read filter_fns.php");
+        return null;
+    }
+    if ($useFilter && $filterSrc === "") {
+        dprint("compile failed: prelude: cannot read filter.php");
         return null;
     }
     if ($useWs && $wsSrc === "") {
@@ -5737,6 +5774,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->includeUnserialize = $useUnserialize;
         $lower->unserializeSrc = $unserializeSrc;
         $lower->includeArrayClasses = $useArrayClasses;
+        $lower->includeClassUses = $useClassUses;
         $lower->includeReflection = $useReflection;
         $lower->includeAttributes = $useAttributes;
         $lower->includeDateTime = $useDateTime;
@@ -5766,6 +5804,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->httpSrc = $useHttp ? $httpSrc : "";
         $lower->wsSrc = $useWs ? $wsSrc : "";
         $lower->dsSrc = $useDs ? $dsSrc : "";
+        $lower->randomSrc = $useRandom ? $randomSrc : "";
+        $lower->filterSrc = $useFilter ? $filterSrc : "";
+        $lower->filterFnsSrc = $useFilterFns ? $filterFnsSrc : "";
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
@@ -6285,6 +6326,7 @@ function analyze_prelude_files(): array
         "io_poll.php",
         "async.php",
         "pcntl.php",
+        "random.php",
         // Function-only prelude files. Omitting these is invisible in a normal
         // build (they are injected on demand all the same) but makes the
         // closed-world undefined-function rule report every one of their
@@ -6308,6 +6350,8 @@ function analyze_prelude_files(): array
         "websocket.php",
         "ds.php",
         "ds_map.php",
+        "filter.php",
+        "filter_fns.php",
         "weak.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the

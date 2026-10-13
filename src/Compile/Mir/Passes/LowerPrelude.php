@@ -165,6 +165,10 @@ trait LowerPrelude
             // buffering the output of.
             $src .= $this->obSrc;
         }
+        if ($this->filterFnsSrc !== '') {
+            // Calls the stdlib validators and throws Filter\ (parsed after this blob).
+            $src .= $this->filterFnsSrc;
+        }
         if ($this->autoloadSrc !== '') {
             // Order-independent — the queue holds callables and calls nothing
             // else in the prelude.
@@ -243,7 +247,8 @@ trait LowerPrelude
             $own = new \Compile\Mir\PreludeDemand([
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
-                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->filterSrc,
             ]);
             if (!$this->includeArrayFnsExt
                 && $own->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsExtSrc))) {
@@ -315,6 +320,16 @@ trait LowerPrelude
         if ($this->dsSrc !== '') {
             $ds = \Parser\Parser::parseSource("<?php\n" . $this->dsSrc);
             foreach ($ds->statements as $s) { $stmts[] = $s; }
+        }
+        // Random\ — braced namespaces, names nothing outside the core.
+        if ($this->randomSrc !== '') {
+            $rn = \Parser\Parser::parseSource("<?php\n" . $this->randomSrc);
+            foreach ($rn->statements as $s) { $stmts[] = $s; }
+        }
+        // Filter\ — braced namespace, extends \Exception only.
+        if ($this->filterSrc !== '') {
+            $fl = \Parser\Parser::parseSource("<?php\n" . $this->filterSrc);
+            foreach ($fl->statements as $s) { $stmts[] = $s; }
         }
         return $stmts;
     }
@@ -1328,6 +1343,116 @@ trait LowerPrelude
             // sort flags
             // ext/hash: the only flag php defines for hash_init().
             'HASH_HMAC' => 1,
+            // ext/hash mhash ids, crypt() and password_* integers.
+            'MHASH_CRC32' => 0,
+            'MHASH_MD5' => 1,
+            'MHASH_SHA1' => 2,
+            'MHASH_HAVAL256' => 3,
+            'MHASH_RIPEMD160' => 5,
+            'MHASH_TIGER' => 7,
+            'MHASH_GOST' => 8,
+            'MHASH_CRC32B' => 9,
+            'MHASH_HAVAL224' => 10,
+            'MHASH_HAVAL192' => 11,
+            'MHASH_HAVAL160' => 12,
+            'MHASH_HAVAL128' => 13,
+            'MHASH_TIGER128' => 14,
+            'MHASH_TIGER160' => 15,
+            'MHASH_MD4' => 16,
+            'MHASH_SHA256' => 17,
+            'MHASH_ADLER32' => 18,
+            'MHASH_SHA224' => 19,
+            'MHASH_SHA512' => 20,
+            'MHASH_SHA384' => 21,
+            'MHASH_WHIRLPOOL' => 22,
+            'MHASH_RIPEMD128' => 23,
+            'MHASH_RIPEMD256' => 24,
+            'MHASH_RIPEMD320' => 25,
+            'MHASH_SNEFRU256' => 27,
+            'MHASH_MD2' => 28,
+            'MHASH_FNV132' => 29,
+            'MHASH_FNV1A32' => 30,
+            'MHASH_FNV164' => 31,
+            'MHASH_FNV1A64' => 32,
+            'MHASH_JOAAT' => 33,
+            'MHASH_CRC32C' => 34,
+            'MHASH_MURMUR3A' => 35,
+            'MHASH_MURMUR3C' => 36,
+            'MHASH_MURMUR3F' => 37,
+            'MHASH_XXH32' => 38,
+            'MHASH_XXH64' => 39,
+            'MHASH_XXH3' => 40,
+            'MHASH_XXH128' => 41,
+            'PKCS7_TEXT' => 1,
+            'PKCS7_NOCERTS' => 2,
+            'PKCS7_NOSIGS' => 4,
+            'PKCS7_NOCHAIN' => 8,
+            'PKCS7_NOINTERN' => 16,
+            'PKCS7_NOVERIFY' => 32,
+            'PKCS7_DETACHED' => 64,
+            'PKCS7_BINARY' => 128,
+            'PKCS7_NOATTR' => 256,
+            'PKCS7_NOSMIMECAP' => 512,
+            'PKCS7_NOOLDMIMETYPE' => 1024,
+            'PKCS7_CRLFEOL' => 2048,
+            'PKCS7_NOCRL' => 8192,
+            'PKCS7_NO_DUAL_CONTENT' => 65536,
+            'OPENSSL_CIPHER_RC2_40' => 0,
+            'OPENSSL_CIPHER_RC2_128' => 1,
+            'OPENSSL_CIPHER_RC2_64' => 2,
+            'OPENSSL_CIPHER_DES' => 3,
+            'OPENSSL_CIPHER_3DES' => 4,
+            'OPENSSL_CIPHER_AES_128_CBC' => 5,
+            'OPENSSL_CIPHER_AES_192_CBC' => 6,
+            'OPENSSL_CIPHER_AES_256_CBC' => 7,
+            'OPENSSL_CMS_TEXT' => 1,
+            'OPENSSL_CMS_NOCERTS' => 2,
+            'OPENSSL_CMS_NOSIGS' => 12,
+            'OPENSSL_CMS_NOINTERN' => 16,
+            'OPENSSL_CMS_NOVERIFY' => 32,
+            'OPENSSL_CMS_DETACHED' => 64,
+            'OPENSSL_CMS_BINARY' => 128,
+            'OPENSSL_CMS_NOATTR' => 256,
+            'OPENSSL_CMS_OLDMIMETYPE' => 1024,
+            'OPENSSL_RAW_DATA' => 1,
+            'OPENSSL_ZERO_PADDING' => 2,
+            'OPENSSL_DONT_ZERO_PAD_KEY' => 4,
+            'OPENSSL_ALGO_SHA1' => 1,
+            'OPENSSL_ALGO_MD5' => 2,
+            'OPENSSL_ALGO_MD4' => 3,
+            'OPENSSL_ALGO_SHA224' => 6,
+            'OPENSSL_ALGO_SHA256' => 7,
+            'OPENSSL_ALGO_SHA384' => 8,
+            'OPENSSL_ALGO_SHA512' => 9,
+            'OPENSSL_ALGO_RMD160' => 10,
+            'OPENSSL_PKCS1_PADDING' => 1,
+            'OPENSSL_NO_PADDING' => 3,
+            'OPENSSL_PKCS1_OAEP_PADDING' => 4,
+            'OPENSSL_PKCS1_PSS_PADDING' => 6,
+            'OPENSSL_KEYTYPE_RSA' => 0,
+            'OPENSSL_KEYTYPE_DSA' => 1,
+            'OPENSSL_KEYTYPE_DH' => 2,
+            'OPENSSL_KEYTYPE_EC' => 3,
+            'OPENSSL_KEYTYPE_X25519' => 4,
+            'OPENSSL_KEYTYPE_ED25519' => 5,
+            'OPENSSL_KEYTYPE_X448' => 6,
+            'OPENSSL_KEYTYPE_ED448' => 7,
+            'X509_PURPOSE_SSL_CLIENT' => 1,
+            'X509_PURPOSE_SSL_SERVER' => 2,
+            'X509_PURPOSE_NS_SSL_SERVER' => 3,
+            'X509_PURPOSE_SMIME_SIGN' => 4,
+            'X509_PURPOSE_SMIME_ENCRYPT' => 5,
+            'X509_PURPOSE_CRL_SIGN' => 6,
+            'X509_PURPOSE_ANY' => 7,
+            'X509_PURPOSE_OCSP_HELPER' => 8,
+            'X509_PURPOSE_TIMESTAMP_SIGN' => 9,
+            'OPENSSL_ENCODING_DER' => 0,
+            'OPENSSL_ENCODING_SMIME' => 1,
+            'OPENSSL_ENCODING_PEM' => 2,
+            'PASSWORD_BCRYPT_DEFAULT_COST' => 12, 'CRYPT_SALT_LENGTH' => 123, 'CRYPT_STD_DES' => 1,
+            'CRYPT_EXT_DES' => 1, 'CRYPT_MD5' => 1, 'CRYPT_BLOWFISH' => 1, 'CRYPT_SHA256' => 1,
+            'CRYPT_SHA512' => 1, 'PASSWORD_ARGON2_DEFAULT_MEMORY_COST' => 65536,
+            'PASSWORD_ARGON2_DEFAULT_TIME_COST' => 4, 'PASSWORD_ARGON2_DEFAULT_THREADS' => 1,
             // ext/random: the mt_srand() engine variants.
             'MT_RAND_MT19937' => 0, 'MT_RAND_PHP' => 1,
             // ext/zlib: the container a gz* function wraps its DEFLATE stream in.
@@ -1502,7 +1627,13 @@ trait LowerPrelude
             'FILTER_FLAG_ENCODE_AMP' => 64, 'FILTER_FLAG_ALLOW_FRACTION' => 4096,
             'FILTER_FLAG_ALLOW_THOUSAND' => 8192, 'FILTER_FLAG_ALLOW_SCIENTIFIC' => 16384,
             'FILTER_FLAG_IPV4' => 1048576, 'FILTER_FLAG_IPV6' => 2097152,
-            'FILTER_FLAG_EMAIL_UNICODE' => 1048576,
+            'FILTER_FLAG_EMAIL_UNICODE' => 1048576, 'FILTER_FLAG_HOSTNAME' => 1048576,
+            'FILTER_THROW_ON_FAILURE' => 268435456, 'FILTER_SANITIZE_STRING' => 513,
+            'FILTER_SANITIZE_STRIPPED' => 513, 'FILTER_FLAG_STRIP_BACKTICK' => 512,
+            'FILTER_FLAG_NO_ENCODE_QUOTES' => 128, 'FILTER_FLAG_EMPTY_STRING_NULL' => 256,
+            'FILTER_FLAG_PATH_REQUIRED' => 262144, 'FILTER_FLAG_QUERY_REQUIRED' => 524288,
+            'FILTER_FLAG_NO_RES_RANGE' => 4194304, 'FILTER_FLAG_NO_PRIV_RANGE' => 8388608,
+            'FILTER_FLAG_GLOBAL_RANGE' => 536870912,
             // ext-intl grapheme_extract() type selector — php's own values
             // (host-invariant). The intl-grapheme polyfill defines these behind
             // `if (!defined(...))`, redundant once predefined here.
@@ -1537,6 +1668,8 @@ trait LowerPrelude
         if (isset($floats[$name])) { return new FloatConst($floats[$name], Type::float_()); }
 
         $strs = [
+            'PASSWORD_DEFAULT' => '2y', 'PASSWORD_BCRYPT' => '2y', 'PASSWORD_ARGON2I' => 'argon2i',
+            'PASSWORD_ARGON2ID' => 'argon2id', 'PASSWORD_ARGON2_PROVIDER' => 'standard',
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
             'PHP_VERSION' => '8.5.11', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',

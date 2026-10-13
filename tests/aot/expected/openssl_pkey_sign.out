@@ -1,0 +1,58 @@
+string(20) "OpenSSLAsymmetricKey"
+bool(false)
+int(2048)
+int(0)
+bool(true)
+b941ed0f096bc7933c53f559b319295b93a979fa 256
+int(1)
+int(0)
+int(1)
+bool(true)
+b68147f9a6c8c15cfbc679fd9615c762c8ae2d6b 256
+int(1)
+int(0)
+int(1)
+bool(true)
+737965418373e203a741be56455d9e9bb0cb473a 256
+int(1)
+int(0)
+int(1)
+bool(true)
+49d36bad2bb1be96fce95c3e5cd454d5da28a395 256
+int(1)
+int(0)
+int(1)
+bool(true)
+b68147f9a6c8c15cfbc679fd9615c762c8ae2d6b 256
+int(1)
+int(0)
+int(1)
+string(40) "b941ed0f096bc7933c53f559b319295b93a979fa"
+bool(true)
+a63c30f8f16fd1d9b9c47296d1e1a63b231e5b31
+bool(true)
+string(12) "short secret"
+bool(false)
+bool(true)
+int(256)
+bool(true)
+string(10) "top secret"
+bool(true)
+int(256)
+bool(true)
+string(10) "top secret"
+bool(false)
+bool(false)
+int(1024)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+string(20) "OpenSSLAsymmetricKey"
+bool(true)
+bool(true)
+int(1)
+string(20) "OpenSSLAsymmetricKey"
+bool(true)
+bool(true)
