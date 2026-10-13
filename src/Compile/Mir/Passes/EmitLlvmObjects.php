@@ -6294,6 +6294,25 @@ trait EmitLlvmObjects
                     }
                 }
             }
+            // `unset($o->{$name})`: a dynamic property lives in the bag; drop the entry.
+            if ($t->kind === Node::KIND_DYN_PROP) {
+                $dcls = $t->object->type->class ?? '';
+                if ($dcls !== '' && isset($this->classes[$dcls]) && $this->classes[$dcls]->usesBag()) {
+                    $out .= $this->emitDynMemberKey($t->name);
+                    $dKey = $this->lastValue;
+                    $out .= $this->emitNode($t->object);
+                    $out .= $this->coerceToPtr();
+                    $dObj = $this->lastValue;
+                    $dg = $this->ssa->allocReg();
+                    $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $dObj
+                          . ', i64 ' . (string)$this->classes[$dcls]->bagOffset() . "\n";
+                    $dBagI = $this->ssa->allocReg();
+                    $out .= '  ' . $dBagI . ' = load i64, ptr ' . $dg . "\n";
+                    $dBagP = $this->ssa->allocReg();
+                    $out .= '  ' . $dBagP . ' = inttoptr i64 ' . $dBagI . " to ptr\n";
+                    $out .= '  call void @__mir_array_unset_str(ptr ' . $dBagP . ', ptr ' . $dKey . ")\n";
+                }
+            }
             // vec element unset still deferred (needs hole / shift semantics).
         }
         $this->lastValue = '0';

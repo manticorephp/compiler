@@ -179,6 +179,10 @@ trait LowerExprs
                         $cells[] = $this->unsetGlobalsCell($a);
                         continue;
                     }
+                    if ($a->kind === 'ArrayAccess' && $a->array->kind === 'DynProp' && $a->index !== null) {
+                        $cells[] = $this->unsetDimOfDynProp($a);
+                        continue;
+                    }
                     $ts[] = $this->lowerExpr($a);
                 }
                 if ($cells === []) { return new Unset_($ts, Type::void()); }
@@ -903,6 +907,55 @@ trait LowerExprs
     /** Cached `getcwd()` with a trailing slash for {@see callSite()}; '-' = none. */
     private string $siteCwd = '';
 
+    /** `unset($o->{$n}[i])`: take the property out, unset in the copy, put it back. */
+    private function unsetDimOfDynProp(\Parser\Ast\ArrayAccess $a): Node
+    {
+        $dp = $a->array;
+        $tmp = '__dpu_' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $ct = Type::cell();
+        $idx = $this->foldNumericKey($this->lowerExpr($a->index));
+        return new Block([
+            new StoreLocal($tmp, $this->lowerExpr($dp), $ct),
+            new Unset_([new ArrayAccess_(new LoadLocal($tmp, $ct), $idx, Type::cell())], Type::void()),
+            new StoreDynProp_(
+                $this->lowerExpr($this->dynPropObject($dp)),
+                $this->lowerExpr($this->dynPropName($dp)),
+                new LoadLocal($tmp, $ct),
+                $ct,
+            ),
+        ], Type::void());
+    }
+
+    /**
+     * `$o->{$n}[i] = v`: a dynamic property read is a COPY, so the element store
+     * lands in a temp. Take the property out, store into it, put it back; the
+     * expression still yields v.
+     */
+    private function storeDimOfDynProp(\Parser\Ast\ArrayAccess $target, Node $value): Node
+    {
+        $dp = $target->array;
+        $tmp = '__dpw_' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $vtmp = $tmp . 'v';
+        $ct = Type::cell();
+        $idx = $target->index === null
+            ? new NullConst(Type::null_())
+            : $this->foldNumericKey($this->lowerExpr($target->index));
+        return new Block([
+            new StoreLocal($vtmp, $value, $value->type),
+            new StoreLocal($tmp, $this->lowerExpr($dp), $ct),
+            new StoreElement(new LoadLocal($tmp, $ct), $idx, new LoadLocal($vtmp, $value->type), $value->type),
+            new StoreDynProp_(
+                $this->lowerExpr($this->dynPropObject($dp)),
+                $this->lowerExpr($this->dynPropName($dp)),
+                new LoadLocal($tmp, $ct),
+                $ct,
+            ),
+            new LoadLocal($vtmp, $value->type),
+        ], $value->type);
+    }
+
     /** Build the store node for an assignment target + already-lowered value. */
     private function storeToTarget(\Parser\Ast\Expr $target, Node $value): Node
     {
@@ -916,6 +969,7 @@ trait LowerExprs
         if ($target->kind === 'ArrayAccess') {
             $g = $this->storeToGlobals($target, $value);
             if ($g !== null) { return $g; }
+            if ($target->array->kind === 'DynProp') { return $this->storeDimOfDynProp($target, $value); }
             $arr = $this->lowerExpr($target->array);
             $idx = $target->index === null
                 ? new NullConst(Type::null_())
