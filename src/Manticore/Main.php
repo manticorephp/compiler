@@ -4977,6 +4977,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $wsSrc = prelude_src_or_empty("websocket.php");
     // Ds\Map / Set live in ds_map.php, appended to the same unit (both are braced namespaces).
     $dsSrc = prelude_src_or_empty("ds.php");
+    $filterSrc = prelude_src_or_empty("filter.php");
+    $filterFnsSrc = prelude_src_or_empty("filter_fns.php");
     $dsMapSrc = prelude_src_or_empty("ds_map.php");
     // ext/random — Random\Randomizer + engines, braced namespaces, DEMAND-GATED on the `Random` qualifier.
     $randomSrc = prelude_src_or_empty("random.php");
@@ -5051,6 +5053,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $useAutoload = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($autoloadSrc));
     // class_uses() is GENERATED from the class declarations, not read from a file.
     $useClassUses = $demand->callsAny(['class_uses']);
+    // filter_var / filter_input & co. (entry points; validators live in the stdlib).
+    $useFilterFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($filterFnsSrc));
     // `array_multisort` is DESUGARED at the call site (LowerExprs) into
     // __mc_multisort_order + __mc_multisort_apply, so the user's source never
     // names either helper and the definedFunctions gate above cannot see the
@@ -5209,6 +5213,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // trees above: nobody reaches `Int32Array` without writing `Ds\`.
     $useDs = $demand->mentions('Ds');
     $useRandom = $demand->mentions('Random');
+    // Filter\ exceptions are UNCONDITIONAL: the stdlib's filter_var() throws one by name
+    // (`new $cls`) and the stdlib build cannot see a demand-gated prelude class.
+    $useFilter = true;
     if ($useWs) {
         $useHttp = true;
         $useBuffer = true;
@@ -5622,7 +5629,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // sapi.php MENTIONS $_SERVER, and superglobal demand is module-wide: the
         // seed for it is __mc_server(), which lives in cli.php. Without this the
         // request seam would link against an undefined symbol.
-        || $useSapi;
+        || $useSapi
+        // filter_input() & co. read $_SERVER; its seed (__mc_server) lives in cli.php.
+        || $useFilterFns;
     // Stack traces cost a frame push at EVERY call, so instrument only when the
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
@@ -5679,6 +5688,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     }
     if ($useDs && $dsSrc === "") {
         dprint("compile failed: prelude: cannot read ds.php");
+        return null;
+    }
+    if ($useFilterFns && $filterFnsSrc === "") {
+        dprint("compile failed: prelude: cannot read filter_fns.php");
+        return null;
+    }
+    if ($useFilter && $filterSrc === "") {
+        dprint("compile failed: prelude: cannot read filter.php");
         return null;
     }
     if ($useWs && $wsSrc === "") {
@@ -5788,6 +5805,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->wsSrc = $useWs ? $wsSrc : "";
         $lower->dsSrc = $useDs ? $dsSrc : "";
         $lower->randomSrc = $useRandom ? $randomSrc : "";
+        $lower->filterSrc = $useFilter ? $filterSrc : "";
+        $lower->filterFnsSrc = $useFilterFns ? $filterFnsSrc : "";
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
@@ -6331,6 +6350,8 @@ function analyze_prelude_files(): array
         "websocket.php",
         "ds.php",
         "ds_map.php",
+        "filter.php",
+        "filter_fns.php",
         "weak.php",
         // ext/simplexml + ext/dom: SimpleXMLElement, DOMDocument and the node
         // tree are prelude CLASSES, so closed-world analysis needs them for the

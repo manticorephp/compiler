@@ -1,0 +1,501 @@
+int "12" 0 => 12
+int " 12 " 0 => 12
+int "\f12" 0 => false
+int "+0" 0 => 0
+int "-0" 0 => 0
+int "012" 0 => false
+int "0x1A" 0 => false
+int "0x1A" 2 => 26
+int "017" 1 => 15
+int "0xFFFFFFFFFFFFFFFF" 2 => -1
+int "9223372036854775807" 0 => 9223372036854775807
+int "9223372036854775808" 0 => false
+int "1.5" 0 => false
+int "abc" 134217728 => NULL
+int "" 0 => false
+int range ok => 7
+int range bad => false
+int default => 3
+int true => 1
+bool '1' => true
+bool-null '1' => true
+bool 'yes' => true
+bool-null 'yes' => true
+bool 'Off' => false
+bool-null 'Off' => false
+bool 'on' => true
+bool-null 'on' => true
+bool 'no' => false
+bool-null 'no' => false
+bool '' => false
+bool-null '' => false
+bool 'maybe' => false
+bool-null 'maybe' => NULL
+bool ' TRUE ' => true
+bool-null ' TRUE ' => true
+bool null => false
+float '1.5' => 1.5
+float '1e3' => 1000.0
+float '-0' => 0.0
+float '1,000.5' => false
+float '.5' => 0.5
+float '5.' => 5.0
+float '1e' => false
+float 'x' => false
+float '1e999' => false
+float thousand => 1000.5
+float decimal => 1.5
+float range => false
+regexp ok => '123'
+regexp bad => false
+regexp missing => ValueError: filter_var(): "regexp" option is missing
+domain 'example.com' => 'example.com'
+hostname 'example.com' => 'example.com'
+domain 'example.com.' => 'example.com.'
+hostname 'example.com.' => 'example.com.'
+domain 'a..b' => false
+hostname 'a..b' => false
+domain '-a.com' => '-a.com'
+hostname '-a.com' => false
+domain 'a_b.com' => 'a_b.com'
+hostname 'a_b.com' => false
+domain '' => ''
+hostname '' => false
+url 'http://example.com' => 'http://example.com'
+url 'https://example.com/p?q=1#f' => 'https://example.com/p?q=1#f'
+url 'http://' => false
+url 'ftp://u:pw@h.com:21/' => 'ftp://u:pw@h.com:21/'
+url 'mailto:a@b.c' => 'mailto:a@b.c'
+url '//example.com' => false
+url 'http://exa mple.com' => false
+url 'http://[::1]/' => 'http://[::1]/'
+url 'javascript:alert(1)' => false
+url 'file:///etc/passwd' => 'file:///etc/passwd'
+url 'http://a_b.com' => false
+url 'urn:isbn:123' => false
+url path req => false
+url query req => false
+email 'a@b.co' => 'a@b.co'
+email 'a@b' => false
+email 'user+tag@example.com' => 'user+tag@example.com'
+email '"a b"@x.com' => false
+email 'a@[127.0.0.1]' => 'a@[127.0.0.1]'
+email 'ü@example.com' => false
+email 'a..b@x.com' => false
+email '.a@x.com' => false
+email unicode => 'ü@example.com'
+ip '127.0.0.1' => '127.0.0.1'
+ip4 '127.0.0.1' => '127.0.0.1'
+ip6 '127.0.0.1' => false
+ip nopriv '127.0.0.1' => '127.0.0.1'
+ip nores '127.0.0.1' => false
+ip global '127.0.0.1' => false
+ip '256.1.1.1' => false
+ip4 '256.1.1.1' => false
+ip6 '256.1.1.1' => false
+ip nopriv '256.1.1.1' => false
+ip nores '256.1.1.1' => false
+ip global '256.1.1.1' => false
+ip '01.2.3.4' => false
+ip4 '01.2.3.4' => false
+ip6 '01.2.3.4' => false
+ip nopriv '01.2.3.4' => false
+ip nores '01.2.3.4' => false
+ip global '01.2.3.4' => false
+ip '10.0.0.1' => '10.0.0.1'
+ip4 '10.0.0.1' => '10.0.0.1'
+ip6 '10.0.0.1' => false
+ip nopriv '10.0.0.1' => false
+ip nores '10.0.0.1' => '10.0.0.1'
+ip global '10.0.0.1' => false
+ip '192.168.1.1' => '192.168.1.1'
+ip4 '192.168.1.1' => '192.168.1.1'
+ip6 '192.168.1.1' => false
+ip nopriv '192.168.1.1' => false
+ip nores '192.168.1.1' => '192.168.1.1'
+ip global '192.168.1.1' => false
+ip '169.254.1.1' => '169.254.1.1'
+ip4 '169.254.1.1' => '169.254.1.1'
+ip6 '169.254.1.1' => false
+ip nopriv '169.254.1.1' => '169.254.1.1'
+ip nores '169.254.1.1' => false
+ip global '169.254.1.1' => false
+ip '8.8.8.8' => '8.8.8.8'
+ip4 '8.8.8.8' => '8.8.8.8'
+ip6 '8.8.8.8' => false
+ip nopriv '8.8.8.8' => '8.8.8.8'
+ip nores '8.8.8.8' => '8.8.8.8'
+ip global '8.8.8.8' => '8.8.8.8'
+ip '100.64.0.1' => '100.64.0.1'
+ip4 '100.64.0.1' => '100.64.0.1'
+ip6 '100.64.0.1' => false
+ip nopriv '100.64.0.1' => '100.64.0.1'
+ip nores '100.64.0.1' => '100.64.0.1'
+ip global '100.64.0.1' => false
+ip '::1' => '::1'
+ip4 '::1' => false
+ip6 '::1' => '::1'
+ip nopriv '::1' => '::1'
+ip nores '::1' => false
+ip global '::1' => false
+ip '::' => '::'
+ip4 '::' => false
+ip6 '::' => '::'
+ip nopriv '::' => '::'
+ip nores '::' => false
+ip global '::' => false
+ip 'fe80::1' => 'fe80::1'
+ip4 'fe80::1' => false
+ip6 'fe80::1' => 'fe80::1'
+ip nopriv 'fe80::1' => 'fe80::1'
+ip nores 'fe80::1' => false
+ip global 'fe80::1' => false
+ip 'fd12::1' => 'fd12::1'
+ip4 'fd12::1' => false
+ip6 'fd12::1' => 'fd12::1'
+ip nopriv 'fd12::1' => false
+ip nores 'fd12::1' => 'fd12::1'
+ip global 'fd12::1' => false
+ip '2001:db8::1' => '2001:db8::1'
+ip4 '2001:db8::1' => false
+ip6 '2001:db8::1' => '2001:db8::1'
+ip nopriv '2001:db8::1' => '2001:db8::1'
+ip nores '2001:db8::1' => '2001:db8::1'
+ip global '2001:db8::1' => false
+ip '2001:4860:4860::8888' => '2001:4860:4860::8888'
+ip4 '2001:4860:4860::8888' => false
+ip6 '2001:4860:4860::8888' => '2001:4860:4860::8888'
+ip nopriv '2001:4860:4860::8888' => '2001:4860:4860::8888'
+ip nores '2001:4860:4860::8888' => '2001:4860:4860::8888'
+ip global '2001:4860:4860::8888' => '2001:4860:4860::8888'
+ip '1:2:3:4:5:6:7:8' => '1:2:3:4:5:6:7:8'
+ip4 '1:2:3:4:5:6:7:8' => false
+ip6 '1:2:3:4:5:6:7:8' => '1:2:3:4:5:6:7:8'
+ip nopriv '1:2:3:4:5:6:7:8' => '1:2:3:4:5:6:7:8'
+ip nores '1:2:3:4:5:6:7:8' => '1:2:3:4:5:6:7:8'
+ip global '1:2:3:4:5:6:7:8' => '1:2:3:4:5:6:7:8'
+ip '1::2::3' => false
+ip4 '1::2::3' => false
+ip6 '1::2::3' => false
+ip nopriv '1::2::3' => false
+ip nores '1::2::3' => false
+ip global '1::2::3' => false
+ip '::ffff:1.2.3.4' => '::ffff:1.2.3.4'
+ip4 '::ffff:1.2.3.4' => false
+ip6 '::ffff:1.2.3.4' => '::ffff:1.2.3.4'
+ip nopriv '::ffff:1.2.3.4' => '::ffff:1.2.3.4'
+ip nores '::ffff:1.2.3.4' => false
+ip global '::ffff:1.2.3.4' => false
+ip 'g::1' => false
+ip4 'g::1' => false
+ip6 'g::1' => false
+ip nopriv 'g::1' => false
+ip nores 'g::1' => false
+ip global 'g::1' => false
+ip '1:2:3:4:5:6:7:8:9' => false
+ip4 '1:2:3:4:5:6:7:8:9' => false
+ip6 '1:2:3:4:5:6:7:8:9' => false
+ip nopriv '1:2:3:4:5:6:7:8:9' => false
+ip nores '1:2:3:4:5:6:7:8:9' => false
+ip global '1:2:3:4:5:6:7:8:9' => false
+mac '00:11:22:33:44:55' => '00:11:22:33:44:55'
+mac '00-11-22-33-44-55' => '00-11-22-33-44-55'
+mac '0011.2233.4455' => '0011.2233.4455'
+mac '00:11:22:33:44:5g' => false
+mac '00:11-22:33:44:55' => false
+mac sep => false
+san 516/0 => '3c623e68693c2f623e2022712220276127202620017fc3a92060746020c3a9'
+san 516/4 => '3c623e68693c2f623e20227122202761272026207fc3a92060746020c3a9'
+san 516/8 => '3c623e68693c2f623e2022712220276127202620012060746020'
+san 516/512 => '3c623e68693c2f623e2022712220276127202620017fc3a9207420c3a9'
+san 516/16 => '3c623e68693c2f623e20227122202761272026202623313b7fc3a92060746020c3a9'
+san 516/32 => '3c623e68693c2f623e20227122202761272026200126233132373b26233139353b26233136393b206074602026233139353b26233136393b'
+san 516/64 => '3c623e68693c2f623e202271222027612720262333383b20017fc3a92060746020c3a9'
+san 514/0 => '25334362253345686925334325324662253345253230253232712532322532302532376125323725323025323625323025303125374625433325413925323025363074253630253230254333254139'
+san 514/4 => '25334362253345686925334325324662253345253230253232712532322532302532376125323725323025323625323025374625433325413925323025363074253630253230254333254139'
+san 514/8 => '25334362253345686925334325324662253345253230253232712532322532302532376125323725323025323625323025303125323025363074253630253230'
+san 514/32 => '25334362253345686925334325324662253345253230253232712532322532302532376125323725323025323625323025303125374625433325413925323025363074253630253230254333254139'
+san 515/0 => '262336303b62262336323b6869262336303b2f62262336323b20262333343b71262333343b20262333393b61262333393b20262333383b202623313b7fc3a92060746020c3a9'
+san 515/4 => '262336303b62262336323b6869262336303b2f62262336323b20262333343b71262333343b20262333393b61262333393b20262333383b207fc3a92060746020c3a9'
+san 515/8 => '262336303b62262336323b6869262336303b2f62262336323b20262333343b71262333343b20262333393b61262333393b20262333383b202623313b2060746020'
+san 515/32 => '262336303b62262336323b6869262336303b2f62262336323b20262333343b71262333343b20262333393b61262333393b20262333383b202623313b26233132373b26233139353b26233136393b206074602026233139353b26233136393b'
+san 522/0 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 522/4 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 522/8 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 522/512 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 522/16 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 522/32 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 522/64 => '266c743b622667743b6869266c743b2f622667743b202671756f743b712671756f743b2026233033393b6126233033393b2026616d703b20017f266561637574653b2060746020266561637574653b'
+san 517/0 => '626869627127612726607460'
+san 517/4 => '626869627127612726607460'
+san 517/8 => '626869627127612726607460'
+san 517/512 => '626869627127612726607460'
+san 517/16 => '626869627127612726607460'
+san 517/32 => '626869627127612726607460'
+san 517/64 => '626869627127612726607460'
+san 518/0 => '3c623e68693c2f623e22712227612726607460'
+san 518/4 => '3c623e68693c2f623e22712227612726607460'
+san 518/8 => '3c623e68693c2f623e22712227612726607460'
+san 518/512 => '3c623e68693c2f623e22712227612726607460'
+san 518/16 => '3c623e68693c2f623e22712227612726607460'
+san 518/32 => '3c623e68693c2f623e22712227612726607460'
+san 518/64 => '3c623e68693c2f623e22712227612726607460'
+san 519/0 => ''
+san 519/4 => ''
+san 519/8 => ''
+san 519/512 => ''
+san 519/16 => ''
+san 519/32 => ''
+san 519/64 => ''
+san 520/0 => ''
+san 520/4 => ''
+san 520/8 => ''
+san 520/512 => ''
+san 520/16 => ''
+san 520/32 => ''
+san 520/64 => ''
+san 523/0 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san 523/4 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san 523/8 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san 523/512 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san 523/16 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san 523/32 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san 523/64 => '3c623e68693c2f623e205c22715c22205c27615c27202620017fc3a92060746020c3a9'
+san float => '1,234.5e3'
+san empty-null => NULL
+cb str => 'ABC'
+cb user fn => 'ABC'
+cb closure => 'ABC'
+cb closure arr => array (
+  0 => 'a!',
+  1 => 
+  array (
+    0 => 'b!',
+  ),
+)
+cb missing => TypeError: filter_var(): Option must be a valid callback
+array scalar => false
+array scalar null => NULL
+require array => array (
+  0 => 
+  array (
+    0 => 1,
+  ),
+  1 => false,
+  2 => 2,
+)
+require array scalar => false
+force array => array (
+  0 => 1,
+)
+force array fail => array (
+  0 => NULL,
+)
+object => false
+stringable => 5
+float in => '2.5'
+null in => ''
+throw int => Filter\FilterFailedException: filter validation failed: filter int not satisfied by 'x'
+throw ok => 4
+throw email => Filter\FilterFailedException: filter validation failed: filter validate_email not satisfied by 'x'
+throw array => Filter\FilterFailedException: filter validation failed: not a scalar value (got an array)
+throw req array => Filter\FilterFailedException: filter validation failed: not an array (got string)
+throw object => Filter\FilterFailedException: filter validation failed: object of type stdClass has no __toString() method
+throw+null => ValueError: filter_var(): Argument #3 ($options) cannot use both FILTER_NULL_ON_FAILURE and FILTER_THROW_ON_FAILURE
+Filter\FilterFailedException failed exception
+var_array #0 true => array (
+  'a' => 1,
+  'b' => false,
+  'c' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => false,
+  ),
+  'd' => false,
+  'e' => false,
+  'f' => false,
+)
+var_array #0 false => array (
+  'a' => 1,
+  'b' => false,
+  'c' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => false,
+  ),
+  'd' => false,
+  'e' => false,
+  'f' => false,
+)
+var_array #1 true => array (
+  'a' => '1',
+  'b' => 'x',
+  'c' => 
+  array (
+    0 => '1',
+    1 => '2',
+    2 => 'y',
+  ),
+  'd' => '',
+  'e' => 'a@b.co',
+  'f' => '1.5',
+)
+var_array #1 false => array (
+  'a' => '1',
+  'b' => 'x',
+  'c' => 
+  array (
+    0 => '1',
+    1 => '2',
+    2 => 'y',
+  ),
+  'd' => '',
+  'e' => 'a@b.co',
+  'f' => '1.5',
+)
+var_array #2 true => array (
+  'a' => true,
+  'b' => false,
+  'c' => 
+  array (
+    0 => true,
+    1 => false,
+    2 => false,
+  ),
+  'd' => false,
+  'e' => false,
+  'f' => false,
+)
+var_array #2 false => array (
+  'a' => true,
+  'b' => false,
+  'c' => 
+  array (
+    0 => true,
+    1 => false,
+    2 => false,
+  ),
+  'd' => false,
+  'e' => false,
+  'f' => false,
+)
+var_array #3 true => array (
+  'a' => 1,
+  'b' => false,
+  'z' => NULL,
+)
+var_array #3 false => array (
+  'a' => 1,
+  'b' => false,
+)
+var_array #4 true => array (
+  'a' => 1,
+  'z' => NULL,
+  'd' => false,
+)
+var_array #4 false => array (
+  'a' => 1,
+  'd' => false,
+)
+var_array #5 true => array (
+  'c' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => false,
+  ),
+)
+var_array #5 false => array (
+  'c' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => false,
+  ),
+)
+var_array #6 true => array (
+  'c' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => NULL,
+  ),
+)
+var_array #6 false => array (
+  'c' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => NULL,
+  ),
+)
+var_array #7 true => array (
+  'c' => false,
+  'a' => 
+  array (
+    0 => 1,
+  ),
+)
+var_array #7 false => array (
+  'c' => false,
+  'a' => 
+  array (
+    0 => 1,
+  ),
+)
+var_array #8 true => array (
+  'b' => -1,
+  'f' => 1.5,
+)
+var_array #8 false => array (
+  'b' => -1,
+  'f' => 1.5,
+)
+var_array #9 true => array (
+  'e' => 'A@B.CO',
+)
+var_array #9 false => array (
+  'e' => 'A@B.CO',
+)
+var_array #10 true => Filter\FilterFailedException: filter validation failed: filter int not satisfied by 'x'
+var_array #10 false => Filter\FilterFailedException: filter validation failed: filter int not satisfied by 'x'
+var_array #11 true => array (
+)
+var_array #11 false => array (
+)
+var_array #12 true => array (
+  'b' => 'x',
+)
+var_array #12 false => array (
+  'b' => 'x',
+)
+var_array #13 true => array (
+  'a' => false,
+)
+var_array #13 false => array (
+  'a' => false,
+)
+var_array int keys => TypeError: filter_var_array(): Argument #2 ($options) must contain only string keys
+var_array empty key => ValueError: filter_var_array(): Argument #2 ($options) cannot contain empty keys
+int,boolean,float,validate_regexp,validate_domain,validate_url,validate_email,validate_ip,validate_mac,string,stripped,encoded,special_chars,full_special_chars,unsafe_raw,email,url,number_int,number_float,add_slashes,callback
+filter_id 'int' => 257
+filter_id 'boolean' => 258
+filter_id 'validate_email' => 274
+filter_id 'callback' => 1024
+filter_id 'nope' => false
+filter_id 'INT' => false
+filter_id '' => false
+FILTER_VALIDATE_INT ok
+FILTER_VALIDATE_BOOL ok
+FILTER_THROW_ON_FAILURE ok
+FILTER_FLAG_GLOBAL_RANGE ok
+FILTER_FLAG_HOSTNAME ok
+FILTER_FLAG_NO_RES_RANGE ok
+FILTER_FLAG_NO_PRIV_RANGE ok
+FILTER_FLAG_PATH_REQUIRED ok
+FILTER_FLAG_QUERY_REQUIRED ok
+FILTER_FLAG_STRIP_BACKTICK ok
+FILTER_FLAG_NO_ENCODE_QUOTES ok
+FILTER_FLAG_EMPTY_STRING_NULL ok

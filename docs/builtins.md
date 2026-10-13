@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **998 / 2135** · classes **198 / 327** · codegen builtins 240 · lowered 37 · stdlib globals 1109 · prelude globals 1178
+Functions **1004 / 2135** · classes **200 / 327** · codegen builtins 240 · lowered 37 · stdlib globals 1137 · prelude globals 1190
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Functions **998 / 2135** · classes **198 / 327** · codegen builtins 240 · low
 | [exif](#exif) | 0 / 4 | 0 / 0 | 0% |
 | [FFI](#ffi) | 0 / 0 | 1 / 5 | 20% |
 | [fileinfo](#fileinfo) | 0 / 6 | 0 / 1 | 0% |
-| [filter](#filter) | 1 / 7 | 0 / 2 | 11% |
+| [filter](#filter) | 7 / 7 | 2 / 2 | 100% |
 | [ftp](#ftp) | 0 / 36 | 0 / 1 | 0% |
 | [gd](#gd) | 0 / 105 | 0 / 2 | 0% |
 | [gettext](#gettext) | 0 / 10 | 0 / 0 | 0% |
@@ -106,6 +106,10 @@ Types: `Async\AggregateError` `Async\CancellationToken` `Async\CancelledExceptio
 
 Types: `Buffer\ByteBuffer` `Buffer\Reader` `Buffer\Writer`
 
+#### `Filter\`
+
+Types: `Filter\FilterException` `Filter\FilterFailedException`
+
 #### `Http\` — [http.md](http.md)
 
 Functions: `Http\acceptsGzip` `Http\canonicalIntKey` `Http\chunkFrame` `Http\chunkHdr` `Http\chunkSize` `Http\cidrParse` `Http\compressible` `Http\connClose` `Http\contentLength` `Http\dispositionParam` `Http\dispositionParamPos` `Http\etagMatches` `Http\firstToken` `Http\headEnd` `Http\headerSplit` `Http\hopIp` `Http\httpDate` `Http\inCidr` `Http\inCidrParsed` `Http\lowerName` `Http\mimeFor` `Http\nestedAssign` `Http\nestedWalk` `Http\normPath` `Http\parseCookies` `Http\parseQuery` `Http\parseQueryNested` `Http\parseRange` `Http\peerIp` `Http\proxyTrusted` `Http\reason` `Http\renderLines` `Http\reqLine` `Http\request` `Http\resolveForwarded` `Http\safePath` `Http\splitHead` `Http\splitHostPort` `Http\splitPath` `Http\splitStr` `Http\statusLine` `Http\stringSource` `Http\teIsChunked` `Http\tokenOk`
@@ -167,7 +171,7 @@ Functions (39): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1512 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1546 — not user API.
 
 ## Per extension
 
@@ -349,17 +353,11 @@ Classes: `finfo`
 
 ### filter
 
-Functions 1 / 7 · classes 0 / 2
+Functions 7 / 7 · classes 2 / 2
 
-<details><summary>implemented (1)</summary>
+<details><summary>implemented (9)</summary>
 
-`filter_var`<sup>s</sup>
-
-</details>
-
-<details><summary>missing (8)</summary>
-
-`filter_has_var` `filter_id` `filter_input` `filter_input_array` `filter_list` `filter_var_array`
+`filter_has_var`<sup>p</sup> `filter_id`<sup>s</sup> `filter_input`<sup>p</sup> `filter_input_array`<sup>p</sup> `filter_list`<sup>s</sup> `filter_var`<sup>p</sup> `filter_var_array`<sup>p</sup>
 
 Classes: `Filter\FilterException` `Filter\FilterFailedException`
 

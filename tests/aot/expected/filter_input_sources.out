@@ -1,0 +1,47 @@
+has get a => true
+has get zz => false
+has post p => true
+has cookie c => true
+has server => true
+has env => true
+has bad type => ValueError: filter_has_var(): Argument #1 ($type) must be an INPUT_* constant
+input a int => 5
+input b int => false
+input b int null => NULL
+input missing => NULL
+input missing nullfail => false
+input missing default => 9
+input array scalar => false
+input array => array (
+  0 => 1,
+  1 => 2,
+  2 => false,
+)
+input mail => 'a@b.co'
+input post bool => true
+input cookie => 1
+input server => 42
+input env => 7
+input throw => Filter\FilterFailedException: filter validation failed: filter int not satisfied by 'x'
+input bad type => ValueError: filter_input(): Argument #1 ($type) must be an INPUT_* constant
+array all => array (
+  'p' => true,
+)
+array spec => array (
+  'a' => 5,
+  'b' => NULL,
+  'nope' => NULL,
+)
+array spec no empty => array (
+  'a' => 5,
+)
+array nested => array (
+  'arr' => 
+  array (
+    0 => 1,
+    1 => 2,
+    2 => false,
+  ),
+)
+array empty source => NULL
+array empty source nullfail => false
