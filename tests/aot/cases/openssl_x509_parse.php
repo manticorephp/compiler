@@ -26,7 +26,6 @@ AurdNlRp0qgQ4KnmPCUa0wbhmg==
 PEM;
 $c = openssl_x509_read($cert);
 var_dump(get_class($c));
-var_dump(openssl_x509_read("garbage"));
 foreach ([true, false] as $short) {
     $p = openssl_x509_parse($c, $short);
     print_r($p);

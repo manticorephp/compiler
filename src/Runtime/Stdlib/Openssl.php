@@ -174,9 +174,7 @@ function openssl_pbkdf2(string $password, string $salt, int $key_length, int $it
     if ($key_length < 1) {
         throw new \ValueError('openssl_pbkdf2(): Argument #3 ($key_length) must be greater than 0');
     }
-    if ($iterations < 1) {
-        throw new \ValueError('openssl_pbkdf2(): Argument #4 ($iterations) must be greater than 0');
-    }
+    if ($iterations < 1) { return false; }
     \__mc_ossl_md('openssl_pbkdf2', 5, 'digest_algo', $digest_algo);
     if (!\in_array(\strtolower($digest_algo), \hash_algos(), true)) {
         throw new \ValueError('openssl_pbkdf2(): Argument #5 ($digest_algo) must be a valid digest algorithm');
@@ -220,7 +218,7 @@ function __mc_ossl_crypt(bool $enc, string $fn, string $data, string $method, st
     }
     if (\strlen($key) !== $keyLen) {
         if (($options & 4) !== 0) {
-            return false;
+            throw new \ValueError($fn . '(): Key length cannot be set for the cipher algorithm');
         }
         $key = \strlen($key) < $keyLen ? \str_pad($key, $keyLen, "\0") : \substr($key, 0, $keyLen);
     }
@@ -232,9 +230,7 @@ function __mc_ossl_crypt(bool $enc, string $fn, string $data, string $method, st
             $data = $d;
         }
     }
-    if ($aead && !$enc && $tag === '') {
-        throw new \ValueError($fn . '(): A tag must be given for AEAD decryption');
-    }
+    if ($aead && !$enc && $tag === '') { return false; }
 
     \__mc_ossl_clear_errors();
     $ctx = \Runtime\Crypto\cipherCtxNew();
@@ -330,7 +326,7 @@ function __mc_ossl_load_priv(string $pem, string $pass): int
     return $k;
 }
 
-/** EVP_PKEY* from a PEM SPKI / certificate / private key (0 on failure). */
+/** EVP_PKEY* from a PEM SPKI / certificate (0 on failure; a private key does not count, as in php). */
 function __mc_ossl_load_pub(string $pem): int
 {
     $nul = \__mc_ossl_null();
@@ -351,7 +347,19 @@ function __mc_ossl_load_pub(string $pem): int
         return \__mc_ossl_load_pub($spki);
     }
 
-    return \__mc_ossl_load_priv($pem, '');
+    return 0;
+}
+
+/** SubjectPublicKeyInfo PEM of the private key in $pem (decrypted with $pass); '' when unusable. */
+function __mc_ossl_priv_spki_pem(string $pem): string
+{
+    \__mc_ossl_clear_errors();
+    $k = \__mc_ossl_load_priv($pem, '');
+    if ($k === 0) { return ''; }
+    $out = \__mc_ossl_pkey_pubpem($k);
+    \Runtime\Crypto\pkeyFree($k);
+
+    return $out;
 }
 
 /** Unencrypted PKCS#8 PEM of the private key in $pem (decrypted with $pass), or ''. */
@@ -496,7 +504,12 @@ function __mc_ossl_pkey_new(int $type, int $bits, string $curve, string $dhP = '
             $ok = \Runtime\Crypto\pkeyCtxCtrl($ctx, 6, 4, 0x1003, $bits, $nul) === 1;
         } elseif ($type === 3) {
             $nid = \Runtime\Crypto\objTxt2nid($curve === '' ? 'prime256v1' : $curve);
-            $ok = $nid !== 0 && \Runtime\Crypto\pkeyCtxCtrl($ctx, 408, 6, 0x1001, $nid, $nul) === 1;
+            if ($nid === 0) {
+                \Runtime\Libc\free($cell);
+                \Runtime\Crypto\pkeyCtxFree($ctx);
+                throw new \ValueError('openssl_pkey_new(): Unknown elliptic curve (short) name ' . $curve);
+            }
+            $ok = \Runtime\Crypto\pkeyCtxCtrl($ctx, 408, 6, 0x1001, $nid, $nul) === 1;
         }
         // The paramgen step left its parameters key in the cell; keygen wants a NULL slot.
         \poke_i64($cell, 0, 0);
@@ -955,6 +968,24 @@ function __mc_ossl_x509_check_key(string $certPem, string $privPem): bool
     return $r;
 }
 
+/** Load trusted CA files / directories into $store; the first path that fails, or ''. @param string[] $caInfo */
+function __mc_ossl_store_fill(int $store, array $caInfo): string
+{
+    $nul = \__mc_ossl_null();
+    if (\count($caInfo) === 0) {
+        \Runtime\Crypto\storeSetDefaultPaths($store);
+
+        return '';
+    }
+    foreach ($caInfo as $p) {
+        if (!\file_exists($p)) { return $p; }
+        $ok = \is_dir($p) ? \Runtime\Crypto\storeLoadDir($store, $nul, $p) : \Runtime\Crypto\storeLoadFile($store, $p, $nul);
+        if ($ok !== 1) { return $p; }
+    }
+
+    return '';
+}
+
 /**
  * X509_verify_cert for purpose $purpose against the trust store built from $caInfo
  * (files / directories; the host default paths when empty). 1 ok, 0 rejected, -1 error.
@@ -968,12 +999,11 @@ function __mc_ossl_x509_checkpurpose(string $certPem, int $purpose, array $caInf
     if ($x === 0) { return -1; }
     $nul = \__mc_ossl_null();
     $store = \Runtime\Crypto\storeNew();
-    if (\count($caInfo) === 0) {
-        \Runtime\Crypto\storeSetDefaultPaths($store);
-    }
-    foreach ($caInfo as $p) {
-        if (\is_dir($p)) { \Runtime\Crypto\storeLoadDir($store, $nul, $p); }
-        else { \Runtime\Crypto\storeLoadFile($store, $p, $nul); }
+    $badCa = \__mc_ossl_store_fill($store, $caInfo);
+    if ($badCa !== '') {
+        \Runtime\Crypto\storeFree($store);
+        \Runtime\Crypto\x509Free($x);
+        throw new \ValueError('openssl_x509_checkpurpose(): Argument #3 ($ca_info) names an unreadable path: ' . $badCa);
     }
     $stack = 0;
     /** @var int[] $extra */
@@ -1101,12 +1131,17 @@ function __mc_ossl_csr_sign(string $csrPem, string $caPem, string $privPem, int 
     $priv = \__mc_ossl_load_priv($privPem, '');
     $ca = $caPem === '' ? 0 : \__mc_ossl_load_x509($caPem);
     $out = '';
+    $err = '';
     $pub = 0;
     $x = 0;
     if ($req !== 0 && $priv !== 0 && ($caPem === '' || $ca !== 0)) {
         $pub = \Runtime\Crypto\reqGetPubkey($req);
         $ok = $pub !== 0 && \Runtime\Crypto\reqVerify($req, $pub) > 0;
-        if ($ok && $ca !== 0) { $ok = \Runtime\Crypto\x509CheckPrivateKey($ca, $priv) === 1; }
+        if (!$ok) { $err = 'signature did not match the certificate request'; }
+        if ($ok && $ca !== 0) {
+            $ok = \Runtime\Crypto\x509CheckPrivateKey($ca, $priv) === 1;
+            if (!$ok) { $err = 'Private key does not correspond to signing cert'; }
+        }
         if ($ok) {
             $x = \Runtime\Crypto\x509New();
             $subject = \Runtime\Crypto\reqSubjectName($req);
@@ -1130,6 +1165,7 @@ function __mc_ossl_csr_sign(string $csrPem, string $caPem, string $privPem, int 
     if ($ca !== 0) { \Runtime\Crypto\x509Free($ca); }
     if ($priv !== 0) { \Runtime\Crypto\pkeyFree($priv); }
     if ($req !== 0) { \Runtime\Crypto\reqFree($req); }
+    if ($err !== '') { throw new \ValueError('openssl_csr_sign(): ' . $err); }
 
     return $out;
 }
@@ -1465,10 +1501,12 @@ function __mc_ossl_p7_verify(string $smime, int $flags, array $caInfo, string $u
     $signers = '';
     if ($p7 !== 0) {
         $store = \Runtime\Crypto\storeNew();
-        if (\count($caInfo) === 0) { \Runtime\Crypto\storeSetDefaultPaths($store); }
-        foreach ($caInfo as $p) {
-            if (\is_dir($p)) { \Runtime\Crypto\storeLoadDir($store, $nul, $p); }
-            else { \Runtime\Crypto\storeLoadFile($store, $p, $nul); }
+        $badCa = \__mc_ossl_store_fill($store, $caInfo);
+        if ($badCa !== '') {
+            \Runtime\Crypto\storeFree($store);
+            \Runtime\Crypto\p7Free($p7);
+            if ($bcont !== 0) { \Runtime\Crypto\bioFree($bcont); }
+            throw new \ValueError('Argument #4 ($ca_info) names an unreadable path: ' . $badCa);
         }
         $extra = \__mc_ossl_pem_certs($untrusted);
         $sk = \count($extra) === 0 ? 0 : \__mc_ossl_stack_of($extra);
@@ -1503,4 +1541,189 @@ function __mc_ossl_p7_verify(string $smime, int $flags, array $caInfo, string $u
     if ($bcont !== 0) { \Runtime\Crypto\bioFree($bcont); }
 
     return [$status, $content, $signers];
+}
+
+// ── CMS ───────────────────────────────────────────────────────────────────
+// $enc is php's OPENSSL_ENCODING_*: 0 DER, 1 S/MIME, 2 PEM.
+
+/** Serialise a CMS_ContentInfo in the requested encoding ($data is the signed/encrypted input for S/MIME). */
+function __mc_ossl_cms_write(int $cms, string $data, int $flags, int $enc): string
+{
+    $mem = \Runtime\Crypto\bioNew(\Runtime\Crypto\bioSMem());
+    if ($enc === 1) {
+        $in = \Runtime\Crypto\bioNewMemBuf($data, \strlen($data));
+        \Runtime\Crypto\smimeWriteCms($mem, $cms, $in, $flags);
+        \Runtime\Crypto\bioFree($in);
+    } elseif ($enc === 2) {
+        \Runtime\Crypto\pemWriteCms($mem, $cms);
+    } else {
+        \Runtime\Crypto\i2dCmsBio($mem, $cms);
+    }
+
+    return \__mc_ossl_bio_take($mem);
+}
+
+/** CMS_ContentInfo* from DER / S/MIME / PEM text (0 on failure); S/MIME also yields the detached content BIO in $bcont. */
+function __mc_ossl_cms_load(string $blob, int $enc, int &$bcont): int
+{
+    $nul = \__mc_ossl_null();
+    $bcont = 0;
+    $bio = \Runtime\Crypto\bioNewMemBuf($blob, \strlen($blob));
+    $cms = 0;
+    if ($enc === 1) {
+        $cell = \__mc_ossl_buf(8);
+        $cms = \Runtime\Crypto\smimeReadCms($bio, $cell);
+        $bcont = \peek_i64($cell, 0);
+        \Runtime\Libc\free($cell);
+    } elseif ($enc === 2) {
+        $cms = \Runtime\Crypto\pemReadCms($bio, $nul, $nul, $nul);
+    } else {
+        $cms = \Runtime\Crypto\d2iCmsBio($bio, $nul);
+    }
+    \Runtime\Crypto\bioFree($bio);
+
+    return $cms;
+}
+
+/** CMS SignedData of $data in encoding $enc; '' on failure. */
+function __mc_ossl_cms_sign(string $data, string $certPem, string $privPem, string $extraBundle, int $flags, int $enc): string
+{
+    \__mc_ossl_clear_errors();
+    $x = \__mc_ossl_load_x509($certPem);
+    $k = \__mc_ossl_load_priv($privPem, '');
+    $out = '';
+    if ($x !== 0 && $k !== 0) {
+        $extra = \__mc_ossl_pem_certs($extraBundle);
+        $sk = \count($extra) === 0 ? 0 : \__mc_ossl_stack_of($extra);
+        $in = \Runtime\Crypto\bioNewMemBuf($data, \strlen($data));
+        $cms = \Runtime\Crypto\cmsSign($x, $k, $sk, $in, $flags);
+        \Runtime\Crypto\bioFree($in);
+        if ($cms !== 0) {
+            $out = \__mc_ossl_cms_write($cms, $data, $flags, $enc);
+            \Runtime\Crypto\cmsFree($cms);
+        }
+        if ($sk !== 0) { \Runtime\Crypto\skFree($sk); }
+        \__mc_ossl_free_certs($extra);
+    }
+    if ($x !== 0) { \Runtime\Crypto\x509Free($x); }
+    if ($k !== 0) { \Runtime\Crypto\pkeyFree($k); }
+
+    return $out;
+}
+
+/**
+ * Verify a CMS message. [status, content, signersPem, cmsPem]: status 1 valid, 0 invalid,
+ * -1 unreadable. $content is the detached content (DER / PEM); an S/MIME multipart carries its own.
+ *
+ * @param string[] $caInfo
+ * @return array<int,mixed>
+ */
+function __mc_ossl_cms_verify(string $blob, int $enc, int $flags, array $caInfo, string $untrusted, string $content): array
+{
+    \__mc_ossl_clear_errors();
+    $nul = \__mc_ossl_null();
+    $bcont = 0;
+    $cms = \__mc_ossl_cms_load($blob, $enc, $bcont);
+    $status = -1;
+    $data = '';
+    $signers = '';
+    $pem = '';
+    if ($cms !== 0) {
+        $store = \Runtime\Crypto\storeNew();
+        $badCa = \__mc_ossl_store_fill($store, $caInfo);
+        if ($badCa !== '') {
+            \Runtime\Crypto\storeFree($store);
+            \Runtime\Crypto\cmsFree($cms);
+            if ($bcont !== 0) { \Runtime\Crypto\bioFree($bcont); }
+            throw new \ValueError('Argument #4 ($ca_info) names an unreadable path: ' . $badCa);
+        }
+        $extra = \__mc_ossl_pem_certs($untrusted);
+        $sk = \count($extra) === 0 ? 0 : \__mc_ossl_stack_of($extra);
+        $dcont = $bcont;
+        $dbio = 0;
+        if ($content !== '') {
+            $dbio = \Runtime\Crypto\bioNewMemBuf($content, \strlen($content));
+            $dcont = $dbio;
+        }
+        $out = \Runtime\Crypto\bioNew(\Runtime\Crypto\bioSMem());
+        $r = \Runtime\Crypto\cmsVerify($cms, $sk, $store, $dcont, $out, $flags);
+        $status = $r > 0 ? 1 : 0;
+        $data = \__mc_ossl_bio_take($out);
+        if ($status === 1) {
+            $sg = \Runtime\Crypto\cmsSigners($cms);
+            if ($sg !== 0) {
+                $n = \Runtime\Crypto\skNum($sg);
+                for ($i = 0; $i < $n; $i = $i + 1) {
+                    $mem = \Runtime\Crypto\bioNew(\Runtime\Crypto\bioSMem());
+                    \Runtime\Crypto\pemWriteX509($mem, \Runtime\Crypto\skValue($sg, $i));
+                    $signers = $signers . \__mc_ossl_bio_take($mem);
+                }
+                \Runtime\Crypto\skFree($sg);
+            }
+            $pem = \__mc_ossl_cms_write($cms, '', 0, 2);
+        }
+        if ($dbio !== 0) { \Runtime\Crypto\bioFree($dbio); }
+        if ($sk !== 0) { \Runtime\Crypto\skFree($sk); }
+        \__mc_ossl_free_certs($extra);
+        \Runtime\Crypto\storeFree($store);
+        \Runtime\Crypto\cmsFree($cms);
+    }
+    if ($bcont !== 0) { \Runtime\Crypto\bioFree($bcont); }
+
+    return [$status, $data, $signers, $pem];
+}
+
+/** CMS EnvelopedData of $data for every certificate in $certPems; '' on failure. @param string[] $certPems */
+function __mc_ossl_cms_encrypt(string $data, array $certPems, string $cipher, int $flags, int $enc): string
+{
+    \__mc_ossl_clear_errors();
+    $c = \Runtime\Crypto\getCipherByName($cipher);
+    /** @var int[] $xs */
+    $xs = [];
+    foreach ($certPems as $p) {
+        $x = \__mc_ossl_load_x509($p);
+        if ($x !== 0) { $xs[] = $x; }
+    }
+    $out = '';
+    if ($c !== 0 && \count($xs) === \count($certPems) && \count($xs) > 0) {
+        $sk = \__mc_ossl_stack_of($xs);
+        $in = \Runtime\Crypto\bioNewMemBuf($data, \strlen($data));
+        $cms = \Runtime\Crypto\cmsEncrypt($sk, $in, $c, $flags);
+        \Runtime\Crypto\bioFree($in);
+        if ($cms !== 0) {
+            $out = \__mc_ossl_cms_write($cms, $data, $flags, $enc);
+            \Runtime\Crypto\cmsFree($cms);
+        }
+        \Runtime\Crypto\skFree($sk);
+    }
+    \__mc_ossl_free_certs($xs);
+
+    return $out;
+}
+
+/** Plaintext of a CMS EnvelopedData; false on failure. @return string|false */
+function __mc_ossl_cms_decrypt(string $blob, int $enc, string $certPem, string $privPem)
+{
+    \__mc_ossl_clear_errors();
+    $x = \__mc_ossl_load_x509($certPem);
+    $k = \__mc_ossl_load_priv($privPem, '');
+    $res = false;
+    if ($x !== 0 && $k !== 0) {
+        $bcont = 0;
+        $cms = \__mc_ossl_cms_load($blob, $enc, $bcont);
+        if ($cms !== 0) {
+            $mem = \Runtime\Crypto\bioNew(\Runtime\Crypto\bioSMem());
+            if (\Runtime\Crypto\cmsDecrypt($cms, $k, $x, 0, $mem, 0) === 1) {
+                $res = \__mc_ossl_bio_take($mem);
+            } else {
+                \Runtime\Crypto\bioFree($mem);
+            }
+            \Runtime\Crypto\cmsFree($cms);
+        }
+        if ($bcont !== 0) { \Runtime\Crypto\bioFree($bcont); }
+    }
+    if ($x !== 0) { \Runtime\Crypto\x509Free($x); }
+    if ($k !== 0) { \Runtime\Crypto\pkeyFree($k); }
+
+    return $res;
 }

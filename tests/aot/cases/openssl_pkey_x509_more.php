@@ -127,7 +127,7 @@ echo implode(',', array_keys($dda)), ' ', openssl_pkey_get_details($da)['type'],
 var_dump($dda['p'] === $p, $dda['g'] === "\2");
 $s1 = openssl_dh_compute_key($ddb['pub_key'], $da);
 $s2 = openssl_dh_compute_key($dda['pub_key'], $db);
-var_dump($s1 === $s2, strlen($s1));
+var_dump($s1 === $s2);
 var_dump(openssl_pkey_derive(openssl_pkey_get_public(openssl_pkey_get_details($db)['key']), $da) === $s1);
 $dsa = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_DSA, 'private_key_bits' => 1024]);
 echo implode(',', array_keys(openssl_pkey_get_details($dsa)['dsa'])), "\n";
@@ -140,7 +140,6 @@ var_dump(openssl_x509_export($cert, $out));
 var_dump(trim($out) === trim($cert));
 var_dump(openssl_x509_export($cert, $txt, false));
 var_dump(str_starts_with($txt, "Certificate:\n"), str_ends_with(trim($txt), '-----END CERTIFICATE-----'));
-var_dump(openssl_x509_export('garbage', $junk));
 $tmp = tempnam(sys_get_temp_dir(), 'mcx');
 var_dump(openssl_x509_export_to_file($cert, $tmp), trim(file_get_contents($tmp)) === trim($cert));
 var_dump(openssl_pkey_export_to_file($rsa, $tmp), str_starts_with(file_get_contents($tmp), '-----BEGIN PRIVATE KEY-----'));

@@ -451,3 +451,29 @@ function p7Signers(int $p7, int $certs, #[CType('int')] int $flags): int {}
 function p7Encrypt(int $certs, int $in, int $cipher, #[CType('int')] int $flags): int {}
 #[Library('crypto'), Symbol('PKCS7_decrypt'), CType('int')]
 function p7Decrypt(int $p7, int $pkey, int $cert, int $data, #[CType('int')] int $flags): int {}
+
+// ── CMS (RFC 5652) — 1.1.1 and 3.x ──
+#[Library('crypto'), Symbol('CMS_sign')]
+function cmsSign(int $cert, int $pkey, int $certs, int $in, #[CType('unsigned int')] int $flags): int {}
+#[Library('crypto'), Symbol('CMS_verify'), CType('int')]
+function cmsVerify(int $cms, int $certs, int $store, int $dcont, int $out, #[CType('unsigned int')] int $flags): int {}
+#[Library('crypto'), Symbol('CMS_encrypt')]
+function cmsEncrypt(int $certs, int $in, int $cipher, #[CType('unsigned int')] int $flags): int {}
+#[Library('crypto'), Symbol('CMS_decrypt'), CType('int')]
+function cmsDecrypt(int $cms, int $pkey, int $cert, int $dcont, int $out, #[CType('unsigned int')] int $flags): int {}
+#[Library('crypto'), Symbol('CMS_get0_signers')]
+function cmsSigners(int $cms): int {}
+#[Library('crypto'), Symbol('CMS_ContentInfo_free')]
+function cmsFree(int $cms): void {}
+#[Library('crypto'), Symbol('SMIME_write_CMS'), CType('int')]
+function smimeWriteCms(int $out, int $cms, int $data, #[CType('int')] int $flags): int {}
+#[Library('crypto'), Symbol('SMIME_read_CMS')]
+function smimeReadCms(int $in, Ptr $bcont): int {}
+#[Library('crypto'), Symbol('PEM_write_bio_CMS'), CType('int')]
+function pemWriteCms(int $out, int $cms): int {}
+#[Library('crypto'), Symbol('PEM_read_bio_CMS')]
+function pemReadCms(int $in, Ptr $x, Ptr $cb, Ptr $u): int {}
+#[Library('crypto'), Symbol('i2d_CMS_bio'), CType('int')]
+function i2dCmsBio(int $out, int $cms): int {}
+#[Library('crypto'), Symbol('d2i_CMS_bio')]
+function d2iCmsBio(int $in, Ptr $cms): int {}

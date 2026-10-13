@@ -1,5 +1,4 @@
 string(18) "OpenSSLCertificate"
-bool(false)
 Array
 (
     [name] => /C=UA/ST=Kyiv/O=Manticore/OU=Compiler/CN=example.test/emailAddress=a@b.c

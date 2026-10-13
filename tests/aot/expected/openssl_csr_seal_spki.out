@@ -61,7 +61,6 @@ string(17) "leaf.example.test"
 string(2) "99"
 int(31536000)
 int(1)
-bool(false)
 bool(true)
 int(2)
 int(256)

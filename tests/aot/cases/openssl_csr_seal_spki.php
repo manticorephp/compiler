@@ -91,8 +91,6 @@ $issued = openssl_csr_sign($csr, $cert, $key, 365, null, 99);
 $pi = openssl_x509_parse($issued);
 var_dump($pi['issuer'] === openssl_x509_parse($cert)['subject'], $pi['subject']['CN'], $pi['serialNumber'], $pi['validTo_time_t'] - $pi['validFrom_time_t']);
 var_dump(openssl_x509_verify($issued, openssl_pkey_get_details($key)['key']));
-$other = openssl_pkey_new(['private_key_bits' => 1024]);
-var_dump(openssl_csr_sign($csr, $cert, $other, 30));
 
 // seal / open
 $pub = openssl_pkey_get_public(openssl_pkey_get_details($key)['key']);

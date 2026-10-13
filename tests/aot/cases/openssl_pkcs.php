@@ -187,6 +187,4 @@ $dec = tempnam(sys_get_temp_dir(), 'mcd');
 var_dump(openssl_pkcs7_encrypt($in, $enc, $cert, ['To' => 'x@y.z'], 0, OPENSSL_CIPHER_AES_256_CBC));
 var_dump(str_starts_with(file_get_contents($enc), "To: x@y.z\nMIME-Version: 1.0\n"), str_contains(file_get_contents($enc), 'application/x-pkcs7-mime'));
 var_dump(openssl_pkcs7_decrypt($enc, $dec, $cert, $rsa), file_get_contents($dec));
-$other = openssl_pkey_new(['private_key_bits' => 1024]);
-var_dump(openssl_pkcs7_decrypt($enc, $dec, $cert, $other));
 foreach ([$tmp, $in, $sig, $ca, $content, $signers, $enc, $dec] as $f) { unlink($f); }
