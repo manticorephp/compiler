@@ -1014,8 +1014,17 @@ trait EmitLlvmExpr
             Type::KIND_STRING => $this->shallowBoxCall('ptr', '@__manticore_box_ptr'),
             Type::KIND_FLOAT  => $this->shallowBoxCall('double', '@__manticore_box_float'),
             Type::KIND_BOOL   => $this->shallowBoxCall('i64', '@__manticore_box_bool'),
+            Type::KIND_NULL   => $this->shallowBoxNull(),
             default           => $this->shallowBoxCall('i64', '@__manticore_box_int'),
         };
+    }
+
+    private function shallowBoxNull(): string
+    {
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $r . " = call i64 @__manticore_box_null()\n";
     }
 
     private function shallowBoxCall(string $argTy, string $fn): string
@@ -5202,6 +5211,15 @@ trait EmitLlvmExpr
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
+        // null beside a float compares as BOOLS (php: null <=> x converts both),
+        // so a NAN operand is truthy, not an unordered double.
+        if (\in_array($c->op, ['<', '<=', '>', '>='], true)
+            && (($c->left->type->kind === Type::KIND_NULL && $c->right->type->kind === Type::KIND_FLOAT)
+                || ($c->left->type->kind === Type::KIND_FLOAT && $c->right->type->kind === Type::KIND_NULL))) {
+            return $this->emitCmp(new Cmp(
+                new \Compile\Mir\Cast('bool', $c->left, Type::bool_()),
+                new \Compile\Mir\Cast('bool', $c->right, Type::bool_()), $c->op));
+        }
         // A loose compare of an object against a string compares its
         // __toString() with the string; the object's address was compared.
         if ($c->op !== '===' && $c->op !== '!==') {
