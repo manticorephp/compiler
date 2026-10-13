@@ -1147,7 +1147,8 @@ trait EmitLlvmBuiltins
             $this->markCellBoxed($this->lastValue);
             return $ret;
         }
-        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION || $k === Type::KIND_CLOSURE) {
+        if ($k === Type::KIND_CLOSURE) { return $this->boxCallableSlotIr(); }
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION) {
             // A union arm is a bare object pointer (all-object union) — box it as
             // an object cell so a tagged consumer (var_dump / a mixed param)
             // dispatches on the object tag and the class_id resolves the type.
@@ -1175,6 +1176,63 @@ trait EmitLlvmBuiltins
         $out = $this->coerceToI64();
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $helper . '(i64 ' . $this->lastValue . ")\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
+    }
+
+    /**
+     * A `callable` slot's word as a cell. The slot holds a closure env — boxed
+     * as an object, as a literal's `obj<__closure_N>` is — but also a callable
+     * ARRAY raw (identified by its allocator magic) or a value already boxed:
+     * boxing every word as an object handed `[$obj, 'm']` to a `mixed` consumer
+     * as an object whose class descriptor was the array header.
+     */
+    private function boxCallableSlotIr(): string
+    {
+        $out = $this->coerceToI64();
+        $w = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $boxedL = $this->ssa->allocLabel('cbox.boxed');
+        $rawL = $this->ssa->allocLabel('cbox.raw');
+        $chkL = $this->ssa->allocLabel('cbox.chk');
+        $objL = $this->ssa->allocLabel('cbox.obj');
+        $arrL = $this->ssa->allocLabel('cbox.arr');
+        $endL = $this->ssa->allocLabel('cbox.end');
+        $isB = $this->ssa->allocReg();
+        $out .= '  ' . $isB . ' = icmp ugt i64 ' . $w . ", -4503599627370496\n";
+        $out .= '  br i1 ' . $isB . ', label %' . $boxedL . ', label %' . $rawL . "\n";
+        $out .= $boxedL . ":\n  store i64 " . $w . ', ptr ' . $res . "\n  br label %" . $endL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($w);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $chkL . ', label %' . $objL . "\n";
+        $out .= $chkL . ":\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $g = $this->ssa->allocReg();
+        $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $p . ", i64 -8\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = load i64, ptr ' . $g . "\n";
+        $isArr = $this->magicMatchIr($m, [\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            \Compile\MemoryAbi::ARRAY_TAG_ARENA, \Compile\MemoryAbi::ASSOC_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $out .= '  br i1 ' . $isArr . ', label %' . $arrL . ', label %' . $objL . "\n";
+        $out .= $arrL . ":\n";
+        $ap = $this->ssa->allocReg();
+        $out .= '  ' . $ap . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $ab = $this->ssa->allocReg();
+        $out .= '  ' . $ab . ' = call i64 @__manticore_box_array(ptr ' . $ap . ")\n";
+        $out .= '  store i64 ' . $ab . ', ptr ' . $res . "\n  br label %" . $endL . "\n";
+        $out .= $objL . ":\n";
+        $op = $this->ssa->allocReg();
+        $out .= '  ' . $op . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $ob = $this->ssa->allocReg();
+        $out .= '  ' . $ob . ' = call i64 @__manticore_box_object(ptr ' . $op . ")\n";
+        $out .= '  store i64 ' . $ob . ', ptr ' . $res . "\n  br label %" . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $ret = $this->finishI64($out, $r);
         $this->markCellBoxed($this->lastValue);
         return $ret;
