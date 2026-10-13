@@ -118,7 +118,7 @@ php's `curl_exec` answering `true` rather than the buffer when both
 divergence — it is matched. php keeps ONE write method per handle
 (`STDOUT`/`RETURN`/`FILE`/`USER`) and the last setter wins outright.
 
-## Not implemented
+## Limitations: not implemented
 
 Each throws with a message naming itself rather than failing quietly:
 

@@ -1,5 +1,5 @@
 <?php
-// Reading a by-ref out parameter (union array|object|null) that a generator method assigns lazily segfaults in the caller
+// by-ref out param assigned lazily by a generator method segfaults in caller
 final class Res implements IteratorAggregate
 {
     public function __construct(private string $prefix) {}

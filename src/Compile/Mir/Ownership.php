@@ -523,6 +523,26 @@ final class Ownership
     }
 
     /**
+     * `$o[$k]` on an object whose whole class chain is user code is a real
+     * `offsetGet` call: its result is a +1 the reader already owns. A prelude
+     * class (SplFixedArray, Ds maps, native buffers) may read inline and hand
+     * out a BORROW instead. An unknown class answers false (the borrow reading).
+     *
+     * @param array<string, ClassDef> $classes
+     */
+    public static function userOffsetGetBase(Type $at, array $classes): bool
+    {
+        if ($at->kind !== Type::KIND_OBJ) { return false; }
+        $cur = \ltrim($at->class ?? '', '\\');
+        while ($cur !== '') {
+            $cd = $classes[$cur] ?? null;
+            if ($cd === null || $cd->isPreludeClass) { return false; }
+            $cur = $cd->parent;
+        }
+        return true;
+    }
+
+    /**
      * Does an ELEMENT read of this type co-own what it hands out? One predicate
      * for the store side ({@see storedOwned}) and the emitter's element-read
      * retain ({@see Passes\EmitLlvmLocals::elemReadCoOwn}).
@@ -782,8 +802,7 @@ final class Ownership
             if ($fn === $cn) { return true; }
         }
         if ($lastCallWasBuiltin) { return false; }
-        return isset($this->ctx->moduleFns[$fn])
-            && !($this->ctx->returnsByRef[$fn] ?? false);
+        return isset($this->ctx->moduleFns[$fn]);
     }
 
     /**
@@ -870,7 +889,7 @@ final class Ownership
             if ($ck === Node::KIND_METHOD_CALL || $ck === Node::KIND_STATIC_CALL || $ck === Node::KIND_INVOKE) { return 'closure'; }
             if ($ck === Node::KIND_CALL) {
                 $cfn = $a->function;
-                if (isset($this->ctx->moduleFns[$cfn]) && !($this->ctx->returnsByRef[$cfn] ?? false)) { return 'closure'; }
+                if (isset($this->ctx->moduleFns[$cfn])) { return 'closure'; }
             }
             return '';
         }
@@ -908,7 +927,7 @@ final class Ownership
               || ($a instanceof Cast && self::castArrayMints($a));
         if ($k === Node::KIND_CALL) {
             $fn = $a->function;
-            $owned = isset($this->ctx->moduleFns[$fn]) && !($this->ctx->returnsByRef[$fn] ?? false);
+            $owned = isset($this->ctx->moduleFns[$fn]);
             // …or a BUILTIN that mints a fresh array. A module body is evidence
             // a user BODY was called, and a codegen builtin has no body — so
             // `array_slice(explode($d, $s), 0, 2)` stranded the exploded vec:
@@ -1309,7 +1328,11 @@ final class Ownership
     {
         $vk = $v->type->kind;
         $retCell = $retType !== null && $retType->kind === Type::KIND_CELL;
-        if ($closureAbi && self::cellBoxableKind($v->type)) {
+        // A CELL value under a declared OBJECT / ARRAY return rides raw, not boxed
+        // ({@see EmitLlvmModule::emitReturn}): it takes the plain-function arms below.
+        $rawRet = $closureAbi && $retType !== null && $vk === Type::KIND_CELL
+            && ($retType->kind === Type::KIND_OBJ || $retType->isArray());
+        if ($closureAbi && !$rawRet && self::cellBoxableKind($v->type)) {
             if ($this->returnBorrowsObj($v, $retType, $moved, $erasedArray)) { return self::RET_CELL_PAYLOAD; }
             if ($vk === Type::KIND_CELL && $this->returnBorrowsCell($v, $moved, $erasedArray)) { return self::RET_CELL_TAG; }
             return self::RET_NONE;

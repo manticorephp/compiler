@@ -80,6 +80,9 @@ final class SpillFreshBases
     /** @var array<string, bool> functions whose result is not a +1 (FFI, by-ref) */
     private array $notOwned = [];
 
+    /** @var array<string, \Compile\Mir\ClassDef> */
+    private array $classDefs = [];
+
     /** @var array<string, bool> classes whose instances are not rc-managed */
     private array $notRc = [];
 
@@ -140,7 +143,7 @@ final class SpillFreshBases
         $this->refMasks = [];
         $this->refVariadic = [];
         foreach ($module->functions as $fn) {
-            if ($fn->ffiSymbol !== null || $fn->returnsByRef) { $this->notOwned[$fn->name] = true; }
+            if ($fn->ffiSymbol !== null) { $this->notOwned[$fn->name] = true; }
             $mask = [];
             $lastVariadicRef = false;
             foreach ($fn->params as $p) {
@@ -152,6 +155,7 @@ final class SpillFreshBases
         }
         $this->notRc = ['Ffi\\Ptr' => true, 'Closure' => true];
         $this->parents = [];
+        $this->classDefs = $module->classes;
         foreach ($module->classes as $name => $cd) {
             if ($cd->isStruct) { $this->notRc[$name] = true; }
             $this->parents[$name] = $cd->parent;
@@ -1281,6 +1285,10 @@ final class SpillFreshBases
         $k = $b->kind;
         if ($k === Node::KIND_CALL) { return !isset($this->notOwned[\ltrim($this->asCall($b)->function, '\\')]); }
         if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        if ($k === Node::KIND_ARRAY_ACCESS) {
+            $aa = $this->asArrayAccess($b);
+            return !$aa->probe && \Compile\Mir\Ownership::userOffsetGetBase($aa->array->type, $this->classDefs);
+        }
         if ($t->kind !== Type::KIND_OBJ) { return false; }
         return $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
     }

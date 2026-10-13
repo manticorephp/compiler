@@ -1,0 +1,5 @@
+direct: ArgumentCountError
+method: ArgumentCountError
+dyn-func: ArgumentCountError
+call_user_func: ArgumentCountError
+ok: 3

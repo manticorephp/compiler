@@ -1,5 +1,7 @@
 # `#[Async]` — design note (not implemented)
 
+Status: **proposal** (not implemented). Sketches how an `#[Async]` attribute would rewrite a function body and type its call site as a task of the return type.
+
 Everything else in `Async\` is a library. This one cannot be: it needs the compiler to
 rewrite a function body and to type the call site as a task of the function's return type.
 This note is what the implementation would be, written before any of it, so the decision is

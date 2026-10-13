@@ -1,0 +1,19 @@
+0=0/5 1=10/15 2=20/25 3=30/35 
+-- mutate through the loop variable
+1 11 21 31 
+-- break / continue
+11 
+-- loop variable keeps the last element
+31
+-- grow while iterating
+0 10 77 
+-- nested
+0 10 10 20 
+-- generator body
+1 11 21 31 
+-- getIterator override
+0:2 1:1 2:0 
+-- object outlives the array
+20 21
+-- the same object in two slots
+21

@@ -52,7 +52,7 @@ final class ReturnType
             if ($u->exprBody !== null) {
                 if ($this->permissive($target) || $target->kind === Ty::KIND_VOID) { continue; }
                 $src = $infer->of($u->exprBody);
-                if (!Ty::assignable($target, $src, $idx)) {
+                if (!Ty::assignable($target, $src, $idx) && !Ty::coercedScalars($target, $src, $pf->path)) {
                     $this->diags[] = Diagnostic::error(
                         $pf->path, $u->exprBody->span->line, $u->exprBody->span->column, 'return.type',
                         $u->label . ': returns ' . $src->display() . ', declared ' . $target->display()
@@ -81,7 +81,7 @@ final class ReturnType
             foreach ($this->returns as $ret) {
                 if ($ret->value === null) { continue; }
                 $src = $infer->of($ret->value);
-                if (Ty::assignable($target, $src, $idx)) { continue; }
+                if (Ty::assignable($target, $src, $idx) || Ty::coercedScalars($target, $src, $pf->path)) { continue; }
                 $this->diags[] = Diagnostic::error(
                     $pf->path, $ret->span->line, $ret->span->column, 'return.type',
                     $u->label . ': returns ' . $src->display() . ', declared ' . $target->display()

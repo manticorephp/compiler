@@ -1286,6 +1286,9 @@ class RecursiveDirectoryIterator extends FilesystemIterator implements Recursive
     }
 }
 
+/**
+ * @template T
+ */
 class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSerializable
 {
     /** The native CELL buffer (MemoryAbi::BUF_KIND_CELL) holding the elements.
@@ -1373,6 +1376,7 @@ class SplFixedArray implements IteratorAggregate, ArrayAccess, Countable, JsonSe
         return $i >= 0 && __mc_nbuf_get_c($this->__mcbuf, $i) !== null;
     }
 
+    /** @return T */
     public function offsetGet(mixed $index): mixed
     {
         if (\is_int($index)) {

@@ -879,6 +879,8 @@ class ReflectionMethod extends ReflectionFunctionAbstract
         $this->name = $method;
         $this->tramp = __mc_refl_tramp($h, $method);
         $this->row = __mc_refl_mrow($h, $method);
+        $d = __mc_refl_row_declclass($this->row);
+        if ($d !== "") { $this->class = $d; }
     }
 
     public function getName(): string
@@ -940,6 +942,12 @@ class ReflectionMethod extends ReflectionFunctionAbstract
             throw new ReflectionException("Method " . $this->name . " is not invokable");
         }
         return __mc_refl_invoke($this->tramp, $object, $args);
+    }
+
+    /** A closure over the method; `$object` is the receiver (null for a static method). */
+    public function getClosure(?object $object = null): \Closure
+    {
+        return function (mixed ...$args) use ($object) { return $this->invoke($object, ...$args); };
     }
 
     private function flags(): int

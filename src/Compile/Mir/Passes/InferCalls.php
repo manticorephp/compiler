@@ -273,7 +273,7 @@ trait InferCalls
         // Never actually returns — it throws php's `Undefined constant` Error.
         // Typed CELL so whatever position the constant stood in accepts it: the
         // value is unreachable, but the type has to be one every consumer takes.
-        if ($n === '__mir_throw_error') { return Type::cell(); }
+        if ($n === '__mir_throw_error' || $n === '__mir_throw_type_error' || $n === '__mir_throw_argcount_error') { return Type::cell(); }
         // `print` always yields int 1 in PHP — that is what makes it usable in
         // `$c and print "x"` and `$ok = print "y"`.
         if ($n === 'print') { return Type::int_(); }
@@ -333,7 +333,7 @@ trait InferCalls
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
             || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name'
             || $n === '__mc_refl_attr_err'
-            || $n === '__mc_refl_row_rettype'
+            || $n === '__mc_refl_row_rettype' || $n === '__mc_refl_row_declclass'
             || $n === '__mc_refl_prow_type') { return Type::string_(); }
         // The boxed result of an indirect trampoline call — a mixed cell the
         // prelude's ReflectionMethod::invoke / newInstance hand back to the user.
@@ -748,7 +748,10 @@ trait InferCalls
         if ($args === [] && isset($this->classes[$decl])) {
             $args = $this->defaultTypeArgs($this->classes[$decl]);
         }
-        if ($args === []) { return null; }
+        // A class with no parameters of its own can still bind its parent's
+        // (`/** @extends SplFixedArray<Token> */ class Tokens extends SplFixedArray`):
+        // the walk below translates them, so only a class with neither is a dead end.
+        if ($args === [] && !(isset($this->classes[$decl]) && $this->classes[$decl]->parentTypeArgs !== [])) { return null; }
         $seen = [];
         while ($decl !== '' && isset($this->classes[$decl]) && !isset($seen[$decl])) {
             $seen[$decl] = true;

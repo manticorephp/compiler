@@ -587,7 +587,7 @@ final class NothrowSummary
     private static function helperThrows(string $fn): bool
     {
         if (\str_starts_with($fn, '__mc_refl_')) { return true; }
-        return $fn === '__mir_throw_error' || $fn === '__mir_fiber_jump' || $fn === '__mir_out_write_str'
+        return $fn === '__mir_throw_error' || $fn === '__mir_throw_type_error' || $fn === '__mir_throw_argcount_error' || $fn === '__mir_fiber_jump' || $fn === '__mir_out_write_str'
             || $fn === '__mc_require_value' || $fn === '__mc_pool_start' || $fn === '__mc_weak_arm';
     }
 

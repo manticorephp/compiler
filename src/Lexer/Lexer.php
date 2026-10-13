@@ -605,6 +605,7 @@ final class Lexer
         // Pairs.
         if ($c === '=' && $n === \ord('=')) { $this->emit(TokenKind::DoubleEquals, '==', 2, $line, $col); return; }
         if ($c === '!' && $n === \ord('=')) { $this->emit(TokenKind::NotEquals, '!=', 2, $line, $col); return; }
+        if ($c === '<' && $n === \ord('>')) { $this->emit(TokenKind::NotEquals, '<>', 2, $line, $col); return; }
         if ($c === '<' && $n === \ord('=')) { $this->emit(TokenKind::LessEquals, '<=', 2, $line, $col); return; }
         if ($c === '>' && $n === \ord('=')) { $this->emit(TokenKind::GreaterEquals, '>=', 2, $line, $col); return; }
         if ($c === '<' && $n === \ord('<')) { $this->emit(TokenKind::ShiftLeft, '<<', 2, $line, $col); return; }

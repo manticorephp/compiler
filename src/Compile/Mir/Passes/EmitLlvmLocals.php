@@ -581,6 +581,9 @@ trait EmitLlvmLocals
         if ($dest !== '' && !isset($this->frame->ownLocals[$dest])
             && !isset($this->locals->globalBacked[$dest])
             && !isset($this->locals->refLocals[$dest])) { return ''; }
+        // A real `offsetGet` call hands the reader its own +1: no retain on top.
+        if ($v instanceof \Compile\Mir\ArrayAccess_
+            && \Compile\Mir\Ownership::userOffsetGetBase($v->array->type, $this->classes)) { return ''; }
         if (InsertMemoryOps::cellElemReadCoOwns($v)) {
             $sv = $this->lastValue;
             $st = $this->lastValueType;

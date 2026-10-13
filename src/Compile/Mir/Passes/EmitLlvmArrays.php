@@ -274,14 +274,21 @@ trait EmitLlvmArrays
         // `$obj[$k]` on an ArrayAccess object → `$obj->offsetGet($k)`.
         if ($aa->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
-            $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$this->keyAsWritten($aa->array, $aa->index)], $n->type);
+            // A bound SplFixedArray<Class> read is typed the class
+            // ({@see InferNodes::inferArrayAccess}); the call and the inline
+            // load both answer the CELL word, which is unboxed to the pointer.
+            $wantObj = $n->type->kind === Type::KIND_OBJ && $this->fixedArrayIsPlain($aa);
+            $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetGet', [$this->keyAsWritten($aa->array, $aa->index)], $wantObj ? Type::cell() : $n->type);
             $fast = $this->emitFixedArrayGet($aa, $mc);
-            if ($fast !== null) { return $fast; }
+            if ($fast !== null) { return $wantObj ? $fast . $this->unboxFixedElemObj() : $fast; }
             $fast = $this->emitNbufGet($aa, $mc);
             if ($fast !== null) { return $fast; }
             $fast = $this->emitHmapCall($mc, true);
             if ($fast !== null) { return $fast; }
-            if ($this->fixedArrayIsPlain($aa)) { return $this->emitFixedArrayCallBorrow($mc); }
+            if ($this->fixedArrayIsPlain($aa)) {
+                $borrow = $this->emitFixedArrayCallBorrow($mc);
+                return $wantObj ? $borrow . $this->unboxFixedElemObj() : $borrow;
+            }
             return $this->emitMethodCall($mc);
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
@@ -381,6 +388,29 @@ trait EmitLlvmArrays
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /**
+     * The cell word in lastValue as the object POINTER it carries: the payload
+     * when the tag is OBJECT, else null. The element of a SplFixedArray bound to
+     * a class is that class's cell, boxed by `offsetSet`.
+     */
+    private function unboxFixedElemObj(): string
+    {
+        $w = $this->lastValue;
+        $m = $this->ssa->allocReg();
+        $out = '  ' . $m . ' = and i64 ' . $w . ", 281474976710655\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = lshr i64 ' . $w . ", " . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n";
+        $tag = $this->ssa->allocReg();
+        $out .= '  ' . $tag . ' = and i64 ' . $sh . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n";
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ', ' . (string)\Compile\MemoryAbi::CELL_TAG_OBJ . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = select i1 ' . $isObj . ', i64 ' . $m . ", i64 0\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
@@ -996,9 +1026,28 @@ trait EmitLlvmArrays
         return $out;
     }
 
+    /**
+     * An object or array used as the key of an ARRAY: php throws TypeError
+     * ("Cannot access offset of type E on array"); the key words would otherwise
+     * be hashed as ints. The key is evaluated first, as php does.
+     */
+    private function illegalOffsetThrow(Node $base, Node $idx): ?string
+    {
+        if ($base->type->kind !== Type::KIND_ARRAY
+            || ($idx->type->kind !== Type::KIND_OBJ && $idx->type->kind !== Type::KIND_ARRAY)) { return null; }
+        $t = $idx->type->kind === Type::KIND_OBJ ? ($idx->type->class ?? 'object') : 'array';
+        $out = $this->emitNode($idx);
+        $out .= $this->emitThrowIf('true', 'TypeError', 'Cannot access offset of type ' . $t . ' on array');
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitStoreElement(StoreElement $n): string
     {
         $se = $n;
+        $bad = $this->illegalOffsetThrow($se->array, $se->index);
+        if ($bad !== null) { return $bad; }
         // `$s[$i] = $c` on a string → set byte $i to $c's first byte and write
         // the new string back into the base. Growing past the end pads with
         // spaces; negative $i counts from the end (all in the helper). The `[]`
@@ -2023,6 +2072,8 @@ trait EmitLlvmArrays
 
     private function emitArrayAccessUnified(Node $self, ArrayAccess_ $aa): string
     {
+        $bad = $this->illegalOffsetThrow($aa->array, $aa->index);
+        if ($bad !== null) { return $bad; }
         // `$a[$k] ?? d` probed the key already ({@see emitCoalesceArrayLookup}):
         // base, key and the found word arrive evaluated, and only the decode below
         // runs. Consumed here so nothing nested can see it.

@@ -37,10 +37,10 @@ Three independently-investigated gaps all converge on ONE root —
 - **Canonical NaN-boxing for float.** Blocked because the cell repr keeps RAW ints
   (tag 0) alongside boxed ints; canonical NaN-boxing needs "untagged = double",
   which requires EVERY int in a cell to be boxed — i.e. eliminating the erased
-  raw-element path. (see float-nanbox-handoff memory.)
+  raw-element path.
 
 Fixing erasure unblocks all three plus general generics. The USER DESIGN CALL
-(recorded across handoffs): **monomorphization (non-reified) is the generics path;
+(design decision): **monomorphization (non-reified) is the generics path;
 cell is the dynamic fallback; reflection is orthogonal.**
 
 ## The cell question (answered)
@@ -235,7 +235,7 @@ the native rebuild ignores; now `bootstrap-from-pin` plays the independent-gener
 - **Phase 4 — accumulators.** `array_sum`/`array_reduce` specializations return the
   right scalar (int/float/numericCell). Fixes array_sum.
 - **Phase 5 (separate, after monomorphization is stable) — canonical NaN-boxing
-  retry.** Re-apply the NaN-boxing diff (reconstructable from float-nanbox-handoff:
+  retry.** Re-apply the NaN-boxing diff (sketch:
   `cellTagHead` = `isd=icmp ugt v,-4503599627370496; tag=select isd,(v>>48&15),6`;
   `box_float`=`select(fcmp uno v,v),0x7FF8…,bitcast v`; asfloat→`bitcast i64 %v`),
   now safe because the `$cell` fallback boxes all ints (no raw-int/raw-double
@@ -257,7 +257,7 @@ the native rebuild ignores; now `bootstrap-from-pin` plays the independent-gener
   correctness, not raw representation — focus tests on those observable sites.
 - Recovery from a mis-built native binary: restore `bin/.manticore.prev` or re-run `bin/build` from the pin (historically: `bin/build --seed`).
 
-## First action for the dedicated session
+## Open work
 
 Phase 0 + Phase 1: wire the pass (pass-through, prove fixpoint), then specialize a
 single user helper over two element types with a focused test. Do NOT touch the

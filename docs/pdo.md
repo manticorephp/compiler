@@ -113,35 +113,29 @@ ignored, exactly as pdo_sqlite does — a sqlite statement is forward-only and p
 next row whatever is asked for (measured: `ORI_PRIOR` / `FIRST` / `LAST` / `ABS` / `REL` all
 behave as `ORI_NEXT`). Throwing was stricter than the oracle.
 
-## Not implemented, each with a named throw
+## Limitations
 
-`PDO::FETCH_BOUND` and `bindColumn()` — both need a stored by-reference binding, the same
+`PDO::FETCH_BOUND` and `bindColumn()` throw — both need a stored by-reference binding, the same
 missing primitive `bindParam()` documents above. `nextRowset()` reports IM001, as php's sqlite
-driver does.
+driver does. Only the `sqlite:` driver exists today; `mysql:` and `pgsql:` DSNs are not
+implemented.
 
-## The default-fetch bug, and what it turned out to be
+## Regression notes: default fetch mode and variadic calls
 
-`$stmt->fetch()` with no argument — and therefore `foreach ($stmt as $row)` — used to hand
-back an object where php hands back an array, and `count()` on it answered a pointer.
-
-It was not a PDO bug and it was not about `$fetchMode` at all. `PDO::query()` is declared
+`$stmt->fetch()` with no argument (and so `foreach ($stmt as $row)`) must return an array, as in
+php. The cause of a past regression was in call lowering, not in PDO. `PDO::query()` is declared
 
 ```php
 public function query(string $query, ?int $fetchMode = null, mixed ...$fetchModeArgs)
 ```
 
-and the compiler's call lowering **packed the variadic into the first OMITTED parameter's
-slot**: `$db->query($sql)` passed the empty pack as `$fetchMode`. So `$fetchMode !== null`
-held, `setFetchMode()` ran with an array POINTER, and every later `fetch()` masked that
-pointer's low nibble into a fetch mode. Fixed in `LowerFns::defaultFillArgs` — an omitted
-fixed parameter keeps its own slot and its own default.
-
-The discriminator that found it in minutes, after an earlier session spent an hour on toy
-repros: **`prepare()` + `execute()` + `fetch()` was always correct, only `query()` was not.**
+and the compiler packed the variadic into the first OMITTED parameter's slot, so
+`$db->query($sql)` passed the empty pack as `$fetchMode`. Fixed in `LowerFns::defaultFillArgs`:
+an omitted fixed parameter keeps its own slot and its own default. Telltale symptom of this
+class of bug: `prepare()` + `execute()` + `fetch()` is correct while `query()` is not, because
 `prepare()` has no optional-before-variadic parameter.
 
-Four further compiler bugs in the same family surfaced from PDO's own `FETCH_CLASS` path and
-are fixed with it — all four have PDO-free regression cases in
+Four related spread-call bugs are fixed too, with PDO-free regression cases in
 `tests/aot/cases/spread_call_defaults.php`:
 
 - `new $cls(...$args)` emitted **no value at all** for the pack, so the constructor received

@@ -1,5 +1,7 @@
 # Memory ABI contract — the stone tablet
 
+Status: **shipped; normative.** The layout and refcount contract between the compiler and its runtime.
+
 The single source of truth for string / object / array layout, refcount encoding,
 ownership transitions, destructor order and the child-iteration ABI. Anything that breaks
 this contract breaks the compiler; anything that *extends* it updates this doc in the same
