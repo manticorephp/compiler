@@ -2792,12 +2792,13 @@ final class EmitLlvm implements EmitVisitor
         $this->rt->needsStrtod = true;
         $out = $this->emitNode($left);
         $out .= $this->boxToCell($left->type);
-        $out .= $this->cellArithGuard($left, $left, $right, $op);
+        if ($op !== 'add') { $out .= $this->cellArithGuard($left, $left, $right, $op); }
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
         $out .= $this->boxToCell($right->type);
-        $out .= $this->cellArithGuard($right, $left, $right, $op);
+        if ($op !== 'add') { $out .= $this->cellArithGuard($right, $left, $right, $op); }
         $r = $this->lastValue;
+        if ($op === 'add') { $out .= $this->cellAddGuard($left, $right, $l, $r); }
         $reg = $this->ssa->allocReg();
         if ($op === 'add' || $op === 'sub') {
             $out .= $this->taggedIntStepInline($op, $l, $r, $reg);

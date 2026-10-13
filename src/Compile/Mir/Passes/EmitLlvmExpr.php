@@ -2348,6 +2348,50 @@ trait EmitLlvmExpr
         $cnd = $this->ssa->allocReg();
         $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $this->lastValue . ")\n";
         $out .= '  ' . $cnd . ' = icmp ugt i32 ' . $bad . ", 1\n";
+        return $out . $this->cellArithThrow($cnd, $left, $right, $sym);
+    }
+
+    /**
+     * `+` over two CELL words, after both are evaluated: two ARRAYS are php's
+     * union (`$_SERVER += $_ENV`), which `__manticore_tagged_add` answers; an
+     * array beside anything else, or a non-numeric string, is the TypeError.
+     * Guarding each side alone threw on the union.
+     */
+    private function cellAddGuard(Node $left, Node $right, string $l, string $r): string
+    {
+        if ($left->type->kind !== Type::KIND_CELL && $right->type->kind !== Type::KIND_CELL) { return ''; }
+        $this->rt->needsCellToIntArg = true;
+        $this->rt->needsStrtol = true;
+        $out = '';
+        $codes = [];
+        foreach ([[$left, $l], [$right, $r]] as $side) {
+            if ($side[0]->type->kind !== Type::KIND_CELL) { $codes[] = '0'; continue; }
+            $b = $this->ssa->allocReg();
+            $out .= '  ' . $b . ' = call i32 @__manticore_cell_int_bad(i64 ' . $side[1] . ")\n";
+            $codes[] = $b;
+        }
+        $lb = $this->ssa->allocReg();
+        $rb = $this->ssa->allocReg();
+        $la = $this->ssa->allocReg();
+        $ra = $this->ssa->allocReg();
+        $any = $this->ssa->allocReg();
+        $both = $this->ssa->allocReg();
+        $nb = $this->ssa->allocReg();
+        $cnd = $this->ssa->allocReg();
+        $out .= '  ' . $lb . ' = icmp ugt i32 ' . $codes[0] . ", 1\n";
+        $out .= '  ' . $rb . ' = icmp ugt i32 ' . $codes[1] . ", 1\n";
+        $out .= '  ' . $la . ' = icmp eq i32 ' . $codes[0] . ", 2\n";
+        $out .= '  ' . $ra . ' = icmp eq i32 ' . $codes[1] . ", 2\n";
+        $out .= '  ' . $any . ' = or i1 ' . $lb . ', ' . $rb . "\n";
+        $out .= '  ' . $both . ' = and i1 ' . $la . ', ' . $ra . "\n";
+        $out .= '  ' . $nb . ' = xor i1 ' . $both . ", true\n";
+        $out .= '  ' . $cnd . ' = and i1 ' . $any . ', ' . $nb . "\n";
+        return $out . $this->cellArithThrow($cnd, $left, $right, '+');
+    }
+
+    /** The cold `Unsupported operand types: L op R` TypeError under the i1 `$cnd`. */
+    private function cellArithThrow(string $cnd, Node $left, Node $right, string $sym): string
+    {
         $head = 'Unsupported operand types: ';
         $mid = ' ' . $sym . ' ';
         $st = static fn (Node $n): string => $n->type->kind === Type::KIND_CELL ? 'mixed' : $n->type->toString();
@@ -2369,7 +2413,7 @@ trait EmitLlvmExpr
         $thr = $this->emitThrowNodeIf($cnd, $thr);
         $this->lastValue = $saved;
         $this->lastValueType = $savedT;
-        return $out . $thr;
+        return $thr;
     }
 
     /** Branch on the i1 `$cond` into a cold block that evaluates `$thrower` (a throwing call). */
