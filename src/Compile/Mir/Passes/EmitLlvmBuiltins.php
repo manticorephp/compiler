@@ -4525,9 +4525,13 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
             return $this->finishI64($out, $r);
         }
+        // The answer folds from the static type, but the operand still RUNS:
+        // `is_string($t = $recv)` (a runtime callable array's receiver probe)
+        // lost its assignment, and the method call read `$t` unset.
+        $out = $a->kind === Node::KIND_LOAD_LOCAL ? '' : $this->emitNode($a);
         $this->lastValue = ($a->type->kind === $kind) ? '1' : '0';
         $this->lastValueType = 'i64';
-        return '';
+        return $out;
     }
 
     /**
