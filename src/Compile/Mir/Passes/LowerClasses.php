@@ -707,8 +707,19 @@ trait LowerClasses
         // A global default is never seen by InferTypes, so the literal names
         // its own shape here: a homogeneous scalar list/map keeps that element
         // kind (the boxer rebuilds it as cells), anything else is a cell array.
-        if ($k === Node::KIND_ARRAY_LIT) { $def->type = $this->staticDefaultLitType($def); }
+        if ($k === Node::KIND_ARRAY_LIT) { $this->typeCellStaticLit($def); }
         return new \Compile\Mir\Call('__mir_to_cell', [$def], Type::cell());
+    }
+
+    /** A literal under a CELL slot, and every literal nested in it, names its own
+     *  shape: an inner list left untyped was built with no element repr and read
+     *  back through the outer cell as denormal floats. */
+    private function typeCellStaticLit(\Compile\Mir\ArrayLit $lit): void
+    {
+        $lit->type = $this->staticDefaultLitType($lit);
+        foreach ($lit->elements as $el) {
+            if ($el->value instanceof \Compile\Mir\ArrayLit) { $this->typeCellStaticLit($el->value); }
+        }
     }
 
     /** Type a static default literal and every literal nested in it: the slot's
