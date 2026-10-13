@@ -1,0 +1,36 @@
+bool(true)
+cert,pkey
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+cert,pkey,extracerts 1
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+int(1)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+string(24) "signed message
+line two
+"
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(26) "signed message
+line two
+"

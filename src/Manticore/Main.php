@@ -5512,7 +5512,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // enrols it automatically. The class arm matters because a program can take
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
-        || $demand->mentions('OpenSSLAsymmetricKey');
+        || $demand->mentionsAny(['OpenSSLAsymmetricKey', 'OpenSSLCertificate', 'OpenSSLCertificateSigningRequest']);
     // ext/intl over the host ICU: gated on its functions and its classes, so a
     // program that uses neither never links libicu.
     // One gate per class family; each needs intl.php (UTF-16 helpers, the

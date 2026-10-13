@@ -1,0 +1,16 @@
+aes-128-ccm 648b759fa1b48fda180e50 7ec9ee0d74840487ed1c561ad6948219
+string(11) "ccm payload"
+bool(false)
+aes-256-ocb bc41cd5a87e88820a0fc95 6af7cb60d336582a41689c452c781143
+string(11) "ccm payload"
+bool(false)
+aes-128-gcm 4d090be2c4812f8b8b78b7 9ea566fcb6dfce22c3f450d373180f51
+string(11) "ccm payload"
+bool(false)
+string(4) "+w=="
+int(8)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)

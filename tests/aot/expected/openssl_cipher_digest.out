@@ -1,0 +1,39 @@
+aes-256-cbc 32 16 lYEPWIZ0HtmJ3axR+EK3t5utenCuqLtQKB+Y0zww7aU=
+string(25) "The quick brown fox jumps"
+aes-128-cbc 16 16 n1iOQ7yMbSSJc2eiBDyxn2rozSYLWLFZH37NOil5Bf4=
+string(25) "The quick brown fox jumps"
+aes-256-ctr 32 16 WHzp246od0HToR6PaohPcA+/pBOvI3GDdQ==
+string(25) "The quick brown fox jumps"
+aes-192-cfb 24 16 LQgufM/xIslqtwRdzyjMRDRvuA77M4r+OA==
+string(25) "The quick brown fox jumps"
+aes-256-ofb 32 16 WHzp246od0HToR6PaohPcBb6ua85DYn2Wg==
+string(25) "The quick brown fox jumps"
+des-ede3-cbc 24 8 j/QTqQbYuTQkzm8KLBdCMfZdQn27kEYx8yd75zW1Jwg=
+string(25) "The quick brown fox jumps"
+1c374376150ccdf6d2cd9c28b48f11f7
+string(11) "hello world"
+dc7366fe05e4b4dfd8b1cfeeb4c13bea
+string(16) "xxxxxxxxxxxxxxxx"
+bool(false)
+bool(false)
+7ecab6590631bbfea99a9c14a97d 299e11ead7e89a85ae7192e4998dc518
+string(14) "secret payload"
+bool(false)
+int(12)
+string(4) "zA=="
+c077d4e849da04b5b650c272dc68 52c5482d37de05cf25ea7a91d093c4cc
+string(14) "chacha payload"
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(64) "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+string(32) "900150983cd24fb0d6963f7d28e17f72"
+string(40) "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+string(40) "4b007901b765489abead49d926f721d065a429c1"
+string(64) "632c2812e46d4604102ba7618e9d6d7d2f8128f6266b4a03264d2a0460b7dcb3"
+int(24)
+bool(true)
+bool(true)
+bool(true)
