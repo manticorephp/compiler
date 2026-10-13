@@ -62,23 +62,26 @@ Priority is how many real applications reach a function, not the percentage. A m
 function compiles and fails at run time with `Call to undefined function`.
 
 **P0 — every application**
-- [~] `standard` 82 % · `SPL` 74 % · `date` 84 % · core 78 % — close the missing tail
+- [ ] Core audit false negatives (`get_called_class`, `get_defined_vars`, `ErrorException`, `UnhandledMatchError`, …) — triage real vs audit-blind [#215]
+- [ ] `SPL` iterators (`LimitIterator`, `CachingIterator`, `RegexIterator`, `RecursiveArrayIterator`, …), `class_uses` [#214]
+- [ ] `password_*`, `crypt` [#212] · `hash_pbkdf2`/`hkdf`/`copy`/`update_stream` [#213]
+- [ ] `openssl` 7 % — encrypt/decrypt, digest, sign/verify, pkey, x509 over libcrypto [#211]
+- [ ] PDO `pgsql` / `mysql` drivers [#210]
+- [~] `standard` 82 % · `date` 84 % — tail tracked in [#218]
 - [~] `Reflection` 62 % — interface reflection, declaring class, defaults of plain functions
 - [~] `mbstring` 62 % — remaining: `mb_convert_variables`, `mb_parse_str`, `mb_http_*`,
       `mb_convert_kana`, `mb_strcut` on stateful encodings
 
 **P1 — web frameworks**
-- [ ] `hash` (48 %), `random` classes, `filter` (11 %)
-- [ ] `openssl` (7 %) over libcrypto
-- [ ] XML: `dom` (28 %), `libxml`, `xml`, `xmlwriter`, `xmlreader` over libxml2
-- [ ] Databases: PDO `mysql` and `pgsql` drivers on the existing driver seam, then `mysqli`
-      and `pgsql`
+- [ ] `xml` SAX parser [#216] · `random` classes [#217] · `fileinfo` [#219] · `dom` 28 % [#220]
+      · `filter` 11 % [#221] · `posix` / `pcntl` [#222]
+- [ ] `xmlwriter`, `xmlreader`, `libxml` loaders (see #225)
+- [ ] `mysqli`, `pgsql` procedural APIs after the PDO drivers
 - [x] `pdo_sqlite`, `curl`, `session`, `sockets`, `intl`, `iconv`, `ctype`, `tokenizer`
 
 **P2 — common**
-- [~] `zlib` 50 % (one-shot + incremental done over libz) · [ ] `zip` · [ ] `fileinfo`
-- [ ] `bcmath` · [ ] `gmp` · [ ] `sodium` · [ ] `gd`
-- [~] `posix` 15 % · `pcntl` 54 %
+- [~] `zlib` 50 % (one-shot + incremental done over libz; `gz*` streams open) · [ ] `zip` [#225]
+- [ ] `bcmath` · `gmp` [#223] · [ ] `sodium` + argon2 [#224] · [ ] `gd`
 
 **P3 — on request:** `calendar`, `gettext`, `readline`, `bz2`, `ftp`, `ldap`, `soap`, `odbc`,
 `snmp`, `tidy`, SysV IPC, `exif`, `dba`, `Phar`. `mb_ereg*` is parked (Oniguruma is EOL).
