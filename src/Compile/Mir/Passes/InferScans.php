@@ -2688,6 +2688,8 @@ trait InferScans
                 // A nested store `$a[k][…] = v` where the value is a scalar: mark
                 // the OUTER base local so an empty inner `[]` promotes to vec[cell].
                 $base = $se->array->array;
+                // Any depth: `$a[k1][k2][…] = v` mutates the root just as `$a[k][…]` does.
+                while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
                 if ($base->kind === Node::KIND_LOAD_LOCAL) {
                     $bname = $base->name;
                     $this->recordDisqualified[$bname] = true; // nested mutation
