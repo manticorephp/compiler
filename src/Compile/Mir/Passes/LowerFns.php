@@ -766,7 +766,12 @@ trait LowerFns
         // Closure object, so `instanceof Closure` on the result is not modelled.
         if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
             $cc = $this->coerceCallableArg(Type::closure(), $calleeAst);
-            return $cc !== null ? $cc : $this->lowerExpr($calleeAst);
+            if ($cc !== null) { return $cc; }
+            // A runtime callable VALUE becomes a real Closure, as php's `$c(...)` does
+            // ({@see LowerFromAst::closureFromSource}); passing the value through left an
+            // invokable object or an array where a Closure was promised.
+            $this->needsClosureFrom = true;
+            return new \Compile\Mir\Call('__mc_closure_from', [$this->lowerExpr($calleeAst)], Type::closure());
         }
         if ($ck === 'StringLiteral') {
             return $this->lowerStringCallable($this->strLitValue($calleeAst), $expr->args);

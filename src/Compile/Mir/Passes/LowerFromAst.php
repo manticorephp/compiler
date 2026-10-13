@@ -1532,7 +1532,7 @@ final class LowerFromAst implements Pass
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         $this->synthStaticCallable($module);
         if ($this->needsClosureFrom) {
-            $prog = \Parser\Parser::parseSource("<?php\n" . $this->closureFromSource());
+            $prog = \Parser\Parser::parseSource("<?php\n" . $this->closureFromSource($module));
             foreach ($prog->statements as $cfs) {
                 if ($cfs->kind !== 'Function') { continue; }
                 $this->fnDecls[$cfs->decl->name] = $cfs->decl;
@@ -5972,8 +5972,18 @@ final class LowerFromAst implements Pass
      * ponytail: 8 forwarded arguments at most; a by-ref parameter of the target
      * binds a copy.
      */
-    private function closureFromSource(): string
+    private function closureFromSource(Module $module): string
     {
+        // An invokable OBJECT becomes its own `__invoke(...)` closure — the one
+        // php builds, whose parameters reflection reads (symfony's ControllerEvent
+        // reflects `$controller(...)` to resolve the controller's arguments).
+        $arms = '';
+        foreach ($module->classes as $cd) {
+            if ($cd->isAbstract || !isset($cd->methodMeta['__invoke'])) { continue; }
+            $mm = $cd->methodMeta['__invoke'];
+            if ($mm->isStatic || $mm->visibility !== 'public') { continue; }
+            $arms .= '  if ($c instanceof \\' . \ltrim($cd->name, '\\') . ") { return \$c->__invoke(...); }\n";
+        }
         $s = "'\\0__mc_fromcallable_omitted'";
         $params = [];
         $elems = [];
@@ -5983,6 +5993,7 @@ final class LowerFromAst implements Pass
         }
         return "function __mc_closure_from(mixed \$c): \\Closure {\n"
             . "  if (\$c instanceof \\Closure) { return \$c; }\n"
+            . $arms
             . '  return static function (' . \implode(', ', $params) . ") use (\$c) {\n"
             . '    $__a = [' . \implode(', ', $elems) . "];\n"
             . "    \$__n = 8;\n"
