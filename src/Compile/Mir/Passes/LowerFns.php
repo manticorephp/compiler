@@ -760,6 +760,17 @@ trait LowerFns
         // string/array callable held in a var stays that value rather than a
         // Closure object, so `instanceof Closure` on the result is not modelled.
         if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
+            // `$s(...)` on a local that holds a string-callable literal: build the closure
+            $ci = $ck === 'Variable' ? ($this->constCallables[$this->varName($calleeAst)] ?? null) : null;
+            if ($ci !== null && $ci['kind'] === 'str') {
+                $nm = (string)$ci['name'];
+                $dc = \strpos($nm, '::');
+                if ($dc !== false && $dc > 0) {
+                    $cls = \ltrim(\substr($nm, 0, $dc), '\\');
+                    return $this->synthStaticClosure($cls, \substr($nm, $dc + 2), $cls);
+                }
+                return $this->lowerFcc($nm);
+            }
             $cc = $this->coerceCallableArg(Type::closure(), $calleeAst);
             return $cc !== null ? $cc : $this->lowerExpr($calleeAst);
         }

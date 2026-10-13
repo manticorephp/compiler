@@ -1014,8 +1014,17 @@ trait EmitLlvmExpr
             Type::KIND_STRING => $this->shallowBoxCall('ptr', '@__manticore_box_ptr'),
             Type::KIND_FLOAT  => $this->shallowBoxCall('double', '@__manticore_box_float'),
             Type::KIND_BOOL   => $this->shallowBoxCall('i64', '@__manticore_box_bool'),
+            Type::KIND_NULL   => $this->shallowBoxNull(),
             default           => $this->shallowBoxCall('i64', '@__manticore_box_int'),
         };
+    }
+
+    private function shallowBoxNull(): string
+    {
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $r . " = call i64 @__manticore_box_null()\n";
     }
 
     private function shallowBoxCall(string $argTy, string $fn): string
@@ -1068,6 +1077,15 @@ trait EmitLlvmExpr
      * a `!== null` test reads garbage — it fired the array path on an `int`
      * property and handed __mir_array_loose_eq the raw value 1 as a pointer.
      */
+    /** Identity-compared elements (enum / closure) match only the very same class on both sides. */
+    private function idElemMismatch(?Type $a, ?Type $b): bool
+    {
+        $ia = $a !== null && $a->kind === Type::KIND_OBJ && ($this->isEnumClass($a->class ?? '') || $this->isClosureClass($a->class ?? ''));
+        $ib = $b !== null && $b->kind === Type::KIND_OBJ && ($this->isEnumClass($b->class ?? '') || $this->isClosureClass($b->class ?? ''));
+        if (!$ia && !$ib) { return false; }
+        return !($ia && $ib) || $a->class !== $b->class;
+    }
+
     private function elemChainOf(?Type $t, int $depth = 0): int
     {
         if ($t === null || $depth > 12) {
@@ -1080,8 +1098,10 @@ trait EmitLlvmExpr
         }
         if ($t->kind === Type::KIND_OBJ) {
             $cls = $t->class ?? '';
-            if ($this->isEnumClass($cls) || $this->objTypeIsStruct($t) || $this->isClosureClass($cls)
-                || $cls === 'Ffi\\Ptr') {
+            // an enum case (ordinal word) and a closure env (pointer word) are equal
+            // only when identical: compare the raw words as ints
+            if ($this->isEnumClass($cls) || $this->isClosureClass($cls)) { return self::EK_INT; }
+            if ($this->objTypeIsStruct($t) || $cls === 'Ffi\\Ptr') {
                 return self::EK_NONE;
             }
             return self::EK_OBJ;
@@ -4806,6 +4826,7 @@ trait EmitLlvmExpr
             $eka = $this->elemChainOf($n->left->type->element);
             $ekb = $this->elemChainOf($n->right->type->element);
             if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && !$this->idElemMismatch($n->left->type->element, $n->right->type->element)
                 && $this->chainsComparable($eka, $ekb)) {
                 $this->rt->needsTaggedCompare = true;
                 $lp = $l;
@@ -5205,6 +5226,15 @@ trait EmitLlvmExpr
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
+        // null beside a float compares as BOOLS (php: null <=> x converts both),
+        // so a NAN operand is truthy, not an unordered double.
+        if (\in_array($c->op, ['<', '<=', '>', '>='], true)
+            && (($c->left->type->kind === Type::KIND_NULL && $c->right->type->kind === Type::KIND_FLOAT)
+                || ($c->left->type->kind === Type::KIND_FLOAT && $c->right->type->kind === Type::KIND_NULL))) {
+            return $this->emitCmp(new Cmp(
+                new \Compile\Mir\Cast('bool', $c->left, Type::bool_()),
+                new \Compile\Mir\Cast('bool', $c->right, Type::bool_()), $c->op));
+        }
         // A loose compare of an object against a string compares its
         // __toString() with the string; the object's address was compared.
         if ($c->op !== '===' && $c->op !== '!==') {
@@ -5978,6 +6008,7 @@ trait EmitLlvmExpr
             $eka = $this->elemChainOf($c->left->type->element);
             $ekb = $this->elemChainOf($c->right->type->element);
             if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && !$this->idElemMismatch($c->left->type->element, $c->right->type->element)
                 && $this->chainsComparable($eka, $ekb)) {
                 $this->rt->needsTaggedCompare = true;
                 $lp = $l;

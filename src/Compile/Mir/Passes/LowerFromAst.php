@@ -5592,9 +5592,20 @@ final class LowerFromAst implements Pass
         $method = $e->method;
         $args = $e->args;
         $span = $e->span;
+        // `$c::$m(args)`: the method name is a variable too, so every STATIC method of a
+        // user class is a candidate arm, selected on (class, method) at run time.
+        $methodVar = \strncmp($method, '$', 1) === 0 ? \substr($method, 1) : '';
         $names = [];
+        $pairs = [];
         foreach ($this->classTable as $cname => $cd) {
             if ($this->isTypeDef($cname)) { continue; }
+            if ($methodVar !== '') {
+                if ($cd->isPreludeClass) { continue; }
+                foreach ($cd->methodMeta as $mn => $mm) {
+                    if ($mm->isStatic && !$mm->isAbstract) { $pairs[] = [$cname, (string)$mn]; }
+                }
+                continue;
+            }
             if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
         }
         $nameExpr = \Parser\Ast\Expr::ternary(
@@ -5604,6 +5615,14 @@ final class LowerFromAst implements Pass
             $span,
         );
         $chain = \Parser\Ast\Expr::null($span);
+        for ($i = \count($pairs) - 1; $i >= 0; $i = $i - 1) {
+            $cond = \Parser\Ast\Expr::binary('&&',
+                \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($pairs[$i][0], $span), $span),
+                \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::variable($methodVar, $span), new \Parser\Ast\StringLiteral($pairs[$i][1], $span), $span),
+                $span);
+            $then = \Parser\Ast\Expr::staticCall($pairs[$i][0], $pairs[$i][1], $args, $span);
+            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        }
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
             $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);

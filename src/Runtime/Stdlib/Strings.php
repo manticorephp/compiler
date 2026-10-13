@@ -488,6 +488,8 @@ function str_pad(string $s, int $len, string $pad = " ", int $type = 1): string
  */
 function number_format(float $num, int $decimals = 0, string $dec_point = ".", string $thousands_sep = ","): string
 {
+    if (\is_nan($num)) { return "nan"; }
+    if (\is_infinite($num)) { return "inf"; }
     $neg = $num < 0.0;
     if ($neg) { $num = -$num; }
     $factor = 1;
@@ -497,11 +499,18 @@ function number_format(float $num, int $decimals = 0, string $dec_point = ".", s
     // representation error so number_format(1.005, 2) is "1.01", not "1.00"),
     // then take the smallest-unit integer count, half away from zero.
     $num = \round($num, $decimals);
-    $scaled = (int)($num * (float)$factor + 0.5);
-    $intPart = \intdiv($scaled, $factor);
-    $frac = $scaled - $intPart * $factor;
+    if ($num * (float)$factor >= 9.0e18) {
+        // beyond int range the float is integral: print its exact digits
+        $intStr = \sprintf("%.0f", $num);
+        $frac = 0;
+        $scaled = 1;
+    } else {
+        $scaled = (int)($num * (float)$factor + 0.5);
+        $intPart = \intdiv($scaled, $factor);
+        $frac = $scaled - $intPart * $factor;
+        $intStr = (string)$intPart;
+    }
     // Group the integer digits in threes from the right.
-    $intStr = (string)$intPart;
     $n = \strlen($intStr);
     $grouped = "";
     $j = 0;

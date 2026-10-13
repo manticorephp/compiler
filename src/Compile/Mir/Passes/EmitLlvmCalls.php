@@ -2118,6 +2118,10 @@ trait EmitLlvmCalls
     private function closureArgRepr(Type $at, ?Type $pt, ?Node $src = null): string
     {
         if ($this->closureArgOwnsBox($at, $pt)) { return $this->boxToCell($at, $src); }
+        // an enum case rides as its ordinal; an erased param needs the case singleton
+        if ($this->isEnumType($at) && ($pt === null || $pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN)) {
+            return $this->shallowBoxToCell($at);
+        }
         if ($this->isCellBoxableArg($at) || $this->isClosureValueType($at)
             || $this->own->condFlavor($at) === 'obj') {
             return $this->boxToCell($at);
