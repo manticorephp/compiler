@@ -1,0 +1,3 @@
+before: cli cli
+handler: cli-server cli-server web=yes
+after: cli-server

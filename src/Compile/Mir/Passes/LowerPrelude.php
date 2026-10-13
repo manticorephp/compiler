@@ -1261,6 +1261,9 @@ trait LowerPrelude
         if ($name === 'STDIN')  { return $this->stdStreamNode(0); }
         if ($name === 'STDOUT') { return $this->stdStreamNode(1); }
         if ($name === 'STDERR') { return $this->stdStreamNode(2); }
+        // A runtime read, not a fold: a compat Http\Server flips the process to
+        // 'cli-server' once it serves (php_sapi_name() in the stdlib).
+        if ($name === 'PHP_SAPI') { return new Call('php_sapi_name', [], Type::string_()); }
 
         return $this->preludeConstInt($name);
     }
@@ -1597,7 +1600,7 @@ trait LowerPrelude
             'PASSWORD_DEFAULT' => '2y', 'PASSWORD_BCRYPT' => '2y', 'PASSWORD_ARGON2I' => 'argon2i',
             'PASSWORD_ARGON2ID' => 'argon2id', 'PASSWORD_ARGON2_PROVIDER' => 'standard',
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.11', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.11', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references
