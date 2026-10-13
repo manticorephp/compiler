@@ -607,6 +607,13 @@ trait EmitLlvmCalls
             $out = $this->emitNode($iv->callee);
             $out .= $this->coerceToPtr();
             $keyP = $this->lastValue;
+            /** @var array<string, string> $owned */
+            $owned = [];
+            $iv2 = $this->hoistFreshInvokeArgs($iv, $out, $owned);
+            if ($iv2 !== $iv) {
+                $out .= $this->emitDynFnCall($iv2, $keyP);
+                return $out . $this->releaseHoistedArgs($owned);
+            }
         }
         $argc = \count($iv->args);
         // A `...$arr` spread makes the runtime arg count unknown. HOIST the
@@ -1293,6 +1300,80 @@ trait EmitLlvmCalls
         $out = $this->emitNode($n->callee);
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
+        /** @var array<string, string> $owned */
+        $owned = [];
+        $n = $this->hoistFreshInvokeArgs($n, $out, $owned);
+        $out .= $this->emitErasedInvokeArms($n, $raw);
+        return $out . $this->releaseHoistedArgs($owned);
+    }
+
+    /**
+     * Evaluate every argument that RUNS CODE (a call, an invoke, a `new`, a
+     * concat, an array literal) once, after the callee, into a slot, and answer
+     * the invoke over LoadLocals of those slots. Each dispatch arm below (by-name
+     * function arms, the callable-array arms, `__invoke`, the closure struct)
+     * re-emits the argument nodes, so an argument that is itself a dynamic call
+     * was spliced once per arm, recursively: symfony's NullAdapter::get
+     * (`$callback((self::$createCacheItem)($key), $save)`) emitted 68 copies of
+     * the inner dispatch, 5.7 MB of IR for one line. A plain variable, property
+     * or element read stays in place — it may be the by-reference target of the
+     * arm that runs. Fresh +1 arguments land in `$owned` for
+     * {@see releaseHoistedArgs}, as {@see dynHoistOperand} does for `$o->$m()`.
+     *
+     * @param array<string, string> $owned
+     */
+    private function hoistFreshInvokeArgs(Invoke_ $n, string &$out, array &$owned): Invoke_
+    {
+        $need = false;
+        foreach ($n->args as $a) {
+            $o = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+            if ($this->invokeArgRunsCode($o)) { $need = true; }
+        }
+        if (!$need) { return $n; }
+        $args = [];
+        foreach ($n->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) {
+                $sp = $this->asSpreadNode($a);
+                $args[] = $this->invokeArgRunsCode($sp->operand)
+                    ? new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out, $owned, false), $a->type)
+                    : $a;
+            } else {
+                $args[] = $this->invokeArgRunsCode($a) ? $this->dynHoistOperand($a, $out, $owned, true) : $a;
+            }
+        }
+        $n2 = new Invoke_($n->callee, $args, $n->type);
+        $n2->line = $n->line;
+        return $n2;
+    }
+
+    private function invokeArgRunsCode(Node $o): bool
+    {
+        $k = $o->kind;
+        return $k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_INVOKE || $k === Node::KIND_CONCAT || $k === Node::KIND_NEW_OBJ
+            || $k === Node::KIND_ARRAY_LIT;
+    }
+
+    /** @param array<string, string> $owned */
+    private function releaseHoistedArgs(array $owned): string
+    {
+        if ($owned === []) { return ''; }
+        $resReg = $this->lastValue;
+        $resTy = $this->lastValueType;
+        $out = '';
+        foreach ($owned as $slot => $flavor) {
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = load i64, ptr ' . $slot . "\n";
+            $out .= $this->rcReleaseReg($v, $flavor);
+        }
+        $this->lastValue = $resReg;
+        $this->lastValueType = $resTy;
+        return $out;
+    }
+
+    private function emitErasedInvokeArms(Invoke_ $n, string $raw): string
+    {
+        $out = '';
         $out .= $this->cellTagIr($raw);
         $tag0 = $this->cellTagReg;
         // A RAW word is classified by its allocator header, as if it were
