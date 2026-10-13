@@ -1,6 +1,5 @@
 <?php
 // `$o[$i]` on an ArrayAccess object returned through a `mixed` function keeps an extra reference: the element's destructor runs at shutdown
-// issue: #100
 class Tok { public function __destruct() { echo "tok\n"; } }
 class Box implements ArrayAccess {
     /** @var array<int, mixed> */

@@ -2413,7 +2413,7 @@ trait EmitLlvmExpr
      * continues in a fresh block. The throw sits in its own cold block, the way
      * php raises these from the operator itself.
      */
-    private function emitThrowIf(string $cond, string $class, string $message): string
+    private function emitThrowIf(string $cond, string $class, string $message, string $leaf = ''): string
     {
         $thr = $this->ssa->allocLabel('arith.throw');
         $ok = $this->ssa->allocLabel('arith.ok');
@@ -2422,6 +2422,8 @@ trait EmitLlvmExpr
         $saved = $this->lastValue;
         $savedT = $this->lastValueType;
         $savedB = $this->lastCallWasBuiltin;
+        // A builtin that raises is a frame of its own in the trace (`$leaf`).
+        $out .= $leaf !== '' ? $this->btPush($leaf, $this->btCallLine) : '';
         $out .= $this->emitNode(new \Compile\Mir\Throw_(
             new \Compile\Mir\NewObj($class, [
                 new \Compile\Mir\StringConst($message, Type::string_()),
@@ -2430,6 +2432,7 @@ trait EmitLlvmExpr
             ], Type::obj($class)),
             Type::void(),
         ));
+        $out .= $leaf !== '' ? $this->btPop() : '';
         $out .= '  br label %' . $ok . "\n";
         $out .= $ok . ":\n";
         $this->lastValue = $saved;

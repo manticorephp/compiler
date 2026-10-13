@@ -1740,12 +1740,19 @@ final class OwnershipFlow implements Pass
             $at = $l->retAt[$i];
             $out = $l->retOut[$i];
             if (\spl_object_id($at) === $bodyId) {
+                // php destroys the objects the global scope holds alone in REVERSE order of
+                // declaration (zend_call_destructors); every other local follows in order.
+                $objDrops = [];
+                $restDrops = [];
                 foreach ($out as $name => $x) {
                     if ($x > 0 && $rel) {
-                        $tail[] = $this->dropOp($name, $x);
+                        $op = $this->dropOp($name, $x);
+                        if ($fn->name === '__main' && $op->flavor === 'obj') { $objDrops[] = $op; } else { $restDrops[] = $op; }
                         $this->say(0, $name, $x, 'fall-through');
                     }
                 }
+                foreach (\array_reverse($objDrops) as $op) { $tail[] = $op; }
+                foreach ($restDrops as $op) { $tail[] = $op; }
                 continue;
             }
             if ($at->kind !== Node::KIND_RETURN) { continue; }
