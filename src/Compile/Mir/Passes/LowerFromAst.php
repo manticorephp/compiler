@@ -4020,6 +4020,11 @@ final class LowerFromAst implements Pass
         // deep index chain comes along for free — there is no new store node.
         $dyn = $this->dynStaticPropBase($expr->target);
         if ($dyn !== null) { return $this->lowerDynStaticStore($dyn, $expr); }
+        if ($expr->target->kind === 'ArrayLit' && $this->destructureHasRef($expr->target)) {
+            return $this->lowerRefDestructure($expr->target, $expr->value);
+        }
+        $h = $this->hoistLvalueExpr($expr);
+        if ($h !== null) { return $h; }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
     }
 
@@ -5790,12 +5795,54 @@ final class LowerFromAst implements Pass
         return new Block($stmts, Type::void());
     }
 
+    private function destructureHasRef(\Parser\Ast\ArrayLit $t): bool
+    {
+        foreach ($t->elements as $el) {
+            if ($el->byRef) { return true; }
+            if ($el->value !== null && $el->value->kind === 'ArrayLit' && $this->destructureHasRef($el->value)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * `[&$a, $b] = $src` → `$a = &$src[0]; $b = $src[1];`. The source is an
+     * lvalue and is named once per element, so an effectful one is evaluated
+     * into a temp first.
+     */
+    private function lowerRefDestructure(\Parser\Ast\ArrayLit $target, \Parser\Ast\Expr $src): Node
+    {
+        $stmts = [];
+        if (!$this->astIsPlainRead($src)) {
+            $tmp = '__destr_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $stmts[] = $this->storeToTarget(new \Parser\Ast\Variable($tmp, $src->span), $this->lowerExpr($src));
+            $src = new \Parser\Ast\Variable($tmp, $src->span);
+        }
+        $idx = 0;
+        foreach ($target->elements as $el) {
+            if ($el->value === null) { $idx = $idx + 1; continue; }
+            $key = $el->key ?? new \Parser\Ast\IntLiteral($idx, $target->span);
+            $access = new \Parser\Ast\ArrayAccess($src, $key, $target->span);
+            if ($el->value->kind === 'ArrayLit' && $this->destructureHasRef($el->value)) {
+                $stmts[] = $this->lowerRefDestructure($el->value, $access);
+            } elseif ($el->byRef) {
+                $stmts[] = $this->lowerRefAssign(new \Parser\Ast\RefAssign($el->value, $access, $target->span));
+            } else {
+                $stmts[] = $this->storeToTarget($el->value, $this->lowerExpr($access));
+            }
+            $idx = $idx + 1;
+        }
+        return new Block($stmts, Type::void());
+    }
+
     /** `$t op= v` → `$t = ($t op v)`. */
     private function lowerCompoundAssign(\Parser\Ast\CompoundAssign $expr): Node
     {
         // `$GLOBALS += […]` is a WRITE of the whole array (a php 8.1 fatal), so
         // say so — lowering the target as a read below would blame the read.
         if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite(); }
+        $h = $this->hoistLvalueExpr($expr);
+        if ($h !== null) { return $h; }
         $read = $this->lowerExpr($expr->target);
         $value = $this->lowerExpr($expr->value);
         // `$t ??= v` → `$t = $t ?? v`.
@@ -5815,9 +5862,22 @@ final class LowerFromAst implements Pass
             // `$this->p++` / `$a[$k]++` — no plain-local slot. Desugar to
             // `target = target ± 1` (a compound assign). In statement context
             // (the common case, e.g. an Iterator's `next()`) this is exact; a
-            // postfix used as an expression value yields the NEW value (minor).
+            // postfix used as an expression value answers the OLD one, via a temp
+            // (a statement postfix is lowered as a prefix: lowerStmtInner).
+            $h = $this->hoistLvalueExpr($expr);
+            if ($h !== null) { return $h; }
             $read = $this->lowerExpr($operand);
-            return $this->storeToTarget($operand, $this->buildBinop($op, $read, new IntConst(1, Type::int_())));
+            $one = new IntConst(1, Type::int_());
+            if ($expr->prefix) {
+                return $this->storeToTarget($operand, $this->buildBinop($op, $read, $one));
+            }
+            $tmp = '__lv_' . (string)$this->lvCounter;
+            $this->lvCounter = $this->lvCounter + 1;
+            return new Block([
+                new StoreLocal($tmp, $read, Type::unknown()),
+                $this->storeToTarget($operand, $this->buildBinop($op, new LoadLocal($tmp, Type::unknown()), $one)),
+                new LoadLocal($tmp, Type::unknown()),
+            ], Type::unknown());
         }
         return new IncDec($operand->name, $op, $expr->prefix, Type::int_());
     }

@@ -1,6 +1,5 @@
 <?php
 // A side-effecting index of a write target in EXPRESSION context is evaluated more than once
-// issue: #66
 $n = 0;
 function f(): int { global $n; $n++; return 0; }
 function g(): int { return 1; }

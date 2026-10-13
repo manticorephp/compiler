@@ -243,6 +243,13 @@ trait LowerStmts
         // store's base, whose SSA values do not survive the resume switch.
         $v = $e->value;
         if ($v->kind === 'Yield' && $e->target->kind !== 'Variable') { $v = $this->lvTemp($v); }
+        // php reads a plain-variable dim LATE (at the store, after the value):
+        // `$a[$i] = $i++` keys on the NEW $i. Evaluate a value that writes
+        // a variable first, so the store's own read of the dim sees the write.
+        if ($e->target->kind === 'ArrayAccess' && $this->lvHasVarDim($e->target)
+            && ($v->kind === 'IncDec' || $v->kind === 'Assign' || $v->kind === 'CompoundAssign')) {
+            $v = $this->lvTemp($v);
+        }
         if ($t === $e->target && $v === $e->value) { return null; }
         return new \Parser\Ast\Assign($t, $v, $e->span);
     }
@@ -273,6 +280,44 @@ trait LowerStmts
         }
         if (!$changed) { return null; }
         return new \Parser\Ast\CallExpr($e->function, $args, $e->span);
+    }
+
+    private function lvHasVarDim(\Parser\Ast\Expr $e): bool
+    {
+        while ($e->kind === 'ArrayAccess') {
+            if ($e->index !== null && $e->index->kind === 'Variable') { return true; }
+            $e = $e->array;
+        }
+        return false;
+    }
+
+    /**
+     * Expression-context twin of {@see hoistLvalueStmt}: `while ($w[f()]++ < 3)`,
+     * `echo mk()->a[] = 5`. The dims / receiver are evaluated once into temps
+     * and the Block answers the rewritten expression's value. The temps are
+     * not unset (a value block ends in its value); they die with the frame.
+     */
+    private function hoistLvalueExpr(\Parser\Ast\Expr $e): ?Node
+    {
+        $k = $e->kind;
+        if ($k !== 'Assign' && $k !== 'CompoundAssign' && $k !== 'IncDec') { return null; }
+        $outerHoist = $this->lvHoist;
+        $outerTemps = $this->lvTemps;
+        $this->lvHoist = [];
+        $this->lvTemps = [];
+        $rewritten = $k === 'Assign' ? $this->hoistAssign($e)
+            : ($k === 'CompoundAssign' ? $this->hoistCompound($e) : $this->hoistIncDec($e));
+        $r = null;
+        if ($rewritten !== null && $this->lvTemps !== []) {
+            $stmts = $this->lvHoist;
+            $this->lvHoist = [];
+            $this->lvTemps = [];
+            $stmts[] = $this->lowerExpr($rewritten);
+            $r = new Block($stmts, Type::unknown());
+        }
+        $this->lvHoist = $outerHoist;
+        $this->lvTemps = $outerTemps;
+        return $r;
     }
 
     /** The target chain with every effectful dim / receiver replaced by a temp. */
@@ -352,9 +397,10 @@ trait LowerStmts
     private function lowerStmtInner(\Parser\Ast\Stmt $stmt): Node
     {
         if ($stmt->kind === 'Expression') {
-            $hoisted = $this->hoistLvalueStmt($stmt->expr);
+            $se = $this->discardedIncDec($stmt->expr);
+            $hoisted = $this->hoistLvalueStmt($se);
             if ($hoisted !== null) { return $hoisted; }
-            $lowered = $this->lowerExpr($stmt->expr);
+            $lowered = $this->lowerExpr($se);
             // `(void) f();` — the cast lowered away, so mark the call itself so
             // the #[\NoDiscard] check stays quiet for it.
             if ($this->isVoidCastExpr($stmt->expr)) { $this->markVoidCast($lowered); }
@@ -501,8 +547,16 @@ trait LowerStmts
         return new Block($stmts, Type::void());
     }
 
+    /** A discarded `x++` is `++x`: no old value to keep. */
+    private function discardedIncDec(\Parser\Ast\Expr $e): \Parser\Ast\Expr
+    {
+        if ($e->kind !== 'IncDec' || $e->prefix) { return $e; }
+        return new \Parser\Ast\IncDec($e->op, true, $e->operand, $e->span);
+    }
+
     private function lowerClauseExpr(\Parser\Ast\Expr $e): Node
     {
+        $e = $this->discardedIncDec($e);
         $h = $this->hoistLvalueStmt($e);
         return $h ?? $this->lowerExpr($e);
     }
