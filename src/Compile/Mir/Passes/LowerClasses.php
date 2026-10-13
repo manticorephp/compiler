@@ -291,6 +291,8 @@ trait LowerClasses
                         $pdoc = $this->docTagType($m->docComment, '@param', $p->name);
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
+                        // untyped promoted param is `mixed`, same as an untyped property
+                        if ($peff === null || $peff === '') { $types[$p->name] = Type::cell(); }
                         $arrHinted[$p->name] = $this->isBareArrayHint($peff) || $types[$p->name]->isArray();
                         $neverObj[$p->name] = $this->hintNeverObject($peff);
                         $docList[$p->name] = $this->isElemOnlyArrayDoc($peff);
