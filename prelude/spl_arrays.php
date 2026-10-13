@@ -23,7 +23,24 @@
  * can't be read). Keep the two in sync.
  */
 
-class ArrayIterator implements Iterator, ArrayAccess, Countable
+interface OuterIterator extends Iterator
+{
+    public function getInnerIterator(): ?Iterator;
+}
+
+interface RecursiveIterator extends Iterator
+{
+    public function hasChildren(): bool;
+
+    public function getChildren(): ?RecursiveIterator;
+}
+
+interface SeekableIterator extends Iterator
+{
+    public function seek(int $offset): void;
+}
+
+class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
 {
     private mixed $__s;
     private mixed $__k;
@@ -31,12 +48,13 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     // Declared LAST: a property added mid-class shifts every later offset.
     private int $__f = 0;
 
-    public function __construct(mixed $array = [])
+    public function __construct(mixed $array = [], int $flags = 0)
     {
         if (!\is_array($array) && !\is_object($array)) {
             throw new \TypeError('ArrayIterator::__construct(): Argument #1 ($array) must be of type array, ' . \get_debug_type($array) . ' given');
         }
         $this->__s = $array;
+        $this->__f = $flags;
         $this->__rebuildKeys();
     }
 
@@ -53,6 +71,14 @@ class ArrayIterator implements Iterator, ArrayAccess, Countable
     {
         $this->__rebuildKeys();
         $this->__i = 0;
+    }
+
+    public function seek(int $offset): void
+    {
+        if ($offset < 0 || $offset >= \count($this->__k)) {
+            throw new \OutOfBoundsException('Seek position ' . $offset . ' is out of range');
+        }
+        $this->__i = $offset;
     }
 
     public function valid(): bool

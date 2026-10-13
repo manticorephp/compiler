@@ -470,6 +470,24 @@ function php_sapi_name(): string
     return 'cli';
 }
 
+/** The Zend Engine version of the php this build tracks (PHP_VERSION 8.5.11). */
+function zend_version(): string
+{
+    return '4.5.11';
+}
+
+/**
+ * The extensions a compiled binary carries (no loader, no php.ini — the set is
+ * fixed at build time). `$zend_extensions` asks for engine extensions: none.
+ *
+ * @return string[]
+ */
+function get_loaded_extensions(bool $zend_extensions = false): array
+{
+    if ($zend_extensions) { return []; }
+    return ['Core', 'date', 'pcre', 'zlib', 'openssl', 'ctype', 'json', 'mbstring', 'SPL', 'standard'];
+}
+
 /**
  * php_uname($mode) — host info via uname(2). $mode: 's' sysname, 'n' nodename,
  * 'r' release, 'v' version, 'm' machine (arch), 'a' (default) all five joined by

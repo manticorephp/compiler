@@ -62,7 +62,7 @@ Priority is how many real applications reach a function, not the percentage. A m
 function compiles and fails at run time with `Call to undefined function`.
 
 **P0 — every application**
-- [~] `standard` 82 % · `SPL` 74 % · `date` 84 % · core 78 % — close the missing tail
+- [~] `standard` 82 % · `SPL` 100 % · `date` 84 % · core 92 % — close the missing tail
 - [~] `Reflection` 62 % — interface reflection, declaring class, defaults of plain functions
 - [~] `mbstring` 62 % — remaining: `mb_convert_variables`, `mb_parse_str`, `mb_http_*`,
       `mb_convert_kana`, `mb_strcut` on stateful encodings

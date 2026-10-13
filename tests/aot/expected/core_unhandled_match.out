@@ -1,0 +1,17 @@
+UnhandledMatchError: Unhandled match case 5
+UnhandledMatchError: Unhandled match case 'ab'c'
+UnhandledMatchError: Unhandled match case 1.5
+UnhandledMatchError: Unhandled match case 2.0
+UnhandledMatchError: Unhandled match case true
+UnhandledMatchError: Unhandled match case NULL
+UnhandledMatchError: Unhandled match case of type array
+UnhandledMatchError: Unhandled match case of type stdClass
+UnhandledMatchError: Unhandled match case 'a\\b'
+UnhandledMatchError: Unhandled match case 'xxxxxxxxxxxxxxx...'
+UnhandledMatchError: Unhandled match case -0.0
+side1 Unhandled match case 101
+side2 hit
+hearts
+Unhandled match case Suit::S
+mid
+UnhandledMatchError: Unhandled match case true

@@ -1,0 +1,14 @@
+ErrorException m 3 2 f.php:7
+1 file-ok 4
+inner 8
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+ParseError:syntax
+ClosedGeneratorException:closed
+boom sev=512

@@ -1,0 +1,6 @@
+#0 core_debug_print_backtrace.php(3): K->m()
+#1 core_debug_print_backtrace.php(4): K::s()
+#2 core_debug_print_backtrace.php(5): f()
+#3 core_debug_print_backtrace.php(6): g()
+--
+#0 core_debug_print_backtrace.php(9): h()

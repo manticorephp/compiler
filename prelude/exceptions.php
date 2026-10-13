@@ -294,6 +294,71 @@ class ValueError extends Error {}
 class ArithmeticError extends Error {}
 class DivisionByZeroError extends ArithmeticError {}
 class AssertionError extends Error {}
+class CompileError extends Error {}
+class ParseError extends CompileError {}
+class UnhandledMatchError extends Error {}
+class ClosedGeneratorException extends Exception {}
+
+/**
+ * Exception carrying an error severity — what an error handler rethrows
+ * (`throw new ErrorException($msg, 0, $errno, $file, $line)`). An explicit
+ * `$filename` / `$line` replaces the position the `new` recorded.
+ */
+class ErrorException extends Exception
+{
+    protected int $severity = 1;
+    // The `new` site is recorded AFTER the constructor returns, so an explicit
+    // position is kept here and served by the accessors.
+    private ?string $__efile = null;
+    private ?int $__eline = null;
+
+    public function __construct(
+        string $message = "",
+        int $code = 0,
+        int $severity = 1,
+        ?string $filename = null,
+        ?int $line = null,
+        ?Throwable $previous = null,
+    ) {
+        parent::__construct($message, $code, $previous);
+        $this->severity = $severity;
+        $this->__efile = $filename;
+        $this->__eline = $line;
+    }
+
+    public function getFile(): string
+    {
+        return $this->__efile ?? $this->file;
+    }
+
+    public function getLine(): int
+    {
+        return $this->__eline ?? $this->line;
+    }
+
+    final public function getSeverity(): int
+    {
+        return $this->severity;
+    }
+}
+
+/** The message of an UnhandledMatchError, as php renders the subject. */
+function __mc_unhandled_match_msg(mixed $v): string
+{
+    if (\is_string($v)) {
+        $t = \strlen($v) > 15 ? \substr($v, 0, 15) . '...' : $v;
+        return "Unhandled match case '" . \addcslashes($t, "\\") . "'";
+    }
+    if (\is_int($v)) { return 'Unhandled match case ' . $v; }
+    if (\is_float($v)) { return 'Unhandled match case ' . \var_export($v, true); }
+    if (\is_bool($v)) { return 'Unhandled match case ' . ($v ? 'true' : 'false'); }
+    if ($v === null) { return 'Unhandled match case NULL'; }
+    if (\is_object($v)) {
+        $en = __mir_enum_name($v);
+        if ($en !== '') { return 'Unhandled match case ' . $en; }
+    }
+    return 'Unhandled match case of type ' . \get_debug_type($v);
+}
 
 // The rest of SPL's exception tree, with php's exact parentage — `catch
 // (LogicException)` has to catch a BadMethodCallException, and `catch

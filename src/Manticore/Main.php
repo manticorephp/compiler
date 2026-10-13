@@ -5047,6 +5047,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Same definedFunctions gate: adding a function to prelude/autoload.php
     // enrols it automatically, no second list to keep in step.
     $useAutoload = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($autoloadSrc));
+    // class_uses() is GENERATED from the class declarations, not read from a file.
+    $useClassUses = $demand->callsAny(['class_uses']);
     // `array_multisort` is DESUGARED at the call site (LowerExprs) into
     // __mc_multisort_order + __mc_multisort_apply, so the user's source never
     // names either helper and the definedFunctions gate above cannot see the
@@ -5067,6 +5069,19 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'RecursiveFilterIterator',
             'RecursiveCallbackFilterIterator',
             'AppendIterator',
+            'LimitIterator',
+            'CachingIterator',
+            'RecursiveCachingIterator',
+            'InfiniteIterator',
+            'NoRewindIterator',
+            'RegexIterator',
+            'RecursiveRegexIterator',
+            'RecursiveArrayIterator',
+            'MultipleIterator',
+            'ParentIterator',
+            'GlobIterator',
+            'SplObserver',
+            'SplSubject',
             'EmptyIterator',
             'RecursiveIteratorIterator',
             'RecursiveTreeIterator',
@@ -5109,6 +5124,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         'restore_exception_handler',
         'register_shutdown_function',
         'trigger_error',
+        'user_error',
         'error_reporting',
         'error_get_last',
     ]);
@@ -5261,6 +5277,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'get_declared_traits',
             'class_implements',
             'class_parents',
+            'get_mangled_object_vars',
             'get_defined_constants',
         ]);
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
@@ -5607,7 +5624,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // program actually QUERIES a trace — the arrow-call form, never the prelude's
     // own `function getTrace(…)` definitions.
     $useBacktrace = $demand->callsAnyMethod(['getTrace', 'getTraceAsString'])
-        || $demand->calls('debug_backtrace');
+        || $demand->calls('debug_backtrace') || $demand->calls('debug_print_backtrace');
     // PreludeDemand has scanned every input source and is no longer needed after
     // the gates above. Its release drops the token-derived maps and, critically,
     // the full source-array ownership it retained during the scan.
@@ -5737,6 +5754,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->includeUnserialize = $useUnserialize;
         $lower->unserializeSrc = $unserializeSrc;
         $lower->includeArrayClasses = $useArrayClasses;
+        $lower->includeClassUses = $useClassUses;
         $lower->includeReflection = $useReflection;
         $lower->includeAttributes = $useAttributes;
         $lower->includeDateTime = $useDateTime;
