@@ -2183,6 +2183,19 @@ trait EmitLlvmControl
         $out .= '  ' . $addr . ' = load i64, ptr ' . $slot . "\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+        // A box this frame owns holds a value it owns, and its scope-exit
+        // release drops it ({@see ownedBoxReleaseIr}): the element / key the
+        // loop binds is a BORROW of the buffer, so the box takes its own +1 and
+        // gives back the previous iteration's — the pair `$v = …` takes in
+        // emitStoreLocal's ref arm. Storing the borrow bare dropped the last
+        // element at return: `foreach ($a as $k => $v) { … $a[$k] = &$v; }` freed
+        // what the caller's array still held.
+        $flavor = isset($this->locals->ownedBoxes[$name]) && !isset($this->frame->ownLocals[$name])
+            ? $this->ownedBoxFlavor($name) : '';
+        if ($flavor !== '') {
+            $out .= $this->rcRetainReg($val, $flavor);
+            $out .= $this->ownedBoxOverwriteIr($name, $addr);
+        }
         $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         return $out;
     }
