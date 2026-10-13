@@ -243,7 +243,7 @@ trait LowerPrelude
             $own = new \Compile\Mir\PreludeDemand([
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
-                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
             ]);
             if (!$this->includeArrayFnsExt
                 && $own->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsExtSrc))) {
@@ -315,6 +315,11 @@ trait LowerPrelude
         if ($this->dsSrc !== '') {
             $ds = \Parser\Parser::parseSource("<?php\n" . $this->dsSrc);
             foreach ($ds->statements as $s) { $stmts[] = $s; }
+        }
+        // Random\ — braced namespaces, names nothing outside the core.
+        if ($this->randomSrc !== '') {
+            $rn = \Parser\Parser::parseSource("<?php\n" . $this->randomSrc);
+            foreach ($rn->statements as $s) { $stmts[] = $s; }
         }
         return $stmts;
     }

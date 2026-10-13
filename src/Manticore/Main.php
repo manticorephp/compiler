@@ -4978,6 +4978,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Ds\Map / Set live in ds_map.php, appended to the same unit (both are braced namespaces).
     $dsSrc = prelude_src_or_empty("ds.php");
     $dsMapSrc = prelude_src_or_empty("ds_map.php");
+    // ext/random — Random\Randomizer + engines, braced namespaces, DEMAND-GATED on the `Random` qualifier.
+    $randomSrc = prelude_src_or_empty("random.php");
     if ($dsSrc !== "" && $dsMapSrc !== "") {
         $dsSrc .= "\n" . $dsMapSrc;
     }
@@ -5190,6 +5192,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Manticore\Ds — typed fixed-width arrays. Gates on the QUALIFIER like the
     // trees above: nobody reaches `Int32Array` without writing `Ds\`.
     $useDs = $demand->mentions('Ds');
+    $useRandom = $demand->mentions('Random');
     if ($useWs) {
         $useHttp = true;
         $useBuffer = true;
@@ -5766,6 +5769,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->httpSrc = $useHttp ? $httpSrc : "";
         $lower->wsSrc = $useWs ? $wsSrc : "";
         $lower->dsSrc = $useDs ? $dsSrc : "";
+        $lower->randomSrc = $useRandom ? $randomSrc : "";
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
         $lower->xmlXpathSrc = $useXml ? $xmlXpathSrc : "";
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
@@ -6285,6 +6289,7 @@ function analyze_prelude_files(): array
         "io_poll.php",
         "async.php",
         "pcntl.php",
+        "random.php",
         // Function-only prelude files. Omitting these is invisible in a normal
         // build (they are injected on demand all the same) but makes the
         // closed-world undefined-function rule report every one of their
