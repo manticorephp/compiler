@@ -132,10 +132,6 @@ function pkeyCtxNewId(#[CType('int')] int $id, Ptr $engine): int {}
 function pkeyKeygenInit(int $ctx): int {}
 #[Library('crypto'), Symbol('EVP_PKEY_keygen'), CType('int')]
 function pkeyKeygen(int $ctx, Ptr $ppkey): int {}
-#[Library('crypto'), Symbol('EVP_PKEY_CTX_set_rsa_keygen_bits'), CType('int')]
-function pkeyCtxSetRsaKeygenBits(int $ctx, #[CType('int')] int $bits): int {}
-#[Library('crypto'), Symbol('EVP_PKEY_CTX_set_ec_paramgen_curve_nid'), CType('int')]
-function pkeyCtxSetEcCurveNid(int $ctx, #[CType('int')] int $nid): int {}
 #[Library('crypto'), Symbol('OBJ_txt2nid'), CType('int')]
 function objTxt2nid(string $s): int {}
 #[Library('crypto'), Symbol('X509_get0_pubkey')]
@@ -160,8 +156,6 @@ function digestVerify(int $ctx, string $sig, #[CType('size_t')] int $siglen, str
 function pkeyCtxNew(int $pkey, Ptr $engine): int {}
 #[Library('crypto'), Symbol('EVP_PKEY_CTX_free')]
 function pkeyCtxFree(int $ctx): void {}
-#[Library('crypto'), Symbol('EVP_PKEY_CTX_set_rsa_padding'), CType('int')]
-function pkeyCtxSetRsaPadding(int $ctx, #[CType('int')] int $pad): int {}
 #[Library('crypto'), Symbol('EVP_PKEY_encrypt_init'), CType('int')]
 function pkeyEncryptInit(int $ctx): int {}
 #[Library('crypto'), Symbol('EVP_PKEY_encrypt'), CType('int')]
@@ -245,3 +239,215 @@ function purposeName(int $pp): Ptr {}
 function purposeSname(int $pp): Ptr {}
 #[Library('crypto'), Symbol('X509_check_purpose'), CType('int')]
 function x509CheckPurpose(int $x, #[CType('int')] int $id, #[CType('int')] int $ca): int {}
+
+// ── slice 2: key parameters, derive, paramgen, verification ──
+// Everything below is OpenSSL >= 3.0 (EVP_PKEY_get_* names, *_param accessors).
+
+#[Library('crypto'), Symbol('EVP_PKEY_get_bits'), CType('int')]
+function pkeyBits(int $pkey): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_get_base_id'), CType('int')]
+function pkeyBaseId(int $pkey): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_get_bn_param'), CType('int')]
+function pkeyBnParam(int $pkey, string $name, Ptr $bnOut): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_get_octet_string_param'), CType('int')]
+function pkeyOctetParam(int $pkey, string $name, Ptr $buf, #[CType('size_t')] int $max, Ptr $outLen): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_get_utf8_string_param'), CType('int')]
+function pkeyUtf8Param(int $pkey, string $name, Ptr $buf, #[CType('size_t')] int $max, Ptr $outLen): int {}
+#[Library('crypto'), Symbol('BN_num_bits'), CType('int')]
+function bnNumBits(int $bn): int {}
+#[Library('crypto'), Symbol('BN_bn2bin'), CType('int')]
+function bnToBin(int $bn, Ptr $to): int {}
+#[Library('crypto'), Symbol('BN_bin2bn')]
+function bnFromBin(string $s, #[CType('int')] int $len, Ptr $ret): int {}
+
+#[Library('crypto'), Symbol('EVP_PKEY_derive_init'), CType('int')]
+function pkeyDeriveInit(int $ctx): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_derive_set_peer'), CType('int')]
+function pkeyDeriveSetPeer(int $ctx, int $peer): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_derive'), CType('int')]
+function pkeyDerive(int $ctx, Ptr $out, Ptr $outLen): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_paramgen_init'), CType('int')]
+function pkeyParamgenInit(int $ctx): int {}
+#[Library('crypto'), Symbol('EVP_PKEY_paramgen'), CType('int')]
+function pkeyParamgen(int $ctx, Ptr $ppkey): int {}
+// int EVP_PKEY_CTX_ctrl(ctx, keytype, optype, cmd, p1, void *p2) — the form that
+// exists as a function on 1.1.1 and 3.x alike (the DSA bits setter is a macro on 1.1.1).
+#[Library('crypto'), Symbol('EVP_PKEY_CTX_ctrl'), CType('int')]
+function pkeyCtxCtrl(int $ctx, #[CType('int')] int $keytype, #[CType('int')] int $optype,
+                     #[CType('int')] int $cmd, #[CType('int')] int $p1, Ptr $p2): int {}
+#[Library('crypto'), Symbol('PEM_read_bio_Parameters')]
+function pemReadParameters(int $bio, Ptr $x): int {}
+
+#[Library('crypto'), Symbol('PEM_write_bio_X509'), CType('int')]
+function pemWriteX509(int $bio, int $x): int {}
+#[Library('crypto'), Symbol('X509_print'), CType('int')]
+function x509Print(int $bio, int $x): int {}
+#[Library('crypto'), Symbol('X509_verify'), CType('int')]
+function x509Verify(int $x, int $pkey): int {}
+#[Library('crypto'), Symbol('X509_check_private_key'), CType('int')]
+function x509CheckPrivateKey(int $x, int $pkey): int {}
+
+#[Library('crypto'), Symbol('OPENSSL_sk_new_null')]
+function skNewNull(): int {}
+#[Library('crypto'), Symbol('OPENSSL_sk_push'), CType('int')]
+function skPush(int $sk, int $p): int {}
+#[Library('crypto'), Symbol('OPENSSL_sk_free')]
+function skFree(int $sk): void {}
+#[Library('crypto'), Symbol('OPENSSL_sk_num'), CType('int')]
+function skNum(int $sk): int {}
+#[Library('crypto'), Symbol('OPENSSL_sk_value')]
+function skValue(int $sk, #[CType('int')] int $i): int {}
+
+#[Library('crypto'), Symbol('X509_STORE_new')]
+function storeNew(): int {}
+#[Library('crypto'), Symbol('X509_STORE_free')]
+function storeFree(int $s): void {}
+#[Library('crypto'), Symbol('X509_STORE_add_cert'), CType('int')]
+function storeAddCert(int $s, int $x): int {}
+#[Library('crypto'), Symbol('X509_STORE_set_default_paths'), CType('int')]
+function storeSetDefaultPaths(int $s): int {}
+#[Library('crypto'), Symbol('X509_STORE_load_locations'), CType('int')]
+function storeLoadFile(int $s, string $file, Ptr $dir): int {}
+#[Library('crypto'), Symbol('X509_STORE_load_locations'), CType('int')]
+function storeLoadDir(int $s, Ptr $file, string $dir): int {}
+#[Library('crypto'), Symbol('X509_STORE_CTX_new')]
+function storeCtxNew(): int {}
+#[Library('crypto'), Symbol('X509_STORE_CTX_free')]
+function storeCtxFree(int $c): void {}
+#[Library('crypto'), Symbol('X509_STORE_CTX_init'), CType('int')]
+function storeCtxInit(int $c, int $store, int $x, int $untrusted): int {}
+#[Library('crypto'), Symbol('X509_STORE_CTX_set_purpose'), CType('int')]
+function storeCtxSetPurpose(int $c, #[CType('int')] int $purpose): int {}
+#[Library('crypto'), Symbol('X509_verify_cert'), CType('int')]
+function x509VerifyCert(int $c): int {}
+#[Library('crypto'), Symbol('OBJ_nid2obj')]
+function objNid2obj(#[CType('int')] int $nid): int {}
+#[Library('crypto'), Symbol('EVP_CipherUpdate'), CType('int')]
+function cipherUpdateLen(int $ctx, Ptr $out, Ptr $outl, Ptr $in, #[CType('int')] int $inl): int {}
+// void OBJ_NAME_do_all_sorted(int type, void (*fn)(const OBJ_NAME *, void *arg), void *arg) — 1.1.1 and 3.x
+#[Library('crypto'), Symbol('OBJ_NAME_do_all_sorted')]
+function objNameDoAllSorted(#[CType('int')] int $type, Ptr $fn, Ptr $arg): void {}
+
+// ── slice 2: CSR, certificate issue, SPKAC, curves, PKCS#12, PKCS#7 ──
+// All present on OpenSSL 1.1.1 and 3.x.
+
+#[Library('crypto'), Symbol('X509_REQ_new')]
+function reqNew(): int {}
+#[Library('crypto'), Symbol('X509_REQ_free')]
+function reqFree(int $req): void {}
+#[Library('crypto'), Symbol('X509_REQ_set_version'), CType('int')]
+function reqSetVersion(int $req, #[CType('long')] int $version): int {}
+#[Library('crypto'), Symbol('X509_REQ_set_pubkey'), CType('int')]
+function reqSetPubkey(int $req, int $pkey): int {}
+#[Library('crypto'), Symbol('X509_REQ_get_subject_name')]
+function reqSubjectName(int $req): int {}
+#[Library('crypto'), Symbol('X509_NAME_add_entry_by_txt'), CType('int')]
+function nameAddEntryByTxt(int $name, string $field, #[CType('int')] int $type, string $bytes,
+                           #[CType('int')] int $len, #[CType('int')] int $loc, #[CType('int')] int $set): int {}
+#[Library('crypto'), Symbol('X509_REQ_sign'), CType('int')]
+function reqSign(int $req, int $pkey, int $md): int {}
+#[Library('crypto'), Symbol('PEM_write_bio_X509_REQ'), CType('int')]
+function pemWriteReq(int $bio, int $req): int {}
+#[Library('crypto'), Symbol('PEM_read_bio_X509_REQ')]
+function pemReadReq(int $bio, Ptr $x, Ptr $cb, Ptr $u): int {}
+#[Library('crypto'), Symbol('X509_REQ_get_pubkey')]
+function reqGetPubkey(int $req): int {}
+#[Library('crypto'), Symbol('X509_REQ_verify'), CType('int')]
+function reqVerify(int $req, int $pkey): int {}
+#[Library('crypto'), Symbol('X509_REQ_print'), CType('int')]
+function reqPrint(int $bio, int $req): int {}
+
+#[Library('crypto'), Symbol('X509_new')]
+function x509New(): int {}
+#[Library('crypto'), Symbol('X509_set_version'), CType('int')]
+function x509SetVersion(int $x, #[CType('long')] int $version): int {}
+#[Library('crypto'), Symbol('ASN1_INTEGER_set'), CType('int')]
+function asn1IntegerSet(int $ai, #[CType('long')] int $v): int {}
+#[Library('crypto'), Symbol('X509_set_issuer_name'), CType('int')]
+function x509SetIssuerName(int $x, int $name): int {}
+#[Library('crypto'), Symbol('X509_set_subject_name'), CType('int')]
+function x509SetSubjectName(int $x, int $name): int {}
+#[Library('crypto'), Symbol('X509_getm_notBefore')]
+function x509MNotBefore(int $x): int {}
+#[Library('crypto'), Symbol('X509_getm_notAfter')]
+function x509MNotAfter(int $x): int {}
+#[Library('crypto'), Symbol('X509_gmtime_adj')]
+function x509GmtimeAdj(int $t, #[CType('long')] int $adj): int {}
+#[Library('crypto'), Symbol('X509_set_pubkey'), CType('int')]
+function x509SetPubkey(int $x, int $pkey): int {}
+#[Library('crypto'), Symbol('X509_sign'), CType('int')]
+function x509Sign(int $x, int $pkey, int $md): int {}
+
+// NETSCAPE_SPKI
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_new')]
+function spkiNew(): int {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_free')]
+function spkiFree(int $s): void {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_set_pubkey'), CType('int')]
+function spkiSetPubkey(int $s, int $pkey): int {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_sign'), CType('int')]
+function spkiSign(int $s, int $pkey, int $md): int {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_b64_encode')]
+function spkiB64Encode(int $s): Ptr {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_b64_decode')]
+function spkiB64Decode(string $s, #[CType('int')] int $len): int {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_get_pubkey')]
+function spkiGetPubkey(int $s): int {}
+#[Library('crypto'), Symbol('NETSCAPE_SPKI_verify'), CType('int')]
+function spkiVerify(int $s, int $pkey): int {}
+#[Library('crypto'), Symbol('ASN1_STRING_set'), CType('int')]
+function asn1StringSet(int $s, string $data, #[CType('int')] int $len): int {}
+#[Library('crypto'), Symbol('ASN1_STRING_length'), CType('int')]
+function asn1StringLength(int $s): int {}
+
+// EC curves, default locations
+#[Library('crypto'), Symbol('EC_get_builtin_curves')]
+function ecBuiltinCurves(Ptr $r, #[CType('size_t')] int $n): int {}
+#[Library('crypto'), Symbol('X509_get_default_cert_file')]
+function defCertFile(): Ptr {}
+#[Library('crypto'), Symbol('X509_get_default_cert_file_env')]
+function defCertFileEnv(): Ptr {}
+#[Library('crypto'), Symbol('X509_get_default_cert_dir')]
+function defCertDir(): Ptr {}
+#[Library('crypto'), Symbol('X509_get_default_cert_dir_env')]
+function defCertDirEnv(): Ptr {}
+#[Library('crypto'), Symbol('X509_get_default_private_dir')]
+function defPrivateDir(): Ptr {}
+#[Library('crypto'), Symbol('X509_get_default_cert_area')]
+function defCertArea(): Ptr {}
+
+// PKCS#12
+#[Library('crypto'), Symbol('PKCS12_create')]
+function p12Create(string $pass, string $name, int $pkey, int $cert, int $ca, #[CType('int')] int $nidKey,
+                   #[CType('int')] int $nidCert, #[CType('int')] int $iter, #[CType('int')] int $macIter,
+                   #[CType('int')] int $keytype): int {}
+#[Library('crypto'), Symbol('PKCS12_create')]
+function p12CreateNoName(string $pass, Ptr $name, int $pkey, int $cert, int $ca, #[CType('int')] int $nidKey,
+                         #[CType('int')] int $nidCert, #[CType('int')] int $iter, #[CType('int')] int $macIter,
+                         #[CType('int')] int $keytype): int {}
+#[Library('crypto'), Symbol('PKCS12_free')]
+function p12Free(int $p12): void {}
+#[Library('crypto'), Symbol('i2d_PKCS12_bio'), CType('int')]
+function i2dP12Bio(int $bio, int $p12): int {}
+#[Library('crypto'), Symbol('d2i_PKCS12_bio')]
+function d2iP12Bio(int $bio, Ptr $p12): int {}
+#[Library('crypto'), Symbol('PKCS12_parse'), CType('int')]
+function p12Parse(int $p12, string $pass, Ptr $ppkey, Ptr $pcert, Ptr $pca): int {}
+
+// PKCS#7 / S-MIME
+#[Library('crypto'), Symbol('PKCS7_sign')]
+function p7Sign(int $cert, int $pkey, int $certs, int $in, #[CType('int')] int $flags): int {}
+#[Library('crypto'), Symbol('PKCS7_free')]
+function p7Free(int $p7): void {}
+#[Library('crypto'), Symbol('SMIME_write_PKCS7'), CType('int')]
+function smimeWrite(int $out, int $p7, int $data, #[CType('int')] int $flags): int {}
+#[Library('crypto'), Symbol('SMIME_read_PKCS7')]
+function smimeRead(int $in, Ptr $bcont): int {}
+#[Library('crypto'), Symbol('PKCS7_verify'), CType('int')]
+function p7Verify(int $p7, int $certs, int $store, int $indata, int $out, #[CType('int')] int $flags): int {}
+#[Library('crypto'), Symbol('PKCS7_get0_signers')]
+function p7Signers(int $p7, int $certs, #[CType('int')] int $flags): int {}
+#[Library('crypto'), Symbol('PKCS7_encrypt')]
+function p7Encrypt(int $certs, int $in, int $cipher, #[CType('int')] int $flags): int {}
+#[Library('crypto'), Symbol('PKCS7_decrypt'), CType('int')]
+function p7Decrypt(int $p7, int $pkey, int $cert, int $data, #[CType('int')] int $flags): int {}
